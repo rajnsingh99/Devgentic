@@ -5,11 +5,7 @@
 //  Devgentic
 //
 //  Small-model-friendly split variants of edit_code / code_search / create_file.
-//  Used exclusively by the Code interface — the originals remain for chat & workflow.
-//
-//  These tools are intentionally NOT registered in LocalToolManager, so they do not
-//  appear in the Tool Library UI. They are wired directly via AgentConnect's
-//  resolveNativeTool switch and surfaced only through CodeToolPreset.
+//  Promoted to standard Library tools for all profiles (Chat, Code, and Workflow).
 //
 //  Each tool carries a single intent and no behavior-changing boolean toggles —
 //  so a small LLM cannot mis-set a knob and silently land in the wrong behavior.
@@ -272,7 +268,7 @@ struct CodeSearchFilesTool: DevgenticTool {
 
 struct CreateNewFileTool: DevgenticTool {
     let name = "create_new_file"
-    let category = "Coding Assistant"
+    let category = "File System"
     let description = "Creates a brand-new file with the given content. Fails if a file already exists at that path — to intentionally replace an existing file, use `overwrite_file` instead. Creates parent directories as needed."
 
     struct Arguments: Decodable, Sendable {
@@ -327,7 +323,7 @@ struct CreateNewFileTool: DevgenticTool {
 
 struct OverwriteFileTool: DevgenticTool {
     let name = "overwrite_file"
-    let category = "Coding Assistant"
+    let category = "File System"
     let description = "Replaces an existing file's contents entirely with new content. Use this ONLY when you intentionally want to discard the current contents. For partial edits, use `edit_code_single` / `edit_code_batch`. For creating a genuinely new file, use `create_new_file`."
 
     struct Arguments: Decodable, Sendable {

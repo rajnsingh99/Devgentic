@@ -449,6 +449,16 @@ final class ActiveStreamManager {
         // in sync with the message it was sending.
         let conversationID = userMessage.conversationId
         let userQuery = promptOverride ?? userMessage.content.textContent ?? ""
+
+        // ⚠️ A Code run takes ITS CONVERSATION'S project, not whichever one is open. Every path in —
+        // composer, background-task wake, scheduler, resume, Orb, QuickAccess — comes through here,
+        // which is why this is the one place it is done. A no-op for composer sends, whose
+        // conversation is always bound to the open folder. See `CodeSessionManager.profile(_:forConversationProject:)`.
+        let config = config.profile.profileType == .code
+            ? BackendRequestConfig(profile: CodeSessionManager.profile(
+                config.profile,
+                forConversationProject: persistenceService.getConversation(withId: conversationID)?.projectPath))
+            : config
         
         // ⚠️ GUARD-RAIL: a workflow profile started without workflow bookkeeping.
         //

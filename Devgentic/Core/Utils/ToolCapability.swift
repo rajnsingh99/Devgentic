@@ -34,7 +34,6 @@ enum ToolCapability {
     /// bounded thing to a named path. These three do *anything*, which is a different property:
     /// no argument validation can bound them, because the argument is a program.
     ///
-    /// - `execute_shell` → `/bin/zsh -c <command>` (via `ShellSessionManager`)
     /// - `batch_command` → `/bin/zsh -c <command>` (directly)
     /// - `run_applescript` → `NSAppleScript(source: <script>)`, which reaches a shell of its own
     ///   through `do shell script`
@@ -43,7 +42,6 @@ enum ToolCapability {
     /// mitigation is escaping (`AppleScriptEscaping`), not gating, because the shape of what runs
     /// is fixed by us and only a value inside it comes from the model.
     static let arbitraryCodeExecution: Set<String> = [
-        "execute_shell",
         "batch_command",
         // ⚠️ The `batch_command` splits. Both hand their argument to `/bin/zsh -c`, so both are
         // arbitrary code execution and both must be `.destructive` — `HITLRiskTier.classify`

@@ -85,7 +85,7 @@ struct AgentBubbleContentView: View, Equatable {
                         // token — body re-runs only when the timeline revision (or the
                         // streaming flag / post-stream final text) actually changes.
                         .equatable()
-                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+                        .transition(.opacity)
                 }
             } else if message.isStreaming {
                 // Bot: simple "Generating..." indicator while streaming

@@ -356,7 +356,7 @@ struct PlanProgressCard: View {
                         .frame(width: 2)
                         .padding(.leading, 18)
                 }
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+                .transition(.opacity)
             }
         }
     }
@@ -616,7 +616,7 @@ struct ReflectionAttemptsCard: View {
                         .frame(width: 2)
                         .padding(.leading, 18)
                 }
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+                .transition(.opacity)
             }
         }
     }

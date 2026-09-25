@@ -88,8 +88,9 @@ final class ToolRiskResolverTests: XCTestCase {
 
     func testArbitraryCodeNameEscalatesAnyProvenance() {
         // Escalation BY NAME is safe (worst case: an extra confirmation); trust by name is the
-        // defect. An MCP tool calling itself `execute_shell` is treated as what it claims to be.
-        let r = ToolRiskResolver.derive(toolName: "execute_shell", nativeTier: nil,
+        // defect. An MCP tool calling itself `run_command` is treated as what it claims to be.
+        // (Pinned on `execute_shell` until that tool was removed 2026-09-24.)
+        let r = ToolRiskResolver.derive(toolName: "run_command", nativeTier: nil,
                                         mcp: .present(annotations(readOnly: true)))
         XCTAssertEqual(r.risk, .destructive)
     }

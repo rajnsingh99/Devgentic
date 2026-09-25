@@ -93,6 +93,15 @@ enum AppAccentColor: String, CaseIterable {
         case .black: return "Onyx Black"
         }
     }
+
+    /// Whether this accent color is perceptually light and requires dark foreground text on CTAs/badges.
+    var isLight: Bool? {
+        switch self {
+        case .default: return nil
+        case .white: return true
+        default: return false
+        }
+    }
 }
 
 // MARK: - Theme Decorator (For Global Overrides)
@@ -139,18 +148,21 @@ struct ThemeDecorator: Theme {
     // Tier 1 — Controls & Accent (The heart of the decorator)
     var accentColor: Color { accentOverride ?? base.accentColor }
     var isAccentLight: Bool {
-        switch accentColorOverride {
-        case .white: return true
-        default: return false
+        if let overrideLight = accentColorOverride.isLight {
+            return overrideLight
         }
+        return base.isAccentLight
+    }
+    var accentForegroundColor: Color {
+        isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
     }
     var dividerColor: Color { base.dividerColor }
     var selectionColor: Color { base.selectionColor }
 
-    // Tier 1 — Semantic
     var errorColor: Color { base.errorColor }
     var successColor: Color { base.successColor }
     var warningColor: Color { base.warningColor }
+    var warningForegroundColor: Color { base.warningForegroundColor }
     var colorScheme: ColorScheme? { base.colorScheme }
     var isDark: Bool { base.isDark }
 
@@ -304,6 +316,8 @@ protocol Theme {
     var accentColor: Color { get }
     /// Whether the effective accent color is light (e.g. Pure White), requiring dark foreground text on CTAs.
     var isAccentLight: Bool { get }
+    /// High-contrast foreground color for text and icons placed directly on top of `accentColor`.
+    var accentForegroundColor: Color { get }
     var dividerColor: Color { get }
     var selectionColor: Color { get }
 
@@ -312,6 +326,9 @@ protocol Theme {
     var errorColor: Color { get }
     var successColor: Color { get }
     var warningColor: Color { get }
+    /// High-contrast foreground color for text and icons placed directly on top of `warningColor` (amber/orange).
+    /// Guarantees WCAG AAA legibility (> 8:1 contrast) across all themes.
+    var warningForegroundColor: Color { get }
 
     /// Hint to SwiftUI / AppKit about whether this theme is intended for
     /// light or dark contexts — used by detached `NSWindow` editors that
@@ -524,6 +541,12 @@ extension Theme {
     var colorScheme: ColorScheme? { nil }
     var isDark: Bool { colorScheme != .light }
     var isAccentLight: Bool { false }
+    var accentForegroundColor: Color {
+        isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+    }
+    var warningForegroundColor: Color {
+        Color(red: 0.08, green: 0.08, blue: 0.08)
+    }
 
     // ── Tier 2 Color Defaults ────────────────────────────────────────
 

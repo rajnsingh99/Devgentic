@@ -63,9 +63,9 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         case .card:
             return theme.surfaceOverlay
         case .elevated:
-            return theme.secondaryBackground.opacity(0.45)
+            return theme.isDark ? Color.white.opacity(0.04) : Color.white.opacity(0.65)
         case .popover:
-            return theme.secondaryBackground.opacity(0.8)
+            return theme.secondaryBackground.opacity(0.85)
         }
     }
 
@@ -73,7 +73,7 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         if isFocused {
             return AnyShapeStyle(
                 LinearGradient(
-                    colors: [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)],
+                    colors: [theme.accentColor.opacity(0.65), theme.accentColor.opacity(0.20)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -88,39 +88,76 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
                 )
             )
         }
-        return AnyShapeStyle(
-            LinearGradient(
-                colors: [Color.white.opacity(0.12), Color.white.opacity(0.03)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+        switch elevation {
+        case .elevated:
+            // Specular Liquid Glass rim with accent catch-light reflection
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        theme.isDark ? Color.white.opacity(0.28) : Color.white.opacity(0.70),
+                        theme.dividerColor.opacity(0.40),
+                        theme.accentColor.opacity(0.22)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
             )
-        )
+        case .container:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [
+                        theme.isDark ? Color.white.opacity(0.18) : theme.dividerColor,
+                        theme.dividerColor.opacity(0.5),
+                        theme.accentColor.opacity(0.20)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        default:
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.14), Color.white.opacity(0.04)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        }
     }
 
     private var glassShadowColor: Color {
         if isFocused {
-            return theme.accentColor.opacity(0.12)
+            return theme.accentColor.opacity(0.22)
         }
-        return Color.black.opacity(0.16)
+        switch elevation {
+        case .elevated:
+            return Color.black.opacity(theme.isDark ? 0.38 : 0.14)
+        case .container:
+            return theme.shadowColor.opacity(0.6)
+        case .popover:
+            return Color.black.opacity(0.25)
+        default:
+            return Color.black.opacity(0.16)
+        }
     }
 
     private var glassShadowRadius: CGFloat {
         switch elevation {
         case .canvas: return 0
-        case .container: return 12
+        case .container: return 16
         case .card: return 6
-        case .elevated: return isFocused ? 10 : 6
-        case .popover: return 10
+        case .elevated: return isFocused ? 22 : 18
+        case .popover: return 12
         }
     }
 
     private var glassShadowY: CGFloat {
         switch elevation {
         case .canvas: return 0
-        case .container: return 4
+        case .container: return 6
         case .card: return 2
-        case .elevated: return 3
-        case .popover: return 4
+        case .elevated: return 8
+        case .popover: return 5
         }
     }
 
@@ -138,9 +175,10 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         case .card:
             return theme.isDark ? Color(hex: "#1E1E22") : theme.secondaryBackground
         case .elevated:
-            return theme.isDark ? Color(hex: "#222225") : (theme.colorScheme == .light ? Color.white : theme.primaryBackground)
+            // Match the solid grounding of container panels (sidebar) in dark mode
+            return theme.isDark ? theme.secondaryBackground : (theme.colorScheme == .light ? Color.white : theme.secondaryBackground)
         case .popover:
-            return theme.isDark ? Color(hex: "#26262A") : (theme.colorScheme == .light ? Color.white : theme.secondaryBackground)
+            return theme.isDark ? Color(hex: "#242428") : (theme.colorScheme == .light ? Color.white : theme.secondaryBackground)
         }
     }
 
@@ -151,21 +189,28 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         if let strokeColor {
             return AnyShapeStyle(strokeColor)
         }
-        // Razor-sharp 1px hairline border with intentional contrast
-        return AnyShapeStyle(theme.isDark ? Color.white.opacity(0.09) : Color.black.opacity(0.08))
+        switch elevation {
+        case .elevated:
+            // Crisp, razor-sharp 1px border matching the solid sidebar
+            return AnyShapeStyle(theme.isDark ? Color.white.opacity(0.14) : theme.dividerColor.opacity(0.8))
+        case .card, .container, .popover:
+            return AnyShapeStyle(theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.6))
+        default:
+            return AnyShapeStyle(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+        }
     }
 
     private var solidShadowColor: Color {
         if isFocused {
-            return theme.accentColor.opacity(0.12)
+            return theme.accentColor.opacity(0.15)
         }
         switch elevation {
         case .elevated:
-            return Color.black.opacity(theme.isDark ? 0.35 : 0.08)
+            return Color.black.opacity(theme.isDark ? 0.28 : 0.08)
         case .popover:
-            return Color.black.opacity(theme.isDark ? 0.40 : 0.12)
+            return Color.black.opacity(theme.isDark ? 0.30 : 0.10)
         case .card:
-            return Color.black.opacity(theme.isDark ? 0.20 : 0.04)
+            return Color.black.opacity(theme.isDark ? 0.15 : 0.04)
         default:
             return Color.clear
         }
@@ -174,18 +219,18 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
     private var solidShadowRadius: CGFloat {
         switch elevation {
         case .canvas, .container: return 0
-        case .card: return 4
-        case .elevated: return isFocused ? 10 : 8
-        case .popover: return 10
+        case .card: return 3
+        case .elevated: return isFocused ? 8 : 4
+        case .popover: return 6
         }
     }
 
     private var solidShadowY: CGFloat {
         switch elevation {
         case .canvas, .container: return 0
-        case .card: return 2
-        case .elevated: return 3
-        case .popover: return 4
+        case .card: return 1
+        case .elevated: return 2
+        case .popover: return 3
         }
     }
 }
@@ -210,5 +255,75 @@ extension View {
                 solidFillOverride: solidFillOverride
             )
         )
+    }
+
+    /// Applies a unified control surface style (pills, buttons, chips) matching the current `surfaceStyle`.
+    func composerControlSurface<S: InsettableShape>(
+        in shape: S,
+        isHovered: Bool,
+        isSelected: Bool = false,
+        selectedTint: Color? = nil
+    ) -> some View {
+        self.modifier(
+            ComposerControlSurfaceModifier(
+                shape: shape,
+                isHovered: isHovered,
+                isSelected: isSelected,
+                selectedTint: selectedTint
+            )
+        )
+    }
+}
+
+// MARK: - Composer Control Surface Modifier
+
+/// Applies surface treatment for composer buttons, pills, and chips according to `surfaceStyle`.
+/// In `.glassmorphic`, uses subtle translucent glass overlays.
+/// In `.solid`, uses crisp, opaque solid fills with hairline borders.
+struct ComposerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
+    let shape: S
+    var isHovered: Bool
+    var isSelected: Bool = false
+    var selectedTint: Color? = nil
+
+    @Environment(\.surfaceStyle) private var surfaceStyle
+    @Environment(\.appTheme) private var theme
+
+    func body(content: Content) -> some View {
+        content
+            .background(shape.fill(fillColor))
+            .overlay(shape.strokeBorder(strokeColor, lineWidth: 0.75))
+    }
+
+    private var fillColor: Color {
+        if isSelected, let selectedTint {
+            return selectedTint.opacity(isHovered ? 0.24 : 0.14)
+        }
+        switch surfaceStyle {
+        case .glassmorphic:
+            return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
+        case .solid:
+            if theme.isDark {
+                return isHovered ? Color(hex: "#34343A") : Color(hex: "#26262B")
+            } else {
+                return isHovered ? Color(hex: "#E4E4E8") : Color(hex: "#F4F4F5")
+            }
+        }
+    }
+
+    private var strokeColor: Color {
+        if isSelected, let selectedTint {
+            return selectedTint.opacity(isHovered ? 0.65 : 0.40)
+        }
+        switch surfaceStyle {
+        case .glassmorphic:
+            return isHovered ? theme.dividerColor.opacity(0.65) : theme.dividerColor.opacity(0.35)
+        case .solid:
+            if theme.isDark {
+                return isHovered ? Color.white.opacity(0.20) : Color.white.opacity(0.11)
+            } else {
+                return isHovered ? Color.black.opacity(0.20) : Color.black.opacity(0.10)
+            }
+        }
     }
 }

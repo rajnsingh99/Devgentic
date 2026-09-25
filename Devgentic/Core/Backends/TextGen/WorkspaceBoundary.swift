@@ -55,8 +55,8 @@ enum WorkspaceBoundary {
     /// name here.
     ///
     /// Present per preset tool:
-    ///   path              — read_file, list_directory, codebase_map, glob_files,
-    ///                       find_definition, code_search_text/_symbol/_files, git_tool
+    ///   path              — read_file, list_directory, project_tree, glob_files,
+    ///                       find_definition, code_search_text/_symbol/_files, git
     ///   file_path         — file_overview, edit_code_single, edit_code_batch,
     ///                       create_new_file, overwrite_file
     ///   working_directory — batch_command
@@ -78,27 +78,27 @@ enum WorkspaceBoundary {
     /// Preset tools that only read. Everything else is treated as mutating — the safe direction
     /// for a name this list has not been taught.
     static let readOnlyToolNames: Set<String> = [
-        "read_file", "list_directory", "codebase_map", "glob_files",
+        "read_file", "list_directory", "project_tree", "codebase_map", "glob_files",
         "find_definition", "file_overview",
         "code_search_text", "code_search_symbol", "code_search_files",
         "diff_files",
-        // ⚠️ `git_tool` IS read-only: its schema offers status, log, diff, branch, stash_list,
+        // ⚠️ `git` IS read-only: its schema offers status, log, diff, branch, stash_list,
         // blame and show, and nothing that writes. Classifying it as mutating was wrong in a way
         // that bites immediately — a project whose `.git` lives in a PARENT directory (a module
         // inside a larger repo, which is the common layout) would have its git calls REFUSED
         // outright instead of prompting. If a write action is ever added to that tool, remove it
         // from this list in the same commit.
-        "git_tool",
+        "git", "git_tool",
         // Report on, and read the log of, a background task. Both take a `task_id` and no path,
         // so `evaluate` is never reached for them today — they are listed because this set is the
         // app's answer to "does this tool only read", and `CodeEditPreviewTests` derives from it.
         // A tool missing here is treated as mutating and must produce an approval preview; being
         // silently wrong in that direction is how a tool ships approving through a raw JSON blob.
         //
-        // ⚠️ `command_stop` is deliberately NOT here. It ends a process — the machine is in a
+        // ⚠️ `stop_background_task` is deliberately NOT here. It ends a process — the machine is in a
         // different state afterwards — and only its lack of a FILE to diff keeps it out of the
         // preview requirement.
-        "command_output",
+        "get_task_output", "command_output",
     ]
 
     /// Paths outside the project that ordinary development legitimately needs, so a shell command
@@ -300,7 +300,7 @@ struct WorkspaceBoundaryDecision {
         current: Outcome,
         locator: GitRepositoryLocator
     ) -> Outcome {
-        guard toolName == "git_tool" else { return current }
+        guard toolName == "git" || toolName == "git_tool" else { return current }
 
         // Only when the ARGUMENT check found nothing to object to. A path already outside the
         // project has produced its own verdict, and asking twice about one call would park the
@@ -318,10 +318,10 @@ struct WorkspaceBoundaryDecision {
         guard !WorkspaceBoundary.isWithin(repository, root: canonicalRoot) else { return current }
 
         let projectName = (canonicalRoot as NSString).lastPathComponent
-        logger.notice("[WORKSPACE] 'git_tool' path \(start) is inside the project, but git resolves it to the repository at \(repository), which is OUTSIDE '\(projectName)'. CONSEQUENCE: the call is routed through the ordinary confirmation banner instead of silently reporting on a repository the user did not point the agent at; the path argument alone could never have caught this, because git discovers its repository by walking upwards.")
+        logger.notice("[WORKSPACE] 'git' path \(start) is inside the project, but git resolves it to the repository at \(repository), which is OUTSIDE '\(projectName)'. CONSEQUENCE: the call is routed through the ordinary confirmation banner instead of silently reporting on a repository the user did not point the agent at; the path argument alone could never have caught this, because git discovers its repository by walking upwards.")
 
         return .askUser(reason:
-            "'git_tool' would operate on the repository at \(repository), which git finds by "
+            "'git' would operate on the repository at \(repository), which git finds by "
             + "walking up from \(start). That repository is outside the '\(projectName)' project, "
             + "so its status, log, diff and blame cover files the project folder does not contain."
         )

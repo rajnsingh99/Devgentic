@@ -77,7 +77,7 @@ enum FileOpenCoordinator {
            let fileSize = attributes[.size] as? Int64,
            fileSize > maxViewerFileSizeBytes {
             logger.warning("File '\(item.name)' is \(fileSize / (1024 * 1024))MB, exceeding the 10MB limit. Opening with system default app.")
-            fallbackViewModel?.openWithSystemApp(item)
+            fallbackViewModel?.openWithSystemApp(item)	
             return
         }
 

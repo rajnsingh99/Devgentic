@@ -27,11 +27,11 @@ final class CodeToolPresetTests: XCTestCase {
     /// what the pin is for. Pinned by name so a silent change in membership — a `preset(…)` line lost to a bad merge, or a catalogue rename —
     /// fails here rather than quietly shipping a Code agent with fewer tools.
     private static let expectedNames: Set<String> = [
-        "read_file", "list_directory", "codebase_map", "glob_files", "find_definition",
+        "read_file", "list_directory", "project_tree", "glob_files", "find_definition",
         "file_overview", "code_search_text", "code_search_symbol", "code_search_files",
         "edit_code_single", "edit_code_batch", "create_new_file", "overwrite_file",
-        "run_command", "start_background_task", "git_tool", "diff_files",
-        "command_output", "command_stop",
+        "run_command", "start_background_task", "git", "diff_files",
+        "get_task_output", "stop_background_task",
     ]
 
     func testPresetMembershipIsUnchanged() {
@@ -62,7 +62,7 @@ final class CodeToolPresetTests: XCTestCase {
         // Tools that genuinely take no arguments would legitimately have an empty schema, so this
         // checks the ones that certainly do take some rather than asserting over every entry.
         let mustHaveArguments = ["read_file", "glob_files", "edit_code_single", "overwrite_file",
-                                 "run_command", "start_background_task", "git_tool", "diff_files"]
+                                 "run_command", "start_background_task", "git", "diff_files"]
         for name in mustHaveArguments {
             guard let tool = CodeToolPreset.defaultTools.first(where: { $0.name == name }) else {
                 return XCTFail("\(name) is missing from the preset")
@@ -96,7 +96,7 @@ final class CodeToolPresetTests: XCTestCase {
         let mustConfirm: Set<String> = ["edit_code_single", "edit_code_batch", "create_new_file",
                                         "overwrite_file", "batch_command"]
         let mustNotConfirm: Set<String> = ["read_file", "list_directory", "glob_files",
-                                           "find_definition", "git_tool", "diff_files"]
+                                           "find_definition", "git", "diff_files"]
 
         for tool in CodeToolPreset.defaultTools {
             if mustConfirm.contains(tool.name) {

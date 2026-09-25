@@ -189,7 +189,7 @@ enum GitCommandBuilder {
             if let hit {
                 return "Error: option '\(name)' is not permitted"
                     + (hit == name ? "" : " (it abbreviates '\(hit)')")
-                    + " — git_tool is read-only and confined to the repository. Remove it and retry."
+                    + " — git is read-only and confined to the repository. Remove it and retry."
             }
         }
         return nil
@@ -239,7 +239,7 @@ enum GitCommandBuilder {
 }
 
 struct GitTool: DevgenticTool {
-    let name = "git_tool"
+    let name = "git"
     let category = "Developer & Diagnostics"
     let description = "Performs Git operations with structured output: status, log, diff, branch, stash, and blame."
 

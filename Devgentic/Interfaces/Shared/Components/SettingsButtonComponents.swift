@@ -171,8 +171,10 @@ struct TactileButton: View {
                 y: 1
             )
             .scaleEffect(isHovered && isEnabled && !reduceMotion ? 1.02 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: size.cornerRadius, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: isEnabled && !isLoading)
         .disabled(!isEnabled || isLoading)
         .onHover { hovering in
             withAnimation(.spring(response: 0.22, dampingFraction: 0.72)) {
@@ -382,8 +384,10 @@ struct TactileIconButton: View {
                     y: 1
                 )
                 .scaleEffect(isHovered && isEnabled && !reduceMotion ? 1.05 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: isEnabled)
         .disabled(!isEnabled)
         .onHover { hovering in
             withAnimation(.spring(response: 0.22, dampingFraction: 0.72)) {

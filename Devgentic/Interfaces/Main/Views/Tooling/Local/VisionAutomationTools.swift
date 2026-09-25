@@ -14,7 +14,7 @@ import ApplicationServices
 // MARK: - Read Screen State Tool
 
 struct ReadScreenStateTool: DevgenticTool {
-    let name = "read_screen_state"
+    let name = "extract_screen_text"
     let category = "Vision & UI"
     let description = "Takes a silent capture of the screen and extracts structural text for UI understanding."
     

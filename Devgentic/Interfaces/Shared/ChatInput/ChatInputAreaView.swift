@@ -615,7 +615,7 @@ struct ChatInputAreaView: View {
     // then the action icons, then a spacer, then SPLIT voice + send buttons (the single
     // morphing mic/send button is now voice-only; send is the shared accent button).
     private var toolbarArea: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             if mainViewModel.interfaceMode == .code {
                 CodeModelPickerButton()
                     .disabled(!isInputEnabled)
@@ -700,7 +700,13 @@ struct ChatInputAreaView: View {
                     usage: contextUsage,
                     onOpenTools: { profileID in router.navigate(to: .toolLibrary(profileID: profileID)) },
                     onCompact: { await compactHistoryNow() },
-                    canCompact: isInputEnabled
+                    canCompact: isInputEnabled,
+                    // Code keeps its window in the project's quick settings, not the profile's
+                    // Advanced panel (the Code profile has none a user can reach). Ollama only —
+                    // the one provider whose window the app chooses.
+                    onRaiseContext: mainViewModel.interfaceMode == .code && codeSessionManager.provider == .ollama
+                        ? { codeSessionManager.showQuickSettings = true }
+                        : nil
                 ) { profileID in
                     router.navigate(to: .profileDetail(profileID: profileID))
                 }
@@ -738,7 +744,10 @@ struct ChatInputAreaView: View {
             // it reads the observable workflow state in ITS body, so node events re-render a
             // capsule instead of the whole composer. Renders nothing unless the selected
             // conversation has a live run with exactly the right shape (see ComposerSkipResolver).
-            ComposerWorkflowSkipButton(conversationID: mainViewModel.selectedConversationID)
+            if let conversationID = mainViewModel.selectedConversationID,
+               mainViewModel.workflowExecutionStates[conversationID]?.isRunning == true {
+                ComposerWorkflowSkipButton(conversationID: conversationID)
+            }
 
             // Send / stop — the shared accent button (same as the QuickAccess panel).
             ComposerSendStopButton(
@@ -793,6 +802,11 @@ struct ChatInputAreaView: View {
             if codeSessionManager.projectPath == nil {
                 logger.info("[CODE] Send intercepted — folder not selected, opening folder picker")
                 openCodeFolderPicker()
+                return
+            }
+            if let refusal = mainViewModel.codeSendRefusal(openFolder: codeSessionManager.projectPath) {
+                logger.warning("[CODE_PROJECT] Send refused for session \(mainViewModel.selectedConversationID?.uuidString ?? "nil") — its bound folder is not the open one (\(codeSessionManager.projectPath?.path ?? "none")). CONSEQUENCE: nothing is sent; the draft stays in the composer.")
+                toastManager.show(refusal, style: .warning)
                 return
             }
             if let codeID = codeSessionManager.codeProfileID {
@@ -907,9 +921,9 @@ struct ChatInputAreaView: View {
     /// Updates the Explorer sidebar and triggers context.md bootstrap + recents tracking.
     @MainActor
     private func applyCodeFolderSelection(_ url: URL) {
-        explorerViewModel.selectedRootURL = url
-        explorerViewModel.loadDirectoryContents(for: url)
-        codeSessionManager.updateProjectPath(url)
+        // Through the coordinator: a session already bound to another folder keeps it, and the
+        // new folder gets a new session.
+        mainViewModel.chooseCodeFolder(url)
     }
 
     /// Code-mode file attachment picker. Hard-whitelists docs/code/images so the

@@ -144,15 +144,16 @@ final class ToolCategoryGroupingTests: XCTestCase {
     /// The specific tool that was wrong, pinned by name so the fix cannot silently regress.
     func testWatchFolderIsNotTreatedAsReadOnly() {
         let watcher = NativeToolCatalog.libraryTools
-            .first { $0.name == "fs_watch_folder" }
+            .first { $0.name == "watch_folder" || $0.name == "fs_watch_folder" }
             .map { $0.executable() }
-        XCTAssertNotNil(watcher, "fs_watch_folder is no longer offered in the Library")
+        XCTAssertNotNil(watcher, "watch_folder is no longer offered in the Library")
 
         XCTAssertTrue(watcher?.requiresConfirmation == true, """
-            fs_watch_folder defaults to no confirmation. Its `start` action opens a file \
+            watch_folder defaults to no confirmation. Its `start` action opens a file \
             descriptor and arms a dispatch source that lives until something stops it — only \
             `list` is read-only, and this default is per-tool.
             """)
+        XCTAssertEqual(HITLRiskTier.classify(toolName: "watch_folder"), .moderate)
         XCTAssertEqual(HITLRiskTier.classify(toolName: "fs_watch_folder"), .moderate)
     }
 }

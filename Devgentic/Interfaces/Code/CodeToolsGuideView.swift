@@ -129,8 +129,8 @@ struct CodeToolsGuideView: View {
             whySplit: nil
         ),
         CodeToolItem(
-            id: "codebase_map",
-            name: "codebase_map",
+            id: "project_tree",
+            name: "project_tree",
             category: .read,
             description: "Generates an architectural tree map of the workspace, automatically excluding build artifacts, caches, and git metadata.",
             parameters: [
@@ -300,8 +300,8 @@ struct CodeToolsGuideView: View {
             whySplit: "The other half of the batch_command split. It runs unattended, so its timeout is the only thing that stops a runaway."
         ),
         CodeToolItem(
-            id: "git_tool",
-            name: "git_tool",
+            id: "git",
+            name: "git",
             category: .vcs,
             description: "Structured Git operations: status, log, diff, branch, stash_list, blame, and commit inspection.",
             parameters: [
@@ -327,8 +327,8 @@ struct CodeToolsGuideView: View {
 
         // MARK: - Background tasks
         CodeToolItem(
-            id: "command_output",
-            name: "command_output",
+            id: "get_task_output",
+            name: "get_task_output",
             category: .vcs,
             description: "Reads what a background command has written so far. Pass since_line to get only what is new since the last read.",
             parameters: [
@@ -339,8 +339,8 @@ struct CodeToolsGuideView: View {
             whySplit: "Background output used to go to /dev/null; it is captured to a log file now and read through here."
         ),
         CodeToolItem(
-            id: "command_stop",
-            name: "command_stop",
+            id: "stop_background_task",
+            name: "stop_background_task",
             category: .vcs,
             description: "Ends a background command early. Output up to that point is kept and can still be read.",
             parameters: [

@@ -300,7 +300,7 @@ struct ReadFileTool: DevgenticTool {
             logger.info("[READFILE] '\(resolvedPath)' is \(total) characters; returning the first \(Self.maxPlainTextCharacters) and saying so. The rest is NOT in this observation.")
             content = String(content.prefix(Self.maxPlainTextCharacters))
                 + "\n\n…[truncated: showing the first \(Self.maxPlainTextCharacters) of \(total) characters. "
-                + "read_file cannot page; use preview_file for the head or tail, or grep_files / code_search to find a region.]"
+                + "read_file cannot page; use preview_file for the head or tail, or code_search_text to find a region.]"
         }
 
         return "📄 Contents of file '\(resolvedPath)':\n\(content)"

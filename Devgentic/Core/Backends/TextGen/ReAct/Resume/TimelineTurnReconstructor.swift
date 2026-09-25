@@ -48,7 +48,7 @@ enum TimelineTurnReconstructor {
     /// Tools that count toward the G6 reading-gate. Mirrors `ReActAgentExecutor.readingToolNames`
     /// so the gate counter re-derived here matches what a fresh run would compute.
     static let readingToolNames: Set<String> = [
-        "read_file", "find_definition", "code_search", "file_overview", "codebase_map"
+        "read_file", "find_definition", "code_search", "file_overview", "project_tree", "codebase_map"
     ]
 
     /// Rebuilds the in-flight state from a persisted timeline.

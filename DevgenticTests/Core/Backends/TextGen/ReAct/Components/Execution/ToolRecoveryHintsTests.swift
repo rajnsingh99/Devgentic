@@ -22,7 +22,7 @@ final class ToolRecoveryHintsTests: XCTestCase {
 
     /// Every tool the registry can suggest, as far as these tests are concerned.
     private let allTools: Set<String> = [
-        "list_directory", "glob_files", "codebase_map", "code_search", "code_search_text",
+        "list_directory", "glob_files", "project_tree", "codebase_map", "code_search", "code_search_text",
         "read_file", "file_overview", "preview_file", "overwrite_file", "edit_code_single",
         "edit_code", "edit_code_batch", "move_file", "copy_file", "delete_file", "create_file",
         "create_new_file",
@@ -92,6 +92,7 @@ final class ToolRecoveryHintsTests: XCTestCase {
         XCTAssertTrue(enriched.contains("glob_files"))
         XCTAssertFalse(enriched.contains("list_directory"),
                        "a tool absent from this request must never be suggested")
+        XCTAssertFalse(enriched.contains("project_tree"))
         XCTAssertFalse(enriched.contains("codebase_map"))
     }
 
@@ -102,7 +103,7 @@ final class ToolRecoveryHintsTests: XCTestCase {
     /// probe is a tool whose own name appears among its mapped suggestions.
     func testEnrich_NeverSuggestsTheToolThatJustFailed() {
         for toolName in ["read_file", "edit_code", "list_directory", "glob_files",
-                         "code_search", "codebase_map", "file_overview", "create_file"] {
+                         "code_search", "project_tree", "codebase_map", "file_overview", "create_file"] {
             for errorText in ["File not found", "old_string not found", "File already exists",
                               "does not exist", "matches"] {
                 let enriched = ToolRecoveryHints.enrich(

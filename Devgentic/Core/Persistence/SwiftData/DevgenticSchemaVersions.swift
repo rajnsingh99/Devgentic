@@ -22,6 +22,12 @@
 //  what makes the first post-release change a migration instead of a launch failure, and it cannot
 //  be added after the fact.
 //
+//  ⚠️ STILL PRE-RELEASE, V1 HAS BEEN EDITED IN PLACE ONCE SINCE: 2026-09-24 added the OPTIONAL
+//  `ConversationSD.projectPath`. Allowed only because nobody else holds a store; proven safe for
+//  the developer's store by `testAllEntitiesFixtureOpensUnderCurrentSchema`, which opens a V1 store
+//  written before the field through the production plan. After the first release, a change like
+//  this is a V2.
+//
 //  ⚠️ THIS FILE IS A HISTORICAL RECORD FROM THE FIRST RELEASE ON. Each `VersionedSchema` below
 //  describes the shape of a schema that was ONCE CURRENT. Once a version has shipped, its `models`
 //  list is frozen forever: editing it retroactively rewrites history and breaks migration from

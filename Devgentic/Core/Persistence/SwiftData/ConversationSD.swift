@@ -21,6 +21,11 @@ final class ConversationSD {
     var backendType: String?
     var backendEntityId: UUID?
     var profileTypeRaw: String?
+    /// The project folder a Code conversation runs in — recorded on its first send and fixed from
+    /// then on (2026-09-24). Selecting the conversation reopens this folder, and the Code sidebar
+    /// groups conversations by it. `nil` for Chat/Workflow and for Code conversations from before
+    /// it existed ("No project").
+    var projectPath: String?
 
     @Relationship(deleteRule: .cascade, inverse: \ChatMessageSD.conversation)
     var messages: [ChatMessageSD] = []
@@ -38,7 +43,7 @@ final class ConversationSD {
     init(id: UUID = UUID(), timestamp: Date = Date(), userDefinedTitle: String? = nil,
          isPinned: Bool = false, openAIThreadID: String? = nil,
          backendType: String? = nil, backendEntityId: UUID? = nil,
-         profileTypeRaw: String? = nil) {
+         profileTypeRaw: String? = nil, projectPath: String? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.userDefinedTitle = userDefinedTitle
@@ -47,6 +52,7 @@ final class ConversationSD {
         self.backendType = backendType
         self.backendEntityId = backendEntityId
         self.profileTypeRaw = profileTypeRaw
+        self.projectPath = projectPath
     }
 
     func toStruct() -> Conversation {

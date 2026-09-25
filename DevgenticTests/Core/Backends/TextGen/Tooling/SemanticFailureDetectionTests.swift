@@ -159,17 +159,17 @@ final class SemanticFailureDetectionTests: XCTestCase {
     ///
     /// This was originally pinned on `xcode_orchestrator`, which was deleted 2026-07-31 as
     /// unreachable. It is re-pinned rather than removed because the invariant belongs to the
-    /// OPT-OUT, not to that tool: `execute_shell` is now the only tool setting the flag, so it is
-    /// where the property has to hold. A refused command is used because it exercises the throw
+    /// OPT-OUT, not to that tool. It was re-pinned on `execute_shell`, and again on `run_command`
+    /// when that was removed (2026-09-24) — the shell is where the property has to hold. A refused command is used because it exercises the throw
     /// path without running anything.
     func testOptedOutTool_OperationalFailure_ThrowsRatherThanReturning() async throws {
-        let optedOut = TerminalTool()
+        let optedOut = RunCommandTool()
         XCTAssertTrue(optedOut.outputMayContainErrorText,
                       "if this tool stops opting out, re-point this test at whichever tool does")
 
         let args = try JSONDecoder().decode(
-            TerminalTool.Arguments.self,
-            from: Data(#"{"command":"vim"}"#.utf8)   // refused by ShellCommandGuard; nothing runs
+            ShellCommandArguments.self,
+            from: Data(#"{"command":"vim","working_directory":"/tmp"}"#.utf8)   // refused by ShellCommandGuard; nothing runs
         )
         do {
             let output = try await optedOut.call(arguments: args)

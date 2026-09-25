@@ -48,7 +48,7 @@ final class BackgroundPollFoldingTests: XCTestCase {
         let events: [TimelineEvent] = [
             tool("batch_command", params: #"{"command":"xcodebuild","background":true}"#),
             card("bg_1"),
-        ] + (1...9).map { _ in tool("command_output", params: #"{"task_id":"bg_1"}"#) }
+        ] + (1...9).map { _ in tool("get_task_output", params: #"{"task_id":"bg_1"}"#) }
 
         let folded = AgentTimelineView.foldBackgroundTaskPolls(events)
 
@@ -56,37 +56,42 @@ final class BackgroundPollFoldingTests: XCTestCase {
                        "nine identical poll rows survived above a card showing the same status")
     }
 
-    func testCommandOutputIsFoldedToo() {
+    func testGetTaskOutputIsFoldedToo() {
+        let events = [card("bg_1"), tool("get_task_output", params: #"{"task_id":"bg_1"}"#)]
+        XCTAssertEqual(names(AgentTimelineView.foldBackgroundTaskPolls(events)), ["card:bg_1"])
+    }
+
+    func testLegacyCommandOutputIsFoldedToo() {
         let events = [card("bg_1"), tool("command_output", params: #"{"task_id":"bg_1"}"#)]
         XCTAssertEqual(names(AgentTimelineView.foldBackgroundTaskPolls(events)), ["card:bg_1"])
     }
 
     /// ⚠️ Hide observations, keep actions. Stopping a task CHANGES state; the user should see
     /// that it happened even though the card also reports the outcome.
-    func testCommandStopKeepsItsRow() {
-        let events = [card("bg_1"), tool("command_stop", params: #"{"task_id":"bg_1"}"#)]
+    func testStopBackgroundTaskKeepsItsRow() {
+        let events = [card("bg_1"), tool("stop_background_task", params: #"{"task_id":"bg_1"}"#)]
         XCTAssertEqual(names(AgentTimelineView.foldBackgroundTaskPolls(events)),
-                       ["card:bg_1", "command_stop"],
+                       ["card:bg_1", "stop_background_task"],
                        "an action the agent took was hidden, not just an observation")
     }
 
     /// ⚠️ Without a card there is nowhere else for the information to appear, so folding would
     /// leave the user with nothing at all.
     func testPollsSurviveWhenNoCardExists() {
-        let events = [tool("command_output", params: #"{"task_id":"bg_1"}"#)]
-        XCTAssertEqual(names(AgentTimelineView.foldBackgroundTaskPolls(events)), ["command_output"])
+        let events = [tool("get_task_output", params: #"{"task_id":"bg_1"}"#)]
+        XCTAssertEqual(names(AgentTimelineView.foldBackgroundTaskPolls(events)), ["get_task_output"])
     }
 
     func testAPollForADifferentTaskIsKept() {
-        let events = [card("bg_1"), tool("command_output", params: #"{"task_id":"bg_2"}"#)]
+        let events = [card("bg_1"), tool("get_task_output", params: #"{"task_id":"bg_2"}"#)]
         XCTAssertEqual(names(AgentTimelineView.foldBackgroundTaskPolls(events)),
-                       ["card:bg_1", "command_output"],
+                       ["card:bg_1", "get_task_output"],
                        "bg_2 has no card, so its status row is the only place it shows")
     }
 
     /// The list-everything form. With a card on screen it is the same noise.
     func testAListAllPollIsFoldedWhenAnyCardExists() {
-        let events = [card("bg_1"), tool("command_output", params: "{}")]
+        let events = [card("bg_1"), tool("get_task_output", params: "{}")]
         XCTAssertEqual(names(AgentTimelineView.foldBackgroundTaskPolls(events)), ["card:bg_1"])
     }
 
@@ -113,7 +118,7 @@ final class BackgroundPollFoldingTests: XCTestCase {
     /// entry point instead.
     func testTheNodeBuilderActuallyAppliesTheFold() {
         let events: [TimelineEvent] = [card("bg_1")]
-            + (1...9).map { _ in tool("command_output", params: #"{"task_id":"bg_1"}"#) }
+            + (1...9).map { _ in tool("get_task_output", params: #"{"task_id":"bg_1"}"#) }
 
         let nodes = AgentTimelineView.buildGroupedNodes(from: events, isStreaming: false)
 
@@ -122,10 +127,10 @@ final class BackgroundPollFoldingTests: XCTestCase {
         for node in nodes {
             switch node {
             case .action(let event):
-                if case .toolExecution(let d) = event, d.name == "command_output" { polls += 1 }
+                if case .toolExecution(let d) = event, d.name == "get_task_output" { polls += 1 }
             case .actionGroup(let group):
                 polls += group.filter {
-                    if case .toolExecution(let d) = $0 { return d.name == "command_output" }
+                    if case .toolExecution(let d) = $0 { return d.name == "get_task_output" }
                     return false
                 }.count
             case .backgroundCard:

@@ -39,7 +39,7 @@ enum CodeToolPreset {
         // MARK: - Read & Navigate
         preset("read_file"),
         preset("list_directory"),
-        preset("codebase_map"),
+        preset("project_tree"),
         preset("glob_files"),
         preset("find_definition"),
         preset("file_overview"),
@@ -60,9 +60,9 @@ enum CodeToolPreset {
         // itself started — unlike `batch_command`, which runs arbitrary code. Confirming these
         // would teach the user to approve without reading, which is what the 2026-07-31
         // manage_processes/kill_process split was about.
-        preset("command_output"),
-        preset("command_stop"),
-        preset("git_tool"),
+        preset("get_task_output"),
+        preset("stop_background_task"),
+        preset("git"),
         preset("diff_files"),
     ].compactMap { $0 }
 
@@ -108,22 +108,18 @@ enum CodeToolPreset {
         )
     }
 
+    /// Names of core preset tools that are always enabled for a Code profile and cannot be disabled.
+    static let lockedToolNames: Set<String> = {
+        Set(defaultTools.map(\.name))
+    }()
+
     /// Names of tools hidden from the Tool Library when it is opened for a Code profile.
     ///
-    /// Two groups, both DERIVED as of 2026-07-31 — neither is a list maintained here:
-    ///
-    /// 1. **The preset's own tools.** Hidden so the user cannot disable what the preset
-    ///    guarantees. Taken from `defaultTools`, which is this type's actual job.
-    /// 2. **Library tools the preset supersedes** — `edit_code`, `code_search`, `create_file`,
-    ///    `write_file`, `execute_shell`. Offering these to a Code agent alongside the narrower
-    ///    tools that replaced them would hand it several shapes for one intent, which is the
-    ///    confusion the splits were introduced to prevent. This group used to be a `Set` literal
-    ///    right here, so the reason a tool was hidden lived in a comment rather than beside the
-    ///    tool; it now comes from `NativeToolCatalog`, where each entry names what supersedes it.
-    ///
-    /// Chat and Workflow profiles still see group 2 — being superseded is a fact about the CODE
-    /// interface, not about the tool.
+    /// Library tools the preset supersedes (if any) are hidden so the model is not offered
+    /// duplicate shapes for one intent. Core preset tools are no longer hidden — they are shown
+    /// with locked status so users can inspect them and configure execution modes.
     static let hiddenToolNames: Set<String> = {
-        Set(defaultTools.map(\.name)).union(NativeToolCatalog.hiddenFromCodeLibrary)
+        NativeToolCatalog.hiddenFromCodeLibrary
     }()
 }
+

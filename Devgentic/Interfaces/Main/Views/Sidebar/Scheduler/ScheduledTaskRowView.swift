@@ -103,6 +103,7 @@ struct ScheduledTaskRowView: View {
         .padding(.vertical, 7)
         .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .contentShape(Rectangle())
+        .pointingHandCursor()
         .onTapGesture { onTap() }
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }

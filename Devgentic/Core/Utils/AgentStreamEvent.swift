@@ -625,7 +625,7 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
         if ToolCapability.executesArbitraryCode(toolName) { return .destructive }
 
         switch toolName {
-        case "delete_file", "fs_organize_batch",
+        case "delete_file", "batch_move_files", "fs_organize_batch",
              // Split out of read/write multiplexers 2026-07-31 precisely so they could be
              // labelled and gated as what they are. Each removes something with no undo:
              // an event, a reminder, a process (SIGKILL), or every tag on a file.
@@ -642,9 +642,9 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
              // to reach `.destructive` faster would fail the test that keeps the set honest.
              "update_skill":
             return .destructive
-        case "write_file", "move_file", "copy_file", "create_folder", "fs_watch_folder":
+        case "write_file", "move_file", "copy_file", "create_folder", "watch_folder", "fs_watch_folder":
             return .moderate
-        case "read_file", "list_directory", "fs_smart_search", "fs_read_metadata",
+        case "read_file", "list_directory", "spotlight_search", "fs_smart_search", "read_file_metadata", "fs_read_metadata",
              "get_system_stats", "web_search":
             return .safe
         default:

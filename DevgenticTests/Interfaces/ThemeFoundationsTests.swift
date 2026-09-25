@@ -102,15 +102,19 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertEqual(AppAccentColor(rawValue: "jet_black"), .black)
         XCTAssertEqual(AppAccentColor(rawValue: "pure_black"), .black)
 
-        // Test isAccentLight behavior
+        // Test isAccentLight and accentForegroundColor behavior
         let whiteDecorator = ThemeDecorator(base: AppThemes.MaterialTheme(), accentColorOverride: .white)
         XCTAssertTrue(whiteDecorator.isAccentLight)
+        XCTAssertEqual(whiteDecorator.accentForegroundColor, Color(red: 0.08, green: 0.08, blue: 0.08))
 
         let blackDecorator = ThemeDecorator(base: AppThemes.MaterialTheme(), accentColorOverride: .black)
         XCTAssertFalse(blackDecorator.isAccentLight)
+        XCTAssertEqual(blackDecorator.accentForegroundColor, .white)
 
         let blueDecorator = ThemeDecorator(base: AppThemes.MaterialTheme(), accentColorOverride: .blue)
         XCTAssertFalse(blueDecorator.isAccentLight)
+        XCTAssertEqual(blueDecorator.accentForegroundColor, .white)
+        XCTAssertEqual(blueDecorator.warningForegroundColor, Color(red: 0.08, green: 0.08, blue: 0.08))
     }
 
     func testThemeManagerAvailableThemesAndMigration() {
@@ -239,5 +243,45 @@ final class ThemeFoundationsTests: XCTestCase {
         manager.applySurfaceStyle(.glassmorphic)
         XCTAssertEqual(manager.surfaceStyle, .glassmorphic)
         XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedSurfaceStyle"), "glassmorphic")
+    }
+
+    func testChatFontFamilyAndTypographySettings() {
+        let manager = ThemeManager()
+
+        // Verify all font families
+        XCTAssertEqual(ChatFontFamily.allCases.count, 4)
+        XCTAssertEqual(ChatFontFamily.system.rawValue, "system")
+        XCTAssertEqual(ChatFontFamily.monospaced.rawValue, "monospaced")
+        XCTAssertEqual(ChatFontFamily.serif.rawValue, "serif")
+        XCTAssertEqual(ChatFontFamily.rounded.rawValue, "rounded")
+
+        // Verify design mappings
+        XCTAssertEqual(ChatFontFamily.system.design, .default)
+        XCTAssertEqual(ChatFontFamily.monospaced.design, .monospaced)
+        XCTAssertEqual(ChatFontFamily.serif.design, .serif)
+        XCTAssertEqual(ChatFontFamily.rounded.design, .rounded)
+
+        // Verify display metadata
+        for family in ChatFontFamily.allCases {
+            XCTAssertFalse(family.displayName.isEmpty)
+            XCTAssertFalse(family.shortName.isEmpty)
+            XCTAssertFalse(family.subtitle.isEmpty)
+            XCTAssertFalse(family.sampleGlyph.isEmpty)
+        }
+
+        // Apply Monospaced
+        manager.applyChatFontFamily(.monospaced)
+        XCTAssertEqual(manager.chatFontFamily, .monospaced)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey), "monospaced")
+
+        // Apply Serif
+        manager.applyChatFontFamily(.serif)
+        XCTAssertEqual(manager.chatFontFamily, .serif)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey), "serif")
+
+        // Reset to System
+        manager.applyChatFontFamily(.system)
+        XCTAssertEqual(manager.chatFontFamily, .system)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey), "system")
     }
 }

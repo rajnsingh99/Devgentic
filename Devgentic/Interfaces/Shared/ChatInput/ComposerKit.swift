@@ -55,9 +55,8 @@ struct ComposerCapabilities {
 
 // MARK: - Icon button
 
-/// The standard 28×28 circular composer icon button (attach, screenshot, …). Unifies the
-/// panel's static-circle style and the main toolbar's hover-circle style: faint base circle,
-/// brighter circle + primary-text icon on hover.
+/// The standard 28×28 circular composer icon button (attach, screenshot, …).
+/// Adapts between Apple Liquid Glass and Pro Solid Matte via `composerControlSurface`.
 struct ComposerIconButton: View {
     let systemName: String
     let help: LocalizedStringKey
@@ -76,18 +75,12 @@ struct ComposerIconButton: View {
                 .font(.system(.body, weight: .medium))
                 .foregroundColor(isHovered && !disabled ? theme.primaryText : theme.secondaryText.opacity(0.85))
                 .frame(width: 28, height: 28)
-                .background(
-                    Circle()
-                        .fill(isHovered && !disabled ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-                )
-                .overlay(
-                    Circle()
-                        .stroke(isHovered && !disabled ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
-                )
+                .composerControlSurface(in: Circle(), isHovered: isHovered && !disabled)
                 .shadow(color: isHovered && !disabled ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
                 .scaleEffect(isHovered && !disabled ? 1.06 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: !disabled)
         .disabled(disabled)
         .opacity(disabled ? 0.5 : 1.0)
         .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
@@ -144,6 +137,7 @@ struct ComposerMicButton: View {
             }
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: isReady)
         .onHover { hover in withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hover } }
         .help(isRecording ? "Stop dictation (⌘⇧V)" : "Start voice dictation (⌘⇧V)")
         .accessibilityLabel(isRecording ? "Stop dictation"
@@ -152,15 +146,17 @@ struct ComposerMicButton: View {
     }
 }
 
-// MARK: - Send / stop button
+// MARK: - Primary action button
 
-/// Tactile Dark Glass send button that respects ButtonAccentStyle and flips to a stop control while streaming.
-struct ComposerSendStopButton: View {
-    let isSending: Bool
-    let isDisabled: Bool
+/// Tactile circular primary action button (Send, Confirm/Transcribe, etc.) that respects ButtonAccentStyle and SurfaceStyle.
+struct ComposerPrimaryButton: View {
+    let systemName: String
+    let help: LocalizedStringKey
+    var isDisabled: Bool = false
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
     @Environment(\.buttonAccentStyle) private var buttonAccentStyle
     @State private var isHovered = false
 
@@ -168,7 +164,7 @@ struct ComposerSendStopButton: View {
         buttonAccentStyle == .themeContrast
     }
 
-    private var sendForegroundColor: Color {
+    private var foregroundColor: Color {
         if isDisabled {
             return theme.secondaryText.opacity(0.35)
         }
@@ -180,11 +176,19 @@ struct ComposerSendStopButton: View {
         return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
     }
 
-    private var sendBackgroundColor: Color {
+    private var backgroundColor: Color {
         if isDisabled {
+            if surfaceStyle == .solid {
+                return theme.isDark ? Color(hex: "#26262B") : Color(hex: "#F4F4F5")
+            }
             return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05)
         }
         if isThemeContrast {
+            if surfaceStyle == .solid {
+                return theme.isDark
+                    ? Color.white.opacity(isHovered ? 1.0 : 0.96)
+                    : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.96)
+            }
             return theme.isDark
                 ? Color.white.opacity(isHovered ? 1.0 : 0.94)
                 : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.94)
@@ -192,9 +196,15 @@ struct ComposerSendStopButton: View {
         return theme.accentColor.opacity(isHovered ? 1.0 : 0.92)
     }
 
-    private var sendBorderColor: Color {
+    private var borderColor: Color {
         if isDisabled {
-            return theme.dividerColor.opacity(0.25)
+            return surfaceStyle == .solid ? theme.dividerColor.opacity(0.5) : theme.dividerColor.opacity(0.25)
+        }
+        if surfaceStyle == .solid {
+            if isThemeContrast {
+                return theme.isDark ? Color.white : Color.black
+            }
+            return theme.accentColor
         }
         if isThemeContrast {
             return theme.isDark
@@ -204,9 +214,15 @@ struct ComposerSendStopButton: View {
         return theme.accentColor.opacity(isHovered ? 0.8 : 0.4)
     }
 
-    private var sendShadowColor: Color {
+    private var shadowColor: Color {
         if isDisabled {
             return .clear
+        }
+        if surfaceStyle == .solid {
+            if isThemeContrast {
+                return Color.black.opacity(theme.isDark ? (isHovered ? 0.40 : 0.25) : (isHovered ? 0.20 : 0.10))
+            }
+            return Color.black.opacity(theme.isDark ? 0.35 : 0.12)
         }
         if isThemeContrast {
             return Color.black.opacity(theme.isDark ? (isHovered ? 0.35 : 0.20) : (isHovered ? 0.15 : 0.08))
@@ -220,7 +236,51 @@ struct ComposerSendStopButton: View {
             action()
         }) {
             ZStack {
-                if isSending {
+                Circle()
+                    .fill(backgroundColor)
+                    .frame(width: 28, height: 28)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(borderColor, lineWidth: 0.5)
+                    )
+                    .shadow(
+                        color: shadowColor,
+                        radius: isHovered ? 4 : 2,
+                        x: 0,
+                        y: 1
+                    )
+                Image(systemName: systemName)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(foregroundColor)
+            }
+            .scaleEffect(isHovered && !isDisabled ? 1.06 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor(enabled: !isDisabled)
+        .disabled(isDisabled)
+        .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isHovered = hover } }
+        .help(help)
+        .accessibilityLabel(Text(help))
+    }
+}
+
+// MARK: - Send / stop button
+
+/// Tactile send button that respects ButtonAccentStyle and SurfaceStyle, and flips to a stop control while streaming.
+struct ComposerSendStopButton: View {
+    let isSending: Bool
+    let isDisabled: Bool
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        if isSending {
+            Button(action: {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                action()
+            }) {
+                ZStack {
                     Circle()
                         .fill(Color.red.opacity(isHovered ? 0.18 : 0.10))
                         .frame(width: 28, height: 28)
@@ -232,30 +292,21 @@ struct ComposerSendStopButton: View {
                     Image(systemName: "stop.fill")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.red)
-                } else {
-                    Circle()
-                        .fill(sendBackgroundColor)
-                        .frame(width: 28, height: 28)
-                        .overlay(
-                            Circle()
-                                .strokeBorder(sendBorderColor, lineWidth: 0.5)
-                        )
-                        .shadow(
-                            color: sendShadowColor,
-                            radius: isHovered ? 4 : 2,
-                            x: 0,
-                            y: 1
-                        )
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(sendForegroundColor)
                 }
+                .scaleEffect(isHovered ? 1.06 : 1.0)
             }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isHovered = hover } }
+            .help("Stop generating (⌘.)")
+            .accessibilityLabel("Stop generating")
+        } else {
+            ComposerPrimaryButton(
+                systemName: "arrow.up",
+                help: "Send message (⏎)",
+                isDisabled: isDisabled,
+                action: action
+            )
         }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isHovered = hover } }
-        .help(isSending ? "Stop generating (⌘.)" : "Send message (⏎)")
-        .accessibilityLabel(isSending ? "Stop generating" : "Send")
     }
 }

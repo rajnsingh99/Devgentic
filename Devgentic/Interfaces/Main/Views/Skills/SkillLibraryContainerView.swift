@@ -491,7 +491,7 @@ struct SkillLibraryContainerView: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 8) {
-                GlassActionButton(title: "Add execute_shell", icon: "plus", isAccent: true) {
+                GlassActionButton(title: "Add run_command", icon: "plus", isAccent: true) {
                     acceptShellToolOffer()
                 }
                 GlassActionButton(title: "Not now", icon: "xmark", isAccent: false) {
@@ -678,13 +678,13 @@ struct SkillLibraryContainerView: View {
             // ⚠️ A silent early return here means a skill that bundles scripts is linked and the
             // user is never offered the tool that runs them — indistinguishable, from the outside,
             // from the offer logic deciding against it.
-            DGLogger(category: "SkillLibrary").notice("[SKILLS] No shell-tool offer evaluated for '\(skill.name)' [skill \(skill.id)]: no AGENT profile is in scope. CONSEQUENCE: if this skill bundles scripts, nothing will prompt for execute_shell — the user must add it from the Tool Library themselves.")
+            DGLogger(category: "SkillLibrary").notice("[SKILLS] No shell-tool offer evaluated for '\(skill.name)' [skill \(skill.id)]: no AGENT profile is in scope. CONSEQUENCE: if this skill bundles scripts, nothing will prompt for run_command — the user must add it from the Tool Library themselves.")
             return
         }
 
         let declared = skill.latestVersion?.allowedTools
         let hasScripts = skill.latestVersion?.hasScripts ?? false
-        let alreadyHas = config.tools.contains { $0.name == "execute_shell" }
+        let alreadyHas = config.tools.contains { $0.name == SkillCapabilityHints.shellToolName }
 
         // ⚠️ The decision is logged HERE rather than inside `SkillCapabilityHints`, which stays a
         // pure predicate — it is unit-tested directly, and a logger inside it would fire on every
@@ -694,16 +694,16 @@ struct SkillLibraryContainerView: View {
             hasScripts: hasScripts,
             profileTools: config.tools
         ) else {
-            DGLogger(category: "SkillLibrary").info("[SKILLS] No shell-tool offer for '\(skill.name)' [skill \(skill.id)] on '\(profile.displayName)': declaredTools=\(declared?.joined(separator: ",") ?? "none") hasScripts=\(hasScripts) profileAlreadyHasShell=\(alreadyHas). CONSEQUENCE: no prompt is shown — either the skill needs no shell, or the profile already has execute_shell and a second copy would be unreachable from the Tool Library.")
+            DGLogger(category: "SkillLibrary").info("[SKILLS] No shell-tool offer for '\(skill.name)' [skill \(skill.id)] on '\(profile.displayName)': declaredTools=\(declared?.joined(separator: ",") ?? "none") hasScripts=\(hasScripts) profileAlreadyHasShell=\(alreadyHas). CONSEQUENCE: no prompt is shown — either the skill needs no shell, or the profile already has run_command and a second copy would be unreachable from the Tool Library.")
             shellToolOffer = nil
             return
         }
 
-        DGLogger(category: "SkillLibrary").notice("[SKILLS] OFFERING execute_shell for '\(skill.name)' [skill \(skill.id)] on '\(profile.displayName)': triggered by \(hasScripts ? "a bundled scripts/ directory" : "the skill's allowed-tools declaration") (declaredTools=\(declared?.joined(separator: ",") ?? "none")). CONSEQUENCE: this is an OFFER and grants nothing — the tool is added only if the user accepts, and it stays confirmation-gated when they do.")
+        DGLogger(category: "SkillLibrary").notice("[SKILLS] OFFERING run_command for '\(skill.name)' [skill \(skill.id)] on '\(profile.displayName)': triggered by \(hasScripts ? "a bundled scripts/ directory" : "the skill's allowed-tools declaration") (declaredTools=\(declared?.joined(separator: ",") ?? "none")). CONSEQUENCE: this is an OFFER and grants nothing — the tool is added only if the user accepts, and it stays confirmation-gated when they do.")
         shellToolOffer = skill.name
     }
 
-    /// Adds `execute_shell` because the USER asked, from the offer row.
+    /// Adds `run_command` because the USER asked, from the offer row.
     private func acceptShellToolOffer() {
         defer { shellToolOffer = nil }
         // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. The launch sweep re-links every pre-V6
@@ -717,16 +717,16 @@ struct SkillLibraryContainerView: View {
               let index = profileService.profiles.firstIndex(where: { $0.id == profileID }),
               let current = profileService.freshProfile(id: profileID),
               case .agent(var config) = current.details else {
-            DGLogger(category: "SkillLibrary").error("[SKILLS] The user ACCEPTED the execute_shell offer but no agent profile was in scope. CONSEQUENCE: the tool was NOT granted and the offer row disappears anyway — the user believes they granted it and the next run has no shell.")
+            DGLogger(category: "SkillLibrary").error("[SKILLS] The user ACCEPTED the run_command offer but no agent profile was in scope. CONSEQUENCE: the tool was NOT granted and the offer row disappears anyway — the user believes they granted it and the next run has no shell.")
             return
         }
-        guard !config.tools.contains(where: { $0.name == "execute_shell" }) else {
-            DGLogger(category: "SkillLibrary").notice("[SKILLS] The user accepted the execute_shell offer for '\(profileService.profiles[index].displayName)' but the profile already has it. CONSEQUENCE: nothing was added — a second copy would render as OFF while the first is live, which is a defect this codebase has already shipped once.")
+        guard !config.tools.contains(where: { $0.name == SkillCapabilityHints.shellToolName }) else {
+            DGLogger(category: "SkillLibrary").notice("[SKILLS] The user accepted the run_command offer for '\(profileService.profiles[index].displayName)' but the profile already has it. CONSEQUENCE: nothing was added — a second copy would render as OFF while the first is live, which is a defect this codebase has already shipped once.")
             return
         }
 
         config.tools.append(SkillCapabilityHints.shellTool())
-        DGLogger(category: "SkillLibrary").notice("[SKILLS] GRANTED execute_shell to '\(profileService.profiles[index].displayName)' [profile \(profileID)] from the skills offer. CONSEQUENCE: this profile can now run shell commands in every conversation, not just for the skill that prompted it — each call still requires per-call confirmation, and the tool can be removed from the Tool Library.")
+        DGLogger(category: "SkillLibrary").notice("[SKILLS] GRANTED run_command to '\(profileService.profiles[index].displayName)' [profile \(profileID)] from the skills offer. CONSEQUENCE: this profile can now run shell commands in every conversation, not just for the skill that prompted it — each call still requires per-call confirmation, and the tool can be removed from the Tool Library.")
 
         // ⚠️ Same three steps as `mutateSelections`, and for the same reasons: sync the open edit
         // buffer FACET-ONLY so an editor showing this profile does not overwrite the new tool on its
@@ -749,10 +749,10 @@ struct SkillLibraryContainerView: View {
             try profileService.saveProfile(profile)
             profileService.rebaseEditBuffer(to: profile)
         } catch {
-            DGLogger(category: "SkillLibrary").error("[SKILLS] Failed to add execute_shell for '\(profile.displayName)': \(error.localizedDescription). CONSEQUENCE: the tool was NOT granted and the offer is dismissed — the user must add it from the Tool Library instead.")
+            DGLogger(category: "SkillLibrary").error("[SKILLS] Failed to add run_command for '\(profile.displayName)': \(error.localizedDescription). CONSEQUENCE: the tool was NOT granted and the offer is dismissed — the user must add it from the Tool Library instead.")
             // ⚠️ The offer row is dismissed by the `defer` either way, so without this the click
             // simply appears to have worked and the skill's scripts then fail at run time.
-            actionError = "execute_shell was not granted to '\(profile.displayName)': \(error.localizedDescription) Add it from the Tool Library instead."
+            actionError = "run_command was not granted to '\(profile.displayName)': \(error.localizedDescription) Add it from the Tool Library instead."
         }
         revision += 1
     }

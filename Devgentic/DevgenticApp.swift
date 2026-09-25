@@ -624,6 +624,9 @@ struct DevgenticApp: App {
     @State private var chatInputViewModel = ChatInputViewModel()
 
     init() {
+        // Enforce overlay scrollers and eliminate scroller track / path backgrounds
+        ScrollerCustomizer.install()
+
         let persistence = ChatPersistenceStore.shared
         let fileProcessor = FileProcessorService()
 
@@ -1121,7 +1124,9 @@ struct DevgenticApp: App {
                 .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
                 .frame(minWidth: 700, minHeight: 520)
                 .tint(themeManager.currentTheme.accentColor)
+                .ignoresSafeArea()
         }
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
     }
 

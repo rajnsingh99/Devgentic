@@ -224,6 +224,18 @@ final class MessagingCoordinator {
         // Tag Code mode conversations with profileTypeRaw for sidebar filtering
         if vm.interfaceMode == .code {
             persistenceService.updateProfileType(for: conversationIDToUse, profileTypeRaw: ProfileType.code.rawValue)
+            // Binds the conversation to its folder on the first send. `codeSendRefusal` has already
+            // refused a send whose bound folder differs, so this never re-points a conversation.
+            let bound = persistenceService.getConversation(withId: conversationIDToUse)?.projectPath
+            if let folder = vm.codeSessionManager?.projectPath?.path {
+                if bound == nil {
+                    persistenceService.updateProjectPath(for: conversationIDToUse, projectPath: folder)
+                } else {
+                    logger.debug("[CODE_PROJECT] Session \(conversationIDToUse.uuidString) already bound to '\(URL(fileURLWithPath: bound ?? "").lastPathComponent)' — not re-bound.")
+                }
+            } else {
+                logger.warning("[CODE_PROJECT] Code send for session \(conversationIDToUse.uuidString) with no project selected. CONSEQUENCE: the session is not bound to a project and lists under 'No project'.")
+            }
         }
 
         // Auto-title if empty

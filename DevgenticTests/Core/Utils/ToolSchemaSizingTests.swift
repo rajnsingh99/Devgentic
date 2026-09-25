@@ -39,7 +39,7 @@ final class ToolSchemaSizingTests: XCTestCase {
     /// whole layer used to be charged at — that gap is the defect.
     func testARealisticLoadoutDwarfsTheFlatOverhead() {
         let loadout = ["read_file", "write_file", "list_directory", "execute_shell",
-                       "fs_smart_search", "edit_code_single", "create_new_file", "git_tool"]
+                       "spotlight_search", "edit_code_single", "create_new_file", "git"]
         let chars = ToolSchemaSizes.chars(for: loadout)
         XCTAssertGreaterThan(chars, PromptFitCheck.layerOverheadChars / 2,
                              "8 tools priced at \(chars) chars vs a \(PromptFitCheck.layerOverheadChars)-char flat allowance for the ENTIRE layer")
@@ -155,20 +155,21 @@ final class ToolSchemaSizingTests: XCTestCase {
         XCTAssertEqual(total, sum)
     }
 
-    /// Code-only tools are the nine that were missing, and they are NOT in the registry — so this
-    /// also pins the reason the old code missed them.
-    func testCodeOnlyToolsArePricedEvenThoughTheRegistryWithholdsThem() {
-        let codeOnly = NativeToolCatalog.codeOnlyTools.map(\.name)
-        XCTAssertFalse(codeOnly.isEmpty, "the catalogue must still carry code-only tools")
+    /// All coding tools are now registered in the shared registry and fully priced.
+    func testAllCodingToolsAreInSharedRegistryAndPriced() {
+        let codingTools = [
+            "diff_files", "git", "edit_code_single", "edit_code_batch",
+            "code_search_text", "code_search_symbol", "code_search_files",
+            "create_new_file", "overwrite_file"
+        ]
 
         let registered = Set(LocalToolManager.shared.availableTools().map(\.name))
-        for name in codeOnly {
-            XCTAssertFalse(registered.contains(name),
-                           "'\(name)' is code-only and must not be in the shared registry — if that "
-                           + "changed, this test is no longer covering the gap it was written for.")
+        for name in codingTools {
+            XCTAssertTrue(registered.contains(name),
+                          "'\(name)' must now be in the shared registry for all profiles")
             XCTAssertGreaterThan(
                 ToolSchemaSizes.chars(for: [name]), 30,
-                "'\(name)' is dispatchable in Code mode but costs nothing in the gauge."
+                "'\(name)' is dispatchable but costs nothing in the gauge."
             )
         }
     }

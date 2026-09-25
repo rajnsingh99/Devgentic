@@ -247,18 +247,37 @@ final class CodeProfileSingletonTests: XCTestCase {
 
     // MARK: - resetSession
 
-    /// The successful path still deletes and still clears the handle — hardening the failure branch
-    /// must not turn reset into a no-op.
-    func testResetSessionDeletesTheRowAndClearsTheHandle() throws {
+    /// ⚠️ Home RESETS the singleton, never deletes it (2026-09-24). Deleting it lost every per-tool
+    /// setting and MCP tool on the row; see `CodeProjectSessionTests`. Asserted here too because a
+    /// delete would re-open exactly the handle-loss paths this file exists for.
+    func testResetSessionKeepsTheRowAndTheHandle() throws {
         let manager = CodeSessionManager(defaults: defaults)
-        manager.ensureCodeProfile()
+        let id = manager.ensureCodeProfile()
 
         manager.resetSession()
 
-        XCTAssertNil(manager.codeProfileID)
-        XCTAssertNil(defaults.string(forKey: "devgentic.codeProfileID"),
-                     "a surviving handle would point at a deleted row")
-        XCTAssertEqual(try sharedCodeRows().count, 0)
+        XCTAssertEqual(manager.codeProfileID, id)
+        XCTAssertEqual(defaults.string(forKey: "devgentic.codeProfileID"), id.uuidString)
+        XCTAssertEqual(try sharedCodeRows().count, 1)
+    }
+
+    /// ⚠️ Seen on device 2026-09-24. The handle resolves lazily, so Home pressed before any Code
+    /// action this launch had no handle, reset nothing, and the adoption that followed brought the
+    /// row's stale folder straight back.
+    func testHomeBeforeAnyCodeActionStillResetsTheRow() throws {
+        var config = AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "gemma"),
+                                 tools: CodeToolPreset.defaultTools, historyStrategy: .pointer)
+        config.projectPath = "/tmp/devgentic-tests/stale-project"
+        let row = BackendProfile(displayName: "Code Session", lastSelected: Date(), details: .code(config))
+        context.insert(row)
+
+        let manager = CodeSessionManager(defaults: defaults)   // no stored handle
+        manager.resetSession()
+        manager.ensureCodeProfile()
+
+        XCTAssertNil(manager.projectPath, "Home was undone — the stale folder came back on adoption")
+        let stored = try XCTUnwrap(try BackendProfileStore.shared.fetchProfile(byId: row.id))
+        XCTAssertNil(stored.details.agentConfig?.projectPath, "Home did not reset the row it never had a handle for")
     }
 
     // MARK: - The re-hydrate gate
@@ -288,8 +307,9 @@ final class CodeProfileSingletonTests: XCTestCase {
         XCTAssertEqual(manager.modelName, "", "a stale model came back under the newly chosen provider")
     }
 
-    /// Reset must stay reset for the same reason.
-    func testResetFollowedByEnsureDoesNotResurrectTheClearedModel() throws {
+    /// Home keeps the model — it is the "last used" a project with no remembered model starts
+    /// with — and a later ensure must not change that either way.
+    func testResetKeepsTheModelAcrossALaterEnsure() throws {
         seedCodeProfile(model: "deepseek-r1:32b", lastSelected: Date())
 
         let manager = CodeSessionManager(defaults: defaults)
@@ -299,6 +319,6 @@ final class CodeProfileSingletonTests: XCTestCase {
         manager.resetSession()
         manager.ensureCodeProfile()
 
-        XCTAssertEqual(manager.modelName, "", "the reset model came back — the session did not stay reset")
+        XCTAssertEqual(manager.modelName, "deepseek-r1:32b")
     }
 }

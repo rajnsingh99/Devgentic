@@ -14,6 +14,7 @@ import SwiftUI
 
 struct ComposerDropZoneOverlay: View {
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     var cornerRadius: CGFloat = 18
     var message: String = "Drop files or folders to attach to context"
@@ -28,17 +29,26 @@ struct ComposerDropZoneOverlay: View {
 
     var body: some View {
         ZStack {
-            // 1. Frosted Glass Backdrop Fill
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(Color.black.opacity(0.30))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(activeAccentColor.opacity(0.05))
-                )
+            // 1. Backdrop Fill (Liquid Glass material vs Solid Matte opaque)
+            if surfaceStyle == .solid {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(theme.isDark ? Color(hex: "#18181B").opacity(0.96) : Color.white.opacity(0.96))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(activeAccentColor.opacity(0.08))
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(Color.black.opacity(0.30))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(activeAccentColor.opacity(0.05))
+                    )
+            }
 
             // 2. Diffused Accent Outer Glow
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -59,7 +69,7 @@ struct ComposerDropZoneOverlay: View {
                     )
                 )
 
-            // 4. Centered Floating Glass Pill
+            // 4. Centered Floating Pill
             HStack(spacing: 10) {
                 Image(systemName: "arrow.down.doc.fill")
                     .font(.system(size: 16, weight: .semibold))
@@ -68,30 +78,44 @@ struct ComposerDropZoneOverlay: View {
 
                 Text(message)
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                    .foregroundColor(Color.white.opacity(0.95))
+                    .foregroundColor(surfaceStyle == .solid ? theme.primaryText : Color.white.opacity(0.95))
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 9)
-            .background(
-                Capsule()
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        Capsule()
-                            .fill(Color.black.opacity(0.60))
-                    )
+            .background {
+                if surfaceStyle == .solid {
+                    Capsule()
+                        .fill(theme.isDark ? Color(hex: "#222225") : Color(hex: "#F4F4F5"))
+                } else {
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            Capsule()
+                                .fill(Color.black.opacity(0.60))
+                        )
+                }
+            }
+            .overlay {
+                if surfaceStyle == .solid {
+                    Capsule()
+                        .strokeBorder(theme.isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.12), lineWidth: 1)
+                } else {
+                    Capsule()
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.38), Color.white.opacity(0.08)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            lineWidth: 1
+                        )
+                }
+            }
+            .shadow(
+                color: Color.black.opacity(surfaceStyle == .solid ? (theme.isDark ? 0.45 : 0.15) : 0.45),
+                radius: surfaceStyle == .solid ? 10 : 12,
+                y: surfaceStyle == .solid ? 4 : 5
             )
-            .overlay(
-                Capsule()
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.38), Color.white.opacity(0.08)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: Color.black.opacity(0.45), radius: 12, y: 5)
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .allowsHitTesting(false)

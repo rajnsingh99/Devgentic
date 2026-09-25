@@ -32,6 +32,10 @@ enum MCPRootsProvider {
     /// contribution. Each owns its slot; the union is recomputed and published.
     private(set) static var roots: [URL] = []
 
+    /// How many times a changed root set has been published — one per `roots/list_changed` sent to
+    /// every server. Read by tests: a project switch must cost exactly one.
+    private(set) static var publishCount = 0
+
     /// Code mode's project folder. Nil when Code mode has no project selected.
     private static var codeProjectRoot: URL?
 
@@ -52,6 +56,21 @@ enum MCPRootsProvider {
         guard explorerRoot != url else { return }
         explorerRoot = url
         logger.info("[MCP-ROOTS] Explorer root \(url.map { "→ \($0.path)" } ?? "cleared").")
+        await recompute()
+    }
+
+    /// Moves BOTH slots to `url` in ONE publish — a Code project switch.
+    ///
+    /// ⚠️ Why a combined setter (2026-09-24). A switch moves the Explorer and the Code project
+    /// together, but they reached this type as two separate calls, so every switch published
+    /// `[old, new]` and then `[new]`: two notifications to every connected server, and for the
+    /// moment in between a server's boundary included the project the user had just LEFT. Setting
+    /// both first means the per-slot calls that follow find nothing changed and publish nothing.
+    static func setWorkspace(_ url: URL) async {
+        guard codeProjectRoot != url || explorerRoot != url else { return }
+        codeProjectRoot = url
+        explorerRoot = url
+        logger.info("[MCP-ROOTS] Workspace → \(url.path) (Code project and Explorer together, one notification).")
         await recompute()
     }
 
@@ -126,6 +145,7 @@ enum MCPRootsProvider {
 
         let previous = roots
         roots = normalized
+        publishCount += 1
         logger.info("""
             [MCP-ROOTS] Workspace roots changed (\(previous.count) → \(normalized.count)): \
             \(normalized.map(\.path).joined(separator: ", ")). Notifying connected servers so \

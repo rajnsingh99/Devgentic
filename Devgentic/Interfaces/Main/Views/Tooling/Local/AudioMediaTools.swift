@@ -73,7 +73,7 @@ struct ManageAudioTool: DevgenticTool {
 // MARK: - Media Control Tool
 
 struct MediaControlTool: DevgenticTool {
-    let name = "media_control"
+    let name = "control_media"
     let category = "Audio & Media"
     let description = "Controls media playback: play, pause, next track, previous track via system media keys."
 

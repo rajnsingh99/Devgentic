@@ -244,15 +244,23 @@ struct MLXModelDetailSheet: View {
                     .foregroundColor(theme.secondaryText)
             }
             Spacer()
-            Button("Close") { dismiss() }
-            Button {
+            TactileButton(
+                title: "Close",
+                variant: .secondary,
+                size: .regular
+            ) {
+                dismiss()
+            }
+
+            TactileButton(
+                title: "Download",
+                icon: "arrow.down.circle",
+                variant: .primary,
+                size: .regular
+            ) {
                 dismiss()
                 onDownload()
-            } label: {
-                Label("Download", systemImage: "arrow.down.circle")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.accentColor)
             .keyboardShortcut(.defaultAction)
         }
         .padding()

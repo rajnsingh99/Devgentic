@@ -29,26 +29,34 @@ final class ToolExecutionMediatorTests: XCTestCase {
     // MARK: - T5: Permission Pre-flight Mapping
 
     func testPermissions_FsSmartSearch_RequiresFileSystemPermissions() {
-        let perms = ToolExecutionMediator.getRequiredPermissions(for: "fs_smart_search")
-        XCTAssertEqual(perms.count, 3)
-        XCTAssertTrue(perms.contains(.desktop))
-        XCTAssertTrue(perms.contains(.documents))
-        XCTAssertTrue(perms.contains(.downloads))
+        for tool in ["spotlight_search", "fs_smart_search"] {
+            let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
+            XCTAssertEqual(perms.count, 3, tool)
+            XCTAssertTrue(perms.contains(.desktop), tool)
+            XCTAssertTrue(perms.contains(.documents), tool)
+            XCTAssertTrue(perms.contains(.downloads), tool)
+        }
     }
 
     func testPermissions_FsReadMetadata_RequiresFileSystemPermissions() {
-        let perms = ToolExecutionMediator.getRequiredPermissions(for: "fs_read_metadata")
-        XCTAssertEqual(perms.count, 3)
+        for tool in ["read_file_metadata", "fs_read_metadata"] {
+            let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
+            XCTAssertEqual(perms.count, 3, tool)
+        }
     }
 
     func testPermissions_FsWatchFolder_RequiresFileSystemPermissions() {
-        let perms = ToolExecutionMediator.getRequiredPermissions(for: "fs_watch_folder")
-        XCTAssertEqual(perms.count, 3)
+        for tool in ["watch_folder", "fs_watch_folder"] {
+            let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
+            XCTAssertEqual(perms.count, 3, tool)
+        }
     }
 
     func testPermissions_FsOrganizeBatch_RequiresFileSystemPermissions() {
-        let perms = ToolExecutionMediator.getRequiredPermissions(for: "fs_organize_batch")
-        XCTAssertEqual(perms.count, 3)
+        for tool in ["batch_move_files", "fs_organize_batch"] {
+            let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
+            XCTAssertEqual(perms.count, 3, tool)
+        }
     }
 
     func testPermissions_RunApplescript_RequiresAccessibility() {

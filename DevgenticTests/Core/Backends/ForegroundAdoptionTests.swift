@@ -4,6 +4,9 @@
 //  ForegroundAdoptionTests.swift
 //  DevgenticTests
 //
+//  2026-09-24: foreground runs now write their log LIVE through the registry, exactly as background
+//  tasks do — see the tests below `testAForegroundRunReachesATerminalStatus`.
+//
 //  A foreground `batch_command` used to be invisible and unreachable while it ran:
 //
 //    - no card, so a 15-minute build showed nothing
@@ -57,31 +60,78 @@ final class ForegroundAdoptionTests: XCTestCase {
         XCTAssertNotNil(task.finishedAt)
     }
 
-    /// The log is written once from the finished result — see `adopt`. It is not live, but it must
-    /// not be empty either, or "Open full log" on the card opens nothing.
-    func testTheOutputIsWrittenToTheLogOnCompletion() async throws {
-        _ = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
-            #"{"command":"echo written-to-log","working_directory":"/tmp"}"#))
+    /// The log is written LIVE (2026-09-24), not once at the end: it exists while the command runs,
+    /// so a crash mid-build still leaves it on disk.
+    func testTheLogExistsWhileTheCommandIsStillRunning() async throws {
+        let tool = RunCommandTool(conversationID: conversation)
+        async let result = tool.call(arguments: arguments(
+            #"{"command":"echo early-line; sleep 2","working_directory":"/tmp"}"#))
 
+        var sawLive = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, !sawLive {
+            if let task = BackgroundProcessRegistry.shared.snapshots(conversationID: conversation).first,
+               task.status == .running,
+               let text = try? String(contentsOf: task.logURL, encoding: .utf8),
+               text.contains("early-line") {
+                sawLive = true
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        _ = try await result
+        XCTAssertTrue(sawLive, "the log did not hold the command's output while it was running — "
+                      + "it is being written only at the end again, so a crash leaves nothing")
+    }
+
+    /// stdout and stderr land in ONE log in the order they happened, and that is what the model
+    /// gets back. The old path returned stdout, then a separate `[stderr]` block.
+    func testStdoutAndStderrComeBackInterleavedInOrder() async throws {
+        let output = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
+            #"{"command":"echo one; echo two >&2; echo three","working_directory":"/tmp"}"#))
+        let one = try XCTUnwrap(output.range(of: "one")), two = try XCTUnwrap(output.range(of: "two")),
+            three = try XCTUnwrap(output.range(of: "three"))
+        XCTAssertTrue(one.lowerBound < two.lowerBound && two.lowerBound < three.lowerBound,
+                      "stderr was not interleaved with stdout: \(output)")
+        XCTAssertFalse(output.contains("[stderr]"), "the streams were split: \(output)")
+    }
+
+    func testAForegroundRunIsNamedAsOneAndItsLogFileSaysWhatItRan() async throws {
+        _ = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
+            #"{"command":"echo hi","working_directory":"/tmp","task_name":"Say Hello"}"#))
         let task = try XCTUnwrap(BackgroundProcessRegistry.shared.snapshots(conversationID: conversation).first)
-        let log = try XCTUnwrap(BackgroundProcessRegistry.shared.readLog(
-            conversationID: conversation, taskID: task.id))
-        XCTAssertTrue(log.text.contains("written-to-log"), "the card has nothing to show: \(log.text)")
+        XCTAssertTrue(task.id.hasPrefix("fg_"), "a foreground run carried the background prefix: \(task.id)")
+        XCTAssertTrue(task.logURL.lastPathComponent.hasSuffix("_\(task.id)_say-hello.log"),
+                      "unexpected log name: \(task.logURL.lastPathComponent)")
     }
 
     /// A timeout kill is still reported as a kill, not as an exit code the command chose.
     func testATimedOutForegroundRunIsRecordedAsTimedOut() async throws {
-        _ = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
-            #"{"command":"sleep 30","working_directory":"/tmp","timeout_seconds":1}"#))
+        let output = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
+            #"{"command":"echo before-kill; sleep 30","working_directory":"/tmp","timeout_seconds":1}"#))
 
         let task = try XCTUnwrap(BackgroundProcessRegistry.shared.snapshots(conversationID: conversation).first)
         XCTAssertEqual(task.status, .timedOut)
+        XCTAssertTrue(output.contains("timed out after 1s"), output)
+        XCTAssertTrue(output.contains("before-kill"), "the output written before the kill was lost: \(output)")
     }
 
-    /// ⚠️ Guards the hook itself. `ProcessRunner` attaches its pipes BEFORE `run()` — or the output
-    /// is lost — and there is no pid before it, so the adoption must happen in `onStarted`, inside
-    /// `execute`. Doing it around the call instead silently loses either the output or the handle.
-    func testAdoptionUsesTheOnStartedHook() throws {
+    /// `run_command` opts out of output sniffing, so a REFUSAL returned as a string would be recorded
+    /// as a successful call. It must throw. (`execute_shell` held this until its removal.)
+    func testARefusedCommandThrowsRatherThanReturning() async throws {
+        do {
+            let output = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
+                #"{"command":"vim","working_directory":"/tmp"}"#))
+            XCTFail("a refused command must throw, not return: \(output)")
+        } catch let error as ShellCommandError {
+            guard case .refused = error else { return XCTFail("expected .refused, got \(error)") }
+        }
+        XCTAssertTrue(BackgroundProcessRegistry.shared.snapshots(conversationID: conversation).isEmpty,
+                      "a refused command must not have run")
+    }
+
+    /// ⚠️ THE WIRING. The foreground path must go through the registry's live-log launch and wait on
+    /// it — not back through `ProcessRunner`'s pipes.
+    func testTheForegroundPathLaunchesThroughTheRegistryAndWaits() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -89,9 +139,84 @@ final class ForegroundAdoptionTests: XCTestCase {
         guard let source = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else {
             throw XCTSkip("CodingAssistantTools.swift not reachable — running outside a checkout")
         }
-        XCTAssertTrue(source.contains("onStarted: adopt"),
-                      "the foreground path no longer adopts through onStarted; a handle taken "
-                      + "outside ProcessRunner is taken before the pid exists or after the pipes "
-                      + "are gone")
+        XCTAssertTrue(source.contains("foreground: true)"), "the foreground path no longer launches through the registry")
+        XCTAssertTrue(source.contains("await registry.waitUntilEnded(conversationID: conversationID, taskID: started.id)"),
+                      "the foreground path no longer waits on the registry")
+    }
+}
+
+/// The log file name — `<yyyyMMdd-HHmmss>_<id>_<slug>.log` (2026-09-24).
+final class CommandLogNamingTests: XCTestCase {
+
+    private var root: URL!
+    private var registry: BackgroundProcessRegistry!
+    private let conversation = UUID()
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("lognaming-tests-\(UUID().uuidString)", isDirectory: true)
+        registry = BackgroundProcessRegistry(rootDirectory: root)
+    }
+
+    override func tearDownWithError() throws {
+        registry?.terminateAll()
+        if let root { try? FileManager.default.removeItem(at: root) }
+        try super.tearDownWithError()
+    }
+
+    func testTheNameCarriesTheTimeTheIdAndASlug() {
+        var parts = DateComponents()
+        parts.year = 2026; parts.month = 9; parts.day = 24; parts.hour = 13; parts.minute = 22; parts.second = 5
+        let date = Calendar.current.date(from: parts)!
+        XCTAssertEqual(BackgroundProcessRegistry.logFileName(id: "bg_1", startedAt: date, name: nil, command: "npm run dev"),
+                       "20260924-132205_bg_1_npm-run-dev.log")
+        XCTAssertEqual(BackgroundProcessRegistry.logFileName(id: "fg_2", startedAt: date, name: "Build & Test", command: "swift test"),
+                       "20260924-132205_fg_2_build-test.log", "the task name wins over the command")
+    }
+
+    func testTheSlugIsSafeForAFileNameAndBounded() {
+        XCTAssertEqual(BackgroundProcessRegistry.logSlug("cd /tmp && ls -la | grep \"x\""), "cd-tmp-ls-la-grep-x")
+        XCTAssertEqual(BackgroundProcessRegistry.logSlug("  ~/..//  "), "")
+        XCTAssertLessThanOrEqual(BackgroundProcessRegistry.logSlug(String(repeating: "abc ", count: 50)).count, 40)
+    }
+
+    /// ⚠️ THE BUG THIS NAMING FIXES. The counter restarts every launch while the folder survives, so
+    /// the first task after a relaunch APPENDED to the previous run's `bg_1.log`.
+    func testATaskAfterARelaunchNeverWritesIntoAnEarlierRunsLog() throws {
+        let first = try registry.launch(command: "echo from-the-first-run", workingDirectory: NSTemporaryDirectory(),
+                                        timeout: 30, conversationID: conversation)
+        _ = try XCTUnwrap(waitForEnd(first.id, in: registry))
+        registry.terminateAll()
+
+        let relaunched = BackgroundProcessRegistry(rootDirectory: root)    // counters start over
+        defer { relaunched.terminateAll() }
+        let second = try relaunched.launch(command: "echo from-the-second-run", workingDirectory: NSTemporaryDirectory(),
+                                           timeout: 30, conversationID: conversation)
+        XCTAssertEqual(second.id, first.id, "fixture: the id must repeat for this to test anything")
+        XCTAssertNotEqual(second.logURL, first.logURL, "the relaunched task reused the earlier log file")
+        let done = try XCTUnwrap(waitForEnd(second.id, in: relaunched))
+        XCTAssertFalse(done.tail.contains("from-the-first-run"), "the new task's log holds the old run's output: \(done.tail)")
+    }
+
+    func testForegroundAndBackgroundShareOneCounter() throws {
+        let bg = try registry.launch(command: "true", workingDirectory: NSTemporaryDirectory(),
+                                     timeout: 30, conversationID: conversation)
+        let fg = try registry.launch(command: "true", workingDirectory: NSTemporaryDirectory(),
+                                     timeout: 30, conversationID: conversation, foreground: true)
+        XCTAssertEqual(bg.id, "bg_1")
+        XCTAssertEqual(fg.id, "fg_2")
+    }
+
+    private func waitForEnd(_ id: String, in registry: BackgroundProcessRegistry) -> BackgroundProcessRegistry.Snapshot? {
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if let task = registry.snapshot(conversationID: conversation, taskID: id), task.status.isTerminal {
+                usleep(100_000)     // let the final drain land
+                return registry.snapshot(conversationID: conversation, taskID: id)
+            }
+            usleep(50_000)
+        }
+        return nil
     }
 }

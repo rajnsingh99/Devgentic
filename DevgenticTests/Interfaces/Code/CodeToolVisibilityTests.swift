@@ -20,81 +20,72 @@ import XCTest
 
 final class CodeToolVisibilityTests: XCTestCase {
 
-    /// The tools the preset supersedes. Five, as the removed `Set` literal spelled them. Pinned
-    /// verbatim: this is the one assertion that would catch the derivation silently changing what
-    /// a Code profile sees.
+    /// The legacy monolithic tools withdrawn from the catalogue.
     ///
-    /// ⚠️ `batch_command` was briefly a sixth. It was hidden from Code on 2026-09-22 when the split
-    /// landed, then WITHDRAWN from the catalogue entirely later the same day — `run_command` was a
-    /// literal duplicate of `batch_command(background: false)` (both call
-    /// `BatchCommandTool.runForeground`), so chat and Code were being offered different names for
-    /// identical work. A withdrawn tool cannot be "superseded for Code profiles": it is not in the
-    /// Library for anyone. Profiles that stored the name resolve through
-    /// `NativeToolCatalog.renamedTools`.
-    private static let supersededByPreset: Set<String> = [
-        "edit_code", "code_search", "create_file", "write_file", "execute_shell",
+    /// `execute_shell`, `edit_code`, `code_search`, `create_file`, and `write_file` were withdrawn
+    /// in favor of the focused split tools (`run_command`, `edit_code_single`/`edit_code_batch`,
+    /// `code_search_*`, `create_new_file`/`overwrite_file`) which are now offered in the Library
+    /// to both Chat and Code profiles.
+    private static let withdrawnSupersededTools: Set<String> = [
+        "edit_code", "code_search", "create_file", "write_file", "execute_shell"
     ]
 
-    func testHiddenSetStillMatchesTheHandWrittenLiteral() {
-        let expected = Set(CodeToolPreset.defaultTools.map(\.name)).union(Self.supersededByPreset)
-        XCTAssertEqual(CodeToolPreset.hiddenToolNames, expected, """
-            the derived hidden set no longer matches what the old literal produced — \
-            missing: \(expected.subtracting(CodeToolPreset.hiddenToolNames).sorted()), \
-            unexpected: \(CodeToolPreset.hiddenToolNames.subtracting(expected).sorted())
+    /// The 9 precision tools previously restricted to Code that are now shared across all profiles.
+    private static let sharedCodingTools: Set<String> = [
+        "diff_files", "git", "edit_code_single", "edit_code_batch",
+        "code_search_text", "code_search_symbol", "code_search_files",
+        "create_new_file", "overwrite_file"
+    ]
+
+    func testLockedSetMatchesThePresetTools() {
+        let expected = Set(CodeToolPreset.defaultTools.map(\.name))
+        XCTAssertEqual(CodeToolPreset.lockedToolNames, expected, """
+            the derived locked set no longer matches the preset tools — \
+            missing: \(expected.subtracting(CodeToolPreset.lockedToolNames).sorted()), \
+            unexpected: \(CodeToolPreset.lockedToolNames.subtracting(expected).sorted())
             """)
     }
 
-    /// The superseded group comes from the catalogue now, so the catalogue must actually carry it.
-    func testCatalogCarriesTheSupersededGroup() {
-        XCTAssertEqual(NativeToolCatalog.hiddenFromCodeLibrary, Self.supersededByPreset)
+    /// With all superseded tools withdrawn, `hiddenFromCodeLibrary` is empty.
+    func testCatalogCarriesNoSupersededTools() {
+        XCTAssertTrue(NativeToolCatalog.hiddenFromCodeLibrary.isEmpty,
+                      "superseded tools remaining in catalogue: \(NativeToolCatalog.hiddenFromCodeLibrary)")
     }
 
-    /// Each superseded tool names its replacement. A blank reason would let the group survive
-    /// while losing the thing that made moving it worthwhile.
-    func testEverySupersededToolNamesItsReplacement() {
-        for name in Self.supersededByPreset {
-            guard let entry = NativeToolCatalog.entry(named: name) else {
-                return XCTFail("\(name) is not in the catalogue")
-            }
-            guard case .libraryExceptCode(let supersededBy) = entry.visibility else {
-                return XCTFail("\(name) should be .libraryExceptCode, got \(entry.visibility)")
-            }
-            XCTAssertFalse(supersededBy.trimmingCharacters(in: .whitespaces).isEmpty,
-                           "\(name) is hidden for Code profiles without saying what replaces it")
+    /// All superseded tools must be absent from the catalogue.
+    func testSupersededToolsAreWithdrawnFromCatalog() {
+        for name in Self.withdrawnSupersededTools {
+            XCTAssertNil(NativeToolCatalog.entry(named: name),
+                         "\(name) was superseded and should be withdrawn from the catalogue")
         }
     }
 
-    /// Superseded tools are still ordinary Library tools for Chat and Workflow profiles — being
-    /// superseded is a fact about the Code interface, not about the tool.
+    /// The coding tools are now registered in the shared Library for all profiles (Chat, Code, Workflow).
     @MainActor
-    func testSupersededToolsRemainInTheLibraryForOtherProfiles() {
+    func testCodingToolsAreRegisteredInTheLibrary() {
         let registered = Set(LocalToolManager.shared.availableTools().map(\.name))
-        for name in Self.supersededByPreset {
+        for name in Self.sharedCodingTools {
             XCTAssertTrue(registered.contains(name),
-                          "\(name) must stay in the Library — only CODE profiles hide it")
+                          "\(name) must be in the Library so Chat and Workflow profiles can use it")
         }
     }
 
-    /// The intent-splits are absent from the Library entirely, which is what makes hiding their
-    /// originals coherent: a Code profile sees exactly one shape per intent.
+    /// No tools should be withheld as `.codeOnly` — the entire catalogue is available in the Library.
     @MainActor
-    func testCodeOnlySplitsAreNotInTheLibrary() {
-        let registered = Set(LocalToolManager.shared.availableTools().map(\.name))
+    func testNoToolsAreRestrictedToCodeOnly() {
         let codeOnly = Set(NativeToolCatalog.codeOnlyTools.map(\.name))
-
-        XCTAssertFalse(codeOnly.isEmpty, "no .codeOnly entries — the split tools lost their marking")
-        XCTAssertTrue(codeOnly.isDisjoint(with: registered),
-                      "code-only tools leaked into the Library: \(codeOnly.intersection(registered).sorted())")
+        XCTAssertTrue(codeOnly.isEmpty,
+                      "tools still marked .codeOnly: \(codeOnly.sorted())")
     }
 
-    /// A Code profile must end up with one shape per intent: the preset's narrow tools, and none
-    /// of the broad originals they replaced.
-    func testCodeProfileSeesNoSupersededOriginal() {
+    /// A Code profile surfaces preset tools in the Library view as locked core tools rather than hiding them.
+    func testPresetToolsAreVisibleAndLockedInCodeProfileLibraryView() {
         let presetNames = Set(CodeToolPreset.defaultTools.map(\.name))
-        XCTAssertTrue(presetNames.isDisjoint(with: Self.supersededByPreset),
-                      "the preset itself supplies a tool it also supersedes")
-        for name in Self.supersededByPreset {
-            XCTAssertTrue(CodeToolPreset.hiddenToolNames.contains(name), "\(name) is not hidden for Code")
+        for name in presetNames {
+            XCTAssertFalse(CodeToolPreset.hiddenToolNames.contains(name),
+                           "\(name) is in defaultTools and must NOT be hidden from Library view in Code mode")
+            XCTAssertTrue(CodeToolPreset.lockedToolNames.contains(name),
+                          "\(name) is in defaultTools and must be marked as locked in Code mode")
         }
     }
 }

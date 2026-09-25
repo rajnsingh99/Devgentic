@@ -35,25 +35,25 @@ enum ToolRecoveryHints {
     /// `(toolName, errorSubstring)` wins. Within a tool, list more specific patterns first.
     private static let registry: [Hint] = [
         // read_file — the canonical hallucination recovery path.
-        Hint(toolName: "read_file",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "codebase_map", "code_search"]),
+        Hint(toolName: "read_file",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "project_tree", "code_search"]),
         Hint(toolName: "read_file",      errorSubstring: "Error extracting document",   suggestions: ["file_overview", "preview_file"]),
 
         // edit_code — three distinct failure modes, each needs a different recovery.
-        Hint(toolName: "edit_code",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "codebase_map"]),
+        Hint(toolName: "edit_code",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "project_tree"]),
         Hint(toolName: "edit_code",      errorSubstring: "old_string matches",          suggestions: ["read_file"]),
         Hint(toolName: "edit_code",      errorSubstring: "old_string not found",        suggestions: ["read_file", "code_search"]),
 
         // edit_code_single / edit_code_batch (Code interface splits) — mirror edit_code's patterns,
         // but suggest search tools that are actually in the Code preset (code_search_text / _symbol).
-        Hint(toolName: "edit_code_single", errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "codebase_map"]),
+        Hint(toolName: "edit_code_single", errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "project_tree"]),
         Hint(toolName: "edit_code_single", errorSubstring: "matches",                  suggestions: ["read_file"]),
         Hint(toolName: "edit_code_single", errorSubstring: "old_string not found",     suggestions: ["read_file", "code_search_text"]),
-        Hint(toolName: "edit_code_batch",  errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "codebase_map"]),
+        Hint(toolName: "edit_code_batch",  errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "project_tree"]),
         Hint(toolName: "edit_code_batch",  errorSubstring: "matches",                  suggestions: ["read_file"]),
         Hint(toolName: "edit_code_batch",  errorSubstring: "old_string not found",     suggestions: ["read_file", "code_search_text"]),
 
         // file_overview — same path-recovery pattern as read_file.
-        Hint(toolName: "file_overview",  errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "codebase_map"]),
+        Hint(toolName: "file_overview",  errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "project_tree"]),
 
         // move_file / copy_file — symmetric: source-missing vs destination-collision.
         Hint(toolName: "move_file",      errorSubstring: "Source path does not exist", suggestions: ["list_directory", "glob_files"]),
@@ -73,46 +73,39 @@ enum ToolRecoveryHints {
 
         // Exploration/search tools that take a path argument — always fall back to list_directory
         // (never suggest the tool itself; that would loop).
-        Hint(toolName: "codebase_map",   errorSubstring: "does not exist",              suggestions: ["list_directory"]),
-        Hint(toolName: "code_search",    errorSubstring: "does not exist",              suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "code_search_text",   errorSubstring: "does not exist",          suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "code_search_symbol", errorSubstring: "does not exist",          suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "code_search_files",  errorSubstring: "does not exist",          suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "glob_files",     errorSubstring: "does not exist",              suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "find_definition", errorSubstring: "does not exist",             suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "project_tree",   errorSubstring: "does not exist",              suggestions: ["list_directory"]),
+        Hint(toolName: "code_search",    errorSubstring: "does not exist",              suggestions: ["list_directory", "project_tree"]),
+        Hint(toolName: "code_search_text",   errorSubstring: "does not exist",          suggestions: ["list_directory", "project_tree"]),
+        Hint(toolName: "code_search_symbol", errorSubstring: "does not exist",          suggestions: ["list_directory", "project_tree"]),
+        Hint(toolName: "code_search_files",  errorSubstring: "does not exist",          suggestions: ["list_directory", "project_tree"]),
+        Hint(toolName: "glob_files",     errorSubstring: "does not exist",              suggestions: ["list_directory", "project_tree"]),
+        Hint(toolName: "find_definition", errorSubstring: "does not exist",             suggestions: ["list_directory", "project_tree"]),
 
         // batch_command's working_directory problem is a path-not-found in disguise.
-        Hint(toolName: "run_command",    errorSubstring: "working_directory",           suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "start_background_task", errorSubstring: "working_directory",     suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "run_command",    errorSubstring: "working_directory",           suggestions: ["list_directory", "codebase_map"]),
-        Hint(toolName: "start_background_task", errorSubstring: "working_directory",    suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "run_command",    errorSubstring: "working_directory",           suggestions: ["list_directory", "project_tree"]),
+        Hint(toolName: "start_background_task", errorSubstring: "working_directory",    suggestions: ["list_directory", "project_tree"]),
 
-        // git_tool guards its path arg before dispatch; same recovery as other path tools.
-        Hint(toolName: "git_tool",       errorSubstring: "does not exist",              suggestions: ["list_directory"]),
+        // git guards its path arg before dispatch; same recovery as other path tools.
+        Hint(toolName: "git",            errorSubstring: "does not exist",              suggestions: ["list_directory"]),
 
-        // finder_tags — file-level metadata tool; recovery via filename discovery.
-        Hint(toolName: "finder_tags",    errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files"]),
+        // manage_finder_tags — file-level metadata tool; recovery via filename discovery.
+        Hint(toolName: "manage_finder_tags", errorSubstring: "File not found",          suggestions: ["list_directory", "glob_files"]),
 
         // list_directory — generally a top-level call; when it fails (bad path, permission)
-        // the useful recoveries are broader views (codebase_map) or pattern search (glob_files).
+        // the useful recoveries are broader views (project_tree) or pattern search (glob_files).
         // Kept intentionally minimal since list_directory is usually the first step, not a
         // fallback target, so a short suggestion list keeps the model's next move obvious.
-        Hint(toolName: "list_directory", errorSubstring: "Error listing directory",     suggestions: ["codebase_map", "glob_files"]),
+        Hint(toolName: "list_directory", errorSubstring: "Error listing directory",     suggestions: ["project_tree", "glob_files"]),
 
-        // execute_shell — legacy single-shot shell. batch_command is a richer superset
-        // (timeout, working_directory, background, output cap); hint the model to use it
-        // when simple execution fails.
-        Hint(toolName: "execute_shell", errorSubstring: "Command failed",               suggestions: ["run_command"]),
+        // grep_files — retired tool superseded by code_search_text. If a model attempts
+        // calling it or encounters an error, direct it to code_search_text or glob_files.
+        Hint(toolName: "grep_files",    errorSubstring: "Grep error",                   suggestions: ["code_search_text", "glob_files"]),
+        Hint(toolName: "grep_files",    errorSubstring: "does not exist",               suggestions: ["code_search_text", "list_directory"]),
 
-        // grep_files — classic grep wrapper. code_search is a structured ripgrep-backed
-        // alternative with richer output; glob_files is the right fallback for "find by
-        // name/pattern" rather than content.
-        Hint(toolName: "grep_files",    errorSubstring: "Grep error",                   suggestions: ["code_search", "glob_files"]),
-
-        // fs_read_metadata — metadata read failures usually mean the path is wrong or
+        // read_file_metadata — metadata read failures usually mean the path is wrong or
         // the file is unreadable. Fall back to content-level reads that may bypass the
         // metadata quirk, or list the parent dir to verify the path.
-        Hint(toolName: "fs_read_metadata", errorSubstring: "Error reading metadata",    suggestions: ["read_file", "file_overview", "list_directory"]),
+        Hint(toolName: "read_file_metadata", errorSubstring: "Error reading metadata",  suggestions: ["read_file", "file_overview", "list_directory"]),
 
         // diff_files — when diffing fails, read each file independently so the model
         // can reason about differences manually.
@@ -122,15 +115,15 @@ enum ToolRecoveryHints {
         // model should inspect its contents before deciding what to do.
         Hint(toolName: "create_folder", errorSubstring: "Directory already exists",     suggestions: ["list_directory"]),
 
-        // fs_organize_batch — when the destination can't be created, creating it
+        // batch_move_files — when the destination can't be created, creating it
         // explicitly via create_folder first is the clean recovery path.
-        Hint(toolName: "fs_organize_batch", errorSubstring: "Could not create destination folder", suggestions: ["create_folder"]),
+        Hint(toolName: "batch_move_files", errorSubstring: "Could not create destination folder", suggestions: ["create_folder"]),
 
-        // fs_smart_search — both path-missing and permission-denied land on the same
+        // spotlight_search — both path-missing and permission-denied land on the same
         // substring; recovery via broader exploration works for the path-missing case
         // and is harmless for permission (model sees bare error + suggestion that won't
         // itself error if tools exist).
-        Hint(toolName: "fs_smart_search", errorSubstring: "does not exist",             suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "spotlight_search", errorSubstring: "does not exist",             suggestions: ["list_directory", "project_tree"]),
     ]
 
     /// Short, action-phrase descriptors rendered alongside each suggestion.
@@ -138,6 +131,7 @@ enum ToolRecoveryHints {
     private static let toolDescriptors: [String: String] = [
         "list_directory":     "list files in a specific directory",
         "glob_files":         "find files by pattern (e.g. '**/*.java')",
+        "project_tree":       "see the full project tree",
         "codebase_map":       "see the full project tree",
         "code_search":        "regex-search content across the codebase",
         "code_search_text":   "loose regex/text search (case-insensitive) across the codebase",

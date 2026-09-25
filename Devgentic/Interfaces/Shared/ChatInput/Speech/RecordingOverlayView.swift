@@ -21,29 +21,23 @@ struct RecordingOverlayView: View {
     let onCancel: () -> Void
     let onConfirm: () -> Void
 
-    // MARK: - State
-    @State private var isCancelHovering: Bool = false
-    @State private var isConfirmHovering: Bool = false
-
     @Environment(\.appTheme) private var theme
-
-    // Match DynamicActionButton / toolbar sizing
-    private let buttonSize: CGFloat = 30
 
     var body: some View {
         VStack(spacing: 6) {
             // Each child observes only what it needs from the store
             LiveTranscriptionTextView(store: displayStore)
 
-            HStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
                 cancelButton
                 WaveformBarView(store: displayStore)
                 TimerTextView(store: displayStore)
                 confirmButton
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
         }
+        .padding(.top, 6)
         .frame(minHeight: 58)
         // Match mainInputArea chrome exactly so toggling voice input doesn't visibly swap materials.
         .appSurface(in: .rect(cornerRadius: 18), elevation: .elevated)
@@ -53,39 +47,20 @@ struct RecordingOverlayView: View {
     // MARK: - Controls
 
     private var cancelButton: some View {
-        Button(action: onCancel) {
-            Image(systemName: "xmark")
-                .font(theme.fontBody.weight(.semibold))
-                .foregroundColor(isCancelHovering ? .white : theme.primaryText)
-                .frame(width: buttonSize, height: buttonSize)
-                .background(
-                    Circle()
-                        .fill(isCancelHovering ? theme.errorColor.opacity(0.9) : theme.secondaryText.opacity(0.18))
-                )
-        }
-        .buttonStyle(.plain)
-        .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isCancelHovering = hover } }
-        .help("Cancel recording (Esc)")
-        .accessibilityLabel("Cancel recording (Esc)")
+        ComposerIconButton(
+            systemName: "xmark",
+            help: "Cancel recording (Esc)",
+            action: onCancel
+        )
         .keyboardShortcut(.cancelAction)
     }
 
     private var confirmButton: some View {
-        Button(action: onConfirm) {
-            Image(systemName: "checkmark")
-                .font(theme.fontBody.weight(.semibold))
-                .foregroundColor(.white)
-                .frame(width: buttonSize, height: buttonSize)
-                .background(
-                    Circle()
-                        .fill(isConfirmHovering ? theme.controlAccent.opacity(0.85) : theme.controlAccent)
-                        .shadow(color: theme.controlAccent.opacity(0.3), radius: 3, x: 0, y: 2)
-                )
-        }
-        .buttonStyle(.plain)
-        .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isConfirmHovering = hover } }
-        .help("Stop and transcribe (↩)")
-        .accessibilityLabel("Stop and transcribe (↩)")
+        ComposerPrimaryButton(
+            systemName: "checkmark",
+            help: "Stop and transcribe (↩)",
+            action: onConfirm
+        )
         .keyboardShortcut(.defaultAction)
     }
 }
@@ -100,8 +75,16 @@ struct RecordingOverlayView: View {
 private struct WaveformBarView: View {
     let store: RecordingDisplayStore
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
 
-    private let maxBarHeight: CGFloat = 40.0
+    private let maxBarHeight: CGFloat = 24.0
+
+    private var barColor: Color {
+        if buttonAccentStyle == .themeContrast {
+            return theme.isDark ? Color.white.opacity(0.85) : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(0.85)
+        }
+        return theme.accentColor.opacity(0.85)
+    }
 
     var body: some View {
         // Bound in body (not only inside the Canvas closure) so @Observable
@@ -125,21 +108,18 @@ private struct WaveformBarView: View {
             let totalActualWidth = CGFloat(count) * actualBarWidth + CGFloat(count - 1) * actualSpacing
             let startX = (size.width - totalActualWidth) / 2.0
 
-            // Resolve themed color for Canvas rendering
-            let barColor = theme.controlAccent.opacity(0.7)
-
             for (index, level) in powerLevels.enumerated() {
                 // Sanitize values to protect against NaN/Infinity layout crashes
                 let safeLevel = level.isFinite && !level.isNaN ? CGFloat(max(0.0, min(1.0, level))) : 0.0
 
-                // Keep a baseline height of 1px for flatlines
-                let height = max(1.0, safeLevel * size.height)
+                // Keep a baseline height of 1.5px for flatlines
+                let height = max(1.5, safeLevel * size.height)
 
                 let x = startX + CGFloat(index) * (actualBarWidth + actualSpacing)
                 let y = (size.height - height) / 2.0
 
                 let rect = CGRect(x: x, y: y, width: actualBarWidth, height: height)
-                let path = Path(roundedRect: rect, cornerRadius: 1.5 * scale)
+                let path = Path(roundedRect: rect, cornerRadius: 1.0 * scale)
 
                 context.fill(path, with: .color(barColor))
             }
@@ -164,8 +144,8 @@ private struct TimerTextView: View {
             // Pulsing recording indicator dot
             Circle()
                 .fill(theme.errorColor)
-                .frame(width: 8, height: 8)
-                .scaleEffect(isPulsing ? 1.3 : 1.0)
+                .frame(width: 7, height: 7)
+                .scaleEffect(isPulsing ? 1.25 : 1.0)
                 .opacity(isPulsing ? 0.6 : 1.0)
                 .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
                 // Reduce Motion: keep the dot static — recording state is already
@@ -173,7 +153,7 @@ private struct TimerTextView: View {
                 .onAppear { if !reduceMotion { isPulsing = true } }
 
             Text(formatTime(store.recordingTime))
-                .font(.system(.body, design: .monospaced))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .foregroundColor(theme.secondaryText)
         }
     }
@@ -209,7 +189,7 @@ private struct LiveTranscriptionTextView: View {
                             .foregroundColor(theme.primaryText)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12)
+                            .padding(.horizontal, 14)
                             .id("liveTextBottom")
                     }
                     .frame(maxHeight: 80)
@@ -219,7 +199,7 @@ private struct LiveTranscriptionTextView: View {
                         }
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 4)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }

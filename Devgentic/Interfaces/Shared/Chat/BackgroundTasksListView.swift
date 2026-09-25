@@ -146,7 +146,7 @@ struct BackgroundTasksListView: View {
                                             }
                                         }
                                         .padding(.horizontal, 10)
-                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                        .transition(.opacity)
                                     }
                                 }
                             }

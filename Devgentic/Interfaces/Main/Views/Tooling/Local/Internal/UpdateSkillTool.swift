@@ -58,9 +58,8 @@ struct UpdateSkillTool: DevgenticTool {
 
     let name = "update_skill"
 
-    /// ⚠️ Must be a raw category some `BuiltInToolCategory` group gathers, or the tool gets no
-    /// sidebar row and `testEveryEntryDeclaresANonEmptyCategory` has nothing to catch it with.
-    let category = "macOS Utilities"
+    /// Agent skill instruction updates belong in Developer & Diagnostics.
+    let category = "Developer & Diagnostics"
 
     let description = """
         Rewrite the instructions (the body) of a skill the user has marked as agent-writable. \

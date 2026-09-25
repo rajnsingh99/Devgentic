@@ -84,9 +84,25 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
 
     /// Process-wide instance. Tests construct their own against a scratch directory rather than
     /// sharing this one — a registry that outlives a test would leak children into the next.
-    static let shared = BackgroundProcessRegistry(
-        rootDirectory: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("devgentic-bg", isDirectory: true))
+    static let shared = BackgroundProcessRegistry(rootDirectory: defaultRootDirectory)
+
+    /// Where command logs live: `~/Library/Application Support/Devgentic/Logs/Commands/<conversation>/`.
+    ///
+    /// ⚠️ NOT the temporary directory, which is where they lived until 2026-09-24. macOS cleans
+    /// `$TMPDIR` on its own schedule (files unused for about three days, and at restart), so a
+    /// retention period set here could never be honoured there — the OS would delete logs this
+    /// type had promised to keep. Application Support is removed only by us.
+    ///
+    /// A test host is redirected to a temp directory, as `TraceStore` is: the suite runs real
+    /// commands through `shared`, and must never write into the user's real log folder.
+    static var defaultRootDirectory: URL {
+        if TestHost.isRunning {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent("devgentic-command-logs-testhost", isDirectory: true)
+        }
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return appSupport.appendingPathComponent("Devgentic/Logs/Commands", isDirectory: true)
+    }
 
     // MARK: - Types
 
@@ -211,12 +227,23 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     /// notices.
     static let defaultMaxLogBytes: UInt64 = 32 * 1024 * 1024
 
-    /// How old a log directory must be before a launch-time sweep removes it.
+    /// How long a log is kept after it was last written. User decision 2026-09-24: 7 days.
     ///
-    /// Not a correctness requirement — everything under the root IS orphaned at launch (see
-    /// `sweepOrphanedLogs`). Deliberate conservatism: a crash-and-relaunch within the day keeps its
-    /// files readable on disk, at the cost of one extra day of them.
-    static let defaultOrphanedLogMaxAge: TimeInterval = 24 * 60 * 60
+    /// Measured per FILE from its modification date, not per conversation directory: a directory's
+    /// date moves only when a file is added or removed, so one fresh command kept a week-old
+    /// sibling alive, and a long-running task's directory looked old while its log was current.
+    static let defaultLogRetention: TimeInterval = 7 * 24 * 60 * 60
+
+    /// Ceiling on ALL command logs together. User decision 2026-09-24: 1 GB.
+    ///
+    /// The age limit alone does not bound disk use: one log may reach `defaultMaxLogBytes` before it
+    /// rotates, and a busy week of dev servers and builds could add up to many GB. Past this, the
+    /// oldest logs go first.
+    static let defaultTotalLogBytes: UInt64 = 1024 * 1024 * 1024
+
+    /// How often the sweep runs while the app stays open. Launch alone is not enough: an app left
+    /// running for weeks would never apply the retention period at all.
+    static let sweepInterval: TimeInterval = 24 * 60 * 60
 
     // MARK: - State
 
@@ -233,6 +260,12 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         var finishedAt: Date?
         var status: Status = .running
         var watchdog: DispatchWorkItem?
+
+        /// The shell has exited and its final drain is done. Distinct from `status.isTerminal`:
+        /// a timeout or a stop sets the status FIRST, while the process is still being killed.
+        var ended = false
+        /// Callers waiting in `waitUntilEnded` — the foreground path. Resumed once, after `ended`.
+        var waiters: [CheckedContinuation<Void, Never>] = []
 
         /// Descendants seen WHILE this task's shell was alive.
         ///
@@ -285,6 +318,14 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     private var entries: [UUID: [Entry]] = [:]
     private var counters: [UUID: Int] = [:]
     private var refreshTimer: DispatchSourceTimer?
+    private var sweepTimer: DispatchSourceTimer?
+    /// Log paths `launch` has created but not yet registered. The sweep treats them as live:
+    /// between the file's creation and `entries.append` there is a process spawn, and a sweep in
+    /// that window would otherwise see an unowned file and could delete it under the new task.
+    private var reservedLogPaths: Set<String> = []
+    /// One sweep at a time. Two overlapping passes would each total the same files and each delete
+    /// enough to get under the cap — together removing roughly twice what was needed.
+    private let sweepLock = NSLock()
     private let rootDirectory: URL
 
     /// ⚠️ INSTANCE, not static, purely so tests can use small values. Writing 32 MB to prove a
@@ -293,17 +334,21 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     /// production caller take the defaults, which `testTheShippedCapsAreTheOnesProductionUses` pins
     /// so a convenient test value can never quietly become the shipped one.
     private let maxLogBytes: UInt64
-    private let orphanedLogMaxAge: TimeInterval
+    private let logRetention: TimeInterval
+    private let maxTotalLogBytes: UInt64
 
     init(rootDirectory: URL,
          maxLogBytes: UInt64 = BackgroundProcessRegistry.defaultMaxLogBytes,
-         orphanedLogMaxAge: TimeInterval = BackgroundProcessRegistry.defaultOrphanedLogMaxAge) {
+         logRetention: TimeInterval = BackgroundProcessRegistry.defaultLogRetention,
+         maxTotalLogBytes: UInt64 = BackgroundProcessRegistry.defaultTotalLogBytes) {
         self.rootDirectory = rootDirectory
         self.maxLogBytes = maxLogBytes
-        self.orphanedLogMaxAge = orphanedLogMaxAge
-        // Off the caller's thread: `shared` is built lazily on first use, which can be a UI event.
-        DispatchQueue.global(qos: .utility).async { [weak self] in self?.sweepOrphanedLogs() }
+        self.logRetention = logRetention
+        self.maxTotalLogBytes = maxTotalLogBytes
+        startSweeping()
     }
+
+    deinit { sweepTimer?.cancel() }
 
     // MARK: - Launch
 
@@ -311,19 +356,25 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     ///
     /// The caller gets a task id, never a pid. That is not decoration: a pid is the thing that
     /// cannot be safely handed back (see the type comment).
+    ///
+    /// `foreground` is a caller that will WAIT, through `waitUntilEnded` — `run_command`. It runs
+    /// exactly as a background task does, writing its log live; only the id prefix (`fg_`) and the
+    /// log line differ. One mechanism for both means a foreground build's log exists from its first
+    /// second, survives a crash mid-run, and interleaves stdout and stderr as they happened.
     @discardableResult
     func launch(command: String,
                 workingDirectory: String,
                 timeout: TimeInterval,
                 conversationID: UUID,
                 name: String? = nil,
-                notifyOnCompletion: Bool = false) throws -> Snapshot {
+                notifyOnCompletion: Bool = false,
+                foreground: Bool = false) throws -> Snapshot {
 
         let directory = rootDirectory.appendingPathComponent(conversationID.uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        let id = nextID(for: conversationID)
-        let logURL = directory.appendingPathComponent("\(id).log")
+        let startedAt = Date()
+        let id = nextID(for: conversationID, foreground: foreground)
 
         // ⚠️ O_APPEND IS WHAT MAKES ROTATION POSSIBLE, and it is not incidental. `FileHandle(
         // forWritingTo:)` opens WITHOUT it, so the child carries its own file offset — truncating
@@ -334,7 +385,37 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         //
         // It also strengthens the property the single shared handle exists for: two streams
         // appending atomically to one description interleave in true chronological order.
-        let fd = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        //
+        // ⚠️ O_EXCL: a log is only ever a NEW file. Before 2026-09-24 the name was just `bg_N`, and
+        // the counter restarts every launch while the folder does not — so the first task after a
+        // relaunch APPENDED to the previous run's `bg_1.log` and its card opened on someone else's
+        // output. The timestamped name makes a clash near-impossible; O_EXCL makes it impossible.
+        // Reserved BEFORE the file exists — see `reservedLogPaths` — and released once the entry is
+        // registered (or the launch fails), by which point `entries` covers it.
+        var reserved: [String] = []
+        func reserve(_ url: URL) {
+            lock.lock()
+            reserved.append(url.standardizedFileURL.path)
+            reservedLogPaths.insert(url.standardizedFileURL.path)
+            lock.unlock()
+        }
+        defer {
+            lock.lock()
+            reservedLogPaths.subtract(reserved)
+            lock.unlock()
+        }
+
+        var logURL = directory.appendingPathComponent(Self.logFileName(id: id, startedAt: startedAt,
+                                                                       name: name, command: command))
+        reserve(logURL)
+        var fd = open(logURL.path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0o644)
+        if fd < 0, errno == EEXIST {
+            let retry = Self.logFileName(id: id, startedAt: startedAt, name: name, command: command,
+                                         disambiguator: String(UUID().uuidString.prefix(6)))
+            logURL = directory.appendingPathComponent(retry)
+            reserve(logURL)
+            fd = open(logURL.path, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0o644)
+        }
         guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
 
@@ -348,7 +429,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
 
         let entry = Entry(id: id, conversationID: conversationID, name: name, command: command,
                           workingDirectory: workingDirectory,
-                          startedAt: Date(), logURL: logURL, process: process,
+                          startedAt: startedAt, logURL: logURL, process: process,
                           notifyOnCompletion: notifyOnCompletion)
 
         // Installed BEFORE `run()`. A command that exits immediately would otherwise finish
@@ -375,6 +456,9 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
             self.drainTail(entry, final: true)
             let cancelled = self.finish(entry, status: .exited(code: finished.terminationStatus))
             cancelled?.cancel()
+            // LAST: a foreground caller reads the log the moment it is woken, so the handle must be
+            // closed and the status settled first.
+            self.markEnded(entry)
         }
 
         do {
@@ -394,10 +478,95 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         let snapshot = entry.snapshot
         lock.unlock()
 
-        logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(id) launched (pid \(process.processIdentifier)), bounded at \(Int(timeout))s, log: \(logURL.path). CONSEQUENCE: output is collectable via command_output and the task is killed at its bound whether or not the model checks back.")
+        if foreground {
+            logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(id) launched in the FOREGROUND (pid \(process.processIdentifier)), bounded at \(Int(timeout))s, log: \(logURL.path). CONSEQUENCE: the caller waits for it; the log is written live, so it is readable while the command runs and survives a crash.")
+        } else {
+            logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(id) launched (pid \(process.processIdentifier)), bounded at \(Int(timeout))s, log: \(logURL.path). CONSEQUENCE: output is collectable via command_output and the task is killed at its bound whether or not the model checks back.")
+        }
         announce(taskID: id, conversationID: conversationID)
         return snapshot
     }
+
+    /// Suspends until the task's shell has exited and its log is complete. Returns the final
+    /// record, or nil if the id is unknown.
+    ///
+    /// Waits for the process to EXIT, not merely for a terminal status: a timeout or a stop sets
+    /// the status before the kill lands, and reading the log at that moment would miss the last
+    /// lines the command wrote while it was being signalled.
+    func waitUntilEnded(conversationID: UUID, taskID: String) async -> Snapshot? {
+        lock.lock()
+        let entry = entries[conversationID]?.first { $0.id == taskID }
+        lock.unlock()
+        guard let entry else { return nil }
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if entry.ended {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                entry.waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        return entry.snapshot
+    }
+
+    private func markEnded(_ entry: Entry) {
+        lock.lock()
+        entry.ended = true
+        let waiters = entry.waiters
+        entry.waiters = []
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// `<yyyyMMdd-HHmmss>_<id>_<slug>.log`, e.g. `20260924-132205_bg_1_npm-run-dev.log`.
+    ///
+    /// The timestamp makes every file unique across launches (the id alone restarts at 1), and
+    /// sorts a folder chronologically. The slug is the task's name, or the command when it has
+    /// none, so a folder listing says what each log is without opening it.
+    static func logFileName(id: String, startedAt: Date, name: String?, command: String,
+                            disambiguator: String? = nil) -> String {
+        let stamp = logTimestampFormatter.string(from: startedAt)
+        let slug = logSlug(name.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 } ?? command)
+        var parts = [stamp, id]
+        if !slug.isEmpty { parts.append(slug) }
+        if let disambiguator { parts.append(disambiguator) }
+        return parts.joined(separator: "_") + ".log"
+    }
+
+    /// Lowercase ASCII letters and digits, runs of anything else collapsed to one `-`, at most 40
+    /// characters. A file name has to survive every tool that will ever touch it; a command line
+    /// carries slashes, quotes, pipes and spaces, none of which should.
+    static func logSlug(_ text: String) -> String {
+        var slug = ""
+        var pendingDash = false
+        for scalar in text.lowercased().unicodeScalars {
+            if scalar.isASCII, CharacterSet.alphanumerics.contains(scalar) {
+                let dash = pendingDash && !slug.isEmpty
+                // Room for the dash AND the character, or stop — a slug never ends on a dash.
+                guard slug.count + (dash ? 2 : 1) <= 40 else { break }
+                if dash { slug.append("-") }
+                pendingDash = false
+                slug.unicodeScalars.append(scalar)
+            } else {
+                pendingDash = true
+            }
+        }
+        return slug
+    }
+
+    /// Local time, fixed POSIX locale so the digits are always Western and the layout never
+    /// follows the user's region settings.
+    private static let logTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
 
     /// Arms the bound that the background path silently dropped.
     ///
@@ -498,72 +667,24 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         }
     }
 
-    private func nextID(for conversationID: UUID) -> String {
+    private func nextID(for conversationID: UUID, foreground: Bool) -> String {
         lock.lock()
         defer { lock.unlock() }
         let next = (counters[conversationID] ?? 0) + 1
         counters[conversationID] = next
         // Short because a small model has to echo it back. Scoped per conversation, so `bg_1`
         // in two conversations is not a collision — every lookup takes the conversation too.
-        return "bg_\(next)"
+        // One counter for both prefixes, so `fg_2` and `bg_2` never coexist in one conversation
+        // and the number alone still orders the conversation's commands.
+        return "\(foreground ? "fg" : "bg")_\(next)"
     }
 
-    // MARK: - Adopting a foreground run
-
-    /// Registers a process the caller is ALREADY running and waiting on, so it gets the same
-    /// lifecycle the background path has: a card, a stop control, and quit-time teardown.
-    ///
-    /// ⚠️ This does NOT arm a watchdog and does NOT set a `terminationHandler`. `ProcessRunner`
-    /// owns both for a foreground run — it installs its own handler and the bound is its
-    /// `timeout:` argument — and taking either over here would break the drain it depends on.
-    /// The caller reports the outcome with `complete(…)`.
-    ///
-    /// ⚠️ NO LIVE OUTPUT. A foreground run's output goes through `ProcessRunner`'s pipes, and
-    /// mirroring it here would put file I/O on the drain queue — the one place that must never
-    /// block, because back-pressure there is the ~64 KB pipe wedge that type exists to prevent.
-    /// The log is written once, from the finished result, in `complete(…)`.
-    func adopt(process: Process,
-               command: String,
-               workingDirectory: String,
-               conversationID: UUID,
-               name: String? = nil) -> Snapshot? {
-        let directory = rootDirectory.appendingPathComponent(conversationID.uuidString, isDirectory: true)
-        guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil
-        else { return nil }
-
-        let id = nextID(for: conversationID)
-        let logURL = directory.appendingPathComponent("\(id).log")
-        let entry = Entry(id: id, conversationID: conversationID, name: name, command: command,
-                          workingDirectory: workingDirectory,
-                          startedAt: Date(), logURL: logURL, process: process)
-
-        lock.lock()
-        entries[conversationID, default: []].append(entry)
-        let snapshot = entry.snapshot
-        lock.unlock()
-
-        startDescendantRefreshIfNeeded()
-        announce(taskID: id, conversationID: conversationID)
-        logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(id) adopted (foreground, pid \(process.processIdentifier)). CONSEQUENCE: it is stoppable and is killed at quit, which a foreground command previously was not — it was orphaned to launchd exactly as background commands used to be.")
-        return snapshot
-    }
-
-    /// Records a foreground run's outcome and its output. Paired with `adopt`.
-    func complete(conversationID: UUID, taskID: String, output: String, status: Status) {
-        lock.lock()
-        let entry = entries[conversationID]?.first { $0.id == taskID }
-        lock.unlock()
-        guard let entry else { return }
-
-        // Written once, from the finished result — see `adopt`.
-        try? output.data(using: .utf8)?.write(to: entry.logURL, options: .atomic)
-        // Through the same drain as the background path rather than assigning the string we
-        // already hold: one implementation of "what is the tail" means one set of line-splitting,
-        // bounding and counting rules, tested once. A foreground log is bounded by
-        // `ProcessRunner` before it ever gets here, so the one-shot read is small.
-        drainTail(entry, final: true)
-        finish(entry, status: status)?.cancel()
-    }
+    // ⚠️ `adopt(process:…)` / `complete(…)` WERE REMOVED 2026-09-24. A foreground run used to go
+    // through `ProcessRunner`'s pipes and was registered here only for its card, stop control and
+    // quit teardown; its log was written ONCE, from the finished result. So a crash mid-build left
+    // no log at all, and stdout and stderr arrived as two separate blocks with their relative order
+    // lost. Foreground runs now use `launch(foreground: true)` + `waitUntilEnded` — the same live,
+    // interleaved log a background task has.
 
     // MARK: - Remembering descendants
 
@@ -793,37 +914,104 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         logger.notice("[BGPROC] \(entry.id) log rotated at \(size / 1_048_576) MB. CONSEQUENCE: earlier output is gone from disk — the last \(Self.maxTailLines) lines survive in the task's card and in command_output, and the file keeps growing from here.")
     }
 
-    /// Removes log directories left behind by PREVIOUS runs of the app.
+    /// Sweeps now, then once every `sweepInterval` for as long as this registry lives. Off the
+    /// caller's thread: `shared` is built lazily on first use, which can be a UI event.
+    private func startSweeping() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now(), repeating: Self.sweepInterval, leeway: .seconds(60))
+        timer.setEventHandler { [weak self] in self?.sweepLogs() }
+        lock.lock()
+        sweepTimer = timer
+        lock.unlock()
+        timer.resume()
+    }
+
+    /// Applies the retention rules: logs untouched for `logRetention` go, then — if everything left
+    /// still exceeds `maxTotalLogBytes` — the oldest go until it fits. Empty conversation folders
+    /// are removed after.
     ///
-    /// ⚠️ EVERY directory under the root is orphaned at launch, by construction: entries live only
-    /// in memory, and `terminateAll` kills every task at quit, so nothing on disk here belongs to a
-    /// live process or is reachable from any surface — `BackgroundTasksListView` lists registry
-    /// entries, and after a restart there are none.
+    /// Per FILE, by modification date. See `defaultLogRetention` for why not per directory.
     ///
-    /// They were previously removed ONLY by `discard`, which fires on conversation deletion. A user
-    /// who never deletes a conversation accumulated one directory per conversation that ever ran a
-    /// command, permanently. That is the second half of "uncapped logs", and the quieter half: the
-    /// per-file cap does nothing about a thousand small files.
-    private func sweepOrphanedLogs() {
+    /// ⚠️ A log whose command is still RUNNING is never touched, whatever its age or size: deleting
+    /// it would cut the card and `command_output` off from a live task, and its bytes are already
+    /// bounded by `enforceLogCap`. At launch nothing is running, so this skips nothing then.
+    ///
+    /// Internal rather than private so tests can run one pass without waiting for the timer.
+    func sweepLogs(now: Date = Date()) {
+        sweepLock.lock()
+        defer { sweepLock.unlock() }
         let fileManager = FileManager.default
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .isDirectoryKey, .totalFileAllocatedSizeKey, .fileSizeKey]
         guard let directories = try? fileManager.contentsOfDirectory(
-            at: rootDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
-            options: [.skipsHiddenFiles])
+            at: rootDirectory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
         else { return }   // no root yet is the normal first-launch case, not a failure
 
-        let cutoff = Date().addingTimeInterval(-orphanedLogMaxAge)
-        var removed = 0
+        lock.lock()
+        let live = Set(entries.values.flatMap { $0 }.filter { !$0.ended }.map { $0.logURL.standardizedFileURL.path })
+            .union(reservedLogPaths)
+        lock.unlock()
+
+        struct LogFile { let url: URL; let modified: Date; let bytes: UInt64 }
+        var files: [LogFile] = []
         for directory in directories {
-            let values = try? directory.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
-            guard values?.isDirectory == true,
-                  let modified = values?.contentModificationDate,
-                  modified < cutoff
+            guard (try? directory.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
+                  let contents = try? fileManager.contentsOfDirectory(
+                    at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
             else { continue }
-            if (try? fileManager.removeItem(at: directory)) != nil { removed += 1 }
+            for url in contents {
+                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isDirectory != true,
+                      !live.contains(url.standardizedFileURL.path)
+                else { continue }
+                let bytes = UInt64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
+                files.append(LogFile(url: url, modified: values.contentModificationDate ?? .distantPast, bytes: bytes))
+            }
         }
-        guard removed > 0 else { return }
-        logger.info("[BGPROC] Swept \(removed) log director(ies) from earlier runs, older than \(Int(orphanedLogMaxAge / 3600))h. CONSEQUENCE: disk reclaimed; nothing live was touched — every directory here predates this process, which kills all its own tasks at quit.")
+
+        let cutoff = now.addingTimeInterval(-logRetention)
+        var expired = 0
+        var overCap = 0
+        var freed: UInt64 = 0
+        var kept: [LogFile] = []
+        for file in files {
+            if file.modified < cutoff, (try? fileManager.removeItem(at: file.url)) != nil {
+                expired += 1
+                freed += file.bytes
+            } else {
+                kept.append(file)
+            }
+        }
+
+        // Oldest first until the rest fits. Live logs are not in `kept`, so they neither count
+        // against the cap nor get removed for it — a running dev server cannot evict itself.
+        var total = kept.reduce(UInt64(0)) { $0 + $1.bytes }
+        if total > maxTotalLogBytes {
+            for file in kept.sorted(by: { $0.modified < $1.modified }) {
+                guard total > maxTotalLogBytes else { break }
+                if (try? fileManager.removeItem(at: file.url)) != nil {
+                    overCap += 1
+                    freed += file.bytes
+                    total -= file.bytes
+                }
+            }
+        }
+
+        // A conversation folder with nothing left in it is noise in Finder.
+        //
+        // ⚠️ Only one that has been empty a while. `launch` creates the folder and THEN opens the
+        // log in it; a daily sweep landing between those two steps would remove the folder and the
+        // open would fail. Removing a file updates the folder's date, so one this sweep just emptied
+        // is left for the next pass — a day of an empty folder costs nothing.
+        let emptyFolderGrace: TimeInterval = 60 * 60
+        for directory in directories {
+            guard let remaining = try? fileManager.contentsOfDirectory(atPath: directory.path), remaining.isEmpty,
+                  let modified = (try? fileManager.attributesOfItem(atPath: directory.path))?[.modificationDate] as? Date,
+                  now.timeIntervalSince(modified) > emptyFolderGrace
+            else { continue }
+            try? fileManager.removeItem(at: directory)
+        }
+
+        guard expired + overCap > 0 else { return }
+        logger.info("[BGPROC] Log sweep removed \(expired) log(s) older than \(Int(logRetention / 86_400)) day(s) and \(overCap) more to stay under \(maxTotalLogBytes / 1_048_576) MB in total, freeing \(freed / 1_048_576) MB. CONSEQUENCE: those commands' output is gone from disk; running tasks' logs were not touched.")
     }
 
     /// Drains on demand and returns the refreshed record.
@@ -902,8 +1090,9 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         logger.info("[BGPROC] Quit — signalled \(signalled.count) process(es) across \(roots.count) task(s), including descendants.")
     }
 
-    /// Drops a conversation's records and log files. Not called on the quit path — the temp
-    /// directory outlives a crash, and a log the user never read is worth more than the bytes.
+    /// Drops a conversation's records and log files — the conversation was deleted, so its logs go
+    /// with it rather than waiting out the retention period. Not called on the quit path: a log
+    /// the user never read is worth more than the bytes, and the sweep bounds them anyway.
     func discard(conversationID: UUID) {
         lock.lock()
         let removed = entries.removeValue(forKey: conversationID) ?? []
@@ -920,8 +1109,12 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    /// Clears all terminal (finished, timed out, or stopped) tasks for this conversation,
-    /// removing their records and deleting their log files.
+    /// Clears all terminal (finished, timed out, or stopped) tasks for this conversation from the
+    /// list.
+    ///
+    /// ⚠️ The LOG FILES STAY (2026-09-24). Clearing tidies the task list; it is not a request to
+    /// destroy output, and the logs are kept for `defaultLogRetention` precisely so a finished
+    /// command can still be looked at later. The sweep removes them on schedule.
     func clearFinished(conversationID: UUID) {
         lock.lock()
         guard var list = entries[conversationID] else {
@@ -933,9 +1126,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         entries[conversationID] = list
         lock.unlock()
 
-        for entry in finished {
-            try? FileManager.default.removeItem(at: entry.logURL)
-        }
+        logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — cleared \(finished.count) finished task(s) from the list. CONSEQUENCE: their cards are gone; their log files stay on disk until the retention sweep removes them.")
         announce(taskID: "", conversationID: conversationID)
     }
 }

@@ -78,6 +78,7 @@ struct ConversationRowView: View {
         .padding(.vertical, 6)
         .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
         .contentShape(Rectangle())
+        .pointingHandCursor(enabled: !isRenaming)
         .onTapGesture {
             if !isRenaming {
                 onSelect()

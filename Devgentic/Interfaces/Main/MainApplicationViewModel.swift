@@ -864,6 +864,13 @@ final class MainApplicationViewModel {
         conversationManagementCoordinator.createAndSelectNewConversation()
     }
 
+    // Code projects — bodies in `ConversationManagementCoordinator`.
+    func chooseCodeFolder(_ url: URL) { conversationManagementCoordinator.chooseCodeFolder(url) }
+    func startNewCodeSession(in url: URL) { conversationManagementCoordinator.startNewCodeSession(in: url) }
+    func codeSendRefusal(openFolder: URL?) -> String? {
+        conversationManagementCoordinator.codeSendRefusal(openFolder: openFolder)
+    }
+
     /// Persists the backend profile selection on the given conversation.
     /// Visibility: needed by `MessagingCoordinator.sendMessage` at send time
     /// (stays on the VM so the messaging coordinator can reach it via its

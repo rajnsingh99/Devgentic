@@ -57,18 +57,20 @@ final class ContextCutStrategyTests: XCTestCase {
 
     func testAutomaticKeepsTheEndOfCommandOutput() {
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "run_command"), .keepEnd)
+        XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "get_task_output"), .keepEnd)
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "command_output"), .keepEnd)
     }
 
     func testAutomaticKeepsTheStartOfReadsAndSearches() {
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "read_file"), .keepStart)
+        XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "project_tree"), .keepStart)
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "code_search_text"), .keepStart)
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "list_directory"), .keepStart)
     }
 
     func testAutomaticKeepsBothEndsOfAnythingElse() {
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "some_mcp_tool"), .keepStartAndEnd)
-        XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "git_tool"), .keepStartAndEnd)
+        XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "git"), .keepStartAndEnd)
     }
 
     func testAnExplicitChoiceIsNotReinterpreted() {
@@ -87,7 +89,7 @@ final class ContextCutStrategyTests: XCTestCase {
         var withOverride = Tool(name: "read_file", description: "", sourceId: UUID(),
                                 parameters: ToolParameters(type: "object", properties: [:], required: []))
         withOverride.cutStrategy = .keepEnd
-        let plain = Tool(name: "git_tool", description: "", sourceId: UUID(),
+        let plain = Tool(name: "git", description: "", sourceId: UUID(),
                          parameters: ToolParameters(type: "object", properties: [:], required: []))
 
         let policy = ToolCutPolicy.forRun(tools: [withOverride, plain])
@@ -114,6 +116,18 @@ final class ContextCutStrategyTests: XCTestCase {
         let json = #"{"name":"read_file","description":"d","isEnabled":true,"requiresConfirmation":false,"sourceId":"00000000-0000-0000-0000-000000000001","parameters":{"type":"object","properties":{},"required":[]},"isFavorite":false}"#
         let tool = try JSONDecoder().decode(Tool.self, from: Data(json.utf8))
         XCTAssertNil(tool.cutStrategy)
+    }
+
+    /// ⚠️ `Tool` has a HAND-WRITTEN decoder. The field was encoded but never decoded, so the Tool
+    /// Library's choice was lost on every profile read — and the test above, which only checks an
+    /// ABSENT key, passed throughout.
+    func testAChosenStrategySurvivesAnEncodeDecodeRoundTrip() throws {
+        var tool = Tool(name: "read_file", description: "", sourceId: UUID(),
+                        parameters: ToolParameters(type: "object", properties: [:], required: []))
+        tool.cutStrategy = .keepEnd
+        let decoded = try JSONDecoder().decode(Tool.self, from: JSONEncoder().encode(tool))
+        XCTAssertEqual(decoded.cutStrategy, .keepEnd)
+        XCTAssertEqual(decoded, tool, "a Tool field is dropped by the hand-written decoder")
     }
 
     // MARK: - The wiring

@@ -230,14 +230,14 @@ enum SkillToolDeclaration {
             prose: "Claude Code's in-place editor. Here that is edit_code, and edit_code_single / edit_code_batch in a Code profile.",
             candidates: ["edit_code", "edit_code_single", "edit_code_batch"]),
         "Bash": ForeignHint(
-            prose: "A shell. Here that is execute_shell, or run_command in a Code profile (with start_background_task for something you will not wait for), where execute_shell is not offered.",
-            candidates: ["execute_shell", "run_command", "start_background_task"]),
+            prose: "A shell. Here that is run_command, with start_background_task for something you will not wait for.",
+            candidates: ["run_command", "start_background_task"]),
         "Glob": ForeignHint(
             prose: "Filename pattern matching. The closest here is glob_files.",
             candidates: ["glob_files"]),
         "Grep": ForeignHint(
-            prose: "Content search. The closest here is grep_files, or code_search in a Code profile.",
-            candidates: ["grep_files", "code_search"]),
+            prose: "Content search. The closest here is code_search_text, or code_search_files.",
+            candidates: ["code_search_text", "code_search_files"]),
         "WebFetch": ForeignHint(
             prose: "Fetching a URL. The closest here is http_request.",
             candidates: ["http_request"])

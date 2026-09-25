@@ -27,6 +27,8 @@ protocol ChatPersistenceProtocol: Sendable {
     func deleteConversation(with id: UUID)
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String)
+    /// Records the project folder a Code conversation runs in. See `ConversationSD.projectPath`.
+    func updateProjectPath(for conversationId: UUID, projectPath: String)
     func togglePinStatus(for conversationId: UUID)
 
     // MARK: Code Viewer source-link fallbacks
@@ -76,6 +78,7 @@ extension ChatPersistenceProtocol {
         return (messages, isTruncated)
     }
     func recentConversations(limit: Int) -> [(id: UUID, title: String)] { [] }
+    func updateProjectPath(for conversationId: UUID, projectPath: String) {}
 }
 
 // MARK: - SwiftData Chat Persistence Store
@@ -711,6 +714,23 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             logger.error(
                 "[PERSISTENCE] profileType change for conversation \(conversationId.uuidString) was NOT "
                 + "persisted. CONSEQUENCE: it reverts on relaunch."
+            )
+        }
+    }
+
+    func updateProjectPath(for conversationId: UUID, projectPath: String) {
+        guard let conversation = getConversation(withId: conversationId) else {
+            logger.warning("[PERSISTENCE] Attempted to record a project folder for non-existent conversation \(conversationId.uuidString). CONSEQUENCE: nothing is recorded; the conversation does not exist to be reopened.")
+            return
+        }
+        guard conversation.projectPath != projectPath else { return }
+        conversation.projectPath = projectPath
+        if saveContext() {
+            logger.info("[PERSISTENCE] Conversation \(conversationId.uuidString) runs in project '\(URL(fileURLWithPath: projectPath).lastPathComponent)'.")
+        } else {
+            logger.error(
+                "[PERSISTENCE] Project folder for conversation \(conversationId.uuidString) was NOT persisted. "
+                + "CONSEQUENCE: after relaunch it lists under 'No project' and reopening it keeps whatever folder is open."
             )
         }
     }

@@ -53,6 +53,7 @@ final class CodeEditPreviewTests: XCTestCase {
         "run_command",
         "start_background_task",
         // Ends a background process this agent started. Changes machine state, touches no file.
+        "stop_background_task",
         "command_stop",
     ]
 
@@ -196,7 +197,7 @@ final class CodeEditPreviewTests: XCTestCase {
 
     func testReadOnlyToolsAreNotPreviewedAsChanges() {
         // A read must never render as a file mutation in an approval banner.
-        for tool in ["read_file", "list_directory", "codebase_map", "git_tool", "diff_files"] {
+        for tool in ["read_file", "list_directory", "project_tree", "git", "diff_files"] {
             XCTAssertNil(
                 FileChange.parse(toolName: tool, arguments: args(["path": .string(path)])),
                 "'\(tool)' only reads; previewing it as a change would misrepresent what Allow does."

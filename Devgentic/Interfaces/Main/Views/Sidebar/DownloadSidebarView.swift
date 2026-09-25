@@ -328,8 +328,10 @@ struct DownloadSidebarView: View {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(theme.surfaceOverlay)
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .buttonStyle(.plain)
+            .pointingHandCursor()
             .help("Open the Download Manager")
 
             if !historyRecords.isEmpty {
@@ -348,8 +350,10 @@ struct DownloadSidebarView: View {
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .fill(theme.surfaceOverlay)
                         )
+                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
                 .menuIndicator(.hidden)
                 .help("More actions")
                 .accessibilityLabel("Download history actions")
@@ -636,6 +640,8 @@ private struct ActiveDownloadRowView: View {
                             .foregroundColor(theme.secondaryText)
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Circle())
+                    .pointingHandCursor()
                     .help("Cancel download")
                     .accessibilityLabel("Cancel \(record.displayName) download")
                     .transition(.opacity)

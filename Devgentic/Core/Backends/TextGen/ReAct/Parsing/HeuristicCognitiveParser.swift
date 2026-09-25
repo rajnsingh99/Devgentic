@@ -690,25 +690,14 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         guard !trimmed.isEmpty else { return nil }
 
         switch toolName {
-        case "execute_shell":
-            var command = trimmed
-            if command.hasPrefix("$") { command = String(command.dropFirst()).trimmingCharacters(in: .whitespaces) }
-            let prosePrefixes = ["Running:", "Executing:", "Command:", "Execute:"]
-            for prefix in prosePrefixes {
-                if command.hasPrefix(prefix) {
-                    command = String(command.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
-                }
-            }
-            guard !command.isEmpty else { return nil }
-            return ["command": JSONValue.string(command)]
-
-        case "list_directory", "read_file", "create_folder", "delete_file", "fs_read_metadata",
-             "fs_watch_folder":
+        case "list_directory", "read_file", "create_folder", "delete_file",
+             "read_file_metadata", "fs_read_metadata",
+             "watch_folder", "fs_watch_folder":
             if let path = extractPathFromContent(trimmed) {
                 return ["path": JSONValue.string(path)]
             }
 
-        case "fs_smart_search":
+        case "spotlight_search", "fs_smart_search":
             return ["search_term": JSONValue.string(trimmed)]
 
         case "run_applescript":

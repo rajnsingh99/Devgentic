@@ -239,7 +239,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
     /// The rename changed the tool and left its name in the prose around it — the shape
     /// `feedback_rename_sweeps_miss_derived_vocabulary` was written for.
     func testTheSharedBackgroundToolsNameNoStarter() {
-        for name in ["command_output", "command_stop"] {
+        for name in ["get_task_output", "stop_background_task"] {
             guard let entry = NativeToolCatalog.entry(named: name) else {
                 return XCTFail("\(name) is not in the catalogue — this guard is checking nothing")
             }
@@ -261,7 +261,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
         XCTAssertFalse(refusal.contains("start_background_task"),
                        "the remedy points a chat agent at a tool it cannot call: \(refusal)")
         XCTAssertTrue(refusal.contains("start one"),
-                      "the refusal must still say what to do, just without naming the wrong tool")
+                       "the refusal must still say what to do, just without naming the wrong tool")
     }
 
     // MARK: - Catalogue and preset
@@ -273,7 +273,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
     /// withdrawn from the catalogue — its `call` was a two-line dispatcher over the same statics
     /// these two use, so it was a duplicate offered under a different name in chat.
     func testTheCatalogueSuppliesTheConversationToTheShellTools() throws {
-        for name in ["run_command", "start_background_task", "command_output"] {
+        for name in ["run_command", "start_background_task", "get_task_output"] {
             guard let entry = NativeToolCatalog.entry(named: name) else {
                 return XCTFail("\(name) is not in the catalogue")
             }
@@ -309,14 +309,14 @@ final class BackgroundTaskWiringTests: XCTestCase {
                        + "the capability absorbed from the withdrawn command_status is unreachable")
     }
 
-    /// The withdrawal must be real, and `command_output` must still be there to absorb it.
+    /// The withdrawal must be real, and `get_task_output` must still be there to absorb it.
     func testCommandStatusIsGoneAndCommandOutputRemains() {
         XCTAssertNil(NativeToolCatalog.entry(named: "command_status"),
-                     "command_status is still selectable — it is a strict subset of command_output "
+                     "command_status is still selectable — it is a strict subset of get_task_output "
                      + "and costs a tool slot for nothing")
-        XCTAssertNotNil(NativeToolCatalog.entry(named: "command_output"),
+        XCTAssertNotNil(NativeToolCatalog.entry(named: "get_task_output"),
                         "the only remaining read path is gone")
-        XCTAssertNotNil(NativeToolCatalog.entry(named: "command_stop"),
+        XCTAssertNotNil(NativeToolCatalog.entry(named: "stop_background_task"),
                         "stopping is an ACTION — nothing else can deliver it")
     }
 
@@ -334,7 +334,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
 
     func testThePresetOffersTheBackgroundTools() {
         let names = Set(CodeToolPreset.defaultTools.map(\.name))
-        for tool in ["run_command", "start_background_task", "command_output", "command_stop"] {
+        for tool in ["run_command", "start_background_task", "get_task_output", "stop_background_task"] {
             XCTAssertTrue(names.contains(tool), "\(tool) is not in the Code preset")
         }
     }

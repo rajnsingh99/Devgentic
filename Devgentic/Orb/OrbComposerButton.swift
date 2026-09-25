@@ -34,18 +34,12 @@ struct OrbComposerButton: View {
         }) {
             OrbIcon(size: 18, isHovered: isHovered)
                 .frame(width: 28, height: 28)
-                .background(
-                    Circle()
-                        .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-                )
-                .overlay(
-                    Circle()
-                        .stroke(isHovered ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
-                )
+                .composerControlSurface(in: Circle(), isHovered: isHovered)
                 .shadow(color: isHovered ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
                 .scaleEffect(isHovered ? 1.06 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hovering }
         }

@@ -128,8 +128,10 @@ struct MCPDiscoverView: View {
                                 lineWidth: 0.5
                             )
                         )
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
 
             Spacer()
@@ -216,10 +218,13 @@ struct MCPDiscoverView: View {
                     .frame(maxWidth: 320)
             }
             if let actionTitle, let action {
-                Button(actionTitle, action: action)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .padding(.top, 2)
+                TactileButton(
+                    title: actionTitle,
+                    variant: .secondary,
+                    size: .compact,
+                    action: action
+                )
+                .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -287,18 +292,9 @@ private struct MCPDiscoverCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 9) {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(theme.accentColor.opacity(0.16))
-                    .frame(width: 30, height: 30)
-                    .overlay(
-                        Image(systemName: server.isRemote ? "cloud" : "shippingbox")
-                            .font(.system(size: 13))
-                            .foregroundColor(theme.accentColor)
-                    )
-
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(server.displayName)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
                     Text(server.publisher)
@@ -338,7 +334,8 @@ private struct MCPDiscoverCard: View {
                 .stroke(isInstalled ? Color.green.opacity(0.35) : theme.secondaryText.opacity(0.14), lineWidth: 0.5)
         )
         .opacity(isRuntimeMissing ? 0.6 : 1)
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .pointingHandCursor()
         .onTapGesture { onSelect() }
         .help(isRuntimeMissing ? "\(MCPRuntimeProbe.installHint(for: runtime)) — install it to add this server." : server.name)
     }
@@ -357,10 +354,16 @@ private struct MCPDiscoverCard: View {
                 .background(Capsule().stroke(theme.secondaryText.opacity(0.25), lineWidth: 0.5))
         } else {
             Text("Add")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white)
-                .padding(.horizontal, 10).padding(.vertical, 3)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(theme.accentForegroundColor)
+                .padding(.horizontal, 10).padding(.vertical, 3.5)
                 .background(Capsule().fill(theme.accentColor))
+                .overlay(
+                    Capsule().strokeBorder(
+                        theme.isAccentLight ? theme.dividerColor.opacity(0.5) : Color.white.opacity(0.2),
+                        lineWidth: 1
+                    )
+                )
         }
     }
 

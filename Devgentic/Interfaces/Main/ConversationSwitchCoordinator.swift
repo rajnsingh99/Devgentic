@@ -123,6 +123,13 @@ final class ConversationSwitchCoordinator {
 
         releaseTracesForConversationsLeftBehind(vm: vm, keeping: conversationID)
 
+        // Immediately, not after the debounce below: the composer, the Explorer and a send made
+        // right after the click must all see this conversation's folder.
+        // The model is read on both sides of the restore — reopening a project can change it.
+        let codeModelBefore = Self.codeModelKey(vm)
+        vm.conversationManagementCoordinator.restoreCodeProjectForSelectedConversation()
+        let codeModelAfter = Self.codeModelKey(vm)
+
         loadTask = Task { [weak self] in
             // Brief debounce so rapid selections only run the latest.
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -160,7 +167,17 @@ final class ConversationSwitchCoordinator {
                     self.persistenceService.getConversation(withId: $0)?.backendEntityId
                 }
 
-                if newProfileID != currentProfileID || newProfileID == nil {
+                // ⚠️ Code: decide by MODEL, not profile. Every Code session shares ONE profile, so the
+                // profile test never unloaded between two projects on different local models (both
+                // stayed resident), yet always unloaded for a fresh empty session (no profile yet),
+                // forcing a reload of the very model the next send uses. Both seen on device 2026-09-24.
+                let shouldUnload = Self.shouldUnloadModels(codeModelBefore: codeModelBefore, codeModelAfter: codeModelAfter,
+                                                           newProfileID: newProfileID, currentProfileID: currentProfileID)
+                if let before = codeModelBefore, let after = codeModelAfter {
+                    self.logger.info("[CODE_PROJECT] Code session switch — model \(before) → \(after): \(shouldUnload ? "different, unloading the previous one" : "same, keeping it loaded").")
+                }
+
+                if shouldUnload {
                     let stats = await MLXService.shared.unloadModel()
                     self.logger.debug("Conversation switch MLX unload stats: \(stats)")
                     await self.ollamaService.unloadModel()
@@ -188,6 +205,22 @@ final class ConversationSwitchCoordinator {
                 await UserPersonalService.shared.analyzeRecentConversations()
             }
         }
+    }
+
+    /// Whether a conversation switch should unload the resident local models.
+    ///
+    /// Code compares the MODEL on either side of the switch (all Code sessions share one profile);
+    /// everything else compares the profile, as before.
+    nonisolated static func shouldUnloadModels(codeModelBefore: String?, codeModelAfter: String?,
+                                   newProfileID: UUID?, currentProfileID: UUID?) -> Bool {
+        if let before = codeModelBefore, let after = codeModelAfter { return before != after }
+        return newProfileID != currentProfileID || newProfileID == nil
+    }
+
+    /// "provider/model" of the Code session, or nil outside Code mode or before a model is picked.
+    private static func codeModelKey(_ vm: MainApplicationViewModel) -> String? {
+        guard vm.interfaceMode == .code, let manager = vm.codeSessionManager, !manager.modelName.isEmpty else { return nil }
+        return "\(manager.provider.rawValue)/\(manager.modelName)"
     }
 
     // MARK: - Workflow History Helper

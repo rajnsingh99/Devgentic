@@ -195,47 +195,109 @@ final class BackgroundLogCapTests: XCTestCase {
         XCTAssertFalse(text(of: task.logURL).contains("log rotated"))
     }
 
-    // MARK: - The launch-time sweep
+    // MARK: - The retention sweep (7 days, 1 GB — user decision 2026-09-24)
 
-    private func makeStaleDirectory(age: TimeInterval) throws -> URL {
-        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try Data("old output".utf8).write(to: directory.appendingPathComponent("bg_1.log"))
+    /// A log file of `bytes` bytes, last modified `age` seconds ago, in its own conversation folder
+    /// unless one is given.
+    @discardableResult
+    private func makeLog(age: TimeInterval, bytes: Int = 10, name: String = "20260101-000000_bg_1_old.log",
+                         in directory: URL? = nil) throws -> URL {
+        let folder = directory ?? root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent(name)
+        try Data(repeating: 0x61, count: bytes).write(to: url)
         try FileManager.default.setAttributes(
-            [.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: directory.path)
-        return directory
+            [.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: url.path)
+        return url
     }
 
-    func testLogDirectoriesFromEarlierRunsAreSweptAtLaunch() throws {
-        let stale = try makeStaleDirectory(age: 48 * 60 * 60)
+    private let day: TimeInterval = 24 * 60 * 60
+
+    func testALogOlderThanSevenDaysIsSweptAtLaunch() throws {
+        let stale = try makeLog(age: 8 * day)
         registry = BackgroundProcessRegistry(rootDirectory: root)
 
         XCTAssertTrue(waitUntil { !FileManager.default.fileExists(atPath: stale.path) },
-                      "a log directory from an earlier run survived launch. Nothing else ever "
-                      + "removes it — `discard` only fires on conversation deletion — so one "
-                      + "directory accumulates per conversation that ever ran a command")
+                      "a log past the 7-day retention survived launch")
     }
 
-    func testARecentLogDirectoryIsNotSwept() throws {
-        let recent = try makeStaleDirectory(age: 60)
+    /// An emptied conversation folder goes on a LATER pass — never one that may have just been
+    /// created by `launch`, which opens its log a moment after making the folder.
+    func testAnEmptyFolderIsRemovedOnlyOnceItHasBeenEmptyAWhile() throws {
         registry = BackgroundProcessRegistry(rootDirectory: root)
+        let justMade = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: justMade, withIntermediateDirectories: true)
 
-        usleep(1_000_000)
+        registry.sweepLogs()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: justMade.path),
+                      "a just-created folder was removed — a launch between mkdir and open would fail")
+
+        registry.sweepLogs(now: Date().addingTimeInterval(2 * 60 * 60))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: justMade.path),
+                       "a long-empty conversation folder was left behind")
+    }
+
+    /// ⚠️ The old rule was 24 hours. A 2-day-old log is exactly what a 7-day retention promises to keep.
+    func testALogYoungerThanSevenDaysIsKept() throws {
+        let recent = try makeLog(age: 6 * day)
+        registry = BackgroundProcessRegistry(rootDirectory: root)
+        registry.sweepLogs()
+
         XCTAssertTrue(FileManager.default.fileExists(atPath: recent.path),
-                      "the sweep removed a directory from THIS session — a crash-and-relaunch "
-                      + "would lose the logs it came back to read")
+                      "a 6-day-old log was removed; the retention period is 7 days")
     }
 
-    /// The sweep runs in `init`, before any task exists. A registry that swept its own root, or
-    /// choked on a missing one, would break every launch.
-    func testTheSweepLeavesALiveTasksLogAlone() throws {
+    /// Per FILE, not per folder. A folder's own date moves when a file is added, so the old rule let
+    /// one fresh command keep a stale sibling alive indefinitely.
+    func testAStaleLogIsSweptEvenBesideAFreshOne() throws {
+        let fresh = try makeLog(age: 60, name: "20260924-000000_bg_2_new.log")
+        let folder = fresh.deletingLastPathComponent()
+        let stale = try makeLog(age: 8 * day, in: folder)
         registry = BackgroundProcessRegistry(rootDirectory: root)
+        registry.sweepLogs()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path), "the stale sibling survived")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fresh.path), "the fresh log was removed")
+    }
+
+    /// Past the total cap, the OLDEST go first until what is left fits.
+    func testPastTheTotalCapTheOldestLogsGoFirst() throws {
+        let oldest = try makeLog(age: 3 * day, bytes: 4096, name: "a.log")
+        let middle = try makeLog(age: 2 * day, bytes: 4096, name: "b.log")
+        let newest = try makeLog(age: 1 * day, bytes: 4096, name: "c.log")
+        registry = BackgroundProcessRegistry(rootDirectory: root, maxTotalLogBytes: 10_000)
+        registry.sweepLogs()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldest.path), "the oldest log should go first")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: middle.path),
+                      "removed more than needed — two 4 KB logs fit under a 10 KB cap")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newest.path), "the newest log was removed")
+    }
+
+    /// A running task's log is never swept — not for age, not for the total cap. Deleting it would
+    /// cut the card and `command_output` off from a live command.
+    func testTheSweepLeavesALiveTasksLogAlone() throws {
+        registry = BackgroundProcessRegistry(rootDirectory: root, logRetention: 0, maxTotalLogBytes: 0)
         let task = try registry.launch(command: "echo live; sleep 5",
                                        workingDirectory: NSTemporaryDirectory(),
                                        timeout: 30, conversationID: conversation)
-        usleep(1_000_000)
+        XCTAssertTrue(waitUntil { self.size(of: task.logURL) > 0 })
+        registry.sweepLogs(now: Date().addingTimeInterval(30 * day))
         XCTAssertTrue(FileManager.default.fileExists(atPath: task.logURL.path),
                       "the sweep removed a live task's log")
+    }
+
+    /// "Clear finished" tidies the list; it must not destroy output the retention period keeps.
+    func testClearingFinishedTasksKeepsTheirLogs() throws {
+        registry = BackgroundProcessRegistry(rootDirectory: root)
+        let task = try registry.launch(command: "echo kept", workingDirectory: NSTemporaryDirectory(),
+                                       timeout: 30, conversationID: conversation)
+        XCTAssertTrue(waitUntil { self.registry.snapshot(conversationID: self.conversation, taskID: task.id)?.status.isTerminal == true })
+        registry.clearFinished(conversationID: conversation)
+
+        XCTAssertTrue(registry.snapshots(conversationID: conversation).isEmpty, "the card was not cleared")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: task.logURL.path),
+                      "clearing the list deleted the log file")
     }
 
     func testAMissingRootIsNotAFailure() {
@@ -255,7 +317,12 @@ final class BackgroundLogCapTests: XCTestCase {
         XCTAssertEqual(BackgroundProcessRegistry.defaultMaxLogBytes, 32 * 1024 * 1024,
                        "the per-file cap changed; a smaller value silently discards build output "
                        + "and a much larger one stops being a cap")
-        XCTAssertEqual(BackgroundProcessRegistry.defaultOrphanedLogMaxAge, 24 * 60 * 60)
+        XCTAssertEqual(BackgroundProcessRegistry.defaultLogRetention, 7 * 24 * 60 * 60,
+                       "user decision 2026-09-24: command logs are kept for 7 days")
+        XCTAssertEqual(BackgroundProcessRegistry.defaultTotalLogBytes, 1024 * 1024 * 1024,
+                       "user decision 2026-09-24: all command logs together are capped at 1 GB")
+        XCTAssertEqual(BackgroundProcessRegistry.sweepInterval, 24 * 60 * 60,
+                       "the sweep must repeat while the app stays open, not only at launch")
         XCTAssertGreaterThan(BackgroundProcessRegistry.defaultMaxLogBytes, 1 << 20,
                              "the per-file cap must exceed one drain's ceiling, or a rotation "
                              + "could discard bytes the tail has not read yet")

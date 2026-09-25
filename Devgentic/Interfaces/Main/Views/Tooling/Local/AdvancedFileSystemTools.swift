@@ -334,7 +334,7 @@ class HybridSearchService {
 // MARK: - FS Smart Search (Spotlight + Hybrid)
 
 struct SmartSearchTool: DevgenticTool {
-    let name = "fs_smart_search"
+    let name = "spotlight_search"
     let category = "File System"
     let description = "Advanced macOS Spotlight Search. Finds files by matching Filename OR Text Content. Supports partial matches and scope limiting; scoped searches fall back to a direct filename scan when the Spotlight index has no coverage (e.g. /tmp)."
     
@@ -457,7 +457,7 @@ struct SmartSearchTool: DevgenticTool {
 // MARK: - FS Read Metadata
 
 struct ReadMetadataTool: DevgenticTool {
-    let name = "fs_read_metadata"
+    let name = "read_file_metadata"
     let category = "File System"
     let description = "Retrieves detailed file metadata including creation date, type, size, and origin URL."
     
@@ -548,7 +548,7 @@ struct ReadMetadataTool: DevgenticTool {
 // MARK: - FS Organize Batch
 
 struct OrganizeBatchTool: DevgenticTool {
-    let name = "fs_organize_batch"
+    let name = "batch_move_files"
     let category = "File System"
     let description = "Moves multiple files to a specific destination folder in a single operation."
 
@@ -731,7 +731,7 @@ struct OrganizeBatchTool: DevgenticTool {
 
 // MARK: - FS Watch Folder
 
-/// Tracks the folder monitors `fs_watch_folder` has started.
+/// Tracks the folder monitors `watch_folder` has started.
 ///
 /// ⚠️ This type is `@unchecked Sendable` — a promise to the compiler that it is safe to touch from
 /// several threads at once — and until 2026-08-01 that promise was FALSE: `activeMonitors` was a
@@ -810,7 +810,7 @@ final class WatcherService: @unchecked Sendable {
 }
 
 struct WatchFolderTool: DevgenticTool {
-    let name = "fs_watch_folder"
+    let name = "watch_folder"
     let category = "File System"
     let description = "Manages folder monitoring: start watching, stop watching, or list active monitors."
 

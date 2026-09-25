@@ -204,23 +204,15 @@ class AgentConnect: @unchecked Sendable {
                     // --- UI Progress: Model initialization ---
                     switch llmConfig.apiProvider {
                     case .mlx:
-                        continuation.yield(.thought("Loading local model: \(llmConfig.modelName)…"))
+                        continuation.yield(.thought("Loading local model: \(llmConfig.modelName)."))
                     case .ollama:
-                        continuation.yield(.thought("Connecting to Ollama: \(llmConfig.modelName)…"))
+                        continuation.yield(.thought("Connecting to Ollama: \(llmConfig.modelName)."))
                     default:
                         break
                     }
 
                     // 4. Initialize the Language Model (before tool resolution — delegation needs the model)
                     let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
-
-                    // --- UI Progress: Model ready ---
-                    if llmConfig.apiProvider == .mlx || llmConfig.apiProvider == .ollama {
-                        continuation.yield(.thought("Model loaded. Starting execution…"))
-                    }
-
-                    // --- UI Progress: Preparing tools ---
-                    continuation.yield(.thought("Preparing agent tools…"))
 
                     // Extract capabilities for tool injection (delegation)
                     // ⚠️ register B44 — was `if case .agent … else { nil }`, which dropped `.code`.
@@ -601,6 +593,7 @@ class AgentConnect: @unchecked Sendable {
                         traceContext: traceContext,
                         modelTier: llmConfig.modelMetadata?.tier,
                         nativeContextBudgetChars: nativeContextBudgetChars,
+                        contextWindowTokens: contextWindow,
                         cutPolicy: cutPolicy
                     )
 
@@ -965,6 +958,7 @@ class AgentConnect: @unchecked Sendable {
                         traceContext: traceContext,
                         modelTier: llmConfig.modelMetadata?.tier,
                         nativeContextBudgetChars: nativeContextBudgetChars,
+                        contextWindowTokens: contextWindow,
                         cutPolicy: nodeCutPolicy
                     )
 
@@ -1263,7 +1257,8 @@ class AgentConnect: @unchecked Sendable {
                 stored: llmConfig.advancedConfiguration,
                 metadata: llmConfig.modelMetadata,
                 modelName: llmConfig.modelName,
-                flavour: flavour
+                flavour: flavour,
+                numCtxOverride: llmConfig.numCtxOverride
             )
             let options = resolvedOptions.options
 
@@ -1280,7 +1275,7 @@ class AgentConnect: @unchecked Sendable {
             }
             // The window every budget in this run will be sized against — logged so a truncated
             // prompt can be diagnosed from the log alone instead of inferred from a short reply.
-            logger.info("[num_ctx] '\(llmConfig.modelName)' runs under num_ctx=\(OllamaContextWindowPolicy.configuredNumCtx(in: options).map(String.init) ?? "server default (~\(OllamaContextWindowPolicy.assumedServerDefault))") — source: \(resolvedOptions.presetApplied != nil ? "\(flavour == .agent ? "agent" : "chat") preset" : (llmConfig.advancedConfiguration != nil ? "profile Advanced settings" : "auto-default")). CONSEQUENCE: the context gauge, the compaction budget and the native-turn budget all price against this exact number; a prompt exceeding it is HEAD-truncated by Ollama, system instructions first, with no error.")
+            logger.info("[num_ctx] '\(llmConfig.modelName)' runs under num_ctx=\(OllamaContextWindowPolicy.configuredNumCtx(in: options).map(String.init) ?? "server default (~\(OllamaContextWindowPolicy.assumedServerDefault))") — source: \(resolvedOptions.overrideNumCtx != nil ? "Code context size (per project)" : (resolvedOptions.presetApplied != nil ? "\(flavour == .agent ? "agent" : "chat") preset" : (llmConfig.advancedConfiguration != nil ? "profile Advanced settings" : "auto-default"))). CONSEQUENCE: the context gauge, the compaction budget and the native-turn budget all price against this exact number; a prompt exceeding it is HEAD-truncated by Ollama, system instructions first, with no error.")
 
             let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey, thinkingEnabled: llmConfig.thinkingEnabled)
             return OllamaLLMProvider(config: config)

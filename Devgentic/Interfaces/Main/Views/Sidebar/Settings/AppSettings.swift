@@ -63,6 +63,7 @@ struct AppSettings {
     static let remoteConversationOriginsKey = "remoteConversationOrigins"
 
     // Chat Font
+    static let chatFontFamilyKey = "chatFontFamily"
     static let chatFontSizeKey = "chatFontSize"
     static let chatLineSpacingKey = "chatLineSpacing"
 

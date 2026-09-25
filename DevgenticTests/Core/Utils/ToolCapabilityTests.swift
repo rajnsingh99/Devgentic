@@ -39,7 +39,6 @@ final class ToolCapabilityTests: XCTestCase {
         // it to "a tool that reaches a shell ON THIS LINE".
         ("shared shell core",        #"(BatchCommandTool|Self)\.(runForeground|startBackground)\("#),
         ("NSAppleScript(<argument>)", #"NSAppleScript\(source:\s*arguments\."#),
-        ("ShellSessionManager(<argument>)", #"ShellSessionManager\.shared\.execute\(command:\s*arguments\."#),
     ]
 
     func testEveryToolThatRunsItsOwnArgumentDeclaresTheCapability() throws {
@@ -124,24 +123,26 @@ final class ToolCapabilityTests: XCTestCase {
     func testDestructiveIsWiderThanArbitraryCode() {
         XCTAssertEqual(HITLRiskTier.classify(toolName: "delete_file"), .destructive)
         XCTAssertFalse(ToolCapability.executesArbitraryCode("delete_file"))
+        XCTAssertEqual(HITLRiskTier.classify(toolName: "batch_move_files"), .destructive)
         XCTAssertEqual(HITLRiskTier.classify(toolName: "fs_organize_batch"), .destructive)
     }
 
     func testOrdinaryToolsAreUnaffected() {
         XCTAssertEqual(HITLRiskTier.classify(toolName: "read_file"), .safe)
         XCTAssertEqual(HITLRiskTier.classify(toolName: "write_file"), .moderate)
-        XCTAssertEqual(HITLRiskTier.classify(toolName: "git_tool"), .moderate)
+        XCTAssertEqual(HITLRiskTier.classify(toolName: "git"), .moderate)
         XCTAssertEqual(HITLRiskTier.classify(toolName: "some_unknown_mcp_tool"), .moderate)
-        XCTAssertFalse(ToolCapability.executesArbitraryCode("git_tool"))
+        XCTAssertFalse(ToolCapability.executesArbitraryCode("git"))
         // Converted to argv on 2026-07-31; it interpolated a tool argument into `zsh -c` before
         // that, and belongs out of the set now precisely because the code changed.
+        XCTAssertFalse(ToolCapability.executesArbitraryCode("get_disk_usage"))
         XCTAssertFalse(ToolCapability.executesArbitraryCode("disk_usage"))
     }
 
     /// The tool-side view of the same fact, so a reader looking at a tool gets the same answer
     /// as the banner does. Derived, not restated — there is only one set.
     func testToolsReportTheCapabilityThemselves() {
-        XCTAssertTrue(TerminalTool().executesArbitraryCode)
+        XCTAssertTrue(RunCommandTool().executesArbitraryCode)
         XCTAssertTrue(BatchCommandTool().executesArbitraryCode)
         XCTAssertTrue(RunAppleScriptTool().executesArbitraryCode)
         XCTAssertFalse(GitTool().executesArbitraryCode)

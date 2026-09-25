@@ -362,7 +362,9 @@ final class BackgroundProcessRegistryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 
-    func testClearFinishedRemovesOnlyTerminalTasksAndTheirLogs() throws {
+    /// ⚠️ The log FILES stay since 2026-09-24 — clearing tidies the list; the retention sweep owns
+    /// the files. See `BackgroundLogCapTests.testClearingFinishedTasksKeepsTheirLogs`.
+    func testClearFinishedRemovesOnlyTerminalTasks() throws {
         let finishedTask = try launch("echo done")
         guard waitForTerminal(finishedTask.id) != nil else { return XCTFail("task never finished") }
         let runningTask = try launch("sleep 30")
@@ -376,7 +378,8 @@ final class BackgroundProcessRegistryTests: XCTestCase {
         let remaining = registry.snapshots(conversationID: conversation)
         XCTAssertEqual(remaining.count, 1)
         XCTAssertEqual(remaining.first?.id, runningTask.id)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: finishedTask.logURL.path), "finished log file must be removed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: finishedTask.logURL.path),
+                      "a finished task's log is kept for the retention period, not deleted on clear")
         XCTAssertTrue(FileManager.default.fileExists(atPath: runningTask.logURL.path), "running log file must survive")
     }
 

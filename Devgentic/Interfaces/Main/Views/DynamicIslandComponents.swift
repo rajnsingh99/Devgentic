@@ -363,8 +363,10 @@ struct IslandPillButton: View {
             .shadow(color: theme.shadowColor.opacity(isHovered ? 0.3 : 0.15), radius: 6, y: 2)
             .opacity(isEnabled ? 1.0 : 0.45)
             .scaleEffect(shouldScale ? 1.03 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: isEnabled && !isLoading)
         .focused($isFocused)
         .focusEffectDisabled()
         .onHover { isHovered = $0 }
@@ -530,8 +532,10 @@ struct IslandIconButton: View {
             )
             .scaleEffect(shouldScale ? 1.08 : 1.0)
             .opacity(isEnabled ? 1.0 : 0.4)
+            .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: isEnabled && !isLoading)
         .focused($isFocused)
         .focusEffectDisabled() // we draw our own focus ring above
         .onHover { isHovered = $0 }
@@ -664,8 +668,10 @@ struct GlassActionButton: View {
                 y: 1
             )
             .scaleEffect(isHovered ? 1.03 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovered = hovering

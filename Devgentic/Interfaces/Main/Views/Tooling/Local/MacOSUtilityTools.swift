@@ -20,7 +20,7 @@ private let logger = DGLogger(category: "MacOSUtilityTools")
 
 struct ScreenCaptureTool: DevgenticTool {
     let name = "screen_capture"
-    let category = "macOS Utilities"
+    let category = "Vision & UI"
     let description = "Captures a screenshot of the entire screen, a specific window, or a region. Saves as PNG. Useful for feeding visual context into vision pipelines."
 
     struct Arguments: Decodable, Sendable {
@@ -155,8 +155,8 @@ struct ScreenCaptureTool: DevgenticTool {
 /// not necessarily intend "and drop Red, Work and the other four". Classified `.destructive`.
 struct ReplaceFinderTagsTool: DevgenticTool {
     let name = "replace_finder_tags"
-    let category = "macOS Utilities"
-    let description = "Replaces ALL Finder tags on a file with the given list, discarding any existing tags. Pass an empty list to clear. Use finder_tags 'add'/'remove' to change tags without discarding the rest."
+    let category = "File System"
+    let description = "Replaces ALL Finder tags on a file with the given list, discarding any existing tags. Pass an empty list to clear. Use manage_finder_tags 'add'/'remove' to change tags without discarding the rest."
 
     struct Arguments: Decodable, Sendable {
         let path: String
@@ -192,8 +192,8 @@ struct ReplaceFinderTagsTool: DevgenticTool {
 }
 
 struct FinderTagsTool: DevgenticTool {
-    let name = "finder_tags"
-    let category = "macOS Utilities"
+    let name = "manage_finder_tags"
+    let category = "File System"
     let description = "Reads, adds, removes, or searches macOS Finder tags. Additive and subtractive only — replacing all tags is a separate tool."
 
     struct Arguments: Decodable, Sendable {
@@ -348,8 +348,8 @@ struct FinderTagsTool: DevgenticTool {
 // MARK: - Disk Usage Tool
 
 struct DiskUsageTool: DevgenticTool {
-    let name = "disk_usage"
-    let category = "macOS Utilities"
+    let name = "get_disk_usage"
+    let category = "File System"
     let description = "Reports disk space usage: available/total volume capacity, folder sizes, or finds the largest files in a directory."
 
     struct Arguments: Decodable, Sendable {
@@ -576,7 +576,7 @@ struct DiskUsageTool: DevgenticTool {
 // MARK: - Display Management Tool
 
 struct DisplayManagementTool: DevgenticTool {
-    let name = "display_management"
+    let name = "manage_displays"
     let category = "macOS Utilities"
     let description = "Manages display settings: list connected displays with resolution info, get/set brightness, and get display arrangement details."
 
@@ -800,7 +800,7 @@ struct OpenSystemSettingsTool: DevgenticTool {
 // MARK: - Login Items Tool
 
 struct LoginItemsTool: DevgenticTool {
-    let name = "login_items"
+    let name = "manage_login_items"
     let category = "macOS Utilities"
     let description = "Lists macOS login items (apps that launch at startup) and can open the Login Items settings pane for management."
 
@@ -872,7 +872,7 @@ struct LoginItemsTool: DevgenticTool {
 // MARK: - External Devices Tool
 
 struct ExternalDevicesTool: DevgenticTool {
-    let name = "external_devices"
+    let name = "list_external_devices"
     let category = "macOS Utilities"
     let description = "Lists connected external devices: USB devices, external disks, or all connected peripherals via system profiler."
 
@@ -962,8 +962,8 @@ struct ExternalDevicesTool: DevgenticTool {
 // MARK: - Apple Notes Tool
 
 struct AppleNotesTool: DevgenticTool {
-    let name = "apple_notes"
-    let category = "macOS Utilities"
+    let name = "manage_apple_notes"
+    let category = "Personal Information"
     let description = "Manages Apple Notes: list notes, read a note's content, create a new note, or search notes by keyword."
 
     struct Arguments: Decodable, Sendable {

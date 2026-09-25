@@ -282,8 +282,7 @@ final class CodeQuickSettingsTests: XCTestCase {
         settings.toolConfirmations["run_command"] = false
         manager.updateQuickSettings(settings)
 
-        // The Home button. Deletes the profile row outright — see
-        // `CodeProfileSingletonTests.testResetSessionDeletesTheRowAndClearsTheHandle`.
+        // The Home button. Resets the row to the preset — see `CodeProjectSessionTests`.
         manager.resetSession()
 
         manager.updateProjectPath(projectA)
@@ -369,11 +368,14 @@ final class CodeQuickSettingsTests: XCTestCase {
         s = .default; s.executionTimeout = 300
         XCTAssertFalse(s.isDefault, "executionTimeout is not counted by isDefault.")
 
-        s = .default; s.toolConfirmations["git_tool"] = true
+        s = .default; s.toolConfirmations["git"] = true
         XCTAssertFalse(s.isDefault, "toolConfirmations is not counted by isDefault.")
 
         s = .default; s.thinkingEnabled = false
         XCTAssertFalse(s.isDefault, "thinkingEnabled is not counted by isDefault.")
+
+        s = .default; s.contextTokens = 16_384
+        XCTAssertFalse(s.isDefault, "contextTokens is not counted by isDefault.")
     }
 
     func testRetentionCapKeepsTheMostRecentlyChangedProjects() {

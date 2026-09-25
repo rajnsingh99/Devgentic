@@ -49,8 +49,10 @@ struct SidebarHeaderActionButton: View {
                 y: 1
             )
             .scaleEffect(isHovered ? 1.03 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovered = hovering
@@ -142,6 +144,8 @@ struct SidebarSearchBarView: View {
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
+                .contentShape(Circle())
+                .pointingHandCursor()
                 .accessibilityLabel("Clear search")
                 .transition(.scale.combined(with: .opacity))
             }
@@ -214,6 +218,7 @@ struct BatchHeaderTextButton: View {
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { isHovered = $0 }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
     }
@@ -276,8 +281,10 @@ struct CategoryChip: View {
                     y: 1
                 )
                 .scaleEffect(isHovered ? 1.04 : 1.0)
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovered = hovering
@@ -365,8 +372,10 @@ struct SidebarEmptyStateView: View {
                         y: 2
                     )
                     .scaleEffect(isHovered ? 1.03 : 1.0)
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
                 .onHover { hovering in
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                         isHovered = hovering
@@ -410,6 +419,7 @@ extension View {
     func sidebarRowBackground(isSelected: Bool = false, isHovering: Bool) -> some View {
         self
             .background(SidebarRowBackground(isSelected: isSelected, isHovering: isHovering))
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }

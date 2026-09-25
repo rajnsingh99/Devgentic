@@ -151,7 +151,7 @@ struct CodeQuickSettingsPopover: View {
                         .font(.system(size: 9.5))
                         .foregroundColor(.orange.opacity(0.85))
 
-                    Text(projectName.map { "Scoped to '\($0)'" } ?? "No project folder open")
+                    Text(projectName.map { "Scoped to '\($0)'" } ?? "No Project Selected")
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText)
                         .lineLimit(1)
@@ -245,6 +245,29 @@ struct CodeQuickSettingsPopover: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
+
+                // Context size — Ollama only: it is the one provider whose window the app chooses.
+                if codeSessionManager.provider == .ollama {
+                    Divider().opacity(0.25).padding(.leading, 14)
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Context Size")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundColor(theme.primaryText)
+
+                            Text("Room for the prompt, tools and history. Larger uses more memory.")
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.secondaryText)
+                        }
+
+                        Spacer()
+
+                        contextMenu
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                }
             }
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -409,6 +432,72 @@ struct CodeQuickSettingsPopover: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+
+    // MARK: - Context Size
+
+    /// The model's own trained window, when known — the ceiling offered in the menu.
+    private var trainedWindow: Int? {
+        EffectiveContextWindow.trainedWindow(for: codeSessionManager.currentProviderConfig)
+    }
+
+    private var contextChoices: [Int] {
+        let steps = [8_192, 16_384, 32_768, 65_536, 131_072]
+        guard let trained = trainedWindow else { return steps }
+        return steps.filter { $0 < trained } + [trained]
+    }
+
+    private var contextMenu: some View {
+        Menu {
+            Button(action: { setContext(nil) }) {
+                HStack {
+                    Text("\(Self.tokenLabel(defaultContext)) (Default)")
+                    if draft.contextTokens == nil { Image(systemName: "checkmark") }
+                }
+            }
+            Divider()
+            ForEach(contextChoices, id: \.self) { tokens in
+                Button(action: { setContext(tokens) }) {
+                    HStack {
+                        Text(tokens == trainedWindow ? "\(Self.tokenLabel(tokens)) (model maximum)" : Self.tokenLabel(tokens))
+                        if draft.contextTokens == tokens { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(Self.tokenLabel(draft.contextTokens ?? defaultContext))
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(theme.primaryText)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundColor(theme.secondaryText.opacity(0.8))
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
+            .background(theme.surfaceOverlayStrong)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(theme.dividerColor.opacity(0.35), lineWidth: 0.8)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    /// What "Default" means for the current model. Unknown trained window → the provider's own
+    /// ladder decides, shown as the preset's 8K.
+    private var defaultContext: Int {
+        trainedWindow.map { min($0, CodeSessionManager.presetContextCap) } ?? 8_192
+    }
+
+    private func setContext(_ tokens: Int?) {
+        draft.contextTokens = tokens
+    }
+
+    static func tokenLabel(_ tokens: Int) -> String {
+        tokens >= 1_024 ? "\(tokens / 1_024)K" : "\(tokens)"
     }
 
     private var timeoutDisplayString: String {

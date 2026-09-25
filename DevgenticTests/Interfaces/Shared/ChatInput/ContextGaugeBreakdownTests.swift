@@ -61,11 +61,11 @@ final class ContextCutLogTests: XCTestCase {
     /// The executor posts from off the main actor; the post must land.
     func testAPostFromTheExecutorLands() async throws {
         let conversation = UUID()
-        ContextCutLog.post(cut: cut("git_tool", 20_000, 5_000), conversationID: conversation, traceID: "tX")
+        ContextCutLog.post(cut: cut("git", 20_000, 5_000), conversationID: conversation, traceID: "tX")
         for _ in 0..<50 where ContextCutLog.shared.lastTurn(for: conversation) == nil {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        XCTAssertEqual(ContextCutLog.shared.lastTurn(for: conversation)?.cuts.first?.toolName, "git_tool")
+        XCTAssertEqual(ContextCutLog.shared.lastTurn(for: conversation)?.cuts.first?.toolName, "git")
     }
 }
 
@@ -87,8 +87,11 @@ final class ContextGaugeWiringTests: XCTestCase {
     /// posting — and then the gauge's cut line simply never appears.
     func testTheExecutorReportsEveryKindOfCut() throws {
         let code = try source("Devgentic/Core/Backends/TextGen/ReAct/ReActAgentExecutor.swift")
-        XCTAssertEqual(code.components(separatedBy: "ContextCutLog.post(").count - 1, 3,
-                       "expected three reports: the native fit, native compaction, and the scratchpad path")
+        XCTAssertEqual(code.components(separatedBy: "ContextCutLog.post(").count - 1, 4,
+                       "expected four reports: the native fit, native compaction, the scratchpad path, and a provider-reported overflow")
+        XCTAssertTrue(code.contains("if let overflow = ContextCutLog.overflow(in: usage, step: currentIteration, windowTokens: input.contextWindowTokens) {"),
+                      "overflow is no longer decided from the provider's real count")
+        XCTAssertTrue(code.contains("ContextCutLog.post(overflow: overflow,"), "a detected overflow no longer reaches the gauge")
         XCTAssertTrue(code.contains("ContextCutLog.post(compactedExchanges: droppedNow"),
                       "native compaction no longer reaches the gauge")
     }

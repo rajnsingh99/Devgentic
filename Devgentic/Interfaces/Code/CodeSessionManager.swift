@@ -9,6 +9,14 @@
 //  folder coordination with the Explorer sidebar, and .devgentic/context.md
 //  lifecycle (auto-creation, file watching, prompt injection).
 //
+//  ⚠️ ONE PERMANENT PROFILE, SETTINGS PER PROJECT (2026-09-24). The row is created once and never
+//  deleted — Home resets it to the preset instead. Everything the user can change (limits,
+//  Ask/Auto, the model, the tools) belongs to the project folder and lives in
+//  `CodeQuickSettingsStore`; the row only ever holds the CURRENT project's copy. Opening a folder
+//  loads its copy onto the row (`updateProjectPath`), and leaving it — another folder, Home, or a
+//  send — captures the row back. Before this, Home deleted the row, and every per-tool setting and
+//  enabled MCP tool went with it.
+//
 
 import Foundation
 import os
@@ -30,6 +38,13 @@ final class CodeSessionManager {
     private(set) var modelName: String = ""
     private(set) var apiKey: String? = nil
     private(set) var baseURL: String? = nil
+    /// The model's detected metadata — its trained window is what "Context size" is offered up to.
+    private(set) var modelMetadata: ModelMetadata? = nil
+
+    /// The selected model as a config value, for callers that ask model questions (e.g. its window).
+    var currentProviderConfig: ProviderConfig {
+        ProviderConfig(apiProvider: provider, modelName: modelName, modelMetadata: modelMetadata)
+    }
     private(set) var projectPath: URL? = nil
 
     /// Most-recently-used project folders. Persisted across launches so the folder
@@ -76,6 +91,10 @@ final class CodeSessionManager {
     /// Drives the model picker popover from both the button and send-intercept.
     var showModelPicker: Bool = false
 
+    /// Drives the quick-settings popover — from its toolbar button, and from the context gauge's
+    /// "Raise context size" when the prompt and tools fill most of the window.
+    var showQuickSettings: Bool = false
+
     // MARK: - Project Memory (cached)
 
     /// Cached content of `.devgentic/context.md`. Updated on file change via the monitor
@@ -85,8 +104,8 @@ final class CodeSessionManager {
     // MARK: - Private
 
     private static let profileIDKey = "devgentic.codeProfileID"
-    /// Per-project quick settings live in their OWN UserDefaults key, deliberately outside the
-    /// profile row — see `CodeQuickSettingsStore`'s note on `resetSession()` deleting that row.
+    /// Per-project settings live in their OWN UserDefaults key: the one profile row can only hold
+    /// the current project's copy — see `CodeQuickSettingsStore`.
     private static let quickSettingsKey = CodeQuickSettingsStore.defaultsKey
     private static let recentPathsKey = "devgentic.codeRecentProjectPaths"
     private static let legacyConfigKey = "devgentic.codeSessionConfig"
@@ -280,7 +299,15 @@ final class CodeSessionManager {
     /// for the case where the user changes a setting between sends.
     func updateQuickSettings(_ settings: CodeQuickSettings) {
         guard let path = projectPath?.path else {
-            logger.warning("[CODE_SETTINGS] Quick settings changed with no project folder open. CONSEQUENCE: the change is dropped — settings are scoped per project and there is nothing to attach them to.")
+            logger.warning("[CODE_SETTINGS] Quick settings changed with no project selected. CONSEQUENCE: the change is dropped — settings are scoped per project and there is nothing to attach them to.")
+            return
+        }
+
+        // ⚠️ The popover commits on appear-hydration and again on dismiss, so most calls carry the
+        // values already stored. Seen on device 2026-09-24 as a `[PROFILE_SAVE] ⚠️ REDUNDANT` write
+        // on every open and close.
+        guard settings != CodeQuickSettingsStore.settings(for: path, defaults: defaults) else {
+            logger.debug("[CODE_SETTINGS] Quick settings for '\(URL(fileURLWithPath: path).lastPathComponent)' unchanged — nothing saved.")
             return
         }
 
@@ -300,8 +327,10 @@ final class CodeSessionManager {
               var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
               case .code(var agentConfig) = profile.details else { return }
 
+        let before = profile.details
         Self.apply(settings, to: &agentConfig)
         profile.details = .code(agentConfig)
+        guard profile.details != before else { return }
 
         do {
             try BackendProfileStore.shared.saveProfile(profile)
@@ -331,6 +360,24 @@ final class CodeSessionManager {
     /// bounded by `presetMaxIterations`, not by this; this bounds a hang.
     static let presetExecutionTimeout: TimeInterval = 1800
 
+    /// Code's default context window: the model's own, capped here. KV-cache memory grows with the
+    /// window, so the cap is what keeps a 128K-trained model from claiming many GB by default;
+    /// the per-project "Context size" goes past it deliberately.
+    ///
+    /// ⚠️ Why Code needs its own default at all (2026-09-24). With no override, an Ollama model ran
+    /// under the agent preset's 8,192 — and Code's fixed prompt plus 23 tool definitions is ~5.5K
+    /// tokens of that, before the task. A five-step run overflowed; Ollama silently dropped the
+    /// START of the prompt (the instructions and `final_answer` contract) and the run ended with no
+    /// answer.
+    static let presetContextCap = 32_768
+
+    /// The window a Code run on `llm` should use — nil leaves Ollama's usual ladder in charge.
+    static func contextTokens(_ settings: CodeQuickSettings, for llm: ProviderConfig) -> Int? {
+        guard llm.apiProvider == .ollama else { return nil }
+        if let chosen = settings.contextTokens, chosen > 0 { return chosen }
+        return EffectiveContextWindow.trainedWindow(for: llm).map { min($0, presetContextCap) }
+    }
+
     static func apply(_ settings: CodeQuickSettings, to agentConfig: inout AgentConfig) {
         // ⚠️⚠️ ALWAYS ASSIGN — never "skip when nil". These used to be `if let`, which made the
         // mapping a ONE-WAY DOOR: pressing Remove in the limits panel stored 0, `apply` turned
@@ -350,6 +397,7 @@ final class CodeSessionManager {
         }
 
         agentConfig.llmConfig.thinkingEnabled = settings.thinkingEnabled ?? false
+        agentConfig.llmConfig.numCtxOverride = contextTokens(settings, for: agentConfig.llmConfig)
         agentConfig.tools = mergePresetTools(
             preset: CodeToolPreset.defaultTools,
             existing: agentConfig.tools,
@@ -362,6 +410,7 @@ final class CodeSessionManager {
     func updateProvider(_ provider: ApiProvider) {
         self.provider = provider
         self.modelName = ""
+        self.modelMetadata = nil
         self.apiKey = nil
         logger.info("Provider updated to \(provider.rawValue)")
     }
@@ -383,6 +432,8 @@ final class CodeSessionManager {
             return
         }
 
+        let detailsBefore = profile.details
+
         // Build ProviderConfig with full cognitive data
         agentConfig.llmConfig = ProviderConfig(
             apiProvider: provider,
@@ -396,43 +447,262 @@ final class CodeSessionManager {
             stopSequences: cognitiveProfile.stopSequences,
             thinkingEnabled: thinkingEnabled
         )
+        // A new model means a new trained window — the Code default follows it now, not at the
+        // next send, so the gauge prices the model the user just picked.
+        agentConfig.llmConfig.numCtxOverride = Self.contextTokens(quickSettings, for: agentConfig.llmConfig)
 
         profile.details = .code(agentConfig)
 
         do {
-            try BackendProfileStore.shared.saveProfile(profile)
+            if profile.details == detailsBefore {
+                logger.debug("[CODE_PROFILE] Model '\(modelName)' re-picked unchanged — no profile write.")
+            } else {
+                try BackendProfileStore.shared.saveProfile(profile)
+            }
             // Update local caches
             self.provider = provider
             self.modelName = modelName
             self.apiKey = apiKey
             self.baseURL = baseURL
+            self.modelMetadata = cognitiveProfile.metadata
             logger.info("Model updated to \(modelName) (provider: \(provider.rawValue), capability: \(cognitiveProfile.capability.rawValue), dialect: \(cognitiveProfile.dialect.rawValue), thinking: \(thinkingEnabled))")
+            // The key goes to the provider's Keychain slot so another project's model on this
+            // provider — or this one, after a detour — finds it again.
+            CodeProviderKeys.remember(apiKey, for: provider)
+            if let path = projectPath?.path {
+                captureProject(path, from: agentConfig, reason: "model picked")
+            } else {
+                logger.info("[CODE_PROJECT] Model '\(modelName)' picked with no project selected. CONSEQUENCE: it is the last-used model every project without its own starts with; the first folder opened remembers it.")
+            }
         } catch {
             logger.error("Failed to save model update: \(error.localizedDescription)")
         }
     }
 
-    /// Updates the project path on the persisted code profile and bootstraps project memory.
+    /// Opens `url` as the current project: the project's own model, tools and limits are loaded
+    /// onto the profile, after the project being left has its copy captured.
     func updateProjectPath(_ url: URL) {
+        let previous = projectPath
+        let isSwitch = previous.map { !$0.sameLocation(as: url) } ?? false
         self.projectPath = url
-        logger.info("Project path updated to \(url.path)")
+        logger.info("[CODE_PROJECT] Open '\(url.lastPathComponent)' (\(url.path)) — from: \(previous.map { "'\($0.lastPathComponent)'" } ?? "no folder"), \(isSwitch ? "switching projects" : (previous == nil ? "no folder was open" : "same folder re-opened")).")
 
         // Publish as an MCP root so filesystem-shaped servers get a workspace boundary
         // instead of an empty `roots/list`. Connected servers are notified immediately, so
         // switching project re-scopes them without a reconnect.
         Task { await MCPRootsProvider.setCodeProjectRoot(url) }
 
-        // Update the profile if it exists
-        if let profileID = codeProfileID,
-           var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
+        let profileID = ensureCodeProfile()
+        if var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
            case .code(var agentConfig) = profile.details {
+            let before = profile.details
+            if isSwitch, let previous { captureProject(previous.path, from: agentConfig, reason: "switching to '\(url.lastPathComponent)'") }
+            loadProject(url.path, into: &agentConfig, leavingAnotherProject: isSwitch)
             agentConfig.projectPath = url.path
             profile.details = .code(agentConfig)
-            try? BackendProfileStore.shared.saveProfile(profile)
+            do {
+                if profile.details == before {
+                    logger.debug("[CODE_PROFILE] '\(url.lastPathComponent)' already on the profile — no write.")
+                } else {
+                    try BackendProfileStore.shared.saveProfile(profile)
+                }
+            } catch {
+                // Store validation refuses a row with no model — the state before a first model is
+                // ever picked. The caches below still switch, and the next send re-applies it all.
+                logger.warning("[CODE_PROFILE] Could not write project '\(url.lastPathComponent)' onto the profile: \(error.localizedDescription). CONSEQUENCE: the profile row keeps its previous folder until the next successful write (a model pick or a send); the session already uses the new folder.")
+            }
+            hydrateModelCaches(from: agentConfig.llmConfig)
+            logger.info("[CODE_PROJECT] '\(url.lastPathComponent)' now runs with model: \(self.modelName.isEmpty ? "(none selected)" : "\(self.provider.rawValue)/\(self.modelName)"), \(agentConfig.tools.count) tool(s), maxIterations: \(agentConfig.maxIterations.map(String.init) ?? "unbounded").")
+        } else {
+            logger.error("[CODE_PROFILE] Could not read Code profile \(profileID.uuidString) while opening '\(url.lastPathComponent)'. CONSEQUENCE: the folder is open but its remembered model and tools were NOT loaded, and \(previous.map { "'\($0.lastPathComponent)'" } ?? "the previous state") was not captured; the next send applies this project's limits, but tools and model stay whatever the row held.")
         }
 
         rememberRecentPath(url)
         bootstrapProjectMemory()
+    }
+
+    /// Puts a Code conversation's own folder back when it is selected.
+    ///
+    /// ⚠️ Before conversations recorded their folder, reopening an old session ran it against
+    /// whichever folder happened to be open — a session begun in project A would read and write
+    /// project B's files.
+    enum ConversationProjectOutcome: Equatable {
+        case restored, alreadyOpen, noRecordedFolder, folderMissing
+    }
+
+    @discardableResult
+    func openProject(forConversationPath path: String?) -> ConversationProjectOutcome {
+        guard let path, !path.isEmpty else {
+            logger.info("[CODE_PROJECT] Selected conversation has no recorded folder (from before folders were recorded, or never sent). CONSEQUENCE: \(self.projectPath.map { "'\($0.lastPathComponent)'" } ?? "no folder") stays open, and the conversation is bound to whatever folder its next send runs in.")
+            return .noRecordedFolder
+        }
+        let url = URL(fileURLWithPath: path)
+        if let current = projectPath, current.sameLocation(as: url) {
+            logger.debug("[CODE_PROJECT] Selected conversation's folder '\(url.lastPathComponent)' is already open.")
+            return .alreadyOpen
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            logger.warning("[CODE_PROJECT] The selected conversation's folder '\(path)' no longer exists. CONSEQUENCE: the current folder stays open; the conversation can be read, but sending from it is refused rather than run against another project's files.")
+            return .folderMissing
+        }
+        updateProjectPath(url)
+        logger.info("[CODE_PROJECT] Reopened '\(url.lastPathComponent)' for the selected conversation.")
+        return .restored
+    }
+
+    // MARK: - Per-Project State
+
+    /// Loads `path`'s remembered model, tools and limits onto `agentConfig`.
+    ///
+    /// A project never captured before gets the PRESET tools when another project is being left —
+    /// otherwise it would inherit that project's MCP tools and settings. When no project was open
+    /// (the welcome screen), it adopts what is on the row instead, so tools enabled before picking
+    /// a folder are not thrown away.
+    private func loadProject(_ path: String, into agentConfig: inout AgentConfig, leavingAnotherProject: Bool) {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        if let state = CodeQuickSettingsStore.projectState(for: path, defaults: defaults) {
+            Self.restore(state, into: &agentConfig)
+            logger.info("[CODE_PROJECT] Loaded '\(name)' — model: \(state.model.map { "\($0.apiProvider.rawValue)/\($0.modelName)" } ?? "(none remembered — last used carries over)"), extra tools: [\(state.extraTools.map(\.name).joined(separator: ", "))], preset overrides: [\(state.presetToolOverrides.keys.sorted().joined(separator: ", "))].")
+        } else if leavingAnotherProject {
+            agentConfig.tools = CodeToolPreset.defaultTools
+            logger.info("[CODE_PROJECT] '\(name)' opened for the first time — preset tools and limits; the last-used model carries over.")
+        } else {
+            logger.info("[CODE_PROJECT] '\(name)' has nothing remembered yet and no other project was left — adopting the tools already on the profile (enabled on the welcome screen, or this folder's own).")
+        }
+        Self.apply(CodeQuickSettingsStore.settings(for: path, defaults: defaults), to: &agentConfig)
+    }
+
+    /// A remembered project's tools and model, onto `agentConfig`.
+    static func restore(_ state: CodeProjectState, into agentConfig: inout AgentConfig) {
+        agentConfig.tools = tools(restoring: state)
+        if let model = state.model {
+            agentConfig.llmConfig = restoredModel(model, replacing: agentConfig.llmConfig)
+        }
+    }
+
+    // MARK: - A run in a conversation's own project
+
+    /// The prompt a Code run in `projectPath` is given.
+    static func instructions(forProject projectPath: String, apiProvider: ApiProvider, projectContext: String?) -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        // CodeSystemPrompt picks the XML or markdown variant by provider (Claude → XML, others →
+        // markdown) and formats the project_context injection to match.
+        return CodeSystemPrompt.production(
+            projectPath: projectPath,
+            projectName: URL(fileURLWithPath: projectPath).lastPathComponent,
+            currentDate: dateFormatter.string(from: Date()),
+            apiProvider: apiProvider,
+            projectContext: projectContext
+        )
+    }
+
+    /// `.devgentic/context.md` in `projectPath`, or nil when missing or empty.
+    static func readProjectContext(inProject projectPath: String) -> String? {
+        let memoryURL = URL(fileURLWithPath: projectPath).appendingPathComponent(projectMemoryFileName)
+        guard let content = try? String(contentsOf: memoryURL, encoding: .utf8),
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return content
+    }
+
+    /// The Code profile as a run in `conversationProjectPath` must see it.
+    ///
+    /// ⚠️⚠️ WHY (2026-09-24). There is ONE Code profile and it holds whichever project is OPEN. A run
+    /// the composer starts is always for the open project, but a background-task wake, a scheduled
+    /// run or a resume after approval starts for ITS conversation — possibly while another project
+    /// is open. Taken from the row as-is, such a run got the other project's folder, prompt,
+    /// context.md, tools and limits. This builds the conversation's own, in memory; the row is not
+    /// touched.
+    ///
+    /// Returns `profile` unchanged when it is not Code, the conversation has no folder, or the folder
+    /// is already the one on the row (every composer send).
+    static func profile(_ profile: BackendProfileSnapshot, forConversationProject conversationProjectPath: String?,
+                        defaults: UserDefaults = .standard) -> BackendProfileSnapshot {
+        guard case .code(let base) = profile.details,
+              let target = CodeQuickSettingsStore.normalizedKey(conversationProjectPath) else { return profile }
+        let open = CodeQuickSettingsStore.normalizedKey(base.projectPath)
+        guard open != target else { return profile }
+
+        var config = base
+        if let state = CodeQuickSettingsStore.projectState(for: target, defaults: defaults) {
+            restore(state, into: &config)
+        } else {
+            config.tools = CodeToolPreset.defaultTools
+        }
+        apply(CodeQuickSettingsStore.settings(for: target, defaults: defaults), to: &config)
+        config.instructions = instructions(forProject: target, apiProvider: config.llmConfig.apiProvider,
+                                           projectContext: readProjectContext(inProject: target))
+        config.projectPath = target
+
+        let name = URL(fileURLWithPath: target).lastPathComponent
+        if FileManager.default.fileExists(atPath: target) {
+            logger.info("[CODE_PROJECT] Run bound to '\(name)' while \(open.map { "'\(URL(fileURLWithPath: $0).lastPathComponent)'" } ?? "no folder") is open — using '\(name)''s own folder, prompt, tools (\(config.tools.count)) and limits (maxIterations: \(config.maxIterations.map(String.init) ?? "unbounded")), model \(config.llmConfig.modelName). CONSEQUENCE: the open project is not touched.")
+        } else {
+            logger.warning("[CODE_PROJECT] Run bound to '\(name)', whose folder no longer exists at \(target). CONSEQUENCE: it stays confined to that path rather than running in the open project; tools that touch files will fail.")
+        }
+
+        var rebound = profile
+        rebound.details = .code(config)
+        return rebound
+    }
+
+    /// Records what `agentConfig` runs with as `path`'s project state. `reason` is for the log.
+    private func captureProject(_ path: String, from agentConfig: AgentConfig, reason: String) {
+        let state = Self.projectState(capturing: agentConfig)
+        logger.debug("[CODE_PROJECT] Capturing '\(URL(fileURLWithPath: path).lastPathComponent)' (\(reason)) — model: \(state.model?.modelName ?? "(none)"), \(state.extraTools.count) extra tool(s), \(state.presetToolOverrides.count) preset override(s).")
+        CodeQuickSettingsStore.saveProjectState(state, for: path, defaults: defaults, now: Date())
+    }
+
+    /// The row's tools and model as a delta against the preset.
+    static func projectState(capturing agentConfig: AgentConfig) -> CodeProjectState {
+        let presetByKey = Dictionary(CodeToolPreset.defaultTools.map { (toolKey($0), $0) },
+                                     uniquingKeysWith: { first, _ in first })
+        var state = CodeProjectState()
+        for tool in agentConfig.tools {
+            if let preset = presetByKey[toolKey(tool)] {
+                if let override = CodeToolOverride(preset: preset, current: tool) {
+                    state.presetToolOverrides[tool.name] = override
+                }
+            } else {
+                state.extraTools.append(tool)
+            }
+        }
+        var model = agentConfig.llmConfig
+        model.apiKey = nil
+        state.model = model.modelName.isEmpty ? nil : model
+        return state
+    }
+
+    /// The tool list a captured project runs with — the inverse of `projectState(capturing:)`.
+    static func tools(restoring state: CodeProjectState) -> [Tool] {
+        CodeToolPreset.defaultTools.map { state.presetToolOverrides[$0.name]?.applied(to: $0) ?? $0 }
+            + state.extraTools
+    }
+
+    /// A project's remembered model, with a key found for it: the row's own when the provider is
+    /// unchanged, otherwise the provider's Keychain slot (`CodeProviderKeys`).
+    static func restoredModel(_ model: ProviderConfig, replacing current: ProviderConfig) -> ProviderConfig {
+        var restored = model
+        let sameProvider = current.apiProvider == model.apiProvider
+        let rowKey = sameProvider ? current.apiKey : nil
+        restored.apiKey = rowKey ?? CodeProviderKeys.key(for: model.apiProvider)
+
+        // Never the key itself — only where it came from.
+        if restored.apiKey == nil && providerNeedsKey(model.apiProvider) {
+            logger.warning("[CODE_KEYS] Restored \(model.apiProvider.rawValue)/\(model.modelName) with NO API key — none on the profile and none in the provider's Keychain slot. CONSEQUENCE: the first send fails authentication until a key is entered in the model picker.")
+        } else if restored.apiKey != nil {
+            let source = rowKey != nil ? "the profile (same provider)" : "the \(model.apiProvider.rawValue) Keychain slot"
+            logger.info("[CODE_KEYS] Restored \(model.apiProvider.rawValue)/\(model.modelName) — key from \(source).")
+        }
+        return restored
+    }
+
+    /// Local providers run without a key; a missing one only matters for cloud providers.
+    static func providerNeedsKey(_ provider: ApiProvider) -> Bool {
+        switch provider {
+        case .ollama, .mlx, .openAICompatible: return false
+        case .anthropic, .openAI, .google, .openRouter: return true
+        }
     }
 
     // MARK: - Recent Project Paths
@@ -483,21 +753,10 @@ final class CodeSessionManager {
         let projectPathStr = projectPath?.path ?? "/"
         let projectName = projectPath?.lastPathComponent ?? "?"
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let currentDate = dateFormatter.string(from: Date())
-
-        // Assemble instructions — CodeSystemPrompt picks the XML or markdown variant
-        // based on provider (Claude → XML for trained preference; all others → markdown)
-        // and formats the project_context injection to match.
         let memoryContent = loadProjectMemory()
-        let instructions = CodeSystemPrompt.production(
-            projectPath: projectPathStr,
-            projectName: projectName,
-            currentDate: currentDate,
-            apiProvider: agentConfig.llmConfig.apiProvider,
-            projectContext: memoryContent
-        )
+        let instructions = Self.instructions(forProject: projectPathStr,
+                                             apiProvider: agentConfig.llmConfig.apiProvider,
+                                             projectContext: memoryContent)
         if let projectMemory = memoryContent {
             logger.info("[CODE] Injected project context into instructions (\(projectMemory.count) chars)")
         } else {
@@ -507,19 +766,19 @@ final class CodeSessionManager {
         agentConfig.instructions = instructions
         agentConfig.projectPath = projectPathStr
 
-        // ⚠️ Quick settings are re-applied on EVERY send, not just when the user changes them.
-        // `resetSession()` deletes the profile row on every Home press, so the row minted by the
-        // next `ensureCodeProfile()` carries the hardcoded preset values — this is what puts the
-        // user's per-project choices back onto it. `apply` also performs the tool merge, so the
-        // preset's guarantees still hold.
+        // ⚠️ Quick settings are re-applied on EVERY send, not just when the user changes them —
+        // the row is shared by every project, so this is what guarantees a run uses THIS
+        // project's limits. `apply` also performs the tool merge, so the preset's guarantees still
+        // hold. The capture below then records anything the Tool Library changed on the row.
         let settings = CodeQuickSettingsStore.settings(for: projectPathStr, defaults: defaults)
         Self.apply(settings, to: &agentConfig)
         // ⚠️ Logged on EVERY send, not only when the user has overridden something. This was
         // gated on `!settings.isDefault`, so a run at the preset limits said nothing about what
         // they were — and "Reached maximum iterations (N)" is only diagnosable against the cap
         // that was in force. `apply` runs either way; only the line was conditional.
+        if let path = projectPath?.path { captureProject(path, from: agentConfig, reason: "send") }
         let limitSource = settings.isDefault ? "preset" : "per-project override"
-        logger.info("[CODE_SETTINGS] '\(projectName)' runs with maxIterations: \(agentConfig.maxIterations.map(String.init) ?? "unbounded"), timeout: \(agentConfig.executionTimeout.map { "\(Int($0))s" } ?? "none"), \(settings.toolConfirmations.count) tool confirmation override(s) — source: \(limitSource). CONSEQUENCE: an iteration-cap or timeout termination in this run is against these exact values.")
+        logger.info("[CODE_SETTINGS] '\(projectName)' runs with maxIterations: \(agentConfig.maxIterations.map(String.init) ?? "unbounded"), timeout: \(agentConfig.executionTimeout.map { "\(Int($0))s" } ?? "none"), context: \(agentConfig.llmConfig.numCtxOverride.map { "\($0) tokens (\(settings.contextTokens == nil ? "Code default" : "chosen"))" } ?? "provider default"), \(settings.toolConfirmations.count) tool confirmation override(s) — source: \(limitSource). CONSEQUENCE: an iteration-cap or timeout termination in this run is against these exact values.")
 
         profile.details = .code(agentConfig)
 
@@ -552,45 +811,45 @@ final class CodeSessionManager {
         }
     }
 
-    /// Resets the code session by deleting the profile. `isConfigured` returns false.
-    /// A fresh profile is lazily created on next `ensureCodeProfile()` call.
+    /// Home: the session goes back to "no folder", and the ROW goes back to the preset.
+    ///
+    /// ⚠️⚠️ The row is RESET, never deleted (2026-09-24). Deleting it was how every per-tool
+    /// setting and every MCP tool enabled for Code vanished on each Home press — they lived on the
+    /// row and nowhere else. Now the project being left is captured first, so everything it had
+    /// comes back when its folder is opened again.
+    ///
+    /// The model is kept: it is the "last used" fallback a project with no remembered model starts
+    /// with.
     func resetSession() {
         // Stop file watcher
         contextFileMonitor?.stop()
         contextFileMonitor = nil
         projectMemoryContent = nil
 
-        // Delete the profile from SwiftData.
-        //
-        // ⚠️ The handle is cleared only when the delete ACTUALLY succeeded. `try?` plus an
-        // unconditional clear is how a failed delete became a permanent orphan: the row survived,
-        // nothing pointed at it any more, and the next `ensureCodeProfile()` created a rival. This
-        // path is reached from the Home button on every Code-mode session
-        // (`deselectConversationAndShowWelcome`), so it runs often enough to matter.
-        if let profileID = codeProfileID {
+        let leaving = projectPath
+        // ⚠️ `ensureCodeProfile()`, not `codeProfileID`. The handle is resolved lazily, so a Home
+        // pressed before any Code action this launch found NO handle, reset nothing — and the
+        // adoption that followed re-hydrated the row's stale folder, undoing the Home (seen on
+        // device 2026-09-24: "Home with no readable Code profile (handle: none)").
+        let profileID = ensureCodeProfile()
+        if var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
+           case .code(var agentConfig) = profile.details {
+            if let path = leaving?.path { captureProject(path, from: agentConfig, reason: "Home") }
+            agentConfig.projectPath = nil
+            agentConfig.tools = CodeToolPreset.defaultTools
+            Self.apply(.default, to: &agentConfig)
+            profile.details = .code(agentConfig)
             do {
-                try BackendProfileStore.shared.deleteProfile(withId: profileID)
-                codeProfileID = nil
-                self.defaults.removeObject(forKey: Self.profileIDKey)
-                logger.info("[CODE_PROFILE] Deleted code profile \(profileID.uuidString)")
+                try BackendProfileStore.shared.saveProfile(profile)
             } catch {
-                logger.error("[CODE_PROFILE] Failed to delete code profile \(profileID.uuidString): \(error.localizedDescription). CONSEQUENCE: the handle is KEPT so the surviving row is not orphaned into a duplicate 'Code Session'; the session still clears its model and folder below, and the next reset retries this delete.")
+                logger.error("[CODE_PROFILE] Could not reset profile \(profileID.uuidString) to the preset: \(error.localizedDescription). CONSEQUENCE: the row keeps the previous project's tools until the next folder is opened, which replaces them; that project's copy was already captured, so nothing is lost.")
             }
         } else {
-            // No handle to delete by — make sure a stale key cannot outlive it.
-            self.defaults.removeObject(forKey: Self.profileIDKey)
+            logger.warning("[CODE_PROFILE] Home could not read Code profile \(profileID.uuidString). CONSEQUENCE: \(leaving.map { "'\($0.lastPathComponent)' was NOT captured — tool changes since its last send or switch are lost" } ?? "nothing to capture"); the folder is still cleared.")
         }
 
-        // The caches are cleared below; a pending re-hydrate would undo exactly that.
-        needsHydrationFromStore = false
-
-        // Clear local caches
-        modelName = ""
         projectPath = nil
-        apiKey = nil
-        baseURL = nil
-
-        logger.info("Code session reset — profile deleted, folder & model cleared")
+        logger.info("[CODE_PROFILE] Home — left \(leaving.map { "'\($0.lastPathComponent)'" } ?? "no folder"); profile \(self.codeProfileID?.uuidString ?? "(none)") KEPT and reset to the preset tools and limits; model kept as last used: \(self.modelName.isEmpty ? "(none)" : self.modelName).")
     }
 
     // MARK: - Duplicate Collapse
@@ -659,13 +918,18 @@ final class CodeSessionManager {
     /// Hydrates local caches from a fetched profile snapshot.
     private func hydrateFromProfile(_ profile: BackendProfileSnapshot) {
         guard case .code(let agentConfig) = profile.details else { return }
-        self.provider = agentConfig.llmConfig.apiProvider
-        self.modelName = agentConfig.llmConfig.modelName
-        self.apiKey = agentConfig.llmConfig.apiKey
-        self.baseURL = agentConfig.llmConfig.baseURL
+        hydrateModelCaches(from: agentConfig.llmConfig)
         if let path = agentConfig.projectPath, !path.isEmpty, path != "/" {
             self.projectPath = URL(fileURLWithPath: path)
         }
+    }
+
+    private func hydrateModelCaches(from llmConfig: ProviderConfig) {
+        provider = llmConfig.apiProvider
+        modelName = llmConfig.modelName
+        apiKey = llmConfig.apiKey
+        baseURL = llmConfig.baseURL
+        modelMetadata = llmConfig.modelMetadata
     }
 
     // MARK: - Tool Merge
@@ -679,26 +943,26 @@ final class CodeSessionManager {
     // them), carrying over the user's requiresConfirmation / favorite / timeout
     // fields; user-added tools outside the preset are appended unchanged.
 
+    /// A tool's identity in the merge: the same name from two sources is two tools.
+    static func toolKey(_ tool: Tool) -> String { "\(tool.sourceId)-\(tool.name)" }
+
     /// - Parameter confirmationOverrides: per-project Ask/Auto from `CodeQuickSettings`, keyed by
-    ///   tool name. Authoritative over the carried-over profile value when present, because the
-    ///   profile row is deleted by `resetSession()` while the override survives in UserDefaults —
-    ///   so after a Home press the profile has nothing to carry and the override is the only
-    ///   record of what the user chose.
-    private static func mergePresetTools(
+    ///   tool name. Authoritative over the carried-over profile value when present: the row is
+    ///   shared by every project, so the value it carries may be another project's.
+    static func mergePresetTools(
         preset: [Tool],
         existing: [Tool],
         confirmationOverrides: [String: Bool] = [:]
     ) -> [Tool] {
-        func key(_ tool: Tool) -> String { "\(tool.sourceId)-\(tool.name)" }
-        let existingByKey = Dictionary(uniqueKeysWithValues: existing.map { (key($0), $0) })
-        let presetKeys = Set(preset.map(key))
+        let existingByKey = Dictionary(uniqueKeysWithValues: existing.map { (toolKey($0), $0) })
+        let presetKeys = Set(preset.map(toolKey))
 
         var merged: [Tool] = []
 
         // 1. Preset tools — always present, carry over user preferences when set.
         for presetTool in preset {
             var carried = presetTool
-            if let user = existingByKey[key(presetTool)] {
+            if let user = existingByKey[toolKey(presetTool)] {
                 carried.requiresConfirmation = user.requiresConfirmation
                 carried.isFavorite = user.isFavorite
                 carried.timeout = user.timeout
@@ -715,7 +979,7 @@ final class CodeSessionManager {
         }
 
         // 2. User-added tools that aren't in the preset — append in original order.
-        for tool in existing where !presetKeys.contains(key(tool)) {
+        for tool in existing where !presetKeys.contains(toolKey(tool)) {
             merged.append(tool)
         }
 

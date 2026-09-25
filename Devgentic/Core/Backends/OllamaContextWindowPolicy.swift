@@ -57,7 +57,8 @@ enum EffectiveContextWindow {
                 stored: config?.advancedConfiguration,
                 metadata: config?.modelMetadata,
                 modelName: config?.modelName ?? "",
-                flavour: flavour
+                flavour: flavour,
+                numCtxOverride: config?.numCtxOverride
             )
             return OllamaContextWindowPolicy.effectiveTokens(
                 configuredNumCtx: OllamaContextWindowPolicy.configuredNumCtx(in: resolved.options),
@@ -138,6 +139,8 @@ enum OllamaRequestOptions {
         let presetApplied: OllamaConfigDefaultProfile?
         /// Non-nil when the `num_ctx` auto-default had to be merged in on top.
         let autoNumCtx: Int?
+        /// Non-nil when `numCtxOverride` decided the window (Code's per-project context size).
+        var overrideNumCtx: Int? = nil
     }
 
     /// Resolves stored configuration → preset ladder → `num_ctx` auto-default, in that order.
@@ -154,7 +157,8 @@ enum OllamaRequestOptions {
         stored: [String: JSONValue]?,
         metadata: ModelMetadata?,
         modelName: String,
-        flavour: OllamaConfigDefaultProfile
+        flavour: OllamaConfigDefaultProfile,
+        numCtxOverride: Int?
     ) -> Resolved {
         var options: [String: JSONValue]?
         var presetApplied: OllamaConfigDefaultProfile?
@@ -188,6 +192,15 @@ enum OllamaRequestOptions {
             merged["numCtx"] = .number(Double(auto))
             options = merged
             autoNumCtx = auto
+        }
+
+        // [Code context size] Applied LAST so it wins over everything above — it is the one value
+        // the user set for exactly this run's project. Still in this function, not in a caller,
+        // so the request and every budget read the same window (see the note on this type).
+        if let override = numCtxOverride, override > 0 {
+            var merged = options ?? [:]
+            merged["numCtx"] = .number(Double(override))
+            return Resolved(options: merged, presetApplied: presetApplied, autoNumCtx: nil, overrideNumCtx: override)
         }
 
         return Resolved(options: options, presetApplied: presetApplied, autoNumCtx: autoNumCtx)

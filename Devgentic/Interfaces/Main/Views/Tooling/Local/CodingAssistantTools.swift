@@ -541,7 +541,7 @@ struct CodeSearchTool: DevgenticTool {
 
 struct GlobFilesTool: DevgenticTool {
     let name = "glob_files"
-    let category = "Coding Assistant"
+    let category = "File System"
     let description = "Finds files matching glob patterns (e.g. '**/*.swift', 'src/**/*.ts'). Fast file discovery for navigating codebases."
 
     struct Arguments: Decodable, Sendable {
@@ -822,8 +822,7 @@ struct BatchCommandTool: DevgenticTool {
     let description = "Executes a shell command with advanced options: configurable timeout, background execution, and working directory. Output is returned in full; if it is larger than the room left in the model's context, the middle is omitted (start and end kept) with a note saying so."
 
     /// Scopes background tasks to the conversation that started them, so `bg_1` means one thing
-    /// per conversation and one conversation cannot poll or stop another's build. `TerminalTool`
-    /// is constructed the same way.
+    /// per conversation and one conversation cannot poll or stop another's build.
     ///
     /// ⚠️ Optional because the catalogue builds every tool once with `nil` for Library metadata
     /// (`NativeToolEntry.make` probes a instance for its name and category). A nil id means there
@@ -885,7 +884,7 @@ struct BatchCommandTool: DevgenticTool {
                 // Worth the ~250 extra chars in every request: it is read at the moment of the
                 // decision, which a system-prompt paragraph is not.
                 ("task_name", "string", "Optional short label shown to the user instead of the raw command."),
-                ("background", "boolean", "Default false. Keep it false for anything whose result you need — the call waits and returns the output, and timeout_seconds goes up to 900 for a slow build. Set it true ONLY to leave something running that you will not wait for, such as a dev server; it returns a task id instead of output, and you must call command_output to see anything.")
+                ("background", "boolean", "Default false. Keep it false for anything whose result you need — the call waits and returns the output, and timeout_seconds goes up to 900 for a slow build. Set it true ONLY to leave something running that you will not wait for, such as a dev server; it returns a task id instead of output, and you must call get_task_output to see anything.")
             ],
             required: ["command", "working_directory"]
         )
@@ -1016,32 +1015,67 @@ struct BatchCommandTool: DevgenticTool {
     }
 
     /// Runs `command` and WAITS, returning its output.
+    ///
+    /// ⚠️ With a conversation, the command runs through `BackgroundProcessRegistry` exactly as a
+    /// background task does — output to a log FILE, live — and this call waits for it and reads the
+    /// log back (2026-09-24). It used to run over `ProcessRunner`'s pipes and write the log once, at
+    /// the end: a crash mid-build left no log, and stdout and stderr came back as two blocks with
+    /// their order lost. The file also removes the pipe's failure modes — a file never fills and
+    /// wedges the child, and a `cmd &` left holding it cannot keep the read open.
     static func runForeground(command: String,
                               workingDirectory: String,
                               timeout: Int,
                               conversationID: UUID?,
-                              name: String? = nil) async -> String {
+                              name: String? = nil) async throws -> String {
+        guard let conversationID else {
+            return try await runForegroundUnregistered(command: command, workingDirectory: workingDirectory, timeout: timeout)
+        }
+
+        let registry = BackgroundProcessRegistry.shared
+        let started: BackgroundProcessRegistry.Snapshot
+        do {
+            started = try registry.launch(
+                command: command, workingDirectory: workingDirectory,
+                timeout: TimeInterval(timeout), conversationID: conversationID, name: name,
+                foreground: true)
+        } catch {
+            throw ShellCommandError.launchFailed(reason: error.localizedDescription)
+        }
+
+        guard let ended = await registry.waitUntilEnded(conversationID: conversationID, taskID: started.id) else {
+            // Only if the conversation was deleted while the command ran — `discard` drops the record.
+            return "Error: The command's record was removed while it ran (its conversation was deleted), so its output is unavailable."
+        }
+
+        let data = (try? Data(contentsOf: ended.logURL)) ?? Data()
+        let output = String(decoding: data, as: UTF8.self)
+
+        switch ended.status {
+        case .timedOut:
+            // Partial output is returned rather than discarded: a command killed at the bound
+            // usually produced the evidence for WHY it was slow before it was killed.
+            return output.isEmpty
+                ? "Error: Command timed out after \(timeout)s and was killed. It produced no output."
+                : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)"
+        case .stopped:
+            return output.isEmpty
+                ? "Error: The command was stopped by the user before it finished. It produced no output."
+                : "Error: The command was stopped by the user before it finished. Output before it was stopped:\n\(output)"
+        case .exited(let code):
+            return ShellExitStatus.annotate(output, exitCode: code)
+        case .running:
+            // `waitUntilEnded` returns only after the shell exits, so this cannot be reached.
+            logger.error("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(ended.id) was reported as ended while its status is still running. CONSEQUENCE: its output is returned without an exit code.")
+            return output
+        }
+    }
+
+    /// The path with no conversation to own the command, so no registry entry, card or log. Kept on
+    /// `ProcessRunner` for callers that build the tool without a conversation.
+    private static func runForegroundUnregistered(command: String, workingDirectory: String, timeout: Int) async throws -> String {
         let process = shell(command, in: workingDirectory)
         nonisolated(unsafe) let target = process
         let seconds = TimeInterval(timeout)
-
-        // ⚠️ Adoption happens in `onStarted`, INSIDE ProcessRunner. The pipes must be attached
-        // before `run()` or the output is lost, and there is no pid before it — so the instant
-        // after launch is the only moment a handle can be taken. Without it a foreground run is
-        // unstoppable and is orphaned to launchd at quit.
-        nonisolated(unsafe) var adopted: BackgroundProcessRegistry.Snapshot?
-        let adopt: ((Process) -> Void)? = conversationID.map { id in
-            { running in
-                adopted = BackgroundProcessRegistry.shared.adopt(
-                    process: running, command: command,
-                    workingDirectory: workingDirectory, conversationID: id, name: name)
-            }
-        }
-        func settle(_ output: String, _ status: BackgroundProcessRegistry.Status) {
-            guard let adopted, let conversationID else { return }
-            BackgroundProcessRegistry.shared.complete(
-                conversationID: conversationID, taskID: adopted.id, output: output, status: status)
-        }
 
         // Off the cooperative pool. `ProcessRunner.run` is synchronous by design and `timeout`
         // here goes up to 900s; calling it inline would park a Swift-concurrency worker thread for
@@ -1050,13 +1084,12 @@ struct BatchCommandTool: DevgenticTool {
         do {
             run = try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    do { continuation.resume(returning: try ProcessRunner.run(target, timeout: seconds, onStarted: adopt)) }
+                    do { continuation.resume(returning: try ProcessRunner.run(target, timeout: seconds)) }
                     catch { continuation.resume(throwing: error) }
                 }
             }
         } catch {
-            settle("Error: \(error.localizedDescription)", .exited(code: -1))
-            return "Error: \(error.localizedDescription)"
+            throw ShellCommandError.launchFailed(reason: error.localizedDescription)
         }
 
         var output = run.result.combinedOutput
@@ -1070,12 +1103,7 @@ struct BatchCommandTool: DevgenticTool {
                 + "and the background process loses its output stream. Redirect it to keep its output: `cmd > log 2>&1 &`."
         }
 
-        settle(run.result.combinedOutput,
-               run.timedOut ? .timedOut : .exited(code: run.result.exitCode))
-
         if run.timedOut {
-            // Partial output is returned rather than discarded: a command killed at the bound
-            // usually produced the evidence for WHY it was slow before it was killed.
             return output.isEmpty
                 ? "Error: Command timed out after \(timeout)s and was killed. It produced no output."
                 : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)"
@@ -1102,7 +1130,7 @@ struct BatchCommandTool: DevgenticTool {
             return """
                 Started background task \(task.id): \(command)
                 It will be killed automatically after \(timeout)s if it has not finished.
-                Read its output with command_output, end it early with command_stop.\
+                Read its output with get_task_output, end it early with stop_background_task.\
                 Do not poll in a loop — set notify_on_completion next time if you need the result.
                 """
         } catch {
@@ -1123,7 +1151,7 @@ struct BatchCommandTool: DevgenticTool {
                 ? Self.startBackground(command: arguments.command, workingDirectory: workingDirectory,
                                        timeout: timeout, conversationID: conversationID,
                                        name: arguments.task_name)
-                : await Self.runForeground(command: arguments.command, workingDirectory: workingDirectory,
+                : try await Self.runForeground(command: arguments.command, workingDirectory: workingDirectory,
                                            timeout: timeout, conversationID: conversationID,
                                            name: arguments.task_name)
         }
@@ -1353,7 +1381,7 @@ struct FileOverviewTool: DevgenticTool {
 // MARK: - Codebase Map Tool (Repository Structure)
 
 struct CodebaseMapTool: DevgenticTool {
-    let name = "codebase_map"
+    let name = "project_tree"
     let category = "Coding Assistant"
     let description = "Generates a full map of the repository tree — every directory and file, recursively. Use on unfamiliar codebases to learn the layout and exact filenames before reading, searching, or editing. If the output is too large, re-call with a narrower `path`."
 

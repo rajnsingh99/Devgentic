@@ -133,6 +133,25 @@ struct ContextWindowUsage: Equatable, Sendable {
         guard let trained = trainedTokens, trained > windowTokens else { return nil }
         return trained
     }
+
+    // MARK: Fixed cost
+
+    /// What every request pays before any conversation: tool definitions, instructions, and
+    /// project / knowledge context. An agent re-sends all of it on EVERY step.
+    var fixedTokens: Int? {
+        breakdown.map { ContextOccupancy.tokens($0.toolChars + $0.overheadChars + $0.knowledgeChars) }
+    }
+
+    /// Past this share of the window, the fixed part alone crowds out the work.
+    static let fixedCostWarningFraction = 0.5
+
+    /// ⚠️ Why (2026-09-24): an 8K Code session spent ~5.5K on its prompt and tools before a word
+    /// was typed. The ring read an unremarkable amber; a five-step run then overflowed and Ollama
+    /// silently dropped the instructions. This is the "before you send" half of that warning.
+    var fixedCostIsHigh: Bool {
+        guard let fixed = fixedTokens, windowTokens > 0 else { return false }
+        return Double(fixed) / Double(windowTokens) >= Self.fixedCostWarningFraction
+    }
 }
 
 /// Three visual bands. Kept coarse on purpose — a gauge that changes color at five
@@ -431,6 +450,9 @@ struct ContextWindowGauge: View {
     /// False while a run is in flight — compacting under a running turn would summarize history
     /// the run is still reading.
     var canCompact: Bool = true
+    /// Raises the window where THIS surface keeps it — Code's per-project Context Size. Nil →
+    /// the breakdown falls back to `onOpenSettings` (the profile's Advanced settings).
+    var onRaiseContext: (() -> Void)? = nil
     /// Optional deep-link to the profile's settings (raise Context Window). Each surface
     /// supplies the right implementation — the main window routes; QuickAccess activates
     /// the main window and posts. Nil → the breakdown falls back to instructional text.
@@ -460,19 +482,23 @@ struct ContextWindowGauge: View {
                     .animation(.easeInOut(duration: 0.25), value: usage.displayFraction)
             }
             .frame(width: ringSize, height: ringSize)
+            .overlay(alignment: .topTrailing) {
+                // The prompt and tools alone take most of the window — see `fixedCostIsHigh`.
+                if usage.fixedCostIsHigh {
+                    Circle()
+                        .fill(theme.warningColor)
+                        .frame(width: 5, height: 5)
+                        .offset(x: 3, y: -3)
+                        .accessibilityHidden(true)
+                }
+            }
             .frame(width: 28, height: 28)
-            .background(
-                Circle()
-                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-            )
-            .overlay(
-                Circle()
-                    .stroke(isHovered ? theme.secondaryText.opacity(0.35) : Color.clear, lineWidth: 1)
-            )
+            .composerControlSurface(in: Circle(), isHovered: isHovered)
             .shadow(color: isHovered ? usage.level.color(theme).opacity(0.4) : .clear, radius: 4, x: 0, y: 1)
             .scaleEffect(isHovered ? 1.06 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) { isHovered = hovering }
             hoverTask?.cancel()
@@ -524,7 +550,15 @@ struct ContextWindowGauge: View {
                     onOpenTools?(id)
                 },
                 onCompact: onCompact,
-                canCompact: canCompact
+                canCompact: canCompact,
+                onRaiseContext: onRaiseContext == nil ? nil : {
+                    showBreakdown = false
+                    // After the popover closes — two popovers cannot be presented at once.
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(250))
+                        onRaiseContext?()
+                    }
+                }
             )
             .environment(\.appTheme, theme)
         }
@@ -655,6 +689,7 @@ struct ContextWindowBreakdown: View {
     var onOpenTools: ((UUID) -> Void)? = nil
     var onCompact: (() async -> String)? = nil
     var canCompact: Bool = true
+    var onRaiseContext: (() -> Void)? = nil
     @State private var isCompacting = false
     @State private var compactStatus: String?
     @Environment(\.appTheme) private var theme
@@ -666,6 +701,7 @@ struct ContextWindowBreakdown: View {
             header
             headline
             bar
+            if usage.fixedCostIsHigh, let fixed = usage.fixedTokens { fixedCostRow(fixed) }
             if let breakdown = usage.breakdown { usageRows(breakdown) }
             if onCompact != nil, usage.breakdown != nil { compactRow }
             if let last = usage.lastTurn { lastTurnRow(last) }
@@ -861,7 +897,67 @@ struct ContextWindowBreakdown: View {
         if record.compactedExchanges > 0 {
             parts.append("\(record.compactedExchanges) older tool step(s) summarized out")
         }
-        return noteRow(icon: "scissors", text: "Last turn: " + parts.joined(separator: "; ") + ".")
+        return VStack(alignment: .leading, spacing: 6) {
+            if let overflow = record.overflow { overflowRow(overflow) }
+            if !parts.isEmpty {
+                noteRow(icon: "scissors", text: "Last turn: " + parts.joined(separator: "; ") + ".")
+            }
+        }
+    }
+
+    /// The provider cut a step's prompt — from its real count, not the app's estimate.
+    private func overflowRow(_ overflow: ContextCutLog.Overflow) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(theme.errorColor)
+            Text("Last turn went over the window at step \(overflow.step) (\(PromptFitCheck.roundedK(overflow.promptTokens)) of \(PromptFitCheck.roundedK(overflow.windowTokens))). The start of the prompt was dropped, so the model may have lost its instructions — which can end a run without an answer.")
+                .font(.system(size: 11))
+                .foregroundColor(theme.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// "Prompt and tools use 5.5K of 8K before you type" — with the two things that change it.
+    private func fixedCostRow(_ fixed: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.warningColor)
+                Text("Prompt and tools use \(PromptFitCheck.roundedK(fixed)) of this model's \(usage.windowDisplay) window before you type. A long task will run out of room, and the start of the prompt — the instructions — is what gets dropped.")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.primaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 12) {
+                if let raise = raiseContextAction {
+                    Button(action: raise) {
+                        Label("Raise context size", systemImage: "arrow.up.forward.circle")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(theme.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let profileID = usage.profileID, let onOpenTools {
+                    Button { onOpenTools(profileID) } label: {
+                        Label("Tools…", systemImage: "wrench.and.screwdriver")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(theme.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Fewer enabled tools means a smaller fixed cost on every step")
+                }
+            }
+            .padding(.leading, 16)
+        }
+    }
+
+    /// Code's per-project Context Size when wired, else the profile's Advanced settings.
+    private var raiseContextAction: (() -> Void)? {
+        if let onRaiseContext { return onRaiseContext }
+        if let profileID = usage.profileID, let onOpenSettings { return { onOpenSettings(profileID) } }
+        return nil
     }
 
     private func lastTurnRow(_ turn: TokenUsage) -> some View {
@@ -947,9 +1043,9 @@ struct ContextWindowBreakdown: View {
                 icon: "arrow.up.forward.circle",
                 text: "\(usage.windowDisplay) allocated of \(PromptFitCheck.roundedK(trained)) the model supports."
             )
-            if let profileID = usage.profileID, let onOpenSettings {
+            if let raise = raiseContextAction {
                 Button {
-                    onOpenSettings(profileID)
+                    raise()
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "slider.horizontal.3").font(.system(size: 10))

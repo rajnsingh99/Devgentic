@@ -57,19 +57,7 @@ struct CodeModelPickerButton: View {
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 6)
-            .background(
-                Capsule()
-                    .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-            )
-            .overlay(
-                Capsule()
-                    .strokeBorder(
-                        isHovering
-                            ? theme.dividerColor.opacity(0.55)
-                            : theme.dividerColor.opacity(0.30),
-                        lineWidth: 0.5
-                    )
-            )
+            .composerControlSurface(in: Capsule(), isHovered: isHovering)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $csm.showModelPicker, arrowEdge: .bottom) {

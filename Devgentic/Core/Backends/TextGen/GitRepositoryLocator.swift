@@ -63,7 +63,7 @@ struct GitRepositoryLocator: Sendable {
             let path = run.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             return path.isEmpty ? nil : path
         } catch {
-            logger.error("[WORKSPACE] Could not ask git which repository '\(start)' belongs to: \(error.localizedDescription). CONSEQUENCE: the parent-repository check is SKIPPED for this call, so a git_tool action whose repository lies outside the project runs without prompting. The path argument is still confined.")
+            logger.error("[WORKSPACE] Could not ask git which repository '\(start)' belongs to: \(error.localizedDescription). CONSEQUENCE: the parent-repository check is SKIPPED for this call, so a git action whose repository lies outside the project runs without prompting. The path argument is still confined.")
             return nil
         }
     }

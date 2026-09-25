@@ -11,8 +11,9 @@ import os
 
 private let logger = DGLogger(category: "FileUtilityTools")
 
-// MARK: - Grep Files Tool
+// MARK: - Grep Files Tool (Deprecated — use CodeSearchTextTool)
 
+@available(*, deprecated, message: "Use CodeSearchTextTool instead")
 struct GrepFilesTool: DevgenticTool {
     let name = "grep_files"
     let category = "File System"

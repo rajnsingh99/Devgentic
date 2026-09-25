@@ -51,6 +51,7 @@ struct PromptRowView: View {
         .overlay(keyboardFocusRing)
         .opacity(isSelectionMode && !canDelete ? 0.55 : 1)
         .contentShape(Rectangle())
+        .pointingHandCursor()
         .onTapGesture {
             if isSelectionMode {
                 onToggleBatchSelect()

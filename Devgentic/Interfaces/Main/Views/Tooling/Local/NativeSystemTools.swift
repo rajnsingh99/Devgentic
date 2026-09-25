@@ -14,87 +14,11 @@ import os
 
 private let logger = DGLogger(category: "NativeSystemTools")
 
-// MARK: - Terminal Tool
-
-struct TerminalTool: DevgenticTool {
-    let name = "execute_shell"
-    let category = "System & Shell"
-    let description = "Executes a non-interactive ZSH shell command on the host. Do not use sudo or interactive commands."
-    // #19: a successful command can legitimately emit stderr beginning with "error" (tsc,
-    // git, a failing build) — that's a result, not a tool failure. Opt out of content-sniffing.
-    let outputMayContainErrorText = true
-    
-    // NEW: Session Context injected by AgentConnect
-    let conversationID: UUID?
-    
-    init(conversationID: UUID? = nil) {
-        self.conversationID = conversationID
-    }
-    
-    struct Arguments: Decodable, Sendable {
-        let command: String
-        
-        private struct DynamicKey: CodingKey {
-            var stringValue: String
-            init?(stringValue: String) { self.stringValue = stringValue }
-            var intValue: Int? { return nil }
-            init?(intValue: Int) { return nil }
-        }
-        
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: DynamicKey.self)
-            
-            // ROBUST PARSING: Aliases
-            var foundCmd: String? = nil
-            let keys = [
-                "command", "cmd", "script", "code", "exec",
-                "shell_command", "shellCommand", "bash" // CamelCase & Synonyms
-            ]
-            
-            for key in keys {
-                if let codingKey = DynamicKey(stringValue: key),
-                   let val = try? container.decode(String.self, forKey: codingKey) {
-                    foundCmd = val
-                    break
-                }
-            }
-            
-            guard let cmd = foundCmd else {
-                throw DecodingError.dataCorrupted(
-                    DecodingError.Context(
-                        codingPath: decoder.codingPath,
-                        debugDescription: "Missing property 'command'. Checked aliases: \(keys.joined(separator: ", "))"
-                    )
-                )
-            }
-            
-            self.command = cmd
-        }
-    }
-    
-    var parameterSchema: ToolParameters {
-        return SchemaBuilder.object(
-            properties: [
-                ("command", "string", "The shell command to execute.")
-            ],
-            required: ["command"]
-        )
-    }
-    
-    func call(arguments: Arguments) async throws -> String {
-        // Deliberately NOT wrapped in do/catch. This tool sets `outputMayContainErrorText`,
-        // which switches off the mediator's output sniffing, so a returned string can never
-        // be classified as a failure — throwing is the ONLY channel a tool-level failure has.
-        // The previous `catch { return "Command failed: …" }` closed it, and "Command failed:"
-        // does not even match the sniffer's "error"-prefix shape, so a failure to launch the
-        // shell at all was recorded as a successful tool call.
-        //
-        // A stateful conversation ID persists `cd` across calls; bot / legacy mode gets an
-        // ephemeral one, which simply means no directory memory.
-        let sessionID = conversationID ?? UUID()
-        return try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: sessionID)
-    }
-}
+// ⚠️ `execute_shell` (`TerminalTool`) WAS REMOVED 2026-09-24 — user decision: a duplicate of
+// `run_command`, which the Library already offered beside it in every mode. It persisted `cd`
+// across calls in a per-conversation "virtual session" (`ShellSessionManager`, removed with it);
+// `run_command` takes `working_directory` explicitly on every call instead, and its runs get a
+// card, a stop control and a kept log, which `execute_shell`'s never had.
 
 // MARK: - Open Application Tool
 

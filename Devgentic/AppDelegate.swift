@@ -88,6 +88,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // is SwiftUI's wrapper under the adaptor). Runs before any view's .task.
         Self.shared = self
 
+        // Ensure modern overlay scrollers with hidden tracks across the app
+        ScrollerCustomizer.install()
+
         // Captured before any trace can begin this session, so the orphan reconciliation
         // below can never touch a trace created by the current process (it only reconciles
         // traces that started earlier).
@@ -235,9 +238,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         }
 
         Self.logger.info("Application requested to terminate — running async teardown.")
-
-        // Synchronous, cheap teardown first: kill shell child processes.
-        ShellSessionManager.shared.cleanup()
 
         Task { @MainActor in
             // Race teardown against a watchdog so a hung MCP disconnect or DB write can

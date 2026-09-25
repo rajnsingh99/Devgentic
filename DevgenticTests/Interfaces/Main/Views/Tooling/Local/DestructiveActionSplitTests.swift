@@ -140,7 +140,7 @@ final class DestructiveActionSplitTests: XCTestCase {
     /// And the survivors are NOT destructive — the point was to separate them, so a read-only
     /// half inheriting the scary label would defeat it just as thoroughly.
     func testTheSurvivingMultiplexersAreNotDestructive() {
-        for tool in ["manage_calendar", "manage_reminders", "manage_processes", "finder_tags"] {
+        for tool in ["manage_calendar", "manage_reminders", "manage_processes", "manage_finder_tags", "finder_tags"] {
             XCTAssertNotEqual(HITLRiskTier.classify(toolName: tool), .destructive, tool)
         }
     }

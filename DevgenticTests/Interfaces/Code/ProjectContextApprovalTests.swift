@@ -54,7 +54,7 @@ final class ProjectContextApprovalTests: XCTestCase {
         // The policy answers for injected tools only, and must not start demanding approval for
         // reads — a banner on `read_file` would train the user to click Allow without looking,
         // which costs exactly the protection this change buys.
-        for tool in ["read_file", "final_answer", "ask_user", "codebase_map"] {
+        for tool in ["read_file", "final_answer", "ask_user", "project_tree"] {
             XCTAssertFalse(CodeToolPreset.injectedToolRequiresConfirmation(tool),
                            "'\(tool)' does not mutate anything; asking about it devalues the banner.")
         }

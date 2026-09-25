@@ -68,7 +68,9 @@ struct HomeButton: View {
             logger.debug("Home button: deselected conversation (mode: \(viewModel.interfaceMode.rawValue)).")
 
             if isSidebarVisible {
-                isSidebarVisible = false
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    isSidebarVisible = false
+                }
                 logger.debug("Hid sidebar pane via Home button.")
             }
             selectedTab = nil
@@ -90,6 +92,7 @@ struct HomeButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .help("Home")
         .accessibilityLabel("Home")
         .onHover { hovering in
@@ -158,6 +161,7 @@ struct ActivityBarButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .overlay(alignment: .leading) {
             if isActive {
                 Capsule()
@@ -191,11 +195,15 @@ struct ActivityBarButton: View {
 
     private func handleButtonTap() {
         if selectedTab == tab {
-            isSidebarVisible.toggle()
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                isSidebarVisible.toggle()
+            }
             logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
         } else {
             selectedTab = tab
-            isSidebarVisible = true
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                isSidebarVisible = true
+            }
             logger.debug("Selected tab \(tab.title) via button. Sidebar pane forced visible.")
         }
     }

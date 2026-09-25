@@ -26,6 +26,21 @@ final class ShellFailureClassificationTests: XCTestCase {
 
     private typealias Mediator = ToolExecutionMediator
 
+    private let conversation = UUID()
+
+    override func tearDown() {
+        BackgroundProcessRegistry.shared.discard(conversationID: conversation)
+        super.tearDown()
+    }
+
+    /// `run_command` — the shell since `execute_shell` was removed (2026-09-24). These tests were
+    /// written against `execute_shell`; the invariants belong to the shell, so they moved with it.
+    private func shell(_ command: String) async throws -> String {
+        let args = try JSONDecoder().decode(ShellCommandArguments.self, from: JSONSerialization.data(
+            withJSONObject: ["command": command, "working_directory": NSTemporaryDirectory()]))
+        return try await RunCommandTool(conversationID: conversation).call(arguments: args)
+    }
+
     // MARK: - The prefix that missed by one word
 
     /// The exact string `git_tool` now returns. If anyone "tidies" it back to "Git error:",
@@ -97,9 +112,9 @@ final class ShellFailureClassificationTests: XCTestCase {
     func testInteractiveCommandsThrowRatherThanReturning() async {
         for command in ["nano file.txt", "top", "vim x", "less log.txt"] {
             do {
-                _ = try await ShellSessionManager.shared.execute(command: command, conversationID: UUID())
+                _ = try await shell(command)
                 XCTFail("'\(command)' must throw, not return a string the sniffer cannot see")
-            } catch let error as ShellSessionError {
+            } catch let error as ShellCommandError {
                 XCTAssertTrue(error.localizedDescription.contains("blocked"), "\(error)")
             } catch {
                 XCTFail("unexpected error type for '\(command)': \(error)")
@@ -109,9 +124,9 @@ final class ShellFailureClassificationTests: XCTestCase {
 
     func testBareREPLsThrowButScriptInvocationsDoNot() async {
         do {
-            _ = try await ShellSessionManager.shared.execute(command: "python3", conversationID: UUID())
+            _ = try await shell("python3")
             XCTFail("a bare REPL must throw")
-        } catch is ShellSessionError {
+        } catch is ShellCommandError {
             // expected
         } catch {
             XCTFail("unexpected error type: \(error)")
@@ -120,9 +135,9 @@ final class ShellFailureClassificationTests: XCTestCase {
 
     func testInteractiveSudoThrows() async {
         do {
-            _ = try await ShellSessionManager.shared.execute(command: "sudo -s", conversationID: UUID())
+            _ = try await shell("sudo -s")
             XCTFail("interactive sudo must throw")
-        } catch is ShellSessionError {
+        } catch is ShellCommandError {
             // expected
         } catch {
             XCTFail("unexpected error type: \(error)")
@@ -138,9 +153,7 @@ final class ShellFailureClassificationTests: XCTestCase {
     ///
     /// ~290 KB here, more than four times the buffer. Before the fix this call never returned.
     func testOutputLargerThanThePipeBufferDoesNotDeadlock() async throws {
-        let output = try await ShellSessionManager.shared.execute(
-            command: "seq 1 50000", conversationID: UUID()
-        )
+        let output = try await shell("seq 1 50000")
         XCTAssertGreaterThan(output.count, 200_000, "expected ~290 KB, got \(output.count) chars")
         XCTAssertTrue(output.contains("50000"), "the TAIL of the stream must arrive, not just the head")
     }
@@ -148,18 +161,16 @@ final class ShellFailureClassificationTests: XCTestCase {
     /// The exit code is read at all now — nothing looked at `terminationStatus` before, so a
     /// command that failed and one that succeeded produced identical results.
     func testNonZeroExitIsSurfacedInTheOutput() async throws {
-        let output = try await ShellSessionManager.shared.execute(
-            command: "exit 3", conversationID: UUID()
-        )
+        let output = try await shell("exit 3")
         XCTAssertTrue(output.hasPrefix("Exit code: 3"), "\(output)")
     }
 
-    func testZeroExitCarriesNoExitCodePrefix() async throws {
-        let output = try await ShellSessionManager.shared.execute(
-            command: "echo hello", conversationID: UUID()
-        )
+    func testZeroExitIsStatedAsZero() async throws {
+        let output = try await shell("echo hello")
         XCTAssertTrue(output.contains("hello"))
-        XCTAssertFalse(output.contains("Exit code:"), "a clean run must not be labelled: \(output)")
+        // `run_command` states the status on EVERY run, 0 included — unlike `execute_shell`, which
+        // omitted it on success. Stated always is unambiguous; absent could also mean "not read".
+        XCTAssertEqual(ShellExitStatus.parse(output), 0, "\(output)")
     }
 
     /// A thrown shell failure must stay SOFT. `.executionThrew` does not ban the tool, so one
@@ -168,6 +179,6 @@ final class ShellFailureClassificationTests: XCTestCase {
         let result = ToolExecutionResult.systemError(reason: "Error: Interactive sudo sessions are blocked.")
         XCTAssertEqual(result.failureCategory, .executionThrew)
         XCTAssertFalse(ToolFailureCategory.executionThrew.producesHardConstraint,
-                       "a refusal must not ban execute_shell for the session")
+                       "a refusal must not ban the shell for the session")
     }
 }

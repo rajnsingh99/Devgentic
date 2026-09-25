@@ -51,11 +51,11 @@ private let stillRunningAdvice = """
 Do NOT read this again in a loop — repeated polling burns your iteration budget and tells the user nothing new. Choose one: end your turn now and let the user ask later; or, if you need the result without waiting, stop this task and start it again with notify_on_completion: true, which gives you a turn of your own when it finishes.
 """
 
-// MARK: - command_output
+// MARK: - get_task_output
 
 struct CommandOutputTool: DevgenticTool {
-    let name = "command_output"
-    let category = "Coding Assistant"
+    let name = "get_task_output"
+    let category = "System & Shell"
     let description = "Reads the output a background command has produced so far. Pass since_line to get only what is new since your last read, instead of the whole log again."
     /// A build that writes "error" to stderr is reporting a result, not failing this tool — the
     /// same opt-out `execute_shell` carries.
@@ -120,13 +120,13 @@ struct CommandOutputTool: DevgenticTool {
     }
 }
 
-// MARK: - command_stop
+// MARK: - stop_background_task
 
 struct CommandStopTool: DevgenticTool {
-    let name = "command_stop"
-    let category = "Coding Assistant"
+    let name = "stop_background_task"
+    let category = "System & Shell"
     // ⚠️ Names no starter, for the reason `command_output` gives.
-    let description = "Ends a background command that is still running. Its output up to that point is kept and can still be read with command_output."
+    let description = "Ends a background command that is still running. Its output up to that point is kept and can still be read with get_task_output."
 
     let conversationID: UUID?
 

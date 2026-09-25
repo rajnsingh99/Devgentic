@@ -353,11 +353,14 @@ struct MLXModelStoreContent: View {
                                     .fontWeight(.medium)
                                 Text("No installed models match your search or filter criteria.")
                                     .foregroundColor(theme.secondaryText)
-                                Button("Reset Filters") {
+                                TactileButton(
+                                    title: "Reset Filters",
+                                    icon: "arrow.counterclockwise",
+                                    variant: .primary,
+                                    size: .regular
+                                ) {
                                     resetFilters()
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .tint(theme.accentColor)
                                 .padding(.top, 4)
                             } else {
                                 Text(filterForTools ? "No installed tool-supported models" : "No installed models")
@@ -382,14 +385,27 @@ struct MLXModelStoreContent: View {
                                 // offered no way to get there — the one screen that knows a
                                 // token is missing was the one screen that could not take it.
                                 if case .unauthorized = error {
-                                    Button("Add Token…") { showingTokenEntry = true }
-                                        .buttonStyle(.borderedProminent)
+                                    TactileButton(
+                                        title: "Add Token…",
+                                        icon: "key",
+                                        variant: .primary,
+                                        size: .regular
+                                    ) {
+                                        showingTokenEntry = true
+                                    }
                                 }
                                 // No retry button while throttled: retrying is what deepens a
                                 // 429, and the old "Try Reloading" fired another 31 requests
                                 // straight back into the same wall.
                                 if !error.isRateLimited {
-                                    Button("Try Again") { viewModel.refresh() }
+                                    TactileButton(
+                                        title: "Try Again",
+                                        icon: "arrow.clockwise",
+                                        variant: .secondary,
+                                        size: .regular
+                                    ) {
+                                        viewModel.refresh()
+                                    }
                                 }
                             }
                         } else if hasActiveFilters {
@@ -399,27 +415,37 @@ struct MLXModelStoreContent: View {
                             Text("Try adjusting your search terms or clearing active filters.")
                                 .foregroundColor(theme.secondaryText)
                             HStack(spacing: 10) {
-                                Button("Reset Filters") {
+                                TactileButton(
+                                    title: "Reset Filters",
+                                    icon: "arrow.counterclockwise",
+                                    variant: .primary,
+                                    size: .regular
+                                ) {
                                     resetFilters()
                                 }
-                                .buttonStyle(.borderedProminent)
-                                .tint(theme.accentColor)
 
-                                Button("Reload Models") {
+                                TactileButton(
+                                    title: "Reload Models",
+                                    icon: "arrow.clockwise",
+                                    variant: .secondary,
+                                    size: .regular
+                                ) {
                                     viewModel.refresh()
                                 }
-                                .buttonStyle(.bordered)
                             }
                             .padding(.top, 4)
                         } else {
                             Text("No models found")
                                 .font(.title3)
                                 .fontWeight(.medium)
-                            Button("Try Reloading") {
+                            TactileButton(
+                                title: "Try Reloading",
+                                icon: "arrow.clockwise",
+                                variant: .primary,
+                                size: .regular
+                            ) {
                                 viewModel.refresh()
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(theme.accentColor)
                             .padding(.top, 4)
                         }
                     }
@@ -964,8 +990,17 @@ struct CategoryTabButton: View {
             .padding(.vertical, 6)
             .padding(.horizontal, 12)
             .background(isSelected ? theme.accentColor : theme.surfaceOverlay)
-            .foregroundColor(isSelected ? .white : theme.primaryText)
+            .foregroundColor(isSelected ? theme.accentForegroundColor : theme.primaryText)
             .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(
+                        isSelected
+                            ? (theme.isAccentLight ? theme.dividerColor.opacity(0.5) : Color.white.opacity(0.2))
+                            : Color.clear,
+                        lineWidth: 1
+                    )
+            )
         }
         .buttonStyle(.plain)
     }

@@ -12,7 +12,7 @@ private let logger = DGLogger(category: "DeveloperDiagnostics")
 
 struct ManageProcessesTool: DevgenticTool {
     let name = "manage_processes"
-    let category = "Developer & Diagnostics"
+    let category = "System State"
     let description = "Lists the top processes by CPU and memory. Killing a process is a separate tool."
 
     struct Arguments: Decodable, Sendable {
@@ -102,7 +102,7 @@ struct ManageProcessesTool: DevgenticTool {
 /// confirmation setting. Classified `.destructive` in `HITLRiskTier`.
 struct KillProcessTool: DevgenticTool {
     let name = "kill_process"
-    let category = "Developer & Diagnostics"
+    let category = "System State"
     let description = "Force-terminates a process by PID or name (SIGKILL). Irreversible — unsaved work in that process is lost."
 
     struct Arguments: Decodable, Sendable {
@@ -177,7 +177,7 @@ struct KillProcessTool: DevgenticTool {
 
 struct GetPowerStateTool: DevgenticTool {
     let name = "get_power_state"
-    let category = "Developer & Diagnostics"
+    let category = "System State"
     let description = "Retrieves battery percentage and charging state."
     
     struct Arguments: Decodable, Sendable {}

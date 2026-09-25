@@ -618,7 +618,7 @@ struct PromptLibrarySidebarView: View {
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .padding(.bottom, 10)
-        .transition(.move(edge: .top).combined(with: .opacity))
+        .transition(.opacity)
     }
 
     private func selectAllVisible(viewModel: PromptBrowseViewModel) {

@@ -67,7 +67,24 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
             "read_file",
             "get_system_stats",
             "fs_smart_search",
-            "fs_read_metadata"
+            "spotlight_search",
+            "fs_read_metadata",
+            "read_file_metadata",
+            "project_tree",
+            "codebase_map",
+            "glob_files",
+            "find_definition",
+            "file_overview",
+            "code_search_text",
+            "code_search_symbol",
+            "code_search_files",
+            "diff_files",
+            "git",
+            "git_tool",
+            "get_task_output",
+            "command_output",
+            "stop_background_task",
+            "command_stop"
         ]
         // If the tool is NOT in the safe list, it requires confirmation.
         return !safeTools.contains(nativeTool.name)

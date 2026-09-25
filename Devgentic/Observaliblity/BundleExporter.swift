@@ -507,6 +507,7 @@ enum BundleExporter {
             // report that names only the first cannot distinguish them.
             AppSettings.localNotificationsEnabledKey,
             AppSettings.chatOpsNotificationsEnabledKey,
+            AppSettings.chatFontFamilyKey,
             AppSettings.chatFontSizeKey,
             AppSettings.chatLineSpacingKey,
             AppSettings.speechPlaybackRateKey,

@@ -47,11 +47,11 @@ final class GitRepositoryBoundaryTests: XCTestCase {
     func testCompliantPathIntoAParentRepositoryAsksTheUser() {
         // ⚠️ THE REGRESSION GUARD. Path inside the project, repository outside it. Before the
         // discovery check this returned `.proceed` and git reported on the whole parent checkout.
-        let decision = decide("git_tool", path: project, repository: parentRepo)
+        let decision = decide("git", path: project, repository: parentRepo)
 
         guard case .askUser(let reason) = decision.outcome else {
             return XCTFail(
-                "git_tool resolved to the repository at \(parentRepo), which is outside the "
+                "git resolved to the repository at \(parentRepo), which is outside the "
                 + "project, and the boundary allowed it. The path argument was compliant — this is "
                 + "exactly the case argument validation cannot see."
             )
@@ -64,7 +64,7 @@ final class GitRepositoryBoundaryTests: XCTestCase {
     func testTheReasonNamesBothPathAndRepository() {
         // The user is approving something the arguments do not show. If the banner repeated only
         // the in-project path, "Allow" would look like approving a read inside their own project.
-        guard case .askUser(let reason) = decide("git_tool", path: project, repository: parentRepo).outcome else {
+        guard case .askUser(let reason) = decide("git", path: project, repository: parentRepo).outcome else {
             return XCTFail("Expected an approval prompt.")
         }
         XCTAssertTrue(reason.contains(project),
@@ -76,29 +76,29 @@ final class GitRepositoryBoundaryTests: XCTestCase {
     func testRepositoryInsideTheProjectProceedsSilently() {
         // The ordinary case: the project IS the repository. No prompt, or every git call in a
         // normal single-repo project would park the run on a banner.
-        XCTAssertEqual(decide("git_tool", path: project, repository: project).outcome, .proceed)
+        XCTAssertEqual(decide("git", path: project, repository: project).outcome, .proceed)
     }
 
     func testRepositoryInASubfolderProceeds() {
         // A nested repo below the root is still inside the boundary.
         XCTAssertEqual(
-            decide("git_tool", path: project + "/vendor/lib", repository: project + "/vendor/lib").outcome,
+            decide("git", path: project + "/vendor/lib", repository: project + "/vendor/lib").outcome,
             .proceed
         )
     }
 
     func testNotARepositoryProceeds() {
         // Nil locator result means "no repository here" or "git unavailable". Nothing to confine —
-        // git_tool reports "not a git repository" itself, which is the honest message. Prompting
+        // git reports "not a git repository" itself, which is the honest message. Prompting
         // here would ask the user to approve access to a repository that does not exist.
-        XCTAssertEqual(decide("git_tool", path: project, repository: nil).outcome, .proceed)
+        XCTAssertEqual(decide("git", path: project, repository: nil).outcome, .proceed)
     }
 
     func testSiblingDirectoryIsNotTreatedAsInside() {
         // ⚠️ A prefix check says `/…/monorepo/module-secrets` is inside `/…/monorepo/module`.
         // The discovered root goes through `isWithin`, which compares path COMPONENTS — this
         // asserts the discovery path inherited that, rather than doing its own string compare.
-        guard case .askUser = decide("git_tool", path: project, repository: project + "-secrets").outcome else {
+        guard case .askUser = decide("git", path: project, repository: project + "-secrets").outcome else {
             return XCTFail("A sibling directory sharing a name prefix must not count as inside the project.")
         }
     }
@@ -108,10 +108,10 @@ final class GitRepositoryBoundaryTests: XCTestCase {
     func testAnOutsidePathDoesNotProduceTwoPrompts() {
         // The path itself is outside → the argument check already asked. Running discovery as well
         // would park the run on a second banner for one tool call.
-        let decision = decide("git_tool", path: "/Users/someone/Projects/other", repository: "/Users/someone/Projects/other")
+        let decision = decide("git", path: "/Users/someone/Projects/other", repository: "/Users/someone/Projects/other")
 
         guard case .askUser(let reason) = decision.outcome else {
-            return XCTFail("git_tool is read-only; outside the project it must ASK.")
+            return XCTFail("git is read-only; outside the project it must ASK.")
         }
         XCTAssertFalse(reason.contains("walking up from"),
                        "The argument check already produced a verdict; the discovery check must "
@@ -119,10 +119,10 @@ final class GitRepositoryBoundaryTests: XCTestCase {
     }
 
     func testDiscoveryNeverEscalatesToRefusal() {
-        // git_tool is read-only, and the boundary's policy is that reads outside the project ASK
+        // git is read-only, and the boundary's policy is that reads outside the project ASK
         // while writes are REFUSED. A parent-repo layout is legitimate and common — the user can
         // say yes. Refusing would contradict the policy and break every monorepo module.
-        if case .refuse = decide("git_tool", path: project, repository: parentRepo).outcome {
+        if case .refuse = decide("git", path: project, repository: parentRepo).outcome {
             XCTFail("A read-only tool reaching a parent repository must ask, never refuse.")
         }
     }
@@ -130,10 +130,10 @@ final class GitRepositoryBoundaryTests: XCTestCase {
     // MARK: - Scope
 
     func testOnlyGitToolGetsTheDiscoveryCheck() {
-        // ⚠️ The locator returns a path for ANY tool here. Nothing but git_tool may consult it —
+        // ⚠️ The locator returns a path for ANY tool here. Nothing but git may consult it —
         // `read_file` acts on its argument, and asking about a repository it never touches would
         // be a prompt the user cannot make sense of.
-        for tool in ["read_file", "list_directory", "codebase_map", "diff_files", "edit_code_single"] {
+        for tool in ["read_file", "list_directory", "project_tree", "diff_files", "edit_code_single"] {
             XCTAssertEqual(
                 WorkspaceBoundaryDecision.evaluate(
                     toolName: tool,
@@ -152,7 +152,7 @@ final class GitRepositoryBoundaryTests: XCTestCase {
         // Every chat, agent and workflow run takes this path. It must behave exactly as it did
         // before the boundary existed — and must not spawn git.
         let decision = WorkspaceBoundaryDecision.evaluate(
-            toolName: "git_tool",
+            toolName: "git",
             arguments: ["path": .string("/anywhere")],
             workspaceRoot: nil,
             repositoryLocator: .fixed(parentRepo)
@@ -166,7 +166,7 @@ final class GitRepositoryBoundaryTests: XCTestCase {
         // `path` is required by the schema, but a model can omit it. The tool returns its own
         // error; the boundary must not invent a prompt about a repository it never located.
         let decision = WorkspaceBoundaryDecision.evaluate(
-            toolName: "git_tool",
+            toolName: "git",
             arguments: ["action": .string("status")],
             workspaceRoot: project,
             repositoryLocator: .fixed(parentRepo)

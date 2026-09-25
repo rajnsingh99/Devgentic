@@ -65,6 +65,10 @@ struct ToolTableRow: Identifiable {
     var id: String { "\(source.id)-\(definition.name)" }
     let source: ToolSource
     let definition: ToolDefinition
+
+    var displayTitle: String {
+        definition.title ?? definition.name.toTitleCase()
+    }
 }
 
 // MARK: - Main View
@@ -79,10 +83,11 @@ struct ToolLibraryView: View {
     @Binding var isSelectionMode: Bool
     @Binding var selectedToolIDs: Set<String>
 
-    /// Tool names to hide from the library. For Code profiles, this is the full
-    /// CodeToolPreset — the user never sees those rows, so they can't disable or
-    /// toggle them. Empty for other profile types.
+    /// Tool names to hide from the library. Empty for other profile types.
     var hiddenToolNames: Set<String> = []
+
+    /// Core tools that cannot be disabled (e.g. Code preset tools when viewing a Code profile).
+    var lockedToolNames: Set<String> = []
 
     /// False when no profile is targeted. Everything that writes tool enablement — per-row
     /// toggles, the selection circles, bulk actions — is hidden rather than disabled: a
@@ -279,38 +284,86 @@ struct ToolLibraryView: View {
             Spacer()
 
             Button { bulkSetState(.ask) } label: {
-                Label("Ask First", systemImage: "lock.shield.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 5) {
+                    Image(systemName: "lock.shield.fill")
+                    Text("Ask First")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(theme.warningForegroundColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4.5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.warningColor)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.warningColor)
-            .controlSize(.small)
+            .buttonStyle(.plain)
+            .pointingHandCursor()
 
             Button { bulkSetState(.auto) } label: {
-                Label("Auto Run", systemImage: "bolt.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 5) {
+                    Image(systemName: "bolt.fill")
+                    Text("Auto Run")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4.5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.successColor)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.successColor)
-            .controlSize(.small)
+            .buttonStyle(.plain)
+            .pointingHandCursor()
 
             Button { bulkSetState(.disabled) } label: {
-                Label("Disable", systemImage: "xmark.circle")
-                    .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle")
+                    Text("Disable")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(theme.secondaryText)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4.5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.surfaceOverlay)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(theme.dividerColor.opacity(0.4), lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.bordered)
-            .tint(.secondary)
-            .controlSize(.small)
+            .buttonStyle(.plain)
+            .pointingHandCursor()
 
             Divider().frame(height: 16)
 
             Button { bulkToggleFavorite() } label: {
-                Label("Favorite", systemImage: "star.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 5) {
+                    Image(systemName: "star.fill")
+                    Text("Favorite")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(theme.isDark ? Color(hex: "#ffcc00") : Color(hex: "#9a6700"))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4.5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.yellow.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color.yellow.opacity(0.28), lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.bordered)
-            .tint(.yellow)
-            .controlSize(.small)
+            .buttonStyle(.plain)
+            .pointingHandCursor()
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
@@ -369,12 +422,15 @@ struct ToolLibraryView: View {
                 }
             case .disabled:
                 if instructions.contains("`\(name)`") { continue }
+                if lockedToolNames.contains(name) { continue }
                 tools.removeAll { $0.name == name && $0.sourceId == sourceId }
             }
         }
 
-        configuredTools = tools
-        selectedToolIDs.removeAll()
+        withAnimation(.easeInOut(duration: 0.25)) {
+            configuredTools = tools
+            selectedToolIDs.removeAll()
+        }
     }
 
     private func bulkToggleFavorite() {
@@ -401,10 +457,12 @@ struct ToolLibraryView: View {
 
     private func toolRow(_ row: ToolTableRow) -> some View {
         let isEnabled = configuredTools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
+        let isLocked = lockedToolNames.contains(row.definition.name)
 
         return ToolRowContent(
             row: row,
             isEnabled: isEnabled,
+            isLocked: isLocked,
             isFavorited: isToolFavorited(row),
             // With no profile targeted there is nowhere to write enablement, so the row's
             // selection circle and enable pill are suppressed entirely.
@@ -522,12 +580,20 @@ struct ToolLibraryView: View {
             break
         }
 
-        // Sort: favorites first, then alphabetical
+        // Sort: enabled tools first, then favorites, then alphabetical by display title
+        let enabledKeys = Set(configuredTools.filter(\.isEnabled).map { "\($0.sourceId)-\($0.name)" })
+        let favoriteKeys = Set(configuredTools.filter(\.isFavorite).map { "\($0.sourceId)-\($0.name)" })
+
         return rows.sorted { lhs, rhs in
-            let lhsFav = configuredTools.first(where: { $0.name == lhs.definition.name && $0.sourceId == lhs.source.id })?.isFavorite == true
-            let rhsFav = configuredTools.first(where: { $0.name == rhs.definition.name && $0.sourceId == rhs.source.id })?.isFavorite == true
+            let lhsEnabled = enabledKeys.contains(lhs.id)
+            let rhsEnabled = enabledKeys.contains(rhs.id)
+            if lhsEnabled != rhsEnabled { return lhsEnabled }
+
+            let lhsFav = favoriteKeys.contains(lhs.id)
+            let rhsFav = favoriteKeys.contains(rhs.id)
             if lhsFav != rhsFav { return lhsFav }
-            return lhs.definition.name < rhs.definition.name
+
+            return lhs.displayTitle.localizedStandardCompare(rhs.displayTitle) == .orderedAscending
         }
     }
 
@@ -572,33 +638,50 @@ struct ToolLibraryView: View {
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.09)))
 
                 HStack(spacing: 8) {
-                    Button("Retry") {
+                    TactileButton(
+                        title: "Retry",
+                        icon: "arrow.clockwise",
+                        variant: .primary,
+                        size: .regular
+                    ) {
                         Task { await MCPConnectionCoordinator.shared.reconnect(sourceID: source.id) }
                     }
-                    .buttonStyle(.borderedProminent)
-                    Button("Edit Configuration") {
+
+                    TactileButton(
+                        title: "Edit Configuration",
+                        icon: "slider.horizontal.3",
+                        variant: .secondary,
+                        size: .regular
+                    ) {
                         router.navigate(to: .editMCPServer(sourceID: source.id))
                     }
-                    .buttonStyle(.bordered)
                 }
 
             case .disconnected where !source.isEnabled:
                 stateIcon("pause.circle", tint: theme.secondaryText)
                 stateTitle("\(source.serverName) is disabled")
                 stateDetail("Its configuration and saved credentials are kept. Enable it to make its tools available again.")
-                Button("Enable Server") {
+                TactileButton(
+                    title: "Enable Server",
+                    icon: "play.circle.fill",
+                    variant: .primary,
+                    size: .regular
+                ) {
                     toolStore.setEnabled(true, sourceID: source.id)
                 }
-                .buttonStyle(.borderedProminent)
 
             case .disconnected:
                 stateIcon("bolt.horizontal.circle", tint: theme.secondaryText)
                 stateTitle("Not connected")
                 stateDetail("This server hasn't been connected yet in this session.")
-                Button("Connect") {
+                TactileButton(
+                    title: "Connect",
+                    icon: "bolt.fill",
+                    variant: .primary,
+                    size: .regular
+                ) {
                     Task { await MCPConnectionCoordinator.shared.connectIfNeeded(sourceID: source.id) }
                 }
-                .buttonStyle(.borderedProminent)
 
             case .connected:
                 // Connected and genuinely empty. Rare, but real: a resources-only server whose
@@ -606,10 +689,14 @@ struct ToolLibraryView: View {
                 stateIcon("puzzlepiece.extension", tint: theme.secondaryText)
                 stateTitle("\(source.serverName) exposes no tools")
                 stateDetail("The server connected but advertised nothing this app can call. Rescan if you expect that to have changed.")
-                Button("Rescan Tools") {
+                TactileButton(
+                    title: "Rescan Tools",
+                    icon: "arrow.clockwise",
+                    variant: .secondary,
+                    size: .regular
+                ) {
                     Task { await MCPConnectionCoordinator.shared.rescan(sourceID: source.id) }
                 }
-                .buttonStyle(.bordered)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -649,8 +736,14 @@ struct ToolLibraryView: View {
                 .foregroundColor(theme.secondaryText)
 
             if searchText.isEmpty && !isLocalCategorySelected {
-                Button("Add MCP Server") { router.navigate(to: .addMCPServer) }
-                    .buttonStyle(.bordered)
+                TactileButton(
+                    title: "Add MCP Server",
+                    icon: "plus",
+                    variant: .primary,
+                    size: .regular
+                ) {
+                    router.navigate(to: .addMCPServer)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -664,6 +757,7 @@ struct ToolLibraryView: View {
 private struct ToolRowContent: View {
     let row: ToolTableRow
     let isEnabled: Bool
+    var isLocked: Bool = false
     let isFavorited: Bool
     let isSelectionMode: Bool
     /// False when no profile is targeted — the enable/Ask pill is hidden rather than shown
@@ -677,12 +771,16 @@ private struct ToolRowContent: View {
     let onToggleSelection: () -> Void
 
     @State private var isHovered = false
+    @State private var isShowingDetails = false
+    @State private var isShowingSettings = false
+    @State private var isShowingStateDropdown = false
+
+    private var isCardActive: Bool {
+        isHovered || isShowingDetails || isShowingSettings || isShowingStateDropdown
+    }
 
     private var displayTitle: String {
-        if let title = row.definition.title {
-            return title
-        }
-        return row.definition.name.toTitleCase()
+        row.displayTitle
     }
 
     var body: some View {
@@ -733,29 +831,52 @@ private struct ToolRowContent: View {
                                 RoundedRectangle(cornerRadius: 4)
                                     .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
                             )
+
+                        if isLocked {
+                            HStack(spacing: 3) {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 7, weight: .bold))
+                                Text("CORE")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .foregroundColor(theme.accentColor)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(theme.accentColor.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(theme.accentColor.opacity(0.25), lineWidth: 0.5)
+                            )
+                            .help("Required core tool for Code Session. Cannot be disabled.")
+                        }
                     }
                 }
                 
                 Spacer()
                 
-                // Right: Hover controls (gear, info) + State control button
-                HStack(alignment: .center, spacing: 10) {
-                    if isHovered {
-                        HStack(spacing: 8) {
-                            ToolDetailsButton(definition: row.definition)
-                                .font(.system(size: 14))
-                            
-                            if isEnabled {
-                                ToolSettingsPopover(
-                                    configuredTools: $configuredTools,
-                                    source: row.source,
-                                    definition: row.definition
-                                )
-                                .font(.system(size: 14))
-                            }
+                // Right: Action controls (info, gear) + State dropdown button
+                HStack(alignment: .center, spacing: 8) {
+                    HStack(spacing: 6) {
+                        ToolDetailsButton(
+                            definition: row.definition,
+                            isShowingPopover: $isShowingDetails
+                        )
+                        .opacity(isCardActive ? 1.0 : 0.0)
+                        .allowsHitTesting(isCardActive)
+                        .animation(.easeInOut(duration: 0.15), value: isCardActive)
+                        
+                        if isEnabled {
+                            ToolSettingsPopover(
+                                configuredTools: $configuredTools,
+                                source: row.source,
+                                definition: row.definition,
+                                isShowingPopover: $isShowingSettings
+                            )
+                            .transition(.opacity.combined(with: .scale(scale: 0.95)))
                         }
-                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     }
+                    .animation(.easeInOut(duration: 0.2), value: isEnabled)
                     
                     // Hidden with no profile targeted: this control writes enablement into a
                     // profile's tool list, and there is nothing to write to.
@@ -764,7 +885,9 @@ private struct ToolRowContent: View {
                             configuredTools: $configuredTools,
                             source: row.source,
                             definition: row.definition,
-                            instructions: instructions
+                            instructions: instructions,
+                            isLocked: isLocked,
+                            isShowingDropdown: $isShowingStateDropdown
                         )
                     }
                 }
@@ -776,7 +899,7 @@ private struct ToolRowContent: View {
                     .font(.system(size: 12))
                     .foregroundColor(theme.secondaryText)
                     .lineSpacing(2)
-                    .lineLimit(isHovered ? nil : 2) // Expand description on hover
+                    .lineLimit(isCardActive ? nil : 2) // Expand description on hover or while popover is open
                     .fixedSize(horizontal: false, vertical: true)
                 
                 if row.definition.annotations != nil {
@@ -789,17 +912,35 @@ private struct ToolRowContent: View {
         .padding(.vertical, 14)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(theme.secondaryBackground.opacity(isHovered ? 0.95 : 0.6))
+                .fill(theme.secondaryBackground.opacity(isCardActive ? 0.95 : 0.6))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.dividerColor.opacity(0.3), lineWidth: isHovered ? 1.5 : 1)
+                .stroke(isCardActive ? theme.accentColor.opacity(0.4) : theme.dividerColor.opacity(0.3), lineWidth: isCardActive ? 1.5 : 1)
         )
-        .shadow(color: theme.shadowColor.opacity(isHovered ? 0.12 : 0.04), radius: isHovered ? 8 : 2, x: 0, y: isHovered ? 4 : 1)
+        .shadow(color: theme.shadowColor.opacity(isCardActive ? 0.12 : 0.04), radius: isCardActive ? 8 : 2, x: 0, y: isCardActive ? 4 : 1)
         .contentShape(Rectangle())
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
                 isHovered = hovering
+            }
+        }
+        .onChange(of: isShowingDetails) { _, newValue in
+            if newValue {
+                isShowingSettings = false
+                isShowingStateDropdown = false
+            }
+        }
+        .onChange(of: isShowingSettings) { _, newValue in
+            if newValue {
+                isShowingDetails = false
+                isShowingStateDropdown = false
+            }
+        }
+        .onChange(of: isShowingStateDropdown) { _, newValue in
+            if newValue {
+                isShowingDetails = false
+                isShowingSettings = false
             }
         }
     }
@@ -838,18 +979,47 @@ private struct ParameterTypeBadge: View {
 /// A small button that triggers a popover showing the full description and parameter schema.
 private struct ToolDetailsButton: View {
     let definition: ToolDefinition
-    @State private var isShowingPopover = false
+    @Binding var isShowingPopover: Bool
     @Environment(\.appTheme) private var theme
+    @State private var isButtonHovered = false
 
     var body: some View {
         Button {
             isShowingPopover.toggle()
         } label: {
-            Image(systemName: "info.circle")
-                .foregroundColor(theme.secondaryText)
-                .contentShape(Rectangle())
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(
+                        isShowingPopover
+                            ? theme.accentColor.opacity(0.18)
+                            : (isButtonHovered ? theme.surfaceOverlay : Color.primary.opacity(0.04))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(
+                                isShowingPopover
+                                    ? theme.accentColor.opacity(0.5)
+                                    : theme.dividerColor.opacity(isButtonHovered ? 0.45 : 0.25),
+                                lineWidth: 0.8
+                            )
+                    )
+
+                Image(systemName: "info.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(
+                        isShowingPopover
+                            ? theme.accentColor
+                            : (isButtonHovered ? theme.primaryText : theme.secondaryText)
+                    )
+            }
+            .frame(width: 26, height: 26)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { hover in
+            isButtonHovered = hover
+        }
         .help("View full tool details & parameters")
         .accessibilityLabel("View full tool details & parameters")
         .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
@@ -983,23 +1153,58 @@ private struct ToolDetailsButton: View {
 }
 
 
-/// A unified 3-state control for managing tool activation and HITL approval.
-/// States: Disabled -> Ask (Orange Lock) -> Auto (Green Bolt) -> Disabled
+/// The three operational states for tool execution and HITL approval.
+enum ToolControlState: String, CaseIterable, Sendable {
+    case auto
+    case ask
+    case disabled
+
+    var title: String {
+        switch self {
+        case .auto: return "Auto Run"
+        case .ask: return "Ask First"
+        case .disabled: return "Disabled"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .auto: return "Executes automatically without prompting for confirmation."
+        case .ask: return "Pauses and prompts for user approval before each action."
+        case .disabled: return "Turned off. Tool is unavailable to the agent."
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .auto: return "bolt.fill"
+        case .ask: return "lock.shield.fill"
+        case .disabled: return "circle.dashed"
+        }
+    }
+
+    func tintColor(theme: any Theme) -> Color {
+        switch self {
+        case .auto: return theme.successColor
+        case .ask: return theme.warningColor
+        case .disabled: return theme.secondaryText
+        }
+    }
+}
+
+/// An execution mode dropdown control for managing tool activation and HITL approval.
+/// States: Auto Run (Green Bolt) | Ask First (Orange Shield) | Disabled (Muted Dash)
 fileprivate struct ToolStateControl: View {
     @Binding var configuredTools: [Tool]
     let source: ToolSource
     let definition: ToolDefinition
     let instructions: String
+    var isLocked: Bool = false
+    @Binding var isShowingDropdown: Bool
 
     @Environment(\.appTheme) private var theme
     @State private var showingDependencyAlert = false
     @State private var isHovered = false
-
-    private enum ToolControlState {
-        case disabled
-        case ask
-        case auto
-    }
 
     private var currentState: ToolControlState {
         if let tool = configuredTools.first(where: { $0.name == definition.name && $0.sourceId == source.id }) {
@@ -1010,16 +1215,22 @@ fileprivate struct ToolStateControl: View {
 
     var body: some View {
         Button {
-            cycleState()
+            isShowingDropdown.toggle()
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 stateIcon
                     .font(.system(size: 10, weight: .bold))
                 
-                Text(stateLabel)
-                    .font(.system(size: 10, weight: .semibold))
+                Text(currentState.title)
+                    .font(.system(size: 11, weight: .semibold))
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.8)
+                    .rotationEffect(.degrees(isShowingDropdown ? 180 : 0))
             }
-            .frame(width: 88, height: 24)
+            .padding(.horizontal, 9)
+            .frame(height: 26)
             .background(stateBackground)
             .foregroundColor(stateForeground)
             .clipShape(Capsule())
@@ -1027,20 +1238,57 @@ fileprivate struct ToolStateControl: View {
                 Capsule()
                     .stroke(stateBorder, lineWidth: 1)
             )
-            .shadow(color: stateShadowColor, radius: isHovered ? 4 : 2, x: 0, y: isHovered ? 2 : 1)
+            .shadow(color: stateShadowColor, radius: (isHovered || isShowingDropdown) ? 4 : 2, x: 0, y: (isHovered || isShowingDropdown) ? 2 : 1)
         }
         .buttonStyle(.plain)
-        .help(helpText)
+        .help("Select execution mode: Auto Run, Ask First, or Disabled")
         .contentShape(Capsule())
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
         }
+        .popover(isPresented: $isShowingDropdown, arrowEdge: .bottom) {
+            dropdownContent
+                .frame(width: 290)
+                .padding(8)
+        }
         .alert("Tool in Use", isPresented: $showingDependencyAlert) {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Cannot disable '\(definition.name)'. It is currently referenced in the System Instructions. Please remove it from the instructions first.")
+        }
+    }
+
+    private var dropdownContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("EXECUTION MODE")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(theme.secondaryText.opacity(0.75))
+                .tracking(0.6)
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 2)
+
+            ForEach(ToolControlState.allCases, id: \.self) { state in
+                let isOptionLocked = (state == .disabled && isLocked)
+                StateDropdownOptionRow(
+                    state: state,
+                    isSelected: currentState == state,
+                    isDisabled: isOptionLocked,
+                    disabledReason: isOptionLocked ? "Core tool required for Code Session" : nil,
+                    theme: theme,
+                    onSelect: {
+                        if !isOptionLocked {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                selectState(state)
+                            }
+                            isShowingDropdown = false
+                        }
+                    }
+                )
+            }
         }
     }
 
@@ -1056,22 +1304,17 @@ fileprivate struct ToolStateControl: View {
         }
     }
 
-    private var stateLabel: String {
-        switch currentState {
-        case .disabled: return "Disabled"
-        case .ask: return "Ask First"
-        case .auto: return "Auto Run"
-        }
-    }
-
     private var stateBackground: AnyView {
         switch currentState {
         case .disabled:
-            return AnyView(Color.clear)
+            return AnyView(
+                RoundedRectangle(cornerRadius: 13)
+                    .fill(isHovered || isShowingDropdown ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+            )
         case .ask:
             return AnyView(
                 LinearGradient(
-                    colors: [theme.warningColor.opacity(0.85), theme.warningColor],
+                    colors: [theme.warningColor.opacity(0.88), theme.warningColor],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -1079,7 +1322,7 @@ fileprivate struct ToolStateControl: View {
         case .auto:
             return AnyView(
                 LinearGradient(
-                    colors: [theme.successColor.opacity(0.85), theme.successColor],
+                    colors: [theme.successColor.opacity(0.88), theme.successColor],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -1090,7 +1333,7 @@ fileprivate struct ToolStateControl: View {
     private var stateBorder: Color {
         switch currentState {
         case .disabled:
-            return theme.secondaryText.opacity(0.3)
+            return theme.dividerColor.opacity(isHovered || isShowingDropdown ? 0.5 : 0.25)
         case .ask, .auto:
             return Color.clear
         }
@@ -1100,58 +1343,156 @@ fileprivate struct ToolStateControl: View {
         switch currentState {
         case .disabled:
             return theme.secondaryText
-        case .ask, .auto:
+        case .ask:
+            return theme.warningForegroundColor
+        case .auto:
             return .white
         }
     }
 
     private var stateShadowColor: Color {
-        if !isHovered { return Color.black.opacity(0.05) }
+        if !isHovered && !isShowingDropdown { return Color.black.opacity(0.04) }
         switch currentState {
-        case .disabled: return Color.black.opacity(0.1)
+        case .disabled: return Color.black.opacity(0.08)
         case .ask: return theme.warningColor.opacity(0.3)
         case .auto: return theme.successColor.opacity(0.3)
         }
     }
 
-    private var helpText: String {
-        switch currentState {
-        case .disabled: return "Tool is OFF. Click to enable (Ask mode)."
-        case .ask: return "Ask Before Run: Suspends execution for your approval. Click for Auto mode."
-        case .auto: return "Auto-Run: Tool executes automatically. Click to disable."
-        }
-    }
+    private func selectState(_ state: ToolControlState) {
+        guard state != currentState else { return }
 
-    private func cycleState() {
-        switch currentState {
+        switch state {
         case .disabled:
-            var confirmation = true
-            if let annotations = definition.annotations {
-                if annotations.readOnlyHint == true {
-                    confirmation = false
-                }
+            if isLocked { return }
+            if instructions.contains("`\(definition.name)`") {
+                showingDependencyAlert = true
+                return
             }
-
-            let newTool = Tool(
-                name: definition.name,
-                description: definition.description,
-                isEnabled: true,
-                requiresConfirmation: confirmation,
-                sourceId: source.id,
-                parameters: definition.parameters
-            )
-            configuredTools.append(newTool)
+            configuredTools.removeAll { $0.name == definition.name && $0.sourceId == source.id }
 
         case .ask:
             if let index = configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id }) {
-                configuredTools[index].requiresConfirmation = false
+                configuredTools[index].requiresConfirmation = true
+            } else {
+                let newTool = Tool(
+                    name: definition.name,
+                    description: definition.description,
+                    isEnabled: true,
+                    requiresConfirmation: true,
+                    sourceId: source.id,
+                    parameters: definition.parameters
+                )
+                configuredTools.append(newTool)
             }
 
         case .auto:
-            if instructions.contains("`\(definition.name)`") {
-                showingDependencyAlert = true
+            if let index = configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id }) {
+                configuredTools[index].requiresConfirmation = false
             } else {
-                configuredTools.removeAll { $0.name == definition.name && $0.sourceId == source.id }
+                let newTool = Tool(
+                    name: definition.name,
+                    description: definition.description,
+                    isEnabled: true,
+                    requiresConfirmation: false,
+                    sourceId: source.id,
+                    parameters: definition.parameters
+                )
+                configuredTools.append(newTool)
+            }
+        }
+    }
+}
+
+internal struct StateDropdownOptionRow: View {
+    let state: ToolControlState
+    let isSelected: Bool
+    var isDisabled: Bool = false
+    var disabledReason: String? = nil
+    var customTitle: String? = nil
+    var customSubtitle: String? = nil
+    let theme: any Theme
+    let onSelect: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            if !isDisabled {
+                onSelect()
+            }
+        } label: {
+            HStack(alignment: .center, spacing: 10) {
+                let tint = state.tintColor(theme: theme)
+
+                // Colored icon badge
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(tint.opacity(isSelected ? 0.22 : (isDisabled ? 0.05 : 0.12)))
+                        .frame(width: 26, height: 26)
+
+                    Image(systemName: state.iconName)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(isDisabled ? theme.secondaryText.opacity(0.4) : tint)
+                }
+
+                // Title and info
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(customTitle ?? state.title)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(isDisabled ? theme.secondaryText : theme.primaryText)
+
+                        if isDisabled {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 8))
+                                .foregroundColor(theme.secondaryText.opacity(0.6))
+                        }
+                    }
+
+                    Text(disabledReason ?? customSubtitle ?? state.subtitle)
+                        .font(.system(size: 10))
+                        .foregroundColor(isDisabled ? theme.secondaryText.opacity(0.7) : theme.secondaryText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 4)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(tint)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(
+                        isSelected
+                            ? state.tintColor(theme: theme).opacity(0.1)
+                            : (isHovered && !isDisabled ? theme.surfaceOverlay : Color.clear)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(
+                        isSelected
+                            ? state.tintColor(theme: theme).opacity(0.3)
+                            : Color.clear,
+                        lineWidth: 0.8
+                    )
+            )
+            .contentShape(Rectangle())
+            .opacity(isDisabled ? 0.55 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor(enabled: !isDisabled)
+        .disabled(isDisabled)
+        .onHover { hover in
+            if !isDisabled {
+                isHovered = hover
             }
         }
     }
@@ -1163,9 +1504,10 @@ private struct ToolSettingsPopover: View {
     @Binding var configuredTools: [Tool]
     let source: ToolSource
     let definition: ToolDefinition
+    @Binding var isShowingPopover: Bool
 
-    @State private var isShowingPopover = false
     @Environment(\.appTheme) private var theme
+    @State private var isButtonHovered = false
 
     private var toolIndex: Int? {
         configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id })
@@ -1175,12 +1517,39 @@ private struct ToolSettingsPopover: View {
         Button {
             isShowingPopover.toggle()
         } label: {
-            Image(systemName: "gearshape")
-                .font(.system(.caption))
-                .foregroundColor(theme.secondaryText)
-                .contentShape(Rectangle())
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(
+                        isShowingPopover
+                            ? theme.accentColor.opacity(0.18)
+                            : (isButtonHovered ? theme.surfaceOverlay : Color.primary.opacity(0.04))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(
+                                isShowingPopover
+                                    ? theme.accentColor.opacity(0.5)
+                                    : theme.dividerColor.opacity(isButtonHovered ? 0.45 : 0.25),
+                                lineWidth: 0.8
+                            )
+                    )
+
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(
+                        isShowingPopover
+                            ? theme.accentColor
+                            : (isButtonHovered ? theme.primaryText : theme.secondaryText)
+                    )
+            }
+            .frame(width: 26, height: 26)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { hover in
+            isButtonHovered = hover
+        }
         .help("Tool settings")
         .accessibilityLabel("Tool settings")
         .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {

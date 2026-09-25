@@ -6,8 +6,8 @@
 //
 //  The refusal rules shared by every tool that runs a caller-supplied shell command.
 //
-//  There are TWO such tools, not one. `execute_shell` (`TerminalTool` → `ShellSessionManager`)
-//  enforced these rules; `batch_command` is an equally complete `/bin/zsh -c` runner that
+//  There were TWO such tools, not one. `execute_shell` (`TerminalTool` → `ShellSessionManager`,
+//  both removed 2026-09-24 as a duplicate of `run_command`) enforced these rules; `batch_command` is an equally complete `/bin/zsh -c` runner that
 //  enforced NONE of them, so every refusal below was reachable simply by naming the other
 //  tool. A profile that hardened `execute_shell` — or an operator who read its blocks and
 //  believed them — got none of it.

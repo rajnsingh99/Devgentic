@@ -357,9 +357,7 @@ struct CodeDedicatedView: View {
         openPanel.begin { response in
             if response == .OK, let url = openPanel.url {
                 Task { @MainActor in
-                    viewModel.explorerViewModel.selectedRootURL = url
-                    viewModel.explorerViewModel.loadDirectoryContents(for: url)
-                    codeSessionManager.updateProjectPath(url)
+                    viewModel.chooseCodeFolder(url)
                     activeGitBranch = GitBranchReader.branch(for: url)
                     NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
                 }

@@ -171,7 +171,7 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
 
 struct GetWiFiInfoTool: DevgenticTool {
     let name = "get_wifi_info"
-    let category = "System Toggles"
+    let category = "Network & Connectivity"
     let description = "Returns detailed Wi-Fi information including SSID, BSSID, signal strength, channel, and security."
 
     struct Arguments: Decodable, Sendable {}

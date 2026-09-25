@@ -90,6 +90,68 @@ struct SidebarGroupHeaderView: View {
     }
 }
 
+/// A project's header in the Code sidebar: folder name, a collapse chevron, and — on hover — a
+/// "+" that starts a new session in that folder.
+struct CodeProjectHeaderView: View {
+    let title: String
+    let path: String?
+    let isMissing: Bool
+    @Binding var isExpanded: Bool
+    let onNewSession: (() -> Void)?
+
+    @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(theme.fontCaption2.weight(.semibold))
+                .foregroundColor(theme.secondaryText.opacity(0.5))
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                .frame(width: 12)
+
+            Image(systemName: path == nil ? "tray" : (isMissing ? "folder.badge.questionmark" : "folder"))
+                .font(theme.fontCaption)
+                .foregroundColor(theme.secondaryText)
+
+            Text(title)
+                .font(theme.fontCaption.weight(.semibold))
+                .foregroundColor(isMissing ? theme.tertiaryText : theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 4)
+
+            if let onNewSession, isHovering, !isMissing {
+                Button(action: onNewSession) {
+                    Image(systemName: "plus")
+                        .font(theme.fontCaption.weight(.semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(String(localized: "New session in \(title)"))
+                .accessibilityLabel(String(localized: "New session in \(title)"))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovering ? theme.surfaceOverlay : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { isExpanded.toggle() }
+        }
+        .onHover { isHovering = $0 }
+        .help(isMissing
+              ? String(localized: "\(path ?? "") — this folder was moved or deleted. Its sessions can be read but not continued.")
+              : (path ?? String(localized: "Sessions from before project folders were recorded")))
+    }
+}
 
 /// Wrapper around `ConversationRowView` that specifically handles sidebar behaviors
 /// such as context menus (pinning, renaming, deleting) and inline state preparation.
@@ -313,6 +375,11 @@ struct ConversationSidebarView: View {
 
     @State private var isPinnedExpanded: Bool = true
 
+    // Code sidebar: per-project collapse and "Show more", by project path ("" = No project).
+    @State private var collapsedProjects: Set<String> = []
+    @State private var fullyShownProjects: Set<String> = []
+    private static let collapsedProjectsKey = "codeSidebarCollapsedProjects"
+
     // Batch Selection State
     @State private var selectedConversationIDs: Set<UUID> = []
     @State private var isSelectionMode: Bool = false
@@ -321,15 +388,27 @@ struct ConversationSidebarView: View {
     // MARK: - Mode-Aware Properties
 
     private var sidebarTitle: LocalizedStringKey {
-        viewModel.interfaceMode == .workflow ? "Workflows" : "Chats"
+        switch viewModel.interfaceMode {
+        case .workflow: return "Workflows"
+        case .code:     return "Projects"
+        case .chat:     return "Chats"
+        }
     }
 
     private var newButtonTitle: LocalizedStringKey {
-        viewModel.interfaceMode == .workflow ? "New Workflow" : "New Chat"
+        switch viewModel.interfaceMode {
+        case .workflow: return "New Workflow"
+        case .code:     return "New Session"
+        case .chat:     return "New Chat"
+        }
     }
 
     private var searchPlaceholder: String {
-        viewModel.interfaceMode == .workflow ? "Search workflows..." : "Search conversations..."
+        switch viewModel.interfaceMode {
+        case .workflow: return "Search workflows..."
+        case .code:     return "Search sessions and projects..."
+        case .chat:     return "Search conversations..."
+        }
     }
 
     private var emptyStateTitle: LocalizedStringKey {
@@ -366,7 +445,7 @@ struct ConversationSidebarView: View {
 
             if isSelectionMode {
                 batchHeaderRow
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.opacity)
             } else {
                 SidebarHeaderView(
                     title: sidebarTitle,
@@ -441,6 +520,7 @@ struct ConversationSidebarView: View {
         }
         .onAppear {
             isPinnedExpanded = UserDefaults.standard.object(forKey: "sidebarPinnedExpanded_v2") as? Bool ?? true
+            collapsedProjects = Set(UserDefaults.standard.stringArray(forKey: Self.collapsedProjectsKey) ?? [])
         }
         .onReceive(NotificationCenter.default.publisher(for: .selectNextConversation)) { _ in
             selectNextConversation()
@@ -487,6 +567,12 @@ struct ConversationSidebarView: View {
                         }
                     }
 
+                case .all where viewModel.interfaceMode == .code:
+                    // Code: grouped by PROJECT (non-pinned only), most recently active first.
+                    ForEach(data.projectGroups, id: \.id) { group in
+                        projectSection(group)
+                    }
+
                 case .all:
                     // Date-Grouped Sections (non-pinned only)
                     ForEach(Array(data.dateSections.enumerated()), id: \.element.title) { index, section in
@@ -520,6 +606,57 @@ struct ConversationSidebarView: View {
     }
 
     @ViewBuilder
+    private func projectSection(_ group: CodeProjectGrouping.Group<ConversationSD>) -> some View {
+        let isExpanded = !collapsedProjects.contains(group.id)
+        let showsAll = fullyShownProjects.contains(group.id) || !searchText.isEmpty
+        let limit = CodeProjectGrouping.visibleSessionsPerProject
+        let shown = showsAll ? group.items : Array(group.items.prefix(limit))
+
+        LazyVStack(alignment: .leading, spacing: 2) {
+            CodeProjectHeaderView(
+                title: group.title,
+                path: group.path,
+                isMissing: group.isMissing,
+                isExpanded: Binding(
+                    get: { isExpanded },
+                    set: { setProject(group.id, expanded: $0) }
+                ),
+                onNewSession: group.path.map { path in
+                    { viewModel.startNewCodeSession(in: URL(fileURLWithPath: path)) }
+                }
+            )
+
+            if isExpanded {
+                ForEach(shown) { conversation in
+                    row(for: conversation)
+                        .padding(.leading, 12)
+                        .opacity(group.isMissing ? 0.6 : 1)
+                }
+                if group.items.count > shown.count {
+                    Button {
+                        fullyShownProjects.insert(group.id)
+                    } label: {
+                        Text("Show \(group.items.count - shown.count) more")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.leading, 30)
+                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func setProject(_ id: String, expanded: Bool) {
+        logger.debug("[CODE_SIDEBAR] Project '\(id.isEmpty ? "No project" : URL(fileURLWithPath: id).lastPathComponent)' \(expanded ? "expanded" : "collapsed").")
+        if expanded { collapsedProjects.remove(id) } else { collapsedProjects.insert(id) }
+        UserDefaults.standard.set(Array(collapsedProjects), forKey: Self.collapsedProjectsKey)
+    }
+
+    @ViewBuilder
     private func row(for conversation: ConversationSD) -> some View {
         ConversationSidebarRow(
             conversation: conversation,
@@ -543,6 +680,8 @@ struct ConversationSidebarView: View {
     private struct PartitionedConversations {
         let pinned: [ConversationSD]
         let dateSections: [DateSection]
+        /// Code mode only — takes the place of `dateSections` there.
+        var projectGroups: [CodeProjectGrouping.Group<ConversationSD>] = []
     }
 
     private struct DateSection: Equatable {
@@ -559,7 +698,8 @@ struct ConversationSidebarView: View {
         let p = partitioned
         let pinnedCount = p.pinned.count
         let dateCount = p.dateSections.reduce(0) { $0 + $1.conversations.count }
-        return pinnedCount + dateCount
+        let projectCount = p.projectGroups.reduce(0) { $0 + $1.items.count }
+        return pinnedCount + dateCount + projectCount
     }
 
     /// Single-pass partition: filters by mode, splits pinned/unpinned, and date-groups in one traversal.
@@ -580,6 +720,8 @@ struct ConversationSidebarView: View {
         var thisWeek: [ConversationSD] = []
         var thisMonth: [ConversationSD] = []
         var earlier: [ConversationSD] = []
+        let isCode = viewModel.interfaceMode == .code
+        var codeSessions: [ConversationSD] = []
 
         for conversation in conversations {
             // Mode filter: prefer denormalized profileTypeRaw (covers Code mode + ephemeral profiles),
@@ -604,14 +746,22 @@ struct ConversationSidebarView: View {
                 if viewModel.interfaceMode == .workflow { continue }
             }
 
-            // Search text filter.
+            // Search text filter. In Code, the project's folder name matches too — "which
+            // sessions were in Devgentic?" is a search the grouping invites.
             if !searchText.isEmpty,
-               !conversation.displayTitle.localizedCaseInsensitiveContains(searchText) {
+               !conversation.displayTitle.localizedCaseInsensitiveContains(searchText),
+               !(isCode && (conversation.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent }?
+                    .localizedCaseInsensitiveContains(searchText) ?? false)) {
                 continue
             }
 
             if conversation.isPinned {
                 pinned.append(conversation)
+                continue
+            }
+
+            if isCode {
+                codeSessions.append(conversation)
                 continue
             }
 
@@ -636,7 +786,11 @@ struct ConversationSidebarView: View {
         if !thisWeek.isEmpty { sections.append(DateSection(title: "This Week", conversations: thisWeek)) }
         if !thisMonth.isEmpty { sections.append(DateSection(title: "This Month", conversations: thisMonth)) }
         if !earlier.isEmpty { sections.append(DateSection(title: "Earlier", conversations: earlier)) }
-        return PartitionedConversations(pinned: pinned, dateSections: sections)
+        var result = PartitionedConversations(pinned: pinned, dateSections: sections)
+        if isCode {
+            result.projectGroups = CodeProjectGrouping.groups(codeSessions, path: \.projectPath, date: \.timestamp)
+        }
+        return result
     }
 
     private var pinnedConversations: [ConversationSD] { partitioned.pinned }
@@ -706,7 +860,7 @@ struct ConversationSidebarView: View {
         if selectedFilter == .pinned {
             return p.pinned
         }
-        return p.pinned + p.dateSections.flatMap(\.conversations)
+        return p.pinned + p.dateSections.flatMap(\.conversations) + p.projectGroups.flatMap(\.items)
     }
 
     /// Flattens the current partition (pinned + all date sections) into a

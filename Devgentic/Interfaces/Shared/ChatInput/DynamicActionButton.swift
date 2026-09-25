@@ -64,15 +64,15 @@ struct DynamicActionButton: View {
 
     var body: some View {
         Button(action: handleTap) {
-            if isSending && !isStreamingActive {
+            if mode == .send && isSending && !isStreamingActive {
                 ProgressView().controlSize(.small)
                     .frame(width: buttonSize, height: buttonSize)
             } else {
                 buttonContent
-                    .frame(width: buttonSize, height: buttonSize)
             }
         }
-        .buttonStyle(PlainButtonStyle())
+        .buttonStyle(.plain)
+        .pointingHandCursor(enabled: !isDisabled)
         // Hold the mic to open the speech-model picker even when a model is
         // already loaded (a plain tap starts recording in that state).
         .simultaneousGesture(modelPickerLongPress)
@@ -139,12 +139,9 @@ struct DynamicActionButton: View {
                     }
                     .onDisappear { pulseScale = 1.0 }
             } else {
-                Circle()
-                    .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-                    .overlay(
-                        Circle()
-                            .stroke(isHovering ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
-                    )
+                Color.clear
+                    .frame(width: buttonSize, height: buttonSize)
+                    .composerControlSurface(in: Circle(), isHovered: isHovering && !isDisabled)
             }
 
             // One persistent Image so mode changes morph glyph-to-glyph via symbol
@@ -152,6 +149,7 @@ struct DynamicActionButton: View {
             Image(systemName: symbolName)
                 .font(symbolFont)
                 .foregroundColor(iconForegroundColor)
+                .frame(width: buttonSize, height: buttonSize)
                 .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
                 .animation(.easeInOut(duration: 0.18), value: symbolName)
 
@@ -159,7 +157,8 @@ struct DynamicActionButton: View {
                 modelProgressOverlay
             }
         }
-        .shadow(color: isHovering && mode != .stopVoice ? theme.accentColor.opacity(0.25) : .clear, radius: 4, x: 0, y: 1)
+        .frame(width: buttonSize, height: buttonSize)
+        .shadow(color: isHovering && !isDisabled && mode != .stopVoice ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
         .scaleEffect(isHovering && !isDisabled ? 1.06 : 1.0)
     }
 

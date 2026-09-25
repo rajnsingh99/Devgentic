@@ -3,7 +3,7 @@
 ## What counts as a vulnerability here
 
 Devgentic is a **local tool that runs with your own user's privileges, doing what you configured it to
-do.** That is the design, not an oversight: an Agent profile with `execute_shell` enabled can run shell
+do.** That is the design, not an oversight: an Agent profile with `run_command` enabled can run shell
 commands because you gave it that tool. A report of the form "the user can make the app do something to
 the user's own machine" is not a vulnerability — it is the product.
 

@@ -44,6 +44,11 @@ struct CodeQuickSettings: Codable, Hashable, Sendable {
     /// paid once per turn. Offered only for models detection reports as capable.
     var thinkingEnabled: Bool?
 
+    /// Context window in tokens (Ollama only). `nil` → `CodeSessionManager.presetContextCap`-capped
+    /// model window. The whole Code prompt and its tools ride in this window on every step, so a
+    /// small one fills before any work is done (seen on device 2026-09-24: 5.5K of 8K).
+    var contextTokens: Int?
+
     /// True when nothing has been changed from the preset — used to decide whether the toolbar
     /// button shows a "modified" dot.
     var isDefault: Bool {
@@ -51,23 +56,84 @@ struct CodeQuickSettings: Codable, Hashable, Sendable {
             && executionTimeout == nil
             && toolConfirmations.isEmpty
             && thinkingEnabled == nil
+            && contextTokens == nil
     }
 
     static let `default` = CodeQuickSettings()
 }
 
+// MARK: - Project state
+
+/// What a project remembers besides its quick settings: the model it last ran with and the tools
+/// it was given (2026-09-24).
+///
+/// ⚠️ Kept APART from `CodeQuickSettings` on purpose. The quick-settings popover's "Reset" writes
+/// `CodeQuickSettings.default`, and that must reset the limits — not forget the project's model
+/// or the MCP tools the user enabled for it.
+///
+/// Stored as a DELTA against `CodeToolPreset`, never as the full tool list: preset tools carry
+/// large parameter schemas, and this blob lives in UserDefaults for up to
+/// `CodeQuickSettingsStore.maxRetainedProjects` projects.
+struct CodeProjectState: Codable, Hashable, Sendable {
+
+    /// The model this project last ran with. `apiKey` is ALWAYS nil here — keys stay in the
+    /// Keychain (`CodeProviderKeys`), never in UserDefaults.
+    var model: ProviderConfig?
+
+    /// Tools outside the preset that the user enabled for this project (built-ins from the Tool
+    /// Library, MCP tools), stored whole because there is no preset to diff them against.
+    var extraTools: [Tool] = []
+
+    /// Changes to PRESET tools other than Ask/Auto (that one is `CodeQuickSettings.toolConfirmations`),
+    /// keyed by tool name. Absent = the preset's value.
+    var presetToolOverrides: [String: CodeToolOverride] = [:]
+
+    var isEmpty: Bool { model == nil && extraTools.isEmpty && presetToolOverrides.isEmpty }
+}
+
+/// A preset tool's user-editable fields, stored only for a tool where at least one of them differs
+/// from `CodeToolPreset`.
+///
+/// ⚠️ A full snapshot of the four fields, not a per-field delta: a delta needs "changed to nil"
+/// (`TimeInterval??`), and JSON cannot tell `.some(nil)` from absent — a cleared timeout would come
+/// back as the preset's.
+struct CodeToolOverride: Codable, Hashable, Sendable {
+    var timeout: TimeInterval?
+    var timeoutMessage: String?
+    var isFavorite: Bool
+    var cutStrategy: ContextCutStrategy?
+
+    /// `nil` when `current` matches the preset — nothing worth storing.
+    init?(preset: Tool, current: Tool) {
+        guard current.timeout != preset.timeout
+            || current.timeoutMessage != preset.timeoutMessage
+            || current.isFavorite != preset.isFavorite
+            || current.cutStrategy != preset.cutStrategy else { return nil }
+        timeout = current.timeout
+        timeoutMessage = current.timeoutMessage
+        isFavorite = current.isFavorite
+        cutStrategy = current.cutStrategy
+    }
+
+    func applied(to tool: Tool) -> Tool {
+        var tool = tool
+        tool.timeout = timeout
+        tool.timeoutMessage = timeoutMessage
+        tool.isFavorite = isFavorite
+        tool.cutStrategy = cutStrategy
+        return tool
+    }
+}
+
 // MARK: - Store
 
-/// Persists `CodeQuickSettings` per project folder in UserDefaults.
+/// Persists `CodeQuickSettings` and `CodeProjectState` per project folder in UserDefaults.
 ///
-/// ⚠️⚠️ WHY NOT ON THE PROFILE. The obvious home is the `.code` BackendProfile's `AgentConfig`,
-/// which already carries `maxIterations` and `executionTimeout`. It cannot go there:
-/// `CodeSessionManager.resetSession()` DELETES the profile row outright, and it runs on every
-/// Home-button press via `ConversationManagementCoordinator.deselectConversationAndShowWelcome`.
-/// A user who raised their iteration cap would find it silently back at 20 after clicking Home,
-/// with nothing having reported a change — the same shape of defect as a setting that survives
-/// only until you next look at it. UserDefaults outlives the profile row, so the settings are
-/// re-applied onto whatever profile `ensureCodeProfile()` mints next.
+/// ⚠️⚠️ WHY NOT ON THE PROFILE. There is ONE permanent Code profile for every project, so it can
+/// only ever hold the CURRENT project's values — it is a projection of this store, loaded when a
+/// folder is opened (`CodeSessionManager.updateProjectPath`) and captured back when the user
+/// leaves it. (Until 2026-09-24 the row was also deleted on every Home press; this store is what
+/// survived that, and it is still the only per-project record.)
 ///
 /// Keyed by ABSOLUTE PATH. Renaming or moving a project folder therefore loses its settings and
 /// it reverts to defaults. That is the honest failure: the alternative (following the folder by
@@ -86,6 +152,13 @@ enum CodeQuickSettingsStore {
     static func settings(for projectPath: String?, defaults: UserDefaults) -> CodeQuickSettings {
         guard let key = normalizedKey(projectPath) else { return .default }
         return load(from: defaults).entries[key]?.settings ?? .default
+    }
+
+    /// The project's remembered model and tools, or `nil` when the project has never been captured —
+    /// which callers must tell apart from "captured, and it is the preset" (see `updateProjectPath`).
+    static func projectState(for projectPath: String?, defaults: UserDefaults) -> CodeProjectState? {
+        guard let key = normalizedKey(projectPath) else { return nil }
+        return load(from: defaults).entries[key]?.project
     }
 
     // MARK: Write
@@ -108,15 +181,50 @@ enum CodeQuickSettingsStore {
         }
 
         var store = load(from: defaults)
+        let project = store.entries[key]?.project
 
-        if settings.isDefault {
+        if settings.isDefault && project == nil {
             if store.entries.removeValue(forKey: key) != nil {
                 logger.info("[CODE_SETTINGS] Cleared quick settings for '\(key)' — every value is back to the preset. CONSEQUENCE: the entry is removed rather than stored empty, so it no longer occupies a retention slot.")
             }
         } else {
-            store.entries[key] = Entry(settings: settings, updatedAt: now)
+            // The project's model and tools ride along untouched — "Reset" in the popover is about
+            // the limits, not about forgetting the project.
+            store.entries[key] = Entry(settings: settings, updatedAt: now, project: project)
         }
 
+        write(store, key: key, defaults: defaults)
+    }
+
+    /// Stores what the project runs with — its model and tools. Unlike `save`, an empty state is
+    /// still STORED: it records "this project was captured with the preset", which is what stops
+    /// the next folder opened from inheriting the previous project's tools.
+    static func saveProjectState(
+        _ state: CodeProjectState,
+        for projectPath: String?,
+        defaults: UserDefaults,
+        now: Date
+    ) {
+        guard let key = normalizedKey(projectPath) else {
+            logger.warning("[CODE_SETTINGS] Refusing to save project state with no project folder. CONSEQUENCE: the model and tool choices are not remembered for any project.")
+            return
+        }
+        var sanitized = state
+        sanitized.model?.apiKey = nil   // belt-and-braces: a key must never reach UserDefaults
+
+        var store = load(from: defaults)
+        guard store.entries[key]?.project != sanitized else {
+            logger.debug("[CODE_SETTINGS] '\(key)' unchanged — no write.")
+            return
+        }
+        let settings = store.entries[key]?.settings ?? .default
+        store.entries[key] = Entry(settings: settings, updatedAt: now, project: sanitized)
+        write(store, key: key, defaults: defaults)
+        logger.info("[CODE_SETTINGS] Remembered '\(key)' — model: \(sanitized.model?.modelName ?? "(none)"), \(sanitized.extraTools.count) extra tool(s), \(sanitized.presetToolOverrides.count) preset tool override(s).")
+    }
+
+    private static func write(_ store: Store, key: String, defaults: UserDefaults) {
+        var store = store
         prune(&store)
 
         do {
@@ -131,6 +239,8 @@ enum CodeQuickSettingsStore {
     struct Entry: Codable, Hashable {
         var settings: CodeQuickSettings
         var updatedAt: Date
+        /// Optional so entries written before it existed still decode.
+        var project: CodeProjectState?
     }
 
     struct Store: Codable, Hashable {

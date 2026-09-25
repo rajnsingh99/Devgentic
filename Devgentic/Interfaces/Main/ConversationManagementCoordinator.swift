@@ -83,6 +83,95 @@ final class ConversationManagementCoordinator {
         logger.info("Deselected conversation, returning to welcome screen.")
     }
 
+    // MARK: - Code projects
+    //
+    // ⚠️ A Code conversation is bound to ONE project folder: recorded on its first send
+    // (`MessagingCoordinator`), reopened when it is selected (`ConversationSwitchCoordinator`), and
+    // never changed afterwards. A different folder means a different session — the model's view of
+    // "the project" is spread through the whole history, so re-pointing it at other files would
+    // leave it reasoning about files that are not there.
+
+    /// The folder the conversation is bound to, or nil when it has not run yet (or predates the field).
+    func recordedProjectPath(of conversationID: UUID?) -> String? {
+        guard let conversationID else { return nil }
+        return persistenceService.getConversation(withId: conversationID)?.projectPath
+    }
+
+    /// Opens `url` in the Code session and the Explorer.
+    func openCodeProject(_ url: URL) {
+        guard let vm = viewModel else { return }
+        // ⚠️ FIRST, before either slot's own publish is queued — see `MCPRootsProvider.setWorkspace`.
+        Task { await MCPRootsProvider.setWorkspace(url) }
+        vm.explorerViewModel.selectedRootURL = url
+        vm.explorerViewModel.loadDirectoryContents(for: url)
+        vm.codeSessionManager?.updateProjectPath(url)
+    }
+
+    /// The user picked a folder from the composer or the welcome screen.
+    ///
+    /// The folder is fixed once the session has a message. Before that it simply follows the pick —
+    /// an empty session has no history that describes another project. After it, a different
+    /// folder starts a new session and the old one keeps its own.
+    func chooseCodeFolder(_ url: URL) {
+        guard let vm = viewModel else { return }
+        let conversationID = vm.selectedConversationID
+        let bound = recordedProjectPath(of: conversationID)
+        let isEmpty = conversationID.flatMap { persistenceService.getConversation(withId: $0)?.messages.isEmpty } ?? true
+        openCodeProject(url)
+        if let conversationID, isEmpty, bound.map({ !URL(fileURLWithPath: $0).sameLocationLexically(as: url) }) ?? true {
+            persistenceService.updateProjectPath(for: conversationID, projectPath: url.path)
+            logger.info("[CODE_PROJECT] Empty session \(conversationID.uuidString) re-pointed to '\(url.lastPathComponent)'\(bound.map { " (was '\(URL(fileURLWithPath: $0).lastPathComponent)')" } ?? "") — it has no messages yet, so the folder is not fixed.")
+        } else if let bound, !URL(fileURLWithPath: bound).sameLocationLexically(as: url) {
+            logger.info("[CODE_PROJECT] Folder changed to '\(url.lastPathComponent)' while in session \(conversationID?.uuidString ?? "nil") bound to '\(URL(fileURLWithPath: bound).lastPathComponent)'. CONSEQUENCE: a new session starts in the new folder; the old session keeps its own.")
+            startNewConversation()
+        } else {
+            logger.info("[CODE_PROJECT] Folder '\(url.lastPathComponent)' chosen for session \(conversationID?.uuidString ?? "(none — welcome screen)") — \(bound == nil ? "not yet bound; its first send binds it here" : "already bound here").")
+        }
+    }
+
+    /// The sidebar's per-project "+": a new session in that project.
+    func startNewCodeSession(in url: URL) {
+        logger.info("[CODE_PROJECT] New session requested in '\(url.lastPathComponent)' from the sidebar.")
+        openCodeProject(url)
+        startNewConversation()
+    }
+
+    /// Called on selection: reopen the selected Code conversation's folder.
+    func restoreCodeProjectForSelectedConversation() {
+        guard let vm = viewModel, vm.interfaceMode == .code, let conversationID = vm.selectedConversationID else { return }
+        guard let manager = vm.codeSessionManager else {
+            logger.error("[CODE_PROJECT] Session \(conversationID.uuidString) selected in Code mode with no CodeSessionManager. CONSEQUENCE: its folder is not reopened; a send from it is refused if the open folder differs.")
+            return
+        }
+        let path = recordedProjectPath(of: conversationID)
+        if let path, FileManager.default.fileExists(atPath: path),
+           manager.projectPath.map({ !$0.sameLocation(as: URL(fileURLWithPath: path)) }) ?? true {
+            // Queued before `openProject` queues the Code slot's own publish — see `MCPRootsProvider.setWorkspace`.
+            let url = URL(fileURLWithPath: path)
+            Task { await MCPRootsProvider.setWorkspace(url) }
+        }
+        let outcome = manager.openProject(forConversationPath: path)
+        logger.info("[CODE_PROJECT] Selected session \(conversationID.uuidString) — bound folder: \(path.map { "'\(URL(fileURLWithPath: $0).lastPathComponent)'" } ?? "none"), outcome: \(String(describing: outcome)).")
+        if outcome == .restored, let path {
+            let url = URL(fileURLWithPath: path)
+            vm.explorerViewModel.selectedRootURL = url
+            vm.explorerViewModel.loadDirectoryContents(for: url)
+        }
+    }
+
+    /// Why a send from the selected Code conversation must not run, or nil when it may.
+    ///
+    /// The one case: the conversation is bound to a folder that is not the open one — its folder
+    /// was moved or deleted, so `restoreCodeProjectForSelectedConversation` could not reopen it.
+    /// Running anyway would carry on that session's work inside a different project.
+    func codeSendRefusal(openFolder: URL?) -> String? {
+        guard let vm = viewModel, vm.interfaceMode == .code,
+              let bound = recordedProjectPath(of: vm.selectedConversationID) else { return nil }
+        let boundURL = URL(fileURLWithPath: bound)
+        if let openFolder, openFolder.sameLocationLexically(as: boundURL) { return nil }
+        return String(localized: "This session belongs to “\(boundURL.lastPathComponent)”, which is no longer at \(bound). Start a new session to continue.")
+    }
+
     /// Create (or reuse) an empty conversation and make it the selected one.
     /// Returns the conversation ID. Discardable so callers that only want the
     /// side-effect (UI navigation) can ignore the return value.
@@ -124,6 +213,14 @@ final class ConversationManagementCoordinator {
         switch vm.interfaceMode {
         case .code:
             persistenceService.updateProfileType(for: conversationID, profileTypeRaw: ProfileType.code.rawValue)
+            // Bound at CREATION when a folder is open, not on the first send: a session started
+            // from a project's "+" otherwise listed under "No project" until it was used (seen on
+            // device 2026-09-24). An empty session may still be re-pointed — see `chooseCodeFolder`.
+            if let folder = vm.codeSessionManager?.projectPath?.path {
+                persistenceService.updateProjectPath(for: conversationID, projectPath: folder)
+            } else {
+                logger.debug("[CODE_PROJECT] New Code session \(conversationID.uuidString) created with no project selected — its first folder pick or send binds it.")
+            }
         case .workflow:
             persistenceService.updateProfileType(for: conversationID, profileTypeRaw: ProfileType.workflow.rawValue)
         case .chat:
@@ -132,8 +229,13 @@ final class ConversationManagementCoordinator {
     }
 
     /// Finds the most recent empty conversation (zero messages) that can be reused.
+    ///
+    /// ⚠️ Only one that belongs HERE (2026-09-24). This used to take the most recent empty
+    /// conversation of any kind and re-tag it — so a project's "+" in Code could claim an empty
+    /// Chat conversation, or another project's empty session, and pull it into this project.
     private func findReusableEmptyConversation() -> UUID? {
-        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
+        guard let vm = viewModel,
+              let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
         // [QA revival P1e] Never repurpose the QuickAccess conversation — it's owned by the
         // panel. (create-on-first-send already means it's rarely empty, but guard the gap.)
         let qaID = UserDefaults.standard.string(forKey: GlobalConstants.quickAccessOverlayConversationId).flatMap(UUID.init)
@@ -142,7 +244,36 @@ final class ConversationManagementCoordinator {
         )
         descriptor.fetchLimit = 5
         guard let results = try? context.fetch(descriptor) else { return nil }
-        return results.first(where: { $0.messages.isEmpty && $0.id != qaID })?.id
+        let openFolder = vm.codeSessionManager?.projectPath?.path
+        let empties = results.filter { $0.messages.isEmpty && $0.id != qaID }
+        let reusable = empties.first {
+            Self.isReusableEmptyConversation(profileTypeRaw: $0.profileTypeRaw, projectPath: $0.projectPath,
+                                             mode: vm.interfaceMode, openFolder: openFolder)
+        }
+        if reusable == nil, !empties.isEmpty {
+            logger.info("[NewChat] \(empties.count) recent empty conversation(s) belong to another mode or project — creating a new one instead of taking one over.")
+        }
+        return reusable?.id
+    }
+
+    /// Whether an empty conversation may be reused for a new one in `mode`.
+    ///
+    /// Code: a Code session that is unbound or bound to the open folder. Workflow: a workflow one.
+    /// Chat: anything not claimed by Code or Workflow (Chat leaves conversations untagged).
+    nonisolated static func isReusableEmptyConversation(profileTypeRaw: String?, projectPath: String?,
+                                                        mode: MainApplicationViewModel.InterfaceMode,
+                                                        openFolder: String?) -> Bool {
+        let code = ProfileType.code.rawValue, workflow = ProfileType.workflow.rawValue
+        switch mode {
+        case .code:
+            guard profileTypeRaw == code else { return false }
+            guard let projectPath else { return true }
+            return CodeQuickSettingsStore.normalizedKey(projectPath) == CodeQuickSettingsStore.normalizedKey(openFolder)
+        case .workflow:
+            return profileTypeRaw == workflow
+        case .chat:
+            return profileTypeRaw != code && profileTypeRaw != workflow
+        }
     }
 
     // MARK: - Backend Profile Binding

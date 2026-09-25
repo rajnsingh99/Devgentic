@@ -52,7 +52,8 @@ final class OllamaRequestOptionsTests: XCTestCase {
             stored: config.advancedConfiguration,
             metadata: config.modelMetadata,
             modelName: config.modelName,
-            flavour: flavour
+            flavour: flavour,
+            numCtxOverride: config.numCtxOverride
         )
         return OllamaContextWindowPolicy.configuredNumCtx(in: resolved.options)
     }
@@ -128,12 +129,12 @@ final class OllamaRequestOptionsTests: XCTestCase {
         // that were always set would put a false line in every log; never set, the operator loses
         // the only signal that the UI's preset — not the user's choice — is in force.
         let unconfigured = OllamaRequestOptions.resolve(
-            stored: nil, metadata: ModelMetadata(tier: .small), modelName: "m", flavour: .agent)
+            stored: nil, metadata: ModelMetadata(tier: .small), modelName: "m", flavour: .agent, numCtxOverride: nil)
         XCTAssertEqual(unconfigured.presetApplied, .agent)
 
         let configured = OllamaRequestOptions.resolve(
             stored: ["numCtx": .number(4_096)], metadata: ModelMetadata(tier: .small),
-            modelName: "m", flavour: .agent)
+            modelName: "m", flavour: .agent, numCtxOverride: nil)
         XCTAssertNil(configured.presetApplied,
                      "A stored configuration was used; claiming a preset was applied would be false.")
     }
@@ -143,9 +144,9 @@ final class OllamaRequestOptionsTests: XCTestCase {
         // reaches the ladder at all. The agent preset pins a fixed seed; the chat preset must not,
         // or every repeated prompt in a Bot returns a byte-identical reply.
         let agent = OllamaRequestOptions.resolve(
-            stored: nil, metadata: ModelMetadata(tier: .small), modelName: "m", flavour: .agent)
+            stored: nil, metadata: ModelMetadata(tier: .small), modelName: "m", flavour: .agent, numCtxOverride: nil)
         let chat = OllamaRequestOptions.resolve(
-            stored: nil, metadata: ModelMetadata(tier: .small), modelName: "m", flavour: .chat)
+            stored: nil, metadata: ModelMetadata(tier: .small), modelName: "m", flavour: .chat, numCtxOverride: nil)
 
         XCTAssertNotNil(agent.options?["seed"])
         XCTAssertNotEqual(

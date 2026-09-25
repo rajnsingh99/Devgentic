@@ -263,25 +263,17 @@ final class BackgroundTailDrainTests: XCTestCase {
         XCTAssertEqual(finished.logCharacterCount, 21)
     }
 
-    /// The foreground path writes its log in one shot from an already-finished result, which
-    /// REPLACES the file. A drain holding a byte offset into the old inode would otherwise resume
-    /// past the end of the new one and publish nothing.
-    func testTheForegroundCompletionPathAlsoPopulatesTheTail() throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", "sleep 30"]
-        try process.run()
-        defer { if process.isRunning { process.terminate() } }
-
-        let adopted = try XCTUnwrap(registry.adopt(process: process, command: "swift build",
-                                                   workingDirectory: NSTemporaryDirectory(),
-                                                   conversationID: conversation))
-        registry.complete(conversationID: conversation, taskID: adopted.id,
-                          output: "Compiling\nBuild complete!\n", status: .exited(code: 0))
-
-        let done = try XCTUnwrap(registry.snapshot(conversationID: conversation, taskID: adopted.id))
-        XCTAssertEqual(done.tail, "Compiling\nBuild complete!")
-        XCTAssertEqual(done.logCharacterCount, 26)
+    /// The foreground path uses the same live log, and `waitUntilEnded` must not return before the
+    /// final drain — its caller reads the tail and the file the moment it is woken.
+    func testAForegroundTaskIsDrainedBeforeItsWaiterWakes() async throws {
+        let task = try registry.launch(command: "echo Compiling; printf 'Build complete!'",
+                                       workingDirectory: NSTemporaryDirectory(),
+                                       timeout: 30, conversationID: conversation, foreground: true)
+        let ended = await registry.waitUntilEnded(conversationID: conversation, taskID: task.id)
+        let done = try XCTUnwrap(ended)
+        XCTAssertEqual(done.tail, "Compiling\nBuild complete!",
+                       "the waiter woke before the final drain — the unterminated last line is missing")
+        XCTAssertEqual(done.status, .exited(code: 0))
     }
 
     /// A log rewritten shorter than what was already consumed must reset rather than read garbage

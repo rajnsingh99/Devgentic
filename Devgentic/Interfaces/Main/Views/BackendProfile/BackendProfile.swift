@@ -1432,6 +1432,11 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     /// vision-input gate. Defaults `.textOnly` (backward-compat for old configs).
     var supportedModalities: SupportedModalities = .textOnly
 
+    /// Context window (tokens) to run Ollama under, set by Code's per-project "Context size"
+    /// (2026-09-24). Wins over the Advanced settings, the preset and the auto-default — see
+    /// `OllamaRequestOptions.resolve`. Nil everywhere else. Ollama only; other providers ignore it.
+    var numCtxOverride: Int?
+
     /// Convenience: combined profile used for generator + parser routing in AgentConnect.
     var cognitiveProfile: CognitiveProfile {
         CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata, modalities: supportedModalities, chatTemplateSource: chatTemplateSource, stopSequences: stopSequences)
@@ -1492,7 +1497,7 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     // MARK: - Codable Conformance
 
     enum CodingKeys: String, CodingKey {
-        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences, thinkingEnabled, supportedModalities
+        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences, thinkingEnabled, supportedModalities, numCtxOverride
     }
 
     init(from decoder: Decoder) throws {
@@ -1519,6 +1524,8 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         self.thinkingEnabled = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) ?? false
         // Backward-compat: old configs have no modalities → text-only.
         self.supportedModalities = try container.decodeIfPresent(SupportedModalities.self, forKey: .supportedModalities) ?? .textOnly
+        // ⚠️ Hand-written decoder: a field missing here is encoded and then silently dropped.
+        self.numCtxOverride = try container.decodeIfPresent(Int.self, forKey: .numCtxOverride)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1539,6 +1546,7 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         if supportedModalities != .textOnly {
             try container.encode(supportedModalities, forKey: .supportedModalities)
         }
+        try container.encodeIfPresent(numCtxOverride, forKey: .numCtxOverride)
     }
 }
 
@@ -1583,6 +1591,11 @@ extension Tool {
         timeout = (try? container.decodeIfPresent(TimeInterval.self, forKey: .timeout)) ?? nil
         timeoutMessage = (try? container.decodeIfPresent(String.self, forKey: .timeoutMessage)) ?? nil
         isFavorite = (try? container.decode(Bool.self, forKey: .isFavorite)) ?? false
+        // ⚠️ Every field on `Tool` needs a line HERE — this decoder is hand-written, so a new field
+        // is ENCODED by the synthesized encoder and silently DROPPED on the way back. `cutStrategy`
+        // shipped exactly like that for a day: the Tool Library's choice saved, and every profile
+        // read returned nil (caught 2026-09-24 by `CodeProjectSessionTests`).
+        cutStrategy = (try? container.decodeIfPresent(ContextCutStrategy.self, forKey: .cutStrategy)) ?? nil
     }
 }
 

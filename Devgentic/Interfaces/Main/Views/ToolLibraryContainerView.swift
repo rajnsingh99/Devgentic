@@ -20,6 +20,8 @@ struct ToolLibraryContainerView: View {
     let routeProfileID: UUID?
 
     @Environment(BackendProfileService.self) private var profileService
+    /// The Code profile's tools belong to the OPEN PROJECT — the label must say which one.
+    @Environment(CodeSessionManager.self) private var codeSessionManager
     // register B16 — needed to surface the tool-capability advisory this screen was discarding.
     @Environment(ToastManager.self) private var toastManager
     @Environment(MainViewRouter.self) private var router
@@ -28,6 +30,7 @@ struct ToolLibraryContainerView: View {
     @State private var isSearchExpanded = false
     @State private var isSelectionMode = false
     @State private var selectedToolIDs: Set<String> = []
+    @State private var isShowingAllToolsDropdown = false
 
     /// Profile chosen inside the library, persisted so the Tools tab reopens where you left
     /// off. An explicit route profile always wins over it — arriving from a profile's own
@@ -81,6 +84,7 @@ struct ToolLibraryContainerView: View {
                     isSelectionMode: $isSelectionMode,
                     selectedToolIDs: $selectedToolIDs,
                     hiddenToolNames: hiddenToolNames,
+                    lockedToolNames: lockedToolNames,
                     canConfigureTools: canConfigureTools,
                     profileSelector: { AnyView(profileSelector) }
                 )
@@ -100,7 +104,7 @@ struct ToolLibraryContainerView: View {
                 }
                 logger.info("""
                     [TOOLLIB] Opened \(routeProfileID != nil ? "pinned to a route profile" : "unpinned"); \
-                    configuring '\(currentProfile?.displayName ?? "no profile")' — tool enablement \
+                    configuring '\(profileLabel)' — tool enablement \
                     controls \(canConfigureTools ? "shown" : "HIDDEN, nothing to write to").
                     """)
             }
@@ -135,11 +139,16 @@ struct ToolLibraryContainerView: View {
 
                 IslandIconButton(
                     symbol: allToolsSelected ? "checkmark.circle.fill" : "checkmark.circle",
-                    isActive: allToolsSelected,
-                    help: allToolsSelected ? "Deselect all tools" : "Select all tools",
-                    accessibilityLabel: allToolsSelected ? "Deselect all tools" : "Select all tools"
+                    isActive: isShowingAllToolsDropdown || allToolsSelected,
+                    help: "Configure all visible tools",
+                    accessibilityLabel: "All tools execution mode"
                 ) {
-                    toggleSelectAll()
+                    isShowingAllToolsDropdown.toggle()
+                }
+                .popover(isPresented: $isShowingAllToolsDropdown, arrowEdge: .bottom) {
+                    allToolsDropdownContent
+                        .frame(width: 290)
+                        .padding(8)
                 }
             }
         }
@@ -180,16 +189,18 @@ struct ToolLibraryContainerView: View {
                     if profile.id == profileID {
                         Label(profile.displayName, systemImage: "checkmark")
                     } else {
-                        Text(profile.displayName)
+                        Label(profile.displayName, systemImage: profile.profileType.iconName)
                     }
                 }
             }
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: canConfigureTools ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
-                    .font(.caption2)
-                    .foregroundColor(canConfigureTools ? theme.accentColor : theme.secondaryText)
-                Text(currentProfile?.displayName ?? "No profile selected")
+                if let iconName = profileIconName {
+                    Image(systemName: iconName)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(canConfigureTools ? theme.accentColor : theme.secondaryText)
+                }
+                Text(profileLabel)
                     .font(.caption)
                     .foregroundColor(canConfigureTools ? theme.primaryText : theme.secondaryText)
                     .lineLimit(1)
@@ -214,11 +225,49 @@ struct ToolLibraryContainerView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(pinned)
-        .help(pinned
-              ? "Configuring \(currentProfile?.displayName ?? "this profile"). Open the Tools tab to switch."
-              : (canConfigureTools
-                 ? "Tools you enable apply to this profile. Click to switch."
-                 : "Choose a profile to enable tools for it."))
+        .help(isCodeProfile
+              ? Self.codeScopeHelp(projectFolder: codeSessionManager.projectPath)
+              : (pinned
+                 ? "Configuring \(currentProfile?.displayName ?? "this profile"). Open the Tools tab to switch."
+                 : (canConfigureTools
+                    ? "Tools you enable apply to this profile. Click to switch."
+                    : "Choose a profile to enable tools for it.")))
+    }
+
+    /// Relevant SF Symbol for the active profile type (e.g. `</>` for Code, `cpu` for Agent).
+    private var profileIconName: String? {
+        guard let profile = currentProfile else { return nil }
+        return profile.profileType.iconName
+    }
+
+    /// Which project a Code tool change just went to — the Library edits the one Code profile,
+    /// and the open project captures it from there.
+    private func logCodeScopeOfSave() {
+        guard isCodeProfile else { return }
+        if let folder = codeSessionManager.projectPath {
+            logger.info("[TOOLLIB] Code tools saved for project '\(folder.lastPathComponent)'. CONSEQUENCE: that project keeps them; other projects are unaffected.")
+        } else {
+            logger.info("[TOOLLIB] Code tools saved with no project selected. CONSEQUENCE: they go to the next project opened from the welcome screen; a project with its own remembered tools replaces them.")
+        }
+    }
+
+    private var profileLabel: String {
+        guard let profile = currentProfile else { return "No profile selected" }
+        guard isCodeProfile else { return profile.displayName }
+        return Self.codeScopeLabel(profileName: profile.displayName, projectFolder: codeSessionManager.projectPath)
+    }
+
+    /// "Code Session · <project>" — the Code profile's tools are saved per project (2026-09-24),
+    /// so a bare "Code Session" left the user guessing which project a change would land in.
+    static func codeScopeLabel(profileName: String, projectFolder: URL?) -> String {
+        "\(profileName) · \(projectFolder?.lastPathComponent ?? String(localized: "No Project Selected"))"
+    }
+
+    static func codeScopeHelp(projectFolder: URL?) -> String {
+        if let projectFolder {
+            return String(localized: "Tools you enable here apply to the project “\(projectFolder.lastPathComponent)” only. Each project keeps its own.")
+        }
+        return String(localized: "No project is selected. Tools you enable here go to the next project you open.")
     }
 
     /// Profiles that actually have a tools list to write into.
@@ -242,17 +291,20 @@ struct ToolLibraryContainerView: View {
         profileService.profiles.first(where: { $0.id == profileID })
     }
 
-    /// True when the active profile is a Code profile (`.code(AgentConfig)`). Drives
-    /// the preset-tool hiding in the library so the user can't disable them.
+    /// True when the active profile is a Code profile (`.code(AgentConfig)`).
     private var isCodeProfile: Bool {
         guard let profile = currentProfile else { return false }
         if case .code = profile.details { return true }
         return false
     }
 
-    /// Tool names to hide from the Tool Library UI. For Code profiles, this is the
-    /// full preset (originals + splits) — invisible rows can't be disabled. For
-    /// other profile types, nothing is hidden.
+    /// Core tools that cannot be disabled for a Code profile.
+    private var lockedToolNames: Set<String> {
+        isCodeProfile ? CodeToolPreset.lockedToolNames : []
+    }
+
+    /// Tool names to hide from the Tool Library UI. For Code profiles, this is only
+    /// superseded tools (if any). Preset tools are now shown and locked.
     private var hiddenToolNames: Set<String> {
         isCodeProfile ? CodeToolPreset.hiddenToolNames : []
     }
@@ -261,7 +313,8 @@ struct ToolLibraryContainerView: View {
     private func readTools(from details: ProfileDetails) -> [Tool] {
         switch details {
         case .agent(let config): return config.tools
-        case .code(let config):  return config.tools
+        case .code(let config):
+            return CodeSessionManager.mergePresetTools(preset: CodeToolPreset.defaultTools, existing: config.tools)
         default: return []
         }
     }
@@ -286,7 +339,7 @@ struct ToolLibraryContainerView: View {
             config.tools = tools
             return .agent(config)
         case .code(var config):
-            config.tools = tools
+            config.tools = CodeSessionManager.mergePresetTools(preset: CodeToolPreset.defaultTools, existing: tools)
             return .code(config)
         default:
             return details
@@ -312,39 +365,179 @@ struct ToolLibraryContainerView: View {
         }
     }
 
-    private func toggleSelectAll() {
-        guard let profile = currentProfile else { return }
-        var tools = readTools(from: profile.details)
-        let instructions = currentInstructions
+    // MARK: - All Tools Bulk Configuration
 
+    private var allToolsState: ToolControlState? {
+        let tools = currentTools
         let rows = currentDisplayedRows()
-        let allSelected = rows.allSatisfy { row in
+        guard !rows.isEmpty else { return .disabled }
+
+        let enabledRows = rows.filter { row in
             tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
         }
 
-        if allSelected {
-            // Deselect all in current view
-            for row in rows {
-                // Skip tools referenced in instructions
-                if instructions.contains("`\(row.definition.name)`") {
-                    continue
-                }
-                tools.removeAll { $0.name == row.definition.name && $0.sourceId == row.source.id }
+        let disableableRows = rows.filter { !lockedToolNames.contains($0.definition.name) }
+        let enabledDisableableRows = disableableRows.filter { row in
+            tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
+        }
+
+        if !disableableRows.isEmpty && enabledDisableableRows.isEmpty {
+            return .disabled
+        }
+
+        if enabledRows.count == rows.count {
+            let allAuto = rows.allSatisfy { row in
+                guard let t = tools.first(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) else { return false }
+                return !t.requiresConfirmation
             }
-        } else {
-            // Select all in current view — always Ask mode.
-            //
-            // This used to read the tool's `readOnlyHint` annotation and, when true,
-            // enable the tool with `requiresConfirmation: false`. That annotation is
-            // supplied BY THE MCP SERVER, so a third party was choosing this app's
-            // security posture — and choosing the permissive side. A server declaring
-            // `readOnlyHint: true` on a destructive tool got silent auto-run.
-            //
-            // Annotations describe, they never enforce: they render as badges in the
-            // Tool Library (ToolLibraryView) and nothing more. `requiresConfirmation`
-            // is the user's setting alone.
+            if allAuto { return .auto }
+
+            let allAsk = rows.allSatisfy { row in
+                guard let t = tools.first(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) else { return false }
+                return t.requiresConfirmation
+            }
+            if allAsk { return .ask }
+        }
+
+        return nil
+    }
+
+    private var allToolsDropdownContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("ALL VISIBLE TOOLS")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(theme.secondaryText.opacity(0.75))
+                .tracking(0.6)
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 2)
+
+            StateDropdownOptionRow(
+                state: .auto,
+                isSelected: allToolsState == .auto,
+                customTitle: "Auto Run All",
+                customSubtitle: "Set all visible tools to run automatically",
+                theme: theme,
+                onSelect: {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        setAllToolsState(.auto)
+                    }
+                    isShowingAllToolsDropdown = false
+                }
+            )
+
+            StateDropdownOptionRow(
+                state: .ask,
+                isSelected: allToolsState == .ask,
+                customTitle: "Ask First All",
+                customSubtitle: "Set all visible tools to require confirmation",
+                theme: theme,
+                onSelect: {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        setAllToolsState(.ask)
+                    }
+                    isShowingAllToolsDropdown = false
+                }
+            )
+
+            let rows = currentDisplayedRows()
+            let disableableRows = rows.filter { !lockedToolNames.contains($0.definition.name) }
+            let allLocked = !rows.isEmpty && disableableRows.isEmpty
+
+            StateDropdownOptionRow(
+                state: .disabled,
+                isSelected: allToolsState == .disabled,
+                isDisabled: allLocked,
+                disabledReason: allLocked ? "All visible tools are core tools required for Code Session" : nil,
+                customTitle: "Disable All",
+                customSubtitle: lockedToolNames.isEmpty
+                    ? "Turn off all visible tools"
+                    : "Turn off visible tools (core tools remain protected)",
+                theme: theme,
+                onSelect: {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        setAllToolsState(.disabled)
+                    }
+                    isShowingAllToolsDropdown = false
+                }
+            )
+
+            if isSelectionMode {
+                Divider()
+                    .padding(.vertical, 4)
+
+                let allChecked = !rows.isEmpty && rows.allSatisfy { selectedToolIDs.contains($0.id) }
+
+                Button {
+                    if allChecked {
+                        selectedToolIDs.removeAll()
+                    } else {
+                        selectedToolIDs = Set(rows.map(\.id))
+                    }
+                    isShowingAllToolsDropdown = false
+                } label: {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(theme.accentColor.opacity(0.12))
+                                .frame(width: 26, height: 26)
+
+                            Image(systemName: allChecked ? "checklist.unchecked" : "checklist.checked")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(theme.accentColor)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(allChecked ? "Deselect All Checkboxes" : "Select All Checkboxes (\(rows.count))")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(theme.primaryText)
+
+                            Text(allChecked ? "Clear all checkboxes" : "Check all visible tools for bulk action")
+                                .font(.system(size: 10))
+                                .foregroundColor(theme.secondaryText)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func setAllToolsState(_ targetState: ToolControlState) {
+        guard let profile = currentProfile else { return }
+        var tools = readTools(from: profile.details)
+        let instructions = currentInstructions
+        let rows = currentDisplayedRows()
+
+        switch targetState {
+        case .auto:
             for row in rows {
-                if !tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) {
+                if let idx = tools.firstIndex(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) {
+                    tools[idx].requiresConfirmation = false
+                    tools[idx].isEnabled = true
+                } else {
+                    tools.append(Tool(
+                        name: row.definition.name,
+                        description: row.definition.description,
+                        isEnabled: true,
+                        requiresConfirmation: false,
+                        sourceId: row.source.id,
+                        parameters: row.definition.parameters
+                    ))
+                }
+            }
+
+        case .ask:
+            for row in rows {
+                if let idx = tools.firstIndex(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) {
+                    tools[idx].requiresConfirmation = true
+                    tools[idx].isEnabled = true
+                } else {
                     tools.append(Tool(
                         name: row.definition.name,
                         description: row.definition.description,
@@ -355,6 +548,19 @@ struct ToolLibraryContainerView: View {
                     ))
                 }
             }
+
+        case .disabled:
+            for row in rows {
+                // Skip tools referenced in instructions
+                if instructions.contains("`\(row.definition.name)`") {
+                    continue
+                }
+                // Skip core tools required for Code Session
+                if lockedToolNames.contains(row.definition.name) {
+                    continue
+                }
+                tools.removeAll { $0.name == row.definition.name && $0.sourceId == row.source.id }
+            }
         }
 
         // Sync to edit buffer
@@ -364,25 +570,11 @@ struct ToolLibraryContainerView: View {
         // Persist
         if let idx = profileService.profiles.firstIndex(where: { $0.id == profileID }) {
             profileService.profiles[idx].details = writeTools(tools, into: profileService.profiles[idx].details)
-            // ⚠️ Was a bare `try?`. The in-memory arrays above are ALREADY mutated, so a throw here
-            // leaves the Tool Library showing the new tool set while disk keeps the old one — the
-            // change survives until relaunch and then silently reverts, with no toast and (before
-            // this) no log line either. This was the only one of the affected save paths that
-            // produced zero diagnostic output.
             do {
-                // ⚠️ register B16 — the advisories are SHOWN here, not discarded. `ProfileValidator`
-                // emits "the selected model does not support tool calling" for local providers, and
-                // this screen is where the user is enabling tools: every save recomputed that
-                // warning and threw it away, so someone could tick ten tools onto a model that
-                // cannot call any of them and be told nothing. A34's banner lives in the three
-                // detail editors — the one screen the user is NOT on at this moment.
                 let advisories = try profileService.saveProfile(profileService.profiles[idx])
                 showToolAdvisories(advisories)
-                // ⚠️ Re-baseline ONLY on success, and only onto what was actually written. Without
-                // this the detail editor kept an `original` describing the pre-change tool list, so
-                // it showed Save/Revert pills for an edit the user never made — and Revert restored
-                // that stale list while disk and every send kept the new one.
                 profileService.rebaseEditBuffer(to: profileService.profiles[idx])
+                logCodeScopeOfSave()
             } catch {
                 logger.error(
                     "[TOOLS] Failed to persist tool selection for profile \(profileID): \(error). "
@@ -478,6 +670,7 @@ struct ToolLibraryContainerView: View {
                     self.showToolAdvisories(advisories)
                     // Same re-baseline as the bulk path above — see the note there.
                     self.profileService.rebaseEditBuffer(to: self.profileService.profiles[idx])
+                    self.logCodeScopeOfSave()
                 } catch {
                     logger.error(
                         "[TOOLS] Failed to persist tool binding for profile \(self.profileID): \(error). "

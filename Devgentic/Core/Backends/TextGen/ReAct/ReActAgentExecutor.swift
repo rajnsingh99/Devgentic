@@ -176,7 +176,7 @@ actor ReActAgentExecutor: Executor {
                     // extra iterations bouncing off the gate.
                     var readingToolSuccessCount = 0
                     let readingToolNames: Set<String> = [
-                        "read_file", "find_definition", "code_search", "file_overview", "codebase_map"
+                        "read_file", "find_definition", "code_search", "file_overview", "project_tree", "codebase_map"
                     ]
                     // Narrowed to what THIS run actually registered. The filter below was
                     // already a no-op for a non-Code profile, but the unlock branch was not:
@@ -613,6 +613,16 @@ actor ReActAgentExecutor: Executor {
                             // Accumulate token usage from this cognitive step
                             if let usage = step.tokenUsage {
                                 accumulatedTokenUsage.accumulate(usage)
+
+                                // The provider's OWN count says whether this prompt filled the
+                                // window. Ollama does not error on that — it drops the START of the
+                                // prompt (instructions and the `final_answer` contract go first) and
+                                // answers anyway, so without this the run just "misbehaves".
+                                if let overflow = ContextCutLog.overflow(in: usage, step: currentIteration, windowTokens: input.contextWindowTokens) {
+                                    logger.warning("[CONTEXT] Step \(currentIteration)'s prompt used \(usage.inputTokens) of the \(input.contextWindowTokens)-token window — the provider had to cut it. CONSEQUENCE: Ollama drops the START of the prompt, so the model may have lost its instructions from this step on; the context gauge reports it. Conversation \(input.conversationID.uuidString.prefix(8)), trace \(input.traceContext.traceID).")
+                                    ContextCutLog.post(overflow: overflow, conversationID: input.conversationID,
+                                                       traceID: input.traceContext.traceID)
+                                }
                             }
 
                             // Reasoning is suppressed by `ReasoningQualityFilter` for stub
@@ -936,7 +946,7 @@ actor ReActAgentExecutor: Executor {
                                    readingToolSuccessCount < readingGateThreshold {
                                     let remaining = max(0, readingGateThreshold - readingToolSuccessCount)
                                     let noun = remaining == 1 ? "file" : "files"
-                                    let hint = "Read \(remaining) more source \(noun) (e.g. `read_file`, `file_overview`, `codebase_map`) to unlock it"
+                                    let hint = "Read \(remaining) more source \(noun) (e.g. `read_file`, `file_overview`, `project_tree`) to unlock it"
                                     return .gatedTool(attempted: attempted, unlockHint: hint)
                                 }
                                 return originalReason

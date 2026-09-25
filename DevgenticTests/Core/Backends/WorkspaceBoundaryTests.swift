@@ -191,13 +191,13 @@ final class WorkspaceBoundaryTests: XCTestCase {
     private static let presetToolPathArguments: [(tool: String, arg: String, mutating: Bool)] = [
         ("read_file",          "path",              false),
         ("list_directory",     "path",              false),
-        ("codebase_map",       "path",              false),
+        ("project_tree",       "path",              false),
         ("glob_files",         "path",              false),
         ("find_definition",    "path",              false),
         ("code_search_text",   "path",              false),
         ("code_search_symbol", "path",              false),
         ("code_search_files",  "path",              false),
-        ("git_tool",           "path",              false),
+        ("git",                "path",              false),
         ("file_overview",      "file_path",         false),
         ("diff_files",         "file_a",            false),
         ("diff_files",         "file_b",            false),
@@ -248,14 +248,14 @@ final class WorkspaceBoundaryTests: XCTestCase {
         }
     }
 
-    func testGitToolIsTreatedAsReadOnly() {
+    func testGitIsTreatedAsReadOnly() {
         // ⚠️ Its schema offers only status/log/diff/branch/stash_list/blame/show. Misclassifying
         // it as mutating REFUSES git entirely for the common layout where a module's `.git` lives
         // in a parent directory — which is exactly the shape of the project this was found on.
-        let decision = decide("git_tool", ["path": .string("/Users/someone/Projects")], root: root)
+        let decision = decide("git", ["path": .string("/Users/someone/Projects")], root: root)
 
         guard case .askUser = decision.outcome else {
-            return XCTFail("git_tool is read-only; outside the project it must ASK, not refuse.")
+            return XCTFail("git is read-only; outside the project it must ASK, not refuse.")
         }
     }
 

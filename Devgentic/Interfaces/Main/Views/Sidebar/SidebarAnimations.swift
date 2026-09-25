@@ -58,6 +58,7 @@ struct HoverActionButton: View {
                     .offset(y: icon.contains("pin") ? -1.5 : 0)
             }
             .frame(width: 22, height: 22)
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
         .buttonStyle(.plain)
         .frame(width: 22, height: 22)
@@ -65,6 +66,7 @@ struct HoverActionButton: View {
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(isHovering ? theme.surfaceOverlay : Color.clear)
         )
+        .pointingHandCursor()
         .onHover { isHovering = $0 }
         .accessibilityLabel(label)
     }

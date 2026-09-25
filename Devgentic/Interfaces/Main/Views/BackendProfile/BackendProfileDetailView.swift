@@ -309,6 +309,7 @@ struct ProfileRowView: View {
             }
         }
         .contentShape(Rectangle())
+        .pointingHandCursor()
         // `accessibilityLabel(_: String)` does not localize; the `Text` overload does, and a
         // nested `Text` keeps the type name translatable inside the composed phrase.
         .accessibilityLabel(Text("\(profile.displayName), \(Text(profile.profileType.localizedTitle))"))

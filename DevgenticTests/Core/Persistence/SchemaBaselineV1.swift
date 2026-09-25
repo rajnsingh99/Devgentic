@@ -99,6 +99,7 @@ ENTITY ConversationSD
   ATTR isPinned: Bool [required]
   ATTR openAIThreadID: Optional<String> [optional]
   ATTR profileTypeRaw: Optional<String> [optional]
+  ATTR projectPath: Optional<String> [optional]
   ATTR timestamp: Date [required]
   ATTR userDefinedTitle: Optional<String> [optional]
   REL  messages: Array<ChatMessageSD> [required] -> ChatMessageSD delete=cascade inverse=conversation

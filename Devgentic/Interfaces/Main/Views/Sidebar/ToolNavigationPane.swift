@@ -223,8 +223,10 @@ struct ToolNavigationPane: View {
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .strokeBorder(isSelected ? theme.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
                         )
+                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
         }
         .padding(3)
@@ -559,8 +561,10 @@ struct ToolSidebarRow: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .sidebarRowBackground(isSelected: isSelected, isHovering: isHovered)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering

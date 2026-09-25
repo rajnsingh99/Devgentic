@@ -177,6 +177,7 @@ struct ThemeSettingsView: View {
                     .frame(height: 1)
 
                 // MARK: - Chat Font Section
+                // MARK: - Chat Typography Section
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
@@ -184,18 +185,39 @@ struct ThemeSettingsView: View {
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
 
-                            Text("CHAT FONT")
+                            Text("CHAT TYPOGRAPHY")
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                                 .tracking(1.8)
                                 .foregroundColor(theme.secondaryText)
                         }
 
-                        Text("Adjust font size and line spacing for chat messages.")
+                        Text("Select font family, adjust size and line spacing for chat messages.")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        // Font Family Selector
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Font Family")
+                                .font(theme.fontSubheadline.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
+
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 14)], spacing: 14) {
+                                ForEach(ChatFontFamily.allCases) { family in
+                                    ChatFontFamilyCard(
+                                        family: family,
+                                        isSelected: themeManager.chatFontFamily == family,
+                                        theme: theme
+                                    ) {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                            themeManager.applyChatFontFamily(family)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Font Size Slider
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -268,6 +290,7 @@ struct ThemeSettingsView: View {
 
                             Button {
                                 withAnimation(.easeInOut(duration: 0.2)) {
+                                    themeManager.applyChatFontFamily(.system)
                                     themeManager.applyChatFontSize(15)
                                     themeManager.applyChatLineSpacing(4)
                                 }
@@ -277,8 +300,8 @@ struct ThemeSettingsView: View {
                                     .foregroundColor(theme.secondaryText)
                             }
                             .buttonStyle(.plain)
-                            .disabled(themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4)
-                            .opacity(themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4 ? 0.4 : 1)
+                            .disabled(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4)
+                            .opacity(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4 ? 0.4 : 1)
                         }
                     }
                 }
@@ -719,7 +742,7 @@ struct InteractiveMiniChatPreviewView: View {
                     }
                 }
 
-                Text("Interactive preview reflecting your theme, accent color, chat font size, line spacing, and code syntax palette.")
+                Text("Interactive preview reflecting your theme, accent color, chat typography (\(themeManager.chatFontFamily.shortName), \(Int(themeManager.chatFontSize))pt), and code syntax palette.")
                     .font(theme.fontSubheadline)
                     .foregroundColor(theme.secondaryText)
             }
@@ -732,7 +755,7 @@ struct InteractiveMiniChatPreviewView: View {
                     Circle().fill(Color.yellow.opacity(0.7)).frame(width: 8, height: 8)
                     Circle().fill(Color.green.opacity(0.7)).frame(width: 8, height: 8)
                     Spacer()
-                    Text("Live Preview • \(theme.displayName) • \(selectedLanguage.rawValue)")
+                    Text("Live Preview • \(theme.displayName) • \(themeManager.chatFontFamily.shortName) • \(selectedLanguage.rawValue)")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundColor(theme.secondaryText.opacity(0.7))
                     Spacer()
@@ -865,6 +888,74 @@ struct InteractiveMiniChatPreviewView: View {
             customUserMessage = trimmed
             inputDraft = ""
         }
+    }
+}
+
+// MARK: - Chat Font Family Card
+
+private struct ChatFontFamilyCard: View {
+    let family: ChatFontFamily
+    let isSelected: Bool
+    let theme: any Theme
+    let onSelect: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text(family.sampleGlyph)
+                        .font(.system(size: 13, weight: .bold, design: family.design))
+                        .foregroundColor(isSelected ? theme.accentColor : theme.primaryText)
+                        .frame(width: 26, height: 26)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(isSelected ? theme.accentColor.opacity(0.15) : theme.surfaceOverlay)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(isSelected ? theme.accentColor.opacity(0.3) : theme.dividerColor.opacity(0.4), lineWidth: 0.75)
+                        )
+
+                    Text(family.displayName)
+                        .font(theme.fontFootnote.weight(isSelected ? .bold : .semibold))
+                        .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(theme.accentColor)
+                    }
+                }
+
+                Text(family.subtitle)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? theme.accentColor.opacity(0.08) : (isHovering ? theme.surfaceOverlay : theme.secondaryBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        isSelected
+                            ? theme.accentColor.opacity(0.5)
+                            : (isHovering ? theme.secondaryText.opacity(0.25) : theme.dividerColor.opacity(0.5)),
+                        lineWidth: isSelected ? 1.5 : 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
     }
 }
 
@@ -1018,7 +1109,7 @@ private struct ButtonAccentStyleCard: View {
 
     private var previewForeground: Color {
         switch style {
-        case .accent: return .white
+        case .accent: return theme.accentForegroundColor
         case .themeContrast: return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
         }
     }
@@ -1032,8 +1123,10 @@ private struct ButtonAccentStyleCard: View {
 
     private var previewBorder: Color {
         switch style {
-        case .accent: return Color.white.opacity(0.25)
-        case .themeContrast: return theme.isDark ? .white : Color(red: 0.12, green: 0.12, blue: 0.14)
+        case .accent:
+            return theme.isAccentLight ? theme.dividerColor.opacity(0.5) : Color.white.opacity(0.25)
+        case .themeContrast:
+            return theme.isDark ? .white : Color(red: 0.12, green: 0.12, blue: 0.14)
         }
     }
 }

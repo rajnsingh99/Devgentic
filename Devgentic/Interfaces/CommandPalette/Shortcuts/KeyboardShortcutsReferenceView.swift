@@ -8,12 +8,15 @@
 //
 
 import SwiftUI
+import AppKit
 
 struct KeyboardShortcutsReferenceView: View {
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.dismiss) private var dismiss
     @State private var selectedCategory: ShortcutCategory = .all
     @State private var searchText: String = ""
+    @State private var hostWindow: NSWindow? = nil
 
     private var filteredShortcuts: [ShortcutItem] {
         let categoryFiltered: [ShortcutItem]
@@ -53,8 +56,10 @@ struct KeyboardShortcutsReferenceView: View {
         VStack(spacing: 0) {
             headerView
             categoryFilterBar
-            Divider()
-                .opacity(0.4)
+
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.6))
+                .frame(height: 1)
 
             if filteredShortcuts.isEmpty {
                 emptyStateView
@@ -64,12 +69,30 @@ struct KeyboardShortcutsReferenceView: View {
         }
         .frame(minWidth: 700, idealWidth: 780, minHeight: 520, idealHeight: 600)
         .background(theme.primaryBackground)
+        .ignoresSafeArea()
+        .background(
+            SeamlessShortcutsWindowAccessor(theme: theme, hostWindow: $hostWindow)
+        )
+        // Hidden accelerator for Cmd+W
+        .background(
+            Button(action: closeWindow) {
+                EmptyView()
+            }
+            .keyboardShortcut("w", modifiers: .command)
+            .frame(width: 0, height: 0)
+            .opacity(0)
+        )
+    }
+
+    private func closeWindow() {
+        dismiss()
+        hostWindow?.close()
     }
 
     // MARK: - Header
 
     private var headerView: some View {
-        HStack(alignment: .center, spacing: 16) {
+        HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Image(systemName: "command.square.fill")
@@ -88,43 +111,50 @@ struct KeyboardShortcutsReferenceView: View {
 
             Spacer()
 
-            // Search Bar
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(theme.tertiaryText)
+            // Search Bar & Close Button
+            HStack(alignment: .center, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(theme.tertiaryText)
 
-                TextField("Search shortcuts or keys…", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .foregroundColor(theme.primaryText)
+                    TextField("Search shortcuts or keys…", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .foregroundColor(theme.primaryText)
 
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 12))
-                            .foregroundColor(theme.tertiaryText)
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(theme.tertiaryText)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .frame(width: 240)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.surfaceOverlay)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.8)
+                )
+
+                // Close Button in top-right corner (in place of top bar)
+                WindowCloseIconButton {
+                    closeWindow()
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(width: 240)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.surfaceOverlay)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(theme.surfaceOverlayStrong, lineWidth: 0.8)
-            )
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 20)
-        .padding(.bottom, 14)
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
+        .padding(.bottom, 12)
     }
 
     // MARK: - Category Filter Bar
@@ -151,16 +181,21 @@ struct KeyboardShortcutsReferenceView: View {
                             Capsule(style: .continuous)
                                 .fill(isSelected ? theme.accentColor : theme.surfaceOverlay.opacity(0.7))
                         )
-                        .foregroundColor(isSelected ? .white : theme.secondaryText)
+                        .foregroundColor(isSelected ? theme.accentForegroundColor : theme.secondaryText)
                         .overlay(
                             Capsule(style: .continuous)
-                                .stroke(isSelected ? Color.clear : theme.surfaceOverlayStrong, lineWidth: 0.5)
+                                .stroke(
+                                    isSelected
+                                        ? (theme.isAccentLight ? theme.dividerColor.opacity(0.5) : Color.white.opacity(0.18))
+                                        : theme.surfaceOverlayStrong,
+                                    lineWidth: 0.6
+                                )
                         )
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 20)
             .padding(.vertical, 10)
         }
     }
@@ -199,8 +234,9 @@ struct KeyboardShortcutsReferenceView: View {
                     }
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 18)
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 24)
         }
     }
 
@@ -221,17 +257,117 @@ struct KeyboardShortcutsReferenceView: View {
                 .font(.subheadline)
                 .foregroundColor(theme.secondaryText)
 
-            Button("Clear Search") {
+            TactileButton(
+                title: "Clear Search",
+                icon: "xmark.circle",
+                variant: .primary,
+                size: .compact
+            ) {
                 searchText = ""
                 selectedCategory = .all
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
             .padding(.top, 6)
 
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Close Icon Button with Hover Effect
+
+private struct WindowCloseIconButton: View {
+    let action: () -> Void
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(isHovered ? theme.surfaceOverlayStrong : Color.clear)
+                    .frame(width: 28, height: 28)
+
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(isHovered ? theme.primaryText : theme.secondaryText)
+            }
+            .contentShape(Circle())
+            .scaleEffect(isHovered ? 1.06 : 1.0)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .help("Close (Esc or ⌘W)")
+        .keyboardShortcut(.cancelAction)
+    }
+}
+
+// MARK: - Seamless Window Accessor
+
+private final class WindowObserverNSView: NSView {
+    var onWindowAvailable: ((NSWindow) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window = window {
+            onWindowAvailable?(window)
+        }
+    }
+}
+
+private struct SeamlessShortcutsWindowAccessor: NSViewRepresentable {
+    let theme: any Theme
+    @Binding var hostWindow: NSWindow?
+
+    func makeNSView(context: Context) -> WindowObserverNSView {
+        let view = WindowObserverNSView()
+        view.onWindowAvailable = { [weak view] window in
+            DispatchQueue.main.async {
+                self.hostWindow = window
+                configure(window)
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowObserverNSView, context: Context) {
+        if let window = nsView.window {
+            DispatchQueue.main.async {
+                self.hostWindow = window
+                configure(window)
+            }
+        }
+    }
+
+    private func configure(_ window: NSWindow) {
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
+        window.styleMask.insert(.fullSizeContentView)
+        window.isOpaque = false
+        window.backgroundColor = NSColor(theme.primaryBackground)
+
+        // Hide standard window traffic lights
+        for buttonType in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(buttonType)?.isHidden = true
+        }
+
+        // Hide titlebar container view to eliminate any residual titlebar material or separator
+        if let titlebarContainer = window.standardWindowButton(.closeButton)?.superview?.superview {
+            titlebarContainer.isHidden = true
+            titlebarContainer.alphaValue = 0
+        } else if let themeFrame = window.contentView?.superview {
+            for subview in themeFrame.subviews {
+                if NSStringFromClass(type(of: subview)).contains("Titlebar") {
+                    subview.isHidden = true
+                    subview.alphaValue = 0
+                }
+            }
+        }
     }
 }
 
@@ -254,10 +390,14 @@ private struct ShortcutRowView: View {
                     if let note = item.contextNote {
                         Text(note)
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(theme.accentColor)
+                            .foregroundColor(theme.isAccentLight ? theme.primaryText : theme.accentColor)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(theme.accentColor.opacity(0.12))
+                            .background(
+                                theme.isAccentLight
+                                    ? theme.surfaceOverlayStrong
+                                    : theme.accentColor.opacity(0.12)
+                            )
                             .clipShape(Capsule())
                     }
                 }
@@ -285,7 +425,12 @@ private struct ShortcutRowView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(isHovering ? theme.accentColor.opacity(0.3) : theme.surfaceOverlayStrong.opacity(0.6), lineWidth: 0.7)
+                .stroke(
+                    isHovering
+                        ? (theme.isAccentLight ? theme.dividerColor : theme.accentColor.opacity(0.35))
+                        : theme.surfaceOverlayStrong.opacity(0.6),
+                    lineWidth: 0.7
+                )
         )
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.12)) {

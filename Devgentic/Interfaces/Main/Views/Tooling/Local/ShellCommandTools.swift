@@ -39,7 +39,7 @@ import Foundation
 
 struct RunCommandTool: DevgenticTool {
     let name = "run_command"
-    let category = "Coding Assistant"
+    let category = "System & Shell"
     let description = "Runs a shell command and WAITS for it to finish, returning its output. Use this for builds, tests, linters, and anything whose result you need. Raise timeout_seconds for a slow build."
     /// A build that writes "error" to stderr is reporting a result, not failing this tool.
     let outputMayContainErrorText = true
@@ -68,9 +68,13 @@ struct RunCommandTool: DevgenticTool {
         switch BatchCommandTool.precheck(command: arguments.command,
                                          workingDirectory: arguments.working_directory) {
         case .refused(let reason):
-            return reason
+            // ⚠️ THROWN, not returned. `outputMayContainErrorText` switches off the mediator's
+            // output sniffing, so a returned "Error: …" is recorded as a SUCCESSFUL call and the
+            // circuit breaker never counts it. `execute_shell` held this line until its removal on
+            // 2026-09-24; `run_command` is now the shell, so it holds it here.
+            throw ShellCommandError.refused(reason: reason)
         case .ready(let workingDirectory):
-            return await BatchCommandTool.runForeground(
+            return try await BatchCommandTool.runForeground(
                 command: arguments.command,
                 workingDirectory: workingDirectory,
                 timeout: BatchCommandTool.effectiveTimeout(arguments.timeout_seconds),
@@ -80,12 +84,30 @@ struct RunCommandTool: DevgenticTool {
     }
 }
 
+/// A shell command that never ran. Thrown rather than returned by tools that opt out of output
+/// sniffing — see `RunCommandTool.call`. Classified as `.executionThrew`: a soft failure, so the
+/// model sees the reason and may retry, and the tool is not banned.
+enum ShellCommandError: Error, LocalizedError {
+    /// Refused before any process ran — interactive programs, destructive patterns, a missing
+    /// working directory.
+    case refused(reason: String)
+    /// The shell could not be started at all.
+    case launchFailed(reason: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .refused(let reason):      return reason
+        case .launchFailed(let reason): return "Error: the command could not be started: \(reason)"
+        }
+    }
+}
+
 // MARK: - start_background_task (does not wait)
 
 struct StartBackgroundTaskTool: DevgenticTool {
     let name = "start_background_task"
-    let category = "Coding Assistant"
-    let description = "Starts a shell command and returns IMMEDIATELY with a task id, without waiting. Use this only to leave something running that you are not waiting for, such as a dev server or a watcher. You get no output from this call — read it with command_output."
+    let category = "System & Shell"
+    let description = "Starts a shell command and returns IMMEDIATELY with a task id, without waiting. Use this only to leave something running that you are not waiting for, such as a dev server or a watcher. You get no output from this call — read it with get_task_output."
 
     let conversationID: UUID?
 
@@ -102,7 +124,7 @@ struct StartBackgroundTaskTool: DevgenticTool {
                 ("working_directory", "string", "Working directory. Required — pass the project root or a subpath."),
                 ("timeout_seconds", "integer", "Seconds before the task is killed, max 900 (default 900). It runs unattended, so this is the only thing that stops a runaway."),
                 ("task_name", "string", "Optional short label, e.g. 'Dev server'. Shown to the user instead of the raw command."),
-                ("notify_on_completion", "boolean", "Default false. Set it true ONLY if you are going to end your turn now and want to be given this task's result when it finishes. You will be asked to report on it and will have no tools, so do not set it for anything you intend to act on yourself — poll with command_output instead. Never set it for a dev server or a watcher: those do not finish."),
+                ("notify_on_completion", "boolean", "Default false. Set it true ONLY if you are going to end your turn now and want to be given this task's result when it finishes. You will be asked to report on it and will have no tools, so do not set it for anything you intend to act on yourself — poll with get_task_output instead. Never set it for a dev server or a watcher: those do not finish."),
             ],
             required: ["command", "working_directory"]
         )

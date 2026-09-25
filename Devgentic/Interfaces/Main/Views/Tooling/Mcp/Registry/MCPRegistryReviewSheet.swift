@@ -212,14 +212,23 @@ struct MCPRegistryReviewSheet: View {
                     .foregroundColor(theme.tertiaryText)
             }
             Spacer()
-            Button("Cancel") { onCancel() }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .keyboardShortcut(.cancelAction)
-            Button("Add server") { confirm() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
-                .disabled(!canConfirm)
+            TactileButton(
+                title: "Cancel",
+                variant: .secondary,
+                size: .regular
+            ) {
+                onCancel()
+            }
+            .keyboardShortcut(.cancelAction)
+
+            TactileButton(
+                title: "Add server",
+                variant: .primary,
+                size: .regular,
+                isEnabled: canConfirm
+            ) {
+                confirm()
+            }
         }
         .padding(12)
     }

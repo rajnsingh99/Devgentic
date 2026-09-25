@@ -162,12 +162,25 @@ struct MCPBugReportSheet: View {
                     .lineLimit(2)
             }
             Spacer()
-            Button("Cancel") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-            Button("Save Report…") { saveReport() }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(report == nil)
+            TactileButton(
+                title: "Cancel",
+                variant: .secondary,
+                size: .regular
+            ) {
+                dismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+
+            TactileButton(
+                title: "Save Report…",
+                icon: "square.and.arrow.down",
+                variant: .primary,
+                size: .regular,
+                isEnabled: report != nil
+            ) {
+                saveReport()
+            }
+            .keyboardShortcut(.defaultAction)
         }
         .padding(16)
     }

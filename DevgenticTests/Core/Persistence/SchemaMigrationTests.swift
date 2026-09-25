@@ -652,6 +652,13 @@ final class SchemaMigrationTests: XCTestCase {
         XCTAssertEqual(try context.fetch(FetchDescriptor<WorkflowRunRecordSD>()).count, 1)
         XCTAssertEqual(try context.fetch(FetchDescriptor<AttachedTextFileSD>()).count, 1)
         XCTAssertEqual(try context.fetch(FetchDescriptor<AttachedImageFileSD>()).count, 1)
+
+        // ⚠️ `ConversationSD.projectPath` (2026-09-24) was added AFTER this fixture was written, as
+        // an optional attribute on the still-unreleased V1. This is what proves a store written
+        // before it — every developer store — still opens and reads the new field as "absent".
+        let conversations = try context.fetch(FetchDescriptor<ConversationSD>())
+        XCTAssertEqual(conversations.count, 1)
+        XCTAssertNil(conversations.first?.projectPath)
     }
 
     /// Anti-vacuity guard for the test above: if the fixture ever loses its rows, that test would

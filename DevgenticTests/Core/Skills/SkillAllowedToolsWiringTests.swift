@@ -152,7 +152,7 @@ final class SkillAllowedToolsWiringTests: XCTestCase {
     /// second, unreachable copy.
     func testTheOfferedToolIsConfirmationGatedAndBuiltInSourced() {
         let tool = SkillCapabilityHints.shellTool()
-        XCTAssertEqual(tool.name, "execute_shell")
+        XCTAssertEqual(tool.name, "run_command", "execute_shell was removed 2026-09-24; run_command is the shell")
         XCTAssertTrue(tool.requiresConfirmation,
                       "the grant is a person's answer to a question — a pre-approved shell makes the question cosmetic")
         XCTAssertEqual(tool.sourceId, ToolSource.builtInSourceID)
@@ -193,7 +193,7 @@ final class SkillAllowedToolsNonEnforcementTests: XCTestCase {
     /// resolve to the same set. An absolute assertion would pass if nothing resolved at all.
     func testARestrictiveDeclarationDoesNotRemoveASingleTool() async {
         let memory = StaticGroundingMemory(ragContext: "")
-        let profileTools = [tool(named: "read_file"), tool(named: "execute_shell")]
+        let profileTools = [tool(named: "read_file"), tool(named: "run_command")]
 
         let underDeclaration = await AgentConnect().resolveExecutableTools(
             profileTools: profileTools,
@@ -210,8 +210,8 @@ final class SkillAllowedToolsNonEnforcementTests: XCTestCase {
 
         XCTAssertEqual(Set(underDeclaration.map(\.name)), Set(underNoDeclaration.map(\.name)),
                        "a skill's allowed-tools must not change which tools a run gets — it describes, it does not gate")
-        XCTAssertTrue(underDeclaration.contains { $0.name == "execute_shell" },
-                      "execute_shell survives a declaration that does not mention it; the control that makes the equality above meaningful")
+        XCTAssertTrue(underDeclaration.contains { $0.name == "run_command" },
+                      "run_command survives a declaration that does not mention it; the control that makes the equality above meaningful")
     }
 
     /// `allowed-tools: []` is the strongest form of the declaration — "this skill needs no tools".

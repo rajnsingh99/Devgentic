@@ -113,6 +113,72 @@ enum ButtonAccentStyle: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Chat Font Family
+
+/// Controls the typography family design used for rendering chat message text.
+enum ChatFontFamily: String, CaseIterable, Identifiable {
+    case system = "system"
+    case monospaced = "monospaced"
+    case serif = "serif"
+    case rounded = "rounded"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .system: return "System (SF Pro)"
+        case .monospaced: return "Monospaced (SF Mono)"
+        case .serif: return "Serif (New York)"
+        case .rounded: return "Rounded"
+        }
+    }
+
+    var shortName: String {
+        switch self {
+        case .system: return "SF Pro"
+        case .monospaced: return "SF Mono"
+        case .serif: return "New York"
+        case .rounded: return "Rounded"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .system: return "Default Apple UI font, optimized for clarity and balance."
+        case .monospaced: return "Fixed-width grid typography, loved by developers for technical reading."
+        case .serif: return "Editorial literary aesthetic, crafted for relaxed long-form reading."
+        case .rounded: return "Friendly, rounded geometric letterforms with a contemporary touch."
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .system: return "textformat"
+        case .monospaced: return "chevron.left.forwardslash.chevron.right"
+        case .serif: return "text.book.closed"
+        case .rounded: return "character.textbox"
+        }
+    }
+
+    var design: Font.Design {
+        switch self {
+        case .system: return .default
+        case .monospaced: return .monospaced
+        case .serif: return .serif
+        case .rounded: return .rounded
+        }
+    }
+
+    var sampleGlyph: String {
+        switch self {
+        case .system: return "Ag"
+        case .monospaced: return "</>"
+        case .serif: return "¶"
+        case .rounded: return "Aa"
+        }
+    }
+}
+
 // MARK: - Theme Manager
 
 /// A class that manages the application's themes.
@@ -160,14 +226,21 @@ enum ButtonAccentStyle: String, CaseIterable, Identifiable {
     private(set) var buttonAccentStyle: ButtonAccentStyle
 
     // MARK: - Chat Font Customization
+    /// The font family design for chat message text. Default: .system.
+    private(set) var chatFontFamily: ChatFontFamily
     /// The font size for chat message body text. Default: 15pt (matches fontBody).
     var chatFontSize: CGFloat
     /// The line spacing for chat message text. Default: 4pt.
     var chatLineSpacing: CGFloat
 
-    /// A computed `Font` built from the user's chat font size preference.
+    /// A computed `Font` built from the user's chat font family and size preference.
     var chatFont: Font {
-        .system(size: chatFontSize, weight: .regular)
+        .system(size: chatFontSize, weight: .regular, design: chatFontFamily.design)
+    }
+
+    /// Helper to produce variations of chat font matching the chosen family.
+    func chatFont(size: CGFloat? = nil, weight: Font.Weight = .regular) -> Font {
+        .system(size: size ?? chatFontSize, weight: weight, design: chatFontFamily.design)
     }
 
     init() {
@@ -213,7 +286,9 @@ enum ButtonAccentStyle: String, CaseIterable, Identifiable {
         let savedButtonStyle = UserDefaults.standard.string(forKey: Self.buttonAccentStyleKey)
         self.buttonAccentStyle = savedButtonStyle.flatMap { ButtonAccentStyle(rawValue: $0) } ?? .themeContrast
 
-        // Load chat font settings (default: 15pt body, 4pt line spacing)
+        // Load chat font settings (default: system family, 15pt body, 4pt line spacing)
+        let savedFontFamily = UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey)
+        self.chatFontFamily = savedFontFamily.flatMap { ChatFontFamily(rawValue: $0) } ?? .system
         let savedFontSize = UserDefaults.standard.object(forKey: AppSettings.chatFontSizeKey) as? CGFloat
         self.chatFontSize = savedFontSize ?? 15
         let savedLineSpacing = UserDefaults.standard.object(forKey: AppSettings.chatLineSpacingKey) as? CGFloat
@@ -275,6 +350,11 @@ enum ButtonAccentStyle: String, CaseIterable, Identifiable {
     }
 
     // MARK: - Chat Font Actions
+
+    func applyChatFontFamily(_ family: ChatFontFamily) {
+        self.chatFontFamily = family
+        UserDefaults.standard.set(family.rawValue, forKey: AppSettings.chatFontFamilyKey)
+    }
 
     func applyChatFontSize(_ size: CGFloat) {
         self.chatFontSize = size

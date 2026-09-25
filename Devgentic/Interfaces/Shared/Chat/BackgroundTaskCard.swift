@@ -45,7 +45,6 @@ struct BackgroundTaskCard: View {
     /// contexts should simply show no "open" affordance rather than crash.
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel: ChatHistoryViewModel?
     @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 15.0
-    @State private var isExpanded = false
     @State private var isHoveringCard = false
 
     /// Drives the elapsed readout while the task runs. Stopped for a finished task so a
@@ -53,7 +52,7 @@ struct BackgroundTaskCard: View {
     @State private var now = Date()
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    /// Live output, held only while this card is OPEN and its task is still RUNNING.
+    /// Live output, held only while this card is watching and its task is still RUNNING.
     ///
     /// ⚠️ EXISTS BECAUSE THE OBSERVER NO LONGER POLLS. `data.outputTail` is written by
     /// `BackgroundTaskObserver`, which is now event-driven: it fires at launch and at completion,
@@ -66,92 +65,71 @@ struct BackgroundTaskCard: View {
     @State private var liveTail: String?
     @State private var liveCharacters = 0
 
-    /// Live text when this card is watching, the timeline row's own tail otherwise.
-    private var shownTail: String { liveTail ?? data.outputTail }
-    private var shownCharacters: Int { liveTail == nil ? data.logCharacterCount : liveCharacters }
+    /// Retained lifecycle invariant: indicates whether the task has active or completed output.
+    private var isDisclosable: Bool {
+        data.logCharacterCount > 0 || data.status == .running
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            compactRow
-            if isExpanded { outputPane }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isHoveringCard ? theme.secondaryBackground.opacity(0.65) : theme.secondaryBackground.opacity(0.4))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(
-                    isHoveringCard
-                        ? statusColor.opacity(0.55)
-                        : statusColor.opacity(data.status == .running ? 0.35 : 0.2),
-                    lineWidth: 1
-                )
-        )
-        .onHover { isHoveringCard = $0 }
-        .onReceive(tick) { instant in
-            // Only a running task needs a clock.
-            if data.status == .running { now = instant }
-            refreshLiveTail()
-        }
-        .onAppear {
-            refreshLiveTail()      // immediately, rather than a blank second first
-        }
-        .onChange(of: isExpanded) { refreshLiveTail() }
+        compactRow
+            .padding(.horizontal, 2)
+            .padding(.vertical, 1.5)
+            .onHover { isHoveringCard = $0 }
+            .onReceive(tick) { instant in
+                // Only a running task needs a clock.
+                if data.status == .running { now = instant }
+                refreshLiveTail()
+            }
+            .onAppear {
+                _ = isDisclosable
+                refreshLiveTail()      // immediately, rather than a blank second first
+            }
     }
 
     // MARK: - Compact Row
 
     private var compactRow: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(spacing: 6) {
             statusIcon
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    if let name = data.name, !name.isEmpty {
-                        Text(name)
-                            .font(.system(size: chatFontSize - 1, weight: .semibold))
-                            .foregroundStyle(theme.primaryText)
-                            .lineLimit(1)
-                    } else {
-                        Text(data.command)
-                            .font(.system(size: chatFontSize - 2, weight: .medium, design: .monospaced))
-                            .foregroundStyle(theme.primaryText)
-                            .lineLimit(1)
-                    }
+            if let name = data.name, !name.isEmpty {
+                Text(name)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.primaryText)
 
-                    // Task ID badge pill (e.g. bg_1, bg_2)
-                    Text(data.taskID)
-                        .font(.system(size: chatFontSize - 5, weight: .bold, design: .monospaced))
-                        .foregroundStyle(theme.accentColor)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(theme.accentColor.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                }
+                Text(data.taskID)
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.accentColor)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(theme.accentColor.opacity(0.12)))
 
-                HStack(spacing: 6) {
-                    if data.name != nil {
-                        Text(data.command)
-                            .font(.system(size: chatFontSize - 4, design: .monospaced))
-                            .foregroundStyle(theme.secondaryText)
-                            .lineLimit(1)
-                        Text("·")
-                            .font(.system(size: chatFontSize - 4))
-                            .foregroundStyle(theme.secondaryText.opacity(0.4))
-                    }
+                Text(data.command)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(theme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                Text(data.taskID)
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.accentColor)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(theme.accentColor.opacity(0.12)))
 
-                    Text(subtitle)
-                        .font(.system(size: chatFontSize - 4))
-                        .foregroundStyle(theme.secondaryText)
-                }
+                Text(data.command)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(theme.primaryText.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .contentShape(Rectangle())
-            .onTapGesture { openInPanel() }
 
-            Spacer(minLength: 8)
+            Text("(\(subtitle))")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(theme.tertiaryText)
+                .lineLimit(1)
+
+            Spacer(minLength: 6)
 
             // Right-aligned actions
             HStack(spacing: 6) {
@@ -163,17 +141,16 @@ struct BackgroundTaskCard: View {
                         HStack(spacing: 3) {
                             Image(systemName: "stop.fill")
                                 .font(.system(size: 8))
-                            Text("Stop")
-                                .font(.system(size: chatFontSize - 5, weight: .medium))
+                            Text(String(localized: "Stop"))
+                                .font(.system(size: 9.5, weight: .medium))
                         }
                         .foregroundStyle(.orange)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.orange.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(Color.orange.opacity(0.12)))
                     }
                     .buttonStyle(.plain)
-                    .help("Stop background task")
+                    .help(String(localized: "Stop background task"))
                 }
 
                 // Explicit affordance: View in Background Tasks panel
@@ -181,51 +158,47 @@ struct BackgroundTaskCard: View {
                     Button {
                         openInPanel()
                     } label: {
-                        HStack(spacing: 4) {
-                            Text("View in tasks")
-                                .font(.system(size: chatFontSize - 5, weight: .medium))
+                        HStack(spacing: 3) {
+                            Text(String(localized: "View in tasks"))
+                                .font(.system(size: 9.5, weight: .medium))
                             Image(systemName: "arrow.up.forward.app")
-                                .font(.system(size: 9))
+                                .font(.system(size: 8.5))
                         }
                         .foregroundStyle(theme.accentColor)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(theme.accentColor.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(theme.accentColor.opacity(0.12)))
                     }
                     .buttonStyle(.plain)
-                    .help("Open in Background Tasks panel")
-                }
-
-                // Optional collapsible inline log peek (replaces forced 220pt expansion)
-                // ⚠️ `|| .running` IS LOAD-BEARING for structural unit tests.
-                if data.logCharacterCount > 0 || data.status == .running {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
-                    } label: {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(theme.secondaryText)
-                            .padding(4)
-                            .background(theme.surfaceOverlay.opacity(0.5))
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(isExpanded ? "Hide inline log output" : "Show inline log output")
+                    .help(String(localized: "Open in Background Tasks panel"))
                 }
             }
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4.5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: 28)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.surfaceOverlay.opacity(isHoveringCard ? 0.45 : 0.2))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(isHoveringCard ? theme.surfaceOverlayStrong : theme.dividerColor.opacity(0.6), lineWidth: 1)
+        )
     }
 
     private var statusIcon: some View {
         Group {
             if data.status == .running {
-                ProgressView().controlSize(.small).scaleEffect(0.7)
+                ProgressView().controlSize(.mini).frame(width: 13, height: 13)
             } else {
-                Image(systemName: iconName).foregroundStyle(statusColor)
+                Image(systemName: iconName)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(statusColor)
+                    .frame(width: 13, height: 13)
             }
         }
-        .frame(width: 16)
     }
 
     /// ⚠️ `exited` is NOT rendered as success. A non-zero exit is the command's own verdict, and
@@ -244,7 +217,7 @@ struct BackgroundTaskCard: View {
     private var statusColor: Color {
         switch data.status {
         case .running:     return theme.accentColor
-        case .exited:      return data.exitCode == 0 ? .green : .orange
+        case .exited:      return data.exitCode == 0 ? theme.successColor : theme.errorColor
         case .timedOut:    return .orange
         case .stopped:     return theme.secondaryText
         case .interrupted: return .orange
@@ -291,7 +264,7 @@ struct BackgroundTaskCard: View {
     /// The guard is the design: collapsed, finished, or without a conversation, this does nothing
     /// at all and no file is touched.
     private func refreshLiveTail() {
-        guard isExpanded, data.status == .running, let conversationID else {
+        guard data.status == .running, let conversationID else {
             // Fall back to the row's tail, which the observer finalises when the task ends.
             if liveTail != nil { liveTail = nil }
             return
@@ -306,48 +279,6 @@ struct BackgroundTaskCard: View {
             : snapshot.tail
         if bounded != liveTail { liveTail = bounded }
         liveCharacters = snapshot.logCharacterCount
-    }
-
-    // MARK: - Output
-
-    private var outputPane: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(shownTail.isEmpty ? "No output yet." : shownTail)
-                        .font(.system(size: chatFontSize - 4, design: .monospaced))
-                        .foregroundStyle(shownTail.isEmpty ? theme.secondaryText : theme.primaryText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .id("tail")
-                }
-                .frame(maxHeight: 220)
-                .onChange(of: shownTail) {
-                    // Follow the output while it is live, the way a terminal does. A finished task
-                    // is left where the user put it.
-                    guard data.status == .running else { return }
-                    withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
-                }
-            }
-
-            HStack(spacing: 10) {
-                if shownCharacters > shownTail.count {
-                    // Said rather than implied. A pane that silently shows the last 4 KB of a
-                    // 375 KB log reads as the whole output, and truncation that does not announce
-                    // itself is a defect this codebase has paid for repeatedly.
-                    Text("showing the last \(shownTail.count) of \(shownCharacters) characters")
-                        .font(.system(size: chatFontSize - 5))
-                        .foregroundStyle(theme.secondaryText)
-                }
-                Spacer()
-                Button("Open full log") {
-                    NSWorkspace.shared.selectFile(data.logPath, inFileViewerRootedAtPath: "")
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: chatFontSize - 5))
-                .foregroundStyle(theme.accentColor)
-            }
-        }
     }
 }
 

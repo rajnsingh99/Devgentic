@@ -39,8 +39,8 @@ enum SkillCapabilityHints {
     /// this set decides whether a sentence appears, so a miss costs a missing suggestion and a false
     /// hit costs a suggestion the user declines — but a loose match would start inferring capability
     /// from arbitrary foreign vocabulary, which is the thing that was removed.
-    /// ⚠️ `batch_command` STAYS. It is withdrawn from the catalogue but a SKILL on disk, written
-    /// before the split, may still declare it — and a skill that names a retired tool should still
+    /// ⚠️ `batch_command` and `execute_shell` STAY. Both are withdrawn from the catalogue (the
+    /// latter 2026-09-24, as a duplicate of `run_command`) but a SKILL on disk may still declare one — and a skill that names a retired tool should still
     /// be recognised as declaring a shell rather than silently declaring nothing.
     static let shellDeclaringNames: Set<String> = [
         "Bash", "execute_shell", "batch_command", "run_command", "start_background_task"
@@ -60,7 +60,7 @@ enum SkillCapabilityHints {
         hasScripts: Bool,
         profileTools: [Tool]
     ) -> Bool {
-        guard !profileTools.contains(where: { $0.name == "execute_shell" }) else { return false }
+        guard !profileTools.contains(where: { $0.name == shellToolName }) else { return false }
         if hasScripts { return true }
         return (declaredTools ?? []).contains {
             shellDeclaringNames.contains(SkillToolDeclaration.baseName(of: $0))
@@ -80,17 +80,22 @@ enum SkillCapabilityHints {
     /// while it was live, ticking it appended a SECOND copy, and un-ticking removed only the
     /// built-in-sourced one — leaving the auto-added copy enabled and unreachable from any UI.
     /// Never write `X ?? UUID()` for a compile-time-constant identity.
+    ///
+    /// Built from `RunCommandTool` itself, so the offered record's description and schema cannot
+    /// drift from the tool that will run it.
     static func shellTool() -> Tool {
-        Tool(
-            name: "execute_shell",
-            description: "Executes a non-interactive ZSH shell command on the host.",
+        let shell = RunCommandTool()
+        return Tool(
+            name: shell.name,
+            description: shell.description,
             isEnabled: true,
             requiresConfirmation: true,
             sourceId: ToolSource.builtInSourceID,
-            parameters: SchemaBuilder.object(
-                properties: [("command", "string", "The shell command to execute.")],
-                required: ["command"]
-            )
+            parameters: shell.parameterSchema
         )
     }
+
+    /// The shell tool the offer grants. `run_command` since 2026-09-24, when `execute_shell` — its
+    /// duplicate — was removed.
+    static var shellToolName: String { RunCommandTool().name }
 }

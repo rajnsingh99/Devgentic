@@ -23,13 +23,13 @@
 //  **Why entries store a closure rather than an instance.** `AgentToolFactory.wrap` is generic
 //  over the concrete `T` so it can decode `T.Arguments`; a heterogeneous `[any DevgenticTool]`
 //  would erase exactly the type it needs. `make` captures `T` at each call site, which is what
-//  lets one list hold 72 different tool types.
+//  lets one list hold 71 different tool types.
 //
-//  **Why the closure takes a `UUID?`.** Two tools need the conversation: `execute_shell` to
-//  persist its working directory across calls, and `batch_command` to scope its background tasks
+//  **Why the closure takes a `UUID?`.** The shell tools need the conversation
+//  (`run_command`, `start_background_task`, `get_task_output`, `stop_background_task`), to scope their tasks
 //  so `bg_1` means one thing per conversation and one conversation cannot poll or stop another's
 //  build. Passing `nil` yields the same tool without that state, which is what the Library needs
-//  for metadata. The other 71 ignore the parameter. One uniform signature beats a special case.
+//  for metadata. The rest ignore the parameter. One uniform signature beats a special case.
 //
 
 import Foundation
@@ -123,16 +123,18 @@ enum NativeToolCatalog {
     ///
     /// Order is presentational only — lookup is by name via `entry(named:)`.
     static let entries: [NativeToolEntry] = [
-        // MARK: Offered in the Tool Library (63)
+        // MARK: Offered in the Tool Library (71)
         .make(.library) { _ in UpdateSkillTool() },
         .make(.library) { _ in ListDirectoryTool() },
         .make(.library) { _ in ReadFileTool() },
-        .make(.libraryExceptCode(supersededBy: "the preset's create_new_file / overwrite_file")) { _ in WriteFileTool() },
+        // ⚠️ `write_file` is gone (2026-09-24): superseded by `create_new_file` / `overwrite_file`,
+        // which are now offered in the Tool Library for all profiles.
         .make(.library) { _ in DeleteFileTool() },
         .make(.library) { _ in MoveFileTool() },
         .make(.library) { _ in CopyFileTool() },
         .make(.library) { _ in CreateFolderTool() },
-        .make(.libraryExceptCode(supersededBy: "run_command")) { TerminalTool(conversationID: $0) },
+        // ⚠️ `execute_shell` is gone (2026-09-24): a duplicate of `run_command`. No rename map, for
+        // the reasons given at `batch_command` below.
         .make(.library) { _ in OpenApplicationTool() },
         .make(.library) { _ in RunAppleScriptTool() },
         .make(.library) { _ in GetSystemStatsTool() },
@@ -168,11 +170,14 @@ enum NativeToolCatalog {
         .make(.library) { _ in ToggleDoNotDisturbTool() },
         .make(.library) { _ in GetWiFiInfoTool() },
         .make(.library) { _ in ManageBluetoothTool() },
-        .make(.library) { _ in GrepFilesTool() },
+        // ⚠️ `grep_files` is gone (2026-09-24): superseded by `code_search_text`,
+        // which provides structured regex and literal search across files and directories.
         .make(.library) { _ in PreviewFileTool() },
         .make(.library) { _ in GetFileHashTool() },
-        .make(.libraryExceptCode(supersededBy: "edit_code_single / edit_code_batch")) { _ in EditCodeTool() },
-        .make(.libraryExceptCode(supersededBy: "code_search_text / code_search_symbol / code_search_files")) { _ in CodeSearchTool() },
+        // ⚠️ `edit_code` is gone (2026-09-24): superseded by `edit_code_single` / `edit_code_batch`,
+        // which are now offered in the Tool Library for all profiles.
+        // ⚠️ `code_search` is gone (2026-09-24): superseded by `code_search_text` / `code_search_symbol` /
+        // `code_search_files`, which are now offered in the Tool Library for all profiles.
         .make(.library) { _ in GlobFilesTool() },
         .make(.library) { _ in FindDefinitionTool() },
         // ⚠️ `batch_command` IS GONE FROM THIS CATALOGUE. It was never two behaviours — its `call`
@@ -199,7 +204,8 @@ enum NativeToolCatalog {
         // `batch_command` now is.
         .make(.library) { CommandOutputTool(conversationID: $0) },
         .make(.library) { CommandStopTool(conversationID: $0) },
-        .make(.libraryExceptCode(supersededBy: "create_new_file / overwrite_file")) { _ in CreateFileTool() },
+        // ⚠️ `create_file` is gone (2026-09-24): superseded by `create_new_file` / `overwrite_file`,
+        // which are now offered in the Tool Library for all profiles.
         .make(.library) { _ in FileOverviewTool() },
         .make(.library) { _ in CodebaseMapTool() },
         .make(.library) { _ in ScreenCaptureTool() },
@@ -212,16 +218,16 @@ enum NativeToolCatalog {
         .make(.library) { _ in ExternalDevicesTool() },
         .make(.library) { _ in AppleNotesTool() },
 
-        // MARK: Code interface only — hidden from the Library by CodeToolPreset (9)
-        .make(.codeOnly) { _ in DiffFilesTool() },
-        .make(.codeOnly) { _ in GitTool() },
-        .make(.codeOnly) { _ in EditCodeSingleTool() },
-        .make(.codeOnly) { _ in EditCodeBatchTool() },
-        .make(.codeOnly) { _ in CodeSearchTextTool() },
-        .make(.codeOnly) { _ in CodeSearchSymbolTool() },
-        .make(.codeOnly) { _ in CodeSearchFilesTool() },
-        .make(.codeOnly) { _ in CreateNewFileTool() },
-        .make(.codeOnly) { _ in OverwriteFileTool() },
+        // MARK: - Precision Coding Tools (Shared between Chat and Code)
+        .make(.library) { _ in DiffFilesTool() },
+        .make(.library) { _ in GitTool() },
+        .make(.library) { _ in EditCodeSingleTool() },
+        .make(.library) { _ in EditCodeBatchTool() },
+        .make(.library) { _ in CodeSearchTextTool() },
+        .make(.library) { _ in CodeSearchSymbolTool() },
+        .make(.library) { _ in CodeSearchFilesTool() },
+        .make(.library) { _ in CreateNewFileTool() },
+        .make(.library) { _ in OverwriteFileTool() },
     ]
 
     /// Name → entry. Built once; `resolveNativeTool` is a lookup in this, not a 100-line switch.

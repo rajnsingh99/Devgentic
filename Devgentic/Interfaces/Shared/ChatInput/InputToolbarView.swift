@@ -52,7 +52,6 @@ struct InputToolbarView: View {
     @State private var isScheduleButtonHovering = false
     @State private var isFolderButtonHovering = false
     @State private var isQuickSettingsHovering = false
-    @State private var showingQuickSettings = false
     @State private var showingFolderPopover = false
 
     var body: some View {
@@ -148,7 +147,7 @@ struct InputToolbarView: View {
     // is configuring the session.
 
     private var codeQuickSettingsButton: some View {
-        Button(action: { showingQuickSettings.toggle() }) {
+        Button(action: { codeSessionManager.showQuickSettings.toggle() }) {
             ZStack(alignment: .topTrailing) {
                 toolbarIcon(systemName: "slider.horizontal.3", isHovering: isQuickSettingsHovering)
                 // A dot when this project differs from the preset. Without it the only way to know
@@ -172,7 +171,9 @@ struct InputToolbarView: View {
         // string says which step is outstanding.
         .disabled(!isInputEnabled || codeSessionManager.projectPath == nil)
         .opacity(isInputEnabled && codeSessionManager.projectPath != nil ? 1.0 : 0.5)
-        .popover(isPresented: $showingQuickSettings, arrowEdge: .bottom) {
+        .popover(isPresented: Binding(get: { codeSessionManager.showQuickSettings },
+                                      set: { codeSessionManager.showQuickSettings = $0 }),
+                 arrowEdge: .bottom) {
             CodeQuickSettingsPopover()
                 .environment(codeSessionManager)
                 .environment(\.appTheme, theme)
@@ -256,19 +257,7 @@ struct InputToolbarView: View {
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
-        .background(
-            Capsule()
-                .fill(isFolderButtonHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-        )
-        .overlay(
-            Capsule()
-                .strokeBorder(
-                    isFolderButtonHovering
-                        ? theme.dividerColor.opacity(0.55)
-                        : theme.dividerColor.opacity(0.30),
-                    lineWidth: 0.5
-                )
-        )
+        .composerControlSurface(in: Capsule(), isHovered: isFolderButtonHovering)
     }
 
     // MARK: - Shared Icon Builder
@@ -280,14 +269,7 @@ struct InputToolbarView: View {
             .frame(width: 14, height: 14)
             .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText.opacity(0.85))
             .padding(7)
-            .background(
-                Circle()
-                    .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-            )
-            .overlay(
-                Circle()
-                    .stroke(isHovering ? theme.secondaryText.opacity(0.3) : Color.clear, lineWidth: 1)
-            )
+            .composerControlSurface(in: Circle(), isHovered: isHovering)
             .shadow(color: isHovering ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
             .scaleEffect(isHovering ? 1.06 : 1.0)
     }

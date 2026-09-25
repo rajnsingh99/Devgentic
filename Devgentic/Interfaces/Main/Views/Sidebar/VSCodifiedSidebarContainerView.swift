@@ -84,15 +84,13 @@ struct VSCodifiedSidebarContainerView: View {
                         )
                         .frame(width: 1)
                         .padding(.vertical, 14)
+                        .transition(.opacity)
 
                     // Sidebar Content Pane + Drag Handle
                     SideBarPaneView(selectedTab: selectedTabBinding, sidebarWidth: $sidebarWidth)
                         .frame(width: sidebarWidth)
                         .overlay(alignment: .trailing) { resizeHandle }
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .leading).combined(with: .opacity),
-                            removal: .move(edge: .leading).combined(with: .opacity)
-                        ))
+                        .transition(.opacity)
                         .clipped()
                 }
             }

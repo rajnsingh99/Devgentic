@@ -226,11 +226,11 @@ final class BackgroundTaskObserver {
     ///
     /// ⚠️ This is the ONLY moment the message is findable (see the type comment). A task whose
     /// conversation has no live stream — a workflow node, a scheduled run — gets no row, which is
-    /// a gap rather than a defect: the registry still bounds and kills it, and `command_output`
+    /// a gap rather than a defect: the registry still bounds and kills it, and `get_task_output`
     /// still answers. Logged so the absence is visible rather than silent.
     private func adopt(_ snapshot: BackgroundProcessRegistry.Snapshot, conversationID: UUID) {
         guard let message = liveMessage?(conversationID) else {
-            logger.notice("[BGTASK] \(snapshot.id) started in conversation \(conversationID.uuidString.prefix(8)) with no live stream to attach a row to. CONSEQUENCE: no timeline card for this task — it still runs, is still bounded, and command_output still reports it, but nobody watching the conversation will see it.")
+            logger.notice("[BGTASK] \(snapshot.id) started in conversation \(conversationID.uuidString.prefix(8)) with no live stream to attach a row to. CONSEQUENCE: no timeline card for this task — it still runs, is still bounded, and get_task_output still reports it, but nobody watching the conversation will see it.")
             return
         }
 

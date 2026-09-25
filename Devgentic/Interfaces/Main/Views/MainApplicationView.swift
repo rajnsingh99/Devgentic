@@ -243,12 +243,14 @@ struct MainApplicationView: View {
             // panel keeps its view identity (and the editor its state) across mode flips.
             .padding(.trailing, chatSplitInset)
             .frame(maxWidth: .infinity)
-            .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSidebarVisible)
             .onReceive(NotificationCenter.default.publisher(for: .requestSidebarVisible)) { _ in
                 // The Tool Library's navigation IS the pane; entering it with the pane
                 // hidden would leave no way to change category or pick a server.
                 guard !isSidebarVisible else { return }
-                isSidebarVisible = true
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    isSidebarVisible = true
+                }
             }
             .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
             .animation(.easeInOut(duration: 0.2), value: router.activeDestination)
@@ -259,6 +261,7 @@ struct MainApplicationView: View {
                 sidebarWidth: sidebarPaneWidthCGFloat
             )
             .frame(width: totalSidebarWidth)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSidebarVisible)
             .zIndex(1)
 
             if chatHistoryViewModel.isCodeViewerPanelPresented {
@@ -388,7 +391,7 @@ struct MainApplicationView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                 isSidebarVisible.toggle()
             }
         }
@@ -404,7 +407,9 @@ struct MainApplicationView: View {
                 logger.debug("Triggered new conversation via newChatSession.")
             }
             if isSidebarVisible {
-                isSidebarVisible = false
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    isSidebarVisible = false
+                }
                 logger.debug("Hid sidebar pane via newChatSession.")
             }
         }
@@ -548,12 +553,6 @@ struct MainApplicationView: View {
                 .padding(.horizontal)
                 .padding(.top, 4)
                 .padding(.bottom, 15)
-                .shadow(
-                    color: surfaceStyle == .glassmorphic ? SwiftUI.Color.black.opacity(0.15) : .clear,
-                    radius: 10,
-                    x: 0,
-                    y: 5
-                )
             }
             // Floating mode picker — overlays above the input area
             .overlay(alignment: .top) {
@@ -648,7 +647,7 @@ struct MainApplicationView: View {
             router.returnToChat()
         }
         if !isSidebarVisible {
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                 isSidebarVisible = true
             }
         }

@@ -186,6 +186,7 @@ private struct SettingsCategoryRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering || isFocused)
         .contentShape(Rectangle())
+        .pointingHandCursor()
         .onTapGesture(perform: onSelect)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {

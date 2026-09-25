@@ -162,14 +162,6 @@ private struct CapabilityChipButton<PopoverContent: View>: View {
 
     private var tint: Color { theme.capabilityColor(for: color) }
 
-    private var borderStrokeColor: Color {
-        if isOn {
-            return hovering ? tint.opacity(0.6) : tint.opacity(0.30)
-        } else {
-            return hovering ? theme.secondaryText.opacity(0.35) : Color.clear
-        }
-    }
-
     private var activeShadowColor: Color {
         guard hovering && isEnabled else { return .clear }
         return isOn ? tint.opacity(0.4) : Color.black.opacity(0.2)
@@ -182,13 +174,11 @@ private struct CapabilityChipButton<PopoverContent: View>: View {
                 .foregroundColor(isOn ? tint : (hovering ? theme.primaryText : theme.secondaryText.opacity(0.85)))
                 .frame(width: 16, height: 16)
                 .padding(6)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(isOn ? (hovering ? tint.opacity(0.24) : tint.opacity(0.14)) : (hovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(borderStrokeColor, lineWidth: 1)
+                .composerControlSurface(
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous),
+                    isHovered: hovering && isEnabled,
+                    isSelected: isOn,
+                    selectedTint: tint
                 )
                 .shadow(color: activeShadowColor, radius: 4, x: 0, y: 1)
                 .scaleEffect(hovering && isEnabled ? 1.06 : 1.0)

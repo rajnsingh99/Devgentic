@@ -760,6 +760,10 @@ struct AgentInput: Sendable {
     /// 0 = disabled (no compaction) — the default for minimal/test constructors. (#22)
     var nativeContextBudgetChars: Int
 
+    /// The window (tokens) the model runs under — what a step's REAL prompt count is compared to,
+    /// to tell that the provider had to cut the prompt. 0 = unknown (minimal/test constructors).
+    var contextWindowTokens: Int = 0
+
     /// Which part of an oversized tool result survives — the gauge's global setting plus the
     /// profile's per-tool overrides. Defaults to automatic for minimal/test constructors.
     var cutPolicy: ToolCutPolicy
@@ -814,6 +818,7 @@ struct AgentInput: Sendable {
         traceContext: TraceContext,
         modelTier: ModelTier? = nil,
         nativeContextBudgetChars: Int = 0,
+        contextWindowTokens: Int = 0,
         cutPolicy: ToolCutPolicy = ToolCutPolicy()
     ) {
         self.userInput = userInput
@@ -849,6 +854,7 @@ struct AgentInput: Sendable {
         self.traceContext = traceContext
         self.modelTier = modelTier
         self.nativeContextBudgetChars = nativeContextBudgetChars
+        self.contextWindowTokens = contextWindowTokens
         self.cutPolicy = cutPolicy
     }
 }

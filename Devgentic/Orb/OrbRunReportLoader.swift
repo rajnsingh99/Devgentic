@@ -116,7 +116,7 @@ enum OrbRunReportLoader {
                 // ⚠️ ASK WHETHER IT WROTE, NOT WHAT TIER IT IS. This used to test
                 // `HITLRiskTier.classify(toolName:) != .safe` — but that `.safe` list names only
                 // six tools out of the catalogue's seventy-two, and its default is `.moderate`.
-                // Every other read-only tool (`grep_files`, `code_search_text`, `find_definition`,
+                // Every other read-only tool (`code_search_text`, `find_definition`,
                 // `diff_files`, every MCP tool …) therefore counted as a write, so a purely
                 // read-only run answered "I ran code search text, but I can't tell what changed" —
                 // asserting a change that never happened, which is the one thing this narration

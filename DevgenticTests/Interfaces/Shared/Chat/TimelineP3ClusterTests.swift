@@ -405,19 +405,19 @@ final class RunReportDurationVocabularyTests: XCTestCase {
 final class AgentTimelineScrollableHeightTests: XCTestCase {
 
     func testAgentTimelineMaxHeightBaseline() {
-        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight, 300)
-        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 15.0), 300)
+        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight, 450)
+        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 15.0), 450)
     }
 
     func testAgentTimelineMaxHeightScalesWithChatFontSize() {
-        // Scaled at 12pt: 300 * (12/15) = 240
-        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 12.0), 240)
-        // Scaled at 20pt: 300 * (20/15) = 400
-        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 20.0), 400)
+        // Scaled at 12pt: 450 * (12/15) = 360
+        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 12.0), 360)
+        // Scaled at 20pt: 450 * (20/15) = 600
+        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 20.0), 600)
         // Clamped at lower bound
-        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 8.0), 240)
+        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 8.0), 360)
         // Clamped at upper bound
-        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 40.0), 500)
+        XCTAssertEqual(ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: 40.0), 750)
     }
 
     func testAgentTimelineViewEquatableHonorsScrollable() {

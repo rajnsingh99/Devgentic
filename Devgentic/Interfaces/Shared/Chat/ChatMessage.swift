@@ -220,7 +220,7 @@ struct BackgroundTaskData: Codable, Equatable, Identifiable {
     /// Timeline identity. Distinct from `taskID`: this keys SwiftUI's `ForEach` and must stay
     /// stable across every in-place update of the row.
     let id: UUID
-    /// The registry's handle — `bg_1`. What `command_output` / `command_stop` take.
+    /// The registry's handle — `bg_1`. What `get_task_output` / `stop_background_task` take.
     let taskID: String
     /// What the model called this task, when it said. Optional on the wire, so a row written
     /// before this existed still decodes; every surface falls back to the command.

@@ -17,6 +17,7 @@ struct AgentTimelineView: View {
     private let isStreaming: Bool
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 15.0
     @AppStorage(AppSettings.showTimelineThoughtsKey) private var showThoughts: Bool = false
 
@@ -142,6 +143,7 @@ struct AgentTimelineView: View {
     @State private var isTimelineExpanded: Bool = false
     @State private var userToggled: Bool = false
     @State private var timelineContentHeight: CGFloat = 0
+    @State private var isHoveringRoot: Bool = false
 
     private var timelineMaxHeight: CGFloat {
         ChatUIConstants.agentTimelineMaxHeight(forChatFontSize: CGFloat(chatFontSize))
@@ -149,6 +151,11 @@ struct AgentTimelineView: View {
 
     private var isContentOverflowing: Bool {
         scrollable && timelineContentHeight > timelineMaxHeight
+    }
+
+    private func timelineContainerHeight(nodesCount: Int) -> CGFloat {
+        let naturalHeight = timelineContentHeight > 0 ? timelineContentHeight : initialEstimatedHeight(for: nodesCount)
+        return min(naturalHeight, timelineMaxHeight)
     }
 
     private func initialEstimatedHeight(for count: Int) -> CGFloat {
@@ -190,59 +197,72 @@ struct AgentTimelineView: View {
         let summaryValue = summary
         let titleText = summaryTitle(nodesCount: nodes.count, summary: summaryValue, showThoughts: showThoughts)
         if !nodes.isEmpty || showFooter {
-            VStack(alignment: .leading, spacing: 6) {
-                // Summary Header (collapsible toggle + thoughts toggle)
-                HStack(spacing: 6) {
-                    // Left area: status icon + summary title (click to expand/collapse timeline)
+            VStack(alignment: .leading, spacing: 4) {
+                // Minimal Antigravity-Style Root Header
+                HStack(spacing: 8) {
                     Button {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.75)) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             isTimelineExpanded.toggle()
                             userToggled = true
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: isStreaming ? "sparkles" : summaryValue.status.glyph)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(isStreaming ? theme.accentColor : summaryTint(for: summaryValue.status))
-                                .frame(width: 14, alignment: .center)
+                        HStack(spacing: 5) {
+                            if isStreaming {
+                                Circle()
+                                    .fill(theme.accentColor)
+                                    .frame(width: 6, height: 6)
+                                    .frame(width: 14, alignment: .center)
+                            } else {
+                                Image(systemName: summaryValue.status.glyph)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(summaryTint(for: summaryValue.status))
+                                    .frame(width: 14, alignment: .center)
+                            }
 
                             Text(titleText)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(theme.secondaryText)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundColor(isHoveringRoot ? theme.primaryText : theme.secondaryText)
+
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(theme.tertiaryText)
+                                .rotationEffect(.degrees(isTimelineExpanded ? 90 : 0))
+                                .padding(.leading, 1)
 
                             Spacer(minLength: 0)
                         }
                         .contentShape(Rectangle())
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 2)
                     }
                     .buttonStyle(.plain)
+                    .onHover { hovering in
+                        isHoveringRoot = hovering
+                    }
                     .help(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
                     .accessibilityLabel(
                         "\(titleText). "
                         + (isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
                     )
 
-                    // Inline Thoughts toggle pill (only rendered when there are thoughts in the timeline)
+                    // Inline Thoughts toggle (only rendered when there are thoughts in the timeline)
                     if hasThoughts {
                         Button {
                             withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                                 showThoughts.toggle()
                             }
                         } label: {
-                            HStack(spacing: 4) {
+                            HStack(spacing: 3.5) {
                                 Image(systemName: "sparkles")
-                                    .font(.system(size: 9.5, weight: .medium))
+                                    .font(.system(size: 9, weight: .medium))
                                 Text(showThoughts ? String(localized: "Thoughts: On") : String(localized: "Thoughts: Off"))
                                     .font(.system(size: 10, weight: .medium))
                             }
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2.5)
                             .background(
                                 Capsule()
-                                    .fill(showThoughts ? theme.accentColor.opacity(0.16) : theme.surfaceOverlay.opacity(0.8))
-                            )
-                            .overlay(
-                                Capsule()
-                                    .stroke(showThoughts ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 0.5)
+                                    .fill(showThoughts ? theme.accentColor.opacity(0.14) : theme.surfaceOverlay.opacity(0.4))
                             )
                             .foregroundColor(showThoughts ? theme.accentColor : theme.tertiaryText)
                         }
@@ -250,66 +270,38 @@ struct AgentTimelineView: View {
                         .help(showThoughts ? String(localized: "Hide agent reasoning & thoughts") : String(localized: "Show agent reasoning & thoughts"))
                         .accessibilityLabel(showThoughts ? String(localized: "Hide agent reasoning and thoughts") : String(localized: "Show agent reasoning and thoughts"))
                     }
-
-                    // Chevron expand/collapse trigger
-                    Button {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.75)) {
-                            isTimelineExpanded.toggle()
-                            userToggled = true
-                        }
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(theme.secondaryText.opacity(0.6))
-                            .rotationEffect(.degrees(isTimelineExpanded ? 90 : 0))
-                            .padding(.horizontal, 2)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
-                    .accessibilityLabel(isTimelineExpanded ? String(localized: "Collapse execution log") : String(localized: "Expand execution log"))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.surfaceOverlay.opacity(0.5))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-                )
 
                 // Expanded Nodes Content
                 if Self.showsTimelineBody(isTimelineExpanded: isTimelineExpanded,
                                           isStreaming: isStreaming,
                                           userToggled: userToggled) {
-                    if isContentOverflowing {
-                        ScrollViewReader { proxy in
-                            ScrollView(.vertical, showsIndicators: true) {
-                                timelineNodesContent(nodes: visibleNodes)
-                            }
-                            .frame(height: timelineMaxHeight)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .onChange(of: revision) { _, _ in
-                                if isStreaming {
-                                    withAnimation(.easeOut(duration: 0.2)) {
-                                        if let ctx = streamingContext, ctx.shouldDisplay {
-                                            proxy.scrollTo("streaming_footer", anchor: .bottom)
-                                        } else if let lastID = visibleNodes.last?.id {
-                                            proxy.scrollTo(lastID, anchor: .bottom)
+                    Group {
+                        if scrollable {
+                            ScrollViewReader { proxy in
+                                ScrollView(.vertical, showsIndicators: isContentOverflowing) {
+                                    timelineNodesContent(nodes: visibleNodes)
+                                }
+                                .frame(height: timelineContainerHeight(nodesCount: visibleNodes.count))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .onChange(of: revision) { _, _ in
+                                    if isStreaming {
+                                        withAnimation(.easeOut(duration: 0.2)) {
+                                            if let ctx = streamingContext, ctx.shouldDisplay {
+                                                proxy.scrollTo("streaming_footer", anchor: .bottom)
+                                            } else if let lastID = visibleNodes.last?.id {
+                                                proxy.scrollTo(lastID, anchor: .bottom)
+                                            }
                                         }
                                     }
                                 }
                             }
+                        } else {
+                            timelineNodesContent(nodes: visibleNodes)
                         }
-                        .padding(.top, 2)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else {
-                        timelineNodesContent(nodes: visibleNodes)
-                            .padding(.top, 2)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
+                    .padding(.top, 2)
+                    .transition(.opacity)
                 }
             }
             .padding(.vertical, 4)
@@ -324,19 +316,13 @@ struct AgentTimelineView: View {
                         isTimelineExpanded = streaming
                     }
                 }
-                if !streaming {
-                    timelineContentHeight = 0
-                }
-            }
-            .onChange(of: showThoughts) { _, _ in
-                timelineContentHeight = 0
             }
         }
     }
 
     @ViewBuilder
     private func timelineNodesContent(nodes: [TimelineNode]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             ForEach(nodes) { node in
                 TimelineNodeGroupView(
                     node: node,
@@ -353,9 +339,18 @@ struct AgentTimelineView: View {
                     .transition(.opacity)
             }
         }
-        .padding(.top, 4)
-        .padding(.bottom, 6)
-        .padding(.horizontal, 0)
+        .padding(.top, 2)
+        .padding(.bottom, 4)
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(theme.tertiaryText.opacity(0.2))
+                .frame(width: 1)
+                .padding(.leading, 8.5)
+                .padding(.top, 2)
+                .padding(.bottom, 6)
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onGeometryChange(for: CGFloat.self) { p in
             p.size.height
@@ -611,10 +606,10 @@ struct AgentTimelineView: View {
     }
 
     /// Tool calls that only OBSERVE a background task. Deliberately NOT including
-    /// `command_stop`: that one CHANGES state, and an action the user took (or the agent took on
+    /// `stop_background_task`: that one CHANGES state, and an action the user took (or the agent took on
     /// their behalf) should stay visible even when its outcome is also on the card. Hide
     /// observations, keep actions.
-    private static let backgroundPollTools: Set<String> = ["command_output"]
+    private static let backgroundPollTools: Set<String> = ["get_task_output", "command_output"]
 
     /// Drops poll rows for tasks that already have a `.backgroundTask` card.
     ///
@@ -668,6 +663,17 @@ struct AgentTimelineView: View {
         finalContentText: String? = nil
     ) -> [TimelineNode] {
         var events = events
+
+        // Pass 0: Strip redundant or obsolete infrastructure progress thoughts
+        // ("Model loaded. Starting execution…", "Preparing agent tools…")
+        events.removeAll { event in
+            switch event {
+            case .thought(_, let text), .reasoning(_, let text):
+                return isRedundantSystemText(text)
+            default:
+                return false
+            }
+        }
 
         // Deduplication pass 1: if not streaming and last event is narrative
         // (thought/reasoning), hide it — it usually duplicates the final outcome
@@ -750,14 +756,28 @@ struct AgentTimelineView: View {
             switch event {
             case .thought(let id, let text):
                 flushActions()
-                nodes.append(.thought(id: id, text: text))
+                if isRedundantSystemText(text) {
+                    break
+                }
+                if isSystemStatusText(text) {
+                    nodes.append(.status(id: id, text: text))
+                } else {
+                    nodes.append(.thought(id: id, text: text))
+                }
 
             case .reasoning(let id, let text):
                 // Reasoning reuses the `.thought` timeline node for identical visual
                 // treatment. The semantic split lives at the TimelineEvent layer so
                 // analytics / scratchpad paths can distinguish model vs. system prose.
                 flushActions()
-                nodes.append(.thought(id: id, text: text))
+                if isRedundantSystemText(text) {
+                    break
+                }
+                if isSystemStatusText(text) {
+                    nodes.append(.status(id: id, text: text))
+                } else {
+                    nodes.append(.thought(id: id, text: text))
+                }
 
             case .toolExecution(let data):
                 if data.name == "ask_user" {
@@ -823,11 +843,20 @@ struct AgentTimelineView: View {
         }
 
         for event in events {
+            switch event {
+            case .thought(_, let text), .reasoning(_, let text):
+                if isRedundantSystemText(text) {
+                    continue
+                }
+            default:
+                break
+            }
+
             let shortStatus: (UUID, String)? = {
                 switch event {
-                case .thought(let id, let text) where isShortStatusText(text):
+                case .thought(let id, let text) where isShortStatusText(text) && !isSystemStatusText(text):
                     return (id, text)
-                case .reasoning(let id, let text) where isShortStatusText(text):
+                case .reasoning(let id, let text) where isShortStatusText(text) && !isSystemStatusText(text):
                     return (id, text)
                 default:
                     return nil
@@ -848,12 +877,32 @@ struct AgentTimelineView: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.count <= 100 && !trimmed.contains("\n")
     }
+
+    private static func isSystemStatusText(_ text: String) -> Bool {
+        guard !isRedundantSystemText(text) else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("Connecting to Ollama:")
+            || trimmed.hasPrefix("Loading local model:")
+            || trimmed.hasPrefix("Connecting to ")
+            || trimmed.hasPrefix("Connecting…")
+            || (isShortStatusText(text) && (trimmed.contains("Connecting to Ollama") || trimmed.contains("Loading local model")))
+    }
+
+    private static func isRedundantSystemText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.contains("Model loaded")
+            || trimmed.contains("Preparing agent tools")
+            || trimmed.contains("Preparing tools")
+    }
 }
 
 // MARK: - Models
 
 enum TimelineNode: Identifiable {
     case thought(id: UUID, text: String)
+    /// System infrastructure status (e.g. Connecting to Ollama, model initialization).
+    /// Rendered as a simple status line rather than an interim model reasoning block.
+    case status(id: UUID, text: String)
     /// A single tool invocation rendered inline (no collapsible header).
     case action(TimelineEvent)
     /// Two or more tool invocations collapsed into a header + expandable detail list.
@@ -876,6 +925,7 @@ enum TimelineNode: Identifiable {
     var id: UUID {
         switch self {
         case .thought(let id, _):              return id
+        case .status(let id, _):               return id
         case .action(let e):                   return e.id
         case .actionGroup(let a):              return a.first?.id ?? UUID()
         case .capabilityMilestone(let id, _, _): return id
@@ -934,6 +984,9 @@ struct TimelineNodeGroupView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+        case .status(_, let text):
+            SystemStatusRow(text: text)
+
         case .capabilityMilestone(_, let kind, let detail):
             CapabilityMilestoneRow(kind: kind, detail: detail)
 
@@ -960,7 +1013,7 @@ struct TimelineNodeGroupView: View {
 
         case .actionGroup(let actions):
             VStack(alignment: .leading, spacing: 2) {
-                // Group header
+                // Group header (clean Antigravity-style)
                 Button {
                     if reduceMotion {
                         isExpanded.toggle()
@@ -970,71 +1023,61 @@ struct TimelineNodeGroupView: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 6) {
-                        // Glowing anchor dot centered in 14-pt icon column
-                        Circle()
-                            .fill(theme.accentColor)
-                            .frame(width: 6, height: 6)
-                            .shadow(color: theme.accentColor.opacity(0.6), radius: 3)
-                            .overlay(
-                                Circle()
-                                    .stroke(theme.accentColor.opacity(0.4), lineWidth: 2)
-                                    .scaleEffect(isExpanded ? 1.4 : 1.0)
-                                    .opacity(isExpanded ? 0 : 1)
-                            )
-                            .frame(width: 14, alignment: .center)
-
+                    HStack(spacing: 5) {
                         Text(generateGroupTitle(actions))
-                            .font(theme.fontSubheadline.weight(.medium))
-                            .foregroundColor(theme.primaryText.opacity(0.9))
+                            .font(.system(size: 12.5, weight: .regular))
+                            .foregroundColor(isHoveringHeader ? theme.primaryText : theme.secondaryText)
 
-                        Spacer()
-                        
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(theme.tertiaryText)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                            .padding(.trailing, 2)
+                            .padding(.leading, 1)
+
+                        Spacer()
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isHoveringHeader ? theme.surfaceOverlay.opacity(0.6) : Color.clear)
-                    )
-                    .scaleEffect(isHoveringHeader ? 1.01 : 1.0)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, 2.5)
+                    .padding(.horizontal, 2)
                 }
                 .buttonStyle(.plain)
                 .onHover { hovering in
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                        isHoveringHeader = hovering
-                    }
+                    isHoveringHeader = hovering
                 }
 
                 if isExpanded {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(actions) { action in
-                            ActionDetailView(event: action,
-                                             originConversationID: conversationID,
-                                             expandedRowIDs: $expandedRowIDs,
-                                             isStandalone: false)
+                    let requiresSubScroll = actions.count > 5
+                    let subScrollMaxHeight: CGFloat = 220
+
+                    Group {
+                        if requiresSubScroll {
+                            ScrollView(.vertical, showsIndicators: true) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    ForEach(actions) { action in
+                                        ActionDetailView(event: action,
+                                                         originConversationID: conversationID,
+                                                         expandedRowIDs: $expandedRowIDs,
+                                                         isStandalone: false)
+                                    }
+                                }
+                                .padding(.trailing, 4)
+                                .padding(.vertical, 1)
+                            }
+                            .frame(maxHeight: subScrollMaxHeight)
+                        } else {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(actions) { action in
+                                    ActionDetailView(event: action,
+                                                     originConversationID: conversationID,
+                                                     expandedRowIDs: $expandedRowIDs,
+                                                     isStandalone: false)
+                                }
+                            }
+                            .padding(.vertical, 1)
                         }
                     }
-                    .padding(.leading, 28)
-                    .padding(.top, 4)
-                    .overlay(alignment: .leading) {
-                        Rectangle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.05)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                            .frame(width: 2)
-                            .padding(.leading, 16) // Centered with the anchor dot at 17 (10 + 7)
-                    }
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+                    .padding(.leading, 14)
+                    .transition(.opacity)
                 }
             }
         }
@@ -1389,82 +1432,73 @@ struct ActionDetailView: View {
         let hasBaseline: Bool = effect.map { $0.diff != nil } ?? true
 
         if effect != nil || resolvedAction != nil {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 5) {
-                    if let stat {
-                        if isNoOpWrite {
-                            Text(String(localized: "No changes"))
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(theme.tertiaryText)
-                        } else if !hasBaseline {
-                            Text(String(localized: "Wrote \(stat.added) lines — no baseline"))
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(theme.tertiaryText)
-                                .help(String(localized: "The file couldn't be captured before the write (too large, or not readable as text), so what this replaced can't be shown."))
-                                .accessibilityLabel(String(localized: "Wrote \(stat.added) lines; no baseline, so the replaced content is unknown"))
-                        } else {
-                            HStack(spacing: 3) {
-                                Text("+\(stat.added)").foregroundColor(theme.successColor)
-                                Text("−\(stat.deleted)").foregroundColor(theme.errorColor)
-                            }
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            HStack(spacing: 5) {
+                if let stat {
+                    if isNoOpWrite {
+                        Text(String(localized: "No changes"))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(theme.tertiaryText)
+                    } else if !hasBaseline {
+                        Text(String(localized: "Wrote \(stat.added) lines"))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(theme.tertiaryText)
+                            .help(String(localized: "The file couldn't be captured before the write (too large, or not readable as text), so what this replaced can't be shown."))
+                            .accessibilityLabel(String(localized: "Wrote \(stat.added) lines; no baseline, so the replaced content is unknown"))
+                    } else {
+                        HStack(spacing: 2) {
+                            Text("+\(stat.added)").foregroundColor(theme.successColor)
+                            Text("−\(stat.deleted)").foregroundColor(theme.errorColor)
                         }
-                    }
-
-                    // No "Show diff" toggle: the diff IS the row's output, so the row's own
-                    // chevron discloses it — the same one control a read row uses.
-
-                    // Recovery path — a pure viewer use. Needs the session-scoped snapshot,
-                    // so it is simply absent after a reload rather than misleading.
-                    if let viewModel = chatHistoryViewModel, let action = resolvedAction,
-                       !isNoOpWrite, let pre = action.preWriteContent {
-                        Button {
-                            viewModel.openTimelineFileInCodeViewer(
-                                fileName: action.fileName,
-                                filePath: nil,
-                                content: pre
-                            )
-                        } label: {
-                            Text(String(localized: "Previous version"))
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(theme.secondaryText)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(theme.surfaceOverlay.opacity(0.6)))
-                        }
-                        .buttonStyle(.plain)
-                        .help(String(localized: "Open this file as it was before the change"))
-                        .accessibilityLabel(String(localized: "Open previous version in code viewer"))
-                    }
-
-                    // Reads open in the viewer — that is what it is for.
-                    if let viewModel = chatHistoryViewModel, let action = resolvedAction,
-                       !action.isWrite {
-                        Button {
-                            openInViewer(action, viewModel: viewModel, preWriteContent: nil)
-                        } label: {
-                            HStack(spacing: 3) {
-                                if isOpeningFromDisk {
-                                    ProgressView().controlSize(.mini).scaleEffect(0.6)
-                                } else {
-                                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                                        .font(.system(size: 9, weight: .semibold))
-                                }
-                                Text(String(localized: "Open in viewer"))
-                                    .font(.system(size: 10, weight: .medium))
-                            }
-                            .foregroundColor(theme.accentColor)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill(theme.accentColor.opacity(0.12)))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isOpeningFromDisk)
-                        .help(String(localized: "Open the file the agent read"))
-                        .accessibilityLabel(String(localized: "Open in code viewer"))
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                     }
                 }
 
+                // Recovery path — a pure viewer use. Needs the session-scoped snapshot,
+                // so it is simply absent after a reload rather than misleading.
+                if let viewModel = chatHistoryViewModel, let action = resolvedAction,
+                   !isNoOpWrite, let pre = action.preWriteContent {
+                    Button {
+                        viewModel.openTimelineFileInCodeViewer(
+                            fileName: action.fileName,
+                            filePath: nil,
+                            content: pre
+                        )
+                    } label: {
+                        Text(String(localized: "Previous"))
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(theme.surfaceOverlay.opacity(0.5)))
+                    }
+                    .buttonStyle(.plain)
+                    .help(String(localized: "Open this file as it was before the change"))
+                    .accessibilityLabel(String(localized: "Open previous version in code viewer"))
+                }
+
+                // Reads open in the viewer — that is what it is for.
+                if let viewModel = chatHistoryViewModel, let action = resolvedAction,
+                   !action.isWrite {
+                    Button {
+                        openInViewer(action, viewModel: viewModel, preWriteContent: nil)
+                    } label: {
+                        HStack(spacing: 2) {
+                            if isOpeningFromDisk {
+                                ProgressView().controlSize(.mini).scaleEffect(0.6)
+                            }
+                            Text(String(localized: "Open"))
+                                .font(.system(size: 9.5, weight: .medium))
+                        }
+                        .foregroundColor(theme.accentColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(theme.accentColor.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isOpeningFromDisk)
+                    .help(String(localized: "Open the file the agent read"))
+                    .accessibilityLabel(String(localized: "Open in code viewer"))
+                }
             }
         }
     }
@@ -1478,26 +1512,40 @@ struct ActionDetailView: View {
     @ViewBuilder
     private func inlineDiff(_ effect: ActionEffect) -> some View {
         if let diff = effect.diff {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(diff.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                    diffLine(line)
+            ViewThatFits(in: .vertical) {
+                diffLines(diff: diff, isTruncated: effect.isTruncated)
+
+                ScrollView(.vertical, showsIndicators: true) {
+                    diffLines(diff: diff, isTruncated: effect.isTruncated)
                 }
-                if effect.isTruncated {
-                    // Never let a partial change read as the whole one.
-                    Text(String(localized: "Diff truncated — open the previous version to see everything."))
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(theme.tertiaryText)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                }
+                .frame(height: 200)
             }
-            .padding(.vertical, 4)
-            .background(RoundedRectangle(cornerRadius: 6).fill(theme.surfaceOverlay.opacity(0.5)))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(theme.secondaryText.opacity(0.12), lineWidth: 1)
-            )
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(theme.surfaceOverlay.opacity(0.35)))
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(theme.accentColor.opacity(0.4))
+                    .frame(width: 2)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
+    }
+
+    @ViewBuilder
+    private func diffLines(diff: String, isTruncated: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(diff.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                diffLine(line)
+            }
+            if isTruncated {
+                // Never let a partial change read as the whole one.
+                Text(String(localized: "Diff truncated — open the previous version to see everything."))
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(theme.tertiaryText)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+            }
+        }
+        .padding(.vertical, 3)
     }
 
     @ViewBuilder
@@ -1710,6 +1758,60 @@ struct ActionDetailView: View {
         }.value
     }
 
+    @ViewBuilder
+    private func toolTypeIcon(tool: String, data: ToolExecutionData) -> some View {
+        if data.isExecuting {
+            ProgressView()
+                .controlSize(.mini)
+                .frame(width: 13, height: 13)
+        } else if let success = data.isSuccess, !success {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(theme.errorColor)
+                .frame(width: 13, height: 13)
+        } else {
+            switch tool {
+            case "read_file", "write_file", "edit_file", "edit_code", "create_file",
+                 "create_new_file", "overwrite_file", "edit_code_single", "edit_code_batch", "file_overview":
+                Image(systemName: "doc.text.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(Color.orange.opacity(0.85))
+                    .frame(width: 13, height: 13)
+            case "list_directory", "project_tree", "codebase_map", "batch_move_files":
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(Color.blue.opacity(0.85))
+                    .frame(width: 13, height: 13)
+            case "grep", "grep_search", "ripgrep", "code_search", "glob_files",
+                 "code_search_text", "code_search_symbol", "code_search_files", "web_search", "spotlight_search", "fs_smart_search":
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(theme.tertiaryText)
+                    .frame(width: 13, height: 13)
+            case "execute_shell", "run_shell", "bash", "shell", "batch_command", "run_command", "start_background_task":
+                Image(systemName: "terminal")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(theme.secondaryText)
+                    .frame(width: 13, height: 13)
+            case "ask_user":
+                Image(systemName: "bubble.left.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.accentColor)
+                    .frame(width: 13, height: 13)
+            case "diff_files":
+                Image(systemName: "arrow.left.and.right")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(theme.tertiaryText)
+                    .frame(width: 13, height: 13)
+            default:
+                Image(systemName: "wrench.and.screwdriver")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(theme.tertiaryText)
+                    .frame(width: 13, height: 13)
+            }
+        }
+    }
+
     var body: some View {
         if case .toolExecution(let data) = event {
             // ⚠️ [tc-9] Resolved ONCE per body pass. `TimelineRowDetail.resolve` trims and scans
@@ -1720,8 +1822,8 @@ struct ActionDetailView: View {
             let isDisclosable = detail != nil && !data.isExecuting
             let isExpanded = isOutputExpanded(data)
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
                     Button {
                         guard isDisclosable else { return }
                         withAnimation(.easeInOut(duration: 0.18)) {
@@ -1732,11 +1834,12 @@ struct ActionDetailView: View {
                             }
                         }
                     } label: {
-                        HStack(spacing: 6) {
-                            leadingStatusIcon(data: data)
+                        HStack(spacing: 5) {
+                            toolTypeIcon(tool: data.name, data: data)
+                                .accessibilityLabel(statusAccessibilityLabel(data: data))
 
                             Text(ToolArgFormatter.verb(tool: data.name))
-                                .font(theme.fontSubheadline)
+                                .font(.system(size: 12, weight: .regular))
                                 .foregroundColor(theme.secondaryText)
 
                             // Cached per key by `resolveChip`; parsed inline only on a miss (see
@@ -1750,23 +1853,22 @@ struct ActionDetailView: View {
                             )
                             if !primaryArg.isEmpty {
                                 Text(primaryArg)
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .foregroundColor(theme.primaryText.opacity(0.9))
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundColor(isHovering ? theme.primaryText : theme.primaryText.opacity(0.85))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
 
                             if let dur = data.durationMs, dur >= 100 {
-                                Text(DurationFormat.milliseconds(dur))
-                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                Text("(\(DurationFormat.milliseconds(dur)))")
+                                    .font(.system(size: 10.5, design: .monospaced))
                                     .foregroundColor(theme.tertiaryText)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(theme.surfaceOverlay.opacity(0.5)))
                             }
 
-                            Spacer(minLength: 4)
+                            Spacer(minLength: 6)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(minHeight: 26)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -1808,34 +1910,40 @@ struct ActionDetailView: View {
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(theme.tertiaryText)
                                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                                .padding(2)
+                                .padding(.horizontal, 4)
+                                .frame(minHeight: 26)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityHidden(true)
                     }
                 }
-                .padding(.horizontal, isStandalone ? 0 : 6)
-                .padding(.vertical, isStandalone ? 0 : 4)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3.5)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .background {
-                    if !isStandalone && isHovering && isDisclosable {
+                    if isHovering && isDisclosable {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(theme.surfaceOverlay.opacity(0.7))
+                            .fill(theme.surfaceOverlay.opacity(0.45))
                     }
                 }
 
-                // Disclosed by the row's own chevron, exactly like a read's content —
-                // collapsed by default, one tap to reveal.
+                // Disclosed detail
                 if isExpanded, let detail {
-                    switch detail {
-                    case .diff(let effect, let note):
-                        inlineDiff(effect)
-                        // Only present when the output says something the diff cannot —
-                        // see `TimelineRowDetail.resolve`.
-                        if let note { expandedOutput(note) }
-                    case .output(let out):
-                        expandedOutput(out)
+                    VStack(alignment: .leading, spacing: 3) {
+                        switch detail {
+                        case .diff(let effect, let note):
+                            inlineDiff(effect)
+                            // Only present when the output says something the diff cannot —
+                            // see `TimelineRowDetail.resolve`.
+                            if let note { expandedOutput(note) }
+                        case .output(let out):
+                            expandedOutput(out)
+                        }
                     }
+                    .padding(.leading, 18)
+                    .padding(.vertical, 2)
+                    .transition(.opacity)
                 }
 
                 // The one route this row offers can fail (the file moved, went unreadable,
@@ -1853,13 +1961,13 @@ struct ActionDetailView: View {
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
+                    .padding(.vertical, 4)
                     .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
                             .fill(theme.errorColor.opacity(0.08))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
                             .stroke(theme.errorColor.opacity(0.2), lineWidth: 0.5)
                     )
                     .accessibilityElement(children: .combine)
@@ -1867,22 +1975,10 @@ struct ActionDetailView: View {
                     .transition(.opacity)
                 }
             }
-            .padding(.horizontal, isStandalone ? 10 : 0)
-            .padding(.vertical, isStandalone ? 6 : 0)
-            .background {
-                if isStandalone {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.surfaceOverlay.opacity(isHovering && isDisclosable ? 0.6 : 0.4))
-                }
-            }
-            .overlay {
-                if isStandalone {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-                }
-            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 1.5)
             .onHover { hovering in
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
                     isHovering = hovering
                 }
             }
@@ -1897,22 +1993,37 @@ struct ActionDetailView: View {
 
     @ViewBuilder
     private func expandedOutput(_ out: String) -> some View {
-        Text(out)
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundColor(theme.primaryText.opacity(0.72))
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.surfaceOverlay.opacity(0.3))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-                    )
-            )
-            .padding(.leading, isStandalone ? 0 : 6)
-            .transition(.opacity)
+        ViewThatFits(in: .vertical) {
+            Text(out)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(theme.primaryText.opacity(0.75))
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding(8)
+
+            ScrollView(.vertical, showsIndicators: true) {
+                Text(out)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(theme.primaryText.opacity(0.75))
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(8)
+            }
+            .frame(height: 200)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.surfaceOverlay.opacity(0.3))
+        )
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(theme.secondaryText.opacity(0.3))
+                .frame(width: 2)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .transition(.opacity)
     }
 
     @ViewBuilder
@@ -2052,30 +2163,46 @@ struct WarningRow: View {
                 .frame(width: 14, alignment: .center)
 
             Text(category.displayName.uppercased())
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                 .foregroundColor(.orange.opacity(0.95))
-                .tracking(0.4)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1.5)
-                .background(Capsule().fill(Color.orange.opacity(0.18)))
+                .tracking(0.3)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(Color.orange.opacity(0.15)))
 
             Text(text)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11.5, weight: .medium))
                 .foregroundColor(theme.primaryText.opacity(0.85))
                 .lineLimit(2)
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.orange.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.orange.opacity(0.2), lineWidth: 0.5)
-        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3.5)
+    }
+}
+
+/// Clean single-line row for system-level progress (e.g. "Connecting to Ollama: ...")
+/// that should not be branded as an interim model reasoning "thought".
+struct SystemStatusRow: View {
+    let text: String
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "network")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(theme.tertiaryText)
+                .frame(width: 13, height: 13)
+
+            Text(text)
+                .font(.system(size: 12, weight: .regular))
+                .foregroundColor(theme.secondaryText)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3.5)
     }
 }
 
@@ -2083,75 +2210,80 @@ struct WarningRow: View {
 
 /// Compact display for `.thought`/`.reasoning` nodes inside a chat/code bubble.
 /// Strips heading markers (so `# Summary` doesn't render as an H1 competing with
-/// the final answer), renders at a muted scale, and collapses anything over a
-/// few lines behind a "Show more" toggle.
+/// the final answer), renders at a muted scale, and provides a clean Antigravity-style
+/// collapsible tree hierarchy.
 struct InterimReasoningRow: View {
     let text: String
-    /// [CF-49] Whether the run producing this reasoning is still going. The sparkle used to be
-    /// driven by an `isAnimating` `@State` set true in `.onAppear` and never set false, and the
-    /// row was handed no liveness input at all — so a reasoning row in a run that finished last
-    /// week pulsed continuously, holding one repeating Core Animation loop per visible row. Same
-    /// defect and same fix as `CapabilityStatusIcon.isLive` (CH52), one row over.
+    /// [CF-49] Whether the run producing this reasoning is still going.
     var isLive: Bool = false
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded = false
-
-    private static let collapsedLineLimit = 3
-    private static let expandThresholdChars = 220
+    @State private var isHovering = false
 
     var body: some View {
-        // Flattened ONCE per pass. `flattenedText` is an unmemoized computed property that
-        // rewrites the whole blob (split + three trims + marker strips + two
-        // `replacingOccurrences` per line), and body used to read it twice: here and again
-        // through `needsExpandToggle`. Models like qwen-coder emit multi-KB narratives before
-        // every tool call, and every tool event bumps `timelineRevision` and re-runs this body
-        // for every reasoning row on screen — so the second pass was pure waste, done on the
-        // main actor purely to answer "is it longer than 220 characters?".
         let flattened = flattenedText
-        return HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(theme.accentColor.opacity(0.85))
-                .frame(width: 14, alignment: .center)
-                .padding(.top, 3)
-                .symbolEffect(.pulse, options: .repeating, isActive: isLive && !reduceMotion)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(flattened)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(theme.secondaryText.opacity(0.9))
-                    .lineLimit(isExpanded ? nil : Self.collapsedLineLimit)
-                    .multilineTextAlignment(.leading)
-                    .textSelection(.enabled)
-                    // NB: no `.fixedSize(vertical: true)` — it overrides `lineLimit`
-                    // by forcing the text to reserve space for every line of content.
-
-                if flattened.count > Self.expandThresholdChars {
-                    Button(isExpanded ? "Show less" : "Show more") {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isExpanded.toggle()
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(theme.accentColor.opacity(0.85))
+        VStack(alignment: .leading, spacing: 3) {
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    isExpanded.toggle()
                 }
+            } label: {
+                HStack(spacing: 5) {
+                    if isLive {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(theme.accentColor)
+                            .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+                    }
+
+                    Text(isLive ? String(localized: "Thinking…") : String(localized: "Thought process"))
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(theme.tertiaryText)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .padding(.leading, 1)
+
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+                .padding(.vertical, 2)
+                .padding(.horizontal, 2)
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                isHovering = hovering
             }
 
-            Spacer(minLength: 0)
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(flattened)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.secondaryText.opacity(0.9))
+                        .lineSpacing(3)
+                        .multilineTextAlignment(.leading)
+                        .textSelection(.enabled)
+                }
+                .padding(.leading, 12)
+                .padding(.vertical, 3)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(theme.tertiaryText.opacity(0.2))
+                        .frame(width: 1)
+                        .padding(.leading, 2)
+                }
+                .transition(.opacity)
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(theme.surfaceOverlay.opacity(0.4))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-        )
+        .onAppear {
+            if isLive {
+                isExpanded = true
+            }
+        }
     }
 
     /// Flattens markdown for compact display: drops heading markers, list
@@ -2330,12 +2462,12 @@ enum ToolArgFormatter {
         // instead of `Create Notes.swift`. The same label feeds `ConversationExporter`, so the
         // export carried the code fragment too.
         case "read_file", "write_file", "edit_file", "edit_code", "create_file",
-             "file_overview", "fs_read_metadata", "fs_watch_folder",
+             "file_overview", "read_file_metadata", "fs_read_metadata", "watch_folder", "fs_watch_folder",
              "create_new_file", "overwrite_file", "edit_code_single", "edit_code_batch":
             if let p = firstString(dict, keys: ["path", "file_path"]) {
                 return basename(p)
             }
-        case "list_directory", "fs_smart_search", "fs_organize_batch", "codebase_map":
+        case "list_directory", "spotlight_search", "fs_smart_search", "batch_move_files", "fs_organize_batch", "project_tree", "codebase_map":
             if let p = firstString(dict, keys: ["path", "directory", "dir"]) {
                 return shortPath(p)
             }
@@ -2370,7 +2502,7 @@ enum ToolArgFormatter {
             if let q = firstString(dict, keys: ["query", "topic"]) {
                 return truncate(q, 50)
             }
-        case "git_tool":
+        case "git", "git_tool":
             if let a = firstString(dict, keys: ["action", "operation", "command"]) {
                 return a
             }
@@ -2573,9 +2705,13 @@ enum ToolArgFormatter {
         "edit_code":                   "Edited",
         "create_file":                 "Created",
         "list_directory":              "Explored",
+        "spotlight_search":            "Searched",
         "fs_smart_search":             "Searched",
+        "read_file_metadata":          "Inspected",
         "fs_read_metadata":            "Inspected",
+        "watch_folder":                "Watched",
         "fs_watch_folder":             "Watched",
+        "batch_move_files":            "Organized",
         "fs_organize_batch":           "Organized",
         "execute_shell":               "Ran",
         "run_shell":                   "Ran",
@@ -2595,9 +2731,11 @@ enum ToolArgFormatter {
         "ask_user":                    "Asked",
         "call_agent":                  "Delegated",
         "recall_conversation_history": "Recalled",
+        "git":                         "Git",
         "git_tool":                    "Git",
         "find_definition":             "Located",
         "file_overview":               "Analyzed",
+        "project_tree":                "Mapped",
         "codebase_map":                "Mapped",
         "diff_files":                  "Diffed",
         // The Code profile's intent-splits. Without these `verbLabel` falls back to a generic
@@ -2620,8 +2758,11 @@ enum ToolArgFormatter {
         "edit_code":        ("file", "files"),
         "create_file":      ("file", "files"),
         "list_directory":   ("directory", "directories"),
+        "spotlight_search": ("search", "searches"),
         "fs_smart_search":  ("search", "searches"),
+        "read_file_metadata": ("file", "files"),
         "fs_read_metadata": ("file", "files"),
+        "batch_move_files": ("file", "files"),
         "execute_shell":    ("command", "commands"),
         "run_shell":        ("command", "commands"),
         "bash":             ("command", "commands"),
@@ -2637,9 +2778,11 @@ enum ToolArgFormatter {
         "web_search":       ("search", "searches"),
         "ask_user":         ("question", "questions"),
         "call_agent":       ("agent", "agents"),
+        "git":              ("operation", "operations"),
         "git_tool":         ("operation", "operations"),
         "find_definition":  ("symbol", "symbols"),
         "file_overview":    ("file", "files"),
+        "project_tree":     ("codebase", "codebases"),
         "codebase_map":     ("codebase", "codebases"),
         "diff_files":       ("diff", "diffs"),
         "create_new_file":  ("file", "files"),

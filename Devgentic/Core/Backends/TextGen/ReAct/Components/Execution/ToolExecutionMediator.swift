@@ -301,7 +301,10 @@ struct ToolExecutionMediator: ToolDispatching {
 
     static func getRequiredPermissions(for toolName: String) -> [SystemPermission] {
         switch toolName {
-        case "fs_smart_search", "fs_read_metadata", "fs_watch_folder", "fs_organize_batch":
+        case "spotlight_search", "fs_smart_search",
+             "read_file_metadata", "fs_read_metadata",
+             "watch_folder", "fs_watch_folder",
+             "batch_move_files", "fs_organize_batch":
             return [.desktop, .documents, .downloads]
         case "run_applescript":
             return [.accessibility]

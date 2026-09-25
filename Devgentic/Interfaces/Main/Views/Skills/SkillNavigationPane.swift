@@ -211,8 +211,10 @@ struct SkillNavigationPane: View {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
                     )
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
+            .pointingHandCursor()
             .help("Import skills from a folder, archive or .md file (⌘I)")
             .keyboardShortcut("i", modifiers: [.command])
             .accessibilityIdentifier("skills.add")
@@ -445,8 +447,10 @@ struct SkillNavigationPane: View {
                                 Circle()
                                     .fill(theme.errorColor.opacity(0.12))
                             )
+                            .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                     .padding(.trailing, 8)
                     .help("Delete skill")
                     .accessibilityLabel("Delete \(skill.displayName)")
@@ -456,6 +460,7 @@ struct SkillNavigationPane: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.12)) {
                 hoveredSkillID = hovering ? skill.id : (hoveredSkillID == skill.id ? nil : hoveredSkillID)

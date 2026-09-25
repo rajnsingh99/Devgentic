@@ -218,15 +218,21 @@ struct ModelFitAdvisoryView: View {
 
             // Actions
             HStack(spacing: 12) {
-                Button("Download Anyway") {
+                TactileButton(
+                    title: "Download Anyway",
+                    variant: .secondary,
+                    size: .regular
+                ) {
                     onDownloadAnyway()
                 }
-                .buttonStyle(.bordered)
 
-                Button("Cancel") {
+                TactileButton(
+                    title: "Cancel",
+                    variant: .primary,
+                    size: .regular
+                ) {
                     onDismiss()
                 }
-                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
         }
