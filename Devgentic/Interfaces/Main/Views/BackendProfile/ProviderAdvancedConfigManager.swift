@@ -275,7 +275,7 @@ struct ProviderAdvancedSettingsView: View {
         case .openAI:
             OpenAISettingsView(config: $configManager.localOpenAIConfig, modelName: modelName ?? "")
         case .openRouter:
-            OpenAISettingsView(config: $configManager.localOpenRouterConfig, modelName: modelName ?? "")
+            OpenAISettingsView(config: $configManager.localOpenRouterConfig, modelName: modelName ?? "", showsOpenRouterRouting: true)
         case .openAICompatible:
             OpenAISettingsView(config: $configManager.localOpenAICompatibleConfig, modelName: modelName ?? "")
         case .mlx:

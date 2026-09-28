@@ -44,6 +44,12 @@ struct BackendProfileDetailView: View {
     @State private var unreadable: BackendProfileStore.UnreadableProfileInfo?
     @State private var showingDiscardAlert = false
 
+    /// Register KC-22: the profile HAS an API key, but the Keychain would not hand it over (locked,
+    /// or an access prompt denied — most likely right after an update re-signed the app). Without
+    /// this the key field simply showed empty, identical to a profile that never had one, and the
+    /// obvious "fix" was to paste the key again. Same `@State`-not-`body` rule as `unreadable`.
+    @State private var providerKeyUnreadable = false
+
     var body: some View {
         VStack(spacing: 0) {
             // ⚠️ ABOVE the switch, so it covers every profile type in one place — and it must, because
@@ -53,6 +59,9 @@ struct BackendProfileDetailView: View {
             // on screen for the user to notice.
             if let unreadable {
                 unreadableConfigurationWarning(unreadable)
+            }
+            if providerKeyUnreadable {
+                unreadableProviderKeyWarning
             }
 
             Group {
@@ -108,6 +117,7 @@ struct BackendProfileDetailView: View {
         .task(id: editBuffer.draft.id) {
             unreadable = BackendProfileStore.shared.unreadableProfiles()
                 .first { $0.id == editBuffer.draft.id }
+            providerKeyUnreadable = BackendProfileStore.shared.isProviderKeyUnreadable(for: editBuffer.draft.id)
         }
         // ⚠️ Two different alerts, because the two reasons have OPPOSITE correct actions (G18).
         // A from-the-future profile is intact and merely unreadable here, so its alert offers no
@@ -191,6 +201,59 @@ struct BackendProfileDetailView: View {
             "Warning. This profile's configuration could not be read. It was saved as "
             + "\(info.wasSummary). Your original data is preserved; saving now replaces it permanently."
         )
+    }
+
+    /// Warns without blocking, like the configuration warning above. Register KC-22.
+    private var unreadableProviderKeyWarning: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "key.slash")
+                .foregroundColor(theme.warningColor)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("This profile's API key couldn't be read from the Keychain")
+                    .font(theme.fontBody.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+                Text("Your key is still stored — it is not lost, and you don't need to enter it again. The Keychain may be locked, or access was denied after an update. Choose Always Allow if macOS asks, then try again.")
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.secondaryText)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("Try Again") { retryProviderKeyRead() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.warningColor.opacity(0.10))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.warningColor.opacity(0.35)).frame(height: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "Warning. This profile's API key couldn't be read from the Keychain. The key is still "
+            + "stored; you don't need to enter it again."
+        )
+    }
+
+    private func retryProviderKeyRead() {
+        let id = editBuffer.draft.id
+        guard BackendProfileStore.shared.retryProviderKeyRead(for: id) else {
+            toastManager.show("The Keychain still won't release this key. See the log for details.", style: .error)
+            return
+        }
+        providerKeyUnreadable = false
+        // ⚠️ Reload the draft only when it holds no edits — `load` would destroy them. A dirty
+        // draft still carries the key-less snapshot, but saving it is safe: the model's sticky
+        // clear-suppression (KC-20) refuses to treat that missing key as the user clearing it.
+        if !editBuffer.isDirty, let fresh = try? BackendProfileStore.shared.fetchProfile(byId: id) {
+            editBuffer.load(fresh)
+            toastManager.show("API key restored.", style: .success)
+        } else {
+            toastManager.show("API key is readable again. Save or revert your edits to see it.", style: .success)
+        }
     }
 
     private func discardUnreadableConfiguration() {

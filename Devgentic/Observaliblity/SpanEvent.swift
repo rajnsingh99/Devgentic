@@ -309,6 +309,8 @@ extension TraceStatus {
         // so those runs were indistinguishable from clean ones in the trace store.
         case .completedWithWarnings: return .completedWithWarnings
         case .failed:    return .failed
+        // No timeout TraceStatus yet; the span's error text carries the limit.
+        case .timedOut:  return .failed
         case .cancelled: return .cancelled
         case .none:      return .completed
         }

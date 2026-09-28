@@ -9,7 +9,7 @@
 
 import Foundation
 
-struct MCPUserError {
+struct MCPUserError: Equatable {
     let title: String
     let message: String
     let suggestion: String

@@ -42,25 +42,21 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
         text: Binding<String>,
         agentName: Binding<String>,
         configuredTools: Binding<[Tool]>,
-        themeManager: ThemeManager
+        themeManager: ThemeManager,
+        contextWindow: Int? = nil
     ) {
         let theme = themeManager.currentTheme
 
-        // ⚠️ register B7 — the reuse test was `window != nil && window.isVisible`, and `isVisible`
-        // is FALSE for a miniaturized window. Minimizing the editor and clicking Expand again
-        // therefore fell through to the create path and ABANDONED the old window while it was
-        // still this object's delegate. Closing that orphan then ran `windowWillClose`, which
-        // cleared the LIVE window's reference and all four callbacks — so the live editor's Save
-        // prompt went dead and `closeWindowCommittingChanges()` called a nil `commitChanges`,
-        // silently discarding whatever had been typed. Reuse whenever we still hold a window;
-        // `windowWillClose` nils it on every real close, so a retained window is always usable.
+        // ⚠️ register B7 — reuse test
         if let existingWindow = window {
-            // ⚠️ Commit BEFORE rebuilding the content view. The editor keeps its text in
-            // `@State localText` and only writes back on an explicit commit, so replacing the
-            // hosting view re-initialises that state from the binding and would drop anything
-            // typed since the last commit — the same loss register A27 fixed on the navigation
-            // path, which re-presenting would otherwise reintroduce.
             commitChanges?()
+
+            existingWindow.styleMask.insert(.fullSizeContentView)
+            existingWindow.titleVisibility = .hidden
+            existingWindow.titlebarAppearsTransparent = true
+            existingWindow.titlebarSeparatorStyle = .none
+            existingWindow.isMovableByWindowBackground = false
+            existingWindow.backgroundColor = NSColor(theme.primaryBackground)
 
             existingWindow.contentView = NSHostingView(
                 rootView: AdvancedPromptEditorHost(
@@ -68,11 +64,11 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
                     manager: self,
                     text: text,
                     agentName: agentName,
-                    configuredTools: configuredTools
+                    configuredTools: configuredTools,
+                    contextWindow: contextWindow
                 )
             )
             existingWindow.title = Self.title(for: agentName.wrappedValue)
-            existingWindow.backgroundColor = NSColor(theme.primaryBackground)
             if existingWindow.isMiniaturized { existingWindow.deminiaturize(nil) }
             existingWindow.makeKeyAndOrderFront(nil)
             logger.info("[PROFILE] Re-presented the floating instructions editor for '\(agentName.wrappedValue)'.")
@@ -84,24 +80,30 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
             manager: self,
             text: text,
             agentName: agentName,
-            configuredTools: configuredTools
+            configuredTools: configuredTools,
+            contextWindow: contextWindow
         )
 
         let newWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 750, height: 600),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 640),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
         newWindow.center()
         newWindow.title = Self.title(for: agentName.wrappedValue)
+        newWindow.titleVisibility = .hidden
+        newWindow.titlebarAppearsTransparent = true
+        newWindow.titlebarSeparatorStyle = .none
+        newWindow.isMovableByWindowBackground = false
         newWindow.isReleasedWhenClosed = false
         newWindow.contentView = NSHostingView(rootView: editorView)
         newWindow.level = .floating
 
         newWindow.isOpaque = false
-        newWindow.backgroundColor = NSColor(theme.primaryBackground).withAlphaComponent(0.98)
+        newWindow.backgroundColor = NSColor(theme.primaryBackground)
+        newWindow.minSize = NSSize(width: 660, height: 480)
         newWindow.delegate = self
 
         self.window = newWindow
@@ -218,23 +220,36 @@ private struct AdvancedPromptEditorHost: View {
     @Binding var text: String
     @Binding var agentName: String
     @Binding var configuredTools: [Tool]
+    var contextWindow: Int? = nil
 
     var body: some View {
         AdvancedPromptEditorView(
             manager: manager,
             text: $text,
             agentName: agentName,
-            configuredTools: $configuredTools
+            configuredTools: $configuredTools,
+            contextWindow: contextWindow
         )
         .environment(\.appTheme, themeManager.currentTheme)
+        .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
+        .environment(themeManager)
         .preferredColorScheme(themeManager.currentTheme.colorScheme)
         // ⚠️ register B18 — A75 fixed exactly this for the BOT editor and left the agent one.
-        // `updateTitle(agentName:)` was never wrong; it was never CALLED, so renaming an agent
-        // left the detached window advertising the old name. Driving it from the host's own
-        // re-render removes the call site that can be forgotten. A plain `String` could not have
-        // worked: the editor lives in an `NSHostingView` whose root view is built once, so an
-        // `.onChange` on a captured `String` can never fire.
         .onChange(of: agentName) { _, newName in manager.updateTitle(agentName: newName) }
+    }
+}
+
+// MARK: - Window Drag Area
+
+private struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { DraggingView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class DraggingView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+        override var mouseDownCanMoveWindow: Bool { false }
     }
 }
 
@@ -278,6 +293,7 @@ struct AdvancedPromptEditorView: View {
     @Binding var text: String
     var agentName: String
     @Binding var configuredTools: [Tool]
+    var contextWindow: Int? = nil
     @Environment(\.appTheme) private var theme
     
     // State for supporting components
@@ -296,167 +312,67 @@ struct AdvancedPromptEditorView: View {
         localText != initialText || localTools != initialTools
     }
 
+    private var estimatedTokens: Int {
+        max(1, localText.count / 4)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            
-            // Header
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("System Instructions")
-                        .font(theme.fontHeadline)
-                    Text("Defines the core persona, logic, and protocols for \(agentName).")
-                        .font(theme.fontCaption)
-                        .foregroundColor(theme.secondaryText)
-                }
-                Spacer()
-                
-                VStack(alignment: .trailing) {
-                    VStack(alignment: .trailing) {
-                        Text("\(localText.count) characters")
-                            .font(theme.fontSubheadline)
-                            .monospacedDigit()
-                        Text("~ \(localText.count / 4) tokens")
-                            .font(theme.fontCaption)
-                            .foregroundColor(theme.secondaryText)
-                    }
-                }
-            }
-            .padding()
-            .background(theme.primaryBackground)
+            // Header Bar with Drag Area and Traffic Light Clearance
+            headerView
 
             Rectangle()
-                .fill(theme.dividerColor)
-                .frame(height: 1)
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
 
+            // Subheader Context Banner & Quick Insertion
+            subHeaderView
+
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
+
+            // Workspace Area (Editor Canvas + Optional Slide-out Guide)
             HStack(spacing: 0) {
-                // The Core Editor
-                ZStack(alignment: .topTrailing) {
-                    ZStack(alignment: .topLeading) {
-                        TokenizingTextEditor(text: $localText, configuredTools: $localTools, theme: theme, promptLibraryVM: promptLibraryVM)
-                            .padding()
-                            .scrollContentBackground(.hidden)
-                            .background(theme.textBackground)
-                        
-                        if localText.isEmpty {
-                            Text("Define persona, strategy, and guardrails for \(agentName)...")
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundColor(theme.secondaryText.opacity(0.5))
-                                .padding(.horizontal, 24)
-                                .padding(.vertical, 24)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    
-                    // Floating Guide Toggle
-                    Button(action: { withAnimation { showingGuide.toggle() } }) {
-                        Image(systemName: "info.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(showingGuide ? theme.accentColor : theme.secondaryText)
-                            .padding(8)
-                            .background(
-                                Circle()
-                                    .fill(theme.secondaryBackground.opacity(0.8))
-                                    .blur(radius: 0.5)
-                            )
-                            .overlay(
-                                Circle()
-                                    .stroke(theme.dividerColor, lineWidth: 0.5)
-                            )
-                            .shadow(color: theme.shadowColor, radius: 4, x: 0, y: 2)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 16)
-                    .padding(.trailing, 32) // Increased padding to avoid scrollbar overlap
-                    .help("Explain how to write instructions and use shortcuts")
-                    .accessibilityLabel("Explain how to write instructions and use shortcuts")
-                }
-                
+                editorCanvasView
+
                 if showingGuide {
                     Rectangle()
-                        .fill(theme.dividerColor)
-                        .frame(width: 1)
-                    
-                    PromptGuideView()
-                        .frame(width: 280)
-                        .background(theme.secondaryBackground)
-                        .transition(.move(edge: .trailing))
+                        .fill(theme.dividerColor.opacity(0.25))
+                        .frame(width: 0.5)
+
+                    PromptGuideView(
+                        onInsertSnippet: { snippet in
+                            insertText(snippet)
+                        },
+                        onClose: {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                                showingGuide = false
+                            }
+                        }
+                    )
+                    .frame(width: 290)
+                    .background(theme.secondaryBackground.opacity(0.4))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
 
             Rectangle()
-                .fill(theme.dividerColor)
-                .frame(height: 1)
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
 
-            // Footer
-            HStack {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(theme.successColor)
-                    .accessibilityHidden(true)
-                // ⚠️ Was "Changes sync automatically to the main window." — which was false:
-                // `saveAndClose()` was the ONLY write-back, so navigating away lost everything.
-                // Now accurate for all three exits (Save, navigate away, and the close prompt).
-                Text("Changes apply to the main window when you save or close this window.")
-                    .font(theme.fontCaption)
-                    .foregroundColor(theme.secondaryText)
-
-                Spacer()
-
-                Button(action: {
-                    promptLibraryVM.loadCreateDraft()
-                    promptLibraryVM.text = localText
-                    showingSavePopover = true
-                }) {
-                    Label("Save to Library", systemImage: "plus.square.on.square")
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(theme.accentColor)
-                .padding(.horizontal, 8)
-                .popover(isPresented: $showingSavePopover, arrowEdge: .top) {
-                    CreateEditPromptView()
-                        .environment(promptLibraryVM)
-                        .frame(minWidth: 480, idealWidth: 550, minHeight: 450, idealHeight: 500)
-                }
-                
-                if hasUnsavedChanges {
-                    Button("Save") {
-                        saveAndClose()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                }
-            }
-            .padding()
-            .background(theme.secondaryBackground)
+            // Tactile Footer
+            footerView
         }
-        .frame(minWidth: 500, minHeight: 400)
+        .frame(minWidth: 680, minHeight: 500)
+        .background(theme.primaryBackground)
         .onAppear {
-            // Initialize local state from the binding
             localText = text
             localTools = configuredTools
 
             initialText = text
             initialTools = configuredTools
 
-            // Wire up unsaved-changes callbacks on the manager that owns
-            // THIS editor's window — never the global singleton, so two
-            // editors open simultaneously can't trample each other.
-            //
-            // ⚠️ Register A72. These used to be written `{ hasUnsavedChanges }` and
-            // `{ saveAndClose() }`, which capture `self`. This view is a struct, so that is a value
-            // copy — but the copy carries `manager`, a class reference, so the manager ended up
-            // owning a closure that owned the manager. Only `discardChanges` had been written
-            // `[weak manager]`.
-            //
-            // ⚠️ It has not been LEAKING, because `windowWillClose` nils all four callbacks and
-            // breaks the cycle on every close. That is a rescue, not a design: A71 was this same
-            // file's sibling manager missing its window delegate entirely, so "the teardown always
-            // runs" is exactly the assumption that has already failed once here. Capturing
-            // correctly makes it not matter.
-            //
-            // Each closure captures the STATE BINDINGS it needs rather than the view. A binding
-            // from `@State` references the state's storage box, never the view struct — so none of
-            // these closures reaches `manager` except the two that must, and those hold it weakly.
             manager.checkChanges = { [local = $localText, initial = $initialText,
                                       localTools = $localTools, initialTools = $initialTools] in
                 local.wrappedValue != initial.wrappedValue
@@ -469,19 +385,361 @@ struct AdvancedPromptEditorView: View {
                 manager?.closeWindow()
             }
             manager.discardChanges = { [weak manager] in manager?.closeWindow() }
-            // Used by `closeWindowCommittingChanges()` on navigation teardown. Kept separate from
-            // `saveChanges` so "Don't Save" still has a path that closes without writing back.
             manager.commitChanges = { [target = $text, tools = $configuredTools,
                                        local = $localText, localTools = $localTools] in
                 target.wrappedValue = local.wrappedValue
                 tools.wrappedValue = localTools.wrappedValue
             }
         }
+        .onExitCommand {
+            handleClose()
+        }
+        .background(
+            Group {
+                Button("") {
+                    if hasUnsavedChanges {
+                        saveAndClose()
+                    }
+                }
+                .keyboardShortcut("s", modifiers: .command)
+
+                Button("") {
+                    handleClose()
+                }
+                .keyboardShortcut("w", modifiers: .command)
+            }
+            .frame(width: 0, height: 0)
+            .opacity(0)
+        )
+    }
+
+    // MARK: - Header View
+    private var headerView: some View {
+        HStack(spacing: 12) {
+            // Identity Cluster
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.accentColor.opacity(0.12))
+                        .frame(width: 28, height: 28)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 0.8)
+                        )
+
+                    Image(systemName: "cpu.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(theme.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(agentName)
+                            .font(theme.fontHeadline.weight(.bold))
+                            .foregroundColor(theme.primaryText)
+                            .lineLimit(1)
+
+                        Text("AGENT")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(theme.surfaceOverlayStrong)
+                            .clipShape(Capsule())
+                    }
+
+                    Text("System Instructions & Persona")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                }
+            }
+
+            Spacer(minLength: 16)
+
+            // Telemetry Pill & Actions
+            HStack(spacing: 10) {
+                telemetryPill
+
+                TactileIconButton(
+                    icon: showingGuide ? "book.pages.fill" : "book.pages",
+                    tooltip: showingGuide ? "Hide Prompt Guide" : "Show Prompt Guide",
+                    variant: showingGuide ? .primary : .secondary,
+                    size: 26
+                ) {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                        showingGuide.toggle()
+                    }
+                }
+
+                TactileIconButton(
+                    icon: "xmark",
+                    tooltip: "Close Window",
+                    variant: .subtle,
+                    size: 26
+                ) {
+                    handleClose()
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            ZStack {
+                theme.primaryBackground
+                WindowDragArea()
+            }
+        )
+    }
+
+    // MARK: - Subheader View
+    private var subHeaderView: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "quote.opening")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(theme.accentColor.opacity(0.8))
+
+            Text("Define core persona, protocols, and tool constraints.")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(1)
+
+            Spacer(minLength: 12)
+
+            // Quick Insertion Actions
+            HStack(spacing: 6) {
+                TactileButton(
+                    title: "@ Tool",
+                    icon: "wrench.fill",
+                    variant: .subtle,
+                    size: .compact
+                ) {
+                    insertShortcutSymbol("@")
+                }
+
+                TactileButton(
+                    title: "# Prompt",
+                    icon: "text.quote",
+                    variant: .subtle,
+                    size: .compact
+                ) {
+                    insertShortcutSymbol("#")
+                }
+
+                TactileButton(
+                    title: "Save to Library",
+                    icon: "plus.square.on.square",
+                    variant: .secondary,
+                    size: .compact
+                ) {
+                    promptLibraryVM.loadCreateDraft()
+                    promptLibraryVM.text = localText
+                    showingSavePopover = true
+                }
+                .popover(isPresented: $showingSavePopover, arrowEdge: .top) {
+                    CreateEditPromptView()
+                        .environment(promptLibraryVM)
+                        .frame(minWidth: 480, idealWidth: 550, minHeight: 450, idealHeight: 500)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(theme.secondaryBackground.opacity(0.35))
+    }
+
+    // MARK: - Inset Editor Canvas
+    private var editorCanvasView: some View {
+        ZStack(alignment: .topLeading) {
+            TokenizingTextEditor(
+                text: $localText,
+                configuredTools: $localTools,
+                theme: theme,
+                promptLibraryVM: promptLibraryVM
+            )
+            .padding(10)
+            .scrollContentBackground(.hidden)
+
+            if localText.isEmpty {
+                Text("Define persona, strategy, and guardrails for \(agentName)...")
+                    .font(theme.fontCode)
+                    .foregroundColor(theme.placeholderText)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
+                    .allowsHitTesting(false)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    // MARK: - Telemetry Pill
+    private var telemetryPill: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(contextStatusColor)
+                .frame(width: 5, height: 5)
+
+            Text("~ \(estimatedTokens.formatted()) tokens")
+                .font(theme.fontCaption2.monospacedDigit())
+                .foregroundColor(theme.primaryText)
+
+            if let cw = contextWindow {
+                let ratio = Double(estimatedTokens) / Double(cw)
+                Text("•")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.tertiaryText)
+                Text("\(Int(ratio * 100))% of \(formatContext(cw))")
+                    .font(theme.fontCaption2.monospacedDigit())
+                    .foregroundColor(contextStatusColor)
+            }
+
+            Text("•")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.tertiaryText)
+
+            Text("\(localText.count.formatted()) chars")
+                .font(theme.fontCaption2.monospacedDigit())
+                .foregroundColor(theme.secondaryText)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+        )
+    }
+
+    private var contextStatusColor: Color {
+        guard let cw = contextWindow else { return theme.accentColor }
+        let ratio = Double(estimatedTokens) / Double(cw)
+        if ratio > 0.5 { return theme.errorColor }
+        if ratio > 0.25 { return theme.warningColor }
+        return theme.successColor
+    }
+
+    private func formatContext(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 {
+            return String(format: "%.1fM", Double(tokens) / 1_000_000)
+        } else if tokens >= 1_000 {
+            return "\(tokens / 1_000)k"
+        } else {
+            return "\(tokens)"
+        }
+    }
+
+    // MARK: - Footer View
+    private var footerView: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(hasUnsavedChanges ? theme.warningColor : theme.successColor)
+                .frame(width: 6, height: 6)
+
+            Text(hasUnsavedChanges
+                 ? "Unsaved modifications staged (click Save & Close or ⌘S)"
+                 : "Changes apply to the active configuration on close")
+                .font(theme.fontCaption2)
+                .foregroundColor(hasUnsavedChanges ? theme.warningColor : theme.secondaryText)
+
+            Spacer()
+
+            if hasUnsavedChanges {
+                TactileButton(
+                    title: "Revert",
+                    icon: "arrow.counterclockwise",
+                    variant: .subtle,
+                    size: .compact
+                ) {
+                    revertChanges()
+                }
+
+                TactileButton(
+                    title: "Save & Close",
+                    icon: "checkmark",
+                    variant: .primary,
+                    size: .compact
+                ) {
+                    saveAndClose()
+                }
+            } else {
+                TactileButton(
+                    title: "Done",
+                    icon: "checkmark",
+                    variant: .secondary,
+                    size: .compact
+                ) {
+                    saveAndClose()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(theme.primaryBackground)
+    }
+
+    // MARK: - Actions
+    private func insertShortcutSymbol(_ symbol: String) {
+        if localText.isEmpty || localText.hasSuffix("\n") || localText.hasSuffix(" ") {
+            localText += symbol
+        } else {
+            localText += " " + symbol
+        }
+    }
+
+    private func insertText(_ textToInsert: String) {
+        if localText.isEmpty {
+            localText = textToInsert
+        } else if localText.hasSuffix("\n\n") {
+            localText += textToInsert
+        } else if localText.hasSuffix("\n") {
+            localText += "\n" + textToInsert
+        } else {
+            localText += "\n\n" + textToInsert
+        }
+    }
+
+    private func revertChanges() {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+            localText = initialText
+            localTools = initialTools
+        }
     }
 
     private func saveAndClose() {
         commitToBindings()
         manager.closeWindow()
+    }
+
+    private func handleClose() {
+        if hasUnsavedChanges {
+            let alert = NSAlert()
+            alert.messageText = "Unsaved Changes"
+            alert.informativeText = "You have unsaved changes in the system instructions. Would you like to save them before closing?"
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Don't Save")
+
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                saveAndClose()
+            } else if response == .alertThirdButtonReturn {
+                manager.closeWindow()
+            }
+        } else {
+            manager.closeWindow()
+        }
     }
 
     /// The single write-back path from the editor's local state to the profile's bindings.
@@ -513,7 +771,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
         textView.isRichText = false
         textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         textView.textColor = NSColor(theme.primaryText)
-        textView.backgroundColor = NSColor(theme.textBackground)
+        textView.backgroundColor = NSColor(theme.secondaryBackground)
         textView.drawsBackground = true
         
         textView.delegate = context.coordinator
@@ -552,7 +810,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
         
         // Ensure theme colors are applied on update
         textView.textColor = NSColor(theme.primaryText)
-        textView.backgroundColor = NSColor(theme.textBackground)
+        textView.backgroundColor = NSColor(theme.secondaryBackground)
     }
 
     @MainActor
@@ -1045,100 +1303,165 @@ struct PromptMentionRow: View {
 // MARK: - Prompt Guide
 
 struct PromptGuideView: View {
+    var onInsertSnippet: ((String) -> Void)? = nil
+    var onClose: (() -> Void)? = nil
     @Environment(\.appTheme) private var theme
     
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Writing Instructions")
-                        .font(theme.fontHeadline)
-                    Text("Effective instructions define the boundaries and behavior of your agent.")
-                        .font(theme.fontCaption)
-                        .foregroundColor(theme.secondaryText)
+            VStack(alignment: .leading, spacing: 18) {
+                // Header with Close
+                HStack(alignment: .center) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "book.pages.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(theme.accentColor)
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Instructions Guide")
+                                .font(theme.fontSubheadline.weight(.bold))
+                                .foregroundColor(theme.primaryText)
+                            Text("Persona, strategy & guardrails")
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
+                        }
+                    }
+
+                    Spacer()
+
+                    if let onClose {
+                        TactileIconButton(
+                            icon: "xmark",
+                            tooltip: "Close Guide",
+                            variant: .subtle,
+                            size: 22
+                        ) {
+                            onClose()
+                        }
+                    }
                 }
-                
+                .padding(.bottom, 4)
+
                 guideSection(
                     title: "1. Persona",
-                    description: "Set the identity and tone. Is the agent a software engineer, a creative writer, or a legal expert?",
-                    example: "# PERSONA\nYou are a Principal Swift Engineer specializing in clean architecture..."
+                    description: "Set the identity, specialization, and communication tone.",
+                    example: "# PERSONA\nYou are a Principal Swift Engineer specializing in clean macOS architecture and SwiftUI.",
+                    snippetToInsert: "# PERSONA\nYou are an expert assistant specialized in software engineering and clear explanations.\n"
                 )
-                
+
                 guideSection(
                     title: "2. Strategy",
-                    description: "Outline the problem-solving steps the agent should follow.",
-                    example: "# STRATEGY\n1. Analyze the file system first.\n2. Propose changes before editing."
+                    description: "Outline the step-by-step reasoning cycle.",
+                    example: "# STRATEGY\n1. Analyze codebase requirements.\n2. Propose changes before executing.\n3. Verify results thoroughly.",
+                    snippetToInsert: "# STRATEGY\n1. Understand the goal and gather necessary context.\n2. Plan changes step by step.\n3. Execute with precision and verify integrity.\n"
                 )
-                
+
                 guideSection(
                     title: "3. Guardrails",
-                    description: "Specify what the agent should NEVER do to ensure safety.",
-                    example: "# GUARDRAILS\n- Never delete a folder without user confirmation."
+                    description: "Specify hard constraints and safety boundaries.",
+                    example: "# GUARDRAILS\n- Never execute destructive commands without confirmation.\n- Maintain documentation integrity.",
+                    snippetToInsert: "# GUARDRAILS\n- Never perform irreversible modifications without explicit approval.\n- Preserve existing code comments and style conventions.\n"
                 )
-                
-                Divider()
-                
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Shortcuts")
-                        .font(theme.fontSubheadline)
-                        .fontWeight(.bold)
-                    
+
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.25))
+                    .frame(height: 0.5)
+
+                // Shortcuts Section
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Interactive Shortcuts")
+                        .font(theme.fontFootnote.weight(.bold))
+                        .foregroundColor(theme.primaryText)
+
                     shortcutItem(
                         symbol: "@",
                         label: "Mention Tools",
-                        description: "Type `@` to see and enable tools from your library. This automatically enables them for the agent."
+                        description: "Type `@` to see and bind tools from your library directly into this agent."
                     )
-                    
+
                     shortcutItem(
                         symbol: "#",
-                        label: "Prompt Templates",
-                        description: "Type `#` to search and insert reusable prompt snippets from your Prompt Library."
+                        label: "Prompt Snippets",
+                        description: "Type `#` to search and insert reusable templates from your Prompt Library."
                     )
                 }
-                
-                Spacer(minLength: 20)
+
+                Spacer(minLength: 16)
             }
-            .padding()
+            .padding(16)
         }
     }
-    
-    private func guideSection(title: String, description: String, example: String) -> some View {
+
+    private func guideSection(title: String, description: String, example: String, snippetToInsert: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(theme.fontSubheadline)
-                .fontWeight(.bold)
+            HStack {
+                Text(title)
+                    .font(theme.fontFootnote.weight(.bold))
+                    .foregroundColor(theme.primaryText)
+
+                Spacer()
+
+                if let onInsertSnippet {
+                    Button {
+                        onInsertSnippet(snippetToInsert)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Insert")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundColor(theme.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2.5)
+                        .background(theme.accentColor.opacity(0.12))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Insert this template section into instructions")
+                }
+            }
+
             Text(description)
-                .font(theme.fontCaption)
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
+                .lineSpacing(2)
 
             Text(example)
-                .font(.system(size: 11, weight: .regular, design: .monospaced)) // Fixed size: monospaced
+                .font(.system(size: 10.5, weight: .regular, design: .monospaced))
+                .foregroundColor(theme.secondaryText.opacity(0.9))
                 .padding(8)
-                .background(theme.primaryBackground.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(theme.primaryBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
-                        .stroke(theme.dividerColor, lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
                 )
         }
     }
-    
-    private func shortcutItem(symbol: String, label: String, description: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(symbol)
-                .font(.system(size: 16, weight: .bold, design: .monospaced)) // Fixed size: monospaced
-                .foregroundColor(theme.accentColor)
-                .frame(width: 24, height: 24)
-                .background(theme.accentColor.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusSmall))
 
-            VStack(alignment: .leading, spacing: 2) {
+    private func shortcutItem(symbol: String, label: String, description: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(symbol)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundColor(theme.accentColor)
+                .frame(width: 22, height: 22)
+                .background(theme.accentColor.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 0.5)
+                )
+
+            VStack(alignment: .leading, spacing: 1) {
                 Text(label)
-                    .font(theme.fontCaption)
-                    .fontWeight(.bold)
+                    .font(theme.fontCaption2.weight(.bold))
+                    .foregroundColor(theme.primaryText)
                 Text(description)
-                    .font(.system(.caption2))
+                    .font(.system(size: 10))
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(1.5)
             }
         }
     }

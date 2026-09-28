@@ -35,12 +35,21 @@ struct ProviderConfigSection: View {
     @State private var isApiKeyVisible: Bool = false
     @State private var isEditingBaseURL: Bool = false
 
+    /// Keys pasted for other providers during this editing session, so switching away and back
+    /// restores them. In memory only: `switchProvider(to:)` clears `apiKey`, and only the key for
+    /// the provider actually selected is ever saved (to the Keychain) or sent.
+    @State private var stashedKeys: [ApiProvider: String] = [:]
+
+    /// Bound only so toggling General Settings → "Show Remote Models" re-renders the
+    /// picker live; the filter itself lives in `ProfileCapabilityFilter`.
+    @AppStorage(AppSettings.showRemoteModelsKey) private var showRemoteModels: Bool = false
+
     @Environment(\.appTheme) private var theme
 
     // MARK: - Computed Helpers
 
     private var providers: [ApiProvider] {
-        ProfileCapabilityFilter.allowedProviders(for: profileType)
+        ProfileCapabilityFilter.allowedProviders(for: profileType, keepingCurrent: providerConfig.apiProvider)
     }
 
     private var baseURLBinding: Binding<String> {
@@ -89,7 +98,9 @@ struct ProviderConfigSection: View {
                 set: { newValue in
                     let oldValue = providerConfig.apiProvider
                     guard newValue != oldValue else { return }
+                    if let key = providerConfig.apiKey, !key.isEmpty { stashedKeys[oldValue] = key }
                     providerConfig.switchProvider(to: newValue)
+                    providerConfig.apiKey = stashedKeys[newValue]
                     onProviderChanged?(oldValue, newValue)
                 }
             )) {

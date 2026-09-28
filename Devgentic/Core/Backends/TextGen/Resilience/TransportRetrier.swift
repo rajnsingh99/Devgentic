@@ -132,7 +132,7 @@ struct TransportRetrier {
                 case .mlx:
                     "The local model failed (\(detail)). Try reloading the model or switching to a smaller one."
                 }
-                throw TransportFatalError(reason: reason, category: .providerServerError)
+                throw TransportFatalError(reason: reason, category: ProviderErrorClassifier.exhaustedCategory(forDetail: detail))
             }
             let delay = transport.transientDelay(attempt: transientCount)
             return RetryStep(

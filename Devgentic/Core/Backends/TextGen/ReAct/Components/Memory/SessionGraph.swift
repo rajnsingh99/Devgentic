@@ -37,6 +37,7 @@ enum EpisodeLifecycle: String, Codable, Sendable {
         case .completedWithWarnings: self = .failed
         case .failed:    self = .failed
         case .cancelled: self = .cancelled
+        case .timedOut:  self = .failed   // the goal was not reached; episodic memory keeps the failure signal
         }
     }
 }

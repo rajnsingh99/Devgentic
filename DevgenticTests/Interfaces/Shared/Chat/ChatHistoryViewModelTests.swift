@@ -281,7 +281,7 @@ final class ChatHistoryViewModelTests: XCTestCase {
     /// Presentation is a mode that survives minimize/reopen but clears with the tabs.
     func testPresentationTogglesAndClearsWithTabs() {
         viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
-        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay, "Fresh viewer opens in overlay")
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split, "Fresh viewer opens in split")
 
         viewModel.toggleCodeViewerExpansion()
         XCTAssertEqual(viewModel.codeViewerPresentation, .full)
@@ -292,12 +292,12 @@ final class ChatHistoryViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.codeViewerPresentation, .full)
 
         viewModel.toggleCodeViewerExpansion()
-        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay)
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split)
 
         // Clears when the viewer fully dismisses.
         viewModel.toggleCodeViewerExpansion()
         viewModel.closeAllCodeViewerTabs()
-        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay, "Dismissing the viewer must reset presentation")
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split, "Dismissing the viewer must reset presentation")
     }
 
     /// Closing the LAST tab (not just close-all) also resets presentation.
@@ -309,12 +309,16 @@ final class ChatHistoryViewModelTests: XCTestCase {
         viewModel.closeCodeViewerTab(id: tabID)
 
         XCTAssertTrue(viewModel.codeViewerTabs.isEmpty)
-        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay)
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split)
     }
 
     /// Split toggles against overlay, and full-width remembers it entered from split.
     func testSplitToggleAndFullRoundTrip() {
         viewModel.showCodeInViewer(language: "swift", code: "let x = 1")
+        XCTAssertEqual(viewModel.codeViewerPresentation, .split)
+
+        viewModel.toggleCodeViewerSplit()
+        XCTAssertEqual(viewModel.codeViewerPresentation, .overlay)
 
         viewModel.toggleCodeViewerSplit()
         XCTAssertEqual(viewModel.codeViewerPresentation, .split)
@@ -327,12 +331,40 @@ final class ChatHistoryViewModelTests: XCTestCase {
                        "Restoring from full must return to the mode it was entered from")
 
         // From full, the split button goes STRAIGHT to split.
-        viewModel.toggleCodeViewerExpansion()   // → full
+        viewModel.toggleCodeViewerSplit()
+        viewModel.toggleCodeViewerExpansion()
         viewModel.toggleCodeViewerSplit()
         XCTAssertEqual(viewModel.codeViewerPresentation, .split)
 
         viewModel.toggleCodeViewerSplit()
         XCTAssertEqual(viewModel.codeViewerPresentation, .overlay)
+    }
+
+    func testBackgroundTasksPresentationTogglesAndRoundsTrip() {
+        XCTAssertEqual(viewModel.backgroundTasksPresentation, .split, "Background tasks panel defaults to split")
+
+        viewModel.toggleBackgroundTasksSplit()
+        XCTAssertEqual(viewModel.backgroundTasksPresentation, .overlay)
+
+        viewModel.toggleBackgroundTasksSplit()
+        XCTAssertEqual(viewModel.backgroundTasksPresentation, .split)
+
+        viewModel.toggleBackgroundTasksExpansion()
+        XCTAssertEqual(viewModel.backgroundTasksPresentation, .full)
+
+        viewModel.toggleBackgroundTasksExpansion()
+        XCTAssertEqual(viewModel.backgroundTasksPresentation, .split, "Restoring from full returns to split")
+
+        // From overlay to full and back
+        viewModel.toggleBackgroundTasksSplit()
+        viewModel.toggleBackgroundTasksExpansion()
+        viewModel.toggleBackgroundTasksExpansion()
+        XCTAssertEqual(viewModel.backgroundTasksPresentation, .overlay)
+
+        // From full, toggling split goes directly to split
+        viewModel.toggleBackgroundTasksExpansion()
+        viewModel.toggleBackgroundTasksSplit()
+        XCTAssertEqual(viewModel.backgroundTasksPresentation, .split)
     }
 
     // MARK: - Editable tabs

@@ -112,6 +112,13 @@ final class ChatOpsPairingService {
     func disconnect() async {
         cancelPairing()
 
+        // ⚠️ Register KC-33: capture the credential state BEFORE the reset. A failed Keychain
+        // read collapses to nil in `config.botToken`, which used to make the farewell silently
+        // skip AND the reset report a clean, verified disconnect — while the user's only notice
+        // that the bot was gone was precisely the farewell that never sent.
+        let credentialStateBeforeReset = ChatOpsConfigManager.credentialState(
+            AppSettings.chatOpsBotTokenKey, keychain: config.keychain, logger: logger)
+
         // Send farewell message if we have a valid connection
         if let token = config.botToken, let chatID = config.authorizedChatID {
             let client = TelegramAPIClient(botToken: token)
@@ -124,8 +131,21 @@ final class ChatOpsPairingService {
             }
         }
 
-        config.reset()
-        logger.info("ChatOps disconnected and credentials cleared.")
+        let summary = config.reset()
+        if !summary.allCleared {
+            logger.error(
+                "[SECRETS] Telegram disconnect could not delete \(summary.failedLabels.joined(separator: ", ")) "
+                + "from the Keychain. CONSEQUENCE: the bridge is left in .error naming what is still "
+                + "stored — never a clean disconnected over a credential that survived."
+            )
+        } else {
+            logger.info("ChatOps disconnected and credentials cleared.")
+        }
+        if case .unreadable = credentialStateBeforeReset {
+            // The disconnect could not VERIFY the wipe. Report the outage, not "never paired" —
+            // re-pairing over an unverified credential is exactly what `unreadableMessage` warns against.
+            config.connectionState = .error(ChatOpsPairingRestore.unreadableMessage)
+        }
     }
 
     // MARK: - Private
@@ -281,8 +301,9 @@ final class ChatOpsPairingService {
     /// from the user pressing Cancel, and `PairingWindowExpiry` is what knows the difference.
     private func armDeadline(pin: String) {
         deadlineTask?.cancel()
+        let timeout = pairingTimeout
         deadlineTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000))
+            await PairingWindowExpiry.waitOutWindow(timeout)
             guard !Task.isCancelled, let self else { return }
 
             self.pairingTask?.cancel()

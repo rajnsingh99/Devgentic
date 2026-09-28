@@ -32,6 +32,10 @@ extension MainApplicationViewModel: RemoteRunControlling {
             .id
     }
 
+    func pendingQuestionNoun(inConversation conversation: UUID) -> String? {
+        interactionCenter.current(for: conversation)?.kind.staleNoun
+    }
+
     /// [WF-SE10] `hasActiveRun` is read BEFORE the cancel because cancelling destroys the evidence
     /// — the bridges' reply text ("cancelled the active run" vs "no run was active") depends on it.
     /// `ExecutionSuspensionService.cancel` runs after the stream cancel as belt-and-braces for a

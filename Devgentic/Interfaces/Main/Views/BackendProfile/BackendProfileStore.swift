@@ -547,6 +547,35 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
+    /// Whether this profile's API key is stored but unreadable right now. Register KC-22.
+    ///
+    /// ⚠️ Fails CLOSED to `false` (no banner) when the row cannot be fetched: the banner is advice,
+    /// and a false "your key is unreadable" would send the user to Keychain Access for nothing.
+    func isProviderKeyUnreadable(for id: UUID) -> Bool {
+        providerKeyModel(for: id)?.hasUnreadableProviderKey ?? false
+    }
+
+    /// Re-reads this profile's API key from the Keychain now, bypassing the automatic re-read
+    /// throttle. Register KC-20.
+    /// - Returns: whether the key is readable afterwards.
+    func retryProviderKeyRead(for id: UUID) -> Bool {
+        guard let model = providerKeyModel(for: id) else { return false }
+        return model.retryProviderKeyRead()
+    }
+
+    private func providerKeyModel(for id: UUID) -> BackendProfile? {
+        guard let context = mainContext else { return nil }
+        let predicate = #Predicate<BackendProfile> { $0.id == id }
+        var descriptor = FetchDescriptor<BackendProfile>(predicate: predicate)
+        descriptor.fetchLimit = 1
+        do {
+            return try context.fetch(descriptor).first
+        } catch {
+            logger.error("[SECRETS] Could not fetch profile \(id) to check its Keychain key: \(error.localizedDescription). CONSEQUENCE: the unreadable-key banner is not shown for it.")
+            return nil
+        }
+    }
+
     /// Fetches a single profile by its UUID.
     func fetchProfile(byId id: UUID) throws -> BackendProfileSnapshot? {
         guard let context = mainContext else {
@@ -718,8 +747,14 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
                 // profile whose credential had already been destroyed. A key must never outlive
                 // the profile that owned it — that was one of the two distinct harms in the
                 // UserDefaults side-effect finding too.
-                ProviderKeyStore.delete(for: id)
-                logger.info("Deleted profile with ID \(id.uuidString) and its stored API key.")
+                // ⚠️ Register KC-34: the Bool used to be discarded and the line below claimed the
+                // key was deleted either way. The profile IS gone, so this does not throw — but the
+                // log must not record a credential as destroyed when it survived.
+                if ProviderKeyStore.delete(for: id) {
+                    logger.info("Deleted profile with ID \(id.uuidString) and its stored API key.")
+                } else {
+                    logger.error("[SECRETS] Deleted profile with ID \(id.uuidString), but its API key is STILL in the Keychain (see the preceding [SECRETS] line). Search Keychain Access for \"\(id.uuidString)\" to remove it.")
+                }
             }
         } catch {
             logger.error("Failed to delete profile with ID \(id.uuidString): \(error.localizedDescription)")

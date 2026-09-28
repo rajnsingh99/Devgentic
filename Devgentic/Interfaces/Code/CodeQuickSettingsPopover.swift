@@ -4,14 +4,17 @@
 //  CodeQuickSettingsPopover.swift
 //  Devgentic
 //
-//  Per-project execution settings for the Code interface: iteration cap, compute budget,
-//  and which tools ask before they act.
+//  Per-project execution settings for the Code interface: iteration cap, compute budget and
+//  context size.
+//
+//  ⚠️ No tool settings (2026-09-25). The "Ask before running" section was removed: every Code tool
+//  is in the Tool Library now, which sets Ask First / Auto Run per tool, and this popover's copy
+//  of that choice was applied last on every run — silently overriding the Library.
 //
 
 import SwiftUI
 import AppKit
 
-private let logger = DGLogger(category: "CodeQuickSettings")
 
 struct CodeQuickSettingsPopover: View {
 
@@ -28,6 +31,10 @@ struct CodeQuickSettingsPopover: View {
     /// settings could evict a different project's. Viewing is not changing.
     @State private var hasHydrated = false
 
+    /// What the Max Iterations field shows. Kept apart from `draft` so an out-of-range entry can sit
+    /// in the field, flagged, without being saved — the draft only ever holds a valid cap or none.
+    @State private var iterationsText = ""
+
     /// ⚠️⚠️ F9. `draft` changes on every stepper CLICK, and each change used to persist
     /// immediately: walking maxIterations 3→15 produced nine UserDefaults writes and nine
     /// profile saves, each one bumping `lastSelected` and reordering "recently used" — for a
@@ -43,24 +50,8 @@ struct CodeQuickSettingsPopover: View {
     /// value trades write count against nothing the user can perceive.
     private static let persistDebounce = Duration.milliseconds(400)
 
-    /// Logical ordering for confirmable tools
-    private var confirmableTools: [Tool] {
-        let order = ["edit_code_single", "edit_code_batch", "create_new_file", "overwrite_file", "run_command", "start_background_task"]
-        return CodeToolPreset.defaultTools
-            .filter { $0.requiresConfirmation }
-            .sorted { a, b in
-                let idxA = order.firstIndex(of: a.name) ?? 99
-                let idxB = order.firstIndex(of: b.name) ?? 99
-                return idxA < idxB
-            }
-    }
-
     private var projectName: String? {
         codeSessionManager.projectPath?.lastPathComponent
-    }
-
-    private var autoApprovedCount: Int {
-        confirmableTools.filter { !(draft.toolConfirmations[$0.name] ?? $0.requiresConfirmation) }.count
     }
 
     var body: some View {
@@ -69,24 +60,24 @@ struct CodeQuickSettingsPopover: View {
 
             Divider().opacity(0.35)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    executionSection
-                    approvalsSection
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 16)
+            VStack(alignment: .leading, spacing: 14) {
+                executionSection
+                toolApprovalsPointer
             }
-            .scrollIndicators(.hidden)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
 
             Divider().opacity(0.35)
 
             footer
         }
-        .frame(width: 430, height: 530)
+        // Sized to its content: with the tool rows gone, a fixed 530 pt left half the popover empty.
+        .frame(width: 430)
+        .fixedSize(horizontal: false, vertical: true)
         .background(theme.primaryBackground)
         .onAppear {
             draft = codeSessionManager.quickSettings
+            iterationsText = draft.maxIterations.map(String.init) ?? ""
             hasHydrated = true
         }
         .onChange(of: draft) { _, newValue in
@@ -201,26 +192,22 @@ struct CodeQuickSettingsPopover: View {
                             Text("Max Iterations")
                                 .font(.system(size: 12.5, weight: .medium))
                                 .foregroundColor(theme.primaryText)
-
-                            if draft.maxIterations == nil {
-                                Text("Default")
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundColor(theme.secondaryText.opacity(0.7))
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(theme.surfaceOverlayStrong)
-                                    .clipShape(RoundedRectangle(cornerRadius: 3))
-                            }
                         }
 
-                        Text("Reasoning cycles before forced completion")
-                            .font(.system(size: 11))
-                            .foregroundColor(theme.secondaryText)
+                        if case .outOfRange = Self.parseIterations(iterationsText) {
+                            Text("Enter \(CodeSessionManager.iterationCapRange.lowerBound)–\(CodeSessionManager.iterationCapRange.upperBound), or leave empty for no limit")
+                                .font(.system(size: 11))
+                                .foregroundColor(.orange)
+                        } else {
+                            Text("Optional cap on reasoning cycles. Leave empty for no limit.")
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.secondaryText)
+                        }
                     }
 
                     Spacer()
 
-                    iterationsStepper
+                    iterationsField
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
@@ -277,85 +264,76 @@ struct CodeQuickSettingsPopover: View {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.8)
             )
-        }
-    }
 
-    // MARK: - Iterations Stepper
-
-    private var iterationsStepper: some View {
-        HStack(spacing: 3) {
-            Button(action: decrementIterations) {
-                Image(systemName: "minus")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(currentIterations <= 3 ? theme.secondaryText.opacity(0.3) : theme.primaryText)
-                    .frame(width: 22, height: 22)
-                    .background(theme.surfaceOverlayStrong)
-                    .clipShape(Circle())
+            if Self.bothLimitsOff(draft) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                    Text("No iteration cap and no timeout: only Stop ends a run that keeps going. The loop detector warns but does not stop it.")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .buttonStyle(.plain)
-            .disabled(currentIterations <= 3)
+        }
+    }
 
-            Text("\(currentIterations)")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundColor(theme.primaryText)
-                .frame(minWidth: 26, alignment: .center)
+    // MARK: - Max Iterations field
 
-            Button(action: incrementIterations) {
-                Image(systemName: "plus")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(currentIterations >= 100 ? theme.secondaryText.opacity(0.3) : theme.primaryText)
-                    .frame(width: 22, height: 22)
-                    .background(theme.surfaceOverlayStrong)
-                    .clipShape(Circle())
+    /// Digits only, at most four. Empty = no cap. Anything typed outside
+    /// `CodeSessionManager.iterationCapRange` is shown and flagged but never saved.
+    private var iterationsField: some View {
+        TextField(String(localized: "No limit"), text: $iterationsText)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .multilineTextAlignment(.trailing)
+            .frame(width: 84)
+            .onChange(of: iterationsText) { _, newValue in
+                let digits = Self.digitsOnly(newValue)
+                guard digits == newValue else {
+                    iterationsText = digits      // re-enters with the cleaned text
+                    return
+                }
+                switch Self.parseIterations(digits) {
+                case .noCap:          draft.maxIterations = nil
+                case .cap(let value): draft.maxIterations = value
+                case .outOfRange:     break      // flagged in the row; the last valid value stands
+                }
             }
-            .buttonStyle(.plain)
-            .disabled(currentIterations >= 100)
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 3)
-        .background(theme.surfaceOverlayStrong.opacity(0.6))
-        .clipShape(Capsule())
-        .overlay(
-            Capsule()
-                .stroke(theme.dividerColor.opacity(0.35), lineWidth: 0.8)
-        )
+            // Keeps the field honest when the draft changes from elsewhere — "Reset", hydration.
+            .onChange(of: draft.maxIterations) { _, newValue in
+                if Self.parseIterations(iterationsText) != Self.IterationsInput(newValue) {
+                    iterationsText = newValue.map(String.init) ?? ""
+                }
+            }
+            .accessibilityLabel(String(localized: "Max iterations"))
     }
 
-    private var currentIterations: Int {
-        draft.maxIterations ?? 20
+    enum IterationsInput: Equatable {
+        case noCap
+        case cap(Int)
+        case outOfRange
+
+        init(_ stored: Int?) { self = stored.map(IterationsInput.cap) ?? .noCap }
     }
 
-    private func decrementIterations() {
-        let current = currentIterations
-        let next: Int
-        if current > 20 {
-            next = max(20, current - 5)
-        } else if current > 10 {
-            next = max(10, current - 5)
-        } else {
-            next = max(3, current - 1)
-        }
-        updateIterations(next)
+    /// Pure, so the field's rules are testable without rendering.
+    static func parseIterations(_ text: String) -> IterationsInput {
+        guard !text.isEmpty else { return .noCap }
+        guard let value = Int(text), CodeSessionManager.iterationCapRange.contains(value) else { return .outOfRange }
+        return .cap(value)
     }
 
-    private func incrementIterations() {
-        let current = currentIterations
-        let next: Int
-        if current < 10 {
-            next = current + 1
-        } else {
-            next = min(100, current + 5)
-        }
-        updateIterations(next)
+    /// Strips everything but ASCII digits (pasted "1,000", letters, a minus sign) and keeps at most
+    /// four — enough for the 1000 ceiling.
+    static func digitsOnly(_ text: String) -> String {
+        String(text.filter { $0.isASCII && $0.isNumber }.prefix(4))
     }
 
-    private func updateIterations(_ value: Int) {
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
-        if value == 20 {
-            draft.maxIterations = nil
-        } else {
-            draft.maxIterations = value
-        }
+    /// Nothing stops a run that keeps making new, different steps except these two.
+    static func bothLimitsOff(_ settings: CodeQuickSettings) -> Bool {
+        settings.maxIterations == nil && settings.executionTimeout == 0
     }
 
     // MARK: - Timeout Menu
@@ -364,7 +342,7 @@ struct CodeQuickSettingsPopover: View {
         Menu {
             Button(action: { setTimeout(nil) }) {
                 HStack {
-                    Text("30 minutes (Default)")
+                    Text("\(Int(CodeSessionManager.presetExecutionTimeout / 60)) minutes (Default)")
                     if draft.executionTimeout == nil { Image(systemName: "checkmark") }
                 }
             }
@@ -516,7 +494,7 @@ struct CodeQuickSettingsPopover: View {
                 return "\(Int(timeout))s"
             }
         } else {
-            return "5 min (Default)"
+            return "\(Int(CodeSessionManager.presetExecutionTimeout / 60)) min (Default)"
         }
     }
 
@@ -525,171 +503,19 @@ struct CodeQuickSettingsPopover: View {
         draft.executionTimeout = value
     }
 
-    // MARK: - Approvals Section
+    // MARK: - Tool approvals
 
-    private var approvalsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                sectionLabel("ASK BEFORE RUNNING")
-                Spacer()
-                if autoApprovedCount > 0 {
-                    Text("\(autoApprovedCount) auto-acting")
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundColor(.orange.opacity(0.9))
-                }
-            }
-
-            Text("These tools modify files or execute shell commands. Turn off to grant auto-run permission without confirmation prompts in this project.")
+    /// Where Ask/Auto went. One line, so someone who used to set it here finds it.
+    private var toolApprovalsPointer: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "wrench.and.screwdriver")
+                .font(.system(size: 10))
+                .foregroundColor(theme.secondaryText.opacity(0.7))
+            Text("Whether a tool asks before running is set per tool in the Tool Library, and is remembered for this folder.")
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
-                .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
-
-            VStack(spacing: 0) {
-                ForEach(Array(confirmableTools.enumerated()), id: \.element.name) { index, tool in
-                    if index > 0 {
-                        Divider().opacity(0.25).padding(.leading, 42)
-                    }
-                    toolApprovalRow(tool)
-                }
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(theme.surfaceOverlay)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.8)
-            )
         }
-    }
-
-    private func toolApprovalRow(_ tool: Tool) -> some View {
-        let isAskOn = binding(for: tool).wrappedValue
-
-        return HStack(spacing: 11) {
-            // Icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(theme.surfaceOverlayStrong)
-                    .frame(width: 26, height: 26)
-
-                Image(systemName: toolIcon(for: tool.name))
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundColor(theme.secondaryText)
-            }
-
-            // Names & Description
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(tool.name)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundColor(theme.primaryText)
-
-                    Text(toolDomain(for: tool.name))
-                        .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                        .foregroundColor(theme.secondaryText.opacity(0.7))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(theme.surfaceOverlayStrong)
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-
-                    if !isAskOn {
-                        Text("AUTO-RUN")
-                            .font(.system(size: 8.5, weight: .bold, design: .rounded))
-                            .foregroundColor(.orange)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.orange.opacity(0.12))
-                            .clipShape(RoundedRectangle(cornerRadius: 3))
-                    }
-                }
-
-                Text(toolConciseDescription(for: tool.name, original: tool.description))
-                    .font(.system(size: 10.5))
-                    .foregroundColor(theme.secondaryText)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 8)
-
-            Toggle("", isOn: binding(for: tool))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-    }
-
-    private func toolIcon(for name: String) -> String {
-        switch name {
-        case "run_command", "start_background_task":
-            return "terminal"
-        case "create_new_file":
-            return "doc.badge.plus"
-        case "overwrite_file":
-            return "doc.badge.arrow.up"
-        case "edit_code_single":
-            return "pencil.line"
-        case "edit_code_batch":
-            return "pencil.and.list.clipboard"
-        default:
-            return "wrench"
-        }
-    }
-
-    private func toolDomain(for name: String) -> String {
-        switch name {
-        case "run_command", "start_background_task":
-            return "SHELL"
-        case "create_new_file", "overwrite_file":
-            return "FILE"
-        case "edit_code_single", "edit_code_batch":
-            return "EDIT"
-        default:
-            return "TOOL"
-        }
-    }
-
-    private func toolConciseDescription(for name: String, original: String) -> String {
-        switch name {
-        case "edit_code_single":
-            return "Applies a verified single search-and-replace edit to a file."
-        case "edit_code_batch":
-            return "Applies multiple search-and-replace edits to a file atomically."
-        case "create_new_file":
-            return "Creates a brand-new file. Fails safely if the file already exists."
-        case "overwrite_file":
-            return "Replaces an existing file's contents entirely with new content."
-        case "run_command":
-            return "Runs a shell command and waits for its output."
-        case "start_background_task":
-            return "Starts a shell command and returns immediately with a task id."
-        default:
-            return original
-        }
-    }
-
-    /// `true` = ask first. Absent from the override map means "use what the preset declares",
-    /// which for every tool in `confirmableTools` is `true` by definition.
-    private func binding(for tool: Tool) -> Binding<Bool> {
-        Binding(
-            get: { draft.toolConfirmations[tool.name] ?? tool.requiresConfirmation },
-            set: { newValue in
-                if newValue == tool.requiresConfirmation {
-                    // Back to the preset — drop the override rather than storing a value equal to
-                    // the default, so `isDefault` stays honest and the entry can be reclaimed.
-                    draft.toolConfirmations.removeValue(forKey: tool.name)
-                } else {
-                    draft.toolConfirmations[tool.name] = newValue
-                    if !newValue {
-                        logger.notice("[CODE_SETTINGS] '\(tool.name)' set to run WITHOUT confirmation in '\(projectName ?? "?")'. CONSEQUENCE: it acts on this project's files immediately, with no approval banner; the change is scoped to this folder and reverts if the folder is moved or renamed.")
-                    }
-                }
-            }
-        )
     }
 
     // MARK: - Footer

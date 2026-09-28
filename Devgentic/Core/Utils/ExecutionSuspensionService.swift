@@ -120,19 +120,112 @@ actor ExecutionSuspensionService {
     }
 
     /// Called when an operation begins waiting on a human.
-    private func beginPark(_ conversationID: UUID) {
+    ///
+    /// Credits the conversation total (kept for any reader that wants "was anyone waiting here")
+    /// AND, separately, each time bound in the park's OWNER CHAIN — which is what the timeouts read
+    /// (HITL Waiting Contract, decision A; see `ParkScope`).
+    private func beginPark(_ conversationID: UUID, operationID: UUID) {
         let depth = (parkDepth[conversationID] ?? 0) + 1
         parkDepth[conversationID] = depth
         if depth == 1 { parkBegan[conversationID] = Date() }
+
+        // An actor call runs on the CALLER's task, so this is the chain of the code that parked.
+        let chain = ParkScope.chain
+        let owners: [UUID]
+        if chain.isEmpty {
+            // Out of chain: an MCP elicitation/sampling request arrives on the transport's own task.
+            // Its owner cannot be known, so every bound open in this conversation is paused — the
+            // old conversation-wide credit, now confined to this one case.
+            owners = activeScopes.filter { $0.value == conversationID }.map(\.key)
+        } else {
+            owners = chain
+        }
+        operationToScopes[operationID] = owners
+        for scope in owners {
+            let scopeDepth = (scopeParkDepth[scope] ?? 0) + 1
+            scopeParkDepth[scope] = scopeDepth
+            if scopeDepth == 1 { scopeParkBegan[scope] = Date() }
+        }
     }
 
     /// Called when an operation stops waiting — resolved, cancelled or timed out, all the same here.
-    private func endPark(_ conversationID: UUID) {
+    private func endPark(_ conversationID: UUID, operationID: UUID) {
+        for scope in operationToScopes.removeValue(forKey: operationID) ?? [] {
+            guard let scopeDepth = scopeParkDepth[scope], scopeDepth > 0 else { continue }
+            scopeParkDepth[scope] = scopeDepth - 1
+            if scopeDepth == 1, let began = scopeParkBegan.removeValue(forKey: scope) {
+                scopeParkedTotal[scope, default: 0] += Date().timeIntervalSince(began)
+            }
+        }
+
         guard let depth = parkDepth[conversationID], depth > 0 else { return }
         let next = depth - 1
         parkDepth[conversationID] = next
         guard next == 0, let began = parkBegan.removeValue(forKey: conversationID) else { return }
         parkedTotal[conversationID, default: 0] += Date().timeIntervalSince(began)
+    }
+
+    // MARK: - Owner-chain park credit (HITL Waiting Contract, decision A)
+
+    /// Open time bounds → their conversation, so an out-of-chain park can find them.
+    private var activeScopes: [UUID: UUID] = [:]
+    /// Which bounds each parked operation is paying into; read back by `endPark`.
+    private var operationToScopes: [UUID: [UUID]] = [:]
+    private var scopeParkDepth: [UUID: Int] = [:]
+    private var scopeParkBegan: [UUID: Date] = [:]
+    private var scopeParkedTotal: [UUID: TimeInterval] = [:]
+
+    /// Bounds whose run nobody can answer (scheduled, background-task wake).
+    private var unattendedScopes: Set<UUID> = []
+
+    /// - Parameter attended: whether a human can answer this bound's run. Defaults to the CALLER's
+    ///   `WorkflowRunAttendance` (a default argument is evaluated on the caller's task).
+    func registerScope(_ scope: UUID, conversationID: UUID,
+                       attended: Bool = WorkflowRunAttendance.canReachAHuman) {
+        activeScopes[scope] = conversationID
+        if !attended { unattendedScopes.insert(scope) }
+    }
+
+    /// Whether an out-of-chain ask in this conversation — an MCP question or sampling approval,
+    /// which arrive on the MCP transport's own task and cannot read the run's attendance — has
+    /// anyone to answer it. False while any open bound in the conversation belongs to an
+    /// unattended run (HITL Waiting Contract, decision C). One run per conversation
+    /// (`ConversationAdmission`) is what makes "any bound" a fair proxy for "this call's run".
+    func canReachAHuman(inConversation conversationID: UUID) -> Bool {
+        !activeScopes.contains { $0.value == conversationID && unattendedScopes.contains($0.key) }
+    }
+
+    /// Registers a bound NESTED in `chain` (a tool call inside a turn or node) under its parent's
+    /// conversation, so an out-of-chain park — an MCP question raised while that tool call is in
+    /// flight — pauses the tool's clock too. Unregistered if the chain has no registered parent.
+    func registerScope(_ scope: UUID, under chain: [UUID]) {
+        guard let parent = chain.reversed().first(where: { self.activeScopes[$0] != nil }),
+              let conversationID = activeScopes[parent] else { return }
+        activeScopes[scope] = conversationID
+        if unattendedScopes.contains(parent) { unattendedScopes.insert(scope) }
+    }
+
+    /// Drops a finished bound and its accounting. A park still open on it keeps its operation
+    /// entry and closes harmlessly: `endPark` skips a scope with no depth.
+    func unregisterScope(_ scope: UUID) {
+        activeScopes.removeValue(forKey: scope)
+        unattendedScopes.remove(scope)
+        scopeParkDepth.removeValue(forKey: scope)
+        scopeParkBegan.removeValue(forKey: scope)
+        scopeParkedTotal.removeValue(forKey: scope)
+    }
+
+    /// Wall-clock during which at least one park in THIS bound's owner chain was open, including a
+    /// park still open. This — not the conversation total — is what a timeout subtracts.
+    func parkedTime(forScope scope: UUID) -> TimeInterval {
+        let completed = scopeParkedTotal[scope] ?? 0
+        guard let began = scopeParkBegan[scope] else { return completed }
+        return completed + Date().timeIntervalSince(began)
+    }
+
+    /// Whether a park in this bound's chain is open right now.
+    func isParked(scope: UUID) -> Bool {
+        (scopeParkDepth[scope] ?? 0) > 0
     }
     // [HITL/A3] operationID -> user-edited tool arguments to apply on approval.
     private var editedArgs: [UUID: [String: JSONValue]] = [:]
@@ -215,7 +308,7 @@ actor ExecutionSuspensionService {
         // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
         // stamps every workflow-run park with no signature change.
         if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
-        beginPark(conversationID)
+        beginPark(conversationID, operationID: operationID)
 
         logger.info("[Suspension] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
@@ -250,7 +343,7 @@ actor ExecutionSuspensionService {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
-        if let conversationID { endPark(conversationID) }
+        if let conversationID { endPark(conversationID, operationID: operationID) }
 
         // [HITL/A3] Stash user edits to apply on approval; drop them on denial.
         if approved, let editedArguments {
@@ -299,7 +392,7 @@ actor ExecutionSuspensionService {
         // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
         // stamps every workflow-run park with no signature change.
         if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
-        beginPark(conversationID)
+        beginPark(conversationID, operationID: operationID)
 
         logger.info("[Clarification] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
@@ -322,7 +415,7 @@ actor ExecutionSuspensionService {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
-        if let conversationID { endPark(conversationID) }
+        if let conversationID { endPark(conversationID, operationID: operationID) }
 
         guard let continuation = clarificationContinuations.removeValue(forKey: operationID) else {
             logger.warning("[Clarification] Attempted to resume non-existent clarification for operation: \(operationID)")
@@ -358,7 +451,7 @@ actor ExecutionSuspensionService {
         // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
         // stamps every workflow-run park with no signature change.
         if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
-        beginPark(conversationID)
+        beginPark(conversationID, operationID: operationID)
 
         logger.info("[PlanReview] Suspending operation \(operationID) for conversation: \(conversationID). No timeout — awaiting user action.")
 
@@ -383,7 +476,7 @@ actor ExecutionSuspensionService {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
-        if let conversationID { endPark(conversationID) }
+        if let conversationID { endPark(conversationID, operationID: operationID) }
 
         guard let continuation = planReviewContinuations.removeValue(forKey: operationID) else {
             logger.warning("[PlanReview] Attempted to resume non-existent plan review for operation: \(operationID)")
@@ -415,7 +508,7 @@ actor ExecutionSuspensionService {
         // EXC-2: reads the caller's TaskLocal — see `operationToRunToken`'s doc for why this
         // stamps every workflow-run park with no signature change.
         if let runToken = WorkflowRunScope.token { operationToRunToken[operationID] = runToken }
-        beginPark(conversationID)
+        beginPark(conversationID, operationID: operationID)
         logger.info("[Gate] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
         return await withTaskCancellationHandler {
@@ -431,11 +524,14 @@ actor ExecutionSuspensionService {
     }
 
     /// Resumes a gate suspension with the user's chosen option (nil = cancelled / timed out / rejected).
-    func resumeGate(for operationID: UUID, chosenOption: String?, resolvedBy: MessageSource?) {
+    /// - Parameter outcome: what to REPORT when there is no choice. Nil means "cancelled"; a gate's
+    ///   own configured timer passes "expired" (HITL Waiting Contract, decision B), so trace, audit
+    ///   and the remote mirror can tell an expired gate from a stopped run.
+    func resumeGate(for operationID: UUID, chosenOption: String?, resolvedBy: MessageSource?, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
         operationToRunToken.removeValue(forKey: operationID)
-        if let conversationID { endPark(conversationID) }
+        if let conversationID { endPark(conversationID, operationID: operationID) }
 
         guard let continuation = gateContinuations.removeValue(forKey: operationID) else {
             logger.warning("[Gate] Attempted to resume non-existent gate for operation: \(operationID)")
@@ -445,7 +541,7 @@ actor ExecutionSuspensionService {
         logger.info("[Gate] Resuming operation \(operationID) with choice: \(chosenOption ?? "<none>")")
         continuation.resume(returning: chosenOption)
 
-        var resolvedInfo: [String: Any] = [HITLResolvedKey.outcome: chosenOption ?? "cancelled"]
+        var resolvedInfo: [String: Any] = [HITLResolvedKey.outcome: chosenOption ?? outcome ?? "cancelled"]
         if let resolvedBy { resolvedInfo[HITLResolvedKey.source] = resolvedBy.rawValue }
         postResolved(name: .hitlGateResolved, operationID: operationID, conversationID: conversationID, extraInfo: resolvedInfo)
     }
@@ -466,6 +562,27 @@ actor ExecutionSuspensionService {
         for opID in permissionOps {
             drainOperation(opID, conversationID: conversationID, outcome: "cancelled")
         }
+    }
+
+    /// Force-cancels the parks owned by ONE time bound — raised inside its chain, or out of chain
+    /// (an MCP question) while it was open in its conversation — and nothing else.
+    ///
+    /// ⚠️ For a CONTAINER deadline (the scheduler's per-run limit). The scheduler used to call
+    /// `cancel(for: conversation)`, which also resolved the parks of an attended run the scheduled
+    /// run was queued behind — its approval came back as a denial nobody made (Timeout inventory
+    /// D-20). Owner-chain credit already records which bounds each park belongs to, so the drain
+    /// can be exactly as wide as the bound.
+    @discardableResult
+    func cancel(scope: UUID) -> [UUID] {
+        let owned = operationToScopes.filter { $0.value.contains(scope) }.map(\.key)
+        for opID in owned {
+            guard let conversationID = operationToConversation[opID] else { continue }
+            drainOperation(opID, conversationID: conversationID, outcome: "cancelled")
+        }
+        if !owned.isEmpty {
+            logger.info("[Suspension] Drained \(owned.count) park(s) owned by bound \(scope.uuidString.prefix(8)). CONSEQUENCE: each resolves as cancelled; parks owned by other runs in the conversation are untouched.")
+        }
+        return owned
     }
 
     /// Force-cancels ONE workflow run's suspensions, leaving a concurrent run's parks standing.
@@ -561,7 +678,7 @@ actor ExecutionSuspensionService {
         // ⚠️ Force-cancel closes the park too. Without this the depth never returns to zero and
         // `cumulativeParkedTime` grows forever, so every later node in the conversation would
         // believe it had been waiting on a human and its timeout would never fire.
-        endPark(conversationID)
+        endPark(conversationID, operationID: opID)
         editedArgs.removeValue(forKey: opID)
 
         // ⚠️ NO `HITLResolvedKey.source` on any of these posts, and that absence is the message:

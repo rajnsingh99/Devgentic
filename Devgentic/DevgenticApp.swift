@@ -20,6 +20,9 @@ struct DevgenticApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage(GlobalConstants.isOnboardingComplete) private var isOnboardingComplete: Bool = false
     @Environment(\.openWindow) var openWindow  // Retained for File Viewer window
+    /// Sparkle. Touched here so the updater starts at launch (its scheduled checks run from the
+    /// moment it exists) and so the menu item below tracks `canCheckForUpdates`.
+    @ObservedObject private var softwareUpdater = SoftwareUpdater.shared
 
     /// Unified SwiftData container for all subsystems (profiles, chat, scheduling, etc.).
     private let swiftDataContainer: ModelContainer = {
@@ -65,6 +68,11 @@ struct DevgenticApp: App {
             WorkflowRunHistoryStore.shared.configureContainer(container)
             // Download-history store is configured on the main actor; do it
             // eagerly via Task so reconcileOrphans runs as soon as possible.
+            //
+            // ⚠️ D-25: captured BEFORE the skill sweep. The reconciles below run after it, and it
+            // can block for a volume's mount timeout; anything started in that window is live work
+            // from THIS session and must not be flipped to Interrupted.
+            let launchInstant = Date()
             Task { @MainActor in
                 DownloadHistoryStore.shared.configureContainer(container)
 
@@ -110,7 +118,7 @@ struct DevgenticApp: App {
                         + "Before: \(historyCount) download-history row(s). Will reconcile download "
                         + "orphans, prune history, reconcile workflow-run orphans."
                     )
-                    DownloadHistoryStore.shared.reconcileOrphans()
+                    DownloadHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)
                     // Retention: history is otherwise monotonic for the life of the install, and
                     // every row is scanned on each bridge reconcile and sidebar render.
                     DownloadHistoryStore.shared.pruneOldRecords()
@@ -118,7 +126,7 @@ struct DevgenticApp: App {
                     // session that ended before the run could finalize. Flip to
                     // .cancelled with "Interrupted" so the history list doesn't
                     // show a phantom spinning record forever.
-                    WorkflowRunHistoryStore.shared.reconcileOrphans()
+                    WorkflowRunHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)
                     // The Code Viewer purge that used to run here is gone: `CodeViewerSessionSD`
                     // was retired 2026-08-04, so lightweight migration drops the whole table on
                     // the first launch after the update — no row-by-row sweep needed.
@@ -144,7 +152,7 @@ struct DevgenticApp: App {
                     // the history card ticks a `TimelineView(.periodic(...))` counter climbing from
                     // the original start time, for a run that has been dead for days.
                     startupLogger.info("[STARTUP] Reconciling workflow-run orphans despite the deferral — see the note above for why this one is safe.")
-                    WorkflowRunHistoryStore.shared.reconcileOrphans()
+                    WorkflowRunHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)
 
                 case .skippedByEnvironment:
                     // CONSEQUENCE: download-history retention and workflow-run orphan
@@ -205,13 +213,12 @@ struct DevgenticApp: App {
                     DevgenticSchema.recordSuccessfulOpen()
                 }
 
-                // Partial-download residue from cancelled/interrupted MLX pulls.
+                // Partial downloads left by paused, interrupted, failed or crashed MLX pulls.
                 // READ-ONLY on purpose: these folders are multi-gigabyte user data, a
                 // second app instance could be writing into one, and a user may have
-                // hand-placed files there — so we log what is reclaimable and leave the
-                // delete to an explicit user action (MLXModelService.reclaimOrphanedPartialDownloads).
-                // Until the `partialDownloadFolder` path fix, nothing ever reclaimed these.
-                MLXModelService.logOrphanedPartialDownloadsInBackground()
+                // hand-placed files there — so the scan only lists them in the Download
+                // Manager and, past 1 GB, tells the user once. Deleting is the user's call.
+                MLXModelService.scanPartialDownloadsAtLaunch()
 
                 // Bring enabled MCP servers up now, rather than lazily on the agent's first
                 // tool call. That first call used to pay the entire connect cost inside a
@@ -731,6 +738,8 @@ struct DevgenticApp: App {
             // away and back. Calling it here makes the catch-up a property of startup rather than of
             // scheduling luck; a duplicate call is harmless (`runningTaskIDs` de-dupes).
             SchedulerService.shared.evaluateAndFireDueTasks()
+            // Wake, clock and time-zone changes re-decide every task (D-22).
+            SchedulerService.shared.startObservingSystemChanges()
         }
     }
 
@@ -758,6 +767,7 @@ struct DevgenticApp: App {
                 .environment(mainViewRouter)
                 .environment(backendProfileService)
                 .environment(toastManager)
+                .modifier(LeftoverDownloadNoticeModifier(toastManager: toastManager))
                 .environment(codeSessionManager)
                 // Binds the SAME instance the environment hands the views. See the note in
                 // `init()` for why this cannot be done there.
@@ -1033,6 +1043,13 @@ struct DevgenticApp: App {
 
             // MARK: - App Info / Preferences Group
             CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    softwareUpdater.checkForUpdates()
+                }
+                .disabled(!softwareUpdater.canCheckForUpdates)
+
+                Divider()
+
                 Button("Settings...") {
                     mainViewRouter.navigateToSettings(.general)
                 }

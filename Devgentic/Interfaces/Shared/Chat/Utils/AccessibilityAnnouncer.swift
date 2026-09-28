@@ -6,12 +6,12 @@
 //
 //  VoiceOver only speaks what it is focused on. Everything this app does *to* the user
 //  rather than *for* them — an agent blocking on a permission prompt, an error appearing
-//  mid-conversation, an auto-reject timer running out — happens somewhere the cursor isn't,
+//  mid-conversation, a gate's expiry timer running out — happens somewhere the cursor isn't,
 //  and so happened in silence.
 //
 //  Nothing in the codebase posted an announcement before this (zero hits repo-wide for
 //  AccessibilityNotification / NSAccessibility.post). The worst case it fixes: a HITL gate
-//  appears, says nothing, counts down invisibly, and auto-rejects the user's own agent.
+//  appears, says nothing, counts down invisibly, and expires — failing the user's own run.
 //
 
 import SwiftUI

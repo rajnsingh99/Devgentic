@@ -230,7 +230,13 @@ actor PlanningExecutorWrapper: Executor {
                         // task is too vague) a single CLARIFY question. Suppressed in workflow
                         // mode: nodes run headless on task+input, and a mid-DAG question would
                         // stall the graph on context the upstream node should have provided.
+                        //
+                        // ⚠️ Also suppressed when NOBODY CAN ANSWER (scheduled / woken runs —
+                        // HITL Waiting Contract, decision C). `clarifyBeforePlanning` defaults ON,
+                        // so a vague scheduled prompt used to park on a banner nobody would see
+                        // until the run's deadline killed it; it now plans on assumptions.
                         let allowClarify = config.clarifyBeforePlanning && input.workflowContext == nil
+                            && WorkflowRunAttendance.canReachAHuman
                         let planResult = try await generatePlanWithSlotRetry(
                             context: makePlanContext(nil), allowClarification: allowClarify
                         )
@@ -334,6 +340,30 @@ actor PlanningExecutorWrapper: Executor {
                     // =====================================================================
                     // PHASE 1.5: PLAN REVIEW GATE (if enabled)
                     // =====================================================================
+
+                    // ⚠️ Plan approval REQUIRED but nobody can review it (HITL Waiting Contract,
+                    // decision C). Never auto-approved — the profile asked for a human to approve
+                    // the plan — so the run stops here, honestly, instead of parking until its
+                    // limit kills it. Same shape as an unattended tool confirmation: not executed.
+                    if config.requiresPlanApproval && !subtasks.isEmpty && !WorkflowRunAttendance.canReachAHuman {
+                        let reason = "Plan review required, but nobody can review it in this run (it is unattended) — the plan was NOT executed."
+                        logger.notice("[HITL] Plan review REFUSED — unattended run. CONSEQUENCE: the run stops without executing the plan; turn off plan approval on this profile to let scheduled runs plan and act on their own.")
+                        continuation.yield(.content(reason))
+                        sessionState.closeActiveEpisode(outcome: .cancelled, message: reason)
+                        await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                        onTraceUpdate(AgentTraceLog(
+                            traceID: input.traceContext.traceID,
+                            spanID: input.traceContext.spanID,
+                            parentSpanID: input.traceContext.parentSpanID,
+                            stepNumber: 0,
+                            state: .thinking(.finalizing),
+                            content: reason,
+                            metadata: ["outcome": ExecutionOutcome.cancelled.rawValue]
+                        ))
+                        continuation.yield(.executionFinished(outcome: .cancelled, reason: reason))
+                        continuation.finish()
+                        return
+                    }
 
                     if config.requiresPlanApproval && !subtasks.isEmpty {
                         let reviewOperationID = UUID()

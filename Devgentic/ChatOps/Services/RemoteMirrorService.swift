@@ -55,6 +55,14 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
     /// Maps operationID → transport message_id (for editing HITL messages after resolution).
     private var hitlMessageIDs: [UUID: String] = [:]
 
+    /// One reminder per posted prompt, cancelled when the prompt resolves or the mirror tears down.
+    private var reminderTasks: [UUID: Task<Void, Never>] = [:]
+
+    /// How long a mirrored question may sit unanswered before ONE reminder goes to the remote chat
+    /// (D-23, owner decision 2026-09-27). A reminder, not a deadline: the question stays open —
+    /// HITL is unbounded. `var` so tests can shorten it.
+    var remoteReminderDelay: Duration = .seconds(10 * 60)
+
     /// Messages currently being observed via withObservationTracking.
     private var observedMessageIDs: Set<UUID> = []
 
@@ -208,6 +216,8 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         remoteSessions.removeAll()
         mirroringConversations.removeAll()
         hitlMessageIDs.removeAll()
+        reminderTasks.values.forEach { $0.cancel() }
+        reminderTasks.removeAll()
         mirroredOperations.removeAll()
         observedMessageIDs.removeAll()
 
@@ -215,6 +225,37 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             logger.warning("[Mirror] Torn down while \(abandonedPrompts) posted HITL prompt(s) were still live across \(sessions) session(s). CONSEQUENCE: those prompts keep their approve/deny buttons in the remote chat and NOTHING will ever rewrite them — the run they belong to is unreachable from that chat now. A user tapping one gets silence. This fires when ChatOps is switched off mid-run.")
         } else {
             logger.info("[Mirror] Torn down — \(sessions) session(s) and \(observed) observed run(s) released, no live prompts abandoned.")
+        }
+    }
+
+    // MARK: - Unanswered-question reminder (D-23)
+
+    /// The reminder's text. The Mac already had a local "Still waiting for you" after 3 min; the
+    /// remote operator — the person the question was actually sent to — heard nothing, ever.
+    static func reminderText(waitingOn noun: String) -> String {
+        "Still waiting for \(noun). Answer the message above, or send /cancel to stop the run."
+    }
+
+    private func scheduleReminder(for pending: PendingHITL, session: RemoteSessionInfo, provider: RemoteChannel.Provider) {
+        reminderTasks[pending.id]?.cancel()
+        let operationID = pending.id
+        let delay = remoteReminderDelay
+        reminderTasks[operationID] = Task { [weak self] in
+            // Cancellation = the question was answered or the mirror went away: silence is correct.
+            guard (try? await Task.sleep(for: delay)) != nil, let self else { return }
+            self.reminderTasks[operationID] = nil
+            // Still open? `hitlMessageIDs` loses the entry on every resolution path.
+            guard self.hitlMessageIDs[operationID] != nil,
+                  self.activeStreamManager?.interactionCenter?.item(withID: operationID) != nil else { return }
+            do {
+                _ = try await session.transport.render(
+                    .notice(Notice(tone: .warning, icon: "⏰",
+                                   body: Self.reminderText(waitingOn: pending.kind.staleNoun))),
+                    to: .channel(RemoteChannel(provider: provider, channelID: session.chatID)))
+                self.logger.info("[Mirror] Reminded \(session.source.rawValue) that operation \(operationID) is still waiting.")
+            } catch {
+                self.logger.error("[Mirror] The reminder for operation \(operationID) could not be sent to \(session.source.rawValue): \(error.localizedDescription). CONSEQUENCE: the remote operator is not reminded; the question stays open and answerable, and the Mac's own reminder is unaffected.")
+            }
         }
     }
 
@@ -460,6 +501,7 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                                                  kind: "HITL")
                     } else {
                         hitlMessageIDs[pending.id] = msgID
+                        scheduleReminder(for: pending, session: session, provider: provider)
                     }
                 } else {
                     logger.error("[Mirror] The transport posted the HITL prompt for operation \(pending.id) but returned no message id. CONSEQUENCE: the prompt cannot be edited when it resolves, so its buttons stay live and the remote user can tap a decision that has already been made.")
@@ -828,8 +870,13 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
 
                 // ⚠️ A cancelled gate is not a decision, so it does not get a ✅ or an attribution.
                 let statusText: String
+                // ⚠️ Both used to read "took its default path" — false: a gate that is not answered
+                // takes NO option branch. A stopped run ends; an expired gate fails onto its error
+                // port (HITL Waiting Contract, decision B).
                 if outcome == nil || outcome == "cancelled" {
-                    statusText = "⏹ Gate cancelled — the workflow took its default path."
+                    statusText = "⏹ Gate cancelled — the run was stopped; no option was chosen."
+                } else if outcome == "expired" {
+                    statusText = "⌛ Gate expired — nobody answered in time; the workflow took its error path."
                 } else {
                     statusText = "✅ Gate decided: \(outcome ?? "")"
                         + Self.attribution(for: source, in: session) + "."

@@ -626,15 +626,26 @@ private struct ConditionalKeyboardShortcutModifier: ViewModifier {
 
 // MARK: - GlassActionButton
 
-/// A sleek, elevated glass action pill button for detail card headers and section controls.
+/// A sleek, elevated action pill button for detail card headers, section controls, and inspectors.
+/// Automatically adapts to `buttonAccentStyle` (.themeContrast / Material vs. .accent / Dynamic Accent).
 struct GlassActionButton: View {
     let title: String
     var icon: String? = nil
-    var isAccent: Bool = true
+    var isAccent: Bool = false
     let action: () -> Void
 
     @State private var isHovered = false
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var isMaterialPrimary: Bool {
+        isAccent && buttonAccentStyle == .themeContrast
+    }
+
+    private var isAccentPrimary: Bool {
+        isAccent && buttonAccentStyle == .accent
+    }
 
     var body: some View {
         Button(action: action) {
@@ -642,32 +653,29 @@ struct GlassActionButton: View {
                 if let icon {
                     Image(systemName: icon)
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(theme.accentColor)
+                        .foregroundColor(iconColor)
                 }
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(theme.primaryText)
+                    .font(.system(size: 11, weight: isAccent ? .semibold : .medium))
+                    .foregroundColor(textColor)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, isAccent ? 12 : 10)
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                    .fill(backgroundColor)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(
-                        isHovered ? theme.accentColor.opacity(0.45) : theme.secondaryText.opacity(0.18),
-                        lineWidth: 1
-                    )
+                    .strokeBorder(strokeColor, lineWidth: 1)
             )
             .shadow(
-                color: isHovered ? theme.accentColor.opacity(0.15) : Color.black.opacity(0.08),
+                color: shadowColor,
                 radius: isHovered ? 4 : 2,
                 x: 0,
                 y: 1
             )
-            .scaleEffect(isHovered ? 1.03 : 1.0)
+            .scaleEffect(isHovered && !reduceMotion ? 1.03 : 1.0)
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -676,6 +684,77 @@ struct GlassActionButton: View {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovered = hovering
             }
+        }
+    }
+
+    private var iconColor: Color {
+        if isMaterialPrimary {
+            // Flat solid material primary: dark icon on dark mode white button, white icon on light mode dark button
+            return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        } else if isAccentPrimary {
+            // Dynamic accent solid primary: white icon
+            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        } else if buttonAccentStyle == .themeContrast {
+            // Material secondary/action: crisp monochrome pro styling
+            return isHovered ? theme.primaryText : theme.secondaryText
+        } else {
+            // Dynamic Accent secondary/action: glass surface with colored icon under hover!
+            return isHovered ? theme.accentColor : theme.secondaryText
+        }
+    }
+
+    private var textColor: Color {
+        if isMaterialPrimary {
+            return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        } else if isAccentPrimary {
+            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        } else {
+            return isHovered ? theme.primaryText : theme.primaryText.opacity(0.92)
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isMaterialPrimary {
+            // Flat solid styling for Material
+            return theme.isDark
+                ? Color.white.opacity(isHovered ? 1.0 : 0.95)
+                : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
+        } else if isAccentPrimary {
+            // Solid accent styling for Dynamic Accent
+            return theme.accentColor.opacity(isHovered ? 1.0 : 0.92)
+        } else {
+            // Sleek translucent glass surface
+            return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
+        }
+    }
+
+    private var strokeColor: Color {
+        if isMaterialPrimary {
+            return theme.isDark
+                ? Color.white
+                : Color(red: 0.12, green: 0.12, blue: 0.14)
+        } else if isAccentPrimary {
+            return theme.isAccentLight
+                ? theme.dividerColor.opacity(isHovered ? 0.80 : 0.40)
+                : Color.white.opacity(isHovered ? 0.40 : 0.20)
+        } else if buttonAccentStyle == .themeContrast {
+            return isHovered ? theme.primaryText.opacity(0.40) : theme.dividerColor.opacity(0.25)
+        } else {
+            return isHovered ? theme.accentColor.opacity(0.45) : theme.secondaryText.opacity(0.18)
+        }
+    }
+
+    private var shadowColor: Color {
+        if isMaterialPrimary {
+            return theme.isDark
+                ? Color.black.opacity(isHovered ? 0.35 : 0.20)
+                : Color.black.opacity(isHovered ? 0.25 : 0.12)
+        } else if isAccentPrimary {
+            return theme.accentColor.opacity(isHovered ? 0.30 : 0.15)
+        } else if buttonAccentStyle == .themeContrast {
+            return Color.black.opacity(isHovered ? 0.16 : 0.06)
+        } else {
+            return isHovered ? theme.accentColor.opacity(0.18) : Color.black.opacity(0.06)
         }
     }
 }

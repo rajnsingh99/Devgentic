@@ -9,10 +9,27 @@
 
 import SwiftUI
 
+/// How a bubble sits in its group (`TranscriptGrouping`).
+enum BubbleGroupStyle: Equatable {
+    /// Drawn on its own, with its own action bar.
+    case standalone
+    /// A human turn's reply with continuations below: the group's action bar is drawn after the
+    /// last of them instead of here.
+    case head
+    /// A report drawn inside the turn above it; `lead` is its stub's words.
+    case continuation(lead: String)
+
+    var lead: String? {
+        if case .continuation(let lead) = self { return lead }
+        return nil
+    }
+}
+
 struct AgentBubbleContentView: View, Equatable {
     var message: ChatMessage
     let isAgentic: Bool
     let contentToDisplay: MessageContent
+    var groupStyle: BubbleGroupStyle = .standalone
 
     /// Lets a settled bubble skip its body when a PARENT re-render recreates it — which
     /// happens to every visible message whenever `ChatHistoryView.body` re-runs (a scroll
@@ -30,6 +47,7 @@ struct AgentBubbleContentView: View, Equatable {
     static func == (lhs: AgentBubbleContentView, rhs: AgentBubbleContentView) -> Bool {
         guard !lhs.message.isStreaming, !rhs.message.isStreaming else { return false }
         return lhs.message.id == rhs.message.id
+            && lhs.groupStyle == rhs.groupStyle
             && lhs.isAgentic == rhs.isAgentic
             && lhs.contentToDisplay == rhs.contentToDisplay
             && lhs.message.lifecycleState == rhs.message.lifecycleState
@@ -80,16 +98,24 @@ struct AgentBubbleContentView: View, Equatable {
                 // the only agent view. AgentTimelineView renders its own capability cards, so
                 // the island's compensating ForEach went with it.
                 if message.isStreaming || !message.timelineEvents.isEmpty {
-                    AgentTimelineView(message: message)
+                    AgentTimelineView(message: message, continuationLead: groupStyle.lead)
                         // [TL-4] Skip the O(events) grouping rebuild on every streamed
                         // token — body re-runs only when the timeline revision (or the
                         // streaming flag / post-stream final text) actually changes.
                         .equatable()
                         .transition(.opacity)
+                } else if let lead = groupStyle.lead {
+                    ContinuationLeadRow(lead: lead)
                 }
-            } else if message.isStreaming {
-                // Bot: simple "Generating..." indicator while streaming
-                SparkleLoadingView(headline: "Generating response...")
+            } else {
+                // A bot has no timeline to carry the lead-in, so it gets the plain row.
+                if let lead = groupStyle.lead {
+                    ContinuationLeadRow(lead: lead)
+                }
+                if message.isStreaming {
+                    // Bot: simple "Generating..." indicator while streaming
+                    SparkleLoadingView(headline: "Generating response...")
+                }
             }
 
             // 1b. INTERRUPTED-RUN BADGE (G1 Piece 1)
@@ -135,8 +161,9 @@ struct AgentBubbleContentView: View, Equatable {
                 TerminalOutcomeChip(outcome: outcome, reason: message.terminalReason)
             }
 
-            // 6. ACTIONS
-            if !message.isStreaming && contentToDisplay.textContent != nil {
+            // 6. ACTIONS — only a standalone bubble draws its own; a group draws one bar after its
+            // last message (`GroupActionBar`).
+            if groupStyle == .standalone && !message.isStreaming && contentToDisplay.textContent != nil {
                 AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
                     .environment(chatHistoryViewModel)
                     .opacity(0.6)
@@ -185,7 +212,7 @@ struct AgentBubbleContentView: View, Equatable {
                 // the error card demoted to the timeline) has no error-card Retry — give
                 // the failure the same affordance. `terminalOutcome` is only stamped at
                 // finalize, so this never shows mid-stream.
-                if message.terminalOutcome == .failed {
+                if message.terminalOutcome?.isFailureLike == true {
                     RetryMessageButton(
                         action: { mainAppViewModel.regenerateResponse(for: message) },
                         refusal: mainAppViewModel.regenerationRefusal(for: message)
@@ -453,6 +480,7 @@ struct TerminalOutcomeChip: View {
         switch outcome {
         case .failed, .completedWithWarnings: return "exclamationmark.triangle.fill"
         case .cancelled: return "stop.circle"
+        case .timedOut: return "clock.badge.exclamationmark"
         case .completed: return "checkmark.circle.fill"
         }
     }
@@ -461,6 +489,7 @@ struct TerminalOutcomeChip: View {
         switch outcome {
         case .failed, .completedWithWarnings: return .orange
         case .cancelled: return .gray
+        case .timedOut: return .orange
         case .completed: return .green
         }
     }
@@ -476,11 +505,67 @@ struct TerminalOutcomeChip: View {
         // / etc.). The reason line below states which — the headline must not assert
         // "by user" over a reason that says otherwise.
         case .cancelled: return String(localized: "Run stopped.")
+        // HITL Waiting Contract §4 — the reason line below carries the limit.
+        case .timedOut: return String(localized: "Timed out — the run hit its execution limit.")
         case .completed: return String(localized: "Completed.")
         }
     }
 
     private var accessibilityLabel: String {
         reason.map { "\(headline) \($0)" } ?? headline
+    }
+}
+
+/// The "↳ …" lead-in for a continuation with no timeline header to carry it: a bot's report, or a
+/// stub whose report has not started yet (its wake is waiting its turn).
+struct ContinuationLeadRow: View {
+    let lead: String
+    var isWaiting: Bool = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("↳ \(lead)")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundColor(theme.secondaryText)
+            if isWaiting {
+                ProgressView().controlSize(.mini)
+            }
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(isWaiting ? "\(lead). Report pending." : lead)
+    }
+}
+
+/// Stands in for reports whose tasks an EARLIER attempt of the turn started — the turn was redone
+/// since, so they are not answers to the attempt on screen. Folded, never removed.
+struct EarlierAttemptFoldRow: View {
+    let count: Int
+    let isExpanded: Bool
+    let toggle: () -> Void
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 5) {
+                Text("↳ \(count) report\(count == 1 ? "" : "s") from an earlier attempt")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundColor(theme.tertiaryText)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(theme.tertiaryText)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .padding(.vertical, 6)
+            .padding(.horizontal, 2)
+        }
+        .buttonStyle(.plain)
+        .help(isExpanded ? "Hide reports from an earlier attempt" : "Show reports from an earlier attempt")
+        .accessibilityLabel("\(count) reports from an earlier attempt. " + (isExpanded ? "Hide" : "Show"))
     }
 }

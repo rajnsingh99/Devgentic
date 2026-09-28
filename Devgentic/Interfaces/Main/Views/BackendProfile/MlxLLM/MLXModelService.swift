@@ -1059,25 +1059,30 @@ func refreshInstalledModels() {
                     self.finishCancelled(repoId: repoId, generation: generation, reason: "\(error)")
                     return
                 }
-                self.logger.fault("[MLXSTORE] Download of '\(repoId)' FAILED: \(error.localizedDescription).")
-                // ⚠️ Everything below mutates state owned by the download slot, so it is gated
-                // on still holding it. Unguarded, a superseded task's failure wrote
-                // `errorMessage` — which the bridge reads to classify the ACTIVE download,
-                // marking a healthy running pull as failed — and then ran the reclaim below
-                // against the folder the new download is writing into. On Pause→Resume both
-                // tasks carry the SAME repo id, so that reclaim would have deleted the live
-                // download's bytes.
-                guard self.stillOwnsSlot(generation, repoId: repoId, phase: "failure") else { return }
-                self.errorMessage = "Download failed: \(error.localizedDescription)"
-                self.finishTerminal(repoId: repoId, generation: generation, classification: "failed")
-                // Reclaim the partial bytes. Cleanup used to run only on the CANCEL path, so
-                // a download that failed — the common case when the disk fills — stranded
-                // everything it had written, invisibly (an incomplete folder is hidden from
-                // the installed list, so it has no Delete button either).
-                self.removePartialDownload(repoId: repoId)
+                self.finishFailed(repoId: repoId, generation: generation, error: error)
             }
         }
         return true
+    }
+
+    /// Terminal transition for a genuine failure. **Keeps every downloaded byte.**
+    ///
+    /// ⚠️ Timeout inventory D-27: this used to run `removePartialDownload`, so a 20 GB pull that
+    /// failed at 95% — a dropped connection, a full disk — deleted the finished shards too and
+    /// the user started again from zero. A failed record is already `isResumable`, so keeping the
+    /// bytes is what makes its Resume button honest. The bytes are no longer invisible either: the
+    /// failed row shows their size with Resume and Discard next to it, and the leftover scan
+    /// counts them.
+    func finishFailed(repoId: String, generation: UInt64, error: Error) {
+        logger.fault("[MLXSTORE] Download of '\(repoId)' FAILED: \(error.localizedDescription).")
+        // ⚠️ Gated on still holding the slot. Unguarded, a superseded task's failure wrote
+        // `errorMessage` — which the bridge reads to classify the ACTIVE download, marking a
+        // healthy running pull as failed.
+        guard stillOwnsSlot(generation, repoId: repoId, phase: "failure") else { return }
+        errorMessage = "Download failed: \(error.localizedDescription)"
+        let kept = Self.resumableBytes(at: partialDownloadFolder(for: repoId))
+        logger.notice("[MLXSTORE] Keeping \(ByteCountFormatter.string(fromByteCount: kept, countStyle: .file)) already downloaded for '\(repoId)'. CONSEQUENCE: Resume continues from here; Discard on the failed row frees it.")
+        finishTerminal(repoId: repoId, generation: generation, classification: "failed")
     }
 
     /// True for both cancellation shapes this download path can produce.
@@ -1117,6 +1122,7 @@ func refreshInstalledModels() {
         logger.info("[MLXSTORE] Terminal state for '\(repoId)': \(classification). Clearing in-flight handles.")
         clearDownloadHandles()
         isDownloading = false
+        refreshPartialDownloads()
     }
 
     /// Terminal transition for a user cancel. Clears `errorMessage` so the bridge
@@ -1185,6 +1191,11 @@ func refreshInstalledModels() {
         isDownloading = false
         // ⚠️ Deliberately no `removePartialDownload` here. That is the entire difference
         // between Pause and Cancel.
+        // Re-scan once the cancelled task has stopped writing, so the paused row shows its size.
+        Task { [weak self] in
+            _ = await task.value
+            self?.refreshPartialDownloads()
+        }
         return true
     }
 
@@ -1296,6 +1307,7 @@ func refreshInstalledModels() {
             let reclaimed = Self.directorySize(at: target)
             try fm.removeItem(at: target)
             logger.notice("[MLXSTORE] 🗑️ Removed partial download for '\(repoId)' at \(target.path), reclaiming \(ByteCountFormatter.string(fromByteCount: reclaimed, countStyle: .file)).")
+            refreshPartialDownloads()
             return true
         } catch {
             logger.error("[MLXSTORE] Failed to remove partial download for '\(repoId)' at \(target.path): \(error.localizedDescription). CONSEQUENCE: the partial files stay on disk and are invisible in the UI — the user can only reclaim them manually in Finder.")
@@ -1654,35 +1666,126 @@ func refreshInstalledModels() {
         return (free - requiredBytes >= Self.diskHeadroomBytes, free)
     }
 
-    // MARK: - Orphan reclaim
+    // MARK: - Partial downloads on disk
 
-    /// A folder under the download root that holds no weights file — the residue of a
-    /// cancelled or interrupted pull. `refreshInstalledModels` deliberately filters these
-    /// out of `installedModels`, which means they are invisible in the UI and have no
-    /// Delete button; before the `partialDownloadFolder` fix nothing ever reclaimed them.
-    struct OrphanedPartialDownload: Equatable {
+    /// A folder under the download root that is not a complete install — what a paused,
+    /// interrupted, failed or crashed pull leaves behind. `refreshInstalledModels` deliberately
+    /// filters these out of `installedModels`, so on their own they have no Delete button.
+    struct OrphanedPartialDownload: Equatable, Identifiable, Sendable {
         let repoId: String
         let path: URL
         let bytes: Int64
+        var id: String { repoId }
     }
 
-    /// Scan for partial-download residue. **Read-only** — see `reclaimOrphanedPartialDownloads`
-    /// for the destructive counterpart.
+    /// What the launch notice reports: how many partial downloads, and how much disk they use.
+    struct LeftoverNotice: Equatable, Sendable {
+        let count: Int
+        let bytes: Int64
+    }
+
+    /// Below this, leftovers are not worth interrupting the user about. They are still listed.
+    nonisolated static let leftoverNoticeThreshold: Int64 = 1_000_000_000
+
+    /// Every partial download on disk as of the last scan — including the ones a paused,
+    /// interrupted or failed history row still points at. The Downloads screen splits the two:
+    /// rows show their own size, and `untracked(_:trackedRepoIds:downloading:)` is the rest.
+    private(set) var partialDownloads: [OrphanedPartialDownload] = []
+
+    /// Set once, by the launch scan, when the leftovers reach `leftoverNoticeThreshold`. The root
+    /// view shows it as a toast and clears it.
+    var pendingLeftoverNotice: LeftoverNotice?
+
+    /// Drives the badge on the Downloads tab. Raised with the launch notice; cleared when the user
+    /// opens a Downloads view, or when the leftovers drop below the threshold.
+    private(set) var leftoverNeedsAttention = false
+
+    @ObservationIgnored private var partialScanGeneration: UInt64 = 0
+    /// Sticky across superseded scans, so a later refresh can't swallow the launch notice.
+    @ObservationIgnored private var announceNextScan = false
+
+    /// Bytes on disk for `repoId`'s partial download, or nil when the last scan found none.
+    func partialBytes(for repoId: String) -> Int64? {
+        partialDownloads.first { $0.repoId == repoId }?.bytes
+    }
+
+    /// The leftovers no history row accounts for — the ones that would otherwise have no
+    /// handle in the app at all. Excludes the repo downloading right now.
+    nonisolated static func untracked(
+        _ partials: [OrphanedPartialDownload],
+        trackedRepoIds: Set<String>,
+        downloading: String?
+    ) -> [OrphanedPartialDownload] {
+        partials.filter { !trackedRepoIds.contains($0.repoId) && $0.repoId != downloading }
+    }
+
+    /// The notice to show for `partials`, or nil when they are too small to mention. The live
+    /// download is not a leftover and is never counted.
+    nonisolated static func leftoverNotice(
+        for partials: [OrphanedPartialDownload],
+        excluding downloading: String?
+    ) -> LeftoverNotice? {
+        let counted = partials.filter { $0.repoId != downloading }
+        let total = counted.reduce(Int64(0)) { $0 + $1.bytes }
+        guard !counted.isEmpty, total >= leftoverNoticeThreshold else { return nil }
+        return LeftoverNotice(count: counted.count, bytes: total)
+    }
+
+    /// Scan for partial-download residue. **Read-only** and synchronous — for tests and callers
+    /// that need the answer now. The UI reads `partialDownloads`, kept current by
+    /// `refreshPartialDownloads`.
     @discardableResult
     func findOrphanedPartialDownloads() -> [OrphanedPartialDownload] {
         Self.scanForOrphans(under: modelsDirectory)
     }
 
-    /// Off-actor entry point for the launch-time scan. This walks directories and sums
-    /// file sizes, which must not run on the MainActor — the installed-model scan already
-    /// blocks it enough (see the audit's A15). Resolves the root on the actor, then hands
-    /// the filesystem work to a background task.
-    static func logOrphanedPartialDownloadsInBackground() {
-        Task { @MainActor in
-            let root = MLXModelService.shared.modelsDirectory
-            await Task.detached(priority: .utility) {
-                _ = MLXModelService.scanForOrphans(under: root)
+    /// Re-scans off the main actor and publishes the result. Called after every terminal
+    /// transition, pause and reclaim. Overlapping calls coalesce: only the newest scan publishes.
+    ///
+    /// `announce` asks for the launch notice when the leftovers are large enough.
+    func refreshPartialDownloads(announce: Bool = false) {
+        if announce { announceNextScan = true }
+        partialScanGeneration &+= 1
+        let generation = partialScanGeneration
+        let root = modelsDirectory
+        Task { [weak self] in
+            let found = await Task.detached(priority: .utility) {
+                MLXModelService.scanForOrphans(under: root)
             }.value
+            guard let self else { return }
+            guard generation == self.partialScanGeneration else {
+                self.logger.debug("[MLXSTORE] Partial-download scan \(generation) superseded by \(self.partialScanGeneration); discarding its result.")
+                return
+            }
+            self.applyPartialScan(found)
+        }
+    }
+
+    /// Publishes a scan result. Split out so the notice and badge rules are testable without a
+    /// background scan.
+    func applyPartialScan(_ found: [OrphanedPartialDownload]) {
+        partialDownloads = found
+        let notice = Self.leftoverNotice(for: found, excluding: isDownloading ? currentDownloadName : nil)
+        if notice == nil { leftoverNeedsAttention = false }
+        guard announceNextScan else { return }
+        announceNextScan = false
+        guard let notice else { return }
+        pendingLeftoverNotice = notice
+        leftoverNeedsAttention = true
+        logger.notice("[MLXSTORE] Leftover notice: \(notice.count) unfinished download(s) using \(ByteCountFormatter.string(fromByteCount: notice.bytes, countStyle: .file)). The user is told once this launch and the Downloads tab is badged until they look.")
+    }
+
+    /// The user has seen the Downloads screen; stop badging it.
+    func acknowledgeLeftovers() {
+        leftoverNeedsAttention = false
+    }
+
+    /// Launch entry point. **Read-only**: it lists and announces, it never deletes. These
+    /// folders are multi-gigabyte user data, a second app instance could be writing into one,
+    /// and a user may have hand-placed files there — deleting stays an explicit user action.
+    static func scanPartialDownloadsAtLaunch() {
+        Task { @MainActor in
+            MLXModelService.shared.refreshPartialDownloads(announce: true)
         }
     }
 
@@ -1729,38 +1832,47 @@ func refreshInstalledModels() {
             logger.info("[MLXSTORE] Orphan scan: no partial-download residue under \(root.path).")
         } else {
             let total = orphans.reduce(Int64(0)) { $0 + $1.bytes }
-            logger.warning("[MLXSTORE] Orphan scan: \(orphans.count) partial download(s) occupying \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file)) — \(orphans.map { "\($0.repoId) (\(ByteCountFormatter.string(fromByteCount: $0.bytes, countStyle: .file)))" }.joined(separator: ", ")). CONSEQUENCE: these are hidden from the installed list and have no Delete button; call reclaimOrphanedPartialDownloads() to free them.")
+            logger.notice("[MLXSTORE] Orphan scan: \(orphans.count) partial download(s) occupying \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file)) — \(orphans.map { "\($0.repoId) (\(ByteCountFormatter.string(fromByteCount: $0.bytes, countStyle: .file)))" }.joined(separator: ", ")). They are listed in the Download Manager for the user to resume or delete.")
         }
         return orphans
     }
 
-    /// Destructive counterpart to `findOrphanedPartialDownloads`. Deliberately NOT called
-    /// automatically at launch: these folders are multi-gigabyte user data, a second app
-    /// instance could be mid-download into one, and a user may have hand-placed files
-    /// there. Reclaim must stay an explicit, user-initiated action.
+    /// Deletes one leftover at the user's request. Refuses the repo downloading right now, and —
+    /// through `removePartialDownload` — anything that turns out to be a complete install.
+    /// Returns false when the bytes are still on disk.
     @discardableResult
-    func reclaimOrphanedPartialDownloads() -> Int64 {
-        let orphans = findOrphanedPartialDownloads()
+    func discardLeftover(_ leftover: OrphanedPartialDownload) -> Bool {
+        guard !(isDownloading && leftover.repoId == currentDownloadName) else {
+            logger.notice("[MLXSTORE] Not deleting '\(leftover.repoId)' — it is downloading right now. CONSEQUENCE: nothing removed; cancel the download to discard it.")
+            return false
+        }
+        logger.notice("[MLXSTORE] DISCARDING leftover partial download '\(leftover.repoId)' (\(ByteCountFormatter.string(fromByteCount: leftover.bytes, countStyle: .file))) at the user's request.")
+        let removed = removePartialDownload(repoId: leftover.repoId)
+        if removed, pausedRepoId == leftover.repoId { pausedRepoId = nil }
+        return removed
+    }
+
+    /// Deletes each of `leftovers` and returns the bytes freed. User-initiated only.
+    @discardableResult
+    func discardLeftovers(_ leftovers: [OrphanedPartialDownload]) -> Int64 {
         var reclaimed: Int64 = 0
-        for orphan in orphans {
-            guard orphan.repoId != currentDownloadName else {
-                logger.info("[MLXSTORE] Orphan reclaim: skipping '\(orphan.repoId)' — it is downloading right now.")
-                continue
-            }
-            do {
-                try FileManager.default.removeItem(at: orphan.path)
-                reclaimed += orphan.bytes
-                logger.notice("[MLXSTORE] Orphan reclaim: removed '\(orphan.repoId)', freeing \(ByteCountFormatter.string(fromByteCount: orphan.bytes, countStyle: .file)).")
-            } catch {
-                logger.error("[MLXSTORE] Orphan reclaim FAILED for '\(orphan.repoId)' at \(orphan.path.path): \(error.localizedDescription). CONSEQUENCE: those bytes stay on disk and remain invisible in the UI.")
-            }
+        for leftover in leftovers where discardLeftover(leftover) {
+            reclaimed += leftover.bytes
         }
         if reclaimed > 0 {
-            logger.notice("[MLXSTORE] Orphan reclaim complete: freed \(ByteCountFormatter.string(fromByteCount: reclaimed, countStyle: .file)).")
+            logger.notice("[MLXSTORE] Leftover reclaim complete: freed \(ByteCountFormatter.string(fromByteCount: reclaimed, countStyle: .file)).")
         }
         return reclaimed
     }
-    
+
+    /// Deletes every partial download on disk. Kept for callers that want everything gone;
+    /// the UI deletes an explicit list with `discardLeftovers(_:)` so it never touches a folder
+    /// the user didn't see.
+    @discardableResult
+    func reclaimOrphanedPartialDownloads() -> Int64 {
+        discardLeftovers(findOrphanedPartialDownloads())
+    }
+
     /// Deletes an installed model from disk.
     ///
     /// Returns false when the delete was refused or failed; the caller should surface that.
@@ -1831,7 +1943,26 @@ func refreshInstalledModels() {
         logger.notice("[MLXSTORE] Deleted '\(item.displayName)', reclaimed \(ByteCountFormatter.string(fromByteCount: reclaimable, countStyle: .file)).")
         // Awaited: callers (and the store's card list) must observe the model gone.
         await forceRefreshInstalledModelsAsync()
+        clearIntelligenceCoreSelectionIfUnresolvable(afterDeleting: item)
         return true
+    }
+
+    /// Drops the Intelligence Core selection when the delete left it pointing at nothing.
+    ///
+    /// ⚠️ Without this the setting outlived the model: every later compaction logged
+    /// `IC context-window lookup MISSED`, fell back to a 4096-token window, and still reported an
+    /// IC model as selected — so synthesis and compaction kept being planned around a model that
+    /// could not load. Checked AFTER the refresh and through `installedModel(named:)` (the same
+    /// resolution every IC reader uses), so a selection another installed copy still satisfies is
+    /// left alone; only one that no longer resolves is cleared.
+    private func clearIntelligenceCoreSelectionIfUnresolvable(afterDeleting item: MLXModelItem) {
+        let key = AppSettings.coreIntelligenceModelKey
+        let selected = UserDefaults.standard.string(forKey: key) ?? ""
+        guard !selected.isEmpty,
+              MLXModelIdentity.matches(installed: item.displayName, candidate: selected),
+              installedModel(named: selected) == nil else { return }
+        UserDefaults.standard.removeObject(forKey: key)
+        logger.notice("[MLXSTORE] Cleared the Intelligence Core selection '\(selected)' — its model was just deleted. CONSEQUENCE: IC features (compaction summaries, synthesis) report no model selected until one is chosen in Settings, instead of planning around a model that cannot load.")
     }
 }
 
@@ -1936,8 +2067,7 @@ enum HFRequest {
         if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        // Bounded so the store cannot hang on URLSession's 60s default — every other
-        // network client in this project sets an explicit timeout; this one was the outlier.
+        // Bounded so the store cannot hang on URLSession's 60s default.
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         // The list endpoint's top-30 payload is highly cacheable; let URLSession revalidate

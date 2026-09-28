@@ -317,6 +317,10 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [UUID: [Entry]] = [:]
     private var counters: [UUID: Int] = [:]
+    /// Set by `terminateAll`. From then on nothing is announced (D-29): a quit-time `.stopped`
+    /// used to reach `BackgroundTaskWakeCoordinator`, which could start an unattended run while the
+    /// app was quitting — one that then told the model the task was "stopped on request".
+    private var isQuitting = false
     private var refreshTimer: DispatchSourceTimer?
     private var sweepTimer: DispatchSourceTimer?
     /// Log paths `launch` has created but not yet registered. The sweep treats them as live:
@@ -454,8 +458,15 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
             // the window outright, and `testTheFinalDrainIsOrderedBeforeTheAnnouncement` pins it
             // structurally for exactly the reason `testAnnounceDoesNotBlockTheKillPath` does.
             self.drainTail(entry, final: true)
+            let settledEarlier = self.isSettled(entry)
             let cancelled = self.finish(entry, status: .exited(code: finished.terminationStatus))
             cancelled?.cancel()
+            // ⚠️ D-29: a stop or timeout SETS the verdict before the kill lands but does not
+            // announce it (see `finish(announce:)`); this is the announcement, now that the final
+            // drain has the output the command wrote while it was being signalled. Announcing at
+            // the verdict published a stale tail — on the card and in a woken run's prompt — and
+            // no second announcement ever followed.
+            if settledEarlier { self.announceIfStillRegistered(entry) }
             // LAST: a foreground caller reads the log the moment it is woken, so the handle must be
             // closed and the status settled first.
             self.markEnded(entry)
@@ -581,7 +592,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
             guard entry.process.isRunning else { return }
             // Status FIRST, so "we killed it" wins the race against the `terminationHandler`
             // that this very `terminate()` is about to trigger.
-            _ = self.finish(entry, status: .timedOut)
+            _ = self.finish(entry, status: .timedOut, announce: false)   // announced after the final drain (D-29)
 
             // The whole job tree, not just the shell. `zsh -c "xcodebuild …"` leaves the compiler
             // running if only the zsh is signalled, and a bound that does not stop the work is
@@ -618,8 +629,10 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     /// The precedence is the point. A timeout kill triggers `terminationHandler`, which would
     /// otherwise overwrite `.timedOut` with `.exited(15)` and report a signal number as though
     /// the command had chosen to exit 15.
+    /// - Parameter announce: false when the process is still running and about to be killed — the
+    ///   termination handler announces once the final drain is done (D-29).
     @discardableResult
-    private func finish(_ entry: Entry, status: Status) -> DispatchWorkItem? {
+    private func finish(_ entry: Entry, status: Status, announce shouldAnnounce: Bool = true) -> DispatchWorkItem? {
         lock.lock()
         var accepted = false
         var watchdog: DispatchWorkItem?
@@ -636,8 +649,25 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         // ⚠️ OUTSIDE the lock. `announce` hops to the MainActor, and posting from inside would
         // hold this lock across that boundary — the observer then reads the registry on arrival
         // and would deadlock against a writer that had not yet released.
-        if accepted { announce(taskID: entry.id, conversationID: conversationID) }
+        if accepted, shouldAnnounce { announce(taskID: entry.id, conversationID: conversationID) }
         return watchdog
+    }
+
+    /// Whether a terminal status is already recorded.
+    private func isSettled(_ entry: Entry) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return entry.status.isTerminal
+    }
+
+    /// Announces `entry`'s ending — unless its conversation was discarded (deleted), in which case
+    /// there is nobody to tell, and a wake would start a run in a conversation that no longer exists.
+    private func announceIfStillRegistered(_ entry: Entry) {
+        lock.lock()
+        let registered = entries[entry.conversationID]?.contains { $0 === entry } ?? false
+        lock.unlock()
+        guard registered else { return }
+        announce(taskID: entry.id, conversationID: entry.conversationID)
     }
 
     /// Tells whoever is rendering this task that something changed. Fire-and-forget: a task with
@@ -658,6 +688,10 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     /// ignored) before the delay was simply measured. Nothing about the symptom pointed at a
     /// notification.
     private func announce(taskID: String, conversationID: UUID) {
+        lock.lock()
+        let quitting = isQuitting
+        lock.unlock()
+        guard !quitting else { return }
         let payload: [String: Any] = [
             BackgroundTaskNotificationKey.taskID: taskID,
             BackgroundTaskNotificationKey.conversationID: conversationID,
@@ -1047,7 +1081,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         guard let entry else { return nil }
         guard entry.process.isRunning else { return entry.snapshot }
 
-        let cancelled = finish(entry, status: .stopped)
+        let cancelled = finish(entry, status: .stopped, announce: false)   // announced after the final drain (D-29)
         cancelled?.cancel()
 
         let descendants = ProcessTree.terminateTree(
@@ -1067,6 +1101,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     /// 3 s watchdog.
     func terminateAll() {
         lock.lock()
+        isQuitting = true
         let live = entries.values.flatMap { $0 }.filter { !$0.status.isTerminal }
         lock.unlock()
 
@@ -1075,7 +1110,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
 
         var roots: [pid_t] = []
         for entry in live where entry.process.isRunning {
-            finish(entry, status: .stopped)?.cancel()
+            finish(entry, status: .stopped, announce: false)?.cancel()
             roots.append(entry.process.processIdentifier)
         }
 
@@ -1100,6 +1135,10 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         lock.unlock()
 
         for entry in removed where entry.process.isRunning {
+            // ⚠️ D-29: the verdict FIRST. Without it the termination handler recorded the kill as
+            // `.exited(15)`, and a foreground call still waiting on this command reported "Exit
+            // code: 15" as the command's own result. Not announced: the conversation is gone.
+            finish(entry, status: .stopped, announce: false)?.cancel()
             ProcessTree.terminateTree(root: entry.process.processIdentifier,
                                       grace: Self.sigkillGrace,
                                       isRootRunning: { entry.process.isRunning },

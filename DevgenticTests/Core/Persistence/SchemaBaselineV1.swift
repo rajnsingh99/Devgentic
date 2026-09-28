@@ -170,6 +170,7 @@ ENTITY ScheduledTaskModel
   ATTR profileID: Optional<UUID> [optional]
   ATTR promptTemplate: String [required]
   ATTR runCount: Int [required]
+  ATTR runLimitSeconds: Optional<Double> [optional]
   ATTR scheduledAt: Optional<Date> [optional]
   ATTR status: String [required]
   UNIQUE (id)

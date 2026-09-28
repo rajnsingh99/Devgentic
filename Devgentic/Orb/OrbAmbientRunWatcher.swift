@@ -172,6 +172,8 @@ final class OrbAmbientRunWatcher: ActiveStreamMirrorDelegate {
             return String(localized: "Your task in the main window finished, but not cleanly.")
         case .failed:
             return String(localized: "Your task in the main window failed.")
+        case .timedOut:
+            return String(localized: "Your task in the main window hit its time limit and was stopped.")
         case .cancelled:
             return nil
         case nil:

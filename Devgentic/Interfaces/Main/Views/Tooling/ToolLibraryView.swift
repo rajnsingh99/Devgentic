@@ -71,6 +71,25 @@ struct ToolTableRow: Identifiable {
     }
 }
 
+extension ToolDefinition {
+    /// Resolves the risk tier for this tool based on its capabilities, annotations, and provenance.
+    func riskTier(in source: ToolSource? = nil) -> HITLRiskTier {
+        if ToolCapability.executesArbitraryCode(name) { return .destructive }
+        if annotations?.destructiveHint == true { return .destructive }
+        if annotations?.readOnlyHint == true { return .safe }
+        if let source = source, source.type == .mcp {
+            return .moderate
+        }
+        return HITLRiskTier.classify(toolName: name)
+    }
+}
+
+extension ToolTableRow {
+    var riskTier: HITLRiskTier {
+        definition.riskTier(in: source)
+    }
+}
+
 // MARK: - Main View
 
 struct ToolLibraryView: View {
@@ -783,6 +802,10 @@ private struct ToolRowContent: View {
         row.displayTitle
     }
 
+    private var configuredTimeout: TimeInterval? {
+        configuredTools.first(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })?.timeout
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
@@ -819,36 +842,44 @@ private struct ToolRowContent: View {
                             }
                         }
                         
-                        // Technical name code badge
-                        Text(row.definition.name)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(theme.secondaryText.opacity(0.85))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.04))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
-                            )
+                        HStack(alignment: .center, spacing: 6) {
+                            // Technical name code badge
+                            Text(row.definition.name)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(theme.secondaryText.opacity(0.85))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.04))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
+                                )
 
-                        if isLocked {
-                            HStack(spacing: 3) {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 7, weight: .bold))
-                                Text("CORE")
-                                    .font(.system(size: 8, weight: .bold))
+                            if isLocked {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "lock.fill")
+                                        .font(.system(size: 7, weight: .bold))
+                                    Text("CORE")
+                                        .font(.system(size: 8, weight: .bold))
+                                }
+                                .foregroundColor(theme.accentColor)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(theme.accentColor.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(theme.accentColor.opacity(0.25), lineWidth: 0.5)
+                                )
+                                .help("Required core tool for Code Session. Cannot be disabled.")
                             }
-                            .foregroundColor(theme.accentColor)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(theme.accentColor.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(theme.accentColor.opacity(0.25), lineWidth: 0.5)
-                            )
-                            .help("Required core tool for Code Session. Cannot be disabled.")
+
+                            ToolRiskBadge(tier: row.riskTier)
+
+                            if let timeout = configuredTimeout {
+                                ToolTimeoutBadge(timeout: timeout)
+                            }
                         }
                     }
                 }
@@ -1554,133 +1585,485 @@ private struct ToolSettingsPopover: View {
         .accessibilityLabel("Tool settings")
         .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
             popoverContent
-                .frame(width: 280)
-                .padding()
+                .frame(width: 340)
+                .padding(14)
         }
     }
 
     @ViewBuilder
     private var popoverContent: some View {
         if let idx = toolIndex {
-            VStack(alignment: .leading, spacing: 14) {
-                // Header
-                HStack(spacing: 6) {
-                    Image(systemName: "gearshape.fill")
-                        .foregroundColor(theme.accentColor)
-                    Text("Tool Settings")
-                        .font(.headline)
+            let tier = definition.riskTier(in: source)
+            let riskTint: Color = {
+                switch tier {
+                case .safe: return .blue
+                case .moderate: return theme.warningColor
+                case .destructive: return theme.errorColor
                 }
-
-                Divider()
-
-                // Favorite
-                Toggle(isOn: Binding(
-                    get: { configuredTools[idx].isFavorite },
-                    set: { configuredTools[idx].isFavorite = $0 }
-                )) {
-                    Label("Favorite", systemImage: "star.fill")
-                        .font(theme.fontSubheadline)
+            }()
+            let riskDescription: String = {
+                switch tier {
+                case .safe:
+                    return "Safe read-only tool. Inspects data or queries environment without mutating system state or files."
+                case .moderate:
+                    return "State-modifying tool. Creates, modifies, or moves files and data. Changes are generally recoverable."
+                case .destructive:
+                    return "High-impact or destructive tool. Executes arbitrary system commands, deletes resources, or performs irreversible actions."
                 }
-                .toggleStyle(.switch)
-                .controlSize(.small)
+            }()
 
-                Divider()
-
-                // What survives when this tool's result is larger than the model's room. Nil =
-                // follow the global setting in the context gauge.
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("If the result doesn't fit, keep", systemImage: "scissors")
-                        .font(theme.fontSubheadline)
-                    Picker("", selection: Binding(
-                        get: { configuredTools[idx].cutStrategy?.rawValue ?? "" },
-                        set: { configuredTools[idx].cutStrategy = ContextCutStrategy(rawValue: $0) }
-                    )) {
-                        Text("Default (\(ContextCutStrategy.globalDefault.label))").tag("")
-                        ForEach(ContextCutStrategy.allCases, id: \.rawValue) { strategy in
-                            Text(strategy.label).tag(strategy.rawValue)
-                        }
+            VStack(alignment: .leading, spacing: 12) {
+                // Header: Tool Context & Dismiss
+                HStack(alignment: .center, spacing: 10) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(theme.accentColor.opacity(0.12))
+                            .frame(width: 32, height: 32)
+                        
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(theme.accentColor)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .controlSize(.small)
-                    .fixedSize()
-                }
 
-                Divider()
-
-                // Timeout
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle(isOn: Binding(
-                        get: { configuredTools[idx].timeout != nil },
-                        set: { enabled in
-                            configuredTools[idx].timeout = enabled ? 30 : nil
-                            if !enabled { configuredTools[idx].timeoutMessage = nil }
-                        }
-                    )) {
-                        Label("Timeout", systemImage: "clock")
-                            .font(theme.fontSubheadline)
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-
-                    if configuredTools[idx].timeout != nil {
-                        HStack {
-                            Stepper(
-                                "\(Int(configuredTools[idx].timeout ?? 30))s",
-                                value: Binding(
-                                    get: { configuredTools[idx].timeout ?? 30 },
-                                    set: { configuredTools[idx].timeout = $0 }
-                                ),
-                                in: 5...300,
-                                step: 5
-                            )
-                            .font(.system(.caption))
-                            .fixedSize()
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(definition.title ?? definition.name.toTitleCase())
+                                .font(.system(size: 13.5, weight: .bold))
+                                .foregroundColor(theme.primaryText)
+                                .lineLimit(1)
+                            
+                            if configuredTools[idx].isFavorite {
+                                Image(systemName: "star.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.yellow)
+                            }
                         }
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("On Timeout, Send:")
-                                .font(.system(.caption, weight: .medium))
+                        HStack(spacing: 5) {
+                            Text(definition.name)
+                                .font(.system(size: 9.5, design: .monospaced))
                                 .foregroundColor(theme.secondaryText)
 
-                            TextField(
-                                "Custom message to LLM on timeout...",
-                                text: Binding(
-                                    get: { configuredTools[idx].timeoutMessage ?? "" },
-                                    set: { configuredTools[idx].timeoutMessage = $0.isEmpty ? nil : $0 }
-                                ),
-                                axis: .vertical
-                            )
-                            .lineLimit(2...4)
-                            .font(.system(.caption))
-                            .textFieldStyle(.roundedBorder)
-                        }
+                            Text("•")
+                                .font(.system(size: 9))
+                                .foregroundColor(theme.secondaryText.opacity(0.5))
 
-                        Text("Leave empty for default timeout error")
-                            .font(.system(.caption2))
+                            Text(source.serverName)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .foregroundColor(theme.secondaryText.opacity(0.8))
+                        }
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Button {
+                        isShowingPopover = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundColor(theme.secondaryText.opacity(0.6))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help("Close settings")
+                }
+
+                // 1. Risk Classification Card
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        HStack(spacing: 5) {
+                            Image(systemName: "shield.lefthalf.filled")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundColor(theme.secondaryText)
+                            Text("Tool Impact & Risk")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        
+                        Spacer()
+                        
+                        HStack(spacing: 4) {
+                            Image(systemName: tier.icon)
+                                .font(.system(size: 9, weight: .bold))
+                            Text(tier.label.uppercased())
+                                .font(.system(size: 9, weight: .bold))
+                                .tracking(0.5)
+                        }
+                        .foregroundColor(riskTint)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(riskTint.opacity(0.12))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule()
+                                .stroke(riskTint.opacity(0.35), lineWidth: 0.5)
+                        )
+                    }
+
+                    Text(riskDescription)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(theme.secondaryText.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(riskTint.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(riskTint.opacity(0.2), lineWidth: 0.8)
+                )
+
+                // 2. Favorite Toggle Card
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: configuredTools[idx].isFavorite ? "star.fill" : "star")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(configuredTools[idx].isFavorite ? .yellow : theme.secondaryText)
+                        .frame(width: 20)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Favorite Tool")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Pins this tool to top of library & quick access")
+                            .font(.system(size: 10.5))
                             .foregroundColor(theme.secondaryText)
                     }
+
+                    Spacer()
+
+                    Toggle("", isOn: Binding(
+                        get: { configuredTools[idx].isFavorite },
+                        set: { configuredTools[idx].isFavorite = $0 }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
                 }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(theme.surfaceOverlay.opacity(0.5))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.8)
+                )
+
+                // 3. Truncation Strategy Card
+                let selectedStrategy = configuredTools[idx].cutStrategy
+                let strategyDescription: String = {
+                    guard let strategy = selectedStrategy else {
+                        return "Default: Follows the global context gauge setting (currently \(ContextCutStrategy.globalDefault.label.lowercased()))."
+                    }
+                    switch strategy {
+                    case .automatic:
+                        let autoChoice = ContextCutStrategy.automaticChoice(forTool: definition.name)
+                        return "Automatic: Intelligently chooses '\(autoChoice.label)' for this tool based on its output structure."
+                    case .keepStart:
+                        return "Start (Keep beginning): Retains the first lines and discards the tail. Best for file reading and search listings."
+                    case .keepEnd:
+                        return "End (Keep latest): Retains the bottom/latest output and discards earlier text. Best for terminal commands and test logs."
+                    case .keepStartAndEnd:
+                        return "Start + End: Retains both the beginning and end with a '[...]' omission marker. Ideal for git diffs and structured data."
+                    }
+                }()
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: "scissors")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(theme.secondaryText)
+                            .frame(width: 20)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Output Truncation")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(theme.primaryText)
+                            Text("When tool output exceeds context room")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(theme.secondaryText)
+                        }
+
+                        Spacer()
+
+                        Picker("", selection: Binding(
+                            get: { configuredTools[idx].cutStrategy?.rawValue ?? "" },
+                            set: { configuredTools[idx].cutStrategy = ContextCutStrategy(rawValue: $0) }
+                        )) {
+                            Text("Default (\(ContextCutStrategy.globalDefault.label))").tag("")
+                            Text("Automatic").tag(ContextCutStrategy.automatic.rawValue)
+                            Text("Start (Keep head)").tag(ContextCutStrategy.keepStart.rawValue)
+                            Text("End (Keep tail)").tag(ContextCutStrategy.keepEnd.rawValue)
+                            Text("Start + End (Both ends)").tag(ContextCutStrategy.keepStartAndEnd.rawValue)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .frame(maxWidth: 140)
+                    }
+
+                    HStack(alignment: .top, spacing: 5) {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 9.5))
+                            .foregroundColor(theme.secondaryText.opacity(0.8))
+                            .padding(.top, 1)
+
+                        Text(strategyDescription)
+                            .font(.system(size: 10))
+                            .foregroundColor(theme.secondaryText.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, 1)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(theme.surfaceOverlay.opacity(0.5))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.8)
+                )
+
+                // 4. Execution Timeout Card
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(configuredTools[idx].timeout != nil ? theme.accentColor : theme.secondaryText)
+                            .frame(width: 20)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Execution Timeout")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(theme.primaryText)
+                            if let timeout = configuredTools[idx].timeout {
+                                Text("Capped at \(ToolExecutionMediator.describe(timeout))")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundColor(theme.accentColor)
+                            } else {
+                                Text("Global default of \(ToolExecutionMediator.describe(ToolExecutionMediator.globalDefaultToolTimeout))")
+                                    .font(.system(size: 10.5))
+                                    .foregroundColor(theme.secondaryText)
+                            }
+                        }
+
+                        Spacer()
+
+                        Toggle("", isOn: Binding(
+                            get: { configuredTools[idx].timeout != nil },
+                            set: { enabled in
+                                configuredTools[idx].timeout = enabled ? ToolExecutionMediator.globalDefaultToolTimeout : nil
+                                if !enabled { configuredTools[idx].timeoutMessage = nil }
+                            }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    }
+
+                    if configuredTools[idx].timeout != nil {
+                        Divider()
+                            .opacity(0.5)
+
+                        // Duration Presets & Stepper
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Duration Presets")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundColor(theme.secondaryText)
+
+                            HStack(spacing: 5) {
+                                let currentTimeout = configuredTools[idx].timeout ?? ToolExecutionMediator.globalDefaultToolTimeout
+                                let presets: [(label: String, seconds: TimeInterval)] = [
+                                    ("30s", 30),
+                                    ("1m", 60),
+                                    ("5m", 300),
+                                    ("15m", 900),
+                                    ("30m", 1800)
+                                ]
+
+                                ForEach(presets, id: \.seconds) { preset in
+                                    let isSelected = abs(currentTimeout - preset.seconds) < 1.0
+                                    Button {
+                                        configuredTools[idx].timeout = preset.seconds
+                                    } label: {
+                                        Text(preset.label)
+                                            .font(.system(size: 10, weight: isSelected ? .bold : .medium))
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 3.5)
+                                            .background(
+                                                RoundedRectangle(cornerRadius: 5)
+                                                    .fill(isSelected ? theme.accentColor : theme.surfaceOverlay)
+                                            )
+                                            .foregroundColor(isSelected ? .white : theme.primaryText)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 5)
+                                                    .stroke(isSelected ? Color.clear : theme.dividerColor.opacity(0.4), lineWidth: 0.5)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .pointingHandCursor()
+                                }
+
+                                Spacer(minLength: 4)
+
+                                // Fine-tune Stepper
+                                Stepper(
+                                    "",
+                                    value: Binding(
+                                        get: { configuredTools[idx].timeout ?? ToolExecutionMediator.globalDefaultToolTimeout },
+                                        set: { configuredTools[idx].timeout = $0 }
+                                    ),
+                                    in: 5...3600,
+                                    step: 5
+                                )
+                                .labelsHidden()
+                                .controlSize(.mini)
+                                .help("Fine-tune timeout (5s to 60m)")
+                            }
+
+                            // Custom LLM timeout message
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("On Timeout, Send to LLM:")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundColor(theme.secondaryText)
+
+                                TextField(
+                                    "Optional message (e.g., 'Check logs or retry with higher timeout')...",
+                                    text: Binding(
+                                        get: { configuredTools[idx].timeoutMessage ?? "" },
+                                        set: { configuredTools[idx].timeoutMessage = $0.isEmpty ? nil : $0 }
+                                    ),
+                                    axis: .vertical
+                                )
+                                .lineLimit(2...3)
+                                .font(.system(size: 11))
+                                .textFieldStyle(.roundedBorder)
+
+                                Text("Leave empty for standard timeout error.")
+                                    .font(.system(size: 9.5))
+                                    .foregroundColor(theme.secondaryText.opacity(0.7))
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(theme.surfaceOverlay.opacity(0.5))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.8)
+                )
             }
+        } else {
+            VStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundColor(theme.warningColor)
+                Text("Enable this tool to configure its settings.")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+            }
+            .frame(width: 260)
+            .padding()
         }
+    }
+}
+
+// MARK: - Risk & Behavioral Indicator Components
+
+/// Visual badge indicator showing the tool's HITL risk classification (Read-only, Modifies, Destructive).
+private struct ToolRiskBadge: View {
+    let tier: HITLRiskTier
+    var isCompact: Bool = false
+    @Environment(\.appTheme) private var theme
+
+    private var tintColor: Color {
+        switch tier {
+        case .safe: return .blue
+        case .moderate: return theme.warningColor
+        case .destructive: return theme.errorColor
+        }
+    }
+
+    private var descriptionText: String {
+        switch tier {
+        case .safe:
+            return "Read-only: Performs inspections or queries without modifying files or system state."
+        case .moderate:
+            return "Modifies: Makes changes to files, settings, or state (generally recoverable)."
+        case .destructive:
+            return "Destructive: Executes arbitrary code, removes data, or alters critical system state."
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 3.5) {
+            Image(systemName: tier.icon)
+                .font(.system(size: isCompact ? 7.5 : 8.5, weight: .semibold))
+            
+            Text(tier.label.uppercased())
+                .font(.system(size: isCompact ? 7.5 : 8.5, weight: .bold))
+                .tracking(0.4)
+        }
+        .foregroundColor(tintColor)
+        .padding(.horizontal, isCompact ? 5 : 6)
+        .padding(.vertical, isCompact ? 1.5 : 2.5)
+        .background(tintColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(tintColor.opacity(0.28), lineWidth: 0.5)
+        )
+        .help("\(tier.label): \(descriptionText)")
+    }
+}
+
+/// Pill badge displayed on the tool row when a custom execution timeout override is set.
+private struct ToolTimeoutBadge: View {
+    let timeout: TimeInterval
+    var isCompact: Bool = false
+    @Environment(\.appTheme) private var theme
+
+    private var formattedText: String {
+        ToolExecutionMediator.describe(timeout).uppercased()
+    }
+
+    var body: some View {
+        HStack(spacing: 3.5) {
+            Image(systemName: "clock.fill")
+                .font(.system(size: isCompact ? 7.5 : 8.5, weight: .semibold))
+            
+            Text(formattedText)
+                .font(.system(size: isCompact ? 7.5 : 8.5, weight: .bold))
+                .tracking(0.4)
+        }
+        .foregroundColor(theme.accentColor)
+        .padding(.horizontal, isCompact ? 5 : 6)
+        .padding(.vertical, isCompact ? 1.5 : 2.5)
+        .background(theme.accentColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(theme.accentColor.opacity(0.28), lineWidth: 0.5)
+        )
+        .help("Execution timeout override: \(ToolExecutionMediator.describe(timeout))")
     }
 }
 
 // MARK: - MCP v0.11.0 UI Components
 
-/// Displays annotation badges for a tool's behavioral hints.
+/// Displays supplementary annotation badges for an MCP tool's behavioral hints.
 private struct ToolAnnotationBadges: View {
     let annotations: ToolAnnotations?
 
     var body: some View {
         if let annotations = annotations {
             HStack(spacing: 4) {
-                if annotations.destructiveHint == true {
-                    AnnotationBadge(text: "Destructive", color: .red, symbol: "exclamationmark.triangle.fill")
-                }
-                if annotations.readOnlyHint == true {
-                    AnnotationBadge(text: "Read-only", color: .blue, symbol: "eye.fill")
-                }
                 if annotations.idempotentHint == true {
                     AnnotationBadge(text: "Idempotent", color: .green, symbol: "arrow.2.squarepath")
                 }

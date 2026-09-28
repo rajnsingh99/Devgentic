@@ -95,6 +95,30 @@ actor HistoryCompactionService {
         checkpointSink = sink
     }
 
+    /// Stream-independent UI reporting for AUTOMATIC compaction: `begin` shows the "Compacting
+    /// history…" row, `finish` its outcome — the same row a manual compaction uses. Registered at
+    /// startup beside the checkpoint sink, because an automatic run starts after its turn's stream
+    /// has ended and so cannot report through it. `begin` returns false when a row is already
+    /// running for the conversation.
+    private var activityBegin: (@Sendable (UUID) async -> Bool)?
+    private var activityFinish: (@Sendable (UUID, ManualOutcome) async -> Void)?
+
+    func setActivitySink(begin: @escaping @Sendable (UUID) async -> Bool,
+                         finish: @escaping @Sendable (UUID, ManualOutcome) async -> Void) {
+        activityBegin = begin
+        activityFinish = finish
+    }
+
+    /// WHICH MODEL SUMMARIZES — one rule for manual and automatic compaction (owner decision
+    /// 2026-09-27): the Intelligence Core when it is on, its History Compaction feature is on and a
+    /// model is selected; otherwise the conversation's own model, which is always available because
+    /// it is the one the user is already talking to.
+    static func useIntelligenceCore(defaults: UserDefaults = .standard, icModelSelected: Bool) -> Bool {
+        let master = defaults.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+        let feature = defaults.object(forKey: AppSettings.ciFeatureHistoryCompactionKey) as? Bool ?? true
+        return master && feature && icModelSelected
+    }
+
     /// Marks a background run as started. Returns false when one is already in flight for
     /// this conversation. Internal (not private) so the dedup contract is unit-testable
     /// without triggering a real IC execution.
@@ -110,20 +134,29 @@ actor HistoryCompactionService {
 
     /// Runs the planned compaction OFF the request path.
     ///
-    /// Returns immediately; the IC inference happens in a background task. The current
-    /// request proceeds with uncompacted history (the history builders trim to budget), and
-    /// the checkpoint benefits every turn from the next one on — viable only because
-    /// checkpoints are persisted now; when they were request-local this would have deferred
-    /// the work for nothing.
+    /// Returns immediately; the summarization happens in a background task. The checkpoint
+    /// benefits every turn from the next one on.
     ///
-    /// - Parameter onEvent: Best-effort UI chips (`.compactionCompleted` / `.compactionFailed`).
-    ///   Called after the sink has delivered, so data never depends on it. If the stream has
-    ///   already finished, the yield is a harmless no-op and the persisted checkpoint card
-    ///   in the transcript is the durable evidence.
+    /// ⚠️ Summarized by the Intelligence Core when `useIntelligenceCore` says so, otherwise by the
+    /// CONVERSATION'S OWN MODEL (`conversationModel`). Automatic compaction used to run only through
+    /// the Intelligence Core, which is off by default — so with it off a long conversation was never
+    /// summarized, only trimmed.
+    ///
+    /// ⚠️ NO TIME LIMIT (owner decision 2026-09-27). The old 30 s "timeout" could not stop an
+    /// uninterruptible model load or prefill; it only reported late. Compaction is a bot call with
+    /// no tools, and the transcript row says it is running.
+    ///
+    /// - Parameter onEvent: Optional stream chips; nil when the turn's stream has already ended,
+    ///   which is the normal case now that compaction starts after the answer.
     func scheduleExecution(
         plan: CompactionPlan,
         conversationID: UUID,
-        onEvent: @escaping @Sendable (AgentStreamEvent) -> Void
+        conversationModel: ProviderConfig,
+        onEvent: (@Sendable (AgentStreamEvent) -> Void)? = nil,
+        // Test seams, as on `compactNow`: a stand-in summarizer and delivery, so a test neither
+        // loads a model nor replaces the app-wide checkpoint sink. Production passes neither.
+        summarizerOverride: (@Sendable ([[String: String]]) async throws -> String)? = nil,
+        deliverOverride: (@Sendable (ChatMessage, UUID) async -> Void)? = nil
     ) {
         guard beginBackgroundRun(conversationID: conversationID) else {
             logger.info("[COMPACTION] Background run already in flight for conversation \(conversationID.uuidString.prefix(8)) — duplicate schedule skipped; this turn keeps uncompacted history.")
@@ -131,13 +164,26 @@ actor HistoryCompactionService {
         }
 
         // `Task {}` inherits actor isolation, so the dedup bookkeeping in the defer runs
-        // safely on this actor; the long IC await inside merely suspends, never blocks it.
+        // safely on this actor; the long model await inside merely suspends, never blocks it.
         Task {
             defer { endBackgroundRun(conversationID: conversationID) }
+            let ownsRow = await activityBegin?(conversationID) ?? false
+            let useIC = Self.useIntelligenceCore(icModelSelected: await IntelligenceCoreService.shared.hasModelSelected)
+            logger.notice("[COMPACTION] Automatic compaction for \(conversationID.uuidString.prefix(8)) — \(plan.turnPairsInBatch) turn pairs, summarizer: \(useIC ? "Intelligence Core" : "conversation model '\(conversationModel.modelName)'"). No time limit; the transcript shows it running.")
             do {
-                let result = try await execute(plan: plan, conversationID: conversationID)
+                let result: CompactionResult
+                if let summarizerOverride {
+                    result = try await execute(plan: plan, conversationID: conversationID, summarize: summarizerOverride)
+                } else if useIC {
+                    result = try await execute(plan: plan, conversationID: conversationID)
+                } else {
+                    let model = try await AgentConnect().initializeModel(config: conversationModel, isBotFlow: true)
+                    result = try await execute(plan: plan, conversationID: conversationID) { messages in
+                        try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+                    }
+                }
 
-                if let sink = checkpointSink {
+                if let sink = deliverOverride ?? checkpointSink {
                     await sink(result.checkpointMessage, conversationID)
                 } else {
                     // Should be impossible after startup wiring; loud because the
@@ -146,14 +192,25 @@ actor HistoryCompactionService {
                     logger.error("[COMPACTION] No checkpoint sink registered — checkpoint #\(result.checkpointNumber) for conversation \(conversationID.uuidString.prefix(8)) is LOST and the work will repeat next turn.")
                 }
 
-                onEvent(.compactionCompleted(
+                if ownsRow {
+                    let original = plan.turnsToCompact.reduce(0) { $0 + ($1.content.textContent?.count ?? 0) }
+                    let summaryChars: Int = {
+                        if case .checkpoint(let summary) = result.checkpointMessage.content { return summary.count }
+                        return 0
+                    }()
+                    await activityFinish?(conversationID, .compacted(
+                        turnPairs: result.turnsCompacted, originalChars: original, summaryChars: summaryChars,
+                        usedIntelligenceCore: useIC, checkpointID: result.checkpointMessage.id))
+                }
+                onEvent?(.compactionCompleted(
                     turnsCompacted: result.turnsCompacted,
                     summaryPreview: result.summaryPreview,
                     checkpoint: result.checkpointMessage
                 ))
                 logger.notice("[COMPACTION] Background run complete — checkpoint #\(result.checkpointNumber), \(result.turnsCompacted) turns, conversationID: \(conversationID.uuidString.prefix(8))")
             } catch {
-                onEvent(.compactionFailed(reason: error.localizedDescription))
+                if ownsRow { await activityFinish?(conversationID, .failed(error.localizedDescription)) }
+                onEvent?(.compactionFailed(reason: error.localizedDescription))
                 logger.warning("[COMPACTION] Background run failed: \(error.localizedDescription). History stays uncompacted; the next turn will re-plan. conversationID: \(conversationID.uuidString.prefix(8))")
             }
         }
@@ -165,14 +222,17 @@ actor HistoryCompactionService {
 
     /// What a manual compaction did, in words the gauge can show as-is.
     enum ManualOutcome: Equatable, Sendable {
-        case compacted(turnPairs: Int, originalChars: Int, summaryChars: Int, usedIntelligenceCore: Bool)
+        /// `checkpointID` is the card the summary was saved as, so the transcript row can jump to it
+        /// — the card sits where the summarized turns end, usually well above the fold.
+        case compacted(turnPairs: Int, originalChars: Int, summaryChars: Int, usedIntelligenceCore: Bool,
+                       checkpointID: UUID)
         case nothingToCompact
         case alreadyRunning
         case failed(String)
 
         var message: String {
             switch self {
-            case let .compacted(pairs, original, summary, usedIC):
+            case let .compacted(pairs, original, summary, usedIC, _):
                 return "Summarized \(pairs) earlier turn(s): \(PromptFitCheck.roundedK(ContextOccupancy.tokens(original))) → \(PromptFitCheck.roundedK(ContextOccupancy.tokens(summary))) tokens"
                     + (usedIC ? " (Intelligence Core)." : " (this conversation's model).")
             case .nothingToCompact:
@@ -207,9 +267,7 @@ actor HistoryCompactionService {
         summarizerOverride: (@Sendable ([[String: String]]) async throws -> String)? = nil,
         deliverOverride: (@Sendable (ChatMessage, UUID) async -> Void)? = nil
     ) async -> ManualOutcome {
-        let icEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
-        let icModelSelected = await IntelligenceCoreService.shared.hasModelSelected
-        let useIC = icEnabled && icModelSelected
+        let useIC = Self.useIntelligenceCore(icModelSelected: await IntelligenceCoreService.shared.hasModelSelected)
         let summarizerWindow = useIC ? await resolveICContextWindow() : contextWindow
 
         guard let plan = Self.planCompaction(
@@ -249,7 +307,8 @@ actor HistoryCompactionService {
                 return 0
             }()
             return .compacted(turnPairs: result.turnsCompacted, originalChars: original,
-                              summaryChars: summaryChars, usedIntelligenceCore: useIC)
+                              summaryChars: summaryChars, usedIntelligenceCore: useIC,
+                              checkpointID: result.checkpointMessage.id)
         } catch {
             logger.warning("[COMPACTION] Manual compaction failed for \(conversationID.uuidString.prefix(8)): \(error.localizedDescription). CONSEQUENCE: history is unchanged.")
             return .failed(error.localizedDescription)
@@ -378,8 +437,8 @@ actor HistoryCompactionService {
     }
 
     /// Runs the planned compaction: one IC summarization, then the checkpoint message.
-    /// This is the expensive half — a model load plus inference. ⚠️ It is NOT bounded by
-    /// `icTimeoutSeconds`; see the note on that property.
+    /// This is the expensive half — a model load plus inference, deliberately unbounded
+    /// (owner decision 2026-09-27; see `scheduleExecution`).
     func execute(plan: CompactionPlan, conversationID: UUID) async throws -> CompactionResult {
         try await execute(plan: plan, conversationID: conversationID) { messages in
             try await self.callIC(messages: messages)
@@ -552,32 +611,6 @@ actor HistoryCompactionService {
         return records.joined(separator: "\n\n")
     }
 
-    /// When compaction ASKS the IC inference to stop.
-    ///
-    /// ⚠️ This is NOT a wall-clock bound, despite how the race below reads. Verified
-    /// 2026-07-20 across the Swift semantics and the pinned mlx-swift-lm checkout:
-    ///
-    ///  • `withThrowingTaskGroup` cancels remaining children AND AWAITS them before
-    ///    propagating, so when the timeout child throws, `callIC` still cannot return
-    ///    until the generate child actually finishes. The timer decides when cancellation
-    ///    is *requested*, never when this function returns.
-    ///  • Only the token-decode loop is cancellation-aware (`Evaluate.swift` checks
-    ///    `Task.isCancelled` per token). The two phases most likely to consume the whole
-    ///    window — a cold model load, and prompt prefill (`LLMModel.prepare`, a plain
-    ///    synchronous chunked loop) — have NO cancellation checks. Compaction is by
-    ///    construction the app's largest-prompt IC call (~70% of the IC context window),
-    ///    so it is the most exposed to the uninterruptible prefill.
-    ///  • While it overruns it still holds `ModelContainer`'s mutex, whose waiter queue
-    ///    parks in a bare `withCheckedContinuation` with no cancellation handler — so the
-    ///    next IC caller in the same turn (response synthesis) queues behind it and cannot
-    ///    itself be timed out or stopped. Wrapping that caller in this same pattern would
-    ///    not help; the pattern does not compose.
-    ///
-    /// Consequence for the UI: `.compactionFailed` is emitted from the `catch`, so it
-    /// appears when the inference truly ends — NOT at 30s. Any bound has to come from not
-    /// entering (an admission gate, or a smaller prompt), or from taking compaction off the
-    /// synchronous request path.
-    private let icTimeoutSeconds: UInt64 = 30
 
     /// The summarization prompt — shared by the Intelligence Core and the conversation's own model.
     static func summaryMessages(turnRecords: String, priorSummary: String) -> [[String: String]] {
@@ -622,33 +655,14 @@ actor HistoryCompactionService {
         // synthesis) still reuses the same load rather than paying a second one.
         defer { Task { await IntelligenceCoreService.shared.releaseHold(caller: .historyCompaction) } }
 
-        // Race IC inference against a timeout to prevent blocking the agent pipeline.
-        let result = try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask {
-                try await IntelligenceCoreService.shared.generate(
-                    messages: messages,
-                    maxTokens: 1024,
-                    temperature: 0.3,
-                    caller: .historyCompaction
-                )
-            }
-
-            group.addTask {
-                try await Task.sleep(nanoseconds: self.icTimeoutSeconds * 1_000_000_000)
-                throw NSError(
-                    domain: "HistoryCompactionService",
-                    code: 408,
-                    userInfo: [NSLocalizedDescriptionKey: "IC inference timed out after \(self.icTimeoutSeconds)s."]
-                )
-            }
-
-            // First task to complete wins — the other is cancelled.
-            guard let result = try await group.next() else {
-                throw CancellationError()
-            }
-            group.cancelAll()
-            return result
-        }
+        // NO TIMEOUT (owner decision 2026-09-27). This was a 30 s task-group race, which could
+        // not stop an uninterruptible load or prefill and so only reported "timed out" late.
+        let result = try await IntelligenceCoreService.shared.generate(
+            messages: messages,
+            maxTokens: 1024,
+            temperature: 0.3,
+            caller: .historyCompaction
+        )
 
         let summary = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !summary.isEmpty else {

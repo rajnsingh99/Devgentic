@@ -50,11 +50,17 @@ final class WorkflowParkAccountingTests: XCTestCase {
     func testComputeTimeoutSentinel_CreditsParkedTimeAndDoesNotFireEarly() async throws {
         await assertDrained()
         let conv = UUID(), op = UUID()
+        // Owner-chain credit (HITL Waiting Contract, decision A): the sentinel reads its SCOPE. This
+        // park is raised from the test task, outside any chain, so it reaches the scope through the
+        // out-of-chain fallback — every bound open in the conversation.
+        let scope = UUID()
+        await ExecutionSuspensionService.shared.registerScope(scope, conversationID: conv)
+        defer { Task { await ExecutionSuspensionService.shared.unregisterScope(scope) } }
         let start = Date()
 
         let sentinel = Task { () -> (fired: TimeInterval, error: Error?) in
             do {
-                _ = try await WorkflowExecutor.computeTimeoutSentinel(0.5, conversationID: conv, nodeName: "N")
+                _ = try await WorkflowExecutor.computeTimeoutSentinel(0.5, scope: scope, nodeName: "N")
             } catch {
                 return (Date().timeIntervalSince(start), error)
             }

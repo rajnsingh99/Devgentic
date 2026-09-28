@@ -168,11 +168,12 @@ class AgentConnect: @unchecked Sendable {
                     }
 
                     // 2. Select Cognitive Strategy & Rate Limit Boundary
-                    let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider)
+                    let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider, modelName: llmConfig.modelName)
                     let rateLimitKey = RateLimitCategory.deriveBucketKey(
                         provider: llmConfig.apiProvider,
                         apiKey: llmConfig.apiKey,
-                        baseURL: llmConfig.baseURL
+                        baseURL: llmConfig.baseURL,
+                        modelName: llmConfig.modelName
                     )
                     
                     // Resolve Cognitive Strategy via our 2D routing matrix
@@ -350,6 +351,8 @@ class AgentConnect: @unchecked Sendable {
                     // History building is independent of tool availability.
                     // Even tool-less agents benefit from conversation context.
                     var effectiveHistory = chatHistory // Mutable copy — compaction may insert a checkpoint
+                    // Planned during history building, STARTED after the answer (see below).
+                    var pendingCompaction: CompactionPlan?
                     if !effectiveHistory.isEmpty {
                         // Shared with the fit gauges via PromptFitCheck so the number they
                         // report is measured against the same allocation this spends.
@@ -372,34 +375,23 @@ class AgentConnect: @unchecked Sendable {
                         // loaded the IC model on every long-history turn: the feature key
                         // defaults to true, and its toggle isn't even rendered while the master
                         // switch is off — so the user had no way to see or stop it.
-                        let compactionEnabled = UserDefaults.standard.object(forKey: AppSettings.ciFeatureHistoryCompactionKey) as? Bool ?? true
-                        let icMasterEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
-                        let icModelSelected = await IntelligenceCoreService.shared.hasModelSelected
-                        if compactionEnabled, icMasterEnabled, icModelSelected {
-                            if let plan = await HistoryCompactionService.shared.evaluate(
-                                chatHistory: effectiveHistory,
-                                charBudget: charBudget
-                            ) {
-                                // No `.compactionStarted` chip in background mode: if the
-                                // stream ended before completion, a persisted "Compacting…"
-                                // row with no terminal row would read as a hang forever.
-                                // The completed/failed chip stands alone; the checkpoint
-                                // card in the transcript is the durable evidence.
-                                await HistoryCompactionService.shared.scheduleExecution(
-                                    plan: plan,
-                                    conversationID: conversationID
-                                ) { event in
-                                    // Best-effort chips only — a yield after the stream
-                                    // finishes is a harmless no-op.
-                                    continuation.yield(event)
-                                }
-                                logger.info("[COMPACTION] Scheduled in background — \(plan.turnPairsInBatch) turn pairs, checkpoint #\(plan.checkpointNumber). THIS turn proceeds with uncompacted history (\(effectiveHistory.count) messages, trimmed to budget by the builders); the checkpoint applies from the next turn. conversationID: \(conversationID.uuidString.prefix(8)), traceID: \(traceContext.traceID)")
-                            }
-                        } else {
-                            // Silent-skip logging: the consequence (history stays uncompacted,
-                            // so a long conversation is trimmed rather than summarized) is
-                            // invisible from the outside otherwise.
-                            logger.info("[COMPACTION] Skipped — feature: \(compactionEnabled), ic-master: \(icMasterEnabled), ic-model-selected: \(icModelSelected) → history stays uncompacted (\(effectiveHistory.count) messages), conversationID: \(conversationID.uuidString.prefix(8))")
+                        // ⚠️ ALWAYS planned now (owner decision 2026-09-27) — no longer gated on the
+                        // Intelligence Core. Compaction is summarized by the IC when it and its History
+                        // Compaction feature are on, otherwise by THIS conversation's own model
+                        // (`HistoryCompactionService.useIntelligenceCore`). With the IC off — the
+                        // default — a long conversation used to be trimmed, never summarized.
+                        //
+                        // ⚠️ SCHEDULED AFTER THE ANSWER, not here. With the conversation's own model
+                        // summarizing, starting now would compete with this very turn for the model —
+                        // on MLX the single slot — and delay the reply. The plan is taken from this
+                        // turn's history; the run starts once the turn's stream has finished, and the
+                        // transcript shows it running (the manual-compaction row).
+                        if let plan = await HistoryCompactionService.shared.evaluate(
+                            chatHistory: effectiveHistory,
+                            charBudget: charBudget
+                        ) {
+                            pendingCompaction = plan
+                            logger.info("[COMPACTION] Planned — \(plan.turnPairsInBatch) turn pairs, checkpoint #\(plan.checkpointNumber); it starts after this turn's answer. THIS turn proceeds with uncompacted history (\(effectiveHistory.count) messages, trimmed to budget by the builders). conversationID: \(conversationID.uuidString.prefix(8)), traceID: \(traceContext.traceID)")
                         }
 
                         // SessionGraph tracks tool failures (Ghost Protocol) — only relevant when tools exist.
@@ -559,7 +551,7 @@ class AgentConnect: @unchecked Sendable {
                     let workingMemory: any WorkingMemoryStrategy = windowed
                     logger.info("[MEMORY] Scratchpad sized to \(memoryConfig.totalBudgetChars) chars (payload budget \(nativeContextBudgetChars) − fixed prompt \(reservedPromptChars)); one result may use all of it. CONSEQUENCE: on the text-tools path, tool results are cut only when they exceed the room actually left.")
 
-                    let input = AgentInput(
+                    var input = AgentInput(
                         userInput: userInput,
                         userPayload: userPayload,
                         attachmentContext: attachmentContext,
@@ -596,6 +588,8 @@ class AgentConnect: @unchecked Sendable {
                         contextWindowTokens: contextWindow,
                         cutPolicy: cutPolicy
                     )
+                    input.largeRequestConfirmChars = LargeRequestGate.confirmChars(
+                        provider: llmConfig.apiProvider, baseURL: llmConfig.baseURL)
 
                     // 8. Execute & Stream
                     let traceHandler: @Sendable (AgentTraceLog) -> Void = { log in
@@ -620,7 +614,8 @@ class AgentConnect: @unchecked Sendable {
                     // .agent … else` shape and kept dropping `.code`. Fixing the site rather than
                     // the class is why the trap survived. The switch now lives once, in
                     // `ProfileDetails.agentConfig`, and every agent-setting accessor derives from it.
-                    let executionTimeout: TimeInterval? = profile.details.executionTimeout
+                    let executionTimeout: TimeInterval? = TimeLimit.usable(profile.details.executionTimeout,
+                                                                           "Profile '\(profile.displayName)' execution timeout")
 
                     if let executionTimeout {
                         logger.info("""
@@ -644,7 +639,30 @@ class AgentConnect: @unchecked Sendable {
                         logger.info("[CODE] Executor handoff — executor: \(executor.executorLabel), traceID: \(traceContext.traceID), spanID: \(traceContext.spanID), conversationID: \(conversationID.uuidString.prefix(8))")
                     }
 
-                    let stream = executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
+                    // ⚠️ OWNER-CHAIN PARK CREDIT (HITL Waiting Contract, decision A). Every turn gets a
+                    // scope, bounded or not, and the executor's stream is CREATED inside it so its
+                    // producer task inherits the chain. Then this turn's banners pause only this
+                    // turn's clocks (its budget, its tool timeouts) — never another run's — and an
+                    // out-of-chain MCP question can still find this turn as the conversation's open
+                    // bound. It used to be credited per conversation (Timeout inventory D-18).
+                    // (The workflow-node path below needs none of this: its stream is created inside
+                    // the node's own scope by `WorkflowExecutor`.)
+                    let turnScope = UUID()
+                    await ExecutionSuspensionService.shared.registerScope(turnScope, conversationID: conversationID)
+                    defer { Task { await ExecutionSuspensionService.shared.unregisterScope(turnScope) } }
+                    // Nesting (owner decision 2026-09-27): a limited turn is an outer budget, so a tool
+                    // call inside it is shortened to fit and fires first, leaving
+                    // `ExecutionBudget.reserve` for the model to reply.
+                    let turnFrame: ExecutionBudget.Frame? = if let executionTimeout {
+                        await ExecutionBudget.frame(
+                            owner: "the turn's \(ToolExecutionMediator.describe(executionTimeout)) limit",
+                            limit: executionTimeout, scope: turnScope)
+                    } else { nil }
+                    let stream = ParkScope.bind(turnScope) {
+                        ExecutionBudget.bind(turnFrame) {
+                            executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
+                        }
+                    }
 
                     let finalOutputAccumulator: String
 
@@ -652,7 +670,6 @@ class AgentConnect: @unchecked Sendable {
                         // Enforce execution timeout via Task race.
                         // The typed TaskGroup returns the accumulated output from whichever
                         // task completes first, avoiding shared mutable state across tasks.
-                        let timeoutConversationID = conversationID
                         let timeoutSubject = "Conversation \(conversationID.uuidString.prefix(8)) (\(profile.profileType.rawValue))"
                         finalOutputAccumulator = try await withThrowingTaskGroup(of: String.self) { group in
                             // Timeout sentinel.
@@ -670,7 +687,7 @@ class AgentConnect: @unchecked Sendable {
                             group.addTask {
                                 try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
                                     limit: timeout,
-                                    conversationID: timeoutConversationID,
+                                    scope: turnScope,
                                     logTag: "EXEC_LIMITS",
                                     subject: timeoutSubject,
                                     consequence: "the run is aborted and the timeout surfaces to the user; time spent awaiting a human was excluded from the budget."
@@ -708,6 +725,12 @@ class AgentConnect: @unchecked Sendable {
                     logger.debug("Output preview: \(outputPreview)")
                     
                     continuation.finish()
+
+                    // The answer is out — now summarize, in the background, off this turn.
+                    if let plan = pendingCompaction {
+                        await HistoryCompactionService.shared.scheduleExecution(
+                            plan: plan, conversationID: conversationID, conversationModel: llmConfig)
+                    }
                     
                 } catch is CancellationError {
                     logger.info("AgentConnect Stream Cancelled.")
@@ -816,11 +839,12 @@ class AgentConnect: @unchecked Sendable {
                     // ⚠️ register B44 — the fifth copy, in closure form. Same omission.
                     let agentCapabilities: AgentCapabilities? = profile.details.agentCapabilities
 
-                    let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider)
+                    let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider, modelName: llmConfig.modelName)
                     let rateLimitKey = RateLimitCategory.deriveBucketKey(
                         provider: llmConfig.apiProvider,
                         apiKey: llmConfig.apiKey,
-                        baseURL: llmConfig.baseURL
+                        baseURL: llmConfig.baseURL,
+                        modelName: llmConfig.modelName
                     )
 
                     // An MCP server's `sampling/createMessage` arrives out-of-band on the client
@@ -912,7 +936,7 @@ class AgentConnect: @unchecked Sendable {
 
                     // The node's own per-tool overrides plus the gauge's global setting.
                     let nodeCutPolicy = ToolCutPolicy.forRun(tools: rawTools)
-                    let input = AgentInput(
+                    var input = AgentInput(
                         userInput: userInputForNode,
                         userPayload: workflowImagePayload,
                         // Attachments render as `<attachments>` — the same section the chat path
@@ -961,6 +985,8 @@ class AgentConnect: @unchecked Sendable {
                         contextWindowTokens: contextWindow,
                         cutPolicy: nodeCutPolicy
                     )
+                    input.largeRequestConfirmChars = LargeRequestGate.confirmChars(
+                        provider: llmConfig.apiProvider, baseURL: llmConfig.baseURL)
 
                     // ⚠️ Tool NAMES, not just a count. This said only "tools=3" — which cannot
                     // answer "which three?" from a field log, and that question came up twice
@@ -1205,10 +1231,18 @@ class AgentConnect: @unchecked Sendable {
     // MARK: - Model Initialization
     
     func initializeModel(config llmConfig: ProviderConfig, isBotFlow: Bool) async throws -> any LLMProvider {
+        // Never send one vendor's key to another (see `ProviderKeyShape`). Checked before any
+        // provider is built, so no request — model list or generation — can carry it.
+        if let keyVendor = ProviderKeyShape.mismatchedVendor(key: llmConfig.apiKey, provider: llmConfig.apiProvider) {
+            logger.error("[SECRETS] REFUSED to send a \(keyVendor.rawValue)-shaped API key to \(llmConfig.apiProvider.rawValue). CONSEQUENCE: no request was made; the profile needs a \(llmConfig.apiProvider.rawValue) key.")
+            throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey:
+                ProviderKeyShape.refusalMessage(keyVendor: keyVendor, provider: llmConfig.apiProvider)])
+        }
         let rlKey = RateLimitCategory.deriveBucketKey(
             provider: llmConfig.apiProvider,
             apiKey: llmConfig.apiKey,
-            baseURL: llmConfig.baseURL
+            baseURL: llmConfig.baseURL,
+            modelName: llmConfig.modelName
         )
 
         switch llmConfig.apiProvider {
@@ -1333,7 +1367,12 @@ class AgentConnect: @unchecked Sendable {
                     "HTTP-Referer": GlobalConstants.homepageURL,
                 ]
             )
-            return OpenAILLMProvider(config: config, providerCategory: .openRouter)
+            // Must match the category AgentConnect's executor uses for the same `rlKey` — the
+            // first caller to touch a bucket fixes its rate, and `:free` models get the 20 RPM one.
+            return OpenAILLMProvider(
+                config: config,
+                providerCategory: RateLimitCategory.from(provider: .openRouter, modelName: llmConfig.modelName)
+            )
 
         case .openAICompatible:
             // Any OpenAI-compatible endpoint (LM Studio, vLLM, llama.cpp server,
@@ -1768,6 +1807,22 @@ class AgentConnect: @unchecked Sendable {
 
     // MARK: - Logging Helper
     
+    /// The `Metadata:` line of the configuration banner.
+    ///
+    /// ⚠️ Cloud models used to print "Medium tier, unknown quant, unknown family" — local-model
+    /// vocabulary that read as a misdetection. Quantization and family are only ever filled in by
+    /// the local analyzers; a cloud model's tier is the fixed default the pickers seed (it gates
+    /// only local-path behaviour), so say that instead of implying something failed.
+    static func metadataSummary(for config: ProviderConfig) -> String {
+        let meta = config.modelMetadata
+        let window = meta?.contextWindow.map { "\($0.formatted()) token window" } ?? "window unknown"
+        if ProviderClass(apiProvider: config.apiProvider) == .cloud {
+            return "cloud model, \(window) (tier: default \(meta?.tier.rawValue ?? ModelTier.medium.rawValue); quantization/family not applicable)"
+        }
+        guard let meta else { return "None" }
+        return "\(meta.tier.rawValue) tier, \(meta.quantization ?? "unknown quant"), \(meta.family ?? "unknown family"), \(window)"
+    }
+
     /// Logs the complete configuration for tracking and debugging purposes.
     private func logFullConfiguration(
         profile: BackendProfileModel,
@@ -1777,7 +1832,7 @@ class AgentConnect: @unchecked Sendable {
         instructions: String?
     ) {
         let toolNames = tools.isEmpty ? "None" : tools.map { $0.name }.joined(separator: ", ")
-        let metadata = config.modelMetadata.map { "\($0.tier.rawValue) tier, \($0.quantization ?? "unknown quant"), \($0.family ?? "unknown family")" } ?? "None"
+        let metadata = Self.metadataSummary(for: config)
 
         // Show the effective config that will actually be used at runtime,
         // including auto-detected defaults when no user override exists.

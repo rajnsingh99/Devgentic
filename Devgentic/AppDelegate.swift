@@ -77,7 +77,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     /// Holds the requested `forceExpand`; replayed once injection completes so the press isn't a
     /// silent no-op. nil = nothing pending.
     private var pendingShowForceExpand: Bool?
-    /// [QA revival P1d] Read from QuickAccessConfigManager (default 30 min) instead of hardcoded.
+    /// [QA revival P1d] Read from QuickAccessConfigManager (default 60 s —
+    /// `QuickAccessConfigManager.sessionTimeoutSeconds`) instead of hardcoded.
     private var sessionTimeoutDuration: TimeInterval {
         TimeInterval(QuickAccessConfigManager.shared.sessionTimeoutSeconds)
     }
@@ -240,13 +241,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         Self.logger.info("Application requested to terminate — running async teardown.")
 
         Task { @MainActor in
-            // Race teardown against a watchdog so a hung MCP disconnect or DB write can
-            // never block quit for more than ~3s.
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await Self.performAsyncTeardown() }
-                group.addTask { try? await Task.sleep(for: .seconds(3)) }
-                await group.next()
-                group.cancelAll()
+            // ⚠️ A REAL BOUND (HITL Waiting Contract, quit item; owner decision 2026-09-27). This was
+            // `withTaskGroup { teardown; sleep(3) }`, which cannot return before teardown does — so
+            // one hung step (an MCP disconnect, a store write) hung quit with nothing on screen and
+            // nothing logged, and every step after it never ran (Timeout inventory LC-1, D-13).
+            // `DeadlineRace` returns at the limit; the step that was still running is named.
+            let tracker = QuitTeardownTracker()
+            let started = Date()
+            let outcome = try? await DeadlineRace.run(limit: Self.quitTeardownLimit, stopGrace: 0.2) {
+                await Self.performAsyncTeardown(tracker)
+            }
+            if case .timedOut? = outcome {
+                Self.logger.error("[QUIT] Teardown passed its \(Int(Self.quitTeardownLimit))s limit while '\(tracker.step)' was still running (\(String(format: "%.1f", Date().timeIntervalSince(started)))s). CONSEQUENCE: quitting anyway — steps after it did not run; MCP child processes are force-killed next.")
+            } else {
+                Self.logger.info("[QUIT] Teardown finished in \(String(format: "%.1f", Date().timeIntervalSince(started)))s.")
             }
 
             // Whatever the watchdog cut short, no MCP child may outlive us. ShellProcess's
@@ -690,15 +698,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     /// Everything that needs `await` before quitting. Runs while the run loop is alive
     /// (from `applicationShouldTerminate`), so MainActor-bound services are reachable.
-    private static func performAsyncTeardown() async {
+    /// The whole quit teardown's hard limit. At it, the app quits whatever is still running.
+    static let quitTeardownLimit: TimeInterval = 5
+
+    /// Saving workflow history is the one step where waiting protects data, so it gets its own
+    /// share of the limit rather than being able to consume all of it.
+    static let quitPersistLimit: TimeInterval = 3
+
+    /// ⚠️ ORDER IS LOAD-BEARING (owner decision 2026-09-27): shell tasks are killed FIRST — fast,
+    /// and unable to hang. They used to be killed after the MCP disconnect, so a hang there left
+    /// builds and dev servers running after the app had gone. Then the workflow-history save (the
+    /// one data-protecting step, capped), then everything else, best effort, inside the limit.
+    private static func performAsyncTeardown(_ tracker: QuitTeardownTracker) async {
+        tracker.step = "terminate background tasks"
+        // The same thing, for the children a CONVERSATION started. `batch_command(background:)`
+        // was covered by nothing here: a build launched from Code mode outlived the app as a
+        // launchd orphan, with no record anywhere of what it was. MCP's children were handled
+        // and these were not, which is the asymmetry rather than a considered choice.
+        //
+        // Synchronous, and it sleeps once for `quitGrace` (0.4 s) between SIGTERM and SIGKILL.
+        // Blocking is normally wrong; here the process is ending, the block is bounded well inside
+        // `quitTeardownLimit`, and going async would risk the limit firing before the escalation
+        // runs and leaving the orphan this call exists to prevent.
+        BackgroundProcessRegistry.shared.terminateAll()
+
+        tracker.step = "save workflow history"
         // [WF-PE7] First, and before the observability flush below so its log lines ship: await
         // any in-flight workflow-run persist. `WorkflowRunTicket.finalize()` is deliberately
         // fire-and-forget for the UI, which made quit the one moment it lost data — exiting
         // inside the encode+write window stranded the `.running` stub, and the next launch
-        // relabelled a COMPLETED run "Interrupted" with zero node results. The 3s quit watchdog
-        // wrapping this method still bounds a hung write.
-        await WorkflowRunTicket.drainPendingPersists()
+        // relabelled a COMPLETED run "Interrupted" with zero node results. Capped at
+        // `quitPersistLimit` — its own share, so a hung write cannot spend the whole limit.
+        if case .timedOut? = try? await DeadlineRace.run(limit: quitPersistLimit, stopGrace: 0, work: {
+            await WorkflowRunTicket.drainPendingPersists()
+        }) {
+            Self.logger.error("[QUIT] Saving workflow history passed its \(Int(quitPersistLimit))s share. CONSEQUENCE: the most recent workflow run record may not be saved; quitting continues.")
+        }
 
+        tracker.step = "stop speech recognition"
         // Stop any live Whisper capture (composer dictation or Orb listening) so the
         // HAL client closes cleanly. An AVAudioEngine still running at process death can
         // wedge coreaudiod into refusing this app's audio IO (`_StartIO error 35`) until
@@ -706,31 +743,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // other apps record fine". No-op when nothing is recording.
         _ = await WhisperRecognitionService.shared.stopStreaming()
 
+        tracker.step = "disconnect MCP servers"
         // Disconnect MCP sessions so child processes (npx/uvx/etc.) don't get
         // re-parented to launchd as orphans (SIGTERM, escalating to SIGKILL).
         await MCPClientService.shared.disconnectAll()
 
-        // The same thing, for the children a CONVERSATION started. `batch_command(background:)`
-        // was covered by nothing here: a build launched from Code mode outlived the app as a
-        // launchd orphan, with no record anywhere of what it was. MCP's children were handled
-        // and these were not, which is the asymmetry rather than a considered choice.
-        //
-        // Synchronous, and it sleeps once for `quitGrace` (0.4 s) between SIGTERM and SIGKILL.
-        // Blocking a cooperative-pool thread is normally wrong; here the process is ending, the
-        // block is bounded well inside this method's 3 s watchdog, and the alternative — going
-        // async — risks the watchdog firing before the escalation runs and leaving the orphan
-        // this call exists to prevent.
-        BackgroundProcessRegistry.shared.terminateAll()
-
+        tracker.step = "flush logs and traces"
         // Flush observability buffers to SQLite (Gap #13): up to 5s of logs and 1s of
         // span events are otherwise lost on quit.
         await LogRecorder.shared.prepareForTermination()
         await TraceRecorder.shared.prepareForTermination()
 
+        tracker.step = "unload models"
         // Unload local models cleanly (App RAM + Ollama VRAM).
         let stats = await MLXService.shared.unloadModel()
         Self.logger.info("Termination MLX cleanup stats: \(stats)")
         await OllamaService.shared.unloadModel()
+        tracker.step = "done"
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1131,5 +1160,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     deinit {
         Self.logger.info("AppDelegate deinit.")
+    }
+}
+
+/// Which quit-teardown step is running, so a teardown cut off by its limit can say where it stuck.
+/// Lock-protected: teardown writes it off the main actor while the quit task reads it.
+final class QuitTeardownTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = "starting"
+    var step: String {
+        get { lock.lock(); defer { lock.unlock() }; return current }
+        set { lock.lock(); current = newValue; lock.unlock() }
     }
 }

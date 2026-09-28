@@ -63,7 +63,7 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         case .card:
             return theme.surfaceOverlay
         case .elevated:
-            return theme.isDark ? Color.white.opacity(0.04) : Color.white.opacity(0.65)
+            return theme.isDark ? Color.white.opacity(0.04) : theme.secondaryBackground.opacity(0.85)
         case .popover:
             return theme.secondaryBackground.opacity(0.85)
         }
@@ -94,7 +94,7 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
             return AnyShapeStyle(
                 LinearGradient(
                     colors: [
-                        theme.isDark ? Color.white.opacity(0.28) : Color.white.opacity(0.70),
+                        theme.isDark ? Color.white.opacity(0.28) : theme.dividerColor.opacity(0.65),
                         theme.dividerColor.opacity(0.40),
                         theme.accentColor.opacity(0.22)
                     ],
@@ -175,10 +175,10 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         case .card:
             return theme.isDark ? Color(hex: "#1E1E22") : theme.secondaryBackground
         case .elevated:
-            // Match the solid grounding of container panels (sidebar) in dark mode
-            return theme.isDark ? theme.secondaryBackground : (theme.colorScheme == .light ? Color.white : theme.secondaryBackground)
+            // Match the solid grounding of container panels (sidebar) across dark and light themes
+            return theme.secondaryBackground
         case .popover:
-            return theme.isDark ? Color(hex: "#242428") : (theme.colorScheme == .light ? Color.white : theme.secondaryBackground)
+            return theme.isDark ? Color(hex: "#242428") : theme.secondaryBackground
         }
     }
 
@@ -306,7 +306,7 @@ struct ComposerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
             if theme.isDark {
                 return isHovered ? Color(hex: "#34343A") : Color(hex: "#26262B")
             } else {
-                return isHovered ? Color(hex: "#E4E4E8") : Color(hex: "#F4F4F5")
+                return isHovered ? theme.tertiaryBackground.opacity(0.75) : theme.tertiaryBackground
             }
         }
     }
@@ -322,7 +322,7 @@ struct ComposerControlSurfaceModifier<S: InsettableShape>: ViewModifier {
             if theme.isDark {
                 return isHovered ? Color.white.opacity(0.20) : Color.white.opacity(0.11)
             } else {
-                return isHovered ? Color.black.opacity(0.20) : Color.black.opacity(0.10)
+                return isHovered ? theme.dividerColor.opacity(0.60) : theme.dividerColor.opacity(0.35)
             }
         }
     }

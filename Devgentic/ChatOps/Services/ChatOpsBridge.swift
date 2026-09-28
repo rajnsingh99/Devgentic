@@ -266,6 +266,16 @@ final class ChatOpsBridge {
         // 5. Route
         guard let chatID = update.chatID else { return }
 
+        // 4b. ⚠️ D-23: a work-starting command delivered long after it was sent (Telegram keeps a
+        //     backlog while the Mac sleeps) is skipped and the operator told — never run late.
+        if RemoteCommandAge.isAgeGated(command),
+           let age = RemoteCommandAge.staleAge(sentAt: RemoteCommandAge.telegramSentAt(update.message?.date)) {
+            logger.warning("[CHATOPS] A Telegram \(String(describing: command)) in chat \(chatID) was sent \(Int(age))s ago. CONSEQUENCE: NOT run (older than \(Int(RemoteCommandAge.maxAge))s); the operator is told to send it again.")
+            await tell(chatID, RemoteCommandAge.notice(age: age),
+                       whenLost: "the operator is not told their old command was skipped, so it looks as if the bot ignored it.")
+            return
+        }
+
         switch command {
         case .conversations:
             await render(commands?.conversationList(offset: 0), to: chatID)

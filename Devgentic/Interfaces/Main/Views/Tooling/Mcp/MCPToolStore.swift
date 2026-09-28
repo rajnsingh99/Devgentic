@@ -444,7 +444,21 @@ final class MCPToolStore {
             MCPSecretStore.shared.clear(scope: scope, sourceID: sourceID)
         }
         if case .oauth = definition.auth {
-            // Keep the oauth bundle — container layer manages it.
+            // ⚠️ Register KC-14: the bundle is owned by the container layer, but THIS layer
+            // reconciles its binding on every save. A bundle PROVABLY bound to a different
+            // URL than `definition` is cleared (a guarded clear — an unreadable bundle is
+            // kept, not destroyed), so a repurposed row can never keep riding on another
+            // host's tokens. Everything that cannot be proven — a legacy unbound bundle, an
+            // undecodable blob, an unparseable URL — is KEPT: `MCPOAuthBinding` refuses to
+            // attach those at the runtime layer instead, and the form gate is what demands
+            // a re-auth. This reconcile is hygiene; the attach check is the enforcement.
+            if let storedJSON = MCPSecretStore.shared.retrieve(.oauthBundle, sourceID: sourceID),
+               MCPOAuthBinding.isProvablyMisbound(storedJSON: storedJSON, serverURLString: definition.url) {
+                MCPSecretStore.shared.clear(scope: .oauthBundle, sourceID: sourceID)
+                logger.error(
+                    "[MCP-OAUTH] Cleared the OAuth bundle for source \(sourceID.uuidString): it was bound to a different server URL than the saved definition. CONSEQUENCE: this server has no credentials until the user signs in again; no token was sent anywhere under the old binding."
+                )
+            }
         } else {
             MCPSecretStore.shared.clear(scope: .oauthBundle, sourceID: sourceID)
         }

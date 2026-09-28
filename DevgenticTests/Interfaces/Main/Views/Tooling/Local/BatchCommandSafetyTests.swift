@@ -145,7 +145,7 @@ final class BatchCommandSafetyTests: XCTestCase {
     // MARK: - Timeout Bounds
 
     func testTimeout_DefaultsWhenUnspecified() {
-        XCTAssertEqual(BatchCommandTool.effectiveTimeout(nil), 30)
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(nil), 1800, "foreground default is the 30-min ceiling (owner decision 2026-09-27)")
     }
 
     func testTimeout_HonoursARequestUnderTheCeiling() {
@@ -160,8 +160,8 @@ final class BatchCommandSafetyTests: XCTestCase {
     /// There is no unbounded mode here, and `0` must not become one by accident — a shell with
     /// no bound is the hang this tool's timeout exists to end.
     func testTimeout_NonPositiveIsUnspecifiedNotUnbounded() {
-        XCTAssertEqual(BatchCommandTool.effectiveTimeout(0), 30)
-        XCTAssertEqual(BatchCommandTool.effectiveTimeout(-1), 30)
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(0), 1800)
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(-1), 1800)
     }
 
     /// ⚠️⚠️ THE INVARIANT, not the number. These two bounds were both 300 s and neither knew

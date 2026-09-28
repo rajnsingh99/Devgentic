@@ -324,6 +324,8 @@ struct EpisodicHistoryFormatter {
         // overstating it as a failure.
         case .completedWithWarnings: return "partial"
         case .cancelled: return "cancelled"
+        // HITL Waiting Contract §4: the next turn is told the previous one hit its limit.
+        case .timedOut:  return "timed_out"
         case .completed: return nil
         }
     }
@@ -352,7 +354,7 @@ struct EpisodicHistoryFormatter {
         switch outcome {
         // Degraded runs carry their early-stop reason too — it's the context the model
         // needs to understand why the prior answer may be incomplete.
-        case .failed, .cancelled, .completedWithWarnings:
+        case .failed, .cancelled, .completedWithWarnings, .timedOut:
             return "\(indent)<termination>\(xmlEscape(truncate(reason, maxLength: 200)))</termination>\n"
         case .completed:
             return nil

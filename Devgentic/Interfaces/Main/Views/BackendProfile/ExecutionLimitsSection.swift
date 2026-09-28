@@ -37,9 +37,9 @@ struct ExecutionLimitsSection: View {
                     value: Binding(
                         get: { maxIterations ?? AgentExecutionDefaults.maxIterations },
                         // ⚠️ `AgentExecutionDefaults.maxIterations`, NOT a bare 15 — that literal
-                        // is register A38's exact drift class, and it survived here. A Code
-                        // profile defaults to 20, so a hardcoded 15 would store `.some(15)` as
-                        // though the user had chosen it and silently lower their cap.
+                        // is register A38's exact drift class, and it survived here. If the default
+                        // ever moves, a hardcoded 15 would store `.some(15)` as though the user had
+                        // chosen it and silently change their cap.
                         set: { maxIterations = $0 == AgentExecutionDefaults.maxIterations ? nil : $0 }
                     ),
                     // Ceiling raised from 30: multi-file refactors on smaller models need more

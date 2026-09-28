@@ -18,7 +18,7 @@ struct AgentTimelineView: View {
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 15.0
+    @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 14.0
     @AppStorage(AppSettings.showTimelineThoughtsKey) private var showThoughts: Bool = false
 
     /// Optional text of the final content shown below the timeline. Used to
@@ -75,8 +75,14 @@ struct AgentTimelineView: View {
     /// scroll container (e.g. `WorkflowExecutionTimelineView`).
     private let scrollable: Bool
 
+    /// Set for a CONTINUATION (a report drawn inside the turn above it — `TranscriptGrouping`):
+    /// the header then reads "↳ <lead> · N steps", standing in for the divider the stub used to
+    /// draw, and the Thoughts toggle is left to the turn's own header.
+    private let continuationLead: String?
+
     /// Initialize from a ChatMessage (existing usage in chat bubbles).
-    init(message: ChatMessage, scrollable: Bool = true) {
+    init(message: ChatMessage, scrollable: Bool = true, continuationLead: String? = nil) {
+        self.continuationLead = continuationLead
         self.events = message.timelineEvents
         self.revision = message.timelineRevision
         self.terminalOutcome = message.terminalOutcome
@@ -124,6 +130,7 @@ struct AgentTimelineView: View {
         conversationID: UUID? = nil,
         scrollable: Bool = false
     ) {
+        self.continuationLead = nil
         self.events = events
         self.revision = revision
         self.terminalOutcome = nil
@@ -195,7 +202,8 @@ struct AgentTimelineView: View {
         // (which `body` needs twice: the visible `Text` and the `.accessibilityLabel`) come from
         // these two locals.
         let summaryValue = summary
-        let titleText = summaryTitle(nodesCount: nodes.count, summary: summaryValue, showThoughts: showThoughts)
+        let titleText = continuationLead.map { Self.continuationTitle(lead: $0, stepsCount: nodes.count) }
+            ?? summaryTitle(nodesCount: nodes.count, summary: summaryValue, showThoughts: showThoughts)
         if !nodes.isEmpty || showFooter {
             VStack(alignment: .leading, spacing: 4) {
                 // Minimal Antigravity-Style Root Header
@@ -246,7 +254,7 @@ struct AgentTimelineView: View {
                     )
 
                     // Inline Thoughts toggle (only rendered when there are thoughts in the timeline)
-                    if hasThoughts {
+                    if hasThoughts && continuationLead == nil {
                         Button {
                             withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                                 showThoughts.toggle()
@@ -478,7 +486,7 @@ struct AgentTimelineView: View {
         switch outcome {
         case .cancelled:
             return (.cancelled, failed, toolCount)
-        case .failed, .completedWithWarnings:
+        case .failed, .completedWithWarnings, .timedOut:
             return (.degraded, failed, toolCount)
         case .completed, nil:
             // The outcome still LEADS where there is one; this only fills the gap it leaves.
@@ -529,6 +537,12 @@ struct AgentTimelineView: View {
     }
 
     /// Pure, unit-testable filtering of timeline nodes according to the user's thought-visibility preference.
+    /// A continuation's header: the stub's lead-in, then the step count.
+    static func continuationTitle(lead: String, stepsCount: Int) -> String {
+        guard stepsCount > 0 else { return "↳ \(lead)" }
+        return "↳ \(lead) · \(stepsCount) step\(stepsCount == 1 ? "" : "s")"
+    }
+
     static func filterVisibleNodes(_ nodes: [TimelineNode], showThoughts: Bool) -> [TimelineNode] {
         if showThoughts { return nodes }
         let filtered = nodes.filter {
@@ -582,7 +596,7 @@ struct AgentTimelineView: View {
             return String(localized: "Executed \(executionDescriptor)")
         case .degraded:
             let descriptor = showThoughts ? "\(steps) (\(tools)" : "\(tools)"
-            if terminalOutcome == .failed {
+            if terminalOutcome?.isFailureLike == true {
                 return failed > 0
                     ? String(localized: "Ended early after \(descriptor) · \(failed) failed)")
                     : String(localized: "Ended early after \(descriptor))")
@@ -2110,14 +2124,23 @@ struct ActionDetailView: View {
 struct CapabilityMilestoneRow: View {
     let kind: CapabilityMilestoneKind
     let detail: String
+    /// A spinner in place of the icon, for a milestone still under way — the manual-compaction
+    /// row (`ManualCompactionRow`) uses it while the summary is being written.
+    var inProgress: Bool = false
     @Environment(\.appTheme) private var theme
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: kind.icon)
-                .font(.system(.caption, weight: .semibold))
-                .foregroundColor(milestoneColor)
-                .frame(width: 18, alignment: .center)
+            Group {
+                if inProgress {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: kind.icon)
+                        .font(.system(.caption, weight: .semibold))
+                        .foregroundColor(milestoneColor)
+                }
+            }
+            .frame(width: 18, alignment: .center)
 
             Text(detail)
                 .font(.system(.caption, weight: .medium))
@@ -2859,6 +2882,7 @@ extension AgentTimelineView: Equatable {
     /// freezes the elapsed counter.
     static func == (lhs: AgentTimelineView, rhs: AgentTimelineView) -> Bool {
         lhs.revision == rhs.revision
+            && lhs.continuationLead == rhs.continuationLead
             && lhs.isStreaming == rhs.isStreaming
             && lhs.compactReasoning == rhs.compactReasoning
             && lhs.scrollable == rhs.scrollable

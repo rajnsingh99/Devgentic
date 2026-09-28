@@ -339,7 +339,12 @@ struct BotConfigDetailView: View {
 
                     Spacer()
 
-                    GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
+                    TactileButton(
+                        title: "Expand",
+                        icon: "arrow.up.left.and.arrow.down.right",
+                        variant: .secondary,
+                        size: .compact
+                    ) {
                         promptWindowManager.showEditor(
                             text: instructionsBinding,
                             // A binding, so renaming the bot retitles the detached

@@ -237,6 +237,11 @@ struct BackgroundTaskData: Codable, Equatable, Identifiable {
     var outputTail: String
     /// Characters the log holds in total, so the UI can say how much is not shown here.
     var logCharacterCount: Int
+    /// The `ResponseMessageVariant.variantId` of the attempt that started this task. A Redo appends
+    /// to the SAME timeline, so without this a report from attempt 1 cannot be told from one from
+    /// attempt 2 (`TranscriptGrouping` folds the former). Nil on a row written before 2026-09-27 —
+    /// read as "current attempt", so nothing old is folded away.
+    var variantID: UUID? = nil
 
     /// Small enough that a handful of tasks cannot bloat the message blob, large enough to carry a
     /// build's verdict — the last ~200 chars of an xcodebuild log.
@@ -1002,6 +1007,14 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// testability, same pattern as `resolveFinalizedContent`; the streaming path
     /// (`ActiveStreamManager.updateMessageContent`) and `StreamedChunkMergeTests`
     /// share it.
+    /// What the bubble shows while a `.draftText` preview is live: the pre-draft content with the
+    /// draft after it, by the same rule a streamed chunk follows — except that a pre-draft `.error`
+    /// card is shown as the draft alone and is NOT demoted (the draft may be withdrawn; the real
+    /// `.content` does the demotion when it arrives).
+    static func draftDisplayContent(baseline: MessageContent, draft: String) -> MessageContent {
+        resolveStreamedChunkMerge(current: baseline, chunk: draft)?.content ?? .markdownText(draft)
+    }
+
     static func resolveStreamedChunkMerge(current: MessageContent, chunk: String) -> (content: MessageContent, demotedError: TimelineEvent?)? {
         if case .error(let title, let details, _, let suggestion) = current {
             // [ASM-1] A mid-run `.error` replaced content with the structured card,

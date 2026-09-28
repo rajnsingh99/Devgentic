@@ -28,6 +28,26 @@ final class SchedulerService {
     private var timers: [UUID: DispatchSourceTimer] = [:]
     private var runningTaskIDs: Set<UUID> = []
 
+    /// How late a run may start and still count as on time. Past this it is MISSED: skipped and
+    /// recorded, never run late (owner decision 2026-09-27, Timeout inventory D-22). Covers timer
+    /// coalescing and launch/wake latency, not a closed app or a sleeping Mac.
+    nonisolated static let missedRunGrace: TimeInterval = 5 * 60
+
+    /// Notes to append to a task's next run summary: runs missed just before a caught-up one, and
+    /// slots skipped because the previous run was still going.
+    private var pendingRunNotes: [UUID: [String]] = [:]
+
+    /// Tasks `processDue` has decided to fire whose `fireTask` has not started yet. Launch decides
+    /// due tasks twice (`rescheduleAll`, then the catch-up); without this the second pass spawned a
+    /// second `fireTask` that was refused only by its own "already running" guard.
+    private var pendingFireIDs: Set<UUID> = []
+
+    /// Interrupted runs are reconciled once per process — see `reconcileInterruptedRuns`.
+    private var didReconcileInterruptedRuns = false
+
+    /// Wake / clock / time-zone observers, registered once by `startObservingSystemChanges`.
+    private var systemObservers: [(NotificationCenter, NSObjectProtocol)] = []
+
     /// Weak reference set during app bootstrap (avoids circular dependency).
     weak var mainViewModel: MainApplicationViewModel?
 
@@ -49,7 +69,9 @@ final class SchedulerService {
         modelContainer?.mainContext
     }
 
-    private init() {}
+    /// Internal, not private, so tests can build their own instance over an in-memory store instead
+    /// of repointing the shared one the test host's launch configured. The app uses `shared`.
+    init() {}
 
     /// Call this once from the App init to inject the container.
     func configureContainer(_ container: ModelContainer) {
@@ -76,6 +98,7 @@ final class SchedulerService {
             scheduledTasks = models.map { $0.toStruct() }
             hasLoadedTasks = true
             logger.info("Loaded \(self.scheduledTasks.count) scheduled task(s).")
+            reconcileInterruptedRuns()
 
             // ⚠️ Replay an evaluation that arrived too early. `didBecomeActive` fires during a cold
             // launch and can beat this method; without the replay that request was dropped and an
@@ -221,10 +244,48 @@ final class SchedulerService {
             cancelTimer(for: id)
         }
 
+        // ⚠️ A task whose stored time has already passed is DECIDED first (run if within the grace,
+        // else recorded as missed). Arming it straight away recomputed `nextRunAt` from now and
+        // erased the passed slot, so a cron run missed while the app was quit left no trace (D-22).
+        let now = Date()
         for task in scheduledTasks where task.isEnabled && !task.isPaused {
-            scheduleTimer(for: task)
+            if let next = task.nextRunAt, next <= now {
+                processDue(task, now: now)
+            } else {
+                scheduleTimer(for: task)
+            }
         }
         logger.info("Rescheduled all active tasks.")
+    }
+
+    // MARK: - System clock changes
+
+    /// Re-decides every task when the Mac wakes, the clock is changed or the time zone changes.
+    ///
+    /// ⚠️ D-22: the timer used to be the only trigger, and a timer is armed as an interval. A Mac
+    /// asleep through 9:00 ran the job late; a clock or time-zone change left the old instant armed.
+    /// Cron follows the Mac's CURRENT local time, so a time-zone change re-derives the next run;
+    /// a one-shot is an absolute instant and keeps it.
+    func startObservingSystemChanges() {
+        guard TestHost.permits("observe wake / clock / time-zone changes for scheduled tasks", logger: logger),
+              systemObservers.isEmpty else { return }
+        let workspace = NSWorkspace.shared.notificationCenter
+        let center = NotificationCenter.default
+        let observe: (NotificationCenter, Notification.Name, String) -> Void = { nc, name, reason in
+            let token = nc.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { SchedulerService.shared.handleSystemChange(reason: reason) }
+            }
+            self.systemObservers.append((nc, token))
+        }
+        observe(workspace, NSWorkspace.didWakeNotification, "wake")
+        observe(center, .NSSystemClockDidChange, "clock change")
+        observe(center, .NSSystemTimeZoneDidChange, "time-zone change")
+    }
+
+    func handleSystemChange(reason: String) {
+        if reason == "time-zone change" { NSTimeZone.resetSystemTimeZone() }
+        logger.info("[SCHEDULER] \(reason): re-deciding every scheduled task against the new time.")
+        rescheduleAll()
     }
 
     func cancelTimer(for taskID: UUID) {
@@ -233,6 +294,9 @@ final class SchedulerService {
     }
 
     private func scheduleTimer(for task: ScheduledTask) {
+        // ⚠️ Replaces any armed timer. `fireTask` used to arm a second one after `updateTask` had
+        // already armed the first, orphaning a live DispatchSource that fired the task again.
+        cancelTimer(for: task.id)
         guard task.isEnabled, !task.isPaused else { return }
 
         let nextDate: Date?
@@ -245,7 +309,12 @@ final class SchedulerService {
             return // No valid schedule
         }
 
-        guard let fireDate = nextDate else { return }
+        guard let fireDate = nextDate else {
+            logger.error(
+                "[SCHEDULER] '\(task.displayName)' (\(task.id)) has no future run time. "
+                + "CONSEQUENCE: no timer is armed and the task will not run until its schedule is edited.")
+            return
+        }
 
         // Update nextRunAt
         if var updated = scheduledTasks.first(where: { $0.id == task.id }) {
@@ -263,12 +332,15 @@ final class SchedulerService {
         let taskID = task.id
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + interval)
+        // ⚠️ WALL deadline: an uptime deadline stops counting while the Mac sleeps, so a 9:00 job
+        // fired at 11:00 after a two-hour sleep (D-22). Waking past the slot now fires at once and
+        // `processDue` records it as missed.
+        timer.schedule(wallDeadline: .now() + interval)
         timer.setEventHandler { [weak self] in
             Task { @MainActor in
                 guard let self = self else { return }
                 guard let currentTask = self.scheduledTasks.first(where: { $0.id == taskID }) else { return }
-                await self.fireTask(currentTask)
+                self.processDue(currentTask, now: Date())
             }
         }
         timer.resume()
@@ -314,23 +386,165 @@ final class SchedulerService {
         }
 
         let now = Date()
-        var fired = 0
+        var decided = 0
         for task in scheduledTasks where task.isEnabled && !task.isPaused {
             if let nextRun = task.nextRunAt, nextRun <= now, !runningTaskIDs.contains(task.id) {
-                fired += 1
-                Task { @MainActor in
-                    await self.fireTask(task)
-                }
+                decided += 1
+                processDue(task, now: now)
             }
         }
-        if fired > 0 {
-            logger.info("[SCHEDULER] Catch-up: fired \(fired) overdue task(s) out of \(self.scheduledTasks.count).")
+        if decided > 0 {
+            logger.info("[SCHEDULER] Catch-up: decided \(decided) overdue task(s) out of \(self.scheduledTasks.count).")
         }
+    }
+
+    // MARK: - Due, missed, interrupted
+
+    enum DueDecision: Equatable {
+        /// The slot has not come yet (a timer fired early after a clock change).
+        case notDue
+        /// Run now. `missedBefore` earlier slots passed unrun and are noted in its summary.
+        case fire(missedBefore: Int)
+        /// Every passed slot is older than the grace: skip them all. `next` is the next future slot
+        /// (nil for a one-shot, which is then over). `count` is capped at `missedCountCap`.
+        case missed(count: Int, lastMissed: Date, next: Date?)
+    }
+
+    /// Counting stops here, so a minute-level cron after a month closed does not walk 40,000 slots.
+    nonisolated static let missedCountCap = 1_000
+
+    /// Decides what a task whose stored `nextRunAt` has passed should do. Pure, for tests.
+    nonisolated static func dueDecision(nextRunAt: Date, cron: CronExpression?, now: Date,
+                            grace: TimeInterval = missedRunGrace,
+                            calendar: Calendar = .current) -> DueDecision {
+        guard nextRunAt <= now else { return .notDue }
+        guard let cron else {
+            return now.timeIntervalSince(nextRunAt) <= grace
+                ? .fire(missedBefore: 0)
+                : .missed(count: 1, lastMissed: nextRunAt, next: nil)
+        }
+        var count = 0
+        var last = nextRunAt
+        var slot: Date? = nextRunAt
+        while let s = slot, s <= now {
+            count += 1
+            last = s
+            if count == missedCountCap {
+                // Jump to the slots near now; everything in between is "1,000 or more".
+                slot = cron.nextFireDate(after: now.addingTimeInterval(-grace), calendar: calendar)
+                continue
+            }
+            slot = cron.nextFireDate(after: s, calendar: calendar)
+        }
+        if now.timeIntervalSince(last) <= grace { return .fire(missedBefore: count - 1) }
+        return .missed(count: count, lastMissed: last, next: slot)
+    }
+
+    /// The one place a due task is acted on — timer, launch, activation, wake and clock changes all
+    /// come here, so a slot is run, recorded as missed, or skipped as an overlap exactly once.
+    func processDue(_ task: ScheduledTask, now: Date) {
+        guard task.isEnabled, !task.isPaused, let nextRunAt = task.nextRunAt,
+              !pendingFireIDs.contains(task.id) else { return }
+        let cron = task.cronExpression.flatMap { try? CronExpression(expression: $0) }
+
+        if runningTaskIDs.contains(task.id) {
+            guard nextRunAt <= now, let cron else { return }
+            // Overlap: the previous run is still going. Skipped, and said so after that run ends.
+            pendingRunNotes[task.id, default: []].append(String(
+                localized: "Skipped the \(Self.shortTime(nextRunAt)) run: the previous run was still going."))
+            logger.warning(
+                "[SCHEDULER] '\(task.displayName)' is still running at its \(nextRunAt) slot. "
+                + "CONSEQUENCE: that slot is SKIPPED (no queue); noted in the run summary.")
+            var updated = task
+            updated.nextRunAt = cron.nextFireDate(after: now)
+            persistSchedule(updated)
+            return
+        }
+
+        switch Self.dueDecision(nextRunAt: nextRunAt, cron: cron, now: now) {
+        case .notDue:
+            scheduleTimer(for: task)
+        case .fire(let missedBefore):
+            if missedBefore > 0 {
+                pendingRunNotes[task.id, default: []].append(String(
+                    localized: "\(missedBefore) earlier run(s) were missed while Devgentic was closed or the Mac was asleep."))
+                logger.info("[SCHEDULER] '\(task.displayName)': running the \(nextRunAt) slot; \(missedBefore) earlier slot(s) were missed and are NOT run.")
+            }
+            pendingFireIDs.insert(task.id)
+            Task { @MainActor in await self.fireTask(task) }
+        case .missed(let count, let lastMissed, let next):
+            recordMissed(task, count: count, lastMissed: lastMissed, next: next)
+        }
+    }
+
+    private func recordMissed(_ task: ScheduledTask, count: Int, lastMissed: Date, next: Date?) {
+        var updated = task
+        updated.status = .missed
+        let reason = String(localized: "Devgentic was closed or the Mac was asleep.")
+        updated.lastRunSummary = count == 1
+            ? String(localized: "Missed the \(Self.shortTime(lastMissed)) run. \(reason)")
+            : String(localized: "Missed \(count >= Self.missedCountCap ? "1,000+" : "\(count)") runs, the last at \(Self.shortTime(lastMissed)). \(reason)")
+        if task.isRecurring {
+            updated.nextRunAt = next
+        } else {
+            updated.isEnabled = false    // a one-shot's only run has passed
+        }
+        logger.warning(
+            "[SCHEDULER] '\(task.displayName)' (\(task.id)) missed \(count) slot(s), last \(lastMissed). "
+            + "CONSEQUENCE: skipped, NOT run late (owner policy); recorded on the task"
+            + (task.isRecurring ? "; next run \(String(describing: next))." : "; the one-shot is now disabled."))
+        updateTask(updated)
+    }
+
+    /// A task left `.running` by a previous process was interrupted — Devgentic quit, crashed or was
+    /// killed mid-run. It is marked Cancelled and NOT run again: it may already have done its side
+    /// effects (owner decision 2026-09-27; the same rule as "never auto-retry a timed-out tool").
+    ///
+    /// ⚠️ Once per process, and never for a task this process is running: `loadAllTasks` is also
+    /// called by the sidebar, while a run may be live.
+    private func reconcileInterruptedRuns() {
+        guard !didReconcileInterruptedRuns else { return }
+        didReconcileInterruptedRuns = true
+        for task in scheduledTasks where task.status == .running && !runningTaskIDs.contains(task.id) {
+            var updated = task
+            updated.status = .cancelled
+            updated.lastRunSummary = String(localized: "Cancelled: Devgentic quit during this run.")
+            if let cronStr = task.cronExpression, let cron = try? CronExpression(expression: cronStr) {
+                // The interrupted slot RAN; start from the one after it, so later slots are judged
+                // (run or missed) on their own.
+                updated.nextRunAt = task.nextRunAt.flatMap { cron.nextFireDate(after: $0) }
+                    ?? cron.nextFireDate(after: Date())
+            } else {
+                updated.isEnabled = false
+            }
+            logger.warning(
+                "[SCHEDULER] '\(task.displayName)' (\(task.id)) was still marked running at launch. "
+                + "CONSEQUENCE: recorded as Cancelled (interrupted by quit) and NOT re-run"
+                + (task.isRecurring ? "; it waits for its next slot." : "; the one-shot is disabled."))
+            updateTask(updated)
+        }
+    }
+
+    /// Saves a new `nextRunAt` and re-arms, without touching anything else on the task.
+    private func persistSchedule(_ task: ScheduledTask) {
+        if let idx = scheduledTasks.firstIndex(where: { $0.id == task.id }) {
+            scheduledTasks[idx].nextRunAt = task.nextRunAt
+        }
+        if let model = fetchModel(id: task.id) {
+            model.nextRunAt = task.nextRunAt
+            saveContext()
+        }
+        scheduleTimer(for: task)
+    }
+
+    private static func shortTime(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
     }
 
     // MARK: - Execution
 
     func fireTask(_ task: ScheduledTask) async {
+        pendingFireIDs.remove(task.id)
         guard !runningTaskIDs.contains(task.id) else {
             logger.warning("Task '\(task.displayName)' is already running — skipping.")
             return
@@ -389,44 +603,61 @@ final class SchedulerService {
 
         // Send the message
         let config = BackendRequestConfig(profile: profile)
-        let summary = await vm.sendScheduledMessage(
+        let result = await vm.runScheduledMessage(
             prompt: resolvedPrompt,
             config: config,
             conversationID: conversationID,
-            attachedFileURLs: task.attachedFileURLs
+            attachedFileURLs: task.attachedFileURLs,
+            runLimit: task.runLimit
         )
+        let summary = result.summary
 
-        // Post-execution updates
-        updatedTask.runCount = task.runCount + 1
+        // ⚠️ Post-run bookkeeping is applied to the task AS IT IS NOW, and only to the run's own
+        // fields. Writing back the copy taken at the start reverted anything the user changed
+        // during the run — the prompt, the schedule, a pause, a disable (D-22).
+        guard let current = scheduledTasks.first(where: { $0.id == task.id }) else {
+            runningTaskIDs.remove(task.id)
+            pendingRunNotes[task.id] = nil
+            logger.info("[SCHEDULER] '\(task.displayName)' was deleted during its run; the outcome is not recorded on it.")
+            return
+        }
+        updatedTask = current
+        updatedTask.linkedConversationID = conversationID
+        let notes = pendingRunNotes.removeValue(forKey: task.id) ?? []
+        updatedTask.runCount = current.runCount + 1
         updatedTask.lastRunAt = Date()
-        updatedTask.lastRunSummary = String(summary.prefix(100))
-        updatedTask.status = .completed
+        updatedTask.lastRunSummary = ([String(summary.prefix(100))] + notes).joined(separator: " ")
+        // ⚠️ The run's REAL outcome. This was `.completed` for everything — a timeout, an error
+        // card, a missing conversation (Timeout inventory D-13). A recurring task still returns to
+        // `.pending` below; its summary and notification carry the outcome.
+        updatedTask.status = switch result.outcome {
+        case .completed, .completedWithWarnings: .completed
+        case .failed:    .failed
+        case .timedOut:  .timedOut
+        case .cancelled: .cancelled
+        }
 
-        // Compute next fire date for recurring tasks
-        if let cronStr = task.cronExpression, let cron = try? CronExpression(expression: cronStr) {
+        // Compute next fire date for recurring tasks — from the CURRENT schedule.
+        if let cronStr = current.cronExpression, let cron = try? CronExpression(expression: cronStr) {
             updatedTask.nextRunAt = cron.nextFireDate(after: Date())
             updatedTask.status = .pending
-        } else if task.isOneShot {
+        } else if current.isOneShot {
             updatedTask.isEnabled = false
         }
+        if current.isPaused { updatedTask.status = .paused }
 
-        updateTask(updatedTask)
         runningTaskIDs.remove(task.id)
-
-        // Re-schedule recurring timers
-        if updatedTask.isEnabled && updatedTask.isRecurring {
-            scheduleTimer(for: updatedTask)
-        }
+        updateTask(updatedTask)   // re-arms the timer when still enabled and not paused
 
         // Fire notification
         let payload = AppNotificationPayload(
-            title: "Scheduled Task Completed",
+            title: result.outcome.notificationTitle,
             body: "\(task.displayName): \(summary.prefix(60))",
             conversationID: conversationID
         )
         await NotificationDispatcher.shared.dispatch(payload)
 
-        logger.info("Task '\(task.displayName)' fired successfully (run #\(updatedTask.runCount)).")
+        logger.info("Task '\(task.displayName)' ran (run #\(updatedTask.runCount)) — outcome: \(String(describing: result.outcome)).")
     }
 
     // MARK: - Helpers

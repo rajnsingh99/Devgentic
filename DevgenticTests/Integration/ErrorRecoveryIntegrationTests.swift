@@ -101,10 +101,10 @@ final class ErrorRecoveryIntegrationTests: XCTestCase {
         let content = StreamCollector.contentText(from: events)
         XCTAssertFalse(content.isEmpty, "SkipAndContinue should produce content after recovery")
 
-        // Should emit skip/continue thought
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasSkipThought = thoughts.contains { $0.contains("skipping") || $0.contains("Skipping") || $0.contains("continuing") || $0.contains("skip") }
-        XCTAssertTrue(hasSkipThought, "Should emit skip-and-continue thought")
+        // D-15 (2026-09-27): a downgraded breaker trigger is a real user-facing WARNING that says the
+        // run continues — it was a `.thought`, easy to miss.
+        let continuing = StreamCollector.warnings(from: events).filter { $0.contains("The run continues") }
+        XCTAssertEqual(continuing.count, 1, "Should warn once that the run continues: \(StreamCollector.warnings(from: events))")
 
         // The terminal step should have been reached (4th step consumed)
         // 3 failure iterations + at least 1 post-recovery iteration
@@ -135,14 +135,52 @@ final class ErrorRecoveryIntegrationTests: XCTestCase {
         let content = StreamCollector.contentText(from: events)
         XCTAssertFalse(content.isEmpty, "FallbackPrompt should produce content after recovery")
 
-        // Should emit fallback/alternative approach thought
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasFallbackThought = thoughts.contains { $0.contains("alternative") || $0.contains("Alternative") || $0.contains("fallback") || $0.contains("different approach") }
-        XCTAssertTrue(hasFallbackThought, "Should emit alternative approach thought")
+        // D-15: a warning the user can see, saying the run continues (was a `.thought`).
+        let continuing = StreamCollector.warnings(from: events).filter { $0.contains("The run continues") }
+        XCTAssertEqual(continuing.count, 1, "Should warn once that the run continues: \(StreamCollector.warnings(from: events))")
 
         // The terminal step should have been reached
         XCTAssertGreaterThan(provider.receivedCognitiveMessages.count, 3,
                              "FallbackPrompt should continue execution past the failure threshold")
+    }
+
+    // MARK: - Test 3a: a loop in Code only warns (D-15, owner decision 2026-09-27)
+
+    private func makeLoopSteps(repeats: Int) -> [ModernCognitiveStep] {
+        (1...repeats).map { i in
+            ModernCognitiveStep(reasoning: "Reading it again (\(i)).",
+                                toolCalls: [TestToolCallFactory.make(name: "read_tool", input: "same")])
+        } + [ModernCognitiveStep(reasoning: "Done. Here is the answer.")]
+    }
+
+    func testFallbackPrompt_ALoopWarnsOnceAndNeverClaimsTheRunWillAbort() async throws {
+        let tool = TestToolFactory.make(name: "read_tool", output: "identical content")
+        let provider = MockLLMProvider(steps: makeLoopSteps(repeats: 7))
+        let input = TestAgentInputFactory.make(query: "Read it", tools: [tool],
+                                               errorRecovery: ErrorRecovery(onToolFailure: .fallbackPrompt))
+        let events = try await StreamCollector.collect(
+            from: ReActAgentExecutor(maxIterations: 20).execute(model: provider, input: input) { _ in })
+
+        XCTAssertFalse(StreamCollector.contentText(from: events).isEmpty, "the run must continue to its answer")
+        let warnings = StreamCollector.warnings(from: events)
+        XCTAssertFalse(warnings.contains { $0.localizedCaseInsensitiveContains("abort") },
+                       "a loop that only warns must not tell the user the run will abort: \(warnings)")
+        let continuing = warnings.filter { $0.contains("The run continues") }
+        XCTAssertFalse(continuing.isEmpty, "the loop must be reported to the user: \(warnings)")
+        // Five iterations past the threshold, at most one notice per kind of loop (identical
+        // iterations, and the same call repeated across the run) — never one per iteration.
+        XCTAssertLessThanOrEqual(continuing.count, 2, "the warning repeats every iteration: \(continuing)")
+    }
+
+    func testAbortPolicy_ThePreWarningStillSaysTheRunWillAbort() async throws {
+        let tool = TestToolFactory.make(name: "read_tool", output: "identical content")
+        let provider = MockLLMProvider(steps: makeLoopSteps(repeats: 5))
+        let input = TestAgentInputFactory.make(query: "Read it", tools: [tool],
+                                               errorRecovery: ErrorRecovery(onToolFailure: .abort))
+        let events = try await StreamCollector.collect(
+            from: ReActAgentExecutor(maxIterations: 20).execute(model: provider, input: input) { _ in })
+        XCTAssertTrue(StreamCollector.hasWarningContaining("will abort this run", in: events),
+                      "\(StreamCollector.warnings(from: events))")
     }
 
     // MARK: - Test 3b: .fallbackPrompt with Custom Message

@@ -20,6 +20,10 @@ enum RateLimitCategory: String, Codable, Sendable {
     case geminiFlash
     case anthropic
     case openRouter
+    /// An OpenRouter `:free` model variant. OpenRouter meters these separately from paid models
+    /// and far more tightly (20 RPM, plus a daily cap), so they get their own bucket rather than
+    /// sharing the paid `.openRouter` one keyed on the same API key.
+    case openRouterFree
     case openAICompatible
 
     /// Conservative default RPM for each provider tier.
@@ -30,6 +34,7 @@ enum RateLimitCategory: String, Codable, Sendable {
         case .anthropic:        return 50.0 / 60.0  // 50 RPM — Tier 1
         case .openAI:           return 500.0 / 60.0 // 500 RPM — Tier 1
         case .openRouter:       return 200.0 / 60.0 // limits scale with credits upstream; reactive 429 handling covers the rest
+        case .openRouterFree:   return 20.0 / 60.0  // 20 RPM — OpenRouter's :free limit; the daily cap is left to reactive 429 handling
         case .openAICompatible: return 600.0 / 60.0 // endpoint unknown (often local LM Studio/vLLM) — permissive; reactive 429 covers remote gateways
         }
     }
@@ -42,6 +47,7 @@ enum RateLimitCategory: String, Codable, Sendable {
         case .anthropic:        return 5.0
         case .openAI:           return 10.0
         case .openRouter:       return 10.0
+        case .openRouterFree:   return 5.0
         case .openAICompatible: return 20.0
         }
     }
@@ -58,10 +64,11 @@ extension RateLimitCategory {
     /// - Cloud providers: `"anthropic:<apiKey-hash>"` — same key = same server quota
     /// - Ollama: `"local:<baseURL-hash>"` — same endpoint = same server
     /// - MLX: `"local:mlx"` — single GPU, always shared
-    static func deriveBucketKey(provider: ApiProvider, apiKey: String?, baseURL: String?) -> String {
+    /// - OpenRouter `:free` models: `"openRouterFree:<apiKey-hash>"` — metered apart from paid ones
+    static func deriveBucketKey(provider: ApiProvider, apiKey: String?, baseURL: String?, modelName: String? = nil) -> String {
         switch provider {
         case .anthropic, .openAI, .google, .openRouter:
-            let category = Self.from(provider: provider)
+            let category = Self.from(provider: provider, modelName: modelName)
             let keyHash = apiKey.map { String($0.hashValue) } ?? "no-key"
             return "\(category.rawValue):\(keyHash)"
         case .openAICompatible:
@@ -79,15 +86,27 @@ extension RateLimitCategory {
     }
 
     /// Maps ApiProvider to the corresponding rate limit category.
-    static func from(provider: ApiProvider) -> RateLimitCategory {
+    ///
+    /// ⚠️ Pass `modelName` wherever the model is known. Without it an OpenRouter `:free` model is
+    /// classed as paid `.openRouter` (200 RPM) and trips OpenRouter's 20 RPM free limit on 429s
+    /// instead of pacing under it. Every caller that shares a bucket key must agree on the
+    /// category, because whichever call creates the bucket fixes its rate.
+    static func from(provider: ApiProvider, modelName: String? = nil) -> RateLimitCategory {
         switch provider {
         case .anthropic:        return .anthropic
         case .google:           return .geminiFlash
         case .openAI:           return .openAI
-        case .openRouter:       return .openRouter
+        case .openRouter:       return isOpenRouterFreeModel(modelName) ? .openRouterFree : .openRouter
         case .openAICompatible: return .openAICompatible
         case .ollama, .mlx:     return .local
         }
+    }
+
+    /// OpenRouter marks free variants with a `:free` suffix on the model slug
+    /// (e.g. `nvidia/nemotron-3-ultra-550b-a55b:free`).
+    static func isOpenRouterFreeModel(_ modelName: String?) -> Bool {
+        guard let modelName else { return false }
+        return modelName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasSuffix(":free")
     }
 }
 
@@ -208,12 +227,25 @@ actor GlobalRateLimiter {
 
     /// Drains the bucket to force a hard reset.
     /// Used when the server responds with 429 despite our local counting (Drift).
-    func drainAndPenalize(key: String, category: RateLimitCategory, penaltySeconds: TimeInterval = 0) {
+    func drainAndPenalize(key: String, category: RateLimitCategory, penaltySeconds requestedPenalty: TimeInterval = 0) {
         // Local is unmetered — nothing to drain. A 429 from a local endpoint is
         // still backed off by LLMRetryStrategy's Retry-After sleep independently.
         guard category != .local else { return }
 
         var bucket = getOrCreateBucket(key: key, category: category)
+
+        // ⚠️ Clamped HERE, at the one place debt is written, not only at the callers. The penalty
+        // is a server's Retry-After, and `wait` turns debt into `UInt64(seconds * 1e9)`, which
+        // TRAPS on infinity, NaN or anything past ~584 years. A `Retry-After: inf` used to set the
+        // debt to −∞ and crash the app on the next request to that provider (Timeout inventory
+        // D-09, 2026-09-26). Same bounds the retry sleeps already use: finite, ≥ 0, ≤ 1 hour.
+        let penaltySeconds: TimeInterval
+        if let sane = ProviderErrorClassifier.sanitizedRetryAfter(requestedPenalty) {
+            penaltySeconds = sane
+        } else {
+            penaltySeconds = 0
+            logger.warning("[RATE_LIMIT] Bucket \(key): ignored an unusable 429 penalty of \(requestedPenalty)s. CONSEQUENCE: the bucket is drained but carries no extra debt; the retry path's own Retry-After handling still backs off.")
+        }
 
         bucket.currentTokens = min(0, bucket.currentTokens)
         let penaltyTokens = penaltySeconds * bucket.tokensPerSecond

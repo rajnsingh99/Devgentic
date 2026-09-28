@@ -131,7 +131,8 @@ struct NativeParsePipeline: Sendable {
             thought: step.thought,
             toolCalls: validated,
             tokenUsage: step.tokenUsage,
-            parseOutcome: outcome
+            parseOutcome: outcome,
+            reasoningReplay: step.reasoningReplay
         )
     }
 }

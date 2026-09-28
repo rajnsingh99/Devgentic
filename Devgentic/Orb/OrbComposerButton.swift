@@ -6,7 +6,7 @@
 //
 //  [Orb MVP] The composer entry point — sits next to the voice button in the main
 //  chat input bar and toggles the floating Orb panel.
-//  Follows the exact toolbar button discipline (28×28, surfaceOverlay at rest, surfaceOverlayStrong on hover,
+//  Follows the exact toolbar button discipline (24×24, surfaceOverlay at rest, surfaceOverlayStrong on hover,
 //  subtle secondaryText stroke matching the voice button, zero blue border).
 //
 
@@ -32,8 +32,8 @@ struct OrbComposerButton: View {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
             OrbPanelController.shared.toggle(mainVM: mainVM)
         }) {
-            OrbIcon(size: 18, isHovered: isHovered)
-                .frame(width: 28, height: 28)
+            OrbIcon(size: 15, isHovered: isHovered)
+                .frame(width: ComposerStyle.buttonSize, height: ComposerStyle.buttonSize)
                 .composerControlSurface(in: Circle(), isHovered: isHovered)
                 .shadow(color: isHovered ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
                 .scaleEffect(isHovered ? 1.06 : 1.0)

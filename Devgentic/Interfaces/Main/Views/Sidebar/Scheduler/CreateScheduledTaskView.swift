@@ -60,6 +60,8 @@ struct CreateScheduledTaskView: View {
     @State private var scheduledDate: Date = Date().addingTimeInterval(3600)
     @State private var cronPreset: CronPreset = .daily9am
     @State private var customCronExpression: String = ""
+    /// The task's own execution limit in seconds; nil = the profile's limit, else 30 min.
+    @State private var runLimit: TimeInterval?
 
     /// Per-field validation errors. Captured up-front by `validate()` so the
     /// user sees every problem at once (rather than fix-save-fix-save) and
@@ -208,6 +210,10 @@ struct CreateScheduledTaskView: View {
 
                     SettingsCard(title: "Schedule", icon: "calendar", theme: theme) {
                         scheduleSection
+                    }
+
+                    SettingsCard(title: "Time Limit", icon: "clock", theme: theme) {
+                        runLimitSection
                     }
                 }
                 .padding(ViewLayout.containerPadding)
@@ -563,6 +569,36 @@ struct CreateScheduledTaskView: View {
 
     // MARK: - Card: Schedule
 
+    /// Presets offered for a task's own limit (HITL Waiting Contract §5). A stored value outside
+    /// them is still shown, so editing a task never silently changes its limit.
+    private static let runLimitPresets: [TimeInterval] = [5, 15, 30, 60, 120].map { $0 * 60 }
+
+    private var runLimitSection: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Stop After")
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+                Text("A run that works longer than this is stopped and marked Timed out. Time spent waiting for approval is not counted. Default uses the profile's execution timeout, or \(ToolExecutionMediator.describe(SchedulerCoordinator.defaultScheduledRunLimit)) if it has none.")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
+            }
+
+            Spacer(minLength: 16)
+
+            Picker("", selection: $runLimit) {
+                Text("Default").tag(TimeInterval?.none)
+                ForEach(Self.runLimitPresets + (runLimit.map { Self.runLimitPresets.contains($0) ? [] : [$0] } ?? []), id: \.self) { seconds in
+                    Text(ToolExecutionMediator.describe(seconds)).tag(TimeInterval?.some(seconds))
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
+    }
+
     private var scheduleSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Picker("", selection: $scheduleType) {
@@ -820,6 +856,7 @@ struct CreateScheduledTaskView: View {
         selectedProfileID = task.profileID
         promptTemplate = task.promptTemplate
         linkedConversationID = task.linkedConversationID
+        runLimit = task.runLimit
         runStrategy = strategy(from: task.mode, contextWindowMode: task.contextWindowMode)
 
         if let cron = task.cronExpression {
@@ -954,6 +991,7 @@ struct CreateScheduledTaskView: View {
         task.scheduledAt = scheduledAtDate
         task.contextWindowMode = resolvedContextMode
         task.linkedConversationID = resolvedLink
+        task.runLimit = runLimit
 
         if isEditing {
             SchedulerService.shared.updateTask(task)

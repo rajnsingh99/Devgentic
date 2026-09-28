@@ -38,6 +38,11 @@ final class ScheduledTaskModel {
     var linkedConversationID: UUID?
     var contextWindowMode: String       // ContextWindowMode.rawValue
     var createdAt: Date
+    /// The task's own execution limit in seconds; nil = the profile's `executionTimeout`, else the
+    /// scheduler default (HITL Waiting Contract §5). ⚠️ OPTIONAL on purpose — added 2026-09-27 to
+    /// the still-unreleased V1 in place, which is only lightweight-safe for an optional attribute;
+    /// a store written before it reads nil. See `DevgenticSchemaVersions.swift`.
+    var runLimitSeconds: Double?
 
     init(
         id: UUID = UUID(),
@@ -57,7 +62,8 @@ final class ScheduledTaskModel {
         lastRunSummary: String? = nil,
         linkedConversationID: UUID? = nil,
         contextWindowMode: String = "continuous",
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        runLimitSeconds: Double? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -77,6 +83,7 @@ final class ScheduledTaskModel {
         self.linkedConversationID = linkedConversationID
         self.contextWindowMode = contextWindowMode
         self.createdAt = createdAt
+        self.runLimitSeconds = runLimitSeconds
     }
 }
 
@@ -152,7 +159,8 @@ extension ScheduledTaskModel {
             lastRunSummary: lastRunSummary,
             linkedConversationID: linkedConversationID,
             contextWindowMode: ContextWindowMode(rawValue: contextWindowMode) ?? .continuous,
-            createdAt: createdAt
+            createdAt: createdAt,
+            runLimit: runLimitSeconds
         )
     }
 
@@ -174,6 +182,7 @@ extension ScheduledTaskModel {
         linkedConversationID = task.linkedConversationID
         contextWindowMode = task.contextWindowMode.rawValue
         createdAt = task.createdAt
+        runLimitSeconds = task.runLimit
 
         // ⚠️ REFUSE to null a column we could not read. `toStruct()` hands back an empty list when
         // the stored JSON is undecodable, and this branch nils the column whenever the list is

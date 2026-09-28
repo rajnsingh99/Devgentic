@@ -6005,7 +6005,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
         let gateFailure = try XCTUnwrap(failed.first(where: { $0.nodeID == gate }),
                                         "an unanswered timed gate must fail — got failures: \(failed.map(\.profileName))")
-        XCTAssertTrue(gateFailure.error.contains("was not answered"), "got: \(gateFailure.error)")
+        // Reported as EXPIRED since 2026-09-27 (HITL Waiting Contract, decision B) — it was
+        // "was not answered" under a `.modelError` whose remediation blamed the model.
+        XCTAssertTrue(gateFailure.error.contains("Gate expired"), "got: \(gateFailure.error)")
         // 4. The error port is LIVE (the WF61 contract the inspector advertises) …
         let startedIDs = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
         XCTAssertTrue(startedIDs.contains(handler),

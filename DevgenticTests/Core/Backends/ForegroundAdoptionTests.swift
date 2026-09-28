@@ -106,8 +106,15 @@ final class ForegroundAdoptionTests: XCTestCase {
 
     /// A timeout kill is still reported as a kill, not as an exit code the command chose.
     func testATimedOutForegroundRunIsRecordedAsTimedOut() async throws {
-        let output = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
-            #"{"command":"echo before-kill; sleep 30","working_directory":"/tmp","timeout_seconds":1}"#))
+        // D-17: THROWN as a timeout (so it is not recorded as a successful call), output inside.
+        let output: String
+        do {
+            _ = try await RunCommandTool(conversationID: conversation).call(arguments: arguments(
+                #"{"command":"echo before-kill; sleep 30","working_directory":"/tmp","timeout_seconds":1}"#))
+            return XCTFail("a command killed at its own timeout must be reported as a timeout")
+        } catch ShellCommandError.timedOut(_, let observation) {
+            output = observation
+        }
 
         let task = try XCTUnwrap(BackgroundProcessRegistry.shared.snapshots(conversationID: conversation).first)
         XCTAssertEqual(task.status, .timedOut)
@@ -140,8 +147,14 @@ final class ForegroundAdoptionTests: XCTestCase {
             throw XCTSkip("CodingAssistantTools.swift not reachable — running outside a checkout")
         }
         XCTAssertTrue(source.contains("foreground: true)"), "the foreground path no longer launches through the registry")
-        XCTAssertTrue(source.contains("await registry.waitUntilEnded(conversationID: conversationID, taskID: started.id)"),
+        XCTAssertTrue(source.contains("await registry.waitUntilEnded(conversationID: conversationID, taskID: stopID)"),
                       "the foreground path no longer waits on the registry")
+        // The stop hook (HITL Waiting Contract, slice 1): a cancelled wait must STOP the command.
+        // Without it Stop and every timeout left a foreground command running to its full bound
+        // (Timeout inventory D-02). `ToolTimeoutContractTests` proves the behaviour; this pins
+        // that the handler is wired on the wait itself.
+        XCTAssertTrue(source.contains("} onCancel: {\n            _ = registry.stop(conversationID: conversationID, taskID: stopID)"),
+                      "the foreground wait no longer stops the command when it is cancelled")
     }
 }
 

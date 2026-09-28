@@ -138,6 +138,20 @@ struct AppSettings {
     // Developer Mode
     static let developerModeKey = "developerMode"
 
+    // Remote (first-party cloud) model visibility
+    /// Key for the General Settings toggle that reveals the first-party remote
+    /// providers — Gemini, OpenAI, Anthropic — in every provider picker (agent/bot/
+    /// workflow/image-gen profile config and the Code interface backend selector).
+    /// Default OFF: the providers ship hidden, and the toggle is the way back in.
+    static let showRemoteModelsKey = "showRemoteModels"
+    /// Whether remote-model providers appear in provider pickers. Absence of the key
+    /// means hidden. Read by `ProfileCapabilityFilter` (Foundation-only call sites),
+    /// so it is a computed UserDefaults lookup rather than an `@AppStorage` binding —
+    /// views that need live re-rendering bind their own `@AppStorage` to the key.
+    static var showRemoteModels: Bool {
+        UserDefaults.standard.object(forKey: showRemoteModelsKey) as? Bool ?? false
+    }
+
     // Diagnostics consent (default-ON opt-out)
     /// Opt-out for on-device error/warning diagnostics: warning+ log buffering, v2 error-
     /// analytics columns, and crash-diagnostic capture. NOTE: basic execution traces

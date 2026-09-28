@@ -78,7 +78,8 @@ struct OpenAILLMProvider: LLMProvider {
     ///
     /// ⚠️ Every parameter dropped here is LOGGED. Silently omitting a value the user set in the
     /// panel is how a knob becomes decorative without anyone noticing (registers A19/A24/A25).
-    private func applyGenerationParams(to body: inout [String: Any]) {
+    // Internal (not private) so tests can inspect the exact body shape without a network mock.
+    func applyGenerationParams(to body: inout [String: Any]) {
         let family = modelFamily
 
         if let maxTokens = maxTokens {
@@ -110,6 +111,125 @@ struct OpenAILLMProvider: LLMProvider {
                 )
             }
         }
+
+        // OpenRouter usage accounting: puts the request's `cost` in `usage` so it can be logged
+        // alongside the generation id (see `logRouterMetadata`).
+        if isOpenRouter {
+            body["usage"] = ["include": true]
+        }
+
+        // OpenRouter provider routing. Only ever sent to OpenRouter: OpenAI and compatible
+        // gateways share this config type, and an unknown top-level `provider` key is a 400 on
+        // some of them.
+        if denyDataCollection {
+            if isOpenRouter {
+                body["provider"] = ["data_collection": "deny"]
+            } else {
+                logger.notice("[PROFILE] Omitting provider.data_collection for non-OpenRouter endpoint (\(providerCategory.rawValue)). CONSEQUENCE: the setting only applies to OpenRouter.")
+            }
+        }
+    }
+
+    private var isOpenRouter: Bool { providerCategory == .openRouter || providerCategory == .openRouterFree }
+
+    /// Logs which upstream served an OpenRouter request, its generation id and its cost.
+    ///
+    /// ⚠️ Without these a slow, failed or oddly-behaving OpenRouter call cannot be traced: the same
+    /// model slug is served by several upstream providers, and the generation id is the only handle
+    /// OpenRouter's own dashboard and `/api/v1/generation?id=` lookups accept.
+    private func logRouterMetadata(_ json: [String: Any]?) {
+        guard isOpenRouter, let json, let summary = Self.routerMetadataSummary(json) else { return }
+        logger.info("[OPENROUTER] \(summary)")
+    }
+
+    /// The loggable summary of an OpenRouter response (or terminal stream chunk), or nil when it
+    /// carries none of the fields. Pure so tests can pin the parsing.
+    static func routerMetadataSummary(_ json: [String: Any]) -> String? {
+        let id = json["id"] as? String
+        let upstream = json["provider"] as? String
+        let model = json["model"] as? String
+        let usage = json["usage"] as? [String: Any]
+        let cost = (usage?["cost"] as? NSNumber)?.doubleValue
+        guard id != nil || upstream != nil || cost != nil else { return nil }
+
+        var parts = ["generation: \(id ?? "?")", "upstream: \(upstream ?? "?")"]
+        if let model { parts.append("model: \(model)") }
+        if let prompt = (usage?["prompt_tokens"] as? NSNumber)?.intValue,
+           let completion = (usage?["completion_tokens"] as? NSNumber)?.intValue {
+            parts.append("tokens: \(prompt) in / \(completion) out")
+        }
+        if let cost { parts.append("cost: $" + String(format: "%.6f", cost)) }
+        return parts.joined(separator: ", ")
+    }
+
+    /// An error object carried INSIDE a successful (HTTP 200) body or stream chunk, as a
+    /// `CloudProviderError` so `ProviderErrorClassifier` treats it like the status it names.
+    ///
+    /// ⚠️ OpenRouter (and some gateways) report failures that happen after the response has started
+    /// this way — `{"error": {"code": 502, "message": "..."}}`, sometimes beside a partial `choices`.
+    /// Parsed as a normal response it became "Missing message object" (an invalid-response parse
+    /// failure, retried as if the model had emitted bad JSON) or, streaming, a silent truncation.
+    /// A code outside 4xx/5xx is treated as 502: the upstream failed, the request was fine.
+    static func embeddedError(in json: [String: Any], provider: RateLimitCategory) -> CloudProviderError? {
+        guard let error = json["error"] as? [String: Any] else { return nil }
+        let rawCode = (error["code"] as? Int) ?? (error["code"] as? String).flatMap(Int.init)
+        let status = rawCode.flatMap { (400...599).contains($0) ? $0 : nil } ?? 502
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": error]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "\(error)"
+        return CloudProviderError(statusCode: status, retryAfterSeconds: nil,
+                                  requestId: json["id"] as? String, rawBody: body, provider: provider)
+    }
+
+    /// Decodes one streamed `chat/completions` line. Static and pure so the error paths are testable
+    /// without a network stream.
+    static func streamLineDirective(_ line: String, provider: RateLimitCategory) -> SSELineDirective {
+        guard line.hasPrefix("data: ") else { return .skip }
+        let payload = String(line.dropFirst(6))
+
+        if payload == "[DONE]" { return .finish }
+
+        guard let chunkData = payload.data(using: .utf8),
+              let chunk = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any] else {
+            return .skip
+        }
+
+        // A failure after the 200 was sent arrives as an in-band error chunk (OpenRouter does this
+        // when the upstream dies mid-generation). Skipping it — which this did — ended the stream
+        // "cleanly" with a truncated answer that looked complete.
+        if let embedded = embeddedError(in: chunk, provider: provider) {
+            return .fail(embedded)
+        }
+
+        guard let choices = chunk["choices"] as? [[String: Any]],
+              let delta = choices.first?["delta"] as? [String: Any],
+              let content = delta["content"] as? String else {
+            return .skip
+        }
+        return .emit(content)
+    }
+
+    /// The model's thinking trace. DeepSeek (and OpenAI-compatible servers copying it) use
+    /// `reasoning_content`; OpenRouter normalises every upstream to `reasoning`. Only the first was
+    /// read, so on OpenRouter the trace was silently dropped — the log showed "Model Reasoning:
+    /// (none)" on every step of a reasoning model.
+    static func reasoningTrace(in message: [String: Any]) -> String? {
+        for key in ["reasoning_content", "reasoning"] {
+            if let text = message[key] as? String, !text.isEmpty { return text }
+        }
+        return nil
+    }
+
+    /// OpenRouter's `reasoning_details` array, kept verbatim so it can be echoed back on this
+    /// step's assistant turn (see `ModernCognitiveStep.reasoningReplay`).
+    static func reasoningReplay(in message: [String: Any]) -> JSONValue? {
+        guard let details = message["reasoning_details"] as? [Any], !details.isEmpty else { return nil }
+        return JSONValue(details)
+    }
+
+    /// OpenRouter "Deny Data Collection" (per profile, off by default).
+    private var denyDataCollection: Bool {
+        if case .bool(true) = config.options?["denyDataCollection"] { return true }
+        return false
     }
 
     /// Creates a standard OpenAI URLRequest with proper headers.
@@ -165,6 +285,8 @@ struct OpenAILLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        logRouterMetadata(json)
+        if let json, let embedded = Self.embeddedError(in: json, provider: providerCategory) { throw embedded }
         guard let choices = json?["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any] else {
@@ -229,6 +351,8 @@ struct OpenAILLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        logRouterMetadata(json)
+        if let json, let embedded = Self.embeddedError(in: json, provider: providerCategory) { throw embedded }
         guard let choices = json?["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any] else {
@@ -261,6 +385,8 @@ struct OpenAILLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        logRouterMetadata(json)
+        if let json, let embedded = Self.embeddedError(in: json, provider: providerCategory) { throw embedded }
         guard let choices = json?["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any] else {
@@ -274,7 +400,7 @@ struct OpenAILLMProvider: LLMProvider {
         }
 
         let content = message["content"] as? String ?? ""
-        let reasoningContent = message["reasoning_content"] as? String
+        let reasoningContent = Self.reasoningTrace(in: message)
         var pendingTools: [PendingToolCall] = []
 
         if let toolCalls = message["tool_calls"] as? [[String: Any]] {
@@ -303,7 +429,8 @@ struct OpenAILLMProvider: LLMProvider {
         // Extract token usage from OpenAI API response
         let usage = json.flatMap { TokenUsage.fromOpenAI($0) }
 
-        return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage)
+        return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage,
+                                   reasoningReplay: Self.reasoningReplay(in: message))
     }
 
     // MARK: - Native-Turn Cognitive Step (G12)
@@ -331,6 +458,8 @@ struct OpenAILLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        logRouterMetadata(json)
+        if let json, let embedded = Self.embeddedError(in: json, provider: providerCategory) { throw embedded }
         guard let choices = json?["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               let message = firstChoice["message"] as? [String: Any] else {
@@ -342,8 +471,14 @@ struct OpenAILLMProvider: LLMProvider {
             logger.warning("⚠️ OpenAI cognitive step truncated (finish_reason: length). Configured max_tokens: \(limitDesc).")
         }
 
+        return Self.step(fromMessage: message, usage: json.flatMap { TokenUsage.fromOpenAI($0) })
+    }
+
+    /// Builds a step from one `chat/completions` assistant message — the non-streaming response's
+    /// `choices[0].message`, or the message `OpenAIStreamAccumulator` reassembles from a stream.
+    /// One function so the two paths cannot disagree about tool-call or reasoning parsing.
+    static func step(fromMessage message: [String: Any], usage: TokenUsage?) -> ModernCognitiveStep {
         let content = message["content"] as? String ?? ""
-        let reasoningContent = message["reasoning_content"] as? String
         var pendingTools: [PendingToolCall] = []
 
         if let toolCalls = message["tool_calls"] as? [[String: Any]] {
@@ -363,8 +498,85 @@ struct OpenAILLMProvider: LLMProvider {
             }
         }
 
-        let usage = json.flatMap { TokenUsage.fromOpenAI($0) }
-        return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage)
+        return ModernCognitiveStep(reasoning: content, thought: reasoningTrace(in: message), toolCalls: pendingTools,
+                                   tokenUsage: usage, reasoningReplay: reasoningReplay(in: message))
+    }
+
+    /// The native-turn step with the visible text streamed through `onTextDelta` (see the protocol).
+    ///
+    /// Same request as `generateCognitiveStep(nativeMessages:tools:)` plus `stream: true`; the
+    /// chunks are reassembled by `OpenAIStreamAccumulator` into the message the non-streaming path
+    /// would have received, and parsed by the same `step(fromMessage:usage:)`. Transport, Stop and
+    /// the between-chunk stall watchdog come from `SSEStreamParser`; each `data:` payload is passed
+    /// through verbatim and decoded here, and an in-band error chunk fails the step.
+    func generateCognitiveStepStreaming(
+        nativeMessages: [[String: Any]],
+        tools: [[String: Any]]?,
+        onTextDelta: @escaping @Sendable (String) -> Void
+    ) async throws -> ModernCognitiveStep {
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": nativeMessages,
+            "stream": true,
+            "stream_options": ["include_usage": true],
+        ]
+        applyGenerationParams(to: &body)
+        if let tools = tools, !tools.isEmpty { body["tools"] = tools }
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+
+        let chunks = SSEStreamParser.stream(
+            openBytes: {
+                var request = self.makeRequest()
+                request.httpBody = bodyData
+                let (bytes, _) = try await CloudRequestPipeline.executeStream(
+                    request: request, provider: self.providerCategory, rateLimitKey: self.config.rateLimitKey
+                )
+                return bytes
+            },
+            handleLine: { [providerCategory] line, _ in
+                Self.rawChunkDirective(line, provider: providerCategory)
+            }
+        )
+
+        var accumulator = OpenAIStreamAccumulator()
+        let started = Date()
+        var firstTextAfter: TimeInterval?
+        var chunkCount = 0
+        var textDeltaCount = 0
+        for try await payload in chunks {
+            guard let data = payload.data(using: .utf8),
+                  let chunk = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            chunkCount += 1
+            if let delta = accumulator.consume(chunk), !delta.isEmpty {
+                if firstTextAfter == nil { firstTextAfter = Date().timeIntervalSince(started) }
+                textDeltaCount += 1
+                onTextDelta(delta)
+            }
+        }
+        // The one line that says whether the user SAW anything before the step ended: without it a
+        // streamed step and a blocking one log identically ("Response received in 56s").
+        logger.info("[STREAM] Step streamed: \(chunkCount) chunk(s), \(textDeltaCount) with visible text; first text after \(firstTextAfter.map { String(format: "%.1fs", $0) } ?? "never (tool calls / thinking only)"), total \(String(format: "%.1fs", Date().timeIntervalSince(started))).")
+
+        if let usageChunk = accumulator.lastUsageChunk { logRouterMetadata(usageChunk) }
+        if accumulator.finishReason == "length" {
+            let limitDesc = maxTokens.map { String($0) } ?? "model default"
+            logger.warning("⚠️ OpenAI streamed cognitive step truncated (finish_reason: length). Configured max_tokens: \(limitDesc).")
+        }
+        return Self.step(fromMessage: accumulator.message, usage: accumulator.lastUsageChunk.flatMap { TokenUsage.fromOpenAI($0) })
+    }
+
+    /// Like `streamLineDirective`, but hands each `data:` payload through WHOLE (as the emitted
+    /// string) so the caller can read tool-call and reasoning deltas, not just text.
+    static func rawChunkDirective(_ line: String, provider: RateLimitCategory) -> SSELineDirective {
+        guard line.hasPrefix("data: ") else { return .skip }
+        let payload = String(line.dropFirst(6))
+        if payload == "[DONE]" { return .finish }
+        if let data = payload.data(using: .utf8),
+           let chunk = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let embedded = embeddedError(in: chunk, provider: provider) {
+            return .fail(embedded)
+        }
+        return .emit(payload)
     }
 
     // MARK: - Streaming
@@ -406,22 +618,11 @@ struct OpenAILLMProvider: LLMProvider {
                       let data = payload.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
                 // `usage` is present only on the terminal include_usage chunk.
+                if json["usage"] != nil { self.logRouterMetadata(json) }
                 return TokenUsage.fromOpenAI(json)
             },
-            handleLine: { line, _ in
-                guard line.hasPrefix("data: ") else { return .skip }
-                let payload = String(line.dropFirst(6))
-
-                if payload == "[DONE]" { return .finish }
-
-                guard let chunkData = payload.data(using: .utf8),
-                      let chunk = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
-                      let choices = chunk["choices"] as? [[String: Any]],
-                      let delta = choices.first?["delta"] as? [String: Any],
-                      let content = delta["content"] as? String else {
-                    return .skip
-                }
-                return .emit(content)
+            handleLine: { [providerCategory] line, _ in
+                Self.streamLineDirective(line, provider: providerCategory)
             }
         )
     }

@@ -145,8 +145,10 @@ final class ChatOpsHostSeamTests: XCTestCase {
             .filter { line in
                 line.hasPrefix("    func ") || line.hasPrefix("    var ")
             }
-        XCTAssertEqual(requirements.count, 8, """
-            The seam has \(requirements.count) requirements, not 8: \
+        // 9 since 2026-09-27: `pendingQuestionNoun` lets a refused remote prompt say WHAT the run
+        // is waiting on (Timeout inventory D-23, owner decision). Deliberate, not drift.
+        XCTAssertEqual(requirements.count, 9, """
+            The seam has \(requirements.count) requirements, not 9: \
             \(requirements.map { $0.trimmingCharacters(in: .whitespaces) }).
             A new member is not automatically wrong — but it belongs to whichever QUESTION it \
             answers, and if it answers neither it needs its own narrow protocol rather than a \
@@ -195,6 +197,8 @@ private final class FakeRemoteHost: RemoteRunControlling, RemoteConversationComm
     func pendingClarificationID(inConversation conversation: UUID) -> UUID? {
         pendingClarifications[conversation]
     }
+
+    func pendingQuestionNoun(inConversation conversation: UUID) -> String? { nil }
 
     @discardableResult
     func cancelRun(inConversation conversation: UUID) async -> Bool {

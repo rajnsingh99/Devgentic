@@ -169,7 +169,7 @@ struct LLMRetryStrategy: LLMRetryHandling {
         }
 
         if isTimeout {
-            return transientAction(detail: "request timed out", requestId: nil)
+            return transientAction(detail: ProviderErrorClassifier.timeoutDetail, requestId: nil)
         }
 
         // Ollama's local-model-unloaded string.
@@ -339,7 +339,7 @@ struct LLMRetryStrategy: LLMRetryHandling {
             case .mlx:
                 "The local model failed (\(detail)). Try reloading the model or switching to a smaller one."
             }
-            return .fatal(reason: reason, category: .providerServerError)
+            return .fatal(reason: reason, category: ProviderErrorClassifier.exhaustedCategory(forDetail: detail))
         }
 
         let delay = transport.transientDelay(attempt: consecutiveTransientFailures)

@@ -13,8 +13,6 @@ struct ThemeSettingsView: View {
     @Environment(ThemeManager.self) var themeManager
     @Environment(\.appTheme) private var theme
 
-    let columns = [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 24)]
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 40) {
@@ -38,7 +36,7 @@ struct ThemeSettingsView: View {
                             .foregroundColor(theme.secondaryText)
                     }
 
-                    LazyVGrid(columns: columns, spacing: 20) {
+                    HStack(alignment: .top, spacing: 14) {
                         ForEach(themeManager.availableThemes, id: \.id) { appTheme in
                             ThemePreviewCard(
                                 previewTheme: appTheme,
@@ -114,12 +112,12 @@ struct ThemeSettingsView: View {
                                 .foregroundColor(theme.secondaryText)
                         }
 
-                        Text("Choose between Apple Liquid Glass or a razor-sharp solid matte pro workspace.")
+                        Text("Choose between translucent glass with accent buttons, or solid material with high-contrast buttons.")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
-                    HStack(spacing: 16) {
+                    HStack(alignment: .top, spacing: 16) {
                         ForEach(SurfaceStyle.allCases) { style in
                             SurfaceStyleCard(
                                 style: style,
@@ -128,44 +126,6 @@ struct ThemeSettingsView: View {
                             ) {
                                 withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
                                     themeManager.applySurfaceStyle(style)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Rectangle()
-                    .fill(theme.dividerColor.opacity(0.25))
-                    .frame(height: 1)
-
-                // MARK: - Button Accent Section
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "paintpalette.fill")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(theme.accentColor)
-
-                            Text("BUTTON PRESENTATION")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .tracking(1.8)
-                                .foregroundColor(theme.secondaryText)
-                        }
-
-                        Text("Choose whether primary call-to-actions adopt your active accent color or a stark monochrome pro palette.")
-                            .font(theme.fontSubheadline)
-                            .foregroundColor(theme.secondaryText)
-                    }
-
-                    HStack(spacing: 16) {
-                        ForEach(ButtonAccentStyle.allCases) { style in
-                            ButtonAccentStyleCard(
-                                style: style,
-                                isSelected: themeManager.buttonAccentStyle == style,
-                                theme: theme
-                            ) {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                                    themeManager.applyButtonAccentStyle(style)
                                 }
                             }
                         }
@@ -191,19 +151,19 @@ struct ThemeSettingsView: View {
                                 .foregroundColor(theme.secondaryText)
                         }
 
-                        Text("Select font family, adjust size and line spacing for chat messages.")
+                        Text("Select font family and adjust size for chat messages.")
                             .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
                     VStack(alignment: .leading, spacing: 20) {
-                        // Font Family Selector
+                        // Font Family Selector (Equal Distance HStack)
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Font Family")
                                 .font(theme.fontSubheadline.weight(.semibold))
                                 .foregroundColor(theme.primaryText)
 
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 14)], spacing: 14) {
+                            HStack(alignment: .top, spacing: 14) {
                                 ForEach(ChatFontFamily.allCases) { family in
                                     ChatFontFamilyCard(
                                         family: family,
@@ -218,66 +178,17 @@ struct ThemeSettingsView: View {
                             }
                         }
 
-                        // Font Size Slider
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Font Size")
-                                    .font(theme.fontSubheadline.weight(.semibold))
-                                    .foregroundColor(theme.primaryText)
-                                Spacer()
-                                Text("\(Int(themeManager.chatFontSize)) pt")
-                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                    .foregroundColor(theme.accentColor)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(
-                                        Capsule().fill(theme.accentColor.opacity(0.14))
-                                    )
-                            }
-                            HStack(spacing: 10) {
-                                Text("A")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(theme.tertiaryText)
-                                Slider(
-                                    value: Binding(
-                                        get: { themeManager.chatFontSize },
-                                        set: { themeManager.applyChatFontSize($0) }
-                                    ),
-                                    in: 12...22,
-                                    step: 1
-                                )
-                                .tint(theme.accentColor)
-                                Text("A")
-                                    .font(.system(size: 16, weight: .bold))
-                                    .foregroundColor(theme.tertiaryText)
-                            }
-                        }
-
-                        // Line Spacing Slider
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Line Spacing")
-                                    .font(theme.fontSubheadline.weight(.semibold))
-                                    .foregroundColor(theme.primaryText)
-                                Spacer()
-                                Text(String(format: "%.0f pt", themeManager.chatLineSpacing))
-                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                    .foregroundColor(theme.accentColor)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(
-                                        Capsule().fill(theme.accentColor.opacity(0.14))
-                                    )
-                            }
-                            Slider(
-                                value: Binding(
-                                    get: { themeManager.chatLineSpacing },
-                                    set: { themeManager.applyChatLineSpacing($0) }
-                                ),
-                                in: 0...12,
-                                step: 1
-                            )
-                            .tint(theme.accentColor)
+                        // Premium Font Size Slider
+                        PremiumFontSizeSlider(
+                            value: Binding(
+                                get: { themeManager.chatFontSize },
+                                set: { themeManager.applyChatFontSize($0) }
+                            ),
+                            range: 11...20,
+                            defaultValue: 14,
+                            theme: theme
+                        ) { newSize in
+                            themeManager.applyChatFontSize(newSize)
                         }
 
                         // Reset Button & Preview Hint
@@ -291,8 +202,7 @@ struct ThemeSettingsView: View {
                             Button {
                                 withAnimation(.easeInOut(duration: 0.2)) {
                                     themeManager.applyChatFontFamily(.system)
-                                    themeManager.applyChatFontSize(15)
-                                    themeManager.applyChatLineSpacing(4)
+                                    themeManager.applyChatFontSize(14)
                                 }
                             } label: {
                                 Text("Reset to Default")
@@ -300,8 +210,8 @@ struct ThemeSettingsView: View {
                                     .foregroundColor(theme.secondaryText)
                             }
                             .buttonStyle(.plain)
-                            .disabled(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4)
-                            .opacity(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4 ? 0.4 : 1)
+                            .disabled(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 14)
+                            .opacity(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 14 ? 0.4 : 1)
                         }
                     }
                 }
@@ -329,7 +239,7 @@ struct ThemeSettingsView: View {
                             .foregroundColor(theme.secondaryText)
                     }
 
-                    LazyVGrid(columns: columns, spacing: 20) {
+                    HStack(alignment: .top, spacing: 14) {
                         ForEach(CodeViewerThemeOverride.allCases, id: \.self) { override in
                             CodeViewerPreviewCard(
                                 override: override,
@@ -449,6 +359,7 @@ struct ThemePreviewCard: View {
                 .padding(.horizontal, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
@@ -465,8 +376,8 @@ struct CodeViewerPreviewCard: View {
 
     var previewTheme: any Theme {
         switch override {
-        case .material: return AppThemes.MaterialTheme()
-        case .cosmicDark: return AppThemes.CosmicDarkTheme()
+        case .cosmicDark: return AppThemes.MaterialTheme()
+        case .highContrast: return AppThemes.HighContrastTheme()
         case .oneLight: return AppThemes.OneLightTheme()
         case .solarizedLight: return AppThemes.SolarizedLightTheme()
         }
@@ -543,6 +454,7 @@ struct CodeViewerPreviewCard: View {
                 .padding(.horizontal, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
@@ -918,7 +830,7 @@ private struct ChatFontFamilyCard: View {
                                 .stroke(isSelected ? theme.accentColor.opacity(0.3) : theme.dividerColor.opacity(0.4), lineWidth: 0.75)
                         )
 
-                    Text(family.displayName)
+                    Text(family.shortName)
                         .font(theme.fontFootnote.weight(isSelected ? .bold : .semibold))
                         .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
                         .lineLimit(1)
@@ -939,7 +851,7 @@ private struct ChatFontFamilyCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(isSelected ? theme.accentColor.opacity(0.08) : (isHovering ? theme.surfaceOverlay : theme.secondaryBackground))
@@ -956,6 +868,206 @@ private struct ChatFontFamilyCard: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Premium Font Size Slider
+
+private struct PremiumFontSizeSlider: View {
+    @Binding var value: CGFloat
+    let range: ClosedRange<CGFloat>
+    let defaultValue: CGFloat
+    let theme: any Theme
+    let onCommit: (CGFloat) -> Void
+
+    @State private var isDragging = false
+    @State private var isHovering = false
+
+    private var steps: [Int] {
+        Array(Int(range.lowerBound)...Int(range.upperBound))
+    }
+
+    private var progress: CGFloat {
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        return (value - range.lowerBound) / span
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header Row: Title & Active Value Pill
+            HStack(alignment: .center) {
+                Text("Font Size")
+                    .font(theme.fontSubheadline.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+
+                Spacer()
+
+                HStack(spacing: 5) {
+                    Text("\(Int(value)) pt")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(theme.accentColor)
+
+                    if Int(value) == Int(defaultValue) {
+                        Text("• DEFAULT")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(theme.accentColor.opacity(0.85))
+                    }
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3.5)
+                .background(
+                    Capsule().fill(theme.accentColor.opacity(0.12))
+                )
+                .overlay(
+                    Capsule().strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 0.75)
+                )
+            }
+
+            // Slider Track Row
+            HStack(spacing: 12) {
+                // Decrement Button (Small 'A')
+                Button {
+                    let next = max(range.lowerBound, value - 1)
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+                        value = next
+                    }
+                    onCommit(next)
+                } label: {
+                    Text("A")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(value > range.lowerBound ? theme.secondaryText : theme.tertiaryText.opacity(0.35))
+                        .frame(width: 24, height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(theme.surfaceOverlay)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(value <= range.lowerBound)
+                .help("Decrease font size (\(Int(max(range.lowerBound, value - 1))) pt)")
+
+                // Custom Tactile Track
+                GeometryReader { geometry in
+                    let width = geometry.size.width
+                    let thumbDiameter: CGFloat = isDragging ? 19 : (isHovering ? 17 : 16)
+                    let availableWidth = max(1, width - thumbDiameter)
+                    let thumbX = progress * availableWidth + (thumbDiameter / 2)
+
+                    ZStack(alignment: .leading) {
+                        // Background Track
+                        Capsule()
+                            .fill(theme.secondaryBackground)
+                            .frame(height: 6)
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(theme.dividerColor.opacity(0.4), lineWidth: 0.75)
+                            )
+
+                        // Filled Accent Track
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [theme.accentColor.opacity(0.85), theme.accentColor],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: max(0, min(width, thumbX)), height: 6)
+
+                        // Discrete Step Tick Dots
+                        HStack(spacing: 0) {
+                            ForEach(steps, id: \.self) { step in
+                                let isPast = CGFloat(step) <= value
+                                let isDef = step == Int(defaultValue)
+
+                                if step != steps.first {
+                                    Spacer()
+                                }
+
+                                Circle()
+                                    .fill(
+                                        isDef
+                                            ? (isPast ? Color.white : theme.accentColor)
+                                            : (isPast ? Color.white.opacity(0.7) : theme.dividerColor.opacity(0.8))
+                                    )
+                                    .frame(width: isDef ? 4.5 : 2.5, height: isDef ? 4.5 : 2.5)
+
+                                if step == steps.last {
+                                    // End spacer
+                                }
+                            }
+                        }
+                        .padding(.horizontal, thumbDiameter / 2)
+                        .frame(height: 6)
+
+                        // Tactile Knob (Thumb)
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: thumbDiameter, height: thumbDiameter)
+                            .overlay(
+                                Circle()
+                                    .fill(theme.accentColor)
+                                    .frame(width: 5.5, height: 5.5)
+                            )
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5)
+                            )
+                            .shadow(color: Color.black.opacity(0.28), radius: isDragging ? 4 : 2.5, y: 1.5)
+                            .shadow(color: theme.accentColor.opacity(isDragging || isHovering ? 0.35 : 0), radius: 5)
+                            .scaleEffect(isDragging ? 1.15 : (isHovering ? 1.08 : 1.0))
+                            .position(x: thumbX, y: geometry.size.height / 2)
+                    }
+                    .frame(height: geometry.size.height)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { gesture in
+                                isDragging = true
+                                let clampedX = max(thumbDiameter / 2, min(width - thumbDiameter / 2, gesture.location.x))
+                                let fraction = (clampedX - thumbDiameter / 2) / availableWidth
+                                let raw = range.lowerBound + fraction * (range.upperBound - range.lowerBound)
+                                let snapped = round(raw)
+                                if snapped != value {
+                                    value = snapped
+                                    onCommit(snapped)
+                                }
+                            }
+                            .onEnded { _ in
+                                isDragging = false
+                            }
+                    )
+                    .onHover { hovering in
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            isHovering = hovering
+                        }
+                    }
+                }
+                .frame(height: 24)
+
+                // Increment Button (Large 'A')
+                Button {
+                    let next = min(range.upperBound, value + 1)
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+                        value = next
+                    }
+                    onCommit(next)
+                } label: {
+                    Text("A")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(value < range.upperBound ? theme.secondaryText : theme.tertiaryText.opacity(0.35))
+                        .frame(width: 24, height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(theme.surfaceOverlay)
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(value >= range.upperBound)
+                .help("Increase font size (\(Int(min(range.upperBound, value + 1))) pt)")
+            }
+        }
     }
 }
 
@@ -999,10 +1111,11 @@ private struct SurfaceStyleCard: View {
                     .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .topLeading)
             }
             .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(isSelected ? theme.accentColor.opacity(0.08) : (isHovering ? theme.surfaceOverlay : theme.secondaryBackground))
@@ -1016,118 +1129,11 @@ private struct SurfaceStyleCard: View {
                         lineWidth: isSelected ? 1.5 : 1
                     )
             )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { isHovering = $0 }
-    }
-}
-
-// MARK: - Button Accent Style Card
-
-private struct ButtonAccentStyleCard: View {
-    let style: ButtonAccentStyle
-    let isSelected: Bool
-    let theme: any Theme
-    let onSelect: () -> Void
-
-    @State private var isHovering = false
-
-    var body: some View {
-        Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: style.icon)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
-                        .frame(width: 24, height: 24)
-                        .background(
-                            Circle()
-                                .fill(isSelected ? theme.accentColor.opacity(0.15) : theme.surfaceOverlay)
-                        )
-
-                    Text(style.displayName)
-                        .font(theme.fontFootnote.weight(isSelected ? .bold : .semibold))
-                        .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
-
-                    Spacer()
-
-                    if isSelected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(theme.accentColor)
-                    }
-                }
-
-                Text(style.subtitle)
-                    .font(theme.fontCaption2)
-                    .foregroundColor(theme.secondaryText)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // Mini preview button to demonstrate the effect
-                HStack {
-                    Spacer()
-                    HStack(spacing: 5) {
-                        Image(systemName: "checkmark.shield")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("Action")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .foregroundColor(previewForeground)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4.5)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(previewBackground)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(previewBorder, lineWidth: 1)
-                    )
-                }
-                .padding(.top, 4)
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isSelected ? theme.accentColor.opacity(0.08) : (isHovering ? theme.surfaceOverlay : theme.secondaryBackground))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(
-                        isSelected
-                            ? theme.accentColor.opacity(0.5)
-                            : (isHovering ? theme.secondaryText.opacity(0.25) : theme.dividerColor.opacity(0.5)),
-                        lineWidth: isSelected ? 1.5 : 1
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-    }
-
-    private var previewForeground: Color {
-        switch style {
-        case .accent: return theme.accentForegroundColor
-        case .themeContrast: return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
-        }
-    }
-
-    private var previewBackground: Color {
-        switch style {
-        case .accent: return theme.accentColor
-        case .themeContrast: return theme.isDark ? .white : Color(red: 0.12, green: 0.12, blue: 0.14)
-        }
-    }
-
-    private var previewBorder: Color {
-        switch style {
-        case .accent:
-            return theme.isAccentLight ? theme.dividerColor.opacity(0.5) : Color.white.opacity(0.25)
-        case .themeContrast:
-            return theme.isDark ? .white : Color(red: 0.12, green: 0.12, blue: 0.14)
-        }
     }
 }
 

@@ -365,6 +365,19 @@ final class ReActExecutorIntegrationTests: XCTestCase {
     /// un-opted default — so an unrecovered tool failure must NOT reroute the
     /// answer through synthesis. Pinned at the executor, not the synthesizer:
     /// the synthesizer's own gate is not what regressed here.
+    ///
+    /// ⚠️ The scripted tool name must NOT be a real permission-gated tool name.
+    /// The incident's literal `fs_read_metadata` is mapped by
+    /// `ToolExecutionMediator.getRequiredPermissions` to
+    /// [.desktop, .documents, .downloads], so a mock run with that name routes
+    /// through `PermissionManager.shared.ensurePermissions` — real TCC-gated
+    /// `contentsOfDirectory` reads of ~/Desktop, ~/Documents, ~/Downloads. While
+    /// the test host's TCC decision is undetermined (true after every rebuild —
+    /// this app is signed ad-hoc, so its code identity changes each build), that
+    /// call blocks inside tccd's prompt flow for minutes and intermittently hung
+    /// these tests (observed 2026-09-25/26: the two gated tests cost ~180s each).
+    /// The `-probe` suffix keeps the incident's semantics — one unrecovered
+    /// metadata-read failure — off the real permission seam.
     func testReAct_UnrecoveredToolFailure_NotOptedIn_DoesNotRerouteAnswerThroughSynthesis() async throws {
         let table = """
         | File | Size |
@@ -374,12 +387,12 @@ final class ReActExecutorIntegrationTests: XCTestCase {
         | c.swift | 3 KB |
         """
 
-        let failingTool = TestToolFactory.makeFailing(name: "fs_read_metadata", error: "No such file")
+        let failingTool = TestToolFactory.makeFailing(name: "fs_read_metadata_probe", error: "No such file")
 
         let provider = MockLLMProvider(steps: [
             ModernCognitiveStep(
                 reasoning: "Fetching metadata.",
-                toolCalls: [TestToolCallFactory.make(name: "fs_read_metadata")]
+                toolCalls: [TestToolCallFactory.make(name: "fs_read_metadata_probe")]
             ),
             ModernCognitiveStep(reasoning: table)
         ])
@@ -405,13 +418,18 @@ final class ReActExecutorIntegrationTests: XCTestCase {
     /// `forceSynthesis` expression and the terminal-outcome derivation. Removing it
     /// from synthesis routing must leave the outcome honest, or every partially
     /// failed run would silently record green.
+    ///
+    /// Same naming constraint as the test above: `fs_read_metadata` itself is
+    /// permission-gated and would drag real TCC checks into this mock run. (The
+    /// same incident name with a failing tool and no opt-in must still amber the
+    /// run — that is what `fs_read_metadata_probe` pins here.)
     func testReAct_UnrecoveredToolFailure_StillReportsCompletedWithWarnings() async throws {
-        let failingTool = TestToolFactory.makeFailing(name: "fs_read_metadata", error: "No such file")
+        let failingTool = TestToolFactory.makeFailing(name: "fs_read_metadata_probe", error: "No such file")
 
         let provider = MockLLMProvider(steps: [
             ModernCognitiveStep(
                 reasoning: "Fetching metadata.",
-                toolCalls: [TestToolCallFactory.make(name: "fs_read_metadata")]
+                toolCalls: [TestToolCallFactory.make(name: "fs_read_metadata_probe")]
             ),
             ModernCognitiveStep(reasoning: "Here is the answer anyway.")
         ])

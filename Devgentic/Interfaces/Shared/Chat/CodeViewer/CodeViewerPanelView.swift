@@ -48,7 +48,7 @@ extension CodeEditSourceEditor.EditorTheme {
     public static let defaultDark: Self = SyntaxTheme(
         background: NSColor(hex: "#1e1e1e"),
         lineHighlight: NSColor(hex: "#2c2c2c"),
-        selection: NSColor(hex: "#264f78"),
+        selection: NSColor(hex: "#353535"),
         text: .white,
         keywords: NSColor(hex: "#569cd6"),
         commands: NSColor(hex: "#dcdcaa"),
@@ -270,6 +270,8 @@ private final class SyntaxThemeCache {
 struct CodeViewerPanelView: View {
     @Environment(ChatHistoryViewModel.self) var chatHistoryViewModel
     @Environment(ThemeManager.self) var themeManager
+    @Environment(\.appTheme) private var appTheme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     @State private var isHoveringOnDivider = false
     /// Panel width captured at the start of a divider drag, so the cumulative gesture
@@ -311,7 +313,33 @@ struct CodeViewerPanelView: View {
     private var maxPanelWidth: CGFloat {
         guard chatHistoryViewModel.codeViewerPresentation == .split,
               containerWidth.isFinite else { return containerWidth }
-        return max(400, containerWidth - ChatUIConstants.splitModeMinChatWidth)
+        return max(400, containerWidth - ChatUIConstants.splitModeMinChatWidth - 24)
+    }
+
+    private var floatingBorderStroke: some ShapeStyle {
+        surfaceStyle == .glassmorphic
+            ? AnyShapeStyle(LinearGradient(
+                colors: [
+                    appTheme.isDark ? Color.white.opacity(0.18) : appTheme.dividerColor,
+                    appTheme.dividerColor.opacity(0.6),
+                    accentTint.opacity(0.35)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ))
+            : AnyShapeStyle(LinearGradient(
+                colors: [
+                    appTheme.isDark ? Color.white.opacity(0.08) : appTheme.dividerColor.opacity(0.7)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ))
+    }
+
+    private var floatingShadowColor: Color {
+        surfaceStyle == .glassmorphic
+            ? appTheme.shadowColor.opacity(0.6)
+            : Color.black.opacity(appTheme.isDark ? 0.35 : 0.12)
     }
 
     @State private var document: CodeDocument?
@@ -377,13 +405,10 @@ struct CodeViewerPanelView: View {
     // MARK: - Body
 
     var body: some View {
-        HStack(spacing: 0) {
-            // No divider in full-width mode — there is nothing left to resize against.
-            if presentation != .full {
-                resizableDivider
-            }
-            panelContent
-        }
+        panelContent
+            .padding(.trailing, 12)
+        .padding(.vertical, 12)
+        .padding(.leading, presentation == .full ? 12 : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
@@ -391,10 +416,6 @@ struct CodeViewerPanelView: View {
             containerWidth = newWidth
         }
         .transition(.move(edge: .trailing))
-        // Overlay floats above the chat → drop shadow sells the elevation. In split the
-        // panel is a layout NEIGHBOUR of the chat (nothing underneath) — a shadow there
-        // reads as a rendering glitch on the seam, so it goes clear.
-        .shadow(color: presentation == .split ? .clear : .black.opacity(0.25), radius: 12, x: -4, y: 0)
         // `initial: true` is REQUIRED, not cosmetic. This panel is only created once a tab
         // is ALREADY active, so a plain `onChange` has no transition to observe on first
         // appear — `document` stayed nil and the panel rendered "No Code Selected" until the
@@ -498,53 +519,77 @@ struct CodeViewerPanelView: View {
     // MARK: - Resizable Divider
 
     private var resizableDivider: some View {
-        Rectangle()
-            .fill(isHoveringOnDivider ? accentTint.opacity(0.6) : selectionColor.opacity(0.3))
-            .frame(width: ChatUIConstants.codeViewerDividerWidth)
-            .contentShape(Rectangle())
-            .gesture(
-                // GLOBAL coordinate space is load-bearing. The divider is the panel's
-                // leading edge, so it MOVES as a result of its own drag — and in `.local`
-                // space `translation.width` then includes the divider's own (one-frame-
-                // stale) displacement on top of the cursor's. Subtracting that contaminated
-                // translation from the start width overshoots, the next frame compensates
-                // back, and the edge oscillates violently under the cursor. Global space
-                // measures the CURSOR alone, which is the only thing a resize should track.
-                DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                    .onChanged { value in
-                        // `translation.width` is cumulative from the gesture's START, so it
-                        // must be applied to the width AT THAT START — not to the live
-                        // width, which we're already moving. Subtracting the cumulative
-                        // translation from an already-moved width compounds quadratically and
-                        // the panel races to the clamp on a small drag. Capture the start once.
-                        let start = dragStartWidth ?? displayedWidth
-                        if dragStartWidth == nil { dragStartWidth = start }
-                        let newWidth = CGFloat(start) - value.translation.width
-                        // Rounded to whole points: fractional widths force the editor's
-                        // wrapped-text layout to re-solve on sub-pixel deltas for no
-                        // visible gain. Upper clamp is the measured container — the user
-                        // can drag the panel to the full window width, not an arbitrary
-                        // 1200pt cap.
-                        chatHistoryViewModel.codeViewerLiveDragWidth =
-                            Double(min(max(newWidth, 400), maxPanelWidth)).rounded()
-                    }
-                    .onEnded { _ in
-                        if let final = liveDragWidth {
-                            panelWidth = final   // persist ONCE per drag, not per tick
-                            logger.debug("[CodeViewer] Panel resized to \(Int(final))pt.")
-                        }
-                        // Clear AFTER committing: every reader falls back to the persisted
-                        // width, which now holds the same number, so nothing snaps back.
-                        chatHistoryViewModel.codeViewerLiveDragWidth = nil
-                        dragStartWidth = nil
-                    }
-            )
-            .onHover { hovering in
-                isHoveringOnDivider = hovering
-                if hovering { NSCursor.resizeLeftRight.set() }
-                else { NSCursor.arrow.set() }
+        let isDragging = chatHistoryViewModel.codeViewerLiveDragWidth != nil
+        let isHighlighted = isHoveringOnDivider || isDragging
+
+        return GeometryReader { geo in
+            let handleHeight = min(max(geo.size.height * 0.12, 60), 96)
+
+            ZStack {
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(width: 14, height: geo.size.height)
+                    .contentShape(Rectangle())
+
+                Capsule()
+                    .fill(isHighlighted ? accentTint : selectionColor.opacity(0.45))
+                    .frame(width: isHighlighted ? 2.5 : 1.5, height: handleHeight)
+                    .shadow(color: isHighlighted ? accentTint.opacity(0.6) : .clear, radius: 3)
             }
-            .animation(.easeInOut(duration: 0.15), value: isHoveringOnDivider)
+            .frame(width: 14, height: geo.size.height)
+        }
+        .frame(width: 14)
+        .frame(maxHeight: .infinity)
+        .offset(x: -7)
+        .gesture(
+            // GLOBAL coordinate space is load-bearing. The divider is the panel's
+            // leading edge, so it MOVES as a result of its own drag — and in `.local`
+            // space `translation.width` then includes the divider's own (one-frame-
+            // stale) displacement on top of the cursor's. Subtracting that contaminated
+            // translation from the start width overshoots, the next frame compensates
+            // back, and the edge oscillates violently under the cursor. Global space
+            // measures the CURSOR alone, which is the only thing a resize should track.
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    // `translation.width` is cumulative from the gesture's START, so it
+                    // must be applied to the width AT THAT START — not to the live
+                    // width, which we're already moving. Subtracting the cumulative
+                    // translation from an already-moved width compounds quadratically and
+                    // the panel races to the clamp on a small drag. Capture the start once.
+                    let start = dragStartWidth ?? displayedWidth
+                    if dragStartWidth == nil { dragStartWidth = start }
+                    let newWidth = CGFloat(start) - value.translation.width
+                    // Rounded to whole points: fractional widths force the editor's
+                    // wrapped-text layout to re-solve on sub-pixel deltas for no
+                    // visible gain. Upper clamp is the measured container — the user
+                    // can drag the panel to the full window width, not an arbitrary
+                    // 1200pt cap.
+                    chatHistoryViewModel.codeViewerLiveDragWidth =
+                        Double(min(max(newWidth, 400), maxPanelWidth)).rounded()
+                }
+                .onEnded { _ in
+                    if let final = liveDragWidth {
+                        panelWidth = final   // persist ONCE per drag, not per tick
+                        logger.debug("[CodeViewer] Panel resized to \(Int(final))pt.")
+                    }
+                    // Clear AFTER committing: every reader falls back to the persisted
+                    // width, which now holds the same number, so nothing snaps back.
+                    chatHistoryViewModel.codeViewerLiveDragWidth = nil
+                    dragStartWidth = nil
+                    if !isHoveringOnDivider {
+                        NSCursor.arrow.set()
+                    }
+                }
+        )
+        .onHover { hovering in
+            isHoveringOnDivider = hovering
+            if hovering {
+                NSCursor.resizeLeftRight.set()
+            } else if chatHistoryViewModel.codeViewerLiveDragWidth == nil {
+                NSCursor.arrow.set()
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
     }
 
     // MARK: - Panel Content
@@ -734,7 +779,26 @@ struct CodeViewerPanelView: View {
         // the mount gives us (MainApplicationView insets us past the sidebar).
         .frame(width: presentation == .full ? nil : min(CGFloat(displayedWidth), maxPanelWidth))
         .frame(maxWidth: presentation == .full ? .infinity : nil)
-        .background(panelBackground)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(panelBackground)
+                .shadow(
+                    color: floatingShadowColor,
+                    radius: surfaceStyle == .glassmorphic ? 20 : 16,
+                    x: 0,
+                    y: surfaceStyle == .glassmorphic ? 8 : 4
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(floatingBorderStroke, lineWidth: 1)
+        )
+        .overlay(alignment: .leading) {
+            if presentation != .full {
+                resizableDivider
+            }
+        }
         .background(tabSwitchingShortcuts)
         // Surfaces an Apply-Changes failure (missing file, on-disk drift, I/O error).
         // On a subview separate from the Save-error alert on `body` so the two alert

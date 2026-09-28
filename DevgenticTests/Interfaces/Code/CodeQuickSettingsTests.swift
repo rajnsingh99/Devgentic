@@ -82,30 +82,15 @@ final class CodeQuickSettingsTests: XCTestCase {
     func testSettingsAreScopedToTheirProject() {
         var a = CodeQuickSettings.default
         a.maxIterations = 45
-        a.toolConfirmations["edit_code_single"] = false
         CodeQuickSettingsStore.save(a, for: projectA.path, defaults: defaults, now: Date())
 
         let readA = CodeQuickSettingsStore.settings(for: projectA.path, defaults: defaults)
         let readB = CodeQuickSettingsStore.settings(for: projectB.path, defaults: defaults)
 
         XCTAssertEqual(readA.maxIterations, 45)
-        XCTAssertEqual(readA.toolConfirmations["edit_code_single"], false)
 
         XCTAssertEqual(readB, .default,
-                       "Project B inherited project A's settings. An auto-approve grant must never "
-                       + "follow the user into a folder they did not grant it for.")
-    }
-
-    func testAutoApproveDoesNotLeakToAnotherProject() {
-        // The sharpest form of the scope guarantee, asserted on its own so a failure is unambiguous.
-        var trusted = CodeQuickSettings.default
-        trusted.toolConfirmations["run_command"] = false
-        CodeQuickSettingsStore.save(trusted, for: projectA.path, defaults: defaults, now: Date())
-
-        let other = CodeQuickSettingsStore.settings(for: projectB.path, defaults: defaults)
-
-        XCTAssertNil(other.toolConfirmations["run_command"],
-                     "Shell auto-approve leaked to an unconfigured project.")
+                       "Project B inherited project A's settings.")
     }
 
     func testTrailingSlashIsTheSameProject() {
@@ -216,53 +201,23 @@ final class CodeQuickSettingsTests: XCTestCase {
                      "A 0 timeout must become nil (unbounded), never a zero-second budget.")
     }
 
-    func testToolConfirmationOverrideReachesTheTool() {
-        var settings = CodeQuickSettings.default
-        settings.toolConfirmations["edit_code_single"] = false
-
+    /// Ask/Auto is set in the Tool Library now (2026-09-25), on the profile's tool. Applying the
+    /// quick settings must carry it through untouched — this popover no longer has an opinion.
+    func testApplyKeepsTheAskAutoChoiceTheLibraryMade() {
         var config = agentConfig()
-        CodeSessionManager.apply(settings, to: &config)
+        let idx = try? XCTUnwrap(config.tools.firstIndex { $0.name == "edit_code_single" })
+        guard let idx else { return XCTFail("edit_code_single missing from the preset") }
+        config.tools[idx].requiresConfirmation = false
 
-        let tool = config.tools.first { $0.name == "edit_code_single" }
-        XCTAssertEqual(tool?.requiresConfirmation, false,
-                       "The override did not reach the tool the executor reads — the toggle would "
-                       + "move in the UI and change nothing about whether the banner appears.")
-    }
+        CodeSessionManager.apply(.default, to: &config)
 
-    func testOverrideWinsOverTheValueCarriedFromTheProfile() {
-        // `mergePresetTools` carries requiresConfirmation from the existing profile tools. After a
-        // Home press the profile is freshly minted from the preset and has nothing useful to
-        // carry, so the override has to be authoritative or it is silently discarded.
-        var config = agentConfig()
-        if let idx = config.tools.firstIndex(where: { $0.name == "overwrite_file" }) {
-            config.tools[idx].requiresConfirmation = true
-        }
-
-        var settings = CodeQuickSettings.default
-        settings.toolConfirmations["overwrite_file"] = false
-        CodeSessionManager.apply(settings, to: &config)
-
-        XCTAssertEqual(config.tools.first { $0.name == "overwrite_file" }?.requiresConfirmation, false)
-    }
-
-    func testUnknownToolOverrideCannotResurrectATool() {
-        var settings = CodeQuickSettings.default
-        settings.toolConfirmations["a_tool_that_does_not_exist"] = false
-
-        var config = agentConfig()
-        CodeSessionManager.apply(settings, to: &config)
-
-        XCTAssertFalse(config.tools.contains { $0.name == "a_tool_that_does_not_exist" },
-                       "A stale override invented a tool. The preset is the authority on which "
-                       + "tools exist; overrides may only re-key ones already in it.")
+        XCTAssertEqual(config.tools.first { $0.name == "edit_code_single" }?.requiresConfirmation, false,
+                       "applying the quick settings overwrote the Tool Library's Auto Run choice")
     }
 
     func testApplyKeepsEveryPresetTool() {
-        var settings = CodeQuickSettings.default
-        settings.toolConfirmations["edit_code_batch"] = false
-
         var config = agentConfig()
-        CodeSessionManager.apply(settings, to: &config)
+        CodeSessionManager.apply(.default, to: &config)
 
         XCTAssertEqual(Set(config.tools.map(\.name)),
                        Set(CodeToolPreset.defaultTools.map(\.name)),
@@ -279,7 +234,6 @@ final class CodeQuickSettingsTests: XCTestCase {
 
         var settings = CodeQuickSettings.default
         settings.maxIterations = 50
-        settings.toolConfirmations["run_command"] = false
         manager.updateQuickSettings(settings)
 
         // The Home button. Resets the row to the preset — see `CodeProjectSessionTests`.
@@ -292,8 +246,6 @@ final class CodeQuickSettingsTests: XCTestCase {
         XCTAssertEqual(manager.quickSettings.maxIterations, 50,
                        "The iteration cap did not survive a Home press. This is the whole reason "
                        + "quick settings live in UserDefaults instead of on the profile row.")
-        XCTAssertEqual(manager.quickSettings.toolConfirmations["run_command"], false,
-                       "The auto-approve grant did not survive a Home press.")
 
         // And they must reach the freshly minted profile, not just the store.
         manager.refreshInstructionsOnProfile()
@@ -305,7 +257,6 @@ final class CodeQuickSettingsTests: XCTestCase {
         XCTAssertEqual(config.maxIterations, 50,
                        "Settings survived in UserDefaults but never reached the new profile — the "
                        + "run would still use the hardcoded 20.")
-        XCTAssertEqual(config.tools.first { $0.name == "run_command" }?.requiresConfirmation, false)
     }
 
     func testSettingsReachTheProfileOnEverySend() throws {
@@ -367,9 +318,6 @@ final class CodeQuickSettingsTests: XCTestCase {
 
         s = .default; s.executionTimeout = 300
         XCTAssertFalse(s.isDefault, "executionTimeout is not counted by isDefault.")
-
-        s = .default; s.toolConfirmations["git"] = true
-        XCTAssertFalse(s.isDefault, "toolConfirmations is not counted by isDefault.")
 
         s = .default; s.thinkingEnabled = false
         XCTAssertFalse(s.isDefault, "thinkingEnabled is not counted by isDefault.")

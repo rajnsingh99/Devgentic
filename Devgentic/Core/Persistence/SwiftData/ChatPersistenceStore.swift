@@ -66,6 +66,10 @@ protocol ChatPersistenceProtocol: Sendable {
     /// reason: a caller that needs data should be given data, not a database to query.
     /// Defaulted so lightweight test conformers aren't forced to implement it.
     func recentConversations(limit: Int) -> [(id: UUID, title: String)]
+
+    /// Every background/foreground task card saved in this conversation's timelines, oldest first.
+    /// The task list's history after a relaunch — the registry behind the live list is memory only.
+    func fetchBackgroundTaskRows(for conversationId: UUID) async -> [BackgroundTaskData]
 }
 
 extension ChatPersistenceProtocol {
@@ -79,6 +83,7 @@ extension ChatPersistenceProtocol {
     }
     func recentConversations(limit: Int) -> [(id: UUID, title: String)] { [] }
     func updateProjectPath(for conversationId: UUID, projectPath: String) {}
+    func fetchBackgroundTaskRows(for conversationId: UUID) async -> [BackgroundTaskData] { [] }
 }
 
 // MARK: - SwiftData Chat Persistence Store
@@ -715,6 +720,37 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
                 "[PERSISTENCE] profileType change for conversation \(conversationId.uuidString) was NOT "
                 + "persisted. CONSEQUENCE: it reverts on relaunch."
             )
+        }
+    }
+
+    /// ⚠️ The store is `@MainActor`, and a long conversation has thousands of rows, so this never
+    /// decodes a whole message: it reads only the timeline blob, and decodes THAT only when its
+    /// bytes contain the task case's key. The key is the synthesized `Codable` case name of
+    /// `KnownTimelineEvent.backgroundTask`, pinned by `BackgroundTaskHistoryStoreTests`.
+    func fetchBackgroundTaskRows(for conversationId: UUID) async -> [BackgroundTaskData] {
+        guard let context = mainContext else { return [] }
+        var descriptor = FetchDescriptor<ChatMessageSD>(
+            predicate: #Predicate { $0.conversationId == conversationId },
+            sortBy: [SortDescriptor(\.timestamp, order: .forward)]
+        )
+        descriptor.propertiesToFetch = [\.timelineEventsData]
+        let marker = Data("\"backgroundTask\"".utf8)
+        do {
+            var rows: [BackgroundTaskData] = []
+            for entity in try context.fetch(descriptor) {
+                guard let blob = entity.timelineEventsData, blob.range(of: marker) != nil else { continue }
+                do {
+                    for event in try ChatMessageSD.decodeTimeline(from: blob) {
+                        if case .backgroundTask(let data) = event { rows.append(data) }
+                    }
+                } catch {
+                    logger.error("[BGTASK] Task history: message \(entity.id.uuidString.prefix(8)) has an undecodable timeline (\(error.localizedDescription)). CONSEQUENCE: its task cards are missing from the task list's history; the message itself renders with its own decode-failure placeholder.")
+                }
+            }
+            return rows
+        } catch {
+            logger.error("[BGTASK] Task history fetch failed for conversation \(conversationId.uuidString.prefix(8)): \(error.localizedDescription). CONSEQUENCE: the task list shows only tasks from this launch.")
+            return []
         }
     }
 

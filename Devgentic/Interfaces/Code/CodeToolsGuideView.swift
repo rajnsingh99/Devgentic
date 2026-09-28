@@ -281,7 +281,7 @@ struct CodeToolsGuideView: View {
             parameters: [
                 ("command", "string", true, "Shell command or script to run"),
                 ("working_directory", "string", true, "Working directory path"),
-                ("timeout_seconds", "integer", false, "Max seconds to wait, up to 900 (default 30)")
+                ("timeout_seconds", "integer", false, "Max seconds to wait, up to 1800 (default 1800)")
             ],
             requiresConfirmation: true,
             whySplit: "Split from batch_command: a `background` boolean made one tool serve two intents, and the mode had to be explained in 270 characters of prose the tool name now carries for free."
@@ -294,7 +294,7 @@ struct CodeToolsGuideView: View {
             parameters: [
                 ("command", "string", true, "Shell command to start"),
                 ("working_directory", "string", true, "Working directory path"),
-                ("timeout_seconds", "integer", false, "Seconds before the task is killed, up to 900 (default 900)")
+                ("timeout_seconds", "integer", false, "Seconds before the task is killed, up to 1800 (default 1800)")
             ],
             requiresConfirmation: true,
             whySplit: "The other half of the batch_command split. It runs unattended, so its timeout is the only thing that stops a runaway."

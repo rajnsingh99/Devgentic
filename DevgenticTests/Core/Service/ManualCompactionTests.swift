@@ -52,7 +52,7 @@ final class ManualCompactionTests: XCTestCase {
             summarizerOverride: { messages in await recorder.prompt(messages); return "- earlier turns summarized" },
             deliverOverride: { message, _ in await recorder.deliver(message) })
 
-        guard case .compacted(let pairs, _, _, _) = outcome else { return XCTFail("expected a compaction, got \(outcome)") }
+        guard case .compacted(let pairs, _, _, _, _) = outcome else { return XCTFail("expected a compaction, got \(outcome)") }
         XCTAssertGreaterThan(pairs, 0)
         let delivered = await recorder.delivered
         XCTAssertEqual(delivered.count, 1, "the checkpoint was not delivered")

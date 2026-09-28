@@ -29,6 +29,7 @@ final class ChatOpsCommandServiceTests: XCTestCase {
         var clarifications: [UUID: UUID] = [:]
         func hasActiveRun(inConversation conversation: UUID) -> Bool { busy.contains(conversation) }
         func pendingClarificationID(inConversation conversation: UUID) -> UUID? { clarifications[conversation] }
+        func pendingQuestionNoun(inConversation conversation: UUID) -> String? { nil }
         @discardableResult
         func cancelRun(inConversation conversation: UUID) async -> Bool { busy.remove(conversation) != nil }
     }

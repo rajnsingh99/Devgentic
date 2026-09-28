@@ -389,7 +389,7 @@ final class CapabilityCardRouter {
     private static func stepStatus(for outcome: ExecutionOutcome?) -> PlanStepStatus {
         switch outcome {
         case .completedWithWarnings: return .warning
-        case .failed:                return .failed
+        case .failed, .timedOut:     return .failed
         case .cancelled:             return .cancelled
         case .completed, nil:        return .completed
         }

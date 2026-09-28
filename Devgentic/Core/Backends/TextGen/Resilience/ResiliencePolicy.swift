@@ -262,9 +262,19 @@ enum ProviderErrorClassifier {
         requestId: String? = nil
     ) -> ProviderErrorVerdict {
         let requestRef = requestId.map { " (request-id: \($0))" } ?? ""
+        let lowered = rawBody.lowercased()
 
         switch statusCode {
         case 429:
+            // OpenRouter's DAILY free-model cap is a 429 too, but it resets at midnight UTC —
+            // backing off and retrying five times cannot succeed and only delays the answer.
+            // The per-minute cap ("free-models-per-min") stays an ordinary throttle.
+            if lowered.contains("free-models-per-day") {
+                return .fatal(
+                    reason: "You've reached OpenRouter's daily limit for free models (HTTP 429). It resets at midnight UTC; adding credits to your OpenRouter account raises it, or switch to a paid model.\(requestRef)",
+                    category: .providerQuotaExhausted
+                )
+            }
             return .throttle(retryAfter: retryAfter)
 
         case 408, 500...599:
@@ -286,13 +296,34 @@ enum ProviderErrorClassifier {
             )
 
         case 404:
+            // OpenRouter answers 404 when the model exists but no upstream can serve THIS request.
+            // "Check the model name" is the wrong remedy for both — say what actually excluded it.
+            if lowered.contains("data policy") {
+                return .fatal(
+                    reason: LLMProviderError.formatHTTPError(status: statusCode, body: rawBody) + requestRef,
+                    category: .providerCapabilityMissing
+                )
+            }
+            if lowered.contains("no endpoints found") && lowered.contains("tool") {
+                return .fatal(
+                    reason: "No provider for this model supports tool calling (HTTP 404). Choose a tool-capable model for this Agent profile, or use a Bot profile for plain chat.\(requestRef)",
+                    category: .providerCapabilityMissing
+                )
+            }
             return .fatal(
                 reason: "The provider couldn't find the requested model or endpoint (HTTP 404). Check the model name in this profile.\(requestRef)",
                 category: .providerModelNotFound
             )
 
         default:
-            let lowered = rawBody.lowercased()
+            // OpenRouter rejects a slug that is not (or is no longer) in its catalog with a 400 —
+            // the usual fate of a `:free` variant that was withdrawn after the profile saved it.
+            if statusCode == 400, lowered.contains("not a valid model id") {
+                return .fatal(
+                    reason: "The provider no longer offers this model (HTTP 400) — it may have been withdrawn. Pick another model in this profile.\(requestRef)",
+                    category: .providerModelNotFound
+                )
+            }
             // "maximum context length" also appears in max_tokens-config 400s
             // ("max_tokens is too large: ... maximum context length is N") where
             // "start a new chat" is the wrong remedy — those fall through to the
@@ -348,7 +379,7 @@ enum ProviderErrorClassifier {
         if let urlError = error as? URLError {
             switch urlError.code {
             case .timedOut:
-                return .transient(detail: "request timed out")
+                return .transient(detail: ProviderErrorClassifier.timeoutDetail)
 
             case .cannotConnectToHost, .networkConnectionLost, .cannotFindHost, .dnsLookupFailed:
                 // Local servers: connection-refused means "not running" — an
@@ -379,6 +410,16 @@ enum ProviderErrorClassifier {
     /// `Task.sleep`'s trapping `UInt64` conversion, and real-world proxies send "-1",
     /// past dates, even "inf". Anything non-finite, negative, or absurd is dropped
     /// (caller falls back to local backoff); sane values are honored up to an hour.
+    /// The transient detail for a request that timed out — ONE spelling, so the fatal path can file
+    /// an exhausted timeout as `.providerTimeout` (it was `.providerServerError`, "Provider 5xx";
+    /// `providerTimeout` had no producer — Timeout inventory D-16) without matching free text.
+    static let timeoutDetail = "request timed out"
+
+    /// The category for a transient failure that exhausted its retries.
+    static func exhaustedCategory(forDetail detail: String) -> AgentErrorCategory {
+        detail == timeoutDetail ? .providerTimeout : .providerServerError
+    }
+
     static func sanitizedRetryAfter(_ value: TimeInterval?) -> TimeInterval? {
         guard let value, value.isFinite, value >= 0 else { return nil }
         return min(value, 3600)

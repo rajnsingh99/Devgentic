@@ -29,10 +29,10 @@ struct BackgroundTasksFloatingButton: View {
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(\.appTheme) private var theme
 
-    @State private var tasks: [BackgroundProcessRegistry.Snapshot] = []
+    @State private var tasks: [BackgroundTaskListItem] = []
     @State private var isHovering = false
 
-    private var runningCount: Int { tasks.filter { !$0.status.isTerminal }.count }
+    private var runningCount: Int { tasks.filter(\.isRunning).count }
 
     /// Hidden when the panel is already open (it would point at itself) and when this conversation
     /// has never run anything.
@@ -59,8 +59,15 @@ struct BackgroundTasksFloatingButton: View {
         Group {
             if isVisible { pill } else { EmptyView() }
         }
-        .onAppear(perform: reload)
-        .onChange(of: conversationID) { reload() }
+        // ⚠️ History, not just this launch: the saved cards are fetched on appear and on every
+        // conversation switch. Before 2026-09-26 this read the in-memory registry alone, so after a
+        // relaunch the pill vanished and the list it opens could not be reached at all.
+        .task(id: conversationID) {
+            reload()
+            guard let conversationID else { return }
+            await chatHistoryViewModel.refreshSavedBackgroundTasks(for: conversationID)
+            reload()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .backgroundTaskChanged)) { note in
             // Only this conversation's tasks — a run elsewhere must not light this up.
             guard note.userInfo?[BackgroundTaskNotificationKey.conversationID] as? UUID == conversationID
@@ -117,6 +124,6 @@ struct BackgroundTasksFloatingButton: View {
 
     private func reload() {
         guard let conversationID else { return tasks = [] }
-        tasks = BackgroundProcessRegistry.shared.snapshots(conversationID: conversationID)
+        tasks = chatHistoryViewModel.backgroundTaskItems(for: conversationID)
     }
 }

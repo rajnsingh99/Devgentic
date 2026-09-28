@@ -421,6 +421,34 @@ final class ConversationAdmissionTests: XCTestCase {
                           + "it admits re-parks and the conversation deadlocks")
     }
 
+    /// D-12 (Timeout inventory, 2026-09-26): a run cancelled WHILE QUEUED must still complete.
+    ///
+    /// The gate's park ignores cancellation, so a queued run cancelled by Stop, conversation delete
+    /// or the scheduler's 600 s deadline is only released when the run ahead of it ends. It then
+    /// takes an early `return` — which used to skip the `onComplete()` every other exit calls.
+    /// `SchedulerCoordinator.sendScheduledMessage` waits on exactly that callback, so the task
+    /// stayed "running" and every later fire was skipped until relaunch. Pinned structurally for
+    /// the same reason as the ordering test above: the behavioural failure is a hang.
+    func testARunCancelledWhileQueuedStillCompletes() throws {
+        let source = try sourceFile("Devgentic/Core/Utils/ActiveStreamManager.swift")
+        let code = source.components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        guard let marker = code.range(of: "was cancelled while waiting for conversation") else {
+            return XCTFail("the cancelled-while-queued branch moved — this guard is checking nothing")
+        }
+        guard let exit = code.range(of: "return", range: marker.upperBound..<code.endIndex) else {
+            return XCTFail("the cancelled-while-queued branch no longer returns")
+        }
+        let branch = code[marker.upperBound..<exit.lowerBound]
+        XCTAssertTrue(branch.contains("onComplete()"),
+                      "a run cancelled while queued returns without onComplete — a scheduled run "
+                      + "cancelled by its deadline never finishes and its task is dead until relaunch")
+        XCTAssertTrue(branch.contains("removeTask(for: agentMessage.id)"),
+                      "a run cancelled while queued returns without leaving activeTasks")
+    }
+
     private func sourceFile(_ path: String) throws -> String {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()

@@ -128,6 +128,10 @@ final class ToolCategoryGroupingTests: XCTestCase {
             let defaultsToSafe = !tool.requiresConfirmation
             let tier = HITLRiskTier.classify(toolName: tool.name)
 
+            // The documented exception (2026-09-26): changes state, but only the agent's own work
+            // in its own conversation. Checked against its OWN rule below, not this one.
+            if ToolConfirmationDefaults.ownWorkOnlyTools.contains(tool.name) { continue }
+
             if defaultsToSafe && tier != .safe {
                 contradictions.append(
                     "\(tool.name): defaults to NO confirmation (treated as read-only) but "
@@ -139,6 +143,40 @@ final class ToolCategoryGroupingTests: XCTestCase {
             A tool is described as read-only in one place and state-changing in another:
             \(contradictions.joined(separator: "\n"))
             """)
+    }
+
+    /// The own-work exception must stay honest: these start without confirmation, but the banner
+    /// still says they change state — and none of them may run arbitrary code or be destructive.
+    func testOwnWorkOnlyToolsAreStateChangingButNotDestructive() {
+        XCTAssertEqual(ToolConfirmationDefaults.ownWorkOnlyTools, ["stop_background_task"],
+                       "a tool joined the own-work exception — it must be provably scoped to the agent's own work")
+        for name in ToolConfirmationDefaults.ownWorkOnlyTools {
+            XCTAssertEqual(HITLRiskTier.classify(toolName: name), .moderate,
+                           "\(name) is in the own-work exception, so its badge must still say it changes state")
+            XCTAssertFalse(ToolCapability.executesArbitraryCode(name))
+            XCTAssertFalse(ToolConfirmationDefaults.readOnlyTools.contains(name),
+                           "\(name) is listed as read-only too — the two reasons must stay apart")
+            let tool = try? XCTUnwrap(NativeToolCatalog.entry(named: name)).executable()
+            XCTAssertEqual(tool?.requiresConfirmation, false, "\(name) should start without confirmation")
+        }
+    }
+
+    /// THE PREMISE of the exception: `stop_background_task` cannot reach another conversation's task.
+    func testStopBackgroundTaskCannotStopAnotherConversationsTask() async throws {
+        let owner = UUID(), other = UUID()
+        defer {
+            BackgroundProcessRegistry.shared.discard(conversationID: owner)
+            BackgroundProcessRegistry.shared.discard(conversationID: other)
+        }
+        let task = try BackgroundProcessRegistry.shared.launch(
+            command: "sleep 20", workingDirectory: NSTemporaryDirectory(), timeout: 30, conversationID: owner)
+
+        let args = try JSONDecoder().decode(CommandStopTool.Arguments.self,
+                                            from: Data(#"{"task_id":"\#(task.id)"}"#.utf8))
+        _ = try await CommandStopTool(conversationID: other).call(arguments: args)
+
+        XCTAssertEqual(BackgroundProcessRegistry.shared.snapshot(conversationID: owner, taskID: task.id)?.status, .running,
+                       "a stop from another conversation ended this task — the own-work exception no longer holds")
     }
 
     /// The specific tool that was wrong, pinned by name so the fix cannot silently regress.

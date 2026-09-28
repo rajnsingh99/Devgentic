@@ -786,11 +786,7 @@ final class MainApplicationViewModel {
     /// here". Reading this from a view body registers on `activeStreams`, so the control
     /// re-enables by itself when the blocking run ends.
     func regenerationRefusal(for message: ChatMessage) -> RunAdmissionPolicy.Refusal? {
-        RunAdmissionPolicy.admitRegeneration(
-            in: message.conversationId,
-            attempts: message.agentResponse?.generationAttempts,
-            live: activeStreamManager.liveRunSnapshot()
-        )
+        messagingCoordinator.regenerationRefusal(for: message)
     }
 
     /// Why Resume is unavailable for `message`, or `nil` if it may run. Same rule as
@@ -970,6 +966,22 @@ final class MainApplicationViewModel {
             config: config,
             conversationID: conversationID,
             attachedFileURLs: attachedFileURLs
+        )
+    }
+
+    func runScheduledMessage(
+        prompt: String,
+        config: BackendRequestConfig,
+        conversationID: UUID,
+        attachedFileURLs: [URL],
+        runLimit: TimeInterval? = nil
+    ) async -> SchedulerCoordinator.ScheduledRunResult {
+        await schedulerCoordinator.runScheduledMessage(
+            prompt: prompt,
+            config: config,
+            conversationID: conversationID,
+            attachedFileURLs: attachedFileURLs,
+            runLimit: runLimit
         )
     }
 }

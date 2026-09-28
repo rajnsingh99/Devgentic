@@ -92,6 +92,20 @@ struct AbortTrigger: Equatable, Sendable {
     /// This is the seam where that changes. Returning `false` for a kind makes it abort
     /// regardless of the profile's tolerance; `.consecutiveDenials` is the likeliest first
     /// candidate, since a user saying no repeatedly is not a tool failure to be retried.
+    /// The user-facing warning when the profile's tolerance downgrades this trigger and the run
+    /// CONTINUES (D-15). `reason` ends with "Breaking … loop." — true only on the abort path, and
+    /// kept there because `AgentFailureReason.classify` keys off it — so it is cut here.
+    var continuingWarning: String {
+        let happened = reason.components(separatedBy: " Breaking ").first ?? reason
+        return "\(category.displayName): \(happened) The run continues — press Stop if it looks stuck."
+    }
+
+    /// Identifies "the same loop" across iterations: the reason with its counts removed, so a
+    /// streak that grows from 3 to 4 to 5 is announced once.
+    var announcementKey: String {
+        "\(kind)|" + reason.filter { !$0.isNumber }
+    }
+
     var honoursToolFailurePolicy: Bool {
         switch kind {
         case .repetitiveAction, .staleToolRepetition,

@@ -145,12 +145,12 @@ final class ToolRecoveryHintsTests: XCTestCase {
     /// an error containing BOTH substrings must resolve to the earlier row.
     func testEnrich_FirstMatchingRowWins() {
         let enriched = ToolRecoveryHints.enrich(
-            toolName: "edit_code",
+            toolName: "edit_code_single",
             originalError: "Error: old_string matches 3 locations",
             availableToolNames: allTools
         )
         XCTAssertTrue(enriched.contains("read_file"))
-        XCTAssertFalse(enriched.contains("code_search"),
+        XCTAssertFalse(enriched.contains("code_search_text"),
                        "the 'matches' row maps to read_file only; a later row must not win")
     }
 

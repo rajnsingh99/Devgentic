@@ -17,11 +17,22 @@ private let logToolExecution = DGLogger(category: "ToolExecution")
 /// hallucination catching, Human-In-The-Loop (HITL) suspension, and Pre-flight Permissions.
 struct ToolExecutionMediator: ToolDispatching {
 
-    /// Default per-tool timeout (seconds) for the agent path when a tool doesn't set its own.
-    /// Bounds a hung tool so it can't stall the ReAct loop indefinitely (#20); mirrors the
-    /// workflow path's hard-timeout default (workflow uses 120s; the agent uses 60s).
-    /// Injectable so tests can exercise the default-timeout path without a real-time wait.
-    var defaultToolTimeout: TimeInterval = 60
+    /// The global per-tool timeout (seconds) when the user has set no override for this tool —
+    /// 15 minutes (HITL Waiting Contract, decision 2). Was 60 s, which cut in ahead of the terminal
+    /// tools' own 900 s bound and discarded their output (Timeout inventory D-01).
+    ///
+    /// Injectable so tests can exercise the default path without a real-time wait.
+    static let globalDefaultToolTimeout: TimeInterval = 15 * 60
+    var defaultToolTimeout: TimeInterval = ToolExecutionMediator.globalDefaultToolTimeout
+
+    /// How long a timed-out tool gets, after it is cancelled, to hand back what it had. Covers the
+    /// shell's SIGTERM→SIGKILL grace (2 s) plus reading its log. Work still running after this is
+    /// reported as still running, never waited for.
+    var stopGrace: TimeInterval = 5
+
+    /// Headroom above a self-bounding tool's own ceiling, so the tool's kill — which returns its
+    /// partial output — always lands before the dispatcher's.
+    static let selfBoundHeadroom: TimeInterval = 30
 
     // MARK: - Preparation & HITL
     
@@ -164,22 +175,33 @@ struct ToolExecutionMediator: ToolDispatching {
 
                 let toolResult: (output: String, artifacts: [MediaArtifact])
 
-                // Always bound a tool call: use the per-tool timeout if the user set one, else
-                // the default — so a hung tool (e.g. an unresponsive MCP server) can't stall the
-                // ReAct loop indefinitely. Workflow nodes already default to a hard timeout;
-                // chat agents now match (#20).
-                let effectiveTimeout = tool.timeout ?? defaultToolTimeout
-                toolResult = try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
-                    group.addTask {
-                        try await tool.run(paramData)
-                    }
-                    group.addTask {
-                        try await Task.sleep(for: .seconds(effectiveTimeout))
-                        throw PerToolTimeoutError(toolName: toolName, duration: effectiveTimeout)
-                    }
-                    let first = try await group.next()!
-                    group.cancelAll()
-                    return first
+                // Always bound a tool call (#20), and RETURN AT THE BOUND.
+                //
+                // ⚠️⚠️ This was a `withThrowingTaskGroup` race until 2026-09-26. A task group cannot
+                // return before every child has, so for any tool that ignores cancellation — a
+                // shell command, an MCP request, an AppleScript — the timeout fired and then WAITED
+                // for the tool, discarded its finished output and told the model "timed out after
+                // 60 seconds" (P1: a 1 s bound returned after 4.01 s, the build had exited 0).
+                // `DeadlineRace` returns at the bound, cancels the tool (which fires stop hooks such
+                // as the shell's process kill) and keeps whatever it hands back within the grace.
+                // Nesting: shortened to fit an enclosing turn/run limit, keeping its reserve.
+                let fitted = await ExecutionBudget.clamp(
+                    Self.effectiveTimeout(for: tool, defaultTimeout: defaultToolTimeout),
+                    what: "Tool '\(toolName)'")
+                let effectiveTimeout = fitted.limit
+                // `parkScope`: a human answering inside the call (an MCP question, a permission
+                // prompt) does not count against the tool's limit (HITL Waiting Contract, decision 1).
+                let outcome = try await DeadlineRace.run(limit: effectiveTimeout, stopGrace: stopGrace,
+                                                         parkScope: UUID()) {
+                    try await tool.run(paramData)
+                }
+                switch outcome {
+                case .finished(let finished):
+                    toolResult = try finished.get()
+                case .timedOut(let elapsed, let afterStop):
+                    throw PerToolTimeoutError(toolName: toolName, limit: effectiveTimeout,
+                                              elapsed: elapsed, afterStop: afterStop,
+                                              shortenedBy: fitted.shortenedBy, reserve: fitted.reserve)
                 }
 
                 // #19 (B): tools whose legitimate output surfaces error text (shell stderr,
@@ -206,14 +228,32 @@ struct ToolExecutionMediator: ToolDispatching {
                 }
 
             } catch let timeoutError as PerToolTimeoutError {
-                logToolExecution.warning("⏱️ Tool '\(toolName)' timed out after \(Int(timeoutError.duration))s")
-                // A timeout is a FAILURE even when a custom `timeoutMessage` is set: the message
-                // is surfaced to the LLM as the observation, but the result stays `.timedOut` so
-                // the circuit breaker, timeline, and trace record the timeout instead of a
-                // phantom success (#20).
+                // A timeout is a FAILURE even when a custom `timeoutMessage` is set (#20): the
+                // result stays `.timedOut` so the circuit breaker, timeline, and trace record it.
                 let customMessage = (tool.timeoutMessage?.isEmpty == false) ? tool.timeoutMessage : nil
-                result = .timedOut(toolName: toolName, duration: timeoutError.duration, message: customMessage)
-                errorDescriptionForMetrics = "Per-tool timeout after \(Int(timeoutError.duration))s"
+                let observation = Self.timeoutObservation(timeoutError, customMessage: customMessage)
+                logToolExecution.warning("[TOOL_TIMEOUT] Tool '\(toolName)' passed its \(Self.describe(timeoutError.limit)) limit after \(Self.describe(timeoutError.elapsed)). CONSEQUENCE: \(timeoutError.stopped ? "it was stopped and its partial result (\(timeoutError.partialOutput?.count ?? 0) chars) goes to the model" : "it did not stop within \(Int(stopGrace))s of being cancelled and may still be running; its result will not reach this turn").")
+                result = .timedOut(toolName: toolName, duration: timeoutError.limit, message: observation)
+                errorDescriptionForMetrics = "Per-tool timeout after \(Int(timeoutError.limit))s"
+
+            } catch ShellCommandError.timedOut(let limit, let observation) {
+                // D-17: the command's OWN bound — a timeout, with the partial output for the model.
+                logToolExecution.warning("[TOOL_TIMEOUT] Tool '\(toolName)' hit its own \(Self.describe(limit)) limit and was killed. CONSEQUENCE: recorded as a timeout (it used to count as a success); its partial output goes to the model.")
+                result = .timedOut(toolName: toolName, duration: limit, message: observation)
+                errorDescriptionForMetrics = "Command timed out after \(Int(limit))s"
+
+            } catch ShellCommandError.stopped(let observation) where !Task.isCancelled {
+                // D-17: stopped while the run goes on (the user stopped just this command). Not the
+                // tool's failure, and the model still needs what it printed.
+                logToolExecution.info("[CANCELLED] reason=command-stopped — '\(toolName)' was stopped while its run continues. CONSEQUENCE: recorded as cancelled, not as a success; its partial output goes to the model.")
+                result = .cancelled(toolName: toolName, message: observation)
+
+            } catch _ where Task.isCancelled {
+                // Stop / an outer limit reached a running tool. Not the tool's failure: it used to
+                // land in the generic catch below as `.toolSystemCrash`, a reliability failure and
+                // an "executionThrew" chip for every Stop (Timeout inventory D-04, P7).
+                logToolExecution.info("[CANCELLED] reason=stopped — tool '\(toolName)' was cancelled because its run was stopped. CONSEQUENCE: recorded as cancelled, not as a tool failure.")
+                result = .cancelled(toolName: toolName)
 
             } catch {
                 // Classify the underlying error into the canonical taxonomy so downstream
@@ -250,10 +290,14 @@ struct ToolExecutionMediator: ToolDispatching {
 
         let duration = Date().timeIntervalSince(startTime)
         logToolExecution.info("⏱️ Tool '\(sanitizedName)' latency: \(String(format: "%.4f", duration))s")
-        
+
+        // A cancelled call says nothing about the tool's reliability.
+        if case .cancelled = result { return result }
+
         // Fire-and-forget metrics recording
         Task { @MainActor in
-            MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: result.isSuccess, errorType: errorDescriptionForMetrics, durationMs: Int(duration * 1000), context: toolSpan)
+            MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: result.isSuccess, errorType: errorDescriptionForMetrics, durationMs: Int(duration * 1000), context: toolSpan,
+                                                        failureCategory: result.failureCategory == .timeout ? .toolTimeout : nil)
             MetricsManager.shared.record(duration: duration, for: "tool_latency", context: toolSpan)
         }
 
@@ -373,9 +417,80 @@ struct ToolExecutionMediator: ToolDispatching {
     }
 }
 
-// MARK: - Per-Tool Timeout Error
+// MARK: - Per-Tool Timeout
 
-private struct PerToolTimeoutError: Error {
+extension ToolExecutionMediator {
+
+    /// The bound applied to one call: the user's override if it is usable, else just above a
+    /// self-bounding tool's own ceiling, else the global default. Never 0, negative or infinite —
+    /// a 0 used to mean "time out instantly" (Timeout inventory D-05, P9).
+    static func effectiveTimeout(for tool: AgentTool, defaultTimeout: TimeInterval) -> TimeInterval {
+        if let override = tool.timeout {
+            if override.isFinite, override > 0 { return override }
+            logToolExecution.warning("[TOOL_TIMEOUT] Tool '\(tool.name)' carries an unusable timeout override (\(override)s). CONSEQUENCE: ignored — the tool's normal bound applies instead of an instant timeout.")
+        }
+        if let ceiling = tool.selfBoundCeiling, ceiling.isFinite, ceiling > 0 {
+            return ceiling + selfBoundHeadroom
+        }
+        return defaultTimeout
+    }
+
+    /// What the model reads for a timed-out call — the REAL elapsed time, whether the work was
+    /// stopped, and what it handed back (HITL Waiting Contract §4). Replaces "timed out after
+    /// <bound> seconds", which was also sent for work that had finished.
+    static func timeoutObservation(_ error: PerToolTimeoutError, customMessage: String?) -> String {
+        var text: String
+        if error.stopped {
+            text = "System Error: Tool '\(error.toolName)' timed out after \(describe(error.elapsed)) (limit \(describe(error.limit))) and was stopped."
+        } else {
+            text = "System Error: Tool '\(error.toolName)' timed out after \(describe(error.elapsed)) (limit \(describe(error.limit))). It did not stop when cancelled and may still be running; its result will not be delivered."
+        }
+        if let owner = error.shortenedBy {
+            // ⚠️ Nesting: the model must know WHY the limit was short, and that it still has time
+            // to answer — otherwise it retries a command that cannot fit.
+            text += "\nThe limit was shortened to fit \(owner); about \(describe(error.reserve)) remains to respond. Do not re-run it in this turn — report what you have."
+        }
+        if let customMessage { text += "\n\(customMessage)" }
+        if let partial = error.partialOutput?.trimmingCharacters(in: .whitespacesAndNewlines), !partial.isEmpty {
+            text += "\nIts result before it stopped:\n\(partial)"
+        }
+        return text
+    }
+
+    /// "45 s", "15 min", "1 min 30 s".
+    static func describe(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        guard total >= 60 else { return "\(max(total, 0)) s" }
+        let minutes = total / 60, rest = total % 60
+        return rest == 0 ? "\(minutes) min" : "\(minutes) min \(rest) s"
+    }
+}
+
+struct PerToolTimeoutError: Error {
     let toolName: String
-    let duration: TimeInterval
+    let limit: TimeInterval
+    let elapsed: TimeInterval
+    /// What the tool returned after it was cancelled; nil when it was still running at the end of
+    /// the stop grace.
+    let afterStop: Result<(output: String, artifacts: [MediaArtifact]), Error>?
+    /// Set when the limit was shortened to fit an enclosing one ("the turn's 10 min limit").
+    var shortenedBy: String? = nil
+    var reserve: TimeInterval = 0
+
+    var stopped: Bool { afterStop != nil }
+    var partialOutput: String? {
+        switch afterStop {
+        case .success(let value)?:
+            return value.output
+        case .failure(let error)?:
+            // `run_command` now THROWS its stopped/timed-out outcome (D-17) — its partial output
+            // rides in the error and must not be lost when the dispatcher's own limit stops it.
+            switch error as? ShellCommandError {
+            case .stopped(let observation)?, .timedOut(_, let observation)?: return observation
+            default: return nil
+            }
+        case nil:
+            return nil
+        }
+    }
 }

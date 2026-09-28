@@ -43,7 +43,8 @@ enum AgentToolFactory {
             requiresConfirmation: requiresConfirmation,
             timeout: timeout,
             timeoutMessage: timeoutMessage,
-            contentMayLookLikeError: tool.outputMayContainErrorText
+            contentMayLookLikeError: tool.outputMayContainErrorText,
+            selfBoundCeiling: tool.selfBoundCeiling
         ) { dataArgs in
             let args: T.Arguments
             do {
@@ -83,6 +84,7 @@ enum AgentToolFactory {
             timeout: timeout,
             timeoutMessage: timeoutMessage,
             contentMayLookLikeError: tool.contentMayLookLikeError,
+            selfBoundCeiling: tool.selfBoundCeiling,
             run: tool.run
         )
     }

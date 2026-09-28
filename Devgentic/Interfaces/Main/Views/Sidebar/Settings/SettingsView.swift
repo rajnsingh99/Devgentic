@@ -22,10 +22,10 @@ import SwiftUI
 /// - `.notifications` is gone as a category; its content is now a section at the top of General.
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
-    case coreIntelligence = "Core Intelligence"
     case theme = "Theme"
-    case chatOps = "ChatOps"
+    case coreIntelligence = "Core Intelligence"
     case quickAccess = "Quick Access"
+    case chatOps = "ChatOps"
     case orb = "Orb"
     case downloads = "Downloads"
     case about = "About"
@@ -39,11 +39,11 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .general:          return "General"
-        case .coreIntelligence: return "Core Intelligence"
         case .theme:            return "Theme"
-        case .chatOps:          return "ChatOps"
+        case .coreIntelligence: return "Core Intelligence"
         case .quickAccess:      return "Quick Access"
-        case .orb:              return "Orb"
+        case .chatOps:          return "Chat Ops"
+        case .orb:              return "Orb (Experimental)"
         case .downloads:        return "Downloads"
         case .about:            return "About"
         }
@@ -54,14 +54,14 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             return "gear"
-        case .coreIntelligence:
-            return "cpu.fill"
         case .theme:
             return "paintbrush"
-        case .chatOps:
-            return "paperplane.fill"
+        case .coreIntelligence:
+            return "cpu.fill"
         case .quickAccess:
             return "bolt.circle"
+        case .chatOps:
+            return "paperplane.fill"
         case .orb:
             return "atom"
         case .downloads:
@@ -75,10 +75,10 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .general: return String(localized: "Speech, notifications, and storage")
-        case .coreIntelligence: return String(localized: "On-device intelligence")
         case .theme: return String(localized: "Appearance and Typography")
-        case .chatOps: return String(localized: "Remote Telegram control")
+        case .coreIntelligence: return String(localized: "On-device intelligence")
         case .quickAccess: return String(localized: "Global shortcut and panel")
+        case .chatOps: return String(localized: "Remote Telegram control")
         case .orb: return String(localized: "Voice assistant and listening")
         case .downloads: return String(localized: "Model and asset downloads")
         case .about: return String(localized: "Version and licenses")
@@ -91,14 +91,14 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             GeneralSettingsView()
-        case .coreIntelligence:
-            CoreIntelligenceSettingsView()
         case .theme:
             ThemeSettingsView()
-        case .chatOps:
-            ChatOpsSettingsView()
+        case .coreIntelligence:
+            CoreIntelligenceSettingsView()
         case .quickAccess:
             QuickAccessSettingsView()
+        case .chatOps:
+            ChatOpsSettingsView()
         case .orb:
             OrbSettingsView()
         case .downloads:

@@ -156,6 +156,16 @@ struct PairingAttemptLedger {
 @MainActor
 enum PairingWindowExpiry {
 
+    /// The watchdog's wait, shared by all three services so the unit conversion exists once.
+    ///
+    /// ⚠️ Takes SECONDS and sleeps on a `Duration`. Each service used to hand-convert with
+    /// `UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000)`: `??` binds looser than `*`, so with
+    /// the service alive that is `UInt64(300.0)` — 300 NANOSECONDS. Every pairing window expired the
+    /// moment it opened, on Telegram, Discord and Slack alike (Timeout inventory D-10, 2026-09-26).
+    nonisolated static func waitOutWindow(_ timeout: TimeInterval) async {
+        try? await Task.sleep(for: .seconds(timeout))
+    }
+
     /// Ends an expired window — and ONLY if this window is still the live one.
     ///
     /// ⚠️⚠️ (1) **THE OWNERSHIP CHECK.** `Task.isCancelled` is false for an ORPHANED window: nothing

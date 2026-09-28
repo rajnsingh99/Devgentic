@@ -463,8 +463,8 @@ struct ContextWindowGauge: View {
     @State private var showHoverCard = false
     @State private var hoverTask: Task<Void, Never>?
 
-    private let ringSize: CGFloat = 14
-    private let ringWidth: CGFloat = 2.2
+    private let ringSize: CGFloat = 12
+    private let ringWidth: CGFloat = 1.9
 
     var body: some View {
         Button {
@@ -487,12 +487,12 @@ struct ContextWindowGauge: View {
                 if usage.fixedCostIsHigh {
                     Circle()
                         .fill(theme.warningColor)
-                        .frame(width: 5, height: 5)
-                        .offset(x: 3, y: -3)
+                        .frame(width: 4, height: 4)
+                        .offset(x: 2, y: -2)
                         .accessibilityHidden(true)
                 }
             }
-            .frame(width: 28, height: 28)
+            .frame(width: ComposerStyle.buttonSize, height: ComposerStyle.buttonSize)
             .composerControlSurface(in: Circle(), isHovered: isHovered)
             .shadow(color: isHovered ? usage.level.color(theme).opacity(0.4) : .clear, radius: 4, x: 0, y: 1)
             .scaleEffect(isHovered ? 1.06 : 1.0)

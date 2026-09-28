@@ -44,6 +44,9 @@ no header — don't add one, it would be lost on the next run.
 
 - **Don't run the whole test suite casually** — parts of it load Whisper models and drive real
   embedding models. Find the classes you need and target them with `-only-testing:`.
+- **The Release configuration signs with the maintainer's Developer ID** (team `FM3V43ST5B`), so it
+  fails on any other machine. Build Debug for day-to-day work; to build Release from source, sign ad hoc
+  instead: `xcodebuild -configuration Release DEVGENTIC_SIGN_IDENTITY=- DEVELOPMENT_TEAM=`.
 - **ObjectBox code generation is manual.** After changing a property on an ObjectBox entity, re-run the
   generator plugin; the failure mode when you don't is a confusing "instance member cannot be used on
   type" error at the new property's query accessor, not a missing-file error.
@@ -67,12 +70,22 @@ Maintainer-only, but the rules live here so they are written down somewhere:
   date plus a two-digit sequence. It must **strictly increase** with every published build, because the
   in-app updater compares it; a release that reuses or lowers it will never be offered to anyone. The
   release script sets it; don't edit it by hand.
+- Ship only an app produced by **archive → export** (`method = developer-id`), and run
+  `scripts/verify-release-signing.sh <exported .app>` on it first. A plain `xcodebuild build` leaves
+  Sparkle's nested helpers carrying Sparkle's own ad-hoc signature, which notarization rejects.
+- The Sparkle EdDSA private key is in the maintainer's login Keychain (`generate_keys`, default account)
+  **and** in an offline backup. It cannot be regenerated: `SUPublicEDKey` in `Devgentic/Info.plist` is
+  compiled into every installed copy.
 
 ## Naming and trademark
 
 **Devgentic** is a trademark of Raj Singh, and the AGPL grants no trademark rights. You are free to fork
 and redistribute the code; a redistributed or modified build must carry a different name and must not
 imply endorsement. See the [naming note in the README](README.md#trademark-and-naming).
+
+**A fork must also replace `SUFeedURL` and `SUPublicEDKey`** in `Devgentic/Info.plist` (or remove
+Sparkle). Left as they are, the fork checks the official feed and offers to replace itself with the
+official build.
 
 If you are contributing *to* this project rather than forking it, this does not affect you — it exists so
 that a build calling itself "Devgentic" is one users can trace back to here.

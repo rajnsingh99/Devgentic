@@ -78,7 +78,9 @@ struct ImageGenConfigDetailView: View {
         return Binding<ProviderConfig>(
             get: {
                 if case .imageGen(let config) = buffer.draft.details { return config.llmConfig }
-                return ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")
+                // Default routed through ProfileCapabilityFilter so the fallback doesn't
+                // name `.openAI` while the "Show Remote Models" toggle hides it.
+                return ProviderConfig(apiProvider: ProfileCapabilityFilter.defaultImageGenProvider, modelName: "dall-e-3")
             },
             set: { newConfig in
                 if case .imageGen(var config) = buffer.draft.details {

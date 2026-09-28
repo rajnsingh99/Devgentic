@@ -54,6 +54,8 @@ final class RemoteMirrorRetryTests: XCTestCase {
         func sendTypingIndicator(chatID: String) async throws {}
         private var _edits: [String] = []
         private var _renders = 0
+        private var _views: [RemoteView] = []
+        var views: [RemoteView] { lock.withLock { _views } }
         var renders: Int { lock.withLock { _renders } }
         var lastEditedText: String? { lock.withLock { _edits.last } }
 
@@ -68,7 +70,7 @@ final class RemoteMirrorRetryTests: XCTestCase {
             // ⚠️ A DISTINCT id per render. Two clarifications really can be parked at once (a
             // fan-out workflow parks one per node), and returning a constant would hide exactly the
             // collision slice 4 exists to fix.
-            let n = lock.withLock { () -> Int in _renders += 1; return _renders }
+            let n = lock.withLock { () -> Int in _renders += 1; _views.append(view); return _renders }
             return "remote-msg-\(n)"
         }
     }
@@ -313,6 +315,48 @@ final class RemoteMirrorRetryTests: XCTestCase {
         let sent = transport.lastSentText ?? ""
         XCTAssertFalse(sent.contains("Response complete."), "an image is not a completed text reply")
         XCTAssertTrue(sent.contains("Generated chart"), "the remote user must learn what exists: \(sent)")
+    }
+
+    // MARK: - Unanswered-question reminder (D-23)
+
+    private func parkApproval() -> UUID {
+        let operationID = UUID()
+        streamManager.interactionCenter = center
+        center.enqueue(PendingHITL(
+            id: operationID,
+            origin: HITLOrigin(interface: .chat, conversationID: conversationID, title: "Run a tool"),
+            kind: .toolConfirmation(PendingToolConfirmation(id: operationID, toolName: "write_file", params: "{}"))
+        ))
+        return operationID
+    }
+
+    /// Mutation that must turn this red: stop calling `scheduleReminder` after the prompt is posted.
+    func testAnUnansweredRemoteQuestionGetsOneReminder() async {
+        transport.shouldThrow = false
+        mirror.remoteReminderDelay = .milliseconds(100)
+        _ = parkApproval()
+        message.content = .plainText("working")
+        let renders = await waitForRenders(toReach: 2)
+
+        XCTAssertEqual(renders, 2, "the prompt, then one reminder")
+        guard case .notice(let notice)? = transport.views.last else {
+            return XCTFail("the second render must be a notice: \(transport.views)")
+        }
+        XCTAssertTrue(notice.body.contains("Still waiting for your approval"), notice.body)
+        try? await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(transport.renders, 2, "ONE reminder, not a repeating nag")
+    }
+
+    /// Mutation that must turn this red: drop the still-pending check in the reminder task.
+    func testAnAnsweredQuestionGetsNoReminder() async {
+        transport.shouldThrow = false
+        mirror.remoteReminderDelay = .milliseconds(200)
+        let operationID = parkApproval()
+        message.content = .plainText("working")
+        _ = await waitForRenders(toReach: 1)
+        center.resolve(operationID: operationID)
+        try? await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(transport.renders, 1, "an answered question must not be reminded: \(transport.views)")
     }
 
     // MARK: - Who answered the prompt

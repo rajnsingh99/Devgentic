@@ -68,10 +68,22 @@ enum ProviderKeyStore {
 
         let status = storage.save(value: trimmed, service: service, account: profileID.uuidString)
         guard status == errSecSuccess else {
+            // ⚠️ Registers KC-27 + KC-53. This log used to claim the key "stays where it already
+            // was" — true only when the profile ALREADY had a key, and false (and understated)
+            // on the fresh-profile path, where there is no previous value and the key is stored
+            // NOWHERE. State both cases, and name the disclosure-class consequence of the first:
+            // a live API key sitting in plaintext in the SwiftData blob is the exact threat model
+            // this store exists to close.
             logger.error(
                 "[SECRETS] Failed to write the API key for profile \(profileID) to the Keychain "
-                + "(OSStatus \(status)). CONSEQUENCE: the key is NOT stripped from the profile blob "
-                + "for this save — it stays where it already was rather than being lost."
+                + "(\(SecureKeyStorage.osStatusName(status))). CONSEQUENCE: the key was NOT stripped "
+                + "from the profile blob for this save. Two cases follow: if this profile ALREADY had "
+                + "a key, that previous value remains in the SwiftData store in PLAINTEXT — readable "
+                + "by any process running as the user, swept into backups — and keeps working until "
+                + "the Keychain is writable again; if this is a FIRST key for the profile, it is "
+                + "stored NOWHERE and the profile will fail authentication. Either way: unlock the "
+                + "Keychain (or re-grant access after an app update changed the code signature) and "
+                + "re-save the profile."
             )
             return false
         }

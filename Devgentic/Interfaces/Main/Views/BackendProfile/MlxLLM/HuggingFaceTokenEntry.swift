@@ -111,13 +111,20 @@ struct HuggingFaceTokenEntrySheet: View {
         // This comment previously described a check this file did not perform: `looksLikeToken`
         // appeared nowhere here, so Settings warned on a malformed paste and the sheet did not —
         // the exact drift the header claims sharing `HuggingFaceAccountCheck` prevents.
-        showsShapeWarning = !HuggingFaceTokenStore.looksLikeToken(draft)
+        //
+        // ⚠️ Registers KC-49 + KC-50. BOTH used to run before the save result was known: the
+        // shape warning was set first (so a FAILED save showed "It has been saved anyway"
+        // beside "Couldn't save to the Keychain"), and `draft` was wiped first (so a failed
+        // save left nothing to retry). The step that can fail runs first; the annotations and
+        // the wipe only follow a confirmed store.
         let stored = HuggingFaceTokenStore.shared.store(draft)
-        draft = ""
         guard stored else {
             saveFailed = true
             return
         }
+
+        showsShapeWarning = !HuggingFaceTokenStore.looksLikeToken(draft)
+        draft = ""
 
         // The caller can retry immediately; the check below only annotates.
         onSaved()

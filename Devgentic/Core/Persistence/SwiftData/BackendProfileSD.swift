@@ -118,6 +118,27 @@ final class BackendProfile {
     @Transient
     private var _providerKeyUnreadable: Bool = false
 
+    /// Whether ANY Keychain read for this instance has failed this session. Register KC-20.
+    ///
+    /// ⚠️ STICKY, and deliberately separate from `_providerKeyUnreadable`, which a later successful
+    /// read clears. The setter's clear-suppression must NOT follow that recovery: the profile
+    /// editor holds a draft snapshotted while the key was unreadable (so its key is nil), and
+    /// saving that stale draft after a recovery — a rename, a capability toggle — would read as
+    /// "the user cleared the key" and delete a credential that was fine all along. The cost is the
+    /// narrow case of a user genuinely clearing a key after a recovered failure in the same
+    /// session: the clear is logged as not taken and applies after relaunch.
+    @Transient
+    private var _providerKeyClearSuppressed: Bool = false
+
+    /// When the Keychain was last asked for this profile's key. Throttles the KC-20 re-read —
+    /// `details` is read on nearly every render, and each read of a locked or ACL-pending item can
+    /// raise a system prompt, so an unthrottled retry would re-prompt continuously.
+    @Transient
+    private var _providerKeyLastReadAttempt: Date?
+
+    /// Minimum spacing between automatic re-reads of an unreadable key. Register KC-20.
+    static let providerKeyRetryInterval: TimeInterval = 60
+
     // MARK: - Computed Accessors
 
     /// The strongly-typed profile type, derived from the stored raw value.
@@ -161,7 +182,13 @@ final class BackendProfile {
     ///
     /// Idempotent: `_cachedDetails` is non-nil after the first call, after `init`, and after any set.
     private func primeDecodeState() {
-        guard _cachedDetails == nil else { return }
+        guard _cachedDetails == nil else {
+            // ⚠️ Register KC-20. Before this, a failed first read was cached for the instance's
+            // whole lifetime — the "until the Keychain is readable again" promise in the setter's
+            // log had no code behind it, because nothing ever looked again.
+            if _providerKeyUnreadable { rereadProviderKey(force: false) }
+            return
+        }
         let outcome = Self.decodeDetails(from: configData)
         // ⚠️ Inject the API key from the Keychain, where it now lives instead of in the blob.
         // Done HERE rather than in the getter so the Keychain is touched once per decode and the
@@ -172,7 +199,9 @@ final class BackendProfile {
         // cleared it" and DELETES the item. One locked Keychain therefore turned into permanent
         // credential destruction on the next opportunistic save. The flag below is what stops that.
         let keyOutcome = ProviderKeyStore.read(for: id)
+        _providerKeyLastReadAttempt = Date()
         _providerKeyUnreadable = { if case .failed = keyOutcome { return true } else { return false } }()
+        if _providerKeyUnreadable { _providerKeyClearSuppressed = true }
 
         let keychainKey: String? = { if case .found(let k) = keyOutcome { return k } else { return nil } }()
 
@@ -194,6 +223,58 @@ final class BackendProfile {
         _cachedDetails = nil
         _detailsUnreadableReason = nil
         _providerKeyUnreadable = false
+        _providerKeyClearSuppressed = false
+        _providerKeyLastReadAttempt = nil
+    }
+
+    /// Whether this profile's API key is stored but could not be read from the Keychain right now
+    /// — locked, or an access prompt denied or still pending (typically right after an update
+    /// re-signs the app). Register KC-22: without this, that state rendered exactly like a profile
+    /// that was never given a key, and the user's natural fix was to paste the key again.
+    var hasUnreadableProviderKey: Bool {
+        primeDecodeState()
+        return _providerKeyUnreadable
+    }
+
+    /// Asks the Keychain for the key again now, ignoring the throttle — the user pressed Try Again.
+    /// - Returns: whether the key is readable afterwards (found, or definitively absent).
+    @discardableResult
+    func retryProviderKeyRead() -> Bool {
+        primeDecodeState()
+        guard _providerKeyUnreadable else { return true }
+        rereadProviderKey(force: true)
+        return !_providerKeyUnreadable
+    }
+
+    /// Re-reads ONLY the key — the blob decode is unaffected by Keychain state and stays cached.
+    /// Register KC-20.
+    ///
+    /// ⚠️ Found → the Keychain value replaces the cached key (Keychain wins, as in the first prime).
+    /// Not found → the flag clears and the cached key is left alone: an inline legacy key, if any,
+    /// is still the right fallback. Failed → nothing changes except the throttle timestamp.
+    /// `_providerKeyClearSuppressed` is NEVER cleared here — see its declaration.
+    private func rereadProviderKey(force: Bool) {
+        if !force, let last = _providerKeyLastReadAttempt,
+           Date().timeIntervalSince(last) < Self.providerKeyRetryInterval {
+            return
+        }
+        _providerKeyLastReadAttempt = Date()
+        switch ProviderKeyStore.read(for: id) {
+        case .found(let key):
+            _providerKeyUnreadable = false
+            _cachedDetails = _cachedDetails?.settingProviderAPIKey(key)
+            logger.notice("[SECRETS] The Keychain API key for profile '\(displayName)' (id \(id)) is readable again; the profile is configured once more.")
+        case .notFound:
+            _providerKeyUnreadable = false
+        case .failed:
+            break
+        }
+    }
+
+    /// ⚠️ TEST SEAM for the KC-20 throttle: makes the next `details` read eligible to re-read the
+    /// key without waiting out `providerKeyRetryInterval`.
+    func expireProviderKeyRetryThrottleForTesting() {
+        _providerKeyLastReadAttempt = nil
     }
 
     /// Whether the STORED BYTES still carry an inline API key — i.e. this row predates the move to
@@ -276,15 +357,17 @@ final class BackendProfile {
             // Deliberately asymmetric: a nil key with an unreadable Keychain leaves the item
             // alone, while a nil key with a readable one still clears it. Refusing to clear in
             // both cases would break the user's ability to remove a key at all.
-            let suppressKeychainClear = (keyForKeychain == nil && _providerKeyUnreadable)
+            // ⚠️ The STICKY flag, not `_providerKeyUnreadable` — a recovery since the failure does
+            // not make a draft snapshotted during it trustworthy (register KC-20).
+            let suppressKeychainClear = (keyForKeychain == nil && _providerKeyClearSuppressed)
             if suppressKeychainClear {
                 logger.error(
                     "[SECRETS] NOT clearing the Keychain API key for profile '\(displayName)' "
-                    + "(id \(id)): the key is absent from this write only because the Keychain read "
-                    + "FAILED earlier in this session, not because the user cleared it. "
-                    + "CONSEQUENCE: the stored credential is preserved and the rest of this save "
-                    + "proceeds normally; the profile will keep behaving as unconfigured until the "
-                    + "Keychain is readable again."
+                    + "(id \(id)): a Keychain read FAILED earlier in this session, so a missing key "
+                    + "cannot be trusted as the user clearing it — it may come from a form filled "
+                    + "while the key was hidden. CONSEQUENCE: the stored credential is preserved and "
+                    + "the rest of this save proceeds normally. If the user DID mean to remove the "
+                    + "key, that removal is not applied this session: relaunch and clear it again."
                 )
             }
 
@@ -295,6 +378,11 @@ final class BackendProfile {
                 ? true
                 : ProviderKeyStore.save(keyForKeychain, for: id)
             let detailsToEncode = storedSecurely ? newValue.settingProviderAPIKey(nil) : newValue
+            // A key just WRITTEN is a key we know — the banner must not keep saying "unreadable"
+            // until the next throttled re-read. Display flag only; the sticky one stays (KC-20).
+            if keyForKeychain != nil && storedSecurely && !suppressKeychainClear {
+                _providerKeyUnreadable = false
+            }
 
             guard let encoded = Self.encodeDetails(detailsToEncode) else {
                 // ⚠️ Deliberately leaves `_cachedDetails` and every denormalized column untouched
@@ -311,7 +399,12 @@ final class BackendProfile {
             }
             // `_cachedDetails` keeps the key — it is the in-memory view, and every reader
             // expects `details.llmConfig.apiKey` to be usable. Only `configData` is stripped.
-            _cachedDetails = newValue
+            // ⚠️ In the suppressed case the Keychain still holds the key, so memory must too —
+            // caching the key-less value would send every later request unauthenticated while the
+            // credential sat intact and readable (register KC-20). Nil if it is still unreadable.
+            _cachedDetails = suppressKeychainClear
+                ? newValue.settingProviderAPIKey(_cachedDetails?.providerAPIKey)
+                : newValue
             configData = encoded
             // Keep denormalized columns in sync
             switch newValue {

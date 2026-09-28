@@ -77,7 +77,7 @@ struct ProfileSelectorPopover: View {
                 .padding(.bottom, 6)
 
             Rectangle()
-                .fill(theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.07))
+                .fill(theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35))
                 .frame(height: 1)
                 .padding(.horizontal, 8)
 
@@ -87,11 +87,11 @@ struct ProfileSelectorPopover: View {
         .frame(width: popoverWidth, height: popoverHeight)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.isDark ? Color(hex: "#1E1E20") : Color(hex: "#F8F8F9"))
+                .fill(theme.secondaryBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(theme.isDark ? Color.white.opacity(0.09) : Color.black.opacity(0.08), lineWidth: 1)
+                .stroke(theme.isDark ? Color.white.opacity(0.09) : theme.dividerColor.opacity(0.50), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onAppear {
@@ -128,11 +128,11 @@ struct ProfileSelectorPopover: View {
             .padding(2.5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
+                    .fill(theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.60))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05), lineWidth: 0.5)
+                    .strokeBorder(theme.isDark ? Color.white.opacity(0.06) : theme.dividerColor.opacity(0.35), lineWidth: 0.5)
             )
         }
         .padding(.horizontal, 8)
@@ -152,15 +152,15 @@ struct ProfileSelectorPopover: View {
 
     private var searchBorderColor: Color {
         if isSearchFocused {
-            return theme.isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.15)
+            return theme.accentColor.opacity(0.70)
         } else {
-            return theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.06)
+            return theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35)
         }
     }
 
     private var searchIconColor: Color {
         if isSearchFocused {
-            return theme.isDark ? Color.white.opacity(0.7) : Color.black.opacity(0.6)
+            return theme.accentColor
         } else {
             return theme.tertiaryText
         }
@@ -193,13 +193,14 @@ struct ProfileSelectorPopover: View {
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
+                .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -269,9 +270,9 @@ private struct ProfileRow: View {
 
     private var rowBackground: Color {
         if isHovering {
-            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+            return theme.isDark ? Color.white.opacity(0.08) : theme.tertiaryBackground.opacity(0.70)
         } else if isSelected {
-            return theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03)
+            return theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.40)
         } else {
             return Color.clear
         }
@@ -311,7 +312,7 @@ private struct ProfileRow: View {
                     .padding(.vertical, 2)
                     .background(
                         Capsule()
-                            .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
+                            .fill(theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground)
                     )
 
                 // Right-aligned Checkmark (matching Antigravity ✓)
@@ -333,6 +334,7 @@ private struct ProfileRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hover in
             withAnimation(.easeInOut(duration: 0.1)) { isHovering = hover }
         }
@@ -365,17 +367,17 @@ private struct SegmentTabButton: View {
 
     private var badgeBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.09)
+            return theme.isDark ? Color.white.opacity(0.16) : theme.tertiaryBackground
         } else {
-            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+            return theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground.opacity(0.50)
         }
     }
 
     private var tabBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.13) : Color.black.opacity(0.09)
+            return theme.isDark ? Color.white.opacity(0.12) : theme.primaryBackground
         } else if isHovering {
-            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+            return theme.isDark ? Color.white.opacity(0.06) : theme.primaryBackground.opacity(0.50)
         } else {
             return Color.clear
         }
@@ -383,14 +385,17 @@ private struct SegmentTabButton: View {
 
     private var tabBorder: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+            return theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.40)
         } else {
             return Color.clear
         }
     }
 
     var body: some View {
-        Button(action: action) {
+        Button(action: {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            action()
+        }) {
             HStack(spacing: 4.5) {
                 Text(title)
                     .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
@@ -419,6 +424,7 @@ private struct SegmentTabButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hover in
             withAnimation(.easeInOut(duration: 0.12)) { isHovering = hover }
         }

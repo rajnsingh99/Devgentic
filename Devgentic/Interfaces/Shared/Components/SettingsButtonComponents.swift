@@ -219,8 +219,23 @@ struct TactileButton: View {
     }
 
     private var iconColor: Color {
-        // Match icon color cleanly with foreground text color for cohesive theme harmony
-        return foregroundColor
+        if !isEnabled { return foregroundColor }
+        switch variant {
+        case .primary:
+            return foregroundColor
+        case .secondary:
+            if buttonAccentStyle == .accent && isHovered {
+                return theme.accentColor
+            }
+            return foregroundColor
+        case .subtle:
+            if buttonAccentStyle == .accent && isHovered {
+                return theme.accentColor
+            }
+            return foregroundColor
+        case .destructive:
+            return foregroundColor
+        }
     }
 
     private var backgroundColor: Color {
@@ -311,8 +326,14 @@ struct TactileButton: View {
             }
             return theme.accentColor.opacity(isHovered ? 0.30 : 0.15)
         case .secondary:
+            if buttonAccentStyle == .accent && isHovered {
+                return theme.accentColor.opacity(0.18)
+            }
             return isHovered ? theme.shadowColor.opacity(0.2) : Color.black.opacity(0.06)
         case .subtle:
+            if buttonAccentStyle == .accent && isHovered {
+                return theme.accentColor.opacity(0.15)
+            }
             return Color.clear
         case .destructive:
             return isHovered ? theme.errorColor.opacity(0.25) : Color.clear

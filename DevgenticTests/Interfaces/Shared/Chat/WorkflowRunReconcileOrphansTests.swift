@@ -84,6 +84,31 @@ final class WorkflowRunReconcileOrphansTests: XCTestCase {
         WorkflowRunHistoryStore.shared.load(forConversation: conversationID).first { $0.id == id }
     }
 
+    // MARK: - D-25: only runs from BEFORE this launch are orphans
+
+    /// A run started while the launch sweep was still waiting on the skill import is LIVE; the old
+    /// sweep flipped it to "Interrupted" mid-run. Mutation that must turn this red: drop the
+    /// `startedBefore` filter in `reconcileOrphans`.
+    func testARunStartedDuringThisLaunchIsLeftRunning() throws {
+        let cid = try makeConversation()
+        let launchInstant = Date()
+        let old = WorkflowRunRecord(
+            id: UUID(), conversationID: cid, workflowProfileID: UUID(), workflowName: "Old",
+            timestamp: launchInstant.addingTimeInterval(-3600), userInput: "go", nodeResults: [],
+            finalOutput: "", variables: [:], status: .running, duration: 0, error: nil)
+        let live = WorkflowRunRecord(
+            id: UUID(), conversationID: cid, workflowProfileID: UUID(), workflowName: "Live",
+            timestamp: launchInstant.addingTimeInterval(5), userInput: "go", nodeResults: [],
+            finalOutput: "", variables: [:], status: .running, duration: 0, error: nil)
+        WorkflowRunHistoryStore.shared.upsert(old, forConversation: cid)
+        WorkflowRunHistoryStore.shared.upsert(live, forConversation: cid)
+
+        WorkflowRunHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)
+
+        XCTAssertEqual(try XCTUnwrap(reload(old.id, in: cid)).status, .cancelled, "the previous session's run is the orphan")
+        XCTAssertEqual(try XCTUnwrap(reload(live.id, in: cid)).status, .running, "this session's run is live")
+    }
+
     // MARK: - The contract
 
     /// A `.running` row with no live run behind it is the zombie; the sweep settles it to

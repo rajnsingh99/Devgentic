@@ -27,6 +27,9 @@
 //  the developer's store by `testAllEntitiesFixtureOpensUnderCurrentSchema`, which opens a V1 store
 //  written before the field through the production plan. After the first release, a change like
 //  this is a V2.
+//  A second in-place edit on 2026-09-27 (owner decision): the OPTIONAL
+//  `ScheduledTaskModel.runLimitSeconds` (a per-task execution limit, HITL Waiting Contract §5).
+//  Proven the same way — the same fixture's scheduled task must open and read it as nil.
 //
 //  ⚠️ THIS FILE IS A HISTORICAL RECORD FROM THE FIRST RELEASE ON. Each `VersionedSchema` below
 //  describes the shape of a schema that was ONCE CURRENT. Once a version has shipped, its `models`

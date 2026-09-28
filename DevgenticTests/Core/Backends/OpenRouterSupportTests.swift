@@ -120,6 +120,98 @@ final class OpenRouterSupportTests: XCTestCase {
         )
     }
 
+    func testFreeModel_GetsItsOwnTighterCategory() {
+        XCTAssertEqual(RateLimitCategory.from(provider: .openRouter, modelName: "nvidia/nemotron-3-ultra-550b-a55b:free"), .openRouterFree)
+        XCTAssertEqual(RateLimitCategory.from(provider: .openRouter, modelName: "Some/Model:FREE "), .openRouterFree)
+        XCTAssertEqual(RateLimitCategory.from(provider: .openRouter, modelName: "anthropic/claude-sonnet-5"), .openRouter)
+        XCTAssertEqual(RateLimitCategory.from(provider: .openRouter), .openRouter, "no model name → paid defaults")
+        XCTAssertEqual(RateLimitCategory.from(provider: .openAI, modelName: "x:free"), .openAI, ":free means nothing outside OpenRouter")
+        XCTAssertEqual(RateLimitCategory.openRouterFree.defaultTokensPerSecond * 60, 20, accuracy: 0.001)
+        XCTAssertLessThan(RateLimitCategory.openRouterFree.defaultMaxBurst, RateLimitCategory.openRouter.defaultMaxBurst)
+    }
+
+    func testFreeModel_DoesNotShareABucketWithPaidModelsOnTheSameKey() {
+        let free = RateLimitCategory.deriveBucketKey(provider: .openRouter, apiKey: "sk-or-abc", baseURL: nil, modelName: "a/b:free")
+        let paid = RateLimitCategory.deriveBucketKey(provider: .openRouter, apiKey: "sk-or-abc", baseURL: nil, modelName: "a/b")
+        XCTAssertTrue(free.hasPrefix("openRouterFree:"), free)
+        XCTAssertTrue(paid.hasPrefix("openRouter:"), paid)
+        XCTAssertNotEqual(free, paid, "whichever call creates a bucket fixes its rate, so the two must never collide")
+    }
+
+    // MARK: - Deny Data Collection
+
+    private func provider(_ category: RateLimitCategory, options: [String: JSONValue]?) -> OpenAILLMProvider {
+        OpenAILLMProvider(
+            config: LLMProviderConfig(apiKey: "k", baseURL: URL(string: "https://openrouter.ai/api/v1/")!,
+                                      modelName: "a/b:free", options: options),
+            providerCategory: category)
+    }
+
+    func testDenyDataCollection_OffByDefault() {
+        var body: [String: Any] = [:]
+        provider(.openRouterFree, options: nil).applyGenerationParams(to: &body)
+        XCTAssertNil(body["provider"])
+        XCTAssertNil(OpenAIAdvancedConfig.default().denyDataCollection)
+    }
+
+    func testDenyDataCollection_SentToOpenRouterPaidAndFree() {
+        for category in [RateLimitCategory.openRouter, .openRouterFree] {
+            var body: [String: Any] = [:]
+            provider(category, options: ["denyDataCollection": .bool(true)]).applyGenerationParams(to: &body)
+            XCTAssertEqual(body["provider"] as? [String: String], ["data_collection": "deny"], "\(category)")
+        }
+    }
+
+    func testDenyDataCollection_NeverSentToOtherEndpoints() {
+        for category in [RateLimitCategory.openAI, .openAICompatible] {
+            var body: [String: Any] = [:]
+            provider(category, options: ["denyDataCollection": .bool(true)]).applyGenerationParams(to: &body)
+            XCTAssertNil(body["provider"], "\(category)")
+        }
+    }
+
+    /// The panel's value must survive the encode path the profile actually uses (Codable →
+    /// JSONSerialization → JSONValue) as `.bool`, or the provider's pattern match drops it.
+    func testDenyDataCollection_SurvivesTheProfileEncodePath() throws {
+        var config = OpenAIAdvancedConfig.default()
+        config.denyDataCollection = true
+        let data = try JSONEncoder().encode(config)
+        let dict = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(JSONValue(dict["denyDataCollection"] as Any), .bool(true))
+    }
+
+    func testDenyDataCollection_OldConfigsDecodeAsOff() throws {
+        let old = #"{"temperature":1.0,"reasoningEffort":"low"}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(OpenAIAdvancedConfig.self, from: old)
+        XCTAssertNil(decoded.denyDataCollection)
+        XCTAssertEqual(decoded.reasoningEffort, "low")
+    }
+
+    func testDataPolicy404_PointsAtTheSwitch() {
+        let body = #"{"error":{"message":"No endpoints found matching your data policy (Free model publication). Configure: https://openrouter.ai/settings/privacy","code":404}}"#
+        let message = LLMProviderError.formatHTTPError(status: 404, body: body)
+        XCTAssertTrue(message.contains("Deny Data Collection"), message)
+    }
+
+    // MARK: - Secrets in logs
+
+    func testProviderConfigDescription_NeverContainsTheKey() {
+        let secret = "gw-live-7f3c9a1e22b04d6f8e5a" // no vendor prefix — TelemetrySanitizer would miss it
+        let config = LLMProviderConfig(apiKey: secret, baseURL: URL(string: "https://openrouter.ai/api/v1/")!, modelName: "a/b:free")
+        let provider = OpenAILLMProvider(config: config, providerCategory: .openRouterFree)
+        for rendered in [String(describing: config), String(reflecting: config), String(describing: provider)] {
+            XCTAssertFalse(rendered.contains(secret), "key leaked: \(rendered)")
+            XCTAssertTrue(rendered.contains("set (\(secret.count) chars)"), rendered)
+        }
+    }
+
+    func testUnusableEndpointDescription_WithholdsTheRawValue() {
+        let pastedKey = "sk-or-v1-0123456789abcdef0123456789abcdef"
+        let description = ConfiguredEndpoint.resolve(pastedKey).description
+        XCTAssertTrue(description.contains("unusable"), description)
+        XCTAssertFalse(description.contains(pastedKey), description)
+    }
+
     func testDefaultCognitiveCapability_OpenRouterAgent() {
         XCTAssertEqual(
             ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: .openRouter),

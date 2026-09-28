@@ -70,11 +70,15 @@ final class BackgroundTaskObserver {
         let messageID: UUID
         let eventID: UUID
         let conversationID: UUID
-        init(message: ChatMessage, eventID: UUID, conversationID: UUID) {
+        /// The attempt that started the task — kept here because every update rebuilds the row
+        /// from the snapshot, which does not know it.
+        let variantID: UUID?
+        init(message: ChatMessage, eventID: UUID, conversationID: UUID, variantID: UUID?) {
             self.message = message
             self.messageID = message.id
             self.eventID = eventID
             self.conversationID = conversationID
+            self.variantID = variantID
         }
     }
 
@@ -234,7 +238,8 @@ final class BackgroundTaskObserver {
             return
         }
 
-        let data = makeData(from: snapshot, eventID: UUID())
+        let variantID = Self.currentVariantID(of: message)
+        let data = makeData(from: snapshot, eventID: UUID(), variantID: variantID)
         message.timelineEvents.append(.backgroundTask(data))
         // A task first seen ALREADY ENDED (it finished before its launch notice was handled) gets
         // its final row and nothing else: no update will follow, so tracking it would only leak an
@@ -244,14 +249,15 @@ final class BackgroundTaskObserver {
             logger.info("[BGTASK] \(snapshot.id) adopted onto message \(message.id.uuidString.prefix(8)) already ended (\(snapshot.status.label)).")
             return
         }
-        tracked[snapshot.id] = Tracked(message: message, eventID: data.id, conversationID: conversationID)
+        tracked[snapshot.id] = Tracked(message: message, eventID: data.id, conversationID: conversationID,
+                                       variantID: variantID)
         logger.info("[BGTASK] \(snapshot.id) adopted onto message \(message.id.uuidString.prefix(8)).")
     }
 
     // MARK: - Updates
 
     private func apply(_ snapshot: BackgroundProcessRegistry.Snapshot, to entry: Tracked) {
-        let updated = makeData(from: snapshot, eventID: entry.eventID)
+        let updated = makeData(from: snapshot, eventID: entry.eventID, variantID: entry.variantID)
         let isEnding = snapshot.status.isTerminal
         if isEnding { tracked.removeValue(forKey: snapshot.id) }
 
@@ -315,7 +321,27 @@ final class BackgroundTaskObserver {
         if pendingWrites.count > 32 { pendingWrites.removeFirst(pendingWrites.count - 32) }
     }
 
-    private func makeData(from snapshot: BackgroundProcessRegistry.Snapshot, eventID: UUID) -> BackgroundTaskData {
+    private func makeData(from snapshot: BackgroundProcessRegistry.Snapshot, eventID: UUID,
+                          variantID: UUID?) -> BackgroundTaskData {
+        var data = BackgroundTaskData(snapshot: snapshot, eventID: eventID)
+        data.variantID = variantID
+        return data
+    }
+
+    /// The attempt a streaming message is on. A Redo selects its new variant BEFORE the stream
+    /// starts (`beginRegenerationVariant`), so this is the attempt that launched the task.
+    static func currentVariantID(of message: ChatMessage) -> UUID? {
+        guard let response = message.agentResponse,
+              response.variants.indices.contains(response.selectedVariantIndex) else { return nil }
+        return response.variants[response.selectedVariantIndex].variantId
+    }
+
+}
+
+extension BackgroundTaskData {
+    /// The card for a registry snapshot. Shared by the observer (the card in the turn that started
+    /// the task) and the wake (the copy the report's stub keeps, so Redo can rebuild the report).
+    init(snapshot: BackgroundProcessRegistry.Snapshot, eventID: UUID = UUID()) {
         // ⚠️ NO FILE I/O HERE. The snapshot's tail is already bounded by the registry (200 lines),
         // so this second bound is a wire-format cap on an object that is small before it starts —
         // never a read. See the type comment for what this line used to do.
@@ -332,7 +358,7 @@ final class BackgroundTaskObserver {
         case .stopped:          status = .stopped
         }
 
-        return BackgroundTaskData(
+        self.init(
             id: eventID,
             taskID: snapshot.id,
             name: snapshot.name,
@@ -346,6 +372,4 @@ final class BackgroundTaskObserver {
             outputTail: tail,
             logCharacterCount: snapshot.logCharacterCount)
     }
-
 }
-

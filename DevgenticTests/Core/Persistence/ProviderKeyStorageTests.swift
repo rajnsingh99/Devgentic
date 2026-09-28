@@ -204,6 +204,95 @@ final class ProviderKeyStorageTests: XCTestCase {
         }
     }
 
+    // MARK: - KC-20 / KC-22: recovery after a failed read
+
+    /// Makes a stored row whose first read failed — the post-update "ACL prompt denied" state.
+    private func rowWithUnreadableKey(_ stub: StubKeychain) -> BackendProfile {
+        let row = makeRow(key: sentinel)
+        stub.readOutcome = .failed(errSecAuthFailed)
+        row.resetDecodeCacheForTesting()
+        XCTAssertNil(row.details.providerAPIKey, "precondition: the read failure hides the key")
+        XCTAssertTrue(row.hasUnreadableProviderKey, "precondition: KC-22's flag reports it")
+        return row
+    }
+
+    /// ⚠️ KC-20. The failure used to be cached for the instance's lifetime: the key never came
+    /// back, however long ago the user clicked Always Allow.
+    func testTheKeyComesBackOnceTheKeychainIsReadableAgain() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let row = rowWithUnreadableKey(stub)
+
+            stub.readOutcome = nil
+            row.expireProviderKeyRetryThrottleForTesting()
+
+            XCTAssertEqual(row.details.providerAPIKey, sentinel, "the recovered key must be re-injected")
+            XCTAssertFalse(row.hasUnreadableProviderKey)
+        }
+    }
+
+    /// Every render reads `details`; an unthrottled re-read would re-raise a Keychain prompt
+    /// continuously.
+    func testTheAutomaticRereadIsThrottled() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let row = rowWithUnreadableKey(stub)
+            stub.readOutcome = nil  // readable again — but the throttle window has not elapsed
+
+            XCTAssertNil(row.details.providerAPIKey, "a re-read inside the throttle window must not happen")
+            XCTAssertTrue(row.hasUnreadableProviderKey)
+        }
+    }
+
+    /// The Try Again button bypasses the throttle.
+    func testAnExplicitRetryIgnoresTheThrottle() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let row = rowWithUnreadableKey(stub)
+            XCTAssertFalse(row.retryProviderKeyRead(), "still failing → reports unreadable")
+
+            stub.readOutcome = nil
+            XCTAssertTrue(row.retryProviderKeyRead())
+            XCTAssertEqual(row.details.providerAPIKey, sentinel)
+        }
+    }
+
+    /// ⚠️ THE REASON THE SUPPRESSION IS STICKY. The editor snapshotted its draft while the key was
+    /// unreadable, so the draft carries no key. After a recovery, saving that stale draft must NOT
+    /// read as "the user cleared the key" — that would be B2's credential destruction again, just
+    /// one step later.
+    func testAStaleDraftSavedAfterRecoveryDoesNotDeleteTheKey() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let row = rowWithUnreadableKey(stub)
+            let staleDraft = row.details  // key-less snapshot, as the editor holds it
+
+            stub.readOutcome = nil
+            XCTAssertTrue(row.retryProviderKeyRead(), "precondition: recovered")
+
+            row.details = staleDraft
+
+            XCTAssertEqual(stub.deleteCallCount, 0, "a draft taken during the failure must never delete the key")
+            XCTAssertEqual(stub.stored[row.id.uuidString], sentinel)
+            XCTAssertEqual(row.details.providerAPIKey, sentinel,
+                           "memory must agree with the Keychain — a key-less cache sends requests unauthenticated")
+        }
+    }
+
+    /// Typing a NEW key while unreadable writes it — and the banner must not keep claiming the key
+    /// is unreadable until the next throttled re-read.
+    func testWritingANewKeyClearsTheUnreadableBanner() {
+        let stub = StubKeychain()
+        withStub(stub) {
+            let row = rowWithUnreadableKey(stub)
+
+            row.details = agentDetails(key: "sk-ant-NEW-0123456789")
+
+            XCTAssertEqual(stub.stored[row.id.uuidString], "sk-ant-NEW-0123456789")
+            XCTAssertFalse(row.hasUnreadableProviderKey)
+        }
+    }
+
     /// The asymmetry that keeps the fix honest: when the Keychain is READABLE, clearing the field
     /// must still clear the key. Suppressing in both cases would remove the user's ability to
     /// remove a credential at all.

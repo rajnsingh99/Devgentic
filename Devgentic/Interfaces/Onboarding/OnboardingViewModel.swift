@@ -246,12 +246,20 @@ final class OnboardingViewModel {
         pollTimerTask = Task { @MainActor in
             let backendType: ModelBackendType = selectedBackend == .mlx ? .mlx : .ollama
             let modelId = selectedModelIdentifier
+            var lastRecordSeenAt = Date()
 
             while !Task.isCancelled && isDownloading {
                 try? await Task.sleep(nanoseconds: 250_000_000) // 250ms polling
 
-                // Check active record from DownloadManager
-                if let record = DownloadManager.shared.activeRecord(backend: backendType, modelIdentifier: modelId) {
+                // ⚠️ D-24: a finished download LEAVES the active map in the same turn it fails or is
+                // cancelled, so reading only `activeRecord` meant the failed/cancelled arms below
+                // could never run — the poll spun every 250 ms forever with a stale "Streaming model
+                // weights..." stage. The stored record, by id, still carries the real outcome.
+                let active = DownloadManager.shared.activeRecord(backend: backendType, modelIdentifier: modelId)
+                let record = active ?? self.activeDownloadRecordID.flatMap { DownloadHistoryStore.shared.fetch(id: $0) }
+                if record != nil { lastRecordSeenAt = Date() }
+
+                if let record, active != nil {
                     self.activeDownloadRecordID = record.id
                     self.downloadProgress = max(self.downloadProgress, record.progress)
 
@@ -284,36 +292,63 @@ final class OnboardingViewModel {
                     } else {
                         self.downloadStageText = "Verifying tensor integrity..."
                     }
-
-                    // Terminal state check
-                    if record.status == .completed || record.progress >= 1.0 {
-                        self.downloadProgress = 1.0
-                        self.isDownloading = false
-                        self.isModelInstalled = true
-                        self.downloadStageText = "Model weights downloaded and ready!"
-                        self.downloadEtaText = "Completed"
-                        break
-                    } else if record.status == .failed {
-                        self.downloadErrorMessage = record.errorMessage ?? "Download failed."
-                        self.isDownloading = false
-                        self.downloadStageText = "Download failed."
-                        break
-                    } else if record.status == .cancelled {
-                        self.isDownloading = false
-                        self.downloadStageText = "Download cancelled."
-                        break
-                    }
-                } else {
-                    // If no active record exists, check if model is installed now
-                    if selectedBackend == .mlx && MLXModelService.shared.isInstalled(repoId: modelId) {
-                        self.downloadProgress = 1.0
-                        self.isDownloading = false
-                        self.isModelInstalled = true
-                        self.downloadStageText = "Model verified and ready!"
-                        break
-                    }
                 }
+
+                let installed = selectedBackend == .mlx && MLXModelService.shared.isInstalled(repoId: modelId)
+                switch Self.pollVerdict(status: record?.status, progress: record?.progress ?? 0,
+                                        errorMessage: record?.errorMessage, installed: installed,
+                                        secondsWithoutRecord: Date().timeIntervalSince(lastRecordSeenAt)) {
+                case .keepPolling:
+                    continue
+                case .completed:
+                    self.downloadProgress = 1.0
+                    self.isDownloading = false
+                    self.isModelInstalled = true
+                    self.downloadStageText = "Model weights downloaded and ready!"
+                    self.downloadEtaText = "Completed"
+                case .failed(let message):
+                    self.downloadErrorMessage = message
+                    self.isDownloading = false
+                    self.downloadStageText = "Download failed."
+                case .cancelled:
+                    self.isDownloading = false
+                    self.downloadStageText = "Download cancelled."
+                }
+                break
             }
+        }
+    }
+
+    enum PollVerdict: Equatable {
+        case keepPolling
+        case completed
+        case failed(String)
+        case cancelled
+    }
+
+    /// How long the poll waits for a download record to appear (or reappear) before reporting that
+    /// the download never started. Without it a start that registered nothing polled forever.
+    nonisolated static let recordAppearanceGrace: TimeInterval = 30
+
+    /// What the onboarding poll does next. Pure, so the terminal rules are testable (D-24).
+    nonisolated static func pollVerdict(status: DownloadRecordStatus?, progress: Double, errorMessage: String?,
+                            installed: Bool, secondsWithoutRecord: TimeInterval) -> PollVerdict {
+        switch status {
+        case .completed?:
+            return .completed
+        case .failed?:
+            return .failed(errorMessage ?? "Download failed.")
+        case .interrupted?:
+            return .failed(errorMessage ?? "The download was interrupted. Try again.")
+        case .cancelled?:
+            return .cancelled
+        case .queued?, .downloading?, .paused?:
+            return progress >= 1.0 ? .completed : .keepPolling
+        case nil:
+            if installed { return .completed }
+            return secondsWithoutRecord > recordAppearanceGrace
+                ? .failed("The download did not start. Check your connection and try again.")
+                : .keepPolling
         }
     }
 

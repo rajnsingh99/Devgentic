@@ -35,16 +35,11 @@ enum ToolRecoveryHints {
     /// `(toolName, errorSubstring)` wins. Within a tool, list more specific patterns first.
     private static let registry: [Hint] = [
         // read_file — the canonical hallucination recovery path.
-        Hint(toolName: "read_file",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "project_tree", "code_search"]),
+        Hint(toolName: "read_file",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "project_tree", "code_search_text"]),
         Hint(toolName: "read_file",      errorSubstring: "Error extracting document",   suggestions: ["file_overview", "preview_file"]),
 
-        // edit_code — three distinct failure modes, each needs a different recovery.
-        Hint(toolName: "edit_code",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "project_tree"]),
-        Hint(toolName: "edit_code",      errorSubstring: "old_string matches",          suggestions: ["read_file"]),
-        Hint(toolName: "edit_code",      errorSubstring: "old_string not found",        suggestions: ["read_file", "code_search"]),
-
-        // edit_code_single / edit_code_batch (Code interface splits) — mirror edit_code's patterns,
-        // but suggest search tools that are actually in the Code preset (code_search_text / _symbol).
+        // edit_code_single / edit_code_batch — three distinct failure modes, each needs a different
+        // recovery. (`edit_code`, which these split, was removed 2026-09-24.)
         Hint(toolName: "edit_code_single", errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "project_tree"]),
         Hint(toolName: "edit_code_single", errorSubstring: "matches",                  suggestions: ["read_file"]),
         Hint(toolName: "edit_code_single", errorSubstring: "old_string not found",     suggestions: ["read_file", "code_search_text"]),
@@ -64,9 +59,6 @@ enum ToolRecoveryHints {
         // delete_file — most likely a path mistake if file is missing.
         Hint(toolName: "delete_file",    errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files"]),
 
-        // create_file — already-exists is a signal to read current content before overwriting.
-        Hint(toolName: "create_file",    errorSubstring: "File already exists",         suggestions: ["read_file"]),
-
         // create_new_file — strict-new variant. Already-exists means the agent should read
         // current contents and decide between edit_code_single or explicit overwrite_file.
         Hint(toolName: "create_new_file", errorSubstring: "File already exists",        suggestions: ["read_file", "overwrite_file", "edit_code_single"]),
@@ -74,7 +66,6 @@ enum ToolRecoveryHints {
         // Exploration/search tools that take a path argument — always fall back to list_directory
         // (never suggest the tool itself; that would loop).
         Hint(toolName: "project_tree",   errorSubstring: "does not exist",              suggestions: ["list_directory"]),
-        Hint(toolName: "code_search",    errorSubstring: "does not exist",              suggestions: ["list_directory", "project_tree"]),
         Hint(toolName: "code_search_text",   errorSubstring: "does not exist",          suggestions: ["list_directory", "project_tree"]),
         Hint(toolName: "code_search_symbol", errorSubstring: "does not exist",          suggestions: ["list_directory", "project_tree"]),
         Hint(toolName: "code_search_files",  errorSubstring: "does not exist",          suggestions: ["list_directory", "project_tree"]),
@@ -96,11 +87,6 @@ enum ToolRecoveryHints {
         // Kept intentionally minimal since list_directory is usually the first step, not a
         // fallback target, so a short suggestion list keeps the model's next move obvious.
         Hint(toolName: "list_directory", errorSubstring: "Error listing directory",     suggestions: ["project_tree", "glob_files"]),
-
-        // grep_files — retired tool superseded by code_search_text. If a model attempts
-        // calling it or encounters an error, direct it to code_search_text or glob_files.
-        Hint(toolName: "grep_files",    errorSubstring: "Grep error",                   suggestions: ["code_search_text", "glob_files"]),
-        Hint(toolName: "grep_files",    errorSubstring: "does not exist",               suggestions: ["code_search_text", "list_directory"]),
 
         // read_file_metadata — metadata read failures usually mean the path is wrong or
         // the file is unreadable. Fall back to content-level reads that may bypass the
@@ -132,8 +118,6 @@ enum ToolRecoveryHints {
         "list_directory":     "list files in a specific directory",
         "glob_files":         "find files by pattern (e.g. '**/*.java')",
         "project_tree":       "see the full project tree",
-        "codebase_map":       "see the full project tree",
-        "code_search":        "regex-search content across the codebase",
         "code_search_text":   "loose regex/text search (case-insensitive) across the codebase",
         "code_search_symbol": "exact whole-word, case-sensitive symbol lookup",
         "code_search_files":  "list files that contain a pattern (filenames only)",

@@ -32,6 +32,13 @@ enum TaskStatus: String, Codable, CaseIterable {
     case completed
     case failed
     case paused
+    /// The last run hit its execution limit (HITL Waiting Contract §3). Stored as a raw string and
+    /// read tolerantly, so an older build reads it as `.pending`.
+    case timedOut
+    case cancelled
+    /// Its time passed while Devgentic was closed or the Mac was asleep, and it was skipped, not run
+    /// late (owner decision 2026-09-27, Timeout inventory D-22). The summary says which run(s).
+    case missed
 }
 
 enum ContextWindowMode: String, Codable, CaseIterable, Identifiable {
@@ -78,6 +85,9 @@ struct ScheduledTask: Identifiable, Equatable {
     var linkedConversationID: UUID?
     var contextWindowMode: ContextWindowMode
     var createdAt: Date
+    /// This task's own execution limit in seconds. nil = the profile's `executionTimeout`, else
+    /// `SchedulerCoordinator.defaultScheduledRunLimit` (HITL Waiting Contract §5).
+    var runLimit: TimeInterval? = nil
 
     var isRecurring: Bool { cronExpression != nil }
     var isOneShot: Bool { scheduledAt != nil && cronExpression == nil }
@@ -101,6 +111,9 @@ struct ScheduledTask: Identifiable, Equatable {
         case .running: return "orange"
         case .completed: return "green"
         case .failed: return "red"
+        case .timedOut: return "orange"
+        case .cancelled: return "gray"
+        case .missed: return "orange"
         case .paused: return "gray"
         }
     }

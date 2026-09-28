@@ -27,4 +27,19 @@ enum AgentExecutionDefaults {
     /// ⚠️ Changing this changes when runs terminate — it is not a display value. `ExecutionLimitsSection`
     /// renders it as the "Auto (N)" label, so the panel follows automatically.
     static let maxIterations = 15
+
+    /// "No iteration cap" (2026-09-25, the Code interface's default).
+    ///
+    /// ⚠️ A real value, not `nil`: `nil` on `AgentConfig.maxIterations` already means "use
+    /// `maxIterations` above", and three readers resolve it that way. `Int.max` needs no change in
+    /// the executor — its loop is `while currentIteration < maxIterations` — and cannot be reached.
+    /// Such a run is still stopped by the compute timeout, and by `CognitiveCircuitBreaker` only when
+    /// the profile's `onToolFailure` is `.abort` — Code's `.fallbackPrompt` makes it warn (D-15).
+    static let uncapped = Int.max
+
+    /// For logs and traces: "no cap" rather than a 19-digit number.
+    static func describe(_ maxIterations: Int?) -> String {
+        guard let maxIterations else { return "\(Self.maxIterations) (default)" }
+        return maxIterations == uncapped ? "no cap" : "\(maxIterations)"
+    }
 }

@@ -168,8 +168,9 @@ final class InteractionCenter {
 
 // MARK: - Stale-Notification Copy
 
-private extension PendingInteraction {
-    /// Human phrase for what the stale notification says the run is waiting on.
+extension PendingInteraction {
+    /// Human phrase for what the run is waiting on — the Mac's stale notification, the remote
+    /// reminder and the remote "still working" refusal all use it.
     var staleNoun: String {
         switch self {
         case .toolConfirmation: return "your approval"

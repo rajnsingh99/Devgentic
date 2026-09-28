@@ -41,7 +41,8 @@ class MetricsManager {
     /// Records the reliability of a specific tool execution.
     /// - Parameters:
     ///   - errorType: The raw error description (will be sanitized).
-    func recordToolReliability(toolName: String, isSuccess: Bool, errorType: String?, durationMs: Int = 0, context: TraceContext) {
+    func recordToolReliability(toolName: String, isSuccess: Bool, errorType: String?, durationMs: Int = 0, context: TraceContext,
+                               failureCategory: AgentErrorCategory? = nil) {
         var meta = context.metadata
         meta["tool"] = toolName
         meta["outcome"] = isSuccess ? "success" : "failure"
@@ -53,7 +54,8 @@ class MetricsManager {
         
         let at = Date()
         Task {
-            await TraceRecorder.shared.emitToolResult(span: context, name: toolName, success: isSuccess, output: errorType ?? "success", durationMs: durationMs, at: at)
+            await TraceRecorder.shared.emitToolResult(span: context, name: toolName, success: isSuccess, output: errorType ?? "success", durationMs: durationMs, at: at,
+                                                      failureCategory: failureCategory)
         }
         logMetric(key: "tool_execution", value: isSuccess ? "1" : "0", context: context, extraMeta: meta)
     }

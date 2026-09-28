@@ -23,12 +23,12 @@ final class ThemeFoundationsTests: XCTestCase {
         let cosmicDarkTheme = AppThemes.CosmicDarkTheme()
         XCTAssertEqual(cosmicDarkTheme.colorScheme, .dark)
         XCTAssertTrue(cosmicDarkTheme.isDark)
-        // ⚠️ "dracula" is a HIGHLIGHTR STYLESHEET, not the deleted Dracula app theme. The app
-        // ships four themes (Material, CosmicDark, OneLight, SolarizedLight) and `ThemeManager`
-        // migrates a stored "dracula" id to `.material` — but CosmicDark deliberately renders its
-        // CODE with Highlightr's dracula palette, which `Theme.swift` documents at the property.
-        // Was "nord": the third stale reference to the same rename in this file, and the last.
         XCTAssertEqual(cosmicDarkTheme.codeHighlightThemeName, "dracula")
+
+        let highContrastTheme = AppThemes.HighContrastTheme()
+        XCTAssertEqual(highContrastTheme.colorScheme, .dark)
+        XCTAssertTrue(highContrastTheme.isDark)
+        XCTAssertEqual(highContrastTheme.codeHighlightThemeName, "a11y-dark")
 
         let oneLightTheme = AppThemes.OneLightTheme()
         XCTAssertEqual(oneLightTheme.colorScheme, .light)
@@ -42,11 +42,11 @@ final class ThemeFoundationsTests: XCTestCase {
     }
 
     func testSyntaxThemePatchedPreservesKeywords() {
-        let material = AppThemes.MaterialTheme()
-        let originalKeywords = material.syntaxTheme.keywords
+        let cosmicDark = AppThemes.CosmicDarkTheme()
+        let originalKeywords = cosmicDark.syntaxTheme.keywords
 
         // Patch with an accent color override (e.g. green)
-        let patched = material.syntaxTheme.patched(with: NSColor.green)
+        let patched = cosmicDark.syntaxTheme.patched(with: NSColor.green)
 
         // Keywords must NOT be overwritten by the UI accent color
         XCTAssertEqual(patched.keywords, originalKeywords, "Patched syntax theme must preserve original language keywords")
@@ -145,24 +145,20 @@ final class ThemeFoundationsTests: XCTestCase {
     func testCodeThemeOverridePropagatesToCurrentTheme() {
         let manager = ThemeManager()
 
-        // 1. With the Material override, the code theme follows the app theme (Material Darker).
-        // ⚠️ Was `.default`, a case the override rename removed — "default" survives only as a
-        // backward-compatible rawValue (asserted below), not as a case. The sweep updated the
-        // other two call sites in this file and missed this one, which broke the whole test
-        // BUNDLE's compile — so every test in the target was unrunnable, not just this one.
-        manager.applyTheme(AppThemes.MaterialTheme())
-        manager.applyCodeViewerTheme(.material)
+        // 1. With the Cosmic Dark override, the code theme uses material-darker stylesheet
+        manager.applyTheme(AppThemes.CosmicDarkTheme())
+        manager.applyCodeViewerTheme(.cosmicDark)
         XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "material-darker")
 
-        // 2. Override with One Light (GitHub Highlightr stylesheet)
+        // 2. Override with High Contrast (a11y-dark stylesheet)
+        manager.applyCodeViewerTheme(.highContrast)
+        XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "a11y-dark")
+        XCTAssertEqual(manager.currentTheme.syntaxTheme.background, AppThemes.HighContrastTheme().syntaxTheme.background)
+
+        // 3. Override with One Light (GitHub Highlightr stylesheet)
         manager.applyCodeViewerTheme(.oneLight)
         XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "github")
         XCTAssertEqual(manager.currentTheme.syntaxTheme.background, AppThemes.OneLightTheme().syntaxTheme.background)
-
-        // 3. Override with Cosmic Dark
-        manager.applyCodeViewerTheme(.cosmicDark)
-        XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "dracula")
-        XCTAssertEqual(manager.currentTheme.syntaxTheme.background, AppThemes.CosmicDarkTheme().syntaxTheme.background)
 
         // 4. Override with Solarized Light
         manager.applyCodeViewerTheme(.solarizedLight)
@@ -170,15 +166,17 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertEqual(manager.currentTheme.syntaxTheme.background, AppThemes.SolarizedLightTheme().syntaxTheme.background)
 
         // Backward compatibility mappings
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "default"), .material)
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "dracula"), .material)
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "one_dark"), .material)
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "material"), .material)
+        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "default"), .cosmicDark)
+        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "material"), .cosmicDark)
+        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "cosmic_dark"), .cosmicDark)
+        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "high_contrast"), .highContrast)
+        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "dracula"), .highContrast)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "github_light"), .oneLight)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "one_light"), .oneLight)
+        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "solarized_light"), .solarizedLight)
 
-        // 5. Reset to Material
-        manager.applyCodeViewerTheme(.material)
+        // 5. Reset to Cosmic Dark
+        manager.applyCodeViewerTheme(.cosmicDark)
         XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "material-darker")
     }
 
@@ -191,13 +189,13 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertNotNil(solarizedLight.codeBlockHeaderText)
         XCTAssertNotNil(solarizedLight.codeBlockHeaderSecondaryText)
 
-        let material = AppThemes.MaterialTheme()
-        XCTAssertNotNil(material.codeBlockHeaderText)
-        XCTAssertNotNil(material.codeBlockHeaderSecondaryText)
-
         let cosmicDark = AppThemes.CosmicDarkTheme()
         XCTAssertNotNil(cosmicDark.codeBlockHeaderText)
         XCTAssertNotNil(cosmicDark.codeBlockHeaderSecondaryText)
+
+        let highContrast = AppThemes.HighContrastTheme()
+        XCTAssertNotNil(highContrast.codeBlockHeaderText)
+        XCTAssertNotNil(highContrast.codeBlockHeaderSecondaryText)
     }
 
     func testChatTypographyAndCodeScaling() {
@@ -237,12 +235,12 @@ final class ThemeFoundationsTests: XCTestCase {
         // Switch to solid
         manager.applySurfaceStyle(.solid)
         XCTAssertEqual(manager.surfaceStyle, .solid)
-        XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedSurfaceStyle"), "solid")
+        XCTAssertEqual(TestHost.defaults.string(forKey: "selectedSurfaceStyle"), "solid")
 
         // Switch back to glassmorphic
         manager.applySurfaceStyle(.glassmorphic)
         XCTAssertEqual(manager.surfaceStyle, .glassmorphic)
-        XCTAssertEqual(UserDefaults.standard.string(forKey: "selectedSurfaceStyle"), "glassmorphic")
+        XCTAssertEqual(TestHost.defaults.string(forKey: "selectedSurfaceStyle"), "glassmorphic")
     }
 
     func testChatFontFamilyAndTypographySettings() {
@@ -272,16 +270,30 @@ final class ThemeFoundationsTests: XCTestCase {
         // Apply Monospaced
         manager.applyChatFontFamily(.monospaced)
         XCTAssertEqual(manager.chatFontFamily, .monospaced)
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey), "monospaced")
+        XCTAssertEqual(TestHost.defaults.string(forKey: AppSettings.chatFontFamilyKey), "monospaced")
 
         // Apply Serif
         manager.applyChatFontFamily(.serif)
         XCTAssertEqual(manager.chatFontFamily, .serif)
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey), "serif")
+        XCTAssertEqual(TestHost.defaults.string(forKey: AppSettings.chatFontFamilyKey), "serif")
 
         // Reset to System
         manager.applyChatFontFamily(.system)
         XCTAssertEqual(manager.chatFontFamily, .system)
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey), "system")
+        XCTAssertEqual(TestHost.defaults.string(forKey: AppSettings.chatFontFamilyKey), "system")
+    }
+
+    func testThemeWritesDoNotReachTheUsersDomain() {
+        let key = "selectedAccentColor"
+        let userValueBefore = UserDefaults.standard.string(forKey: key)
+
+        let manager = ThemeManager()
+        manager.applyAccentColor(.pink)
+
+        // The write must reach TestHost.defaults
+        XCTAssertEqual(TestHost.defaults.string(forKey: key), "pink")
+
+        // The write must NEVER pollute the developer's real UserDefaults domain
+        XCTAssertEqual(UserDefaults.standard.string(forKey: key), userValueBefore)
     }
 }

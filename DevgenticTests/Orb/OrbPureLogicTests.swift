@@ -329,6 +329,168 @@ final class OrbCancelPhraseTests: XCTestCase {
     }
 }
 
+// MARK: - Stop: a finished capture, and Orb mid-answer
+
+/// ⚠️ Device, 2026-09-19: the user said "stop" and it was silently discarded at the two-word
+/// dispatch floor, logged as a Whisper-hallucination guard. These pin what a stop now IS.
+@MainActor
+final class OrbStopPhraseTests: XCTestCase {
+
+    // MARK: Finished captures — `classifyCapture`
+
+    func testTheDeviceTranscriptIsACancelNotAFloorDiscard() {
+        // The exact device transcript. Nothing was sent either way — the defect was the reason
+        // and the silence, so pin that it is now classified as what the user meant.
+        XCTAssertEqual(OrbSessionController.classifyCapture("stop"), .cancel)
+    }
+
+    func testEveryStopPhraseCancelsThroughWhisperChurn() {
+        for phrase in OrbSessionController.stopPhrases {
+            XCTAssertEqual(OrbSessionController.classifyCapture(phrase), .cancel, "\"\(phrase)\" must cancel")
+        }
+        XCTAssertEqual(OrbSessionController.classifyCapture("Stop."), .cancel)
+        XCTAssertEqual(OrbSessionController.classifyCapture("Stop, stop, stop!"), .cancel,
+                       "people repeat a stop that did not seem to land")
+        XCTAssertEqual(OrbSessionController.classifyCapture("stop it stop it"), .cancel)
+    }
+
+    func testStopInsideARequestIsStillTheRequest() {
+        // ⚠️ The reason stop words are NOT in `cancelPhrases`: that matcher also takes a suffix.
+        // Each of these is a real request and must reach the model.
+        for request in ["stop the server", "make the build stop", "don't stop the tests",
+                        "cancel my three o'clock meeting", "is that enough memory"] {
+            XCTAssertEqual(OrbSessionController.classifyCapture(request), .dispatch, "\"\(request)\" is a request")
+        }
+    }
+
+    func testOtherOneWordCapturesStillHitTheFloor() {
+        // The floor's real purpose — a hallucinated token must not start a tool-using run — is
+        // untouched. Only STOP words were promoted past it.
+        XCTAssertEqual(OrbSessionController.classifyCapture("Thanks."), .belowFloor)
+        XCTAssertEqual(OrbSessionController.classifyCapture("hello"), .belowFloor)
+        XCTAssertEqual(OrbSessionController.classifyCapture(""), .nothingHeard)
+    }
+
+    func testExistingCancelsAndVoiceCommandsAreUnchanged() {
+        XCTAssertEqual(OrbSessionController.classifyCapture("never mind"), .cancel)
+        XCTAssertEqual(OrbSessionController.classifyCapture("run the tests never mind"), .cancel)
+        XCTAssertEqual(OrbSessionController.classifyCapture("repeat that"), .voiceCommand(.repeatAnswer))
+        XCTAssertEqual(OrbSessionController.classifyCapture("continue"), .voiceCommand(.tellMeMore),
+                       "\"continue\" means read on, not stop")
+        XCTAssertEqual(OrbSessionController.classifyCapture("run the tests"), .dispatch)
+    }
+
+    func testStopWordsDoNotWidenTheSpokenApprovalDenial() {
+        // ⚠️ `isCancelPhrase` is what DENIES a parked tool in the spoken-approval window, which
+        // fails CLOSED: "only an explicit cancel phrase denies". Stop words live in their own list
+        // precisely so this stays true. Change it deliberately, not as a side effect.
+        for phrase in OrbSessionController.stopPhrases {
+            XCTAssertFalse(OrbSessionController.isCancelPhrase(phrase),
+                           "\"\(phrase)\" would now deny tool approvals")
+        }
+    }
+
+    // MARK: Orb mid-answer — `endsWithStopPhrase`
+
+    func testAStopEndingWhatWasHeardInterruptsNarration() {
+        XCTAssertTrue(OrbSessionController.endsWithStopPhrase("stop"))
+        XCTAssertTrue(OrbSessionController.endsWithStopPhrase("Okay, stop."))
+        XCTAssertTrue(OrbSessionController.endsWithStopPhrase("uh that's enough"),
+                      "a stray word ahead of the stop must not defeat the interrupt")
+    }
+
+    func testNarrationIsNotInterruptedByNearMisses() {
+        XCTAssertFalse(OrbSessionController.endsWithStopPhrase(""))
+        XCTAssertFalse(OrbSessionController.endsWithStopPhrase("stop the server"))
+        XCTAssertFalse(OrbSessionController.endsWithStopPhrase("that is unstoppable"))
+        XCTAssertFalse(OrbSessionController.endsWithStopPhrase("keep stopping"))
+    }
+
+    // MARK: A narration listener never feeds the ordinary path
+
+    func testANarrationListenerNeverFallsThroughInAnyStage() {
+        // ⚠️⚠️ The safety property. The follow-up window dispatches ANY speech; a narration
+        // listener's late updates arriving there must be dropped, whatever they contain.
+        let stages: [OrbStage] = [.passiveListening, .commandCapture, .followUpWindow, .executing,
+                                  .awaitingApproval, .announcing, .welcoming, .selectingProfile,
+                                  .voiceUnavailable(reason: "test")]
+        for stage in stages {
+            for transcript in ["", "stop", "orb run the tests", "delete everything"] {
+                XCTAssertNotEqual(
+                    OrbSessionController.narrationListenerAction(openedDuringNarration: true,
+                                                                 stage: stage, transcript: transcript),
+                    .notANarrationListener,
+                    "narration audio \"\(transcript)\" leaked into \(stage)")
+            }
+        }
+    }
+
+    func testANarrationListenerOnlyEverInterruptsWhileOrbIsSpeaking() {
+        typealias C = OrbSessionController
+        XCTAssertEqual(C.narrationListenerAction(openedDuringNarration: true, stage: .announcing,
+                                                 transcript: "okay stop"), .interrupt)
+        XCTAssertEqual(C.narrationListenerAction(openedDuringNarration: true, stage: .announcing,
+                                                 transcript: "orb run the tests"), .keepListening,
+                       "during an answer the wake word and requests are NOT acted on")
+        XCTAssertEqual(C.narrationListenerAction(openedDuringNarration: true, stage: .followUpWindow,
+                                                 transcript: "stop"), .dropStale,
+                       "a stop landing after the answer ended belongs to no narration")
+        XCTAssertEqual(C.narrationListenerAction(openedDuringNarration: false, stage: .followUpWindow,
+                                                 transcript: "stop"), .notANarrationListener)
+    }
+
+    // MARK: When the microphone may stay open during an answer
+
+    func testTheMicrophoneStaysOpenDuringAnAnswerOnlyWithEchoCancellation() {
+        typealias C = OrbSessionController
+        XCTAssertTrue(C.listensDuringNarration(echoCancelling: true, recognizerIsAppleSpeech: false,
+                                               announcingApproval: false))
+        XCTAssertFalse(C.listensDuringNarration(echoCancelling: false, recognizerIsAppleSpeech: false,
+                                                announcingApproval: false),
+                       "without AEC the microphone hears Orb — it could interrupt or wake itself")
+        XCTAssertFalse(C.listensDuringNarration(echoCancelling: true, recognizerIsAppleSpeech: true,
+                                                announcingApproval: false),
+                       "Apple Speech runs its own loop and has released the duplex engine")
+        XCTAssertFalse(C.listensDuringNarration(echoCancelling: true, recognizerIsAppleSpeech: false,
+                                                announcingApproval: true),
+                       "an interrupt during an approval announcement would strand a parked run")
+    }
+}
+
+/// ⚠️ THE WIRING PIN. There are no test hooks into the listening loops, and the defect class this
+/// guards is the one that had already happened: the WhisperKit and Apple Speech loops each carried
+/// a copy of the capture cascade, and the copies drifted. Pinned from the invariant — ONE decision
+/// site, consulted by BOTH loops — rather than from how either loop is written.
+final class OrbCaptureClassifierWiringTests: XCTestCase {
+
+    private func controllerSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let file = root.appendingPathComponent("Devgentic/Orb/OrbSessionController.swift")
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("OrbSessionController.swift not reachable from \(root.path) — running outside a checkout")
+        }
+        return try String(contentsOf: file, encoding: .utf8)
+    }
+
+    private func count(_ needle: String, in haystack: String) -> Int {
+        haystack.components(separatedBy: needle).count - 1
+    }
+
+    func testBothRecognizerLoopsClassifyThroughTheOneClassifier() throws {
+        let source = try controllerSource()
+        XCTAssertEqual(count("switch Self.classifyCapture(", in: source), 2,
+                       "the WhisperKit AND Apple Speech loops must both switch on classifyCapture")
+    }
+
+    func testTheDispatchFloorAndStopWordsAreDecidedInExactlyOnePlace() throws {
+        // A second call to either is a second copy of the cascade — the shape that drifted.
+        let source = try controllerSource()
+        XCTAssertEqual(count("isDispatchable(command)", in: source), 1)
+        XCTAssertEqual(count("isStopPhrase(command)", in: source), 1)
+    }
+}
+
 // MARK: - D-3: wake word vs. speech language
 
 @MainActor

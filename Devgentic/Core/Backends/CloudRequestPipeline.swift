@@ -62,7 +62,7 @@ struct CloudRequestPipeline: Sendable {
 
             // On 429: drain the rate limiter bucket to prevent further requests
             if httpResponse.statusCode == 429 {
-                let penalty = retryAfter ?? 10.0
+                let penalty = ProviderErrorClassifier.sanitizedRetryAfter(retryAfter) ?? 10.0
                 await GlobalRateLimiter.shared.drainAndPenalize(key: key, category: provider, penaltySeconds: penalty)
                 // Stamp the canonical category on the log so ring-buffer analytics can
                 // aggregate rate-limit events by provider without parsing message strings.
@@ -143,7 +143,7 @@ struct CloudRequestPipeline: Sendable {
             let retryAfter = extractRetryAfter(from: httpResponse)
 
             if httpResponse.statusCode == 429 {
-                let penalty = retryAfter ?? 10.0
+                let penalty = ProviderErrorClassifier.sanitizedRetryAfter(retryAfter) ?? 10.0
                 await GlobalRateLimiter.shared.drainAndPenalize(key: key, category: provider, penaltySeconds: penalty)
                 logger.warning(
                     "[\(key)] 429 on stream. Penalty: \(penalty)s.",

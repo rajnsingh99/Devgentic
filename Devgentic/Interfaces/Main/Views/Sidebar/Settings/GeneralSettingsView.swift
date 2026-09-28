@@ -23,7 +23,9 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.developerModeKey) private var developerMode: Bool = false
     @AppStorage(AppSettings.diagnosticsEnabledKey) private var diagnosticsEnabled: Bool = true
     @AppStorage(AppSettings.showTimelineThoughtsKey) private var showTimelineThoughts: Bool = false
+    @AppStorage(AppSettings.showRemoteModelsKey) private var showRemoteModels: Bool = false
     @AppStorage(GlobalConstants.isOnboardingComplete) private var isOnboardingComplete: Bool = true
+    @ObservedObject private var softwareUpdater = SoftwareUpdater.shared
 
     // Download/delete confirmation state
     enum SettingsWhisperAlert { case download, delete }
@@ -140,6 +142,11 @@ struct GeneralSettingsView: View {
 
                     Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
+                    // Microphone Picker
+                    MicrophoneSettingsRow(theme: theme)
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
                     // Language Picker
                     SettingsRow(
                         title: "Language",
@@ -209,6 +216,19 @@ struct GeneralSettingsView: View {
                 // 3. Language Model Section
                 SettingsCard(title: "Language Model", icon: "text.bubble.fill", theme: theme) {
                     SettingsRow(
+                        title: "Show Remote Models",
+                        description: "Reveals Gemini, OpenAI, and Anthropic across all provider pickers. Experimental — not yet tested.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: $showRemoteModels)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
                         title: "Stream LLM Responses",
                         description: "When enabled, the LLM response will appear word-by-word. Disable this if you prefer to receive the full response at once after it has been generated.",
                         theme: theme
@@ -244,6 +264,34 @@ struct GeneralSettingsView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                    }
+                }
+
+                // Updates (Sparkle). The toggle is the user's standing answer to the question Sparkle
+                // asks on second launch — PRIVACY.md promises it can be changed here.
+                SettingsCard(title: "Updates", icon: "arrow.triangle.2.circlepath", theme: theme) {
+                    SettingsRow(
+                        title: "Check for Updates Automatically",
+                        description: "About once a day, download the public update feed from GitHub Pages. No information about your Mac is sent. Updates are verified against a signing key built into the app before installing.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: $softwareUpdater.automaticallyChecksForUpdates)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
+                        title: "Check Now",
+                        description: "Look for a newer version right away. Also available from the Devgentic menu.",
+                        theme: theme
+                    ) {
+                        Button("Check for Updates…") { softwareUpdater.checkForUpdates() }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(!softwareUpdater.canCheckForUpdates)
                     }
                 }
 
@@ -479,5 +527,44 @@ struct SettingsRow<Control: View>: View {
                 isHovered = hovering
             }
         }
+    }
+}
+
+/// Settings → Speech Recognition → Microphone. The same choice as the mic button's right-click
+/// menu (`MicrophoneSelection`).
+private struct MicrophoneSettingsRow: View {
+    let theme: any Theme
+    @State private var selection = MicrophoneSelection.shared
+
+    private var description: String {
+        if case .unavailable(_, let name) = selection.resolution {
+            return MicrophoneMenu.unavailableLabel(name: name, fallback: selection.systemDefault) + "."
+        }
+        return "The input dictation records from. Orb keeps the system default while echo cancellation is on, so barge-in keeps working."
+    }
+
+    var body: some View {
+        SettingsRow(title: "Microphone", description: LocalizedStringKey(description),
+                    isWarning: { if case .unavailable = selection.resolution { return true }; return false }(),
+                    theme: theme) {
+            Picker("", selection: Binding(
+                get: { selection.selectedUID ?? "" },
+                set: { uid in selection.select(selection.devices.first { $0.uid == uid }) }
+            )) {
+                Text(MicrophoneMenu.systemDefaultLabel(selection.systemDefault)).tag("")
+                ForEach(selection.devices) { device in
+                    Text(device.name).tag(device.uid)
+                }
+                // Keep a disconnected choice selectable-as-shown rather than snapping to default.
+                if case .unavailable(let uid, let name) = selection.resolution {
+                    Text("\(name ?? "Chosen microphone") (not connected)").tag(uid)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .tint(theme.primaryText)
+            .fixedSize()
+        }
+        .onAppear { selection.refresh() }
     }
 }

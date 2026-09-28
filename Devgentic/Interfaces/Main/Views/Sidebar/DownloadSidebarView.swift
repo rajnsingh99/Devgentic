@@ -44,6 +44,8 @@ struct DownloadSidebarView: View {
     /// never during render, since it walks the partial-download folder.
     @State private var pendingDeletionBytes: Int64 = 0
     @State private var recordPendingRedownload: DownloadRecord? = nil
+    /// The row whose partial files the user asked to discard from its hover button.
+    @State private var recordPendingDiscard: DownloadRecord? = nil
     @State private var showingClearHistoryAlert: Bool = false
 
     @State private var focusedRecordID: UUID? = nil
@@ -59,6 +61,26 @@ struct DownloadSidebarView: View {
         allRecords.filter { !$0.isActive }
     }
 
+    /// Partial MLX downloads no history row points at. Listed in full on the Download Manager;
+    /// the sidebar only links there.
+    private var leftovers: [MLXModelService.OrphanedPartialDownload] {
+        let mlx = MLXModelService.shared
+        let tracked = Set(allRecords
+            .filter { $0.backend == .mlx && $0.status?.isResumable == true }
+            .map(\.modelIdentifier))
+        return MLXModelService.untracked(
+            mlx.partialDownloads,
+            trackedRepoIds: tracked,
+            downloading: mlx.isDownloading ? mlx.currentDownloadName : nil
+        )
+    }
+
+    /// Size on disk of a resumable MLX row's partial download, from the last scan.
+    private func partialBytes(for record: DownloadRecord) -> Int64? {
+        guard record.backend == .mlx, record.status?.isResumable == true else { return nil }
+        return MLXModelService.shared.partialBytes(for: record.modelIdentifier)
+    }
+
     private var orderedRecords: [DownloadRecord] {
         var result: [DownloadRecord] = []
         result.append(contentsOf: activeRecords)
@@ -71,6 +93,10 @@ struct DownloadSidebarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+
+            if !leftovers.isEmpty {
+                leftoversBanner
+            }
 
             if allRecords.isEmpty {
                 SidebarEmptyStateView(
@@ -146,10 +172,29 @@ struct DownloadSidebarView: View {
         } message: {
             Text("This removes every completed, failed, and cancelled record from your download history. Active downloads are kept.")
         }
+        .alert(
+            "Discard the partial download?",
+            isPresented: Binding(
+                get: { recordPendingDiscard != nil },
+                set: { if !$0 { recordPendingDiscard = nil } }
+            ),
+            presenting: recordPendingDiscard
+        ) { record in
+            Button("Discard", role: .destructive) { discardPartialFiles(for: record) }
+            Button("Cancel", role: .cancel) {}
+        } message: { record in
+            if let bytes = partialBytes(for: record) {
+                Text("Deletes the \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) already downloaded for “\(record.displayName)”. A later download starts from zero.")
+            } else {
+                Text("Deletes whatever was already downloaded for “\(record.displayName)”. A later download starts from zero.")
+            }
+        }
         .onAppear {
             if focusedRecordID == nil {
                 focusedRecordID = orderedRecords.first?.id
             }
+            MLXModelService.shared.acknowledgeLeftovers()
+            MLXModelService.shared.refreshPartialDownloads()
         }
         .onReceive(NotificationCenter.default.publisher(for: .clearDownloadHistory)) { _ in
             showingClearHistoryAlert = true
@@ -187,7 +232,10 @@ struct DownloadSidebarView: View {
             ForEach(group.records) { record in
                 HistoryDownloadRowView(
                     record: record,
-                    isSelected: focusedRecordID == record.id
+                    isSelected: focusedRecordID == record.id,
+                    partialBytes: partialBytes(for: record),
+                    onResume: { resume(record) },
+                    onDiscard: { recordPendingDiscard = record }
                 )
                 .id(record.id)
                 .contentShape(Rectangle())
@@ -362,6 +410,46 @@ struct DownloadSidebarView: View {
         .padding(.horizontal, 12)
         .padding(.top, 12)
         .padding(.bottom, 8)
+    }
+
+    // MARK: - Leftovers banner
+
+    private var leftoversBanner: some View {
+        let total = leftovers.reduce(Int64(0)) { $0 + $1.bytes }
+        let size = ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+        return Button {
+            router.navigateToDownloadManager()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "externaldrive.badge.exclamationmark")
+                    .foregroundColor(theme.warningColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(leftovers.count == 1
+                         ? "1 unfinished download · \(size)"
+                         : "\(leftovers.count) unfinished downloads · \(size)")
+                        .font(theme.fontCaption.weight(.medium))
+                        .foregroundColor(theme.primaryText)
+                    Text("Not in your history. Review to resume or delete.")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.tertiaryText)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.tertiaryText)
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.warningColor.opacity(0.08))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .padding(.horizontal, 8)
+        .padding(.bottom, 6)
+        .help("Open the Download Manager")
     }
 
     // MARK: - Section header
@@ -674,6 +762,10 @@ private struct ActiveDownloadRowView: View {
 private struct HistoryDownloadRowView: View {
     let record: DownloadRecord
     var isSelected: Bool = false
+    /// Size of this row's partial download; non-nil only for a resumable MLX row with bytes.
+    var partialBytes: Int64? = nil
+    var onResume: (() -> Void)? = nil
+    var onDiscard: (() -> Void)? = nil
 
     @Environment(\.appTheme) private var theme
     // B19 shipped Dynamic Type but not Reduce Motion, and this file was the gap: both hover
@@ -702,9 +794,38 @@ private struct HistoryDownloadRowView: View {
                     .font(theme.fontCaption2)
                     .foregroundColor(theme.tertiaryText)
                     .lineLimit(1)
+                if let partialBytes {
+                    Text("\(ByteCountFormatter.string(fromByteCount: partialBytes, countStyle: .file)) on disk")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.warningColor)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
+
+            // ⚠️ Shown on hover or selection rather than only in the context menu: a paused or
+            // failed download's bytes were easy to forget when both actions were hidden there.
+            if partialBytes != nil, isHovering || isSelected, let onResume, let onDiscard {
+                HStack(spacing: 6) {
+                    Button(action: onResume) {
+                        Image(systemName: "play.circle")
+                            .foregroundColor(theme.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Resume Download")
+                    .accessibilityLabel("Resume \(record.displayName)")
+
+                    Button(action: onDiscard) {
+                        Image(systemName: "trash.slash")
+                            .foregroundColor(theme.errorColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Discard Partial Files")
+                    .accessibilityLabel("Discard partial files for \(record.displayName)")
+                }
+                .font(theme.fontCaption)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

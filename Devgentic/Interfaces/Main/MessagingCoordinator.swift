@@ -79,6 +79,7 @@ final class MessagingCoordinator {
         self.fileProcessorService = fileProcessorService
         self.backendConfiguration = backendConfiguration
         registerCompactionCheckpointSink()
+        registerCompactionActivitySink()
     }
 
     // MARK: - Compaction Checkpoint Sink
@@ -89,6 +90,21 @@ final class MessagingCoordinator {
     /// the persistence store and the live history array. Registered here (not per stream)
     /// because compaction runs off the request path now and can finish after the
     /// originating stream — and its events — are gone.
+    /// Shows AUTOMATIC compaction in the transcript with the manual-compaction row (owner decision
+    /// 2026-09-27): it runs after a turn's answer, off the stream, so it reports here instead.
+    private func registerCompactionActivitySink() {
+        Task {
+            await HistoryCompactionService.shared.setActivitySink(
+                begin: { conversationID in
+                    await MainActor.run { ManualCompactionActivity.shared.begin(conversationID, automatic: true) }
+                },
+                finish: { conversationID, outcome in
+                    await MainActor.run { ManualCompactionActivity.shared.finish(conversationID, outcome: outcome) }
+                }
+            )
+        }
+    }
+
     private func registerCompactionCheckpointSink() {
         Task { [logger] in
             await HistoryCompactionService.shared.setCheckpointSink { [weak self, logger] checkpoint, conversationID in
@@ -324,6 +340,47 @@ final class MessagingCoordinator {
 
     // MARK: - Response Regeneration
 
+    /// The wake stub in front of `agentMessage` when that message is a background-task report, or
+    /// nil. Read off the STUB, not the report's own `messageSource`: reports written before the
+    /// report was stamped (2026-09-27) still read `.localUI`, and the stub was always stamped.
+    func precedingWakeStub(for agentMessage: ChatMessage) -> ChatMessage? {
+        Self.precedingWakeStub(for: agentMessage, in: chatHistoryViewModel.currentChatMessages)
+    }
+
+    /// `messages` is newest-first, as `currentChatMessages` is: the message in front of index `i`
+    /// is at `i + 1`.
+    static func precedingWakeStub(for agentMessage: ChatMessage, in messages: [ChatMessage]) -> ChatMessage? {
+        guard let index = messages.firstIndex(where: { $0.id == agentMessage.id }),
+              let previous = messages[safe: index + 1],
+              previous.sender == .user, previous.isSyntheticPrompt,
+              previous.messageSource == .backgroundTask
+        else { return nil }
+        return previous
+    }
+
+    /// `RunAdmissionPolicy.admitRegeneration` with the report check filled in — the one rule the
+    /// Redo/Retry buttons and both runtime checks share.
+    func regenerationRefusal(for agentMessage: ChatMessage) -> RunAdmissionPolicy.Refusal? {
+        let stub = precedingWakeStub(for: agentMessage)
+        return RunAdmissionPolicy.admitRegeneration(
+            in: agentMessage.conversationId,
+            attempts: agentMessage.agentResponse?.generationAttempts,
+            live: viewModel?.activeStreamManager.liveRunSnapshot() ?? [],
+            isReport: stub != nil,
+            reportCardSaved: stub.flatMap(BackgroundTaskWakeCoordinator.reportCard(behind:)) != nil,
+            runningTaskID: Self.runningTaskID(startedBy: agentMessage)
+        )
+    }
+
+    /// A background task this message's run started that has not ended, or nil. The card's status
+    /// is kept current by `BackgroundTaskObserver` and reconciled on load, so it is read directly.
+    static func runningTaskID(startedBy message: ChatMessage) -> String? {
+        for event in message.flattenedTimelineEvents {
+            if case .backgroundTask(let card) = event, card.status == .running { return card.taskID }
+        }
+        return nil
+    }
+
     func regenerateResponse(for agentMessage: ChatMessage) {
         // Cheap guard first so a refused Redo never pays for a history fetch.
         //
@@ -332,11 +389,7 @@ final class MessagingCoordinator {
         // `startMessageStream` overwrites `activeTasks[messageID]`, orphaning the first run's task
         // handle permanently. The Redo button is gated per-message (`message.isStreaming`), so it
         // stays live on older messages and this is reachable with one click and no automation.
-        if let refusal = RunAdmissionPolicy.admitRegeneration(
-            in: agentMessage.conversationId,
-            attempts: agentMessage.agentResponse?.generationAttempts,
-            live: viewModel?.activeStreamManager.liveRunSnapshot() ?? []
-        ) {
+        if let refusal = regenerationRefusal(for: agentMessage) {
             logger.warning("[RUN_CLAIM] Redo REFUSED for message \(agentMessage.id.uuidString.prefix(8)) in conversation \(agentMessage.conversationId.uuidString.prefix(8)): \(refusal.logReason)")
             return
         }
@@ -368,11 +421,7 @@ final class MessagingCoordinator {
         // more — only `await Task.yield()`, kept because the HOP is what creates the window the
         // guard closes, while the fetch it used to sit behind was read by nothing. `resumeRun`
         // still does resolve, so the identical wording in `continueResume` remains accurate there.
-        if let refusal = RunAdmissionPolicy.admitRegeneration(
-            in: agentMessage.conversationId,
-            attempts: agentMessage.agentResponse?.generationAttempts,
-            live: vm.activeStreamManager.liveRunSnapshot()
-        ) {
+        if let refusal = regenerationRefusal(for: agentMessage) {
             logger.warning("[RUN_CLAIM] Redo REFUSED for message \(agentMessage.id.uuidString.prefix(8)) after the actor hop (a run claimed conversation \(agentMessage.conversationId.uuidString.prefix(8)) during the hop): \(refusal.logReason)")
             return
         }
@@ -388,6 +437,19 @@ final class MessagingCoordinator {
             return
         }
         let userQuery = userQueryMessage.content.textContent ?? ""
+
+        // ⚠️⚠️ A BACKGROUND-TASK REPORT IS REDONE AS A REPORT. Its "user message" is the wake stub,
+        // a one-line summary; the task output went to the original run through `promptOverride`
+        // and was never persisted. Re-sent as-is, the stub produced a report on output the model
+        // never saw — and with the profile's FULL toolset, since nothing bound `ReportOnlyRun`.
+        // Now: the same prompt, rebuilt from the card the stub saved, run report-only. The
+        // admission check above has already refused a report whose stub saved no card.
+        let reportCard = BackgroundTaskWakeCoordinator.reportCard(behind: userQueryMessage)
+        if userQueryMessage.messageSource == .backgroundTask, reportCard == nil {
+            logger.error("[RUN_CLAIM] Redo for report \(agentMessage.id.uuidString.prefix(8)) reached the run with no saved task card. CONSEQUENCE: refused — admission should have caught this; nothing starts.")
+            return
+        }
+        let promptOverride = reportCard.map(BackgroundTaskWakeCoordinator.prompt(for:))
 
         let filesForBackend = (userQueryMessage.attachedTextFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? []) +
                               (userQueryMessage.attachedImageFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? [])
@@ -410,7 +472,9 @@ final class MessagingCoordinator {
         // RE-EXECUTES the whole DAG with real side effects, so it is a genuinely new run and gets
         // its own record — without this the transcript showed a second execution that run history
         // had no trace of.
-        let workflowTicket = WorkflowRunBootstrap.begin(
+        // ⚠️ Not for a report: the wake starts no workflow run, so its redo must not either — that
+        // would re-execute the whole DAG to rewrite a paragraph about a finished task.
+        let workflowTicket = reportCard != nil ? nil : WorkflowRunBootstrap.begin(
             config: config,
             conversationID: agentMessage.conversationId,
             userInput: userQuery,
@@ -420,21 +484,28 @@ final class MessagingCoordinator {
 
         // Return value intentionally unused: `updating: agentMessage` streams into that same
         // object, so the returned reference is `agentMessage` itself.
-        _ = activeStreamManager.startMessageStream(
-            withConfig: config,
-            userMessage: userQueryMessage,
-            promptOverride: nil,
-            files: filesForBackend,
-            updating: agentMessage,
-            workflowExecutionState: workflowTicket?.state,
-            onComplete: { [weak self] in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.logger.info("[RUN_LIFECYCLE] regeneration stream completed for message \(agentMessage.id.uuidString.prefix(8)).")
-                    workflowTicket?.finalize()
+        if let reportCard {
+            logger.info("[BGWAKE] Redoing report \(agentMessage.id.uuidString.prefix(8)) for \(reportCard.taskID) from its saved card (\(reportCard.outputTail.count) chars of output). CONSEQUENCE: a report-only run — no profile tools — on the same output the original report saw.")
+        }
+        // ⚠️ Bound around the CALL, like the wake: the stream task inherits task-locals from the
+        // context that creates it. `false` for every ordinary Redo, which is the default.
+        ReportOnlyRun.$isActive.withValue(reportCard != nil) {
+            _ = activeStreamManager.startMessageStream(
+                withConfig: config,
+                userMessage: userQueryMessage,
+                promptOverride: promptOverride,
+                files: filesForBackend,
+                updating: agentMessage,
+                workflowExecutionState: workflowTicket?.state,
+                onComplete: { [weak self] in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.logger.info("[RUN_LIFECYCLE] regeneration stream completed for message \(agentMessage.id.uuidString.prefix(8)).")
+                        workflowTicket?.finalize()
+                    }
                 }
-            }
-        )
+            )
+        }
     }
 
     /// [G1 Piece 2] Resume an interrupted run after the app last closed. Rebuilds the in-flight reasoning

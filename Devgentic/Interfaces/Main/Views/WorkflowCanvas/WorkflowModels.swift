@@ -781,8 +781,10 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
     /// Behavior when this node fails — controls downstream cascade.
     var onFailure: NodeFailurePolicy = .skipDependents
 
-    /// Hard timeout override — `Task.cancel()` safety net.
-    /// If nil, uses the agent's own `executionTimeout` or `ExecutionConstraints.default.maxDuration`.
+    /// Hard timeout override for this node.
+    /// If nil (or 0 / negative — `TimeLimit.usable`), the node uses its profile's `executionTimeout`,
+    /// then the workflow's node timeout (`WorkflowConfig.effectiveNodeTimeout`); an enclosing
+    /// scheduled run can shorten it further (`ExecutionBudget`).
     var hardTimeout: TimeInterval? = nil
 
     /// RETIRED 2026-08-29 — read and written by NOTHING. No UI edits it, no validation requires

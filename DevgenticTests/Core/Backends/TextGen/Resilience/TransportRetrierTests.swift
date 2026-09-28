@@ -134,7 +134,9 @@ final class TransportRetrierTests: XCTestCase {
     func testMLX_FailsFast_NoTransientRetries() {
         var retrier = TransportRetrier(transport: mlxTransport()) // budget 0
         XCTAssertThrowsError(try retrier.nextStep(for: URLError(.timedOut))) { error in
-            XCTAssertEqual((error as? TransportFatalError)?.category, .providerServerError)
+            // A timeout is filed as `.providerTimeout` since the status sweep (2026-09-27) — it
+            // was `.providerServerError` ("Provider 5xx"). The point of this test is fail-fast.
+            XCTAssertEqual((error as? TransportFatalError)?.category, .providerTimeout)
             XCTAssertTrue((error as? TransportFatalError)?.reason.contains("local model") ?? false)
         }
     }

@@ -162,6 +162,7 @@ final class CodeProjectSessionTests: XCTestCase {
             tools[i].timeout = 42
             tools[i].cutStrategy = .keepStart
             tools[i].isFavorite = true
+            tools[i].requiresConfirmation = false
         }
 
         manager.resetSession()
@@ -171,6 +172,63 @@ final class CodeProjectSessionTests: XCTestCase {
         XCTAssertEqual(tool.timeout, 42)
         XCTAssertEqual(tool.cutStrategy, .keepStart)
         XCTAssertTrue(tool.isFavorite)
+        XCTAssertFalse(tool.requiresConfirmation, "the Library's Auto Run choice was lost on Home")
+    }
+
+    // MARK: - Ask/Auto, set in the Tool Library, is remembered per project (2026-09-25)
+
+    /// ⚠️ THE REASON `CodeToolOverride` carries it. The quick-settings popover used to hold Ask/Auto
+    /// per project; with that gone, a Library choice lived only on the shared row and reverted on the
+    /// next project switch.
+    func testAskAutoSetInTheLibraryIsRememberedPerProject() throws {
+        let manager = CodeSessionManager(defaults: defaults)
+        manager.updateProjectPath(projectA)
+        selectModel("qwen", on: manager)
+        try editRowTools(manager) { tools in
+            guard let i = tools.firstIndex(where: { $0.name == "run_command" }) else { return }
+            tools[i].requiresConfirmation = false
+        }
+
+        manager.updateProjectPath(projectB)
+        XCTAssertEqual(try row(manager).tools.first { $0.name == "run_command" }?.requiresConfirmation, true,
+                       "project A's Auto Run leaked into project B — a shell grant nobody gave there")
+
+        manager.updateProjectPath(projectA)
+        XCTAssertEqual(try row(manager).tools.first { $0.name == "run_command" }?.requiresConfirmation, false,
+                       "project A's Auto Run was lost on the round trip")
+    }
+
+    /// Ask/Auto alone is a change worth storing — it is the whole override for most users.
+    func testAnAskAutoChangeAloneIsStored() throws {
+        let preset = try XCTUnwrap(CodeToolPreset.defaultTools.first { $0.requiresConfirmation })
+        var changed = preset
+        changed.requiresConfirmation = false
+        let override = try XCTUnwrap(CodeToolOverride(preset: preset, current: changed),
+                                     "an Ask/Auto change was judged not worth storing")
+        let decoded = try JSONDecoder().decode(CodeToolOverride.self, from: JSONEncoder().encode(override))
+        XCTAssertFalse(decoded.applied(to: preset).requiresConfirmation)
+    }
+
+    /// An override saved before the field existed must still decode, and keep the preset's Ask/Auto.
+    func testAnOverrideSavedBeforeAskAutoWasRememberedStillDecodes() throws {
+        let preset = try XCTUnwrap(CodeToolPreset.defaultTools.first { $0.requiresConfirmation })
+        let old = Data(#"{"timeout":42,"isFavorite":true}"#.utf8)
+        let decoded = try JSONDecoder().decode(CodeToolOverride.self, from: old)
+        XCTAssertEqual(decoded.applied(to: preset).timeout, 42)
+        XCTAssertTrue(decoded.applied(to: preset).requiresConfirmation, "a missing field must mean the preset's")
+    }
+
+    /// Wiring: the popover must not grow a second Ask/Auto control again.
+    func testTheQuickSettingsPopoverHasNoToolApprovals() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let path = "Devgentic/Interfaces/Code/CodeQuickSettingsPopover.swift"
+        guard let source = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else {
+            throw XCTSkip("CodeQuickSettingsPopover.swift not reachable — running outside a checkout")
+        }
+        XCTAssertFalse(source.contains("requiresConfirmation"),
+                       "the popover sets Ask/Auto again — the Tool Library owns it, and a second copy applied on every run overrides it")
     }
 
     /// A setting cleared back to "none" must come back as none, not as the preset's value.

@@ -405,8 +405,16 @@ final class DownloadHistoryStore {
     ///
     /// Safe to call repeatedly — only touches records matching the active
     /// predicate, and writes the terminal transition exactly once per row.
-    func reconcileOrphans() {
-        let stillActive = fetchActive()
+    /// - Parameter startedBefore: only rows started before this instant are orphans. ⚠️ D-25: the
+    ///   launch sweep runs AFTER the skill-import sweep, which can take as long as a volume's mount
+    ///   timeout; a download the user started in that window is live, and flipping it to
+    ///   `.interrupted` stranded it. The launch passes the instant captured before that sweep.
+    func reconcileOrphans(startedBefore cutoff: Date = .distantFuture) {
+        let active = fetchActive()
+        let stillActive = active.filter { $0.startedAt < cutoff }
+        if stillActive.count < active.count {
+            logger.info("[DOWNLOAD] Left \(active.count - stillActive.count) active download(s) alone — started during this launch, so they are live, not orphans.")
+        }
         guard !stillActive.isEmpty else { return }
         for record in stillActive {
             record.statusRaw = DownloadRecordStatus.interrupted.rawValue

@@ -110,6 +110,15 @@ final class SlackPairingService {
     func disconnect() async {
         cancelPairing()
 
+        // ⚠️ Register KC-33, Slack folding TWO credentials: either one unreadable is an outage.
+        let botState = ChatOpsConfigManager.credentialState(
+            AppSettings.chatOpsSlackBotTokenKey, keychain: config.keychain, logger: logger)
+        let appState = ChatOpsConfigManager.credentialState(
+            AppSettings.chatOpsSlackAppTokenKey, keychain: config.keychain, logger: logger)
+        var anyUnreadable = false
+        if case .unreadable = botState { anyUnreadable = true }
+        if case .unreadable = appState { anyUnreadable = true }
+
         if let token = config.slackBotToken, let channelID = config.slackAuthorizedChannelID {
             let client = SlackAPIClient(botToken: token)
             await ChatOpsFarewell.send(provider: .slack, logger: logger) {
@@ -117,8 +126,18 @@ final class SlackPairingService {
             }
         }
 
-        config.resetSlack()
-        logger.info("Slack ChatOps disconnected and credentials cleared.")
+        let summary = config.resetSlack()
+        if !summary.allCleared {
+            logger.error(
+                "[SECRETS] Slack disconnect could not delete \(summary.failedLabels.joined(separator: ", ")) "
+                + "from the Keychain. CONSEQUENCE: the bridge is left in .error naming what is still stored."
+            )
+        } else {
+            logger.info("Slack ChatOps disconnected and credentials cleared.")
+        }
+        if anyUnreadable {
+            config.connectionState = .error(ChatOpsPairingRestore.unreadableMessage)
+        }
     }
 
     // MARK: - Private
@@ -240,8 +259,9 @@ final class SlackPairingService {
     /// from the user pressing Cancel, and `PairingWindowExpiry` is what knows the difference.
     private func armDeadline(pin: String) {
         deadlineTask?.cancel()
+        let timeout = pairingTimeout
         deadlineTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000))
+            await PairingWindowExpiry.waitOutWindow(timeout)
             guard !Task.isCancelled, let self else { return }
 
             self.pairingTask?.cancel()

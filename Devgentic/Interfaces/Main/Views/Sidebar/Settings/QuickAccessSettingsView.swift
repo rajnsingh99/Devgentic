@@ -27,8 +27,8 @@ struct QuickAccessSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                // MARK: Activation
-                SettingsCard(title: "Activation", icon: "command", theme: theme) {
+                // MARK: Quick Access
+                SettingsCard(title: "Quick Access", icon: "bolt.circle", theme: theme) {
                     SettingsRow(
                         title: "Enable Quick Access",
                         description: "Summon a floating chat panel from anywhere with a global shortcut.",
@@ -37,84 +37,87 @@ struct QuickAccessSettingsView: View {
                         Toggle("", isOn: enabledBinding)
                             .labelsHidden()
                             .toggleStyle(.switch)
+                            .tint(theme.accentColor)
                     }
 
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+                    if config.isEnabled {
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
-                    SettingsRow(
-                        title: "Global Shortcut",
-                        description: "Click Record, then press a modifier and a key (e.g. ⌥Space).",
-                        theme: theme
-                    ) {
-                        HStack(spacing: 8) {
-                            HotkeyRecorderView(
-                                currentDescription: config.shortcutDescription,
-                                onRecorded: { code, mods in
-                                    config.setShortcut(carbonKeyCode: code, carbonModifiers: mods)
+                        SettingsRow(
+                            title: "Global Shortcut",
+                            description: "Click Record, then press a modifier and a key (e.g. ⌥Space).",
+                            theme: theme
+                        ) {
+                            HStack(spacing: 8) {
+                                HotkeyRecorderView(
+                                    currentDescription: config.shortcutDescription,
+                                    onRecorded: { code, mods in
+                                        config.setShortcut(carbonKeyCode: code, carbonModifiers: mods)
+                                        AppDelegate.shared.applyHotkeyConfig()
+                                    },
+                                    // [M3] Pause the live global hotkey while the recorder is armed so
+                                    // pressing the CURRENT combo to re-record it is captured here
+                                    // instead of summoning the panel over Settings.
+                                    onRecordingStateChanged: { recording in
+                                        AppDelegate.shared?.setHotkeyPaused(recording)
+                                    }
+                                )
+
+                                TactileIconButton(
+                                    icon: "arrow.counterclockwise",
+                                    tooltip: "Reset to ⌥Space"
+                                ) {
+                                    config.resetShortcutToDefault()
                                     AppDelegate.shared.applyHotkeyConfig()
-                                },
-                                // [M3] Pause the live global hotkey while the recorder is armed so
-                                // pressing the CURRENT combo to re-record it is captured here
-                                // instead of summoning the panel over Settings.
-                                onRecordingStateChanged: { recording in
-                                    AppDelegate.shared?.setHotkeyPaused(recording)
                                 }
+                            }
+                        }
+                    }
+                }
+
+                if config.isEnabled {
+                    // MARK: Default profile
+                    SettingsCard(title: "Default Profile", icon: "person.crop.circle", theme: theme) {
+                        SettingsRow(
+                            title: "Profile",
+                            description: "The chat profile new Quick Access conversations use. Only Bots and Agents can be chosen.",
+                            theme: theme
+                        ) {
+                            BackendPickerButton(
+                                profileThemeColor: selectedProfile?.profileType.displayColor ?? theme.secondaryText,
+                                profileButtonText: selectedProfile?.displayName ?? "Choose profile",
+                                backendConfiguration: profileConfig,
+                                allowedProfileTypes: QuickAccessSessionViewModel.allowedProfileTypes,
+                                showingPopup: $showingProfilePopup
                             )
-                            .disabled(!config.isEnabled)
-                            .opacity(config.isEnabled ? 1 : 0.5)
-
-                            TactileIconButton(
-                                icon: "arrow.counterclockwise",
-                                tooltip: "Reset to ⌥Space",
-                                isDisabled: !config.isEnabled
-                            ) {
-                                config.resetShortcutToDefault()
-                                AppDelegate.shared.applyHotkeyConfig()
+                            .onChange(of: profileConfig.selectedProfileID) { _, newID in
+                                if let id = newID {
+                                    UserDefaults.standard.set(id.uuidString, forKey: GlobalConstants.quickAccessProfileID)
+                                }
                             }
                         }
                     }
-                }
 
-                // MARK: Default profile
-                SettingsCard(title: "Default Profile", icon: "person.crop.circle", theme: theme) {
-                    SettingsRow(
-                        title: "Profile",
-                        description: "The chat profile new Quick Access conversations use. Only Bots and Agents can be chosen.",
-                        theme: theme
-                    ) {
-                        BackendPickerButton(
-                            profileThemeColor: selectedProfile?.profileType.displayColor ?? theme.secondaryText,
-                            profileButtonText: selectedProfile?.displayName ?? "Choose profile",
-                            backendConfiguration: profileConfig,
-                            allowedProfileTypes: QuickAccessSessionViewModel.allowedProfileTypes,
-                            showingPopup: $showingProfilePopup
-                        )
-                        .onChange(of: profileConfig.selectedProfileID) { _, newID in
-                            if let id = newID {
-                                UserDefaults.standard.set(id.uuidString, forKey: GlobalConstants.quickAccessProfileID)
+                    // MARK: Behavior
+                    SettingsCard(title: "Behavior", icon: "clock.arrow.circlepath", theme: theme) {
+                        SettingsRow(
+                            title: "Session Timeout",
+                            description: "Reopening within this window resumes your last Quick Access conversation; after it, a fresh one starts.",
+                            theme: theme
+                        ) {
+                            Picker("", selection: timeoutBinding) {
+                                ForEach(timeoutOptions, id: \.self) { seconds in
+                                    Text(seconds < 60 ? "\(seconds) sec" : "\(seconds / 60) min").tag(seconds)
+                                }
                             }
+                            .labelsHidden()
+                            .frame(width: 110)
                         }
-                    }
-                }
-
-                // MARK: Behavior
-                SettingsCard(title: "Behavior", icon: "clock.arrow.circlepath", theme: theme) {
-                    SettingsRow(
-                        title: "Session Timeout",
-                        description: "Reopening within this window resumes your last Quick Access conversation; after it, a fresh one starts.",
-                        theme: theme
-                    ) {
-                        Picker("", selection: timeoutBinding) {
-                            ForEach(timeoutOptions, id: \.self) { seconds in
-                                Text(seconds < 60 ? "\(seconds) sec" : "\(seconds / 60) min").tag(seconds)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 110)
                     }
                 }
             }
             .padding(24)
+            .animation(.default, value: config.isEnabled)
         }
         .scrollContentBackground(.hidden)
         .background(Color.clear)
@@ -131,7 +134,9 @@ struct QuickAccessSettingsView: View {
         Binding(
             get: { config.isEnabled },
             set: { newValue in
-                config.isEnabled = newValue
+                withAnimation {
+                    config.isEnabled = newValue
+                }
                 AppDelegate.shared.applyHotkeyConfig()
             }
         )

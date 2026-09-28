@@ -266,6 +266,15 @@ final class SlackChatOpsBridge {
             return
         }
 
+        // ⚠️ D-23: a work-starting command redelivered long after it was sent is skipped, not run late.
+        if RemoteCommandAge.isAgeGated(command),
+           let age = RemoteCommandAge.staleAge(sentAt: RemoteCommandAge.slackSentAt(event.ts)) {
+            logger.warning("[CHATOPS] A Slack \(String(describing: command)) in channel \(channelID) was sent \(Int(age))s ago. CONSEQUENCE: NOT run (older than \(Int(RemoteCommandAge.maxAge))s); the operator is told to send it again.")
+            await tell(channelID, RemoteCommandAge.notice(age: age),
+                       whenLost: "the operator is not told their old command was skipped, so it looks as if the bot ignored it.")
+            return
+        }
+
         await routeCommand(command, channelID: channelID)
     }
 

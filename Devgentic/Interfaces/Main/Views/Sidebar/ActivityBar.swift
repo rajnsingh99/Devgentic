@@ -120,7 +120,11 @@ struct ActivityBarButton: View {
 
     private var showBadge: Bool {
         switch tab {
-        case .settings, .downloads:
+        case .downloads:
+            // Also badged, in the warning colour, while unfinished MLX downloads over the notice
+            // threshold are waiting for the user to look at them (cleared on opening Downloads).
+            return downloadManager.hasActiveDownloads || MLXModelService.shared.leftoverNeedsAttention
+        case .settings:
             return downloadManager.hasActiveDownloads
         case .promptLibrary:
             return PromptService.shared.loadState.isError
@@ -133,6 +137,8 @@ struct ActivityBarButton: View {
         switch tab {
         case .promptLibrary where PromptService.shared.loadState.isError:
             return theme.errorColor
+        case .downloads where !downloadManager.hasActiveDownloads && MLXModelService.shared.leftoverNeedsAttention:
+            return theme.warningColor
         default:
             return theme.accentColor
         }

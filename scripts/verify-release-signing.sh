@@ -28,6 +28,9 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PBXPROJ="$PROJECT_DIR/Devgentic.xcodeproj/project.pbxproj"
 APP_PATH="${1:-}"
 FAILURES=0
+# The Developer ID team every release is signed by. Changing it orphans every Keychain item and TCC
+# grant an installed copy holds, so it is pinned here rather than read back from the project.
+EXPECTED_TEAM_ID="FM3V43ST5B"
 
 fail() { printf '  \033[31m✗ FAIL\033[0m  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 pass() { printf '  \033[32m✓ ok\033[0m    %s\n' "$1"; }
@@ -86,6 +89,35 @@ elif [[ "$IDENTITY" == "Developer ID Application"* ]]; then
   pass "Release CODE_SIGN_IDENTITY is '$IDENTITY'"
 else
   warn "Release CODE_SIGN_IDENTITY is '$IDENTITY' — expected 'Developer ID Application' for notarized distribution"
+fi
+
+# 1b. Manual signing style. Xcode refuses a manually specified "Developer ID Application" identity
+# under CODE_SIGN_STYLE = Automatic ("conflicting provisioning settings") — the build fails before
+# compiling anything, so this is caught here rather than at release time.
+if printf '%s' "$BLOCK" | grep -q 'CODE_SIGN_STYLE = Manual;'; then
+  pass "CODE_SIGN_STYLE = Manual"
+else
+  fail "Release CODE_SIGN_STYLE is not Manual — Xcode rejects a Developer ID identity under Automatic signing"
+fi
+
+# 1c. Team ID. The designated requirement is anchored on it — it is the stable identity the Keychain
+# ACLs bind to, so it must never change across releases.
+TEAM="$(printf '%s' "$BLOCK" | sed -n 's/.*DEVELOPMENT_TEAM = \([A-Z0-9]*\);/\1/p' | head -1)"
+if [[ "$TEAM" == "$EXPECTED_TEAM_ID" ]]; then
+  pass "DEVELOPMENT_TEAM = $TEAM"
+elif [[ -z "$TEAM" ]]; then
+  fail "Release sets no DEVELOPMENT_TEAM"
+else
+  fail "Release DEVELOPMENT_TEAM is $TEAM, expected $EXPECTED_TEAM_ID — a different team is a different application to every existing Keychain item"
+fi
+
+# 1d. No injected get-task-allow. `xcodebuild build` adds it to EVERY configuration unless this is
+# off — only archive/export strips it — so a Release product built the ordinary way was not
+# notarizable and let any local process attach to the app holding decrypted Keychain secrets.
+if printf '%s' "$BLOCK" | grep -q 'CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;'; then
+  pass "CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO"
+else
+  fail "Release does not set CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO — a plain build embeds get-task-allow"
 fi
 
 # 2. Hardened runtime — required for notarization.
@@ -170,6 +202,33 @@ else
   done
 fi
 
+# ------------------------------------------------------------------------ Sparkle
+# ⚠️ Both values are compiled into every shipped binary and can never be changed for copies already
+# installed: a different key makes them reject every future update; a different feed host strands
+# them unless GitHub Pages redirects from the same account + repo.
+echo
+echo "── Sparkle ──────────────────────────────────────────────────────"
+EXPECTED_FEED="https://rajnsingh99.github.io/devgentic/appcast.xml"
+if [[ -f "$INFO_PLIST" ]]; then
+  FEED="$(/usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$INFO_PLIST" 2>/dev/null)"
+  if [[ "$FEED" == "$EXPECTED_FEED" ]]; then
+    pass "SUFeedURL = $FEED"
+  else
+    fail "SUFeedURL is '${FEED:-<unset>}', expected $EXPECTED_FEED"
+  fi
+  EDKEY="$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$INFO_PLIST" 2>/dev/null)"
+  if [[ ${#EDKEY} -eq 44 ]]; then
+    pass "SUPublicEDKey is present"
+  else
+    fail "SUPublicEDKey is missing or malformed — Sparkle refuses to start without it"
+  fi
+  if /usr/libexec/PlistBuddy -c "Print :SUEnableAutomaticChecks" "$INFO_PLIST" >/dev/null 2>&1; then
+    fail "SUEnableAutomaticChecks is set — automatic checks must be the user's choice (PRIVACY.md)"
+  else
+    pass "SUEnableAutomaticChecks absent — Sparkle asks the user first"
+  fi
+fi
+
 # ------------------------------------------------------------------ built app
 if [[ -n "$APP_PATH" ]]; then
   echo
@@ -186,6 +245,40 @@ if [[ -n "$APP_PATH" ]]; then
     else
       fail "not signed with Developer ID (authority: $(printf '%s' "$SIGINFO" | sed -n 's/^Authority=//p' | head -1))"
     fi
+
+    if [[ -d "$APP_PATH/Contents/Frameworks/Sparkle.framework" ]]; then
+      pass "Sparkle.framework is embedded"
+    else
+      fail "Sparkle.framework is not embedded — the app cannot update itself"
+    fi
+
+    APP_TEAM="$(printf '%s' "$SIGINFO" | sed -n 's/^TeamIdentifier=//p' | head -1)"
+    if [[ "$APP_TEAM" == "$EXPECTED_TEAM_ID" ]]; then
+      pass "TeamIdentifier = $APP_TEAM"
+    else
+      fail "TeamIdentifier is '${APP_TEAM:-<none>}', expected $EXPECTED_TEAM_ID"
+    fi
+
+    # Every nested code bundle must carry the SAME team. Under the hardened runtime, library
+    # validation makes dyld refuse a framework signed by another team — the app dies at launch,
+    # before any UI. SPM binary targets (ObjectBox, CodeLanguages_Container, Sparkle) arrive
+    # pre-signed by their vendors and are the ones that can slip through un-re-signed.
+    # ⚠️ A plain `xcodebuild build` re-signs Sparkle.framework but NOT the helpers inside it
+    # (Updater.app, Autoupdate, Downloader.xpc, Installer.xpc) — they keep Sparkle's ad-hoc
+    # signature and notarization rejects them. Only archive → export (developer-id) re-signs them,
+    # so run this gate on the EXPORTED app. Symlinks are skipped: Sparkle.framework/Updater.app is
+    # a link to Versions/B/Updater.app and would otherwise be reported twice.
+    while IFS= read -r -d '' nested; do
+      NESTED_TEAM="$(codesign -dvv "$nested" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)"
+      REL="${nested#"$APP_PATH"/}"
+      if [[ "$NESTED_TEAM" == "$EXPECTED_TEAM_ID" ]]; then
+        pass "nested $REL"
+      else
+        fail "nested $REL has TeamIdentifier '${NESTED_TEAM:-<none>}' — dyld will refuse to load it under library validation"
+      fi
+    done < <(find "$APP_PATH/Contents" ! -type l \
+               \( -name '*.framework' -o -name '*.app' -o -name '*.xpc' -o -name '*.dylib' -o -name 'Autoupdate' \) \
+               -not -path '*/Versions/*/Resources/*' -print0 2>/dev/null)
 
     # CodeDirectory flags carry `runtime` when the hardened runtime is on.
     if printf '%s' "$SIGINFO" | grep -q 'flags=.*runtime'; then

@@ -612,6 +612,15 @@ final class ActiveStreamManager {
             if Task.isCancelled {
                 logger.info("[ADMISSION] Run \(agentMessage.id.uuidString.prefix(8)) was cancelled while waiting for conversation \(conversationID.uuidString.prefix(8)).")
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: CancellationError())
+                // ⚠️ The SAME two lines every other exit of this task ends with. This early return
+                // used to skip them, so a run cancelled while QUEUED never called `onComplete` —
+                // and `SchedulerCoordinator.sendScheduledMessage` waits on exactly that callback.
+                // Its 600 s deadline cancels a queued scheduled run, the callback never came, the
+                // task stayed pinned in `runningTaskIDs`, and every later fire was skipped as
+                // "already running" until relaunch; the task also leaked in `activeTasks`
+                // (Timeout inventory D-12, 2026-09-26).
+                self.removeTask(for: agentMessage.id)
+                onComplete()
                 return
             }
 
@@ -717,6 +726,10 @@ final class ActiveStreamManager {
                 // stream produced. Consulted ONLY at stream end, and only when the engine's
                 // terminal outcome is `.failed` (see the workflow settle there).
                 var lastErrorEventMessage: String?
+                // The bubble's content from before a `.draftText` preview started, or nil when no
+                // draft is showing. Restored when the draft is withdrawn, and before the first
+                // `.content` appends — so a draft is REPLACED by the answer, never duplicated by it.
+                var draftBaseline: MessageContent?
 
                 for try await event in stream {
                     try Task.checkCancellation()
@@ -881,7 +894,33 @@ final class ActiveStreamManager {
                         }
 
 
+                    case .draftText(let draft):
+                        // Provisional step text (see `AgentStreamEvent.draftText`). Set directly —
+                        // not merged, buffered or flushed to disk: it is cumulative, and it may yet
+                        // be withdrawn.
+                        if draft.isEmpty {
+                            if let baseline = draftBaseline {
+                                setMessageContent(agentMessage, baseline, isRegeneration: isRegeneration)
+                                draftBaseline = nil
+                            }
+                        } else if let current = messageContent(agentMessage, isRegeneration: isRegeneration) {
+                            let baseline = draftBaseline ?? current
+                            draftBaseline = baseline
+                            setMessageContent(agentMessage, ChatMessage.draftDisplayContent(baseline: baseline, draft: draft),
+                                              isRegeneration: isRegeneration)
+                        }
+
                     case .content(let textChunk):
+                        // A showing draft is the preview of this very text: put the bubble back
+                        // the way it was before the draft, then append as usual.
+                        if let baseline = draftBaseline {
+                            setMessageContent(agentMessage, baseline, isRegeneration: isRegeneration)
+                            draftBaseline = nil
+                            // Render this chunk NOW rather than on the next throttle tick — the bubble
+                            // just lost the draft, and waiting up to `adaptiveInterval` would blink it
+                            // empty between the preview and the answer.
+                            lastUpdateTime = .distantPast
+                        }
                         // 3. Handle Final Text (Buffered)
                         if agentMessage.agentState != .thinking(.finalizing) {
                             agentMessage.agentState = .thinking(.finalizing)
@@ -935,6 +974,9 @@ final class ActiveStreamManager {
                         // stream end. Only USED when the engine's terminal outcome is `.failed` —
                         // an inner-node error a recovery branch survives never reaches it.
                         lastErrorEventMessage = structuredError.message
+                        // The error card below replaces whatever the bubble shows, draft included;
+                        // forget the draft so a later withdrawal cannot restore over the card.
+                        draftBaseline = nil
                         // Surface the failure as a distinct error card in the bubble
                         // instead of leaving it buried in streaming prose. Without this,
                         // capability/system failures render as plain text that mimics
@@ -1537,6 +1579,27 @@ final class ActiveStreamManager {
         Task { await TraceRecorder.shared.emitUserInteraction(span: context, type: type, toolName: tool, outcome: detailed) }
     }
 
+    /// The content the bubble is showing — the selected variant's when regenerating.
+    private func messageContent(_ agentMessage: ChatMessage, isRegeneration: Bool) -> MessageContent? {
+        guard isRegeneration else { return agentMessage.content }
+        guard let response = agentMessage.agentResponse,
+              response.variants.indices.contains(response.selectedVariantIndex) else { return nil }
+        return response.variants[response.selectedVariantIndex].content
+    }
+
+    /// Replaces (does not merge) what the bubble shows. Used only for `.draftText` previews.
+    private func setMessageContent(_ agentMessage: ChatMessage, _ content: MessageContent, isRegeneration: Bool) {
+        if isRegeneration {
+            guard let response = agentMessage.agentResponse,
+                  response.variants.indices.contains(response.selectedVariantIndex) else { return }
+            agentMessage.agentResponse?.variants[response.selectedVariantIndex].content = content
+        } else {
+            agentMessage.content = content
+            agentMessage.agentResponse?.variants[0].content = content
+        }
+        agentMessage.invalidateMarkdownCache()
+    }
+
     private func updateMessageContent(_ agentMessage: ChatMessage, with newTextChunk: String, isRegeneration: Bool) {
         // Merge decision lives in `ChatMessage.resolveStreamedChunkMerge` (pure,
         // testable). ASM-1: when current content is an `.error` card and prose
@@ -1647,6 +1710,11 @@ final class ActiveStreamManager {
         await persistenceService.addMessage(message, toConversation: conversationID)
     }
 
+    /// The execution-timeout wording (HITL Waiting Contract §4), shared by chat, Code and the scheduler.
+    nonisolated static func executionTimeoutMessage(limit: TimeInterval) -> String {
+        "Run stopped: it exceeded its \(ToolExecutionMediator.describe(limit)) execution limit. Time spent waiting for your approval was not counted."
+    }
+
     private func finalizeMessage(_ message: ChatMessage, conversationID: UUID, error: Error?) async {
         message.isStreaming = false
         // [G1 Piece 1] A finalized run (success, error, or user Stop) is a clean terminal state —
@@ -1673,6 +1741,14 @@ final class ActiveStreamManager {
         // chip + `completed` trace status) over an ERROR CARD whenever a producer
         // yielded `.error` and then finished without throwing. The resolver also
         // inspects the content (pure + tested: `ChatMessage.resolveFallbackOutcome`).
+        // HITL Waiting Contract §3–4: an execution limit is TIMED OUT, with the contract's message —
+        // not a "Response Error" card or a generic failure.
+        if message.terminalOutcome == nil,
+           let agentError = error as? AgentExecutionError,
+           case .executionTimeout(_, let limit) = agentError.reason {
+            message.terminalOutcome = .timedOut
+            message.terminalReason = Self.executionTimeoutMessage(limit: limit)
+        }
         if message.terminalOutcome == nil {
             let fallback = ChatMessage.resolveFallbackOutcome(
                 threwError: error,
@@ -1760,7 +1836,12 @@ final class ActiveStreamManager {
                 let se = fre.structuredError
                 errorCard = .error(title: se.title, details: se.message, category: se.category, suggestion: se.suggestion)
             } else {
-                errorCard = .error(title: "Response Error", details: error.localizedDescription)
+                if let agentError = error as? AgentExecutionError,
+                   case .executionTimeout(_, let limit) = agentError.reason {
+                    errorCard = .error(title: "Timed out", details: Self.executionTimeoutMessage(limit: limit))
+                } else {
+                    errorCard = .error(title: "Response Error", details: error.localizedDescription)
+                }
             }
 
             // [ASM-2] Don't discard prose the user watched stream: if real partial text

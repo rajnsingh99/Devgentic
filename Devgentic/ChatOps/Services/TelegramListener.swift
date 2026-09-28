@@ -88,7 +88,7 @@ actor TelegramListener {
                         // Reversing 1 and 2 would silently gut the terminal classifiers: a stop that
                         // races a 401 would exit quietly and the bridge would look stopped rather
                         // than broken, which is the invisibility those classifiers were added to end.
-                        let delay = await self.getBackoffDelay()
+                        let delay = Self.retryDelay(backoff: await self.getBackoffDelay(), error: error)
                         await self.increaseBackoff()
 
                         // Check if this is a terminal error — one that retrying cannot clear,
@@ -184,6 +184,19 @@ actor TelegramListener {
 
     private func recordTerminalFailure(_ reason: String) {
         terminalFailure = reason
+    }
+
+    /// How long to wait before the next poll after `error`.
+    ///
+    /// ⚠️ D-23 (CO-4): a 429 carries Telegram's own `retry_after`, and the loop ignored it — polling
+    /// again after 1 s into a limit that said 30, which Telegram answers by extending the limit.
+    /// Honoured here, never shorter than the backoff, and sanitised exactly like the provider
+    /// Retry-After (D-09): a non-finite or negative value falls back to the backoff, and nothing
+    /// waits more than an hour.
+    nonisolated static func retryDelay(backoff: Double, error: Error) -> Double {
+        guard let requested = (error as? TelegramAPIError)?.retryAfterSeconds,
+              let wait = ProviderErrorClassifier.sanitizedRetryAfter(requested) else { return backoff }
+        return max(backoff, wait)
     }
 
     /// Whether a Telegram API error ends the poll loop, and what to tell the user if so.

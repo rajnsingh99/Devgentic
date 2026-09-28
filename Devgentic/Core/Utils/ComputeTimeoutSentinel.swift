@@ -32,38 +32,41 @@ private let logger = DGLogger(category: "ComputeTimeoutSentinel")
 /// again. That handles parks beginning AFTER the sentinel is already asleep, which a deadline
 /// computed up front cannot.
 ///
-/// ⚠️ Park time is accounted per CONVERSATION, not per operation, so parallel siblings share the
-/// credit and a run can over-run its limit when a sibling parked. Deliberate: over-crediting wastes
-/// some time, under-crediting kills work that was only ever waiting.
+/// ⚠️ Park time is credited per OWNER CHAIN (`ParkScope`, HITL Waiting Contract decision A) —
+/// only parks raised inside `scope`'s task tree pause it. It used to be per CONVERSATION, so an
+/// unrelated banner anywhere in the conversation froze this clock indefinitely (Timeout inventory
+/// D-18).
+///
+/// Clock: `SuspendingClock` — time the Mac spends asleep is not compute (Contract §6.5).
 ///
 /// Returns `Never` — it resolves only by throwing, so it is a sentinel to race real work against.
 enum ComputeTimeoutSentinel {
 
     /// - Parameters:
     ///   - limit: The compute budget in seconds.
-    ///   - conversationID: The park-accounting scope. Parks are keyed per conversation by
-    ///     `ExecutionSuspensionService`, and every HITL surface (tool confirmation, clarification,
-    ///     plan review) accrues into it — not just workflow nodes.
+    ///   - scope: The bound's `ParkScope` id. The work being bounded must run inside it
+    ///     (`ParkScope.withScope` / `bind`), or its parks will not pause this clock.
     ///   - logTag: Bracket tag for the emitted logs, e.g. `WF_TIMEOUT` or `EXEC_LIMITS`. Callers
     ///     keep their own vocabulary so existing log greps still match.
     ///   - subject: What is being bounded, e.g. `Node 'Summarise'` or `Conversation ab12cd34 (code)`.
     ///   - consequence: What happens when the budget is exhausted, for the CONSEQUENCE clause.
     static func sleepUntilComputeExceeded(
         limit: TimeInterval,
-        conversationID: UUID,
+        scope: UUID,
         logTag: String,
         subject: String,
         consequence: String
     ) async throws -> Never {
-        let start = Date()
-        let parkedAtStart = await ExecutionSuspensionService.shared.cumulativeParkedTime(for: conversationID)
+        let clock = SuspendingClock()
+        let start = clock.now
+        let suspension = ExecutionSuspensionService.shared
+        let parkedAtStart = await suspension.parkedTime(forScope: scope)
         var remaining = limit
 
         while true {
-            try await Task.sleep(for: .seconds(remaining))
-            let parked = await ExecutionSuspensionService.shared
-                .cumulativeParkedTime(for: conversationID) - parkedAtStart
-            let wall = Date().timeIntervalSince(start)
+            try await Task.sleep(for: .seconds(max(remaining, 0)), clock: .suspending)
+            let parked = await suspension.parkedTime(forScope: scope) - parkedAtStart
+            let wall = DeadlineRace.seconds(clock.now - start)
             let compute = wall - parked
 
             if compute >= limit {
@@ -72,7 +75,11 @@ enum ComputeTimeoutSentinel {
             }
 
             remaining = limit - compute
-            logger.info("[\(logTag)] \(subject) timeout extended by \(Int(remaining))s — \(Int(parked))s of the elapsed \(Int(wall))s was spent awaiting a human, which does not count against the compute budget.")
+            // ⚠️ While a park is OPEN the shortfall can be a sliver, and re-arming for a sliver
+            // spun this loop — waking and logging "extended by 0s" — for the whole length of a long
+            // park. Nothing can be charged while it stays open, so wake at most once a second.
+            if await suspension.isParked(scope: scope) { remaining = max(remaining, 1) }
+            logger.debug("[\(logTag)] \(subject) timeout extended by \(Int(remaining))s — \(Int(parked))s of the elapsed \(Int(wall))s was spent awaiting a human, which does not count against the compute budget.")
         }
     }
 }

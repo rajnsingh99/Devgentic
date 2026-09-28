@@ -314,7 +314,11 @@ actor TraceRecorder {
     /// `AgentErrorCategory` (e.g. `.toolSemanticFail` when the tool returned
     /// error-shaped output) — this drives the per-tool failure-breakdown chart
     /// in the Trends dashboard.
-    func emitToolResult(span: TraceContext, name: String, success: Bool, output: String, durationMs: Int, at: Date = Date()) {
+    /// - Parameter failureCategory: the failure's real category when the caller knows it (a timeout
+    ///   is `.toolTimeout`). Nil keeps the old inference, `.toolSemanticFail` — which used to file
+    ///   EVERY failure, timeouts included, under one bucket (Timeout inventory D-16).
+    func emitToolResult(span: TraceContext, name: String, success: Bool, output: String, durationMs: Int, at: Date = Date(),
+                        failureCategory: AgentErrorCategory? = nil) {
         let detail: [String: Any] = [
             "tool_name": name,
             "is_success": success,
@@ -329,7 +333,7 @@ actor TraceRecorder {
         // v2 analytics columns are sanitized + non-PII (enums/ints), so record them whenever
         // diagnostics are enabled (default-on), not just in developer mode (Gap #4).
         let recordV2 = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey) || AppSettings.diagnosticsRecordingEnabled
-        let inferredCategory: AgentErrorCategory? = success ? nil : .toolSemanticFail
+        let inferredCategory: AgentErrorCategory? = success ? nil : (failureCategory ?? .toolSemanticFail)
 
         emit(SpanEvent(
             spanID: span.spanID,

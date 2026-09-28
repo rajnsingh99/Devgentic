@@ -93,7 +93,7 @@ struct QuickAccessContentView: View {
     let inputBarHeight: CGFloat = 90 // collapsed fallback before the card reports its real height (full-bleed)
     let editorMinHeight: CGFloat = 38 // one line incl. CustomTextEditor's 10pt vertical insets
     let editorMaxHeight: CGFloat = 120 // ~4 lines, then the editor scrolls internally
-    let buttonRowHeight: CGFloat = 30
+    let buttonRowHeight: CGFloat = 26
     let expandedViewMinHeight: CGFloat = 400
     let topBarHeight: CGFloat = 40
     let panelCornerRadius: CGFloat = 12
@@ -704,21 +704,21 @@ extension QuickAccessContentView {
     @ViewBuilder
     private var profilePickerButton: some View {
         Button(action: { showingProfilePopup = true }) {
-            HStack(spacing: 6) {
+            HStack(spacing: 5.5) {
                 Circle()
                     .fill(session.selectedProfile?.profileType.displayColor ?? Color(white: 0.55))
-                    .frame(width: 8, height: 8)
+                    .frame(width: 7, height: 7)
                 // [M10] Profile name is user data (verbatim); the fallback is localized.
                 Text(session.selectedProfile?.displayName ?? String(localized: "Select profile"))
-                    .font(.system(.subheadline, weight: .medium))
+                    .font(.system(size: 11.5, weight: .medium))
                     .foregroundColor(textColor)
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 7.5, weight: .bold))
                     .foregroundColor(iconColor.opacity(0.8))
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 8.5)
+            .padding(.vertical, 3.5)
             .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 1)) // [UI audit gap 5] uniform stroke weight
         }
         .buttonStyle(PlainButtonStyle())

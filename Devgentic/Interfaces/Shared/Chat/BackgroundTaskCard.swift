@@ -44,11 +44,12 @@ struct BackgroundTaskCard: View {
     /// without a chat view model in the environment (workflow per-node views, previews), and those
     /// contexts should simply show no "open" affordance rather than crash.
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel: ChatHistoryViewModel?
-    @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 15.0
+    @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 14.0
     @State private var isHoveringCard = false
 
-    /// Drives the elapsed readout while the task runs. Stopped for a finished task so a
-    /// conversation full of old tasks is not re-rendering once a second forever.
+    /// Drives the elapsed readout while the task runs. ⚠️ The timer itself keeps firing for a
+    /// finished task (it is autoconnected at init); `onReceive` ignores it then — `now` is written
+    /// only while running and `refreshLiveTail` returns early — so nothing re-renders.
     @State private var now = Date()
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -255,7 +256,8 @@ struct BackgroundTaskCard: View {
     /// opening is what makes the click answer the question that prompted it.
     private func openInPanel() {
         guard let chatHistoryViewModel else { return }
-        chatHistoryViewModel.showBackgroundTasks(focus: data.taskID)
+        // By log file, not task id: `bg_1` repeats across launches, and the list now holds both.
+        chatHistoryViewModel.showBackgroundTasks(focus: BackgroundTaskHistory.key(forLogPath: data.logPath))
     }
 
     /// Pulls the registry's in-memory tail while this card is watching; releases it otherwise.

@@ -63,6 +63,19 @@ protocol LLMProvider: Sendable {
         tools: [[String: Any]]?
     ) async throws -> ModernCognitiveStep
 
+    /// The native-turn step, STREAMED: `onTextDelta` receives the model's visible text as it is
+    /// generated, and the call still returns the complete step (tool calls, thinking trace, usage)
+    /// when the response ends.
+    ///
+    /// Default: the non-streaming call, and `onTextDelta` is never invoked — so a provider without a
+    /// streaming implementation behaves exactly as before. Only the text is streamed; tool calls are
+    /// meaningless until complete, so they arrive with the returned step.
+    func generateCognitiveStepStreaming(
+        nativeMessages: [[String: Any]],
+        tools: [[String: Any]]?,
+        onTextDelta: @escaping @Sendable (String) -> Void
+    ) async throws -> ModernCognitiveStep
+
     // MARK: - Multimodal Overloads (Phase 6)
 
     /// Generates a complete response from multimodal ProviderMessages.
@@ -148,6 +161,14 @@ extension LLMProvider {
         }
         return try await generateCognitiveStep(messages: legacy, tools: tools)
     }
+
+    func generateCognitiveStepStreaming(
+        nativeMessages: [[String: Any]],
+        tools: [[String: Any]]?,
+        onTextDelta: @escaping @Sendable (String) -> Void
+    ) async throws -> ModernCognitiveStep {
+        try await generateCognitiveStep(nativeMessages: nativeMessages, tools: tools)
+    }
 }
 
 // MARK: - Provider Configuration
@@ -184,6 +205,23 @@ struct LLMProviderConfig: Sendable {
         self.thinkingEnabled = thinkingEnabled
         self.extraHeaders = extraHeaders
     }
+}
+
+/// ⚠️ Never prints the key. `ReActAgentExecutor` logs `String(describing: model)`, and the default
+/// reflection of a provider struct walks into this config and printed `apiKey: Optional("sk-…")`
+/// verbatim. `TelemetrySanitizer` happened to catch the `sk-` shape, but a key with no known vendor
+/// prefix (common on OpenAI-compatible gateways) would have gone straight to the log. Reflection
+/// renders a child through `debugDescription`, so conforming here covers every enclosing provider.
+extension LLMProviderConfig: CustomStringConvertible, CustomDebugStringConvertible {
+    var description: String {
+        let key = apiKey.map { $0.isEmpty ? "empty" : "set (\($0.count) chars)" } ?? "none"
+        return "LLMProviderConfig(apiKey: \(key), baseURL: \(baseURL.absoluteString), modelName: \"\(modelName)\", "
+            + "timeout: \(timeout), options: \(options.map { "\($0.count) key(s)" } ?? "nil"), "
+            + "rateLimitKey: \"\(rateLimitKey)\", thinkingEnabled: \(thinkingEnabled), "
+            + "extraHeaders: \(extraHeaders.keys.sorted()))"
+    }
+
+    var debugDescription: String { description }
 }
 
 // MARK: - Error Type
@@ -245,6 +283,12 @@ enum LLMProviderError: LocalizedError {
         // 2b. Payment required — OpenRouter signals an out-of-credits account with 402.
         if status == 402 {
             return "⚠️ Provider account is out of credits (HTTP 402). Add credits to your account (OpenRouter: https://openrouter.ai/credits) and try again."
+        }
+
+        // 2c. OpenRouter found no upstream provider that satisfies the data policy — the usual
+        // result of the profile's "Deny Data Collection" switch on a `:free` model.
+        if status == 404 && lowerBody.contains("data policy") {
+            return "⚠️ No provider for this model meets your data policy — it is only served by providers that store prompts. Pick another model, or turn off \"Deny Data Collection\" in the profile's Advanced Configuration (if it is already off, check your privacy settings at https://openrouter.ai/settings/privacy)."
         }
         
         // 3. General JSON Error Extraction (prevents dumping huge raw JSON strings into the UI)

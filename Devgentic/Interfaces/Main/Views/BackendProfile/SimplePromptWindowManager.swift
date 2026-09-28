@@ -53,34 +53,36 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
         // and re-opening it orphaned the old window. A71 fixed the red-button leak here and left
         // the minimize one; the identity guard in `windowWillClose` is what makes it safe.
         if let existingWindow = window {
+            existingWindow.styleMask.insert(.fullSizeContentView)
+            existingWindow.titleVisibility = .hidden
+            existingWindow.titlebarAppearsTransparent = true
+            existingWindow.titlebarSeparatorStyle = .none
+            existingWindow.isMovableByWindowBackground = false
+            existingWindow.backgroundColor = NSColor(theme.primaryBackground)
             existingWindow.contentView = NSHostingView(
                 rootView: makeHost(text: text, botName: botName,
                                    themeManager: themeManager, contextWindow: contextWindow)
             )
             existingWindow.title = Self.title(for: botName.wrappedValue)
-            existingWindow.backgroundColor = NSColor(theme.primaryBackground)
             if existingWindow.isMiniaturized { existingWindow.deminiaturize(nil) }
             existingWindow.makeKeyAndOrderFront(nil)
             logger.info("[PROFILE] Re-presented the floating prompt editor for '\(botName.wrappedValue)'.")
             return
         }
 
-        // ⚠️ register B7 — A71's orphan branch lived here and is GONE, not silenced. It existed
-        // because the reuse test above rejected a non-visible window and fell through with a
-        // live one still retained; now the reuse path takes every non-nil window, so reaching
-        // this point means `window` is genuinely nil and there is nothing to orphan. The canary
-        // it provided moved into `windowWillClose`'s identity check, which is where a stray
-        // window can actually still show up.
-
         let newWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 560),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
         newWindow.center()
         newWindow.title = Self.title(for: botName.wrappedValue)
+        newWindow.titleVisibility = .hidden
+        newWindow.titlebarAppearsTransparent = true
+        newWindow.titlebarSeparatorStyle = .none
+        newWindow.isMovableByWindowBackground = false
         newWindow.isReleasedWhenClosed = false
         newWindow.contentView = NSHostingView(
             rootView: makeHost(text: text, botName: botName,
@@ -90,7 +92,8 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
         newWindow.delegate = self
 
         newWindow.isOpaque = false
-        newWindow.backgroundColor = NSColor(theme.primaryBackground).withAlphaComponent(0.98)
+        newWindow.backgroundColor = NSColor(theme.primaryBackground)
+        newWindow.minSize = NSSize(width: 540, height: 420)
 
         self.window = newWindow
         newWindow.makeKeyAndOrderFront(nil)
@@ -188,8 +191,24 @@ private struct SimplePromptEditorHost: View {
             onClose: onClose
         )
         .environment(\.appTheme, themeManager.currentTheme)
+        .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
+        .environment(themeManager)
         .preferredColorScheme(themeManager.currentTheme.colorScheme)
         .onChange(of: botName) { _, newName in onTitleChange(newName) }
+    }
+}
+
+// MARK: - Window Drag Area
+
+private struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { DraggingView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class DraggingView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+        override var mouseDownCanMoveWindow: Bool { false }
     }
 }
 
@@ -207,110 +226,259 @@ struct SimplePromptEditorView: View {
     // Local state to drive real-time UI updates in the detached window
     @State private var localText: String = ""
 
+    private var estimatedTokens: Int {
+        max(1, localText.count / 4)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-
-            // Header
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("System Instructions")
-                        .font(theme.fontHeadline)
-                        .foregroundColor(theme.primaryText)
-                    Text("Defines the core persona and behavior for \(botName).")
-                        .font(theme.fontCaption)
-                        .foregroundColor(theme.secondaryText)
-                }
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    let estimatedTokens = max(1, localText.count / 4)
-                    Text("~ \(estimatedTokens.formatted()) tokens")
-                        .font(theme.fontSubheadline)
-                        .monospacedDigit()
-                        .foregroundColor(tokenWarningColor(estimatedTokens: estimatedTokens))
-                    if let cw = contextWindow {
-                        let ratio = Double(estimatedTokens) / Double(cw)
-                        Text("\(Int(ratio * 100))% of \(cw.formatted()) context")
-                            .font(theme.fontCaption)
-                            .foregroundColor(ratio > 0.5 ? theme.errorColor : ratio > 0.25 ? theme.warningColor : theme.secondaryText)
-                    }
-                }
-            }
-            .padding()
-            .background(theme.primaryBackground)
+            // Header Bar with Drag Area and Traffic Light Clearance
+            headerView
 
             Rectangle()
-                .fill(theme.dividerColor)
-                .frame(height: 1)
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
 
-            // The Core Editor (Standard SwiftUI TextEditor)
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $localText)
-                    .font(theme.fontCode)
-                    .foregroundColor(theme.primaryText)
-                    .disableAutocorrection(true)
-                    .padding(8)
-                    .scrollContentBackground(.hidden)
-                    .background(theme.textBackground)
+            // Subheader Context Banner
+            subHeaderView
 
-                if localText.isEmpty {
-                    Text("Enter system instructions for \(botName) here...")
-                        .font(theme.fontCode)
-                        .foregroundColor(theme.secondaryText.opacity(0.5))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 16)
-                        .allowsHitTesting(false)
-                }
-            }
+            // Inset Tactile Editor Card
+            editorCanvasView
 
             Rectangle()
-                .fill(theme.dividerColor)
-                .frame(height: 1)
+                .fill(theme.dividerColor.opacity(0.25))
+                .frame(height: 0.5)
 
-            // Footer
-            HStack {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(theme.successColor)
-                    .accessibilityHidden(true)
-                Text("Changes sync automatically to the main window.")
-                    .font(theme.fontCaption)
-                    .foregroundColor(theme.secondaryText)
-
-                Spacer()
-
-                Button("Done") {
-                    onClose()
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-            }
-            .padding()
-            .background(theme.secondaryBackground)
+            // Tactile Footer
+            footerView
         }
-        .frame(minWidth: 400, minHeight: 300)
+        .frame(minWidth: 540, minHeight: 420)
+        .background(theme.primaryBackground)
         .onAppear {
-            // Initialize local state from the binding
             localText = text
         }
         .onChange(of: localText) { _, newValue in
-            // Push changes back to the main app binding
             if text != newValue {
                 text = newValue
             }
         }
         .onChange(of: text) { _, newValue in
-            // Sync if the text was changed externally while the window is open
             if localText != newValue {
                 localText = newValue
             }
         }
+        .onExitCommand {
+            onClose()
+        }
+        .background(
+            Button("") { onClose() }
+                .keyboardShortcut("w", modifiers: .command)
+                .frame(width: 0, height: 0)
+                .opacity(0)
+        )
     }
 
-    private func tokenWarningColor(estimatedTokens: Int) -> Color {
-        guard let cw = contextWindow else { return theme.primaryText }
+    // MARK: - Header View
+    private var headerView: some View {
+        HStack(spacing: 12) {
+            // Identity Cluster
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.accentColor.opacity(0.12))
+                        .frame(width: 28, height: 28)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(theme.accentColor.opacity(0.25), lineWidth: 0.8)
+                        )
+
+                    Image(systemName: "bubble.left.and.text.bubble.right.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(theme.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(botName)
+                            .font(theme.fontHeadline.weight(.bold))
+                            .foregroundColor(theme.primaryText)
+                            .lineLimit(1)
+
+                        Text("BOT")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(theme.surfaceOverlayStrong)
+                            .clipShape(Capsule())
+                    }
+
+                    Text("System Instructions & Persona")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
+                }
+            }
+
+            Spacer(minLength: 16)
+
+            // Telemetry Capsule & Actions
+            HStack(spacing: 10) {
+                telemetryPill
+
+                TactileIconButton(
+                    icon: "xmark",
+                    tooltip: "Close Window",
+                    variant: .subtle,
+                    size: 26
+                ) {
+                    onClose()
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            ZStack {
+                theme.primaryBackground
+                WindowDragArea()
+            }
+        )
+    }
+
+    // MARK: - Subheader View
+    private var subHeaderView: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "quote.opening")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(theme.accentColor.opacity(0.8))
+
+            Text("Defines the core persona, tone, and behavioral instructions for \(botName).")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(1)
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(theme.secondaryBackground.opacity(0.35))
+    }
+
+    // MARK: - Inset Editor Canvas
+    private var editorCanvasView: some View {
+        ZStack(alignment: .topLeading) {
+            TextEditor(text: $localText)
+                .font(theme.fontCode)
+                .foregroundColor(theme.primaryText)
+                .disableAutocorrection(true)
+                .padding(10)
+                .scrollContentBackground(.hidden)
+
+            if localText.isEmpty {
+                Text("Enter system instructions for \(botName) here...")
+                    .font(theme.fontCode)
+                    .foregroundColor(theme.placeholderText)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
+                    .allowsHitTesting(false)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    // MARK: - Telemetry Pill
+    private var telemetryPill: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(contextStatusColor)
+                .frame(width: 5, height: 5)
+
+            Text("~ \(estimatedTokens.formatted()) tokens")
+                .font(theme.fontCaption2.monospacedDigit())
+                .foregroundColor(theme.primaryText)
+
+            if let cw = contextWindow {
+                let ratio = Double(estimatedTokens) / Double(cw)
+                Text("•")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.tertiaryText)
+                Text("\(Int(ratio * 100))% of \(formatContext(cw))")
+                    .font(theme.fontCaption2.monospacedDigit())
+                    .foregroundColor(contextStatusColor)
+            }
+
+            Text("•")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.tertiaryText)
+
+            Text("\(localText.count.formatted()) chars")
+                .font(theme.fontCaption2.monospacedDigit())
+                .foregroundColor(theme.secondaryText)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+        )
+    }
+
+    private var contextStatusColor: Color {
+        guard let cw = contextWindow else { return theme.accentColor }
         let ratio = Double(estimatedTokens) / Double(cw)
         if ratio > 0.5 { return theme.errorColor }
         if ratio > 0.25 { return theme.warningColor }
-        return theme.primaryText
+        return theme.successColor
+    }
+
+    private func formatContext(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 {
+            return String(format: "%.1fM", Double(tokens) / 1_000_000)
+        } else if tokens >= 1_000 {
+            return "\(tokens / 1_000)k"
+        } else {
+            return "\(tokens)"
+        }
+    }
+
+    // MARK: - Footer View
+    private var footerView: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(theme.successColor)
+                .frame(width: 6, height: 6)
+
+            Text("Changes live-sync to the active configuration")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.secondaryText)
+
+            Spacer()
+
+            TactileButton(
+                title: "Done",
+                icon: "checkmark",
+                variant: .primary,
+                size: .compact
+            ) {
+                onClose()
+            }
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(theme.primaryBackground)
     }
 }

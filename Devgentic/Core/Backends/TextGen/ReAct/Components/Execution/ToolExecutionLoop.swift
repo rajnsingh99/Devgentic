@@ -245,10 +245,34 @@ private func executeSingleTool(
     }
 
     if case .askUser(let reason) = boundary.outcome {
+        // ⚠️ NOBODY TO ASK (HITL Waiting Contract, decision C). A scheduled or woken run renders no
+        // banner, so this park could only end by the run's limit killing the whole run. Refused at
+        // once instead, with the same honesty as the tool-confirmation and ask_user refusals.
+        if !WorkflowRunAttendance.canReachAHuman {
+            let refusal = "\(reason) Nobody can answer in this run (it is unattended), so the path outside the project was NOT accessed. Stay inside the project folder."
+            logger.notice("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' reaches outside the project in an UNATTENDED run. CONSEQUENCE: refused without parking; the model is told nobody can approve it.")
+            let refusalOutput = ToolOutput(toolName: toolName, params: paramsString, output: refusal, isSuccess: false)
+            continuation.yield(.toolFailed(refusalOutput, category: .permissionRejected))
+            return ToolObservation(
+                stepId: currentIteration,
+                toolCallId: toolCallId,
+                toolName: toolName,
+                result: refusal,
+                summary: refusal,
+                isSuccess: false,
+                params: paramsString,
+                output: refusal,
+                artifacts: [],
+                failureCategory: .permissionRejected
+            )
+        }
         let operationID = UUID()
         logger.notice("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' reaches outside the project; asking the user. \(reason) CONSEQUENCE: the run PARKS on a confirmation banner and the compute budget stops counting while it waits; if the user declines, the model gets an honest observation and stays inside the project.")
         continuation.yield(.requestConfirmation(toolName: toolName, params: "\(reason)\n\n\(paramsString)", operationID: operationID))
         let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID, nodeID: approvalNodeID)
+        // A Stop resolves the park as `false` too. Without this check that became the observation
+        // "The user declined…" — a denial nobody made (Timeout inventory D-21).
+        try Task.checkCancellation()
         if !approved {
             let denial = "\(reason) The user declined. Stay inside the project folder, or ask them which folder to use."
             let denialOutput = ToolOutput(toolName: toolName, params: paramsString, output: denial, isSuccess: false)

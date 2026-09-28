@@ -178,6 +178,62 @@ final class SchedulerCoordinator {
 
     // MARK: - Run-to-Completion Send
 
+    /// How a scheduled run ended (HITL Waiting Contract §3). The task record and its notification
+    /// used to say "completed" for every outcome — timeouts, error cards, a missing conversation
+    /// (Timeout inventory D-13).
+    enum ScheduledRunOutcome: Equatable, Sendable {
+        case completed
+        case completedWithWarnings
+        case failed
+        case timedOut
+        case cancelled
+
+        var succeeded: Bool { self == .completed || self == .completedWithWarnings }
+
+        var notificationTitle: String {
+            switch self {
+            case .completed, .completedWithWarnings: return "Scheduled Task Completed"
+            case .failed:    return "Scheduled Task Failed"
+            case .timedOut:  return "Scheduled Task Timed Out"
+            case .cancelled: return "Scheduled Task Cancelled"
+            }
+        }
+    }
+
+    struct ScheduledRunResult: Sendable {
+        let summary: String
+        let outcome: ScheduledRunOutcome
+    }
+
+    /// A scheduled run's execution limit when its profile sets none (Contract §5, owner decision
+    /// 2026-09-27). Replaces the fixed 600 s WALL-clock deadline, which counted parks and queue
+    /// time, ignored the profile's own `executionTimeout`, and killed any run longer than ten minutes.
+    static let defaultScheduledRunLimit: TimeInterval = 30 * 60
+
+    /// Reads how the run ended off its message. `timedOut` wins: the limit stamps `.failed`
+    /// before cancelling, and that is a timeout, not a failure of the work.
+    static func outcome(of message: ChatMessage?, timedOut: Bool) -> ScheduledRunOutcome {
+        if timedOut { return .timedOut }
+        switch message?.terminalOutcome {
+        case .completed?:             return .completed
+        case .completedWithWarnings?: return .completedWithWarnings
+        case .failed?:                return .failed
+        case .cancelled?:             return .cancelled
+        case .timedOut?:              return .timedOut
+        case nil:
+            if case .error? = message?.content { return .failed }
+            return .completed
+        }
+    }
+
+    /// The task's own limit, else the profile's `executionTimeout`, else the default. An unusable
+    /// value (0, negative, non-finite) is skipped rather than stopping the run the moment it starts.
+    static func scheduledRunLimit(for profile: BackendProfileModel, taskLimit: TimeInterval? = nil) -> TimeInterval {
+        if let own = taskLimit, own.isFinite, own > 0 { return own }
+        if let own = profile.details.executionTimeout, own.isFinite, own > 0 { return own }
+        return defaultScheduledRunLimit
+    }
+
     /// Send a message for a scheduled task / remote bridge without modifying
     /// the UI's selected conversation. Awaits stream completion and returns
     /// a short summary string for the caller to surface (e.g. Telegram reply
@@ -188,9 +244,21 @@ final class SchedulerCoordinator {
         conversationID: UUID,
         attachedFileURLs: [URL]
     ) async -> String {
+        await runScheduledMessage(prompt: prompt, config: config, conversationID: conversationID,
+                                  attachedFileURLs: attachedFileURLs).summary
+    }
+
+    /// `sendScheduledMessage`, reporting HOW the run ended as well as its summary.
+    func runScheduledMessage(
+        prompt: String,
+        config: BackendRequestConfig,
+        conversationID: UUID,
+        attachedFileURLs: [URL],
+        runLimit taskLimit: TimeInterval? = nil
+    ) async -> ScheduledRunResult {
         guard persistenceService.getConversation(withId: conversationID) != nil else {
             logger.error("[sendScheduledMessage] Conversation \(conversationID.uuidString) not found.")
-            return "Error: conversation not found."
+            return ScheduledRunResult(summary: "Error: conversation not found.", outcome: .failed)
         }
 
         // Build file items from URLs
@@ -212,7 +280,7 @@ final class SchedulerCoordinator {
         // words that "non-workflow profiles are unaffected".
         if config.profile.profileType == .workflow, runRegistry == nil {
             logger.error("[WF_RUN] Scheduled WORKFLOW run for conversation \(conversationID.uuidString.prefix(8)) has NO run registry — the coordinator outlived it. CONSEQUENCE: the run is refused BEFORE its question is persisted, so nothing is left unanswered in the conversation; the schedule reports an error and will fire again on its next occurrence. Bot/agent/imageGen schedules are unaffected and are not refused here.")
-            return "Error: run registry unavailable."
+            return ScheduledRunResult(summary: "Error: run registry unavailable.", outcome: .failed)
         }
 
         // Create user message via the messaging coordinator's factory (same
@@ -246,8 +314,17 @@ final class SchedulerCoordinator {
         // Start stream and await completion.
         // Use a box to break the forward-capture cycle: the closure captures
         // `messageBox` (already declared), and we fill it after the call returns.
-        // [HITL/P5] Scheduled runs are UNATTENDED — bound them with a 10-minute container deadline.
-        let scheduledRunDeadline: TimeInterval = 600
+        // The run's EXECUTION LIMIT (HITL Waiting Contract, decision C): the profile's
+        // `executionTimeout`, else 30 min — COMPUTE, credited to this run's own scope, so time a
+        // park it owns stays open is not counted (decision 1) and nothing outside it is touched.
+        let runLimit = Self.scheduledRunLimit(for: config.profile, taskLimit: taskLimit)
+        let runScope = UUID()
+        await ExecutionSuspensionService.shared.registerScope(runScope, conversationID: conversationID, attended: false)
+        // Nesting: the run is the outermost budget — a turn, node or tool inside it is shortened to
+        // fit, so its own timeout (and a workflow's error branch) fires before the run is cut off.
+        let runFrame = await ExecutionBudget.frame(
+            owner: "the scheduled run's \(ToolExecutionMediator.describe(runLimit)) limit",
+            limit: runLimit, scope: runScope)
         // Workflow bookkeeping (no-op for other profile types). Without it a scheduled workflow
         // run left NO record at all — and history is the only surface an unattended run can be
         // reviewed from. It also flips HITL attribution to `.workflow`, which matters here more
@@ -270,12 +347,15 @@ final class SchedulerCoordinator {
         return await withCheckedContinuation { continuation in
             var messageBox: ChatMessage? = nil
             var deadlineTask: Task<Void, Never>? = nil
+            let timedOut = ScheduledRunFlag()
             // ⚠️ UNATTENDED. Bound around `startMessageStream` so every task the stream spawns —
             // BOS, AgentConnect, the workflow executor, nested sub-workflows — inherits it. A
             // Router's ambiguity arbitration checks this and takes FIRST MATCH instead of parking:
             // a scheduled run renders no banner, so a park here only ever ended one way — the
             // 600s run deadline cancelling the whole run.
             let agentMessage = WorkflowRunAttendance.$isAttended.withValue(false) {
+                // CREATED inside the run's scope: every task the stream spawns inherits the chain.
+                ParkScope.bind(runScope) { ExecutionBudget.bind(runFrame) {
                 activeStreamManager.startMessageStream(
                 withConfig: config,
                 userMessage: userMessage,
@@ -287,9 +367,10 @@ final class SchedulerCoordinator {
                 resumeState: nil,
                 onComplete: { [weak self] in
                     deadlineTask?.cancel()
+                    Task { await ExecutionSuspensionService.shared.unregisterScope(runScope) }
                     workflowTicket?.finalize()
                     // Extract summary from the completed message.
-                    let summary: String
+                    var summary: String
                     switch messageBox?.content {
                     case .plainText(let text), .markdownText(let text):
                         summary = String(text.prefix(100))
@@ -298,17 +379,22 @@ final class SchedulerCoordinator {
                     default:
                         summary = "Response complete."
                     }
+                    let outcome = Self.outcome(of: messageBox, timedOut: timedOut.isSet)
+                    if outcome == .timedOut {
+                        summary = "Timed out: exceeded its \(ToolExecutionMediator.describe(runLimit)) execution limit."
+                    }
 
                     // ✅ The unguarded shared-slot clear that used to live here was DELETED
                     // 2026-08-17 (design doc increment 1) along with the slot itself. It nil'd the
                     // slot regardless of ownership, orphaning whichever run had superseded this
                     // one. There is nothing to release: the composer derives its state from
                     // ActiveStreamManager, which this run's finalize already updates.
-                    self?.logger.info("[RUN_LIFECYCLE] scheduled run completed for conversation \(conversationID.uuidString.prefix(8)).")
+                    self?.logger.info("[RUN_LIFECYCLE] scheduled run ended (\(String(describing: outcome))) for conversation \(conversationID.uuidString.prefix(8)).")
 
-                    continuation.resume(returning: summary)
+                    continuation.resume(returning: ScheduledRunResult(summary: summary, outcome: outcome))
                 }
                 )
+                } }
             }
             // Attribute the unattended run, exactly as ChatOps and QuickAccess attribute theirs.
             // ⚠️ Must be set AFTER `startMessageStream` returns — every caller assigns here, so
@@ -334,18 +420,37 @@ final class SchedulerCoordinator {
             //      model (2-minute idle unload, reload on resume) — which is what [C7] already
             //      intended. See LLM_Execution_Concurrency_Design.md §2.3 and §0.5.
 
-            // [HITL/P5] The deadline: if the unattended run is still going after 10 minutes
-            // (e.g. parked on a HITL nobody is there to answer, now that the per-HITL watchdog is
-            // gone), cancel the stream. Cancellation drains any parked suspension safely via the
-            // withTaskCancellationHandler (deny / nil) → the stream finalizes → onComplete fires.
+            // The execution limit. On expiry the run is recorded as TIMED OUT — stamped BEFORE the
+            // cancel, because the stream's finalize only writes "Cancelled by user" when no outcome
+            // is set yet (the 600 s deadline used to be reported as the user's Stop) — and only
+            // THIS run's parks are drained. The old conversation-wide drain also resolved the
+            // banners of an attended run this one was queued behind (Timeout inventory D-20).
             let scheduledMessageID = agentMessage.id
             deadlineTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(scheduledRunDeadline))
-                guard !Task.isCancelled, let self else { return }
-                logger.notice("[sendScheduledMessage] ⏰ \(Int(scheduledRunDeadline))s deadline hit for \(scheduledMessageID) — cancelling unattended run.")
-                self.activeStreamManager.cancelStream(for: scheduledMessageID)
-                await ExecutionSuspensionService.shared.cancel(for: conversationID)
+                do {
+                    try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
+                        limit: runLimit,
+                        scope: runScope,
+                        logTag: "SCHEDULER",
+                        subject: "Scheduled run \(scheduledMessageID.uuidString.prefix(8))",
+                        consequence: "the run is stopped and recorded as timed out; time spent awaiting a human was excluded.")
+                } catch is AgentExecutionError {
+                    guard let self else { return }
+                    timedOut.isSet = true
+                    agentMessage.terminalOutcome = .timedOut
+                    agentMessage.terminalReason = ActiveStreamManager.executionTimeoutMessage(limit: runLimit)
+                    self.activeStreamManager.cancelStream(for: scheduledMessageID)
+                    await ExecutionSuspensionService.shared.cancel(scope: runScope)
+                } catch {
+                    return   // the run finished first and cancelled the deadline
+                }
             }
         }
     }
+}
+
+/// Set by a scheduled run's deadline, read by its completion — both on the main actor.
+@MainActor
+final class ScheduledRunFlag {
+    var isSet = false
 }

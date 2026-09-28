@@ -34,6 +34,15 @@ struct OpenAIAdvancedConfig: Codable, Hashable {
     /// Valid values: "low", "medium", "high". When nil, uses the model's default.
     var reasoningEffort: String?
 
+    // MARK: - OpenRouter Routing
+
+    /// OpenRouter only: when true, requests carry `provider.data_collection: "deny"`, so OpenRouter
+    /// routes only to upstream providers that do not retain or train on prompts. Off (nil) by
+    /// default — many `:free` models are served ONLY by providers that do collect data, and with
+    /// this on OpenRouter refuses them ("No endpoints found matching your data policy").
+    /// Ignored by OpenAI proper, which shares this config type.
+    var denyDataCollection: Bool?
+
     /// Creates a default configuration for OpenAI.
     static func `default`() -> OpenAIAdvancedConfig {
         OpenAIAdvancedConfig(
@@ -41,24 +50,26 @@ struct OpenAIAdvancedConfig: Codable, Hashable {
             temperature: 1.0,
             topP: nil,
             stopSequences: nil,
-            reasoningEffort: nil
+            reasoningEffort: nil,
+            denyDataCollection: nil
         )
     }
 
     // MARK: - Codable Implementation
 
     private enum CodingKeys: String, CodingKey {
-        case maxTokens, temperature, topP, stopSequences, reasoningEffort
+        case maxTokens, temperature, topP, stopSequences, reasoningEffort, denyDataCollection
     }
 
     // Memberwise initializer required due to custom decoder.
     init(maxTokens: Int?, temperature: Double?, topP: Double?,
-         stopSequences: [String]?, reasoningEffort: String?) {
+         stopSequences: [String]?, reasoningEffort: String?, denyDataCollection: Bool? = nil) {
         self.maxTokens = maxTokens
         self.temperature = temperature
         self.topP = topP
         self.stopSequences = stopSequences
         self.reasoningEffort = reasoningEffort
+        self.denyDataCollection = denyDataCollection
     }
 
     /// Custom decoder to handle cases where numeric types were incorrectly saved as Bools
@@ -98,5 +109,8 @@ struct OpenAIAdvancedConfig: Codable, Hashable {
 
         // reasoningEffort
         self.reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+
+        // denyDataCollection — absent in every config saved before 2026-09-27 → nil (off).
+        self.denyDataCollection = try container.decodeIfPresent(Bool.self, forKey: .denyDataCollection)
     }
 }

@@ -18,6 +18,64 @@ private let logger = DGLogger(category: "LocalToolManager")
 
 // MARK: - Native Tool Adapter
 
+/// Which built-in tools start in the Tool Library WITHOUT confirmation. Two lists, two reasons.
+enum ToolConfirmationDefaults {
+
+    static func startsWithoutConfirmation(_ name: String) -> Bool {
+        readOnlyTools.contains(name) || ownWorkOnlyTools.contains(name)
+    }
+
+    /// Tools that CHANGE state but start without confirmation, because the only state they can
+    /// touch is work this same agent started in this same conversation.
+    ///
+    /// ⚠️ Kept APART from `readOnlyTools` on purpose, and not a claim that these are read-only —
+    /// `HITLRiskTier` still calls them `.moderate`, which is true. The two are different reasons for
+    /// the same default, and `ToolCategoryGroupingTests` checks each against its own rule.
+    ///
+    /// `stop_background_task` (2026-09-26, user decision): it can only stop a task its own
+    /// conversation launched — the registry keys every lookup by conversation — so it cannot reach
+    /// another conversation's work or any other process on the machine. Asking before the agent
+    /// stops its own dev server is a prompt people approve without reading, which trains exactly
+    /// the habit confirmation exists to prevent. The Code preset already ran it without asking.
+    static let ownWorkOnlyTools: Set<String> = [
+        "stop_background_task",
+    ]
+
+    static let readOnlyTools: Set<String> = {
+        // Strictly read-only tools: they alter no state and execute no caller-supplied code.
+        //
+        // `fs_watch_folder` was in this list until 2026-08-01 and does not belong: its `start`
+        // action opens a file descriptor and arms a dispatch source that lives until something
+        // stops it, which is state by any reading. `HITLRiskTier.classify` has always called it
+        // `.moderate`, alongside `write_file` and `move_file`, so the app was describing the same
+        // tool two different ways depending on which code path you asked. Only `list` is
+        // read-only, and the list is per-TOOL, not per-action.
+        let safeTools: Set<String> = [
+            "list_directory",
+            "read_file",
+            "get_system_stats",
+            "fs_smart_search",
+            "spotlight_search",
+            "fs_read_metadata",
+            "read_file_metadata",
+            "project_tree",
+            "glob_files",
+            "find_definition",
+            "file_overview",
+            "code_search_text",
+            "code_search_symbol",
+            "code_search_files",
+            "diff_files",
+            "git",
+            "get_task_output",
+            // `stop_background_task` is NOT here: it changes state. See `ownWorkOnlyTools`.
+            // (`codebase_map`, `git_tool`, `command_output` and `command_stop` were names of tools
+            // that no longer exist.)
+        ]
+        return safeTools
+    }()
+}
+
 /// A wrapper that adapts the new `DevgenticTool` protocol to the legacy `ExecutableTool` protocol
 /// used by the rest of the application (UI, Store, etc.).
 struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
@@ -54,41 +112,9 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
     /// reads, and the user's choice always wins. This only decides where a freshly-offered tool
     /// starts.
     var requiresConfirmation: Bool {
-        // Strictly read-only tools: they alter no state and execute no caller-supplied code.
-        //
-        // `fs_watch_folder` was in this list until 2026-08-01 and does not belong: its `start`
-        // action opens a file descriptor and arms a dispatch source that lives until something
-        // stops it, which is state by any reading. `HITLRiskTier.classify` has always called it
-        // `.moderate`, alongside `write_file` and `move_file`, so the app was describing the same
-        // tool two different ways depending on which code path you asked. Only `list` is
-        // read-only, and the list is per-TOOL, not per-action.
-        let safeTools: Set<String> = [
-            "list_directory",
-            "read_file",
-            "get_system_stats",
-            "fs_smart_search",
-            "spotlight_search",
-            "fs_read_metadata",
-            "read_file_metadata",
-            "project_tree",
-            "codebase_map",
-            "glob_files",
-            "find_definition",
-            "file_overview",
-            "code_search_text",
-            "code_search_symbol",
-            "code_search_files",
-            "diff_files",
-            "git",
-            "git_tool",
-            "get_task_output",
-            "command_output",
-            "stop_background_task",
-            "command_stop"
-        ]
-        // If the tool is NOT in the safe list, it requires confirmation.
-        return !safeTools.contains(nativeTool.name)
+        !ToolConfirmationDefaults.startsWithoutConfirmation(nativeTool.name)
     }
+
     
     /// Bridges the untyped execution call to the strongly-typed native tool call.
     func execute(arguments: [String: Any]) async throws -> String {

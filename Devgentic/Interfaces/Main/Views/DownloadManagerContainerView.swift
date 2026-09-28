@@ -12,6 +12,7 @@
 
 import SwiftUI
 import SwiftData
+import AppKit
 
 private let logger = DGLogger(category: "DownloadManagerContainer")
 
@@ -43,6 +44,22 @@ struct DownloadManagerContainerView: View {
     private var activeRecords: [DownloadRecord] { allRecords.filter { $0.isActive } }
     private var historyRecords: [DownloadRecord] { allRecords.filter { !$0.isActive } }
 
+    /// Partial MLX downloads that no history row accounts for. Rows that DO point at their bytes
+    /// (paused, interrupted, failed) show their own size and actions instead.
+    private var leftovers: [MLXModelService.OrphanedPartialDownload] {
+        let mlx = MLXModelService.shared
+        let tracked = Set(allRecords
+            .filter { $0.backend == .mlx && $0.status?.isResumable == true }
+            .map(\.modelIdentifier))
+        return MLXModelService.untracked(
+            mlx.partialDownloads,
+            trackedRepoIds: tracked,
+            downloading: mlx.isDownloading ? mlx.currentDownloadName : nil
+        )
+    }
+
+    private var isEmpty: Bool { allRecords.isEmpty && leftovers.isEmpty }
+
     var body: some View {
         Group {
             if isEmbeddedInSettings {
@@ -63,11 +80,15 @@ struct DownloadManagerContainerView: View {
         .onReceive(NotificationCenter.default.publisher(for: .clearDownloadHistory)) { _ in
             showingClearAlert = true
         }
+        .onAppear {
+            MLXModelService.shared.acknowledgeLeftovers()
+            MLXModelService.shared.refreshPartialDownloads()
+        }
     }
 
     @ViewBuilder
     private var settingsBody: some View {
-        if allRecords.isEmpty {
+        if isEmpty {
             emptyState
                 .frame(minHeight: 320)
         } else {
@@ -78,6 +99,10 @@ struct DownloadManagerContainerView: View {
                             ActiveDownloadCardView(record: record)
                         }
                     }
+                }
+
+                if !leftovers.isEmpty {
+                    LeftoverDownloadsSection(leftovers: leftovers)
                 }
 
                 if !historyRecords.isEmpty {
@@ -124,7 +149,7 @@ struct DownloadManagerContainerView: View {
                 }
             }
 
-            if allRecords.isEmpty {
+            if isEmpty {
                 emptyState
             } else {
                 ScrollView {
@@ -146,6 +171,10 @@ struct DownloadManagerContainerView: View {
                         ActiveDownloadCardView(record: record)
                     }
                 }
+            }
+
+            if !leftovers.isEmpty {
+                LeftoverDownloadsSection(leftovers: leftovers)
             }
 
             if !historyRecords.isEmpty {
@@ -312,6 +341,7 @@ private struct HistoryDownloadCardView: View {
     /// Bytes still on disk for a row the user asked to remove — non-nil only while the
     /// "this would strand them" confirmation is up.
     @State private var strandedBytesOnRemoval: Int64?
+    @State private var confirmingDiscard: Bool = false
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
@@ -325,6 +355,13 @@ private struct HistoryDownloadCardView: View {
 
     private var isResumableMLX: Bool {
         record.backend == .mlx && record.status?.isResumable == true
+    }
+
+    /// What this row's partial download occupies, from the last scan. Nil for any other row,
+    /// and when nothing is left on disk.
+    private var partialBytes: Int64? {
+        guard isResumableMLX else { return nil }
+        return MLXModelService.shared.partialBytes(for: record.modelIdentifier)
     }
 
     var body: some View {
@@ -350,30 +387,46 @@ private struct HistoryDownloadCardView: View {
                     backendLabel.foregroundColor(theme.secondaryText)
                     Text("·").foregroundColor(theme.secondaryText)
                     Text(relativeDate).foregroundColor(theme.secondaryText)
+                    if let partialBytes {
+                        Text("·").foregroundColor(theme.secondaryText)
+                        Text("\(ByteCountFormatter.string(fromByteCount: partialBytes, countStyle: .file)) on disk")
+                            .foregroundColor(theme.warningColor)
+                    }
                 }
                 .font(.caption)
             }
 
             Spacer()
 
-            Menu {
-                // Resume continues from bytes already on disk; Re-download starts over. Both
-                // are offered because a resume can continue a partial but cannot repair a
-                // corrupt one. MLX only — see the Pause button on the active card.
-                if isResumableMLX {
+            // Resume continues from bytes already on disk; Re-download (in the menu) starts over.
+            // Both exist because a resume can continue a partial but cannot repair a corrupt one.
+            // ⚠️ On the row, not in the menu: tucked away, a paused or failed download's bytes
+            // were easy to forget — gigabytes the user never knew were still there.
+            if isResumableMLX {
+                HStack(spacing: 12) {
                     Button {
                         resume()
                     } label: {
-                        Label("Resume Download", systemImage: "play.circle")
+                        Label("Resume", systemImage: "play.circle")
+                            .font(.caption)
+                            .foregroundColor(theme.accentColor)
                     }
-                    Button(role: .destructive) {
-                        discardPartialFiles()
-                    } label: {
-                        Label("Discard Partial Files", systemImage: "trash.slash")
-                    }
-                    Divider()
-                }
+                    .buttonStyle(.plain)
+                    .help("Continues from the files already downloaded.")
 
+                    Button {
+                        confirmingDiscard = true
+                    } label: {
+                        Label("Discard", systemImage: "trash.slash")
+                            .font(.caption)
+                            .foregroundColor(theme.errorColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Deletes the partial files and removes this row.")
+                }
+            }
+
+            Menu {
                 Button {
                     showingRedownloadAlert = true
                 } label: {
@@ -437,6 +490,16 @@ private struct HistoryDownloadCardView: View {
             Button("Cancel", role: .cancel) { strandedBytesOnRemoval = nil }
         } message: {
             Text("\(record.displayName) has \(ByteCountFormatter.string(fromByteCount: strandedBytesOnRemoval ?? 0, countStyle: .file)) already downloaded. Removing this row is the last way to reach those files from Devgentic.")
+        }
+        .alert("Discard the partial download?", isPresented: $confirmingDiscard) {
+            Button("Discard", role: .destructive) { discardPartialFiles() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let partialBytes {
+                Text("Deletes the \(ByteCountFormatter.string(fromByteCount: partialBytes, countStyle: .file)) already downloaded for \(record.displayName). A later download starts from zero.")
+            } else {
+                Text("Deletes whatever was already downloaded for \(record.displayName). A later download starts from zero.")
+            }
         }
     }
 
@@ -552,6 +615,173 @@ private struct HistoryDownloadCardView: View {
             case .failed(let reason):
                 toastManager.show(reason, style: .error)
             }
+        }
+    }
+}
+
+// MARK: - Unfinished downloads with no history row
+
+/// Partial MLX downloads that no history row points at: what older builds leaked, what a crash
+/// left before its row was saved, and what "Keep Files & Remove" deliberately leaves behind.
+/// Before this section they were reachable from Finder alone, and the launch scan only logged
+/// them.
+private struct LeftoverDownloadsSection: View {
+
+    let leftovers: [MLXModelService.OrphanedPartialDownload]
+    @Environment(ToastManager.self) private var toastManager
+    @Environment(\.appTheme) private var theme
+    /// Non-empty only while the delete confirmation is up.
+    @State private var pendingDiscard: [MLXModelService.OrphanedPartialDownload] = []
+
+    private static func size(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private static func total(_ items: [MLXModelService.OrphanedPartialDownload]) -> Int64 {
+        items.reduce(Int64(0)) { $0 + $1.bytes }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("Unfinished Downloads (\(leftovers.count))")
+                    .font(theme.fontSubheadline.weight(.bold))
+                    .foregroundColor(theme.primaryText)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+                Text(verbatim: Self.size(Self.total(leftovers)))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(theme.warningColor)
+
+                Spacer()
+
+                if leftovers.count > 1 {
+                    TactileButton(
+                        title: "Delete All",
+                        icon: "trash",
+                        variant: .subtle,
+                        size: .compact
+                    ) {
+                        pendingDiscard = leftovers
+                    }
+                }
+            }
+
+            Text("These partial MLX downloads have no entry in your history. Resume one, or delete it to free the space.")
+                .font(.caption)
+                .foregroundColor(theme.secondaryText)
+
+            ForEach(leftovers) { leftover in
+                row(leftover)
+            }
+        }
+        .alert(
+            pendingDiscard.count == 1
+                ? Text("Delete \(Text(verbatim: pendingDiscard[0].repoId))?")
+                : Text("Delete \(pendingDiscard.count) unfinished downloads?"),
+            isPresented: Binding(
+                get: { !pendingDiscard.isEmpty },
+                set: { if !$0 { pendingDiscard = [] } }
+            )
+        ) {
+            Button("Delete", role: .destructive) {
+                let targets = pendingDiscard
+                pendingDiscard = []
+                discard(targets)
+            }
+            Button("Cancel", role: .cancel) { pendingDiscard = [] }
+        } message: {
+            Text("Frees \(Self.size(Self.total(pendingDiscard))). This can't be undone; a later download starts from zero.")
+        }
+    }
+
+    private func row(_ leftover: MLXModelService.OrphanedPartialDownload) -> some View {
+        HStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(ModelBackendType.mlx.tintColor.opacity(0.08))
+                    .frame(width: 44, height: 44)
+                Image(systemName: "arrow.down.circle.dotted")
+                    .font(.title3)
+                    .foregroundColor(ModelBackendType.mlx.tintColor)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                // A repo id is an identifier, not prose.
+                Text(verbatim: leftover.repoId)
+                    .font(.headline)
+                    .foregroundColor(theme.primaryText)
+                    .lineLimit(1)
+                Text("\(Self.size(leftover.bytes)) on disk · not in your download history")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+            }
+
+            Spacer()
+
+            HStack(spacing: 12) {
+                Button {
+                    resume(leftover)
+                } label: {
+                    Label("Resume", systemImage: "play.circle")
+                        .font(.caption)
+                        .foregroundColor(theme.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help("Continues from the files already downloaded.")
+
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([leftover.path])
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .help("Show in Finder")
+                .accessibilityLabel("Show \(leftover.repoId) in Finder")
+
+                Button {
+                    pendingDiscard = [leftover]
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.caption)
+                        .foregroundColor(theme.errorColor)
+                }
+                .buttonStyle(.plain)
+                .help("Deletes these partial files.")
+            }
+        }
+        .padding(16)
+        .background(theme.secondaryBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(theme.dividerColor, lineWidth: 1)
+        )
+    }
+
+    private func resume(_ leftover: MLXModelService.OrphanedPartialDownload) {
+        Task { @MainActor in
+            switch await DownloadCoordinator.resumeMLXDownload(repoId: leftover.repoId) {
+            case .failed(let reason):
+                toastManager.show(reason, style: .error)
+            case .alreadyInstalled:
+                toastManager.show("\(leftover.repoId) is already installed", style: .success)
+            default:
+                toastManager.show("Resuming \(leftover.repoId)…", style: .success)
+            }
+        }
+    }
+
+    private func discard(_ targets: [MLXModelService.OrphanedPartialDownload]) {
+        let freed = MLXModelService.shared.discardLeftovers(targets)
+        let expected = Self.total(targets)
+        if freed < expected {
+            logger.error("[DOWNLOAD] Leftover delete freed \(Self.size(freed)) of \(Self.size(expected)) (see the [MLXSTORE] refusals above). CONSEQUENCE: the rest stays on disk and stays listed.")
+            toastManager.show("Couldn't delete everything — \(Self.size(expected - freed)) is still on disk", style: .error)
+        } else {
+            toastManager.show("Freed \(Self.size(freed))", style: .success)
         }
     }
 }

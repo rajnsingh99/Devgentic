@@ -101,6 +101,12 @@ final class MCPSecretStore {
         shared.backing = replacement ?? SecureKeyStorage()
     }
 
+    /// ⚠️ TEST SEAM (register KC-52). When set, receives exactly the failure line `delete` logs —
+    /// `delete` used to log NOTHING on failure and five of its six call sites discarded the Bool,
+    /// so a refused wipe (a locked Keychain during server removal) was invisible everywhere. One
+    /// message for the sink and the logger alike; the seam cannot drift from the log.
+    nonisolated(unsafe) static var deleteFailureLogSinkForTesting: (@Sendable (String) -> Void)?
+
     private init() {}
 
     // MARK: - Public API
@@ -120,7 +126,10 @@ final class MCPSecretStore {
         }
         let status = backing.save(value: value, service: Self.service, account: account)
         if status != errSecSuccess {
-            logger.error("Failed to store \(scope.rawScope) for \(sourceID.uuidString): status=\(status)")
+            logger.error("[MCP-SECRETS] Could not store \(scope.rawScope) for source "
+                + "\(sourceID.uuidString) (\(SecureKeyStorage.osStatusName(status))). CONSEQUENCE: "
+                + "the secret is stored NOWHERE — the caller must treat this as a failure, and the "
+                + "server will start without the credential.")
             return false
         }
         return true
@@ -214,6 +223,20 @@ final class MCPSecretStore {
     func delete(scope: MCPSecretScope, sourceID: UUID) -> Bool {
         let account = Self.account(sourceID: sourceID, scope: scope)
         let status = backing.delete(service: Self.service, account: account)
+        // Register KC-52: `errSecItemNotFound` is success for a wipe (the goal is "nothing
+        // stored"); anything else means the secret REMAINS, and that must be visible — five of
+        // this function's callers discard the returned Bool.
+        if status != errSecSuccess && status != errSecItemNotFound {
+            let message = "[MCP-SECRETS] Could not delete \(scope.rawScope) for source "
+                + "\(sourceID.uuidString) (\(SecureKeyStorage.osStatusName(status))). CONSEQUENCE: "
+                + "the secret REMAINS in the Keychain with no owning record — if this was a "
+                + "server removal, the credential survives it."
+            if let sink = Self.deleteFailureLogSinkForTesting {
+                sink(message)
+            } else {
+                logger.error(message)
+            }
+        }
         return status == errSecSuccess || status == errSecItemNotFound
     }
 
@@ -249,7 +272,8 @@ final class MCPSecretStore {
                 \(failed.count) item(s) could not be deleted from Keychain \
                 (\(failed.sorted().joined(separator: ", "))). Those credentials REMAIN on this \
                 machine for a server the user has removed, and nothing will retry — they must \
-                be deleted manually from Keychain Access.
+                be deleted manually: search Keychain Access for "\(sourceID.uuidString)" (every \
+                item this app writes is labelled "Devgentic — <service> — <account>").
                 """)
             return false
         }

@@ -155,7 +155,7 @@ struct InputToolbarView: View {
                 if !codeSessionManager.quickSettings.isDefault {
                     Circle()
                         .fill(theme.accentColor)
-                        .frame(width: 6, height: 6)
+                        .frame(width: 5, height: 5)
                         .offset(x: 1, y: -1)
                 }
             }
@@ -239,10 +239,10 @@ struct InputToolbarView: View {
         let label = hasFolder
             ? codeSessionManager.projectPath!.lastPathComponent
             : "Project"
-        return HStack(spacing: 7) {
+        return HStack(spacing: 6) {
             Image(systemName: hasFolder ? "folder.fill" : "folder")
-                .font(.system(size: 11, weight: .medium))
-                .frame(width: 12, height: 12)
+                .font(.system(size: 10.5, weight: .medium))
+                .frame(width: 11, height: 11)
                 .foregroundColor(hasFolder ? theme.accentColor : theme.secondaryText.opacity(0.85))
 
             Text(label)
@@ -252,11 +252,11 @@ struct InputToolbarView: View {
                 .truncationMode(.middle)
 
             Image(systemName: "chevron.down")
-                .font(.system(size: 8.5, weight: .semibold))
+                .font(.system(size: 7.5, weight: .semibold))
                 .foregroundColor(theme.secondaryText.opacity(isFolderButtonHovering ? 0.9 : 0.65))
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
         .composerControlSurface(in: Capsule(), isHovered: isFolderButtonHovering)
     }
 
@@ -266,9 +266,9 @@ struct InputToolbarView: View {
         Image(systemName: systemName)
             .resizable()
             .scaledToFit()
-            .frame(width: 14, height: 14)
+            .frame(width: 12, height: 12)
             .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText.opacity(0.85))
-            .padding(7)
+            .padding(6)
             .composerControlSurface(in: Circle(), isHovered: isHovering)
             .shadow(color: isHovering ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
             .scaleEffect(isHovering ? 1.06 : 1.0)

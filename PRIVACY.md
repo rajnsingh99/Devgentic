@@ -46,6 +46,18 @@ GitHub** button, it opens a pre-filled issue in your browser and asks you to att
 zip you saved — you decide whether and where to share it. An optional screenshot is
 included only if you explicitly add one, and may contain whatever was on screen.
 
+## Update checks
+
+Devgentic uses [Sparkle](https://sparkle-project.org) to check for new versions. On the
+second launch it **asks** whether to check automatically; nothing is requested before you
+answer. If you agree, it fetches `https://rajnsingh99.github.io/devgentic/appcast.xml` about
+once a day. That request is a plain download of a public file from GitHub Pages: it carries
+the standard HTTP headers (including your IP address and a user agent naming the app
+version) and **no system profile** — Sparkle's optional hardware/OS report is turned off.
+You can change your answer at any time, or check by hand with **Devgentic → Check for
+Updates…**. Updates are verified against a signing key built into the app before they are
+installed.
+
 ## What is *not* collected
 
 - No background telemetry, usage analytics, or crash phone-home.

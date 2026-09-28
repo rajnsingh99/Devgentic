@@ -218,7 +218,9 @@ struct AddBackendProfileView: View {
             // and the bound profile's `executionTimeout`. Both win over this default.
             details = .workflow(.forNewProfile())
         case .imageGen:
-            let imageGenConfig = ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")
+            // Default routed through ProfileCapabilityFilter so a fresh profile doesn't
+            // open on `.openAI` while the "Show Remote Models" toggle hides it.
+            let imageGenConfig = ProviderConfig(apiProvider: ProfileCapabilityFilter.defaultImageGenProvider, modelName: "dall-e-3")
             details = .imageGen(ImageGenConfig(
                 llmConfig: imageGenConfig,
                 defaultAspectRatio: .square

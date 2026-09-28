@@ -15,6 +15,7 @@
 		35983B442F78DD6800A7AD62 /* SwiftDocX in Frameworks */ = {isa = PBXBuildFile; productRef = 35983B432F78DD6800A7AD62 /* SwiftDocX */; };
 		35A33CE42F66F6270020A8BE /* Flux2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 35F2A0022F60000000AABB02 /* Flux2Core */; };
 		35A33CE52F66F6270020A8BE /* FluxTextEncoders in Frameworks */ = {isa = PBXBuildFile; productRef = 35F2A0032F60000000AABB03 /* FluxTextEncoders */; };
+		35B7A0032FA0000000C0DE03 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 35B7A0022FA0000000C0DE02 /* Sparkle */; };
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
@@ -97,6 +98,7 @@
 				35EB3F6F2F329FDA00555A83 /* MLXLLM in Frameworks */,
 				35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */,
 				3516AAA22F54A01300CFA72D /* Tokenizers in Frameworks */,
+				35B7A0032FA0000000C0DE03 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -195,6 +197,7 @@
 				35D1206D2F6B285900AF3813 /* GRDB */,
 				35983B402F78DD4400A7AD62 /* CoreXLSX */,
 				35983B432F78DD6800A7AD62 /* SwiftDocX */,
+				35B7A0022FA0000000C0DE02 /* Sparkle */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -293,6 +296,7 @@
 				35D1206C2F6B285900AF3813 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
 				35983B3F2F78DD4400A7AD62 /* XCRemoteSwiftPackageReference "CoreXLSX" */,
 				35983B422F78DD6800A7AD62 /* XCRemoteSwiftPackageReference "SwiftDocX" */,
+				35B7A0012FA0000000C0DE01 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -529,6 +533,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
+				DEVELOPMENT_TEAM = FM3V43ST5B;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				EXCLUDED_SOURCE_FILE_NAMES = (
@@ -538,6 +543,8 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Devgentic;
+				INFOPLIST_KEY_CFBundleName = Devgentic;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025-2026 Raj Singh. Licensed under the GNU AGPL v3.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Devgentic needs access to your microphone to capture audio for voice-to-text input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Devgentic needs to send audio data to Apple's servers or process it on-device for speech recognition to convert your voice to text.";
@@ -562,11 +569,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = devgentic/devgentic.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "$(DEVGENTIC_SIGN_IDENTITY)";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
+				DEVELOPMENT_TEAM = FM3V43ST5B;
 				DEVGENTIC_SIGN_IDENTITY = "Developer ID Application";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -578,6 +587,8 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Devgentic;
+				INFOPLIST_KEY_CFBundleName = Devgentic;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025-2026 Raj Singh. Licensed under the GNU AGPL v3.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Devgentic needs access to your microphone to capture audio for voice-to-text input.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Devgentic needs to send audio data to Apple's servers or process it on-device for speech recognition to convert your voice to text.";
@@ -754,6 +765,14 @@
 				version = 1.0.1;
 			};
 		};
+		35B7A0012FA0000000C0DE01 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.10.0;
+			};
+		};
 		35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/raspu/Highlightr.git";
@@ -850,6 +869,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35983B422F78DD6800A7AD62 /* XCRemoteSwiftPackageReference "SwiftDocX" */;
 			productName = SwiftDocX;
+		};
+		35B7A0022FA0000000C0DE02 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35B7A0012FA0000000C0DE01 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 		35CDA7422E2A2A3400564AB7 /* Highlightr */ = {
 			isa = XCSwiftPackageProductDependency;

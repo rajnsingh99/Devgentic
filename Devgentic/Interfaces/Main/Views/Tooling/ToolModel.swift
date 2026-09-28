@@ -370,21 +370,52 @@ struct MCPRuntimeSecrets: Sendable {
 
 extension MCPRuntimeSecrets {
 
-    /// Build a runtime-secrets bundle by reading the configured secrets out of
-    /// Keychain. Used by the tool-execution reconnect path, where we have a
-    /// `sourceID` + persisted `ServerDefinition` but no live form state.
+    /// Logger for the KC-14 attach refusal — the only log line this extension emits, so it
+    /// lives here rather than in a shared category.
+    private static let attachRefusalLogger = DGLogger(category: "MCPRuntimeSecrets")
+
+    /// ⚠️ TEST SEAM (register KC-31). When set, receives exactly the refusal lines `materialize`
+    /// logs when a credential read FAILS — one message for the sink and the logger alike, so the
+    /// seam cannot drift from the log (the `ShellProcess.stderrLogSinkForTesting` shape).
+    nonisolated(unsafe) static var refusalLogSinkForTesting: (@Sendable (String) -> Void)?
+
+    /// Logs one credential refusal. Register KC-31: an unreadable env value or auth header used
+    /// to be dropped with NO log, so a server was launched with no credential and the only hint
+    /// was an authentication failure from the server itself — with nothing in the diagnostic
+    /// trail explaining why.
+    private static func logRefusal(_ message: String) {
+        if let sink = refusalLogSinkForTesting {
+            sink(message)
+            return
+        }
+        attachRefusalLogger.error(message)
+    }
+
+    private static func refusal(_ what: String, sourceID: UUID, status: OSStatus) -> String {
+        return "[SECRETS] Refusing to materialize \(what) for source \(sourceID.uuidString): the "
+            + "Keychain read FAILED (\(SecureKeyStorage.osStatusName(status))). CONSEQUENCE: the "
+            + "server starts WITHOUT this credential and will fail authentication or miss the "
+            + "variable — the stored value itself is untouched, and no empty or placeholder value "
+            + "is substituted."
+    }
+
     @MainActor
     static func materialize(for sourceID: UUID, definition: ServerDefinition) -> MCPRuntimeSecrets {
         var bundle = MCPRuntimeSecrets()
 
-        // Env vars: read each key's value out of Keychain. Missing values are
-        // skipped silently — the user may have removed the secret since the
-        // server was added; ShellProcess will surface the failure if the
-        // server requires it.
+        // Env vars: read each key's value out of Keychain. MISSING values are skipped silently —
+        // the user may have removed the secret since the server was added; ShellProcess will
+        // surface the failure if the server requires it. FAILED reads are NOT silent (KC-31):
+        // the value may exist, and launching without it must be visible in the diagnostic trail.
         if let keys = definition.envKeys {
             for key in keys {
-                if let value = MCPSecretStore.shared.retrieve(.envValue(key: key), sourceID: sourceID) {
+                switch MCPSecretStore.shared.read(.envValue(key: key), sourceID: sourceID) {
+                case .found(let value):
                     bundle.env[key] = value
+                case .notFound:
+                    break
+                case .failed(let status):
+                    logRefusal(refusal("env variable '\(key)'", sourceID: sourceID, status: status))
                 }
             }
         }
@@ -394,12 +425,22 @@ extension MCPRuntimeSecrets {
         case .none:
             break
         case .bearer:
-            if let token = MCPSecretStore.shared.retrieve(.bearerToken, sourceID: sourceID) {
+            switch MCPSecretStore.shared.read(.bearerToken, sourceID: sourceID) {
+            case .found(let token):
                 bundle.authorizationHeader = ("Authorization", "Bearer \(token)")
+            case .notFound:
+                break
+            case .failed(let status):
+                logRefusal(refusal("the bearer token", sourceID: sourceID, status: status))
             }
         case .apiKeyHeader(let headerName):
-            if let value = MCPSecretStore.shared.retrieve(.apiKeyHeaderValue, sourceID: sourceID) {
+            switch MCPSecretStore.shared.read(.apiKeyHeaderValue, sourceID: sourceID) {
+            case .found(let value):
                 bundle.authorizationHeader = (headerName, value)
+            case .notFound:
+                break
+            case .failed(let status):
+                logRefusal(refusal("the '\(headerName)' header value", sourceID: sourceID, status: status))
             }
         case .oauth:
             // Read the OAuth credential bundle out of Keychain and attach its
@@ -407,7 +448,17 @@ extension MCPRuntimeSecrets {
             // up in `DynamicMCPTool` once Phase 4 lands; for now a stale
             // token will surface as a 401 from the transport.
             if let oauthBundle = MCPOAuthCoordinator.loadBundle(sourceID: sourceID) {
-                bundle.authorizationHeader = ("Authorization", "Bearer \(oauthBundle.accessToken)")
+                // ⚠️ Register KC-14: the token is attached only to the URL the sign-in was
+                // performed for. A bundle bound to a different server (the URL was edited,
+                // or the row repurposed) must NOT ride along to the new host. Legacy
+                // bundles carry no binding and attach — the edit gate is what retires them.
+                if MCPOAuthBinding.shouldAttach(oauthBundle, to: definition.url) {
+                    bundle.authorizationHeader = ("Authorization", "Bearer \(oauthBundle.accessToken)")
+                } else {
+                    logRefusal(
+                        "[MCP-OAUTH] Refused to attach the OAuth token for source \(sourceID.uuidString): it is bound to '\(oauthBundle.serverURL?.absoluteString ?? "—")' but the server is now '\(MCPRedaction.redact(url: definition.url ?? "—"))'. CONSEQUENCE: requests go out WITHOUT credentials and fail authentication — the user must sign in again from the server's editor. The stored bundle is intentionally left in place."
+                    )
+                }
             }
         }
 

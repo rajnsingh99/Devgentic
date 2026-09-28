@@ -37,7 +37,9 @@ final class ToolCapabilityTests: XCTestCase {
         // while remaining every bit as dangerous. Following the one call shape they share keeps
         // the guarantee — "a tool that can reach a shell must declare it" — rather than narrowing
         // it to "a tool that reaches a shell ON THIS LINE".
-        ("shared shell core",        #"(BatchCommandTool|Self)\.(runForeground|startBackground)\("#),
+        // `runForegroundOutcome` since D-17 (2026-09-27): `run_command` needs the outcome, not
+        // the flattened string, to report a timeout or a stop as one.
+        ("shared shell core",        #"(BatchCommandTool|Self)\.(runForeground(Outcome)?|startBackground)\("#),
         ("NSAppleScript(<argument>)", #"NSAppleScript\(source:\s*arguments\."#),
     ]
 
@@ -130,7 +132,9 @@ final class ToolCapabilityTests: XCTestCase {
     func testOrdinaryToolsAreUnaffected() {
         XCTAssertEqual(HITLRiskTier.classify(toolName: "read_file"), .safe)
         XCTAssertEqual(HITLRiskTier.classify(toolName: "write_file"), .moderate)
-        XCTAssertEqual(HITLRiskTier.classify(toolName: "git"), .moderate)
+        // `.safe` since 2026-09-25: `git` is read-only by construction (mutating arguments are
+        // refused before dispatch), and the Library already defaulted it to no confirmation.
+        XCTAssertEqual(HITLRiskTier.classify(toolName: "git"), .safe)
         XCTAssertEqual(HITLRiskTier.classify(toolName: "some_unknown_mcp_tool"), .moderate)
         XCTAssertFalse(ToolCapability.executesArbitraryCode("git"))
         // Converted to argv on 2026-07-31; it interpolated a tool argument into `zsh -c` before

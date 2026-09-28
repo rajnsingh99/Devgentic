@@ -118,6 +118,12 @@ final class MCPSamplingBroker {
 
         // 1. Consent. Reuses the standard tool-confirmation banner so this needs no new UI
         //    and inherits the existing stale-park watchdog and cancel-by-conversation.
+        // ⚠️ NOBODY TO APPROVE (HITL Waiting Contract, decision C): refused, never auto-approved.
+        guard await ExecutionSuspensionService.shared.canReachAHuman(inConversation: context.conversationID) else {
+            logger.notice("[MCP-SAMPLING] '\(serverLabel)' requested \(modelName) during an UNATTENDED run [conv \(context.conversationID)]. CONSEQUENCE: refused without parking — nobody can approve spending the user's tokens.")
+            throw MCPError.invalidRequest("Nobody can approve this sampling request — the run is unattended.")
+        }
+
         let operationID = UUID()
         let confirmation = PendingToolConfirmation(
             id: operationID,

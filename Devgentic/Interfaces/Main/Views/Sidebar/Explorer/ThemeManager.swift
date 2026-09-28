@@ -14,16 +14,16 @@ import SwiftUI
 /// Defines the theme override options for the Code Viewer panel.
 /// Specialized syntax highlighting theme for code blocks and the editor.
 enum CodeViewerThemeOverride: String, CaseIterable {
-    case material = "material"
     case cosmicDark = "cosmic_dark"
+    case highContrast = "high_contrast"
     case oneLight = "one_light"
     case solarizedLight = "solarized_light"
 
     init?(rawValue: String) {
         switch rawValue {
-        case "default", "material", "dracula", "one_dark": self = .material // Backward-compatible migration
-        case "cosmic_dark": self = .cosmicDark
-        case "one_light", "github_light": self = .oneLight // One Light (renamed GitHub Light)
+        case "default", "material", "cosmic_dark": self = .cosmicDark // Migrates Material / Cosmic Dark
+        case "high_contrast", "dracula": self = .highContrast         // Migrates High Contrast
+        case "one_light", "github_light": self = .oneLight
         case "solarized_light": self = .solarizedLight
         default: return nil
         }
@@ -31,8 +31,8 @@ enum CodeViewerThemeOverride: String, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .material: return "Material Darker"
         case .cosmicDark: return "Cosmic Dark"
+        case .highContrast: return "High Contrast"
         case .oneLight: return "One Light"
         case .solarizedLight: return "Solarized Light"
         }
@@ -52,15 +52,15 @@ enum SurfaceStyle: String, CaseIterable, Identifiable {
 
     var displayName: LocalizedStringKey {
         switch self {
-        case .glassmorphic: return "Glassmorphic (Liquid Glass)"
-        case .solid: return "Solid Matte (Pro Minimal)"
+        case .glassmorphic: return "Glassmorphic"
+        case .solid: return "Material Surface"
         }
     }
 
     var subtitle: LocalizedStringKey {
         switch self {
-        case .glassmorphic: return "Translucent acrylic materials, ambient colored auras, and specular highlights."
-        case .solid: return "Deep opaque surfaces, razor-sharp 1px hairline borders, and zero background glare."
+        case .glassmorphic: return "Translucent glass surfaces paired with vibrant accent buttons."
+        case .solid: return "Solid opaque surfaces paired with high-contrast buttons."
         }
     }
 
@@ -139,6 +139,15 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
         case .monospaced: return "SF Mono"
         case .serif: return "New York"
         case .rounded: return "Rounded"
+        }
+    }
+
+    var categoryName: String {
+        switch self {
+        case .system: return "System"
+        case .monospaced: return "Monospace"
+        case .serif: return "Serif"
+        case .rounded: return "Geometric"
         }
     }
 
@@ -243,18 +252,24 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
         .system(size: size ?? chatFontSize, weight: weight, design: chatFontFamily.design)
     }
 
+    /// ⚠️ COMPUTED and routed through `TestHost.defaults`, not `UserDefaults.standard`.
+    /// Under XCTest, writes and reads are redirected to an isolated in-memory test suite so
+    /// test runs never overwrite the developer's real machine settings.
+    private static var defaults: UserDefaults { TestHost.defaults }
+    private var defaults: UserDefaults { Self.defaults }
+
     init() {
         // Load the saved app theme (migrating legacy "dracula", "one_dark", "default", or "github_light").
-        let rawSavedThemeID = UserDefaults.standard.string(forKey: Self.selectedThemeKey)
+        let rawSavedThemeID = Self.defaults.string(forKey: Self.selectedThemeKey)
         let savedThemeID: String
         if rawSavedThemeID == "dracula" || rawSavedThemeID == "one_dark" || rawSavedThemeID == "default" || rawSavedThemeID == nil {
             savedThemeID = "material"
             if rawSavedThemeID != nil {
-                UserDefaults.standard.set("material", forKey: Self.selectedThemeKey)
+                Self.defaults.set("material", forKey: Self.selectedThemeKey)
             }
         } else if rawSavedThemeID == "github_light" {
             savedThemeID = "one_light"
-            UserDefaults.standard.set("one_light", forKey: Self.selectedThemeKey)
+            Self.defaults.set("one_light", forKey: Self.selectedThemeKey)
         } else {
             savedThemeID = rawSavedThemeID ?? "material"
         }
@@ -269,29 +284,30 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
         self.baseTheme = base
 
         // Load the saved code viewer override.
-        let savedOverride = UserDefaults.standard.string(forKey: Self.codeViewerThemeKey)
-        let codeOverride = savedOverride.flatMap { CodeViewerThemeOverride(rawValue: $0) } ?? .material
+        let savedOverride = Self.defaults.string(forKey: Self.codeViewerThemeKey)
+        let codeOverride = savedOverride.flatMap { CodeViewerThemeOverride(rawValue: $0) } ?? .cosmicDark
         self.codeViewerThemeOverride = codeOverride
 
         // Load the saved accent color.
-        let savedAccent = UserDefaults.standard.string(forKey: Self.accentColorKey)
+        let savedAccent = Self.defaults.string(forKey: Self.accentColorKey)
         let accent = savedAccent.flatMap { AppAccentColor(rawValue: $0) } ?? .default
         self.selectedAccentColor = accent
 
         // Load the saved surface style (default: glassmorphic).
-        let savedSurface = UserDefaults.standard.string(forKey: Self.surfaceStyleKey)
-        self.surfaceStyle = savedSurface.flatMap { SurfaceStyle(rawValue: $0) } ?? .glassmorphic
+        let savedSurface = Self.defaults.string(forKey: Self.surfaceStyleKey)
+        let resolvedSurface = savedSurface.flatMap { SurfaceStyle(rawValue: $0) } ?? .glassmorphic
+        self.surfaceStyle = resolvedSurface
 
-        // Load the saved button accent presentation style (default: themeContrast).
-        let savedButtonStyle = UserDefaults.standard.string(forKey: Self.buttonAccentStyleKey)
-        self.buttonAccentStyle = savedButtonStyle.flatMap { ButtonAccentStyle(rawValue: $0) } ?? .themeContrast
+        // Load the saved button accent presentation style (auto-paired with surface style).
+        let savedButtonStyle = Self.defaults.string(forKey: Self.buttonAccentStyleKey)
+        self.buttonAccentStyle = savedButtonStyle.flatMap { ButtonAccentStyle(rawValue: $0) } ?? (resolvedSurface == .glassmorphic ? .accent : .themeContrast)
 
-        // Load chat font settings (default: system family, 15pt body, 4pt line spacing)
-        let savedFontFamily = UserDefaults.standard.string(forKey: AppSettings.chatFontFamilyKey)
+        // Load chat font settings (default: system family, 14pt body, 4pt line spacing)
+        let savedFontFamily = Self.defaults.string(forKey: AppSettings.chatFontFamilyKey)
         self.chatFontFamily = savedFontFamily.flatMap { ChatFontFamily(rawValue: $0) } ?? .system
-        let savedFontSize = UserDefaults.standard.object(forKey: AppSettings.chatFontSizeKey) as? CGFloat
-        self.chatFontSize = savedFontSize ?? 15
-        let savedLineSpacing = UserDefaults.standard.object(forKey: AppSettings.chatLineSpacingKey) as? CGFloat
+        let savedFontSize = Self.defaults.object(forKey: AppSettings.chatFontSizeKey) as? CGFloat
+        self.chatFontSize = savedFontSize ?? 14
+        let savedLineSpacing = Self.defaults.object(forKey: AppSettings.chatLineSpacingKey) as? CGFloat
         self.chatLineSpacing = savedLineSpacing ?? 4
 
         // Initialize currentTheme with decorator
@@ -319,7 +335,7 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
     func applyTheme(_ theme: any Theme) {
         self.baseTheme = theme
         self.currentTheme = ThemeDecorator(base: theme, accentColorOverride: selectedAccentColor, codeThemeOverride: codeViewerThemeOverride)
-        UserDefaults.standard.set(theme.id, forKey: Self.selectedThemeKey)
+        defaults.set(theme.id, forKey: Self.selectedThemeKey)
         Self.syncWindowAppearance(colorScheme: theme.colorScheme)
     }
 
@@ -327,43 +343,48 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
     func applyCodeViewerTheme(_ override: CodeViewerThemeOverride) {
         self.codeViewerThemeOverride = override
         self.currentTheme = ThemeDecorator(base: baseTheme, accentColorOverride: selectedAccentColor, codeThemeOverride: override)
-        UserDefaults.standard.set(override.rawValue, forKey: Self.codeViewerThemeKey)
+        defaults.set(override.rawValue, forKey: Self.codeViewerThemeKey)
     }
 
     /// Applies a new accent color override.
     func applyAccentColor(_ accent: AppAccentColor) {
         self.selectedAccentColor = accent
         self.currentTheme = ThemeDecorator(base: baseTheme, accentColorOverride: accent, codeThemeOverride: codeViewerThemeOverride)
-        UserDefaults.standard.set(accent.rawValue, forKey: Self.accentColorKey)
+        defaults.set(accent.rawValue, forKey: Self.accentColorKey)
     }
 
-    /// Applies a new surface presentation style (Liquid Glass vs. Solid Matte).
+    /// Applies a new surface presentation style and automatically synchronizes the corresponding button presentation style:
+    /// - `.glassmorphic` -> Dynamic Accent buttons (.accent)
+    /// - `.solid` -> High-contrast Material buttons (.themeContrast)
     func applySurfaceStyle(_ style: SurfaceStyle) {
         self.surfaceStyle = style
-        UserDefaults.standard.set(style.rawValue, forKey: Self.surfaceStyleKey)
+        defaults.set(style.rawValue, forKey: Self.surfaceStyleKey)
+        let buttonStyle: ButtonAccentStyle = (style == .glassmorphic ? .accent : .themeContrast)
+        self.buttonAccentStyle = buttonStyle
+        defaults.set(buttonStyle.rawValue, forKey: Self.buttonAccentStyleKey)
     }
 
     /// Applies a new button accent presentation style (Dynamic Accent vs. Monochrome Pro).
     func applyButtonAccentStyle(_ style: ButtonAccentStyle) {
         self.buttonAccentStyle = style
-        UserDefaults.standard.set(style.rawValue, forKey: Self.buttonAccentStyleKey)
+        defaults.set(style.rawValue, forKey: Self.buttonAccentStyleKey)
     }
 
     // MARK: - Chat Font Actions
 
     func applyChatFontFamily(_ family: ChatFontFamily) {
         self.chatFontFamily = family
-        UserDefaults.standard.set(family.rawValue, forKey: AppSettings.chatFontFamilyKey)
+        defaults.set(family.rawValue, forKey: AppSettings.chatFontFamilyKey)
     }
 
     func applyChatFontSize(_ size: CGFloat) {
         self.chatFontSize = size
-        UserDefaults.standard.set(size, forKey: AppSettings.chatFontSizeKey)
+        defaults.set(size, forKey: AppSettings.chatFontSizeKey)
     }
 
     func applyChatLineSpacing(_ spacing: CGFloat) {
         self.chatLineSpacing = spacing
-        UserDefaults.standard.set(spacing, forKey: AppSettings.chatLineSpacingKey)
+        defaults.set(spacing, forKey: AppSettings.chatLineSpacingKey)
     }
 
     /// The resolved syntax theme for the Code Viewer and in-chat code blocks.

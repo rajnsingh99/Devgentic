@@ -95,4 +95,52 @@ final class SecureKeyStorageTests: XCTestCase {
         let retrieved = storage.retrieve(service: testService, account: testAccount)
         XCTAssertEqual(retrieved, longValue)
     }
+
+    // MARK: - Labels (KC-25 / KC-30)
+
+    /// The item's (label, description) as the real Keychain reports them — what Keychain Access
+    /// shows in its Name and Kind columns.
+    private func storedLabelAndDescription() -> (label: String?, description: String?) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: testService,
+            kSecAttrAccount as String: testAccount,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let attributes = result as? [String: Any] else { return (nil, nil) }
+        return (attributes[kSecAttrLabel as String] as? String,
+                attributes[kSecAttrDescription as String] as? String)
+    }
+
+    func testANewItemIsLabelledSoItCanBeFoundInKeychainAccess() {
+        XCTAssertEqual(storage.save(value: "labelled", service: testService, account: testAccount), errSecSuccess)
+
+        let stored = storedLabelAndDescription()
+        XCTAssertEqual(stored.label, "Devgentic — \(testService) — \(testAccount)")
+        XCTAssertEqual(stored.description, "Devgentic credential")
+    }
+
+    /// Items written before KC-25 have no label. The update path must add one, or every credential
+    /// an existing install already holds stays unfindable forever.
+    func testAnUnlabelledItemGainsItsLabelOnTheNextWrite() {
+        let bareAdd: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: testService,
+            kSecAttrAccount as String: testAccount,
+            kSecValueData as String: Data("pre-KC-25".utf8),
+        ]
+        XCTAssertEqual(SecItemAdd(bareAdd as CFDictionary, nil), errSecSuccess)
+        XCTAssertNotEqual(storedLabelAndDescription().description, "Devgentic credential",
+                          "precondition: the item starts without this app's labelling")
+
+        XCTAssertEqual(storage.save(value: "rewritten", service: testService, account: testAccount), errSecSuccess)
+
+        let stored = storedLabelAndDescription()
+        XCTAssertEqual(stored.label, "Devgentic — \(testService) — \(testAccount)")
+        XCTAssertEqual(stored.description, "Devgentic credential")
+        XCTAssertEqual(storage.retrieve(service: testService, account: testAccount), "rewritten")
+    }
 }

@@ -15,7 +15,12 @@ private let logger = DGLogger(category: "ChatBubbleView")
 
 struct ChatBubbleView: View {
     var message: ChatMessage
+    var groupStyle: BubbleGroupStyle = .standalone
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
+    /// ⚠️ Read ONLY for a continuation's "Redo Report" — every surface that draws an agent bubble
+    /// provides it (`AgentBubbleContentView` requires it), and a user bubble never reads it.
+    @Environment(MainApplicationViewModel.self) private var mainAppViewModel
+    @Environment(\.chatActionsSuppressed) private var chatActionsSuppressed
     @Environment(\.appTheme) private var theme
     /// [bm-3] The streaming min-height floor animates a frame by up to
     /// `streamingBubbleMinHeight`; snapping that in is exactly the motion this setting suppresses.
@@ -51,7 +56,8 @@ struct ChatBubbleView: View {
                 AgentBubbleContentView(
                     message: message,
                     isAgentic: isAgentic,
-                    contentToDisplay: contentToDisplay
+                    contentToDisplay: contentToDisplay,
+                    groupStyle: groupStyle
                 )
                 // Settled bubbles skip their body when this view is recreated by a parent
                 // re-render — see AgentBubbleContentView.==, which never claims equality
@@ -62,7 +68,9 @@ struct ChatBubbleView: View {
                 UserBubbleContentView(message: message)
             }
         }
-        .padding(.vertical, 16)
+        // A group reads as one turn: its members sit closer together than separate exchanges.
+        .padding(.top, groupStyle.lead == nil ? 16 : 4)
+        .padding(.bottom, groupStyle == .standalone ? 16 : 6)
         .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
         .animation(.easeInOut, value: message.agentResponse?.selectedVariantIndex)
         .accessibilityElement(children: .contain)
@@ -74,6 +82,18 @@ struct ChatBubbleView: View {
                 } label: {
                     Label(didCopyFeedback ? "Copied!" : "Copy Message", systemImage: didCopyFeedback ? "checkmark" : "doc.on.doc")
                 }
+            }
+            // A report in a group has no action bar of its own; this is its Redo. It re-reports
+            // from the task's saved output, report-only (`MessagingCoordinator.continueRegeneration`).
+            if groupStyle.lead != nil, !chatActionsSuppressed {
+                let refusal = mainAppViewModel.regenerationRefusal(for: message)
+                Button {
+                    mainAppViewModel.regenerateResponse(for: message)
+                } label: {
+                    Label("Redo Report", systemImage: "arrow.clockwise")
+                }
+                .disabled(refusal != nil)
+                .help(refusal?.userFacingReason ?? String(localized: "Write this report again from the task's saved output"))
             }
         }
         // ⚠️ [bm-3] ONE hook on the value, `initial: true` — not an `.onAppear` that only ever
@@ -177,6 +197,10 @@ struct ChatActionButton<LabelContent: View>: View {
 
 struct AgentMessageActionsView: View {
     var message: ChatMessage
+    /// Set when this is a GROUP's bar (`TranscriptGrouping`): `message` is the human turn's reply,
+    /// and these are the reply plus its reports, in order. Copy and Read Aloud then cover the whole
+    /// group; every other action still acts for `message` alone.
+    var groupMessages: [ChatMessage]? = nil
     var speechService = SpeechService.shared
     var mainAppViewModel: MainApplicationViewModel
     @Environment(ChatHistoryViewModel.self) var chatHistoryViewModel
@@ -238,7 +262,12 @@ struct AgentMessageActionsView: View {
                 // slot to "Open in Editor", which a report does not get.
                 if !containsCode || isUnpromptedReport {
                     ChatActionButton(action: {
-                        chatHistoryViewModel.copyMessageContentToClipboard(message: message)
+                        if let groupText {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(groupText, forType: .string)
+                        } else {
+                            chatHistoryViewModel.copyMessageContentToClipboard(message: message)
+                        }
                         withAnimation(.easeInOut) { didCopy = true }
                         Task { @MainActor in try? await Task.sleep(for: .seconds(2)); withAnimation(.easeInOut) { didCopy = false } }
                     }) {
@@ -266,8 +295,8 @@ struct AgentMessageActionsView: View {
                 // unattended and therefore among the hardest to debug, and its `traceID` is real.
                 // It was dropped to match the agreed design; restoring it is this `if` plus
                 // nothing else, and the trace itself is untouched either way.
-                if !isUnpromptedReport {
-
+                // ⚠️ Versions sit OUTSIDE the report trim. A report has one version until a Retry
+                // (its failure card) redoes it — and then hiding the picker would hide the first one.
                 if message.agentResponse?.variants.count ?? 0 > 1 {
                     ChatActionButton(action: { showVariantsPopover.toggle() }) {
                         Image(systemName: "square.3.layers.3d.down.right")
@@ -279,6 +308,8 @@ struct AgentMessageActionsView: View {
                         VariantsSelectionView(message: message, isPresented: $showVariantsPopover)
                     }
                 }
+
+                if !isUnpromptedReport {
 
                 if !chatActionsSuppressed {
                     // Single source for "may this run?" — shared with the runtime refusal in
@@ -352,12 +383,19 @@ struct AgentMessageActionsView: View {
 
     // MARK: - Read Aloud
 
+    /// The group's text, oldest first, or nil for an ordinary bar.
+    private var groupText: String? {
+        guard let groupMessages else { return nil }
+        let parts = groupMessages.compactMap { ($0.currentAgentContent ?? $0.content).textContent }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+    }
+
     private func toggleReadAloud() {
         if isSpeaking {
             speechService.stop()
         } else {
-            guard let content = message.currentAgentContent,
-                  let text = content.textContent, !text.isEmpty else { return }
+            guard let text = groupText ?? message.currentAgentContent?.textContent, !text.isEmpty else { return }
             // [CF-21] Tell the session whether a Code Viewer exists here at all. This same view is
             // rendered in the QuickAccess panel, whose view model is built WITHOUT `ownsCodeViewer`
             // — so the code-block hand-off announced "Here is the code in the panel view" and then

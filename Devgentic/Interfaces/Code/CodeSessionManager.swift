@@ -312,7 +312,7 @@ final class CodeSessionManager {
         }
 
         CodeQuickSettingsStore.save(settings, for: path, defaults: defaults, now: Date())
-        logger.info("[CODE_SETTINGS] Saved quick settings for '\(URL(fileURLWithPath: path).lastPathComponent)' — maxIterations: \(settings.maxIterations.map(String.init) ?? "default"), timeout: \(settings.executionTimeout.map { String(Int($0)) } ?? "default")s, \(settings.toolConfirmations.count) tool override(s), thinking: \(settings.thinkingEnabled.map(String.init) ?? "default").")
+        logger.info("[CODE_SETTINGS] Saved quick settings for '\(URL(fileURLWithPath: path).lastPathComponent)' — maxIterations: \(settings.maxIterations.map(String.init) ?? "no cap"), timeout: \(settings.executionTimeout.map { String(Int($0)) } ?? "default")s, thinking: \(settings.thinkingEnabled.map(String.init) ?? "default").")
 
         applyQuickSettingsToProfile(settings)
     }
@@ -346,19 +346,32 @@ final class CodeSessionManager {
     /// `refreshInstructionsOnProfile` — go through here, so the two cannot drift.
     /// Preset values an untouched project runs with. Named constants rather than literals at the
     /// two sites that need them — the same drift `AgentExecutionDefaults` exists to stop.
-    static let presetMaxIterations = 20
+    ///
+    /// ⚠️ NO CAP by default since 2026-09-25 (user decision; was 20). The iteration cap is opt-in
+    /// per project, typed in the quick settings. A run without one is still bounded by
+    /// `presetExecutionTimeout`. The circuit breaker does NOT stop a Code run: `.fallbackPrompt`
+    /// downgrades every trigger to a warning and a nudge (owner decision 2026-09-27, D-15).
+    static let presetMaxIterations = AgentExecutionDefaults.uncapped
+
+    /// What the quick settings accept for a typed cap (user decision 2026-09-25). A stored value
+    /// outside it — from before the range existed — is clamped at `apply`, never trusted as-is.
+    static let iterationCapRange = 10...1000
 
     /// Bounds the COMPUTE of a whole turn — every iteration and every tool call together, with
     /// time parked awaiting a human excluded (`ComputeTimeoutSentinel`).
     ///
-    /// ⚠️ Raised 300 → 1800 on 2026-09-21, and it is NOT an independent choice. It must stay
-    /// comfortably above `BatchCommandTool.maxTimeoutSeconds` (900): a turn that spends the
+    /// ⚠️ 60 minutes since 2026-09-26 (HITL Waiting Contract, decision D: every limit lives inside
+    /// the one above it, and the terminal ceiling rose to 30 min). Raised 300 → 1800 on 2026-09-21,
+    /// and it is NOT an independent choice. It must stay
+    /// comfortably above `BatchCommandTool.maxTimeoutSeconds` (1800): a turn that spends the
     /// command's full ceiling on one build still has to read the output, fix the error and
     /// re-run. At 300 s the two bounds contradicted each other — the tool advertised a timeout
     /// the run could never reach, and the sentinel got there first and aborted the whole turn
-    /// WITHOUT the partial output the tool's own timeout would have returned. Runaway loops are
-    /// bounded by `presetMaxIterations`, not by this; this bounds a hang.
-    static let presetExecutionTimeout: TimeInterval = 1800
+    /// WITHOUT the partial output the tool's own timeout would have returned.
+    ///
+    /// ⚠️ With no iteration cap by default (2026-09-25), this is the ONLY automatic stop for a Code
+    /// run — the circuit breaker only warns there (D-15).
+    static let presetExecutionTimeout: TimeInterval = 3600
 
     /// Code's default context window: the model's own, capped here. KV-cache memory grows with the
     /// window, so the cap is what keeps a 128K-trained model from claiming many GB by default;
@@ -386,7 +399,9 @@ final class CodeSessionManager {
         // observed 2026-09-20 logged "[EXEC_LIMITS] No execution timeout configured" for exactly
         // this reason. An unset override must RESTORE the preset, not leave the last value in
         // place — that is what makes "Reset to defaults" mean anything.
-        agentConfig.maxIterations = settings.maxIterations ?? presetMaxIterations
+        agentConfig.maxIterations = settings.maxIterations.map {
+            min(max($0, iterationCapRange.lowerBound), iterationCapRange.upperBound)
+        } ?? presetMaxIterations
 
         // Tri-state, and the three states are genuinely different: nil = inherit the preset,
         // 0 = the user explicitly chose "No limit", anything else = that budget.
@@ -400,8 +415,7 @@ final class CodeSessionManager {
         agentConfig.llmConfig.numCtxOverride = contextTokens(settings, for: agentConfig.llmConfig)
         agentConfig.tools = mergePresetTools(
             preset: CodeToolPreset.defaultTools,
-            existing: agentConfig.tools,
-            confirmationOverrides: settings.toolConfirmations
+            existing: agentConfig.tools
         )
     }
 
@@ -778,7 +792,7 @@ final class CodeSessionManager {
         // that was in force. `apply` runs either way; only the line was conditional.
         if let path = projectPath?.path { captureProject(path, from: agentConfig, reason: "send") }
         let limitSource = settings.isDefault ? "preset" : "per-project override"
-        logger.info("[CODE_SETTINGS] '\(projectName)' runs with maxIterations: \(agentConfig.maxIterations.map(String.init) ?? "unbounded"), timeout: \(agentConfig.executionTimeout.map { "\(Int($0))s" } ?? "none"), context: \(agentConfig.llmConfig.numCtxOverride.map { "\($0) tokens (\(settings.contextTokens == nil ? "Code default" : "chosen"))" } ?? "provider default"), \(settings.toolConfirmations.count) tool confirmation override(s) — source: \(limitSource). CONSEQUENCE: an iteration-cap or timeout termination in this run is against these exact values.")
+        logger.info("[CODE_SETTINGS] '\(projectName)' runs with maxIterations: \(AgentExecutionDefaults.describe(agentConfig.maxIterations)), timeout: \(agentConfig.executionTimeout.map { "\(Int($0))s" } ?? "none"), context: \(agentConfig.llmConfig.numCtxOverride.map { "\($0) tokens (\(settings.contextTokens == nil ? "Code default" : "chosen"))" } ?? "provider default") — source: \(limitSource). CONSEQUENCE: an iteration-cap or timeout termination in this run is against these exact values.")
 
         profile.details = .code(agentConfig)
 
@@ -946,13 +960,12 @@ final class CodeSessionManager {
     /// A tool's identity in the merge: the same name from two sources is two tools.
     static func toolKey(_ tool: Tool) -> String { "\(tool.sourceId)-\(tool.name)" }
 
-    /// - Parameter confirmationOverrides: per-project Ask/Auto from `CodeQuickSettings`, keyed by
-    ///   tool name. Authoritative over the carried-over profile value when present: the row is
-    ///   shared by every project, so the value it carries may be another project's.
+    /// Ask/Auto is carried over from `existing` like the other fields. The row is shared by every
+    /// project, but it is not another project's value: switching project rewrites the row's tools
+    /// from that project's `CodeToolOverride`s (`restore(_:into:)`), Ask/Auto included.
     static func mergePresetTools(
         preset: [Tool],
-        existing: [Tool],
-        confirmationOverrides: [String: Bool] = [:]
+        existing: [Tool]
     ) -> [Tool] {
         let existingByKey = Dictionary(uniqueKeysWithValues: existing.map { (toolKey($0), $0) })
         let presetKeys = Set(preset.map(toolKey))
@@ -968,12 +981,6 @@ final class CodeSessionManager {
                 carried.timeout = user.timeout
                 carried.timeoutMessage = user.timeoutMessage
                 carried.cutStrategy = user.cutStrategy
-            }
-            // Applied AFTER the carry-over so it wins, and keyed by NAME so it cannot resurrect a
-            // tool the preset no longer contains — an override for an unknown name is simply
-            // never read.
-            if let override = confirmationOverrides[presetTool.name] {
-                carried.requiresConfirmation = override
             }
             merged.append(carried)
         }

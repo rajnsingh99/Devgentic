@@ -133,11 +133,12 @@ enum WorkflowRetryPolicy {
     /// contradicted the file's own rule above (cancellation is never retried) whenever a Stop
     /// happened to surface through this specific error shape instead of `CancellationError`.
     nonisolated static func isTransientToolError(_ error: Error) -> Bool {
-        // A compute timeout — trigger (1) of the rule. A fresh full budget genuinely helps a stall.
-        if let agentError = error as? AgentExecutionError,
-           case .executionTimeout = agentError.reason {
-            return true
-        }
+        // ⚠️ A TIMED-OUT TOOL IS NEVER RE-RUN (HITL Waiting Contract, decision F). A timeout says
+        // only that the answer did not come back in time — the work may well have happened. Retrying
+        // it re-ran a completed side effect: probe P10 showed a 1.3 s deploy tool run TWICE under a
+        // 1 s limit with one retry (Timeout inventory D-07). No tool declares itself safe to repeat
+        // yet; when one can, this is where it opts back in.
+        if isTimeout(error) { return false }
         // Network transport, including MCP over HTTP, which surfaces as URLError or wraps one —
         // except .cancelled, which is Stop, not a transient blip.
         if let urlError = error as? URLError, urlError.code != .cancelled { return true }
@@ -148,9 +149,20 @@ enum WorkflowRetryPolicy {
         return false
     }
 
+    /// Our own tool limit, or a network request that timed out — in both the request may have been
+    /// carried out; only the reply was lost.
+    nonisolated static func isTimeout(_ error: Error) -> Bool {
+        if let agentError = error as? AgentExecutionError, case .executionTimeout = agentError.reason { return true }
+        if let urlError = error as? URLError, urlError.code == .timedOut { return true }
+        if let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? URLError,
+           underlying.code == .timedOut { return true }
+        return false
+    }
+
     /// One-line reason for the log when a retry is declined, so a skipped attempt is never silent.
     nonisolated static func declineReason(for error: Error) -> String {
         if error is CancellationError { return "the run was cancelled" }
+        if isTimeout(error) { return "it TIMED OUT — the work may already have happened, so it is never re-run automatically" }
         return "the error is not transient (\(type(of: error)))"
     }
 

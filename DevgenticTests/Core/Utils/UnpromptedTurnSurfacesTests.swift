@@ -213,7 +213,9 @@ final class PendingBackgroundReportPredicateTests: XCTestCase {
             // The DEFINITION names itself; only call sites are transcripts.
             guard code.contains("ChatBubbleView(message:"), !code.contains("struct ChatBubbleView")
             else { continue }
-            if !code.contains("isSyntheticPrompt") {
+            // Either branch on the flag directly, or route through `TranscriptGrouping`, which
+            // branches on it for every row (pinned behaviourally in `TranscriptGroupingTests`).
+            if !code.contains("isSyntheticPrompt") && !code.contains("TranscriptGrouping.roles(") {
                 offenders.append(url.lastPathComponent)
             }
         }

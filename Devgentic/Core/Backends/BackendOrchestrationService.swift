@@ -703,6 +703,11 @@ class BackendOrchestrationService {
                             case .content:
                                 tokensReceived += 1
                                 continuation.yield(event)
+                            case .draftText:
+                                // Provisional preview only — deliberately NOT counted in
+                                // `tokensReceived`: a run that streamed drafts and then produced
+                                // no `.content` still produced no answer.
+                                continuation.yield(event)
                             case .thought(_, let message, _):
                                 logger.debug("[THOUGHT] \(message)")
                                 continuation.yield(event)

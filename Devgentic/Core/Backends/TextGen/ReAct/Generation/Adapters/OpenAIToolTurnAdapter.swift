@@ -38,6 +38,14 @@ struct OpenAIToolTurnAdapter: ToolTurnAdapter {
         return msg
     }
 
+    /// OpenRouter's `reasoning_details` rides on the assistant message it came from. Plain OpenAI
+    /// never returns the field, so `replay` is nil there and the turn is byte-identical to before.
+    func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?, replay: JSONValue?) -> [String: Any] {
+        var msg = assistantTurn(toolCalls: toolCalls, reasoning: reasoning)
+        if let replay { msg["reasoning_details"] = replay.rawValue }
+        return msg
+    }
+
     func toolResultTurns(observations: [ToolObservation]) -> [[String: Any]] {
         observations.map { obs in
             [

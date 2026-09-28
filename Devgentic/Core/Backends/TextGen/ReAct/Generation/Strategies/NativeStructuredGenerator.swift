@@ -80,7 +80,8 @@ struct NativeStructuredGenerator: CognitiveGenerator {
         model: any LLMProvider,
         nativeMessages: [[String: Any]],
         availableTools: [AgentTool],
-        iteration: Int
+        iteration: Int,
+        onTextDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> ModernCognitiveStep {
         let reqId = UUID().uuidString.prefix(8)
         logLLMOps.info("⚡️ [Native:\(reqId)] Start Generation - Iteration: \(iteration) | turns=\(nativeMessages.count)")
@@ -90,10 +91,18 @@ struct NativeStructuredGenerator: CognitiveGenerator {
         logLLMOps.debug("📤 [Native:\(reqId)] Sending native-turn request to model...")
         let startTime = Date()
 
-        let raw = try await model.generateCognitiveStep(
-            nativeMessages: nativeMessages,
-            tools: nativeTools
-        )
+        // Streamed when the caller wants the text live (see `AgentStreamEvent.draftText`); a
+        // provider without a streaming implementation falls back to the blocking call.
+        let raw: ModernCognitiveStep
+        if let onTextDelta {
+            raw = try await model.generateCognitiveStepStreaming(
+                nativeMessages: nativeMessages, tools: nativeTools, onTextDelta: onTextDelta)
+        } else {
+            raw = try await model.generateCognitiveStep(
+                nativeMessages: nativeMessages,
+                tools: nativeTools
+            )
+        }
 
         let duration = Date().timeIntervalSince(startTime)
         logLLMOps.info("✅ [Native:\(reqId)] Response received in \(String(format: "%.4f", duration))s")

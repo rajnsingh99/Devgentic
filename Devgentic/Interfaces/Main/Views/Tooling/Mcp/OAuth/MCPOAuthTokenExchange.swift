@@ -127,6 +127,49 @@ struct MCPOAuthTokenExchange {
         return resolve(response: response, fallbackScopes: bundle.grantedScopes)
     }
 
+    /// Best-effort RFC 7592 §2.3 registration deletion, used when the user deletes an MCP
+    /// server whose client was dynamically registered. Register KC-64: the registration access
+    /// token used to be persisted and NEVER read — the client registration lived on at the
+    /// provider forever, with a valid credential for managing it sitting unused in the Keychain.
+    ///
+    /// Deliberately non-throwing and best-effort, exactly like `revoke`: deleting a server must
+    /// succeed even when the provider is unreachable or does not implement RFC 7592 (an AS that
+    /// does not will answer 405 per §2.3, or 501). The injection point keeps it testable without
+    /// a network.
+    static func deleteRegistration(
+        registrationClientUri: URL,
+        registrationAccessToken: String,
+        perform: (URLRequest) async throws -> (Int, Data?) = { req in
+            let (data, response) = try await URLSession.shared.data(for: req)
+            return ((response as? HTTPURLResponse)?.statusCode ?? -1, data)
+        }
+    ) async -> Bool {
+        var req = URLRequest(url: registrationClientUri)
+        req.httpMethod = "DELETE"
+        req.setValue("Bearer \(registrationAccessToken)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 8
+        do {
+            let (status, _) = try await perform(req)
+            if (200..<300).contains(status) {
+                logger.info("[MCP-OAUTH] Deleted the dynamic client registration at \(MCPRedaction.redact(url: registrationClientUri.absoluteString)) (RFC 7592).")
+                return true
+            }
+            logger.warning("""
+                [MCP-OAUTH] Registration deletion returned HTTP \(status) — the AS likely does not \
+                implement RFC 7592. CONSEQUENCE: the client registration REMAINS at the provider \
+                (harmless: it authenticates nobody without the redirect); local secrets are still purged.
+                """)
+            return false
+        } catch {
+            logger.warning("""
+                [MCP-OAUTH] Registration deletion failed: \(error.localizedDescription). \
+                CONSEQUENCE: the client registration REMAINS at the provider; local secrets are \
+                still purged.
+                """)
+            return false
+        }
+    }
+
     /// Best-effort RFC 7009 revocation, used when the user deletes an MCP server.
     ///
     /// Purging the Keychain only makes Devgentic forget the token; the token itself stays

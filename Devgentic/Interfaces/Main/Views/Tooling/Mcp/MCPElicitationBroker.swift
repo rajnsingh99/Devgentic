@@ -105,6 +105,14 @@ final class MCPElicitationBroker {
             return CreateElicitation.Result(action: .cancel, content: nil)
         }
 
+        // ⚠️ NOBODY TO ASK (HITL Waiting Contract, decision C). A scheduled or woken run shows no
+        // banner, so this question would park until the run's limit ended it. Cancelled at once;
+        // the server learns no answer is coming.
+        guard await ExecutionSuspensionService.shared.canReachAHuman(inConversation: conversationID) else {
+            logger.notice("[MCP-ELICIT] '\(serverLabel)' asked a question during an UNATTENDED run [conv \(conversationID)]. CONSEQUENCE: cancelled without parking — nobody can answer it.")
+            return CreateElicitation.Result(action: .cancel, content: nil)
+        }
+
         let fields = Self.fieldNames(in: parameters.requestedSchema)
         let operationID = UUID()
 

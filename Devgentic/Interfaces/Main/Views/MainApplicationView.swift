@@ -68,51 +68,48 @@ struct MainApplicationView: View {
         (isSidebarVisible ? CGFloat(currentSidebarPaneWidth) : 0) + activityBarWidth + (sidebarGap * 1.5)
     }
 
-    /// Trailing inset the chat area yields to the Code Viewer in split mode (EXPERIMENTAL).
+    private var isAnyPanelInSplit: Bool {
+        if chatHistoryViewModel.isCodeViewerPanelPresented {
+            return chatHistoryViewModel.codeViewerPresentation == .split
+        }
+        if chatHistoryViewModel.isBackgroundTasksPanelPresented {
+            return chatHistoryViewModel.backgroundTasksPresentation == .split
+        }
+        return false
+    }
+
+    /// Trailing inset the chat area yields to the Code Viewer or Background Tasks in split mode.
     /// Zero in overlay/full (overlay covers; full replaces). The desired inset is the
     /// panel's full FOOTPRINT — content width plus its divider — plus a breathing gutter,
     /// so chat text doesn't sit flush against the divider edge. Capped so the chat never
     /// drops below `splitModeMinChatWidth` — past that the panel overlaps the difference,
     /// which is the historic overlay behaviour rather than an unreadable sliver of chat.
     private var chatSplitInset: CGFloat {
-        guard chatHistoryViewModel.codeViewerPresentation == .split,
-              chatHistoryViewModel.isCodeViewerPanelPresented else { return 0 }
+        guard isAnyPanelInSplit else { return 0 }
         // [CF-15] The IN-FLIGHT drag width when one is running, else the persisted value.
         // `codeViewerPanelWidth` only updates on drag end (see the doc above), so without
         // this the panel's edge moved live while this inset held still for the whole
         // drag — the panel slid over the chat text, then the chat jumped to its new
-        // column in one animated step on release. The Code Viewer panel publishes the
+        // column in one animated step on release. The panel publishes the
         // live value onto the view model per drag tick for exactly this reader — which
         // only pins the column because `chatSplitInsetAnimation` drops the ease for the
         // duration of the drag; an animated per-tick inset trails just as visibly.
         let liveWidth = chatHistoryViewModel.codeViewerLiveDragWidth ?? codeViewerPanelWidth
+        let trailingMargin: CGFloat = 12
         let desired = CGFloat(liveWidth)
+            + trailingMargin
             + ChatUIConstants.codeViewerDividerWidth
             + ChatUIConstants.splitModeChatGutter
         // The floor accounts for BOTH gutters (leading one below + this trailing one) so
         // the actual text column, not just the padded region, keeps its minimum width.
         let maxInset = windowContentWidth - totalSidebarWidth - ChatUIConstants.splitModeChatGutter
-            - ChatUIConstants.splitModeMinChatWidth
+            - ChatUIConstants.splitModeMinChatWidth - trailingMargin
         return max(0, min(desired, maxInset))
     }
 
     /// Animation for `chatSplitInset` — deliberately NONE while a divider drag is running.
-    ///
-    /// [CF-15] The inset used to change exactly once per drag (on release), so a 0.2s ease
-    /// was the whole transition. It now changes every drag tick, and each tick RETARGETS
-    /// the ease from wherever the presentation value happens to be — so the chat column
-    /// eases permanently behind a panel edge that tracks the cursor instantly (the panel's
-    /// `.frame(width:)` is unanimated), which is the very overlap this row filed, plus a
-    /// ~0.2s slide continuing after the mouse is released. Open/close/mode changes still
-    /// move `codeViewerPanelWidth` with no drag in flight and keep their ease.
-    /// ⚠️ Guarded on `.split` FIRST, so the live-drag property is read only in the mode whose
-    /// inset depends on it. `chatSplitInset` has always had that guard, so before this
-    /// animation existed the root window registered no observation dependency on a value the
-    /// divider writes on every mouse-move tick — and the divider is mounted in `.overlay` too.
-    /// Reading it unguarded here invalidated `MainApplicationView.body` (the whole root window)
-    /// per tick of a drag that, in overlay, cannot move the inset off 0.
     private var chatSplitInsetAnimation: Animation? {
-        guard chatHistoryViewModel.codeViewerPresentation == .split else {
+        guard isAnyPanelInSplit else {
             return Self.splitInsetAnimation(isDraggingDivider: false)
         }
         return Self.splitInsetAnimation(isDraggingDivider: chatHistoryViewModel.codeViewerLiveDragWidth != nil)
@@ -152,33 +149,58 @@ struct MainApplicationView: View {
         if chatHistoryViewModel.isBackgroundTasksPanelPresented {
             BackgroundTasksPanelView(conversationID: chatHistoryViewModel.viewerOwningConversationID)
                 .environment(chatHistoryViewModel)
+                .padding(.leading, chatHistoryViewModel.backgroundTasksPresentation == .overlay ? 0 : totalSidebarWidth)
                 .zIndex(2)
         }
     }
 
+    private var isChatInterfaceActive: Bool {
+        router.isShowingChat && viewModel.interfaceMode == .chat
+    }
+
+    private var shouldShowQuickAccessButton: Bool {
+        let isCoveredByOverlayPanel = (chatHistoryViewModel.isCodeViewerPanelPresented && chatHistoryViewModel.codeViewerPresentation != .split)
+            || (chatHistoryViewModel.isBackgroundTasksPanelPresented && chatHistoryViewModel.backgroundTasksPresentation != .split)
+
+        return QuickAccessFloatingButton.shouldShow(
+            isChatInterfaceActive: isChatInterfaceActive,
+            hasSelectedConversation: viewModel.selectedConversationID != nil,
+            isQuickAccessEnabled: QuickAccessConfigManager.shared.isEnabled,
+            isCoveredByOverlayPanel: isCoveredByOverlayPanel
+        )
+    }
+
+    private var pillsTrailingInset: CGFloat {
+        isAnyPanelInSplit ? chatSplitInset + 18 : 18
+    }
+
     /// The floating pills, STACKED so they can never overlap.
     ///
-    /// Both want the same top-trailing corner. They were separate mounts while only the Code Viewer
-    /// had one; a second independent mount in the same corner would draw on top of the first.
-    ///
-    /// ⚠️ Hoisted for the same reason `backgroundTasksPanel` is — see its note.
+    /// Dynamically tracks split-mode insets so they stay inside the chat column
+    /// without overlapping side panels or each other.
     @ViewBuilder
     private var floatingPills: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            // Shown only when the viewer was minimized with tabs still open and no background tasks panel is covering the area.
-            if chatHistoryViewModel.isCodeViewerMinimized && !chatHistoryViewModel.isBackgroundTasksPanelPresented {
+            if shouldShowQuickAccessButton {
+                QuickAccessFloatingButton()
+                    .environment(viewModel)
+            }
+            if isChatInterfaceActive {
+                BackgroundTasksFloatingButton(conversationID: chatHistoryViewModel.viewerOwningConversationID)
+                    .environment(chatHistoryViewModel)
+            }
+            if isChatInterfaceActive && chatHistoryViewModel.isCodeViewerMinimized && !chatHistoryViewModel.isBackgroundTasksPanelPresented {
                 CodeViewerFloatingButton()
                     .environment(chatHistoryViewModel)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
-            // The panel's second door, and for most of a task's life its only one — the timeline
-            // card that opens it scrolls away. Hides itself when it has nothing to offer.
-            BackgroundTasksFloatingButton(conversationID: chatHistoryViewModel.viewerOwningConversationID)
-                .environment(chatHistoryViewModel)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         .padding(.top, 14)
-        .padding(.trailing, 18)
+        .padding(.trailing, pillsTrailingInset)
+        .animation(chatSplitInsetAnimation, value: pillsTrailingInset)
+        .animation(.easeInOut(duration: 0.2), value: shouldShowQuickAccessButton)
+        .animation(.easeInOut(duration: 0.2), value: chatHistoryViewModel.isCodeViewerMinimized)
         .zIndex(3)
     }
 
@@ -341,21 +363,14 @@ struct MainApplicationView: View {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
-        .onChange(of: chatHistoryViewModel.codeViewerPresentation) { oldMode, newMode in
+        .onChange(of: isAnyPanelInSplit) { wasSplit, isSplit in
             // Entering split: auto-collapse the sidebar PANE so the chat keeps a readable
             // column — expanded sidebar + panel + chat is one region too many. One-shot on
             // the TRANSITION only: re-expanding afterwards is the user's call and nothing
             // fights them for it (leaving split deliberately does not auto-restore either).
-            // `isCodeViewerVisible` is load-bearing: restoring a conversation whose saved
-            // session was in split mode replays this transition with the panel still hidden,
-            // which collapsed the sidebar for a panel the user could not see (field-observed
-            // 2026-07-25 — they re-opened it by hand each switch).
-            if newMode == .split, oldMode != .split, isSidebarVisible,
-               chatHistoryViewModel.isCodeViewerVisible {
+            if isSplit, !wasSplit, isSidebarVisible {
                 isSidebarVisible = false
-                logger.debug("[CodeViewer] Split enabled — sidebar pane auto-collapsed.")
-            } else if newMode == .split, oldMode != .split, isSidebarVisible {
-                logger.debug("[CodeViewer] Split restored while the panel is hidden — sidebar left expanded.")
+                logger.debug("[MainApplicationView] Split enabled — sidebar pane auto-collapsed.")
             }
         }
         .onChange(of: viewModel.selectedConversationID) { _, newID in
@@ -688,7 +703,7 @@ private struct InterfaceModePicker: View {
             Capsule()
                 .fill(
                     surfaceStyle == .solid
-                        ? (theme.isDark ? Color(hex: "#18181B") : Color.white)
+                        ? (theme.isDark ? Color(hex: "#18181B") : theme.secondaryBackground)
                         : theme.secondaryBackground.opacity(0.75)
                 )
         )

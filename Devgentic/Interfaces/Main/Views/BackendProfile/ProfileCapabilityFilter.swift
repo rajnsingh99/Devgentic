@@ -16,16 +16,55 @@ import Foundation
 
 struct ProfileCapabilityFilter {
 
+    // MARK: - Remote Models Gate
+
+    /// First-party remote providers hidden by the General Settings "Show Remote
+    /// Models" toggle (`AppSettings.showRemoteModelsKey`). Deliberately exactly
+    /// Gemini, OpenAI, and Anthropic — the owner's decision (2026-09-26) does not
+    /// gate the third-party remote aggregators (OpenRouter, openAICompatible), which
+    /// keep their own entries in every picker.
+    static let remoteModelProviders: Set<ApiProvider> = [.google, .openAI, .anthropic]
+
+    /// Filters a provider list by the remote-models toggle. `keepingCurrent` re-appends
+    /// a provider the gate removed when it is the profile's CONFIGURED value: hiding a
+    /// provider must not turn an existing profile's picker into a blank selection — the
+    /// configured value stays visible (and runnable) until the user actively switches
+    /// away. New selections are limited to the visible list.
+    static func filteringRemoteModels(
+        _ providers: [ApiProvider],
+        keepingCurrent current: ApiProvider? = nil
+    ) -> [ApiProvider] {
+        guard !AppSettings.showRemoteModels else { return providers }
+        var filtered = providers.filter { !remoteModelProviders.contains($0) }
+        if let current, providers.contains(current), !filtered.contains(current) {
+            filtered.append(current)
+        }
+        return filtered
+    }
+
+    /// Default provider for a NEW image-gen profile. Historically `.openAI`; falls
+    /// back to `.mlx` while remote models are hidden, so a fresh profile doesn't open
+    /// on a provider the toggle just removed from every picker (the picker would show
+    /// it via `keepingCurrent`, defeating the feature on first sight).
+    static var defaultImageGenProvider: ApiProvider {
+        AppSettings.showRemoteModels ? .openAI : .mlx
+    }
+
     // MARK: - Provider Filtering
 
     /// Which providers to show in the provider picker for a given profile type.
-    static func allowedProviders(for profileType: ProfileType) -> [ApiProvider] {
+    /// Filtered by the remote-models gate; pass `keepingCurrent` from a picker that
+    /// edits an existing profile so its configured provider stays visible.
+    static func allowedProviders(
+        for profileType: ProfileType,
+        keepingCurrent current: ApiProvider? = nil
+    ) -> [ApiProvider] {
         switch profileType {
         case .imageGen:
             // Anthropic has no image generation API
-            return [.openAI, .google, .mlx, .ollama]
+            return filteringRemoteModels([.openAI, .google, .mlx, .ollama], keepingCurrent: current)
         case .bot, .agent, .workflow, .code:
-            return ApiProvider.allCases.map { $0 }
+            return filteringRemoteModels(ApiProvider.allCases.map { $0 }, keepingCurrent: current)
         }
     }
 

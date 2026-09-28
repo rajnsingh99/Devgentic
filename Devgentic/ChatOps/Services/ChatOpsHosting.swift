@@ -59,6 +59,10 @@ protocol RemoteRunControlling: AnyObject {
     /// is what lets all three share the one correct answer and lets both dead flags be deleted.
     func pendingClarificationID(inConversation conversation: UUID) -> UUID?
 
+    /// What the run in `conversation` is waiting on from a human ("your approval", …), if anything.
+    /// Lets a refused remote prompt say WHAT is pending instead of only "still working" (D-23).
+    func pendingQuestionNoun(inConversation conversation: UUID) -> String?
+
     /// Cancels the RUN in `conversation` — not merely its parked question — and reports whether
     /// one was active.
     ///

@@ -224,11 +224,11 @@ enum SkillToolDeclaration {
             prose: "Claude Code's file reader. The closest here is read_file — it also handles DOCX, XLSX and PPTX, but not notebooks or images.",
             candidates: ["read_file"]),
         "Write": ForeignHint(
-            prose: "Claude Code's file writer. Here that is write_file or create_file, and create_new_file / overwrite_file in a Code profile.",
-            candidates: ["write_file", "create_file", "create_new_file", "overwrite_file"]),
+            prose: "Claude Code's file writer. Here that is create_new_file for a new file, or overwrite_file to replace one.",
+            candidates: ["create_new_file", "overwrite_file"]),
         "Edit": ForeignHint(
-            prose: "Claude Code's in-place editor. Here that is edit_code, and edit_code_single / edit_code_batch in a Code profile.",
-            candidates: ["edit_code", "edit_code_single", "edit_code_batch"]),
+            prose: "Claude Code's in-place editor. Here that is edit_code_single, or edit_code_batch for several edits to one file.",
+            candidates: ["edit_code_single", "edit_code_batch"]),
         "Bash": ForeignHint(
             prose: "A shell. Here that is run_command, with start_background_task for something you will not wait for.",
             candidates: ["run_command", "start_background_task"]),

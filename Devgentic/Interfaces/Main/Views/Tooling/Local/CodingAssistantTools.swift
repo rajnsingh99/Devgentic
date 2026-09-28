@@ -819,6 +819,9 @@ struct FindDefinitionTool: DevgenticTool {
 struct BatchCommandTool: DevgenticTool {
     let name = "batch_command"
     let category = "Coding Assistant"
+    /// Bounds itself at `timeout_seconds` (≤ `BatchCommandTool.maxTimeoutSeconds`) and returns the
+    /// partial output — so the dispatcher's timeout sits just above that ceiling (Contract dec. 2).
+    var selfBoundCeiling: TimeInterval? { TimeInterval(BatchCommandTool.maxTimeoutSeconds) }
     let description = "Executes a shell command with advanced options: configurable timeout, background execution, and working directory. Output is returned in full; if it is larger than the room left in the model's context, the middle is omitted (start and end kept) with a note saying so."
 
     /// Scopes background tasks to the conversation that started them, so `bg_1` means one thing
@@ -874,7 +877,7 @@ struct BatchCommandTool: DevgenticTool {
             properties: [
                 ("command", "string", "The shell command to execute."),
                 ("working_directory", "string", "Working directory for command execution. Required — pass the project root or a specific subpath."),
-                ("timeout_seconds", "integer", "Maximum execution time in seconds, max 900. Defaults to 30 in the foreground and 900 in the background. The process is killed on timeout, but any output it produced first is still returned."),
+                ("timeout_seconds", "integer", "Maximum execution time in seconds, max 1800. Defaults to 1800 (the maximum) in the foreground and in the background. The process is killed on timeout, but any output it produced first is still returned."),
                 // ⚠️ The model chooses the mode, and it was choosing blind: this said only "run in
                 // background and return immediately", with nothing about WHEN that is right. A
                 // device run on 2026-09-21 backgrounded a build whose result it wanted one second
@@ -884,7 +887,7 @@ struct BatchCommandTool: DevgenticTool {
                 // Worth the ~250 extra chars in every request: it is read at the moment of the
                 // decision, which a system-prompt paragraph is not.
                 ("task_name", "string", "Optional short label shown to the user instead of the raw command."),
-                ("background", "boolean", "Default false. Keep it false for anything whose result you need — the call waits and returns the output, and timeout_seconds goes up to 900 for a slow build. Set it true ONLY to leave something running that you will not wait for, such as a dev server; it returns a task id instead of output, and you must call get_task_output to see anything.")
+                ("background", "boolean", "Default false. Keep it false for anything whose result you need — the call waits and returns the output, and timeout_seconds goes up to 1800 for a slow build. Set it true ONLY to leave something running that you will not wait for, such as a dev server; it returns a task id instead of output, and you must call get_task_output to see anything.")
             ],
             required: ["command", "working_directory"]
         )
@@ -892,9 +895,11 @@ struct BatchCommandTool: DevgenticTool {
 
     // MARK: - Timeout Bounds
 
-    /// Applied to a FOREGROUND call that names no timeout. Deliberately short: most are a build
-    /// probe or a `git status`, and a caller that expects to run long should say so.
-    static let defaultTimeoutSeconds = 30
+    /// Applied to a FOREGROUND call that names no timeout — the full 30-minute ceiling (owner
+    /// decision 2026-09-27, HITL Waiting Contract decision 2). It was 30 s, "deliberately short"
+    /// because a hung command could not be stopped; since slice 1 Stop and every outer timeout
+    /// kill a foreground command, so a short default only cut off builds that forgot to ask.
+    static let defaultTimeoutSeconds = maxTimeoutSeconds
 
     /// Applied to a BACKGROUND call that names no timeout.
     ///
@@ -909,17 +914,19 @@ struct BatchCommandTool: DevgenticTool {
     /// smaller models that omitted the argument in the first place.
     static let defaultBackgroundTimeoutSeconds = maxTimeoutSeconds
 
-    /// The ceiling a caller cannot exceed. Raised 300 → 900 on 2026-09-21: 5 minutes sat just
+    /// The ceiling a caller cannot exceed — 30 minutes (HITL Waiting Contract, decision 2; raised
+    /// 900 → 1800 on 2026-09-26). History: raised 300 → 900 on 2026-09-21: 5 minutes sat just
     /// under this project's own `build-for-testing` + `test-without-building` cycle (~266 s
     /// measured), so the one command a coding agent most needs to run was the one it could not
     /// finish. The bound exists to stop a hang, not to rule out a slow build.
     ///
-    /// ⚠️ This ceiling is NOT the effective limit on its own. A `batch_command` call is compute,
-    /// and the run-level `executionTimeout` sentinel (`AgentConnect`) bounds the compute of the
-    /// WHOLE turn. If that budget is smaller than the command's timeout, the sentinel fires
-    /// first and aborts the entire run — and unlike the bound here it returns no partial output.
-    /// `CodeSessionManager.presetExecutionTimeout` is sized to keep room above this value.
-    static let maxTimeoutSeconds = 900
+    /// ⚠️ This ceiling is NOT the effective limit on its own. Two bounds sit around it:
+    /// - the tool dispatcher (`ToolExecutionMediator`) bounds every call at this ceiling + 30 s
+    ///   (`selfBoundCeiling`), so this tool's own timeout — with its partial output — fires first;
+    /// - an enclosing turn or scheduled-run limit shortens the call to fit what is left, keeping a
+    ///   reserve for the reply (`ExecutionBudget`).
+    /// `CodeSessionManager.presetExecutionTimeout` (60 min) is sized to keep room above this value.
+    static let maxTimeoutSeconds = 1800
 
     /// The bound actually applied to a call. Extracted so the clamp is assertable without
     /// spawning a shell — `isDestructiveCommand` is static for the same
@@ -1022,11 +1029,36 @@ struct BatchCommandTool: DevgenticTool {
     /// the end: a crash mid-build left no log, and stdout and stderr came back as two blocks with
     /// their order lost. The file also removes the pipe's failure modes — a file never fills and
     /// wedges the child, and a `cmd &` left holding it cannot keep the read open.
+    /// How a foreground command ended — so a caller can CLASSIFY the result without reading its
+    /// text. `observation` is what the model is told in every case (D-17).
+    enum ForegroundOutcome: Equatable {
+        case finished(String)
+        /// Killed at its own `timeout_seconds`.
+        case timedOut(limit: Int, observation: String)
+        /// Stopped before it finished — by the user, or because its run was stopped.
+        case stopped(observation: String)
+
+        var observation: String {
+            switch self {
+            case .finished(let text), .timedOut(_, let text), .stopped(let text): text
+            }
+        }
+    }
+
     static func runForeground(command: String,
                               workingDirectory: String,
                               timeout: Int,
                               conversationID: UUID?,
                               name: String? = nil) async throws -> String {
+        try await runForegroundOutcome(command: command, workingDirectory: workingDirectory, timeout: timeout,
+                                       conversationID: conversationID, name: name).observation
+    }
+
+    static func runForegroundOutcome(command: String,
+                                     workingDirectory: String,
+                                     timeout: Int,
+                                     conversationID: UUID?,
+                                     name: String? = nil) async throws -> ForegroundOutcome {
         guard let conversationID else {
             return try await runForegroundUnregistered(command: command, workingDirectory: workingDirectory, timeout: timeout)
         }
@@ -1042,9 +1074,20 @@ struct BatchCommandTool: DevgenticTool {
             throw ShellCommandError.launchFailed(reason: error.localizedDescription)
         }
 
-        guard let ended = await registry.waitUntilEnded(conversationID: conversationID, taskID: started.id) else {
+        // ⚠️ THE STOP HOOK. `waitUntilEnded` is a continuation with no cancellation handler, so a
+        // cancelled caller — Stop, an execution limit, the dispatcher's own tool timeout — used
+        // to keep waiting while the command ran to its full bound (Timeout inventory D-02, P2).
+        // Cancellation now stops the command; the wait then returns its partial output as soon as
+        // the shell is reaped (SIGTERM, SIGKILL after 2 s).
+        let stopID = started.id
+        let waited = await withTaskCancellationHandler {
+            await registry.waitUntilEnded(conversationID: conversationID, taskID: stopID)
+        } onCancel: {
+            _ = registry.stop(conversationID: conversationID, taskID: stopID)
+        }
+        guard let ended = waited else {
             // Only if the conversation was deleted while the command ran — `discard` drops the record.
-            return "Error: The command's record was removed while it ran (its conversation was deleted), so its output is unavailable."
+            return .stopped(observation: "Error: The command's record was removed while it ran (its conversation was deleted), so its output is unavailable.")
         }
 
         let data = (try? Data(contentsOf: ended.logURL)) ?? Data()
@@ -1054,31 +1097,31 @@ struct BatchCommandTool: DevgenticTool {
         case .timedOut:
             // Partial output is returned rather than discarded: a command killed at the bound
             // usually produced the evidence for WHY it was slow before it was killed.
-            return output.isEmpty
+            return .timedOut(limit: timeout, observation: output.isEmpty
                 ? "Error: Command timed out after \(timeout)s and was killed. It produced no output."
-                : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)"
+                : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)")
         case .stopped:
-            return output.isEmpty
-                ? "Error: The command was stopped by the user before it finished. It produced no output."
-                : "Error: The command was stopped by the user before it finished. Output before it was stopped:\n\(output)"
+            return .stopped(observation: output.isEmpty
+                ? "Error: The command was stopped before it finished (by the user, or because its run was stopped or ran out of time). It produced no output."
+                : "Error: The command was stopped before it finished (by the user, or because its run was stopped or ran out of time). Output before it was stopped:\n\(output)")
         case .exited(let code):
-            return ShellExitStatus.annotate(output, exitCode: code)
+            return .finished(ShellExitStatus.annotate(output, exitCode: code))
         case .running:
             // `waitUntilEnded` returns only after the shell exits, so this cannot be reached.
             logger.error("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(ended.id) was reported as ended while its status is still running. CONSEQUENCE: its output is returned without an exit code.")
-            return output
+            return .finished(output)
         }
     }
 
     /// The path with no conversation to own the command, so no registry entry, card or log. Kept on
     /// `ProcessRunner` for callers that build the tool without a conversation.
-    private static func runForegroundUnregistered(command: String, workingDirectory: String, timeout: Int) async throws -> String {
+    private static func runForegroundUnregistered(command: String, workingDirectory: String, timeout: Int) async throws -> ForegroundOutcome {
         let process = shell(command, in: workingDirectory)
         nonisolated(unsafe) let target = process
         let seconds = TimeInterval(timeout)
 
         // Off the cooperative pool. `ProcessRunner.run` is synchronous by design and `timeout`
-        // here goes up to 900s; calling it inline would park a Swift-concurrency worker thread for
+        // here goes up to 1800s; calling it inline would park a Swift-concurrency worker thread for
         // a quarter of an hour. A GCD thread is cheap to hold, a cooperative-pool worker is not.
         let run: ProcessRunner.TimedResult
         do {
@@ -1104,11 +1147,11 @@ struct BatchCommandTool: DevgenticTool {
         }
 
         if run.timedOut {
-            return output.isEmpty
+            return .timedOut(limit: timeout, observation: output.isEmpty
                 ? "Error: Command timed out after \(timeout)s and was killed. It produced no output."
-                : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)"
+                : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)")
         }
-        return ShellExitStatus.annotate(output, exitCode: run.result.exitCode)
+        return .finished(ShellExitStatus.annotate(output, exitCode: run.result.exitCode))
     }
 
     /// Starts `command` and returns immediately with a task id.
@@ -1130,7 +1173,7 @@ struct BatchCommandTool: DevgenticTool {
             return """
                 Started background task \(task.id): \(command)
                 It will be killed automatically after \(timeout)s if it has not finished.
-                Read its output with get_task_output, end it early with stop_background_task.\
+                Read its output with get_task_output, end it early with stop_background_task.
                 Do not poll in a loop — set notify_on_completion next time if you need the result.
                 """
         } catch {

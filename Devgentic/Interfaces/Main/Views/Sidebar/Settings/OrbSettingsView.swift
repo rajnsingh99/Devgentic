@@ -53,12 +53,15 @@ struct OrbSettingsView: View {
         ScrollView {
             VStack(spacing: 24) {
                 orbCard
-                listeningCard
-                conversationCard
-                developerCard
-                statusCard
+                if config.isEnabled {
+                    listeningCard
+                    conversationCard
+                    developerCard
+                    statusCard
+                }
             }
             .padding(24)
+            .animation(.default, value: config.isEnabled)
         }
         .scrollContentBackground(.hidden)
         .background(Color.clear)
@@ -765,7 +768,9 @@ struct OrbSettingsView: View {
         Binding(
             get: { config.isEnabled },
             set: { newValue in
-                config.isEnabled = newValue
+                withAnimation {
+                    config.isEnabled = newValue
+                }
                 AppDelegate.shared?.applyOrbHotkeyConfig()
             }
         )

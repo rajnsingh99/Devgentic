@@ -903,6 +903,10 @@ struct OpenAISettingsView: View {
     /// The selected model, so the panel can hide controls it would reject (register A55).
     /// Empty when nothing is selected yet — treated as `.standard`, the permissive shape.
     var modelName: String = ""
+    /// True only for an OpenRouter profile. OpenAI and OpenAI-compatible endpoints share this
+    /// panel and this config type, but `provider.data_collection` means nothing to them — so,
+    /// per the hide-don't-disable rule below, the control is not rendered there at all.
+    var showsOpenRouterRouting: Bool = false
     @Environment(\.appTheme) private var theme
 
     /// ⚠️ Register A55. **Hide, don't disable** (the rule A56 established): a greyed-out control
@@ -1035,6 +1039,32 @@ struct OpenAISettingsView: View {
                     .labelsHidden()
                     .fixedSize()
                     .accessibilityLabel("Reasoning effort")
+                }
+            }
+
+            if showsOpenRouterRouting {
+                Divider()
+
+                Text("Privacy")
+                    .font(theme.fontSubheadline.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+                    .padding(.top, 8)
+
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Deny Data Collection")
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text("Only route to providers that don't store or train on your prompts. Many free (:free) models have no such provider and will stop working while this is on.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
+                    }
+                    Spacer(minLength: 16)
+                    Toggle("", isOn: $config.denyDataCollection.toNonOptional(defaultValue: false))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .accessibilityLabel("Deny data collection")
                 }
             }
         }

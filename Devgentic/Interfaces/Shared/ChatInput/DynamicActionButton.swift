@@ -56,7 +56,7 @@ struct DynamicActionButton: View {
     /// [Composer parity] Recording pulse (same look as ComposerMicButton).
     @State private var pulseScale: CGFloat = 1.0
 
-    private let buttonSize: CGFloat = 28 // matches the ComposerKit buttons
+    private let buttonSize: CGFloat = ComposerStyle.buttonSize // matches the ComposerKit buttons (24pt)
 
     /// Source of determinate progress for the model-download ring. @Observable —
     /// reading downloadProgress in body re-renders as the download advances.
@@ -86,8 +86,12 @@ struct DynamicActionButton: View {
                 Button("Change Speech Model…") {
                     inputViewModel.showModelSelectorPopover = true
                 }
+                MicrophoneMenu()
             }
         }
+        // Reads the input devices and starts following plug/unplug, so the menu is current
+        // when it opens.
+        .onAppear { MicrophoneSelection.shared.refresh() }
         .popover(isPresented: $inputViewModel.showModelSelectorPopover, arrowEdge: .top) {
             WhisperModelSelectorPopover(
                 isPresented: $inputViewModel.showModelSelectorPopover,
@@ -180,14 +184,14 @@ struct DynamicActionButton: View {
                             .rotationEffect(.degrees(-90))
                             .animation(.linear(duration: 0.25), value: downloadService.downloadProgress)
                         Image(systemName: "arrow.down")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 8, weight: .semibold))
                             .foregroundColor(theme.accentColor)
                     }
-                    .padding(4)
+                    .padding(3.5)
                 } else {
                     ProgressView()
                         .controlSize(.small)
-                        .scaleEffect(0.8)
+                        .scaleEffect(0.75)
                 }
             }
             .transition(.opacity.animation(.easeInOut(duration: 0.2)))
@@ -267,10 +271,10 @@ struct DynamicActionButton: View {
     /// to match the previous frame-based glyph sizes optically.
     private var symbolFont: Font {
         switch mode {
-        case .send:          return .system(size: 13, weight: .semibold)
-        case .stopStreaming: return .system(size: 12, weight: .regular)
-        case .stopVoice:     return .system(size: 14, weight: .medium)
-        case .mic:           return .system(size: 13, weight: .medium)
+        case .send:          return .system(size: 10.5, weight: .semibold)
+        case .stopStreaming: return .system(size: 9.5, weight: .regular)
+        case .stopVoice:     return .system(size: 11, weight: .medium)
+        case .mic:           return .system(size: 11.5, weight: .medium)
         }
     }
 

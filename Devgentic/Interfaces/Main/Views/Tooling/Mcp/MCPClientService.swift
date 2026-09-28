@@ -397,10 +397,11 @@ final class MCPClientService {
         let ids = Array(activeSessions.keys)
         guard !ids.isEmpty else { return }
 
-        // Concurrently, not sequentially. This runs inside AppDelegate's 3s quit
-        // watchdog: serialised, a single server hanging in `client.disconnect()` ate the
-        // whole budget and every server after it kept its child process alive, which then
-        // got re-parented to launchd as an orphan.
+        // Concurrently, not sequentially. This has NO bound of its own: it runs inside
+        // AppDelegate's quit teardown, which returns at `quitTeardownLimit` (5 s,
+        // `DeadlineRace`) whether or not this finishes, and `killAllChildProcessesNow` then
+        // kills any server still alive. Serialised, one server hanging in
+        // `client.disconnect()` would still starve every server after it of its disconnect.
         await withTaskGroup(of: Void.self) { group in
             for id in ids {
                 group.addTask { @MainActor [weak self] in
@@ -518,7 +519,25 @@ final class MCPClientService {
 
         logger.info("[MCP-CALL] req=\(String(describing: requestID)) tool='\(name)' source=\(sourceId) dispatched.")
 
-        let result = try await context.value
+        // ⚠️ CANCELLATION REACHES THE SERVER (HITL Waiting Contract, MCP slice). `context.value` is a
+        // `Task.value`, which does not answer cancellation, so a timed-out or stopped call used to
+        // keep waiting for the server — forever, if it hung — and the request stayed running
+        // server-side (`cancelRequest` had no callers; Timeout inventory D-26). Cancelling now sends
+        // `notifications/cancelled` and fails the pending request locally, so this await returns
+        // at once with `CancellationError`.
+        let client = session.client
+        let result = try await withTaskCancellationHandler {
+            try await context.value
+        } onCancel: {
+            Task {
+                do {
+                    try await client.cancelRequest(requestID, reason: "The call was cancelled: it timed out, or its run was stopped.")
+                    logger.notice("[MCP-CALL] req=\(String(describing: requestID)) tool='\(name)' CANCELLED. CONSEQUENCE: notifications/cancelled sent; the server should stop the work, and any late reply is ignored.")
+                } catch {
+                    logger.error("[MCP-CALL] req=\(String(describing: requestID)) tool='\(name)' could not send notifications/cancelled: \(error.localizedDescription). CONSEQUENCE: the local wait still ends; the server may finish the work.")
+                }
+            }
+        }
 
         // A completed round-trip is the strongest liveness evidence there is — better than
         // any ping, and it keeps the status readout honest between ping intervals.

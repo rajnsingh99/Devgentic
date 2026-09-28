@@ -145,6 +145,9 @@ struct ScheduledTaskRowView: View {
         case .running: return theme.warningColor
         case .completed: return theme.successColor
         case .failed: return theme.errorColor
+        case .timedOut: return theme.warningColor
+        case .cancelled: return theme.secondaryText
+        case .missed: return theme.warningColor
         case .paused: return theme.secondaryText
         }
     }

@@ -625,7 +625,8 @@ final class ChatOpsCommandService {
                     attachMirror: () -> Bool) -> RemoteTurnAdmission.Decision {
 
         let decision = RemoteTurnAdmission.decide(
-            hasActiveRun: runControl?.hasActiveRun(inConversation: conversationID) ?? false
+            hasActiveRun: runControl?.hasActiveRun(inConversation: conversationID) ?? false,
+            waitingOn: runControl?.pendingQuestionNoun(inConversation: conversationID)
         )
 
         guard case .admitted = decision else {

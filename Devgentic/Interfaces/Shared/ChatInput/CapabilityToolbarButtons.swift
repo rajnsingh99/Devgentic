@@ -170,12 +170,12 @@ private struct CapabilityChipButton<PopoverContent: View>: View {
     var body: some View {
         Button { showing = true } label: {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(isOn ? tint : (hovering ? theme.primaryText : theme.secondaryText.opacity(0.85)))
-                .frame(width: 16, height: 16)
-                .padding(6)
+                .frame(width: 13, height: 13)
+                .padding(5.5)
                 .composerControlSurface(
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous),
+                    in: RoundedRectangle(cornerRadius: 6.5, style: .continuous),
                     isHovered: hovering && isEnabled,
                     isSelected: isOn,
                     selectedTint: tint

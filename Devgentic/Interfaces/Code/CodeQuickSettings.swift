@@ -23,21 +23,20 @@ private let logger = DGLogger(category: "CodeQuickSettings")
 /// that is the intended direction.
 struct CodeQuickSettings: Codable, Hashable, Sendable {
 
-    /// Reasoning cycles before the loop stops. `nil` → the preset's 20.
+    /// Reasoning cycles before the loop stops. `nil` → NO cap (the Code default since 2026-09-25);
+    /// a value is clamped to `CodeSessionManager.iterationCapRange` when applied.
     var maxIterations: Int?
 
     /// COMPUTE budget in seconds — time parked awaiting a human is excluded by
     /// `ComputeTimeoutSentinel`. `nil` → `CodeSessionManager.presetExecutionTimeout`. `.some(0)` means no limit.
     var executionTimeout: TimeInterval?
 
-    /// Per-tool confirmation overrides, keyed by tool name. `true` = ask first, `false` = run
-    /// without asking. A tool absent from this map keeps whatever `CodeToolPreset` declares.
-    ///
-    /// ⚠️ Only preset tools belong here. `CodeToolPreset`'s tools are hidden from the Tool
-    /// Library for a Code profile (`ToolLibraryContainerView.hiddenToolNames`), so this map is
-    /// the ONLY surface that can set their Ask/Auto state. Non-preset tools keep using the
-    /// Library, and `mergePresetTools` leaves them alone.
-    var toolConfirmations: [String: Bool] = [:]
+    // ⚠️ `toolConfirmations` (per-tool Ask/Auto) WAS REMOVED 2026-09-25. It existed because the
+    // preset tools were hidden from the Tool Library for a Code profile, which made this popover the
+    // only place to set them. They are in the Library now, with Auto Run / Ask First, so there were
+    // two controls for one fact — and this one was applied LAST on every run, silently undoing a
+    // Library choice. Ask/Auto now lives on the profile's tool, remembered per project by
+    // `CodeToolOverride.requiresConfirmation`. A stored value under the old key is ignored on decode.
 
     /// Extended thinking. `nil` → off, which is the Code default: the ReAct loop pays the
     /// thinking cost once per ITERATION, so it multiplies by `maxIterations` rather than being
@@ -54,7 +53,6 @@ struct CodeQuickSettings: Codable, Hashable, Sendable {
     var isDefault: Bool {
         maxIterations == nil
             && executionTimeout == nil
-            && toolConfirmations.isEmpty
             && thinkingEnabled == nil
             && contextTokens == nil
     }
@@ -84,8 +82,8 @@ struct CodeProjectState: Codable, Hashable, Sendable {
     /// Library, MCP tools), stored whole because there is no preset to diff them against.
     var extraTools: [Tool] = []
 
-    /// Changes to PRESET tools other than Ask/Auto (that one is `CodeQuickSettings.toolConfirmations`),
-    /// keyed by tool name. Absent = the preset's value.
+    /// Changes to PRESET tools — Ask/Auto included since 2026-09-25 — keyed by tool name.
+    /// Absent = the preset's value.
     var presetToolOverrides: [String: CodeToolOverride] = [:]
 
     var isEmpty: Bool { model == nil && extraTools.isEmpty && presetToolOverrides.isEmpty }
@@ -102,21 +100,31 @@ struct CodeToolOverride: Codable, Hashable, Sendable {
     var timeoutMessage: String?
     var isFavorite: Bool
     var cutStrategy: ContextCutStrategy?
+    /// Ask First (`true`) or Auto Run (`false`), as set in the Tool Library (2026-09-25).
+    ///
+    /// Optional ONLY so an override saved before this field existed still decodes; `nil` there
+    /// means "the preset's". Every override written now carries it. Without it here, an Ask/Auto
+    /// choice made in the Library held for the current project and reverted to the preset on the
+    /// next project switch.
+    var requiresConfirmation: Bool?
 
     /// `nil` when `current` matches the preset — nothing worth storing.
     init?(preset: Tool, current: Tool) {
         guard current.timeout != preset.timeout
             || current.timeoutMessage != preset.timeoutMessage
             || current.isFavorite != preset.isFavorite
-            || current.cutStrategy != preset.cutStrategy else { return nil }
+            || current.cutStrategy != preset.cutStrategy
+            || current.requiresConfirmation != preset.requiresConfirmation else { return nil }
         timeout = current.timeout
         timeoutMessage = current.timeoutMessage
         isFavorite = current.isFavorite
         cutStrategy = current.cutStrategy
+        requiresConfirmation = current.requiresConfirmation
     }
 
     func applied(to tool: Tool) -> Tool {
         var tool = tool
+        if let requiresConfirmation { tool.requiresConfirmation = requiresConfirmation }
         tool.timeout = timeout
         tool.timeoutMessage = timeoutMessage
         tool.isFavorite = isFavorite

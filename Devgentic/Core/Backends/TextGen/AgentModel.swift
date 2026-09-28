@@ -175,6 +175,19 @@ struct APISpyModel: LLMProvider {
         }
     }
 
+    /// Forwarded for the same reason as the non-streaming overload above: without it the protocol
+    /// default runs, which calls THIS wrapper's non-streaming method — the step would still work,
+    /// but nothing would ever stream.
+    func generateCognitiveStepStreaming(
+        nativeMessages: [[String: Any]],
+        tools: [[String: Any]]?,
+        onTextDelta: @escaping @Sendable (String) -> Void
+    ) async throws -> ModernCognitiveStep {
+        try await traced(messageCount: nativeMessages.count, preview: Self.stepPreview, usage: { $0.tokenUsage }) {
+            try await inner.generateCognitiveStepStreaming(nativeMessages: nativeMessages, tools: tools, onTextDelta: onTextDelta)
+        }
+    }
+
     func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
         try await traced(messageCount: messages.count, preview: { String($0.text.prefix(300)) }, usage: { $0.usage }) {
             try await inner.generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema)
@@ -235,9 +248,17 @@ struct ModernCognitiveStep: Sendable {
     ///   - `.failed(reason)`     ⇒ `toolCalls` is empty, retry with reason-specific alert
     let parseOutcome: ParseOutcome
 
-    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseOutcome: ParseOutcome? = nil) {
+    /// Provider data that must be sent back VERBATIM on this step's assistant turn, or nil.
+    /// Today: OpenRouter's `reasoning_details`. Reasoning models routed through OpenRouter (Claude,
+    /// Gemini, o-series) need their prior reasoning blocks — some encrypted or signed — returned
+    /// with the tool calls they produced, or the next turn either errors or reasons from scratch.
+    /// Opaque on purpose: nothing here reads it; the tool-turn adapter only echoes it.
+    let reasoningReplay: JSONValue?
+
+    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseOutcome: ParseOutcome? = nil, reasoningReplay: JSONValue? = nil) {
         self.reasoning = reasoning
         self.thought = thought
+        self.reasoningReplay = reasoningReplay
         self.toolCalls = toolCalls
         self.tokenUsage = tokenUsage
         // Default derivation: non-empty tool calls ⇒ success; empty ⇒ genuineCompletion.
@@ -380,6 +401,12 @@ protocol AgentToolProtocol: Sendable {
     /// return is treated as success (#19). Default: false.
     var outputMayContainErrorText: Bool { get }
 
+    /// The ceiling (seconds) of a time bound this tool ENFORCES ITSELF, or nil. A tool that kills
+    /// its own work at a caller-chosen limit and hands back partial output (the terminal tools'
+    /// `timeout_seconds`) sets this so the dispatcher's per-tool timeout sits just ABOVE it rather
+    /// than cutting in first and discarding that output (HITL Waiting Contract, decision 2).
+    var selfBoundCeiling: TimeInterval? { get }
+
     /// True when this tool's ARGUMENT is executed as code — a shell command, or an AppleScript
     /// body. Such a tool cannot be bounded by validating its arguments, because the argument IS
     /// a program; the only real control is whether the profile grants it at all.
@@ -401,6 +428,9 @@ extension AgentToolProtocol {
     /// Default: tools do NOT surface error-shaped text on success (so the semantic-failure
     /// heuristic applies). Error-surfacing tools (shell, build diagnostics) override to true.
     var outputMayContainErrorText: Bool { false }
+
+    /// Default: the tool does not bound itself; the dispatcher's timeout is its only bound.
+    var selfBoundCeiling: TimeInterval? { nil }
 
     /// Answered from the one shared set rather than per-tool, so a tool and the permission
     /// banner can never disagree about what the tool is. A tool may still override, but the
@@ -432,7 +462,8 @@ struct AgentTool: Sendable {
     let requiresConfirmation: Bool
 
     // Per-tool execution limits
-    /// Optional per-tool timeout in seconds. Nil means no per-tool limit.
+    /// The user's per-tool timeout override in seconds (Tool Library). Nil means the dispatcher's
+    /// default applies — NOT "no limit": every tool call is bounded (HITL Waiting Contract §2).
     let timeout: TimeInterval?
     /// Custom message sent to the LLM when this tool times out. Nil uses the default timeout message.
     let timeoutMessage: String?
@@ -441,6 +472,9 @@ struct AgentTool: Sendable {
     /// tool — a non-throwing return is success even if the output looks like an error. Set
     /// for tools whose legitimate output surfaces error text (shell, build diagnostics). (#19)
     let contentMayLookLikeError: Bool
+
+    /// See `AgentToolProtocol.selfBoundCeiling`.
+    let selfBoundCeiling: TimeInterval?
 
     /// The closure to execute the tool.
     /// Takes JSON Data (arguments) and returns text output + optional media artifacts.
@@ -455,6 +489,7 @@ struct AgentTool: Sendable {
         timeout: TimeInterval? = nil,
         timeoutMessage: String? = nil,
         contentMayLookLikeError: Bool = false,
+        selfBoundCeiling: TimeInterval? = nil,
         run: @escaping @Sendable (Data) async throws -> (output: String, artifacts: [MediaArtifact])
     ) {
         self.name = name
@@ -464,6 +499,7 @@ struct AgentTool: Sendable {
         self.timeout = timeout
         self.timeoutMessage = timeoutMessage
         self.contentMayLookLikeError = contentMayLookLikeError
+        self.selfBoundCeiling = selfBoundCeiling
         self.run = run
     }
 
@@ -476,6 +512,7 @@ struct AgentTool: Sendable {
         timeout: TimeInterval? = nil,
         timeoutMessage: String? = nil,
         contentMayLookLikeError: Bool = false,
+        selfBoundCeiling: TimeInterval? = nil,
         textOnlyRun: @escaping @Sendable (Data) async throws -> String
     ) {
         self.name = name
@@ -485,6 +522,7 @@ struct AgentTool: Sendable {
         self.timeout = timeout
         self.timeoutMessage = timeoutMessage
         self.contentMayLookLikeError = contentMayLookLikeError
+        self.selfBoundCeiling = selfBoundCeiling
         self.run = { data in
             let text = try await textOnlyRun(data)
             return (text, [])
@@ -530,6 +568,12 @@ enum ToolExecutionResult: Sendable, Equatable {
     case timedOut(toolName: String, duration: TimeInterval, message: String? = nil)
     case semanticFailure(toolName: String, output: String) // E.g., null, empty, or explicit CLI errors
     case systemError(reason: String)
+    /// The call was cancelled before it finished — the run was stopped (Stop, conversation close,
+    /// an outer limit). Not a tool failure: it must not count against the tool's reliability or be
+    /// reported as a crash (Timeout inventory D-04; HITL Waiting Contract §3 `stopped`).
+    /// `message`: what the model reads when the call was stopped but the RUN goes on — a command
+    /// the user stopped from the task panel, with the output it printed first (D-17).
+    case cancelled(toolName: String, message: String? = nil)
 
     /// Media artifacts (empty for non-success cases).
     var artifacts: [MediaArtifact] {
@@ -555,6 +599,9 @@ enum ToolExecutionResult: Sendable, Equatable {
             return output.isEmpty ? "System Error: Empty tool response." : output
         case .systemError(let reason):
             return "System Error: Failed to execute tool: \(reason)"
+        case .cancelled(let toolName, let message):
+            if let message, !message.isEmpty { return message }
+            return "Tool '\(toolName)' was cancelled before it finished because the run was stopped."
         }
     }
     
@@ -592,6 +639,8 @@ enum ToolExecutionResult: Sendable, Equatable {
             return validationMarkers.contains(where: { output.contains($0) }) ? .invalidArgs : .executionThrew
         case .systemError(let reason):
             return reason.contains("Missing required macOS permissions") ? .permissionRejected : .executionThrew
+        case .cancelled:
+            return .cancelled
         }
     }
 }
@@ -776,6 +825,12 @@ struct AgentInput: Sendable {
     /// re-raising the banner. Declaration-level default keeps the memberwise init
     /// and every existing construction site untouched.
     var interactionMemory: RunInteractionMemory? = nil
+
+    /// Payload size (chars) at which the native loop asks the user before sending the next request.
+    /// Set by `AgentConnect` for remote endpoints only; 0 (the default) disables the gate, which is
+    /// what local providers and every minimal/test constructor get. See `LargeRequestGate`.
+    /// Declaration-level default for the same reason as `interactionMemory`.
+    var largeRequestConfirmChars: Int = 0
 
     /// Resolved input: multimodal if available, text fallback otherwise.
     var resolvedPayload: Payload {
@@ -1009,6 +1064,10 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
     case consecutiveToolFailures(count: Int, lastTool: String, lastError: String)
     case repetitiveActionLoop(action: String, count: Int)
     case executionTimeout(elapsed: TimeInterval, limit: TimeInterval)
+    /// A workflow Gate's own configured timer ran out with nobody answering (HITL Waiting Contract,
+    /// decision B) — the one timer the contract allows on a human. It used to be reported as
+    /// `.modelError`, whose remediation told the author to check their model and credentials.
+    case gateExpired(limit: TimeInterval)
     case modelError(provider: String, error: String)
     case cancelled
 
@@ -1023,6 +1082,7 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
         case .consecutiveToolFailures: false
         case .repetitiveActionLoop: false
         case .executionTimeout: true
+        case .gateExpired: false   // an unanswered question is not fixed by asking again
         case .modelError: true
         case .cancelled: false
         }
@@ -1040,6 +1100,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
             "Repetitive action loop detected: \(action) repeated \(count) times"
         case .executionTimeout(let elapsed, let limit):
             "Execution timeout after \(Int(elapsed))s (limit: \(Int(limit))s)"
+        case .gateExpired(let limit):
+            "Gate expired: nobody answered within \(ToolExecutionMediator.describe(limit))"
         case .modelError(let provider, let error):
             "Model error from \(provider): \(error)"
         case .cancelled:
@@ -1063,6 +1125,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
             return "The agent repeated the same action. Refine the task so the goal is reachable in distinct steps."
         case .executionTimeout(_, let limit):
             return "The node exceeded its \(Int(limit))s timeout. Raise the node timeout or reduce the work it does."
+        case .gateExpired(let limit):
+            return "Nobody answered this gate within its \(ToolExecutionMediator.describe(limit)) timeout, so no option was chosen. Wire its error port to handle no answer, or lengthen or remove the gate timeout."
         case .modelError:
             return "The model provider returned an error. Check connectivity, credentials, and the selected model."
         case .cancelled:
@@ -1114,8 +1178,16 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
 }
 
 /// Error type wrapping an AgentFailureReason for throwing contexts.
-struct AgentExecutionError: Error, Sendable {
+///
+/// ⚠️ `LocalizedError` is load-bearing. Without it every surface that renders
+/// `error.localizedDescription` — the chat/Code "Response Error" card, the terminal reason, the
+/// trace, a workflow Action node's per-attempt card — showed Foundation's placeholder "The
+/// operation couldn't be completed. (devgentic.AgentExecutionError error 1.)" instead of
+/// "Execution timeout after 30s (limit: 30s)" (Timeout inventory D-11, 2026-09-26).
+struct AgentExecutionError: LocalizedError, Sendable {
     let reason: AgentFailureReason
+
+    var errorDescription: String? { reason.localizedDescription }
 }
 
 // MARK: - Plan & Execute Models

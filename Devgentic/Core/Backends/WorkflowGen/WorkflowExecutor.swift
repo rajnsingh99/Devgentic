@@ -1576,14 +1576,14 @@ actor WorkflowExecutor: Executor {
         // Priority: WorkflowNodeConfig.hardTimeout → agent executionTimeout → default 120s
         // `nil` → no timeout (the workflow's node-timeout setting is disabled and the
         // node sets no explicit `hardTimeout`); the node then runs unbounded.
-        let nodeTimeout: TimeInterval? = {
-            if let hardTimeout = node.nodeConfig?.hardTimeout { return hardTimeout }
+        let configuredNodeTimeout: TimeInterval? = {
+            if let hardTimeout = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Node '\(displayName)' hardTimeout") { return hardTimeout }
             // ⚠️ register B44 — routed through the shared accessor rather than a sixth private
             // `if case .agent`. No behaviour change for anything reachable here (a workflow node
             // binds a STORED profile and `.code` is ephemeral, never persisted), but leaving the
             // pattern in place is how this defect kept reproducing itself across five call sites.
-            if let t = profile.details.executionTimeout { return t }
-            return workflowConfig.effectiveNodeTimeout
+            if let t = TimeLimit.usable(profile.details.executionTimeout, "Node '\(displayName)' profile execution timeout") { return t }
+            return TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout")
         }()
 
         var nodeOutput = ""
@@ -1595,6 +1595,24 @@ actor WorkflowExecutor: Executor {
         // downstream, joins satisfied, error port untouched); this flag rides the completion
         // event so the UI can badge the node amber instead of green.
         var nodeHasWarnings = false
+
+        // ⚠️ OWNER-CHAIN PARK CREDIT (HITL Waiting Contract, decision A). The node's inner run is
+        // created inside `nodeScope`, so only parks raised by THIS node pause its clock. With
+        // conversation-wide credit a sibling's unanswered gate froze this node's timeout for as
+        // long as the gate stayed open (Timeout inventory D-18).
+        let nodeScope = UUID()
+        await ExecutionSuspensionService.shared.registerScope(nodeScope, conversationID: conversationID)
+        defer { Task { await ExecutionSuspensionService.shared.unregisterScope(nodeScope) } }
+
+        // Nesting (owner decision 2026-09-27): fitted inside an enclosing run's limit, so the node's
+        // own timeout — and its error port — fires before the run is cut off. A node with no limit
+        // of its own inherits the fitted outer one.
+        let fittedNode = await ExecutionBudget.clamp(configuredNodeTimeout, what: "Node '\(displayName)'")
+        let nodeTimeout: TimeInterval? = fittedNode.limit.isFinite ? fittedNode.limit : nil
+        let nodeFrame: ExecutionBudget.Frame? = if let nodeTimeout {
+            await ExecutionBudget.frame(owner: "node '\(displayName)''s \(ToolExecutionMediator.describe(nodeTimeout)) limit",
+                                        limit: nodeTimeout, scope: nodeScope)
+        } else { nil }
 
         do {
             // Race: stream consumption vs timeout (same pattern as AgentConnect).
@@ -1618,10 +1636,9 @@ actor WorkflowExecutor: Executor {
                 // defect, not a hypothetical. `withComputeTimeout` re-checks parked time when it
                 // wakes and extends by the shortfall.
                 if let nodeTimeout {
-                    let convID = conversationID
                     let name = displayName
                     group.addTask {
-                        try await Self.computeTimeoutSentinel(nodeTimeout, conversationID: convID, nodeName: name)
+                        try await Self.computeTimeoutSentinel(nodeTimeout, scope: nodeScope, nodeName: name)
                     }
                 }
 
@@ -1664,13 +1681,19 @@ actor WorkflowExecutor: Executor {
                     /// timeline for display and then dropped from the OUTCOME decision.
                     var innerErrorMessage: String? = nil
 
-                    let nodeStream = agentConnect.streamWorkflowNodeResponse(
-                        for: profile,
-                        workflowContext: workflowContext,
-                        conversationID: conversationID,
-                        traceContext: nodeSpan,
-                        onTraceUpdate: onTraceUpdate
-                    )
+                    // CREATED inside the node's scope: the stream's producer task inherits the chain,
+                    // so every park the inner run raises is credited to this node.
+                    let nodeStream = ParkScope.bind(nodeScope) {
+                        ExecutionBudget.bind(nodeFrame) {
+                            agentConnect.streamWorkflowNodeResponse(
+                                for: profile,
+                                workflowContext: workflowContext,
+                                conversationID: conversationID,
+                                traceContext: nodeSpan,
+                                onTraceUpdate: onTraceUpdate
+                            )
+                        }
+                    }
 
                     // Event prefixing convention:
                     // - Text events (.thought, .error, .requestClarification): prefixed with [NodeName]
@@ -1679,6 +1702,11 @@ actor WorkflowExecutor: Executor {
                         switch event {
                         case .content(let text):
                             output += text
+
+                        case .draftText:
+                            // A node's output is its `.content` only; the provisional preview is not
+                            // rendered on the canvas and must never reach `output`.
+                            break
 
                         case .toolSucceeded(let toolOut, let durationMs, _):
                             tools.append(toolOut)
@@ -1851,6 +1879,11 @@ actor WorkflowExecutor: Executor {
                 case .cancelled:
                     nodeStatus = .canceled
                     logger.notice("Node '\(displayName)' inner outcome=.cancelled. Demoting nodeStatus to .canceled.")
+                case .timedOut:
+                    // Not emitted by an inner executor today (only a run's own message carries it);
+                    // if one ever does, it is a timeout, never a model error.
+                    nodeStatus = .failed(.executionTimeout(elapsed: 0, limit: 0))
+                    logger.warning("Node '\(displayName)' inner outcome=.timedOut. Demoting nodeStatus to .failed(.executionTimeout).")
                 }
             }
             // ⚠️ THE STOP GAP (register EXC-1). A cancelled consumer of an AsyncThrowingStream gets
@@ -2251,6 +2284,8 @@ actor WorkflowExecutor: Executor {
 
         for attempt in 0..<attempts {
             if attempt > 0 {
+                // Nesting: a retry that cannot fit in the enclosing limit is not started.
+                guard await ExecutionBudget.retryFits(what: "Node '\(node.displayName)' retry \(attempt)") else { break }
                 // Name the REASON, not just the attempt number. A retry log that says only
                 // "retry 2/3" cannot answer "why is this node costing so much?" after the fact.
                 let priorReason: AgentFailureReason? = {
@@ -2418,12 +2453,12 @@ actor WorkflowExecutor: Executor {
     /// workflow call sites read the same and keep the `[WF_TIMEOUT]` tag.
     static func computeTimeoutSentinel(
         _ limit: TimeInterval,
-        conversationID: UUID,
+        scope: UUID,
         nodeName: String
     ) async throws -> Never {
         try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
             limit: limit,
-            conversationID: conversationID,
+            scope: scope,
             logTag: "WF_TIMEOUT",
             subject: "Node '\(nodeName)'",
             consequence: "the node fails and activates its `error` port; a branch wired there runs, otherwise this branch stops here."
@@ -2520,12 +2555,15 @@ actor WorkflowExecutor: Executor {
     /// opt-in escape hatch: an author who wants SOME ceiling on the whole nested run still gets
     /// one by setting it deliberately — this only changes what happens with NO explicit override.
     static func outerTimeoutBudget(for node: WorkflowNode, workflowConfig: WorkflowConfig) -> TimeInterval? {
-        let fallback = node.profileType == .workflow ? nil : workflowConfig.effectiveNodeTimeout
-        guard let perAttempt = node.nodeConfig?.hardTimeout ?? fallback else { return nil }
+        let fallback = node.profileType == .workflow ? nil : TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout")
+        guard let perAttempt = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Node '\(node.displayName)' hardTimeout") ?? fallback else { return nil }
         let attempts = plannedAttempts(for: node, workflowConfig: workflowConfig)
         let retryDelay = node.nodeConfig?.retryDelay ?? 0
         return Double(attempts) * perAttempt + Double(attempts - 1) * retryDelay
     }
+
+    /// How long a timed-out structural node's work gets, once cancelled, to stop on its own.
+    static let structuralStopGrace: TimeInterval = 5
 
     /// Runs `work`, failing it if compute time exceeds `limit`. `nil` limit ⇒ unbounded.
     /// See `computeTimeoutSentinel` for why the clock is not wall-clock.
@@ -2535,16 +2573,35 @@ actor WorkflowExecutor: Executor {
         nodeName: String,
         work: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        guard let limit else { return try await work() }
+        // Nesting: fitted inside any enclosing limit. A node with NO limit of its own (a sub-workflow
+        // without `hardTimeout`) still gets the fitted outer one — it used to run unbounded until
+        // the scheduled run cut everything off, so its error port never fired.
+        let fitted = await ExecutionBudget.clamp(limit, what: "Node '\(nodeName)'")
+        guard fitted.limit.isFinite else { return try await work() }
+        let limit = fitted.limit
 
-        return try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await work() }
-            group.addTask {
-                try await computeTimeoutSentinel(limit, conversationID: conversationID, nodeName: nodeName)
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+        // Owner-chain park credit: only parks raised by `work` pause this bound (decision A).
+        let scope = UUID()
+        await ExecutionSuspensionService.shared.registerScope(scope, conversationID: conversationID)
+        defer { Task { await ExecutionSuspensionService.shared.unregisterScope(scope) } }
+
+        // ⚠️ RETURNS AT THE BOUND (HITL Waiting Contract §6.3). This was a task-group race, which
+        // cannot return before its work does: a structural node whose work ignored cancellation
+        // held the node, its level and Stop until the work finished, and then reported a timeout
+        // with the sentinel's compute as "elapsed" (probe P5: a 1 s limit exited at 3.06 s saying
+        // 1.00 s). The work is now cancelled at the bound and given a grace to stop.
+        let outcome = try await DeadlineRace.run(limit: limit, stopGrace: structuralStopGrace, parkScope: scope) {
+            // ⚠️ No frame for the nodes INSIDE: a structural node's limit is fitted to the limits
+            // around it, but does not shorten its children. With a frame, a sub-workflow's child
+            // node timed out first and the parent reported "1 node failed" instead of a timeout.
+            try await work()
+        }
+        switch outcome {
+        case .finished(let result):
+            return try result.get()
+        case .timedOut(let elapsed, let afterStop):
+            logger.error("[WF_TIMEOUT] Node '\(nodeName)' exceeded its \(Int(limit))s compute budget (\(Int(elapsed))s compute; time awaiting a human excluded). CONSEQUENCE: the node fails onto its error port; its work \(afterStop == nil ? "did not stop within \(Int(structuralStopGrace))s of being cancelled and is abandoned" : "was stopped").")
+            throw AgentExecutionError(reason: .executionTimeout(elapsed: elapsed, limit: limit))
         }
     }
 
@@ -2571,28 +2628,42 @@ actor WorkflowExecutor: Executor {
         return merged
     }
 
-    /// Runs a resolved tool with a wall-clock timeout. Mirrors the per-node timeout
-    /// race used for profile nodes (`executeNode`) — a hung tool throws
-    /// `AgentExecutionError.executionTimeout` instead of blocking the level forever.
-    /// The thrown timeout is retryable by the Action node's retry loop.
+    /// One Action-node attempt's limit: the tool's own limit — the user's Tool Library override,
+    /// a terminal tool's ceiling, else the global default (`ToolExecutionMediator.effectiveTimeout`)
+    /// — capped by the node's per-attempt timeout, so retries keep their share of the node budget.
+    ///
+    /// ⚠️ The Tool Library override used to be carried into the Action node's tool and never read
+    /// (Timeout inventory D-28), and with the retired "node timeout OFF" the call was UNBOUNDED.
+    /// Every tool call is bounded now, whatever the node says (HITL Waiting Contract, decision 2).
+    static func actionAttemptLimit(for tool: AgentTool, nodeTimeout: TimeInterval?) -> TimeInterval {
+        let toolLimit = ToolExecutionMediator.effectiveTimeout(for: tool, defaultTimeout: ToolExecutionMediator.globalDefaultToolTimeout)
+        guard let nodeTimeout, nodeTimeout.isFinite, nodeTimeout > 0 else { return toolLimit }
+        return min(toolLimit, nodeTimeout)
+    }
+
+    /// Runs a resolved tool against `actionAttemptLimit` and RETURNS AT IT.
+    ///
+    /// ⚠️ This was a task-group race: a tool that ignored cancellation held the attempt until it
+    /// finished, was then reported as timed out, and was RETRIED — its side effect ran twice
+    /// (probe P10). Now the tool is cancelled at the bound (firing stop hooks such as the shell's
+    /// process kill), a human waiting inside the call does not count (compute, `parkScope`), the
+    /// real elapsed time is reported, and a timeout is never retried (`WorkflowRetryPolicy`).
     private nonisolated static func runToolWithTimeout(
         _ tool: AgentTool,
         args: Data,
         timeout: TimeInterval?
     ) async throws -> (output: String, artifacts: [MediaArtifact]) {
-        // No timeout configured → run the tool unbounded.
-        guard let timeout else {
-            return try await tool.run(args)
+        // Nesting: fitted inside the node's / run's remaining time.
+        let limit = await ExecutionBudget.clamp(actionAttemptLimit(for: tool, nodeTimeout: timeout),
+                                                what: "Action tool '\(tool.name)'").limit
+        let outcome = try await DeadlineRace.run(limit: limit, stopGrace: structuralStopGrace, parkScope: UUID()) {
+            try await tool.run(args)
         }
-        return try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
-            group.addTask { try await tool.run(args) }
-            group.addTask {
-                try await Task.sleep(for: .seconds(timeout))
-                throw AgentExecutionError(reason: .executionTimeout(elapsed: timeout, limit: timeout))
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
+        switch outcome {
+        case .finished(let result):
+            return try result.get()
+        case .timedOut(let elapsed, _):
+            throw AgentExecutionError(reason: .executionTimeout(elapsed: elapsed, limit: limit))
         }
     }
 
@@ -2741,7 +2812,8 @@ actor WorkflowExecutor: Executor {
         // deliberately so this diagnostic-only value can never drift into describing a per-attempt
         // budget that no longer exists for a sub-workflow node (it's read only by the log below).
         let isSubWorkflowNode = node.profileType == .workflow
-        let perAttemptLimit = node.nodeConfig?.hardTimeout ?? (isSubWorkflowNode ? nil : workflowConfig.effectiveNodeTimeout)
+        let perAttemptLimit = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Node '\(node.displayName)' hardTimeout")
+            ?? (isSubWorkflowNode ? nil : TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout"))
         let retryDelay = node.nodeConfig?.retryDelay ?? 0
         let attempts = Self.plannedAttempts(for: node, workflowConfig: workflowConfig)
         let limit = Self.outerTimeoutBudget(for: node, workflowConfig: workflowConfig)
@@ -2811,6 +2883,8 @@ actor WorkflowExecutor: Executor {
 
                 for outerAttempt in 0..<outerAttempts {
                     if outerAttempt > 0 {
+                        // Nesting: a retry that cannot fit in the remaining limit is not started.
+                        guard await ExecutionBudget.retryFits(what: "Sub-workflow node '\(node.displayName)' retry \(outerAttempt)") else { break }
                         logger.notice("[WF_EXEC] Sub-workflow node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] RETRY \(outerAttempt)/\(outerAttempts - 1) after \(Int(retryDelay))s. CONSEQUENCE: the ENTIRE child workflow re-runs from its first node — any side effect it already committed (a sent message, a written file) happens again. Its previous attempt's output is discarded.")
                         continuation.yield(.thought("[\(node.displayName)] Retrying nested workflow (attempt \(outerAttempt + 1)/\(outerAttempts))...", sourceNodeID: node.id))
                         // [WF-EX9] `try`, NOT `try?` — THIS is now inside the cumulative sentinel's
@@ -3292,6 +3366,10 @@ actor WorkflowExecutor: Executor {
                     case .content(let text):
                         childOutput += text
 
+                    case .draftText:
+                        // Provisional preview — never part of the child's output.
+                        break
+
                     case .thought(let msg, let id, _):
                         continuation.yield(.thought("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
 
@@ -3443,6 +3521,9 @@ actor WorkflowExecutor: Executor {
             case .cancelled:
                 logger.notice("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] outcome=.cancelled.")
                 status = .canceled
+            case .timedOut:
+                logger.error("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] outcome=.timedOut. CONSEQUENCE: node failed as a timeout; error port activates.")
+                status = .failed(.executionTimeout(elapsed: 0, limit: 0))
             case .completedWithWarnings:
                 logger.notice("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] completed with warnings (\(childFailureReason ?? "degraded run")) — continuing with its output.")
             case .completed:
@@ -4062,7 +4143,8 @@ actor WorkflowExecutor: Executor {
             // as-is. With no configured timeout the gate waits INDEFINITELY: the execution container owns
             // the deadline — Stop (cancel(for:)) for an attended run, the 10-min deadline for a scheduled
             // run, or sibling cancelAll on stopWorkflow. Same model as chat.
-            let gateTimeout = config.timeout
+            // D-05: a 0 or negative gate timeout means "no timeout", never "expire at once".
+            let gateTimeout = TimeLimit.usable(config.timeout, "Gate '\(displayName)' timeout")
 
             // [WF-SE11] The sibling the register row names alongside the Action confirmation. With
             // NO configured timeout and nobody reachable (a scheduled run), suspending here parked
@@ -4114,7 +4196,7 @@ actor WorkflowExecutor: Executor {
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(timeout))
-                            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: nil, resolvedBy: nil)   // gate deadline — nobody answered
+                            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: nil, resolvedBy: nil, outcome: "expired")   // gate deadline — nobody answered
                             return nil
                         }
                         let result = try await group.next()!
@@ -4164,9 +4246,12 @@ actor WorkflowExecutor: Executor {
             } else {
                 // No choice, and NOT a cancellation — a configured per-gate timeout elapsed. The
                 // gate fails; no branch is taken.
-                output = "Gate not answered (timed out)"
-                status = .failed(.modelError(provider: "workflow", error: "Gate '\(displayName)' was not answered"))
-                logger.info("Gate node '\(displayName)' unanswered — failing (no branch taken)")
+                // HITL Waiting Contract, decision B: the one timer on a human. Reported as EXPIRED —
+                // not `.modelError` ("check your model"), not "cancelled" — and onto the error port.
+                let limit = gateTimeout ?? 0
+                output = "Gate expired — nobody answered within \(ToolExecutionMediator.describe(limit))."
+                status = .failed(.gateExpired(limit: limit))
+                logger.info("[WF_EXEC] Gate node '\(displayName)' EXPIRED after \(Int(limit))s with no answer. CONSEQUENCE: no option branch runs; the node fails onto its error port.")
             }
 
             // Gate HITL is now a first-class `.gate` interaction, traced uniformly by ActiveStreamManager
@@ -4380,7 +4465,8 @@ actor WorkflowExecutor: Executor {
             // entire node budget and every retry was silently unreachable. The outer bound is now
             // sized to `attempts × limit` in `executeStructuralNodeBounded` — read that before
             // changing either number, because they only work as a pair.
-            let nodeTimeout: TimeInterval? = node.nodeConfig?.hardTimeout ?? workflowConfig.effectiveNodeTimeout
+            let nodeTimeout: TimeInterval? = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Action node '\(displayName)' hardTimeout")
+                ?? TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout")
             let maxRetries = node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries
             let retryDelay = node.nodeConfig?.retryDelay ?? 0
             logger.info("Action node '\(displayName)': invoking tool '\(toolRef.name)' (\(config.argumentBindings.count) binding(s), timeout \(nodeTimeout.map { "\(Int($0))s" } ?? "off"), retries \(maxRetries))")
@@ -4506,9 +4592,11 @@ actor WorkflowExecutor: Executor {
                     // a permission denial. `attemptCategory` was computed just above but only ever
                     // used for reporting. A tool call is deterministic, so those attempts burned the
                     // node's budget to arrive at the identical error.
-                    if WorkflowRetryPolicy.shouldRetryToolFailure(error, attempt: attempt, maxRetries: maxRetries, isCancelled: isCancelled) {
+                    if WorkflowRetryPolicy.shouldRetryToolFailure(error, attempt: attempt, maxRetries: maxRetries, isCancelled: isCancelled),
+                       await ExecutionBudget.retryFits(what: "Action node '\(displayName)' retry \(attempt + 1)") {
                         attempt += 1
-                        await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: attemptDurationMs)
+                        await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: attemptDurationMs,
+                                                                  failureCategory: attemptCategory == .timeout ? .toolTimeout : nil)
                         continuation.yield(.toolFailed(
                             ToolOutput(
                                 toolName: toolRef.name, params: toolParams,
@@ -4545,7 +4633,13 @@ actor WorkflowExecutor: Executor {
                         logger.notice("[WF_EXEC] Action node '\(displayName)': tool '\(toolRef.name)' failed on attempt \(attempt + 1)/\(maxRetries + 1) and \(maxRetries - attempt) retry/retries remain, but they were NOT used — \(WorkflowRetryPolicy.declineReason(for: error)). CONSEQUENCE: the node fails now rather than repeating a deterministic error until the budget runs out; the configured retry count is unchanged and still applies to transient failures.")
                     }
                     output = "Tool '\(toolRef.name)' failed: \(error.localizedDescription)"
-                    status = .failed(.modelError(provider: "tool", error: error.localizedDescription))
+                    // A timeout is reported AS a timeout — it used to be `.modelError`, whose
+                    // remediation told the author to check their model and credentials (D-16).
+                    if let agentErr = error as? AgentExecutionError, case .executionTimeout = agentErr.reason {
+                        status = .failed(agentErr.reason)
+                    } else {
+                        status = .failed(.modelError(provider: "tool", error: error.localizedDescription))
+                    }
                     // Distinguish timeout from a generic throw for the timeline icon.
                     let failureCategory: ToolFailureCategory
                     if let agentErr = error as? AgentExecutionError, case .executionTimeout = agentErr.reason {
@@ -4554,7 +4648,8 @@ actor WorkflowExecutor: Executor {
                         failureCategory = .executionThrew
                     }
                     let durationMs = attemptDurationMs
-                    await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: durationMs)
+                    await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: durationMs,
+                                                              failureCategory: failureCategory == .timeout ? .toolTimeout : nil)
                     continuation.yield(.toolFailed(
                         ToolOutput(toolName: toolRef.name, params: toolParams, output: output, isSuccess: false),
                         category: failureCategory, sourceNodeID: nodeID

@@ -91,10 +91,16 @@ enum RemoteTurnAdmission {
     ///   conversation-scoped. ⚠️ NOT the app-global `streamingMessageID`: that reports "busy"
     ///   whenever ANY conversation is streaming, so using it here would refuse a remote user's very
     ///   first message because the local user happened to be running something else.
-    static func decide(hasActiveRun: Bool) -> Decision {
+    /// - Parameter waitingOn: what the run is parked on ("your approval", …), when it is waiting for a
+    ///   human rather than working. ⚠️ D-23: "still working" was false then — nothing moves until
+    ///   the operator answers, and they were not told there was anything to answer.
+    static func decide(hasActiveRun: Bool, waitingOn: String? = nil) -> Decision {
         guard hasActiveRun else { return .admitted }
+        let message = waitingOn.map {
+            "⏳ Your last message is waiting for \($0). Answer that first, or send /cancel to stop it."
+        } ?? "⏳ Still working on your last message. Send /cancel to stop it, or wait for the answer."
         return .refused(
-            message: "⏳ Still working on your last message. Send /cancel to stop it, or wait for the answer.",
+            message: message,
             whenLost: "the user is not told their prompt was refused, so they wait for an answer to a message that was never submitted — and, believing it lost, are likely to send it again."
         )
     }

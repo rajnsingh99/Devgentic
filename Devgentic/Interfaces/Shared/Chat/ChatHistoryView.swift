@@ -103,11 +103,70 @@ struct ChatHistoryView: View {
         return .button(loading: isLoading)
     }
 
+    // MARK: - Grouped continuations
+
+    /// One continuation of a group: its fold row, its lead row or report, and — after the group's
+    /// last message — the group's action bar.
+    @ViewBuilder
+    private func continuationView(_ continuation: TranscriptGrouping.Continuation,
+                                  message: ChatMessage,
+                                  roles: [UUID: TranscriptGrouping.Role]) -> some View {
+        let unfolded = expandedFolds.contains(continuation.headID)
+        VStack(alignment: .leading, spacing: 0) {
+            if let fold = continuation.fold, fold.isFirst {
+                EarlierAttemptFoldRow(count: fold.count, isExpanded: unfolded) {
+                    withAnimation(motionSafe(.easeInOut(duration: 0.2))) {
+                        if unfolded { expandedFolds.remove(continuation.headID) }
+                        else { expandedFolds.insert(continuation.headID) }
+                    }
+                }
+            }
+            if continuation.fold == nil || unfolded {
+                if continuation.isStub {
+                    // A stub is drawn by its report's header; alone, its report has not started.
+                    if !continuation.hasReport {
+                        ContinuationLeadRow(lead: TranscriptGrouping.leadText(forStub: message), isWaiting: true)
+                            .padding(.top, 4)
+                    }
+                } else if let stub = displayMessages.first(where: { $0.id == continuation.stubID }) {
+                    ChatBubbleView(message: message,
+                                   groupStyle: .continuation(lead: TranscriptGrouping.leadText(forStub: stub)))
+                }
+            }
+            if continuation.isGroupEnd {
+                groupActionBar(headID: continuation.headID, roles: roles)
+            }
+        }
+    }
+
+    /// The group's one action bar: the human turn's own actions, with Copy and Read Aloud covering
+    /// the reports shown beneath it. Withheld while any of them is still streaming.
+    @ViewBuilder
+    private func groupActionBar(headID: UUID, roles: [UUID: TranscriptGrouping.Role]) -> some View {
+        let unfolded = expandedFolds.contains(headID)
+        let members = displayMessages.filter { candidate in
+            if candidate.id == headID { return true }
+            guard case .continuation(let c)? = roles[candidate.id], c.headID == headID, !c.isStub else { return false }
+            return c.fold == nil || unfolded
+        }
+        if let head = members.first(where: { $0.id == headID }),
+           !members.contains(where: \.isStreaming),
+           head.displayedContent.textContent != nil {
+            AgentMessageActionsView(message: head, groupMessages: members, mainAppViewModel: mainAppViewModel)
+                .environment(chatHistoryViewModel)
+                .opacity(0.6)
+                .padding(.bottom, 16)
+        }
+    }
+
     // MARK: - Speech Service
     private var speechService = SpeechService.shared
     /// [sa-5] This mount's identity as a speech-transport host — stable for the view's life,
     /// fresh for every re-mount, so registration is idempotent.
     @State private var transportHostID = UUID()
+
+    /// Groups whose earlier-attempt reports the user unfolded, by head message id.
+    @State private var expandedFolds: Set<UUID> = []
 
     // MARK: - Cached Reversed Messages
     /// Caches the reversed message array to avoid O(n) recomputation on every body evaluation.
@@ -218,29 +277,26 @@ struct ChatHistoryView: View {
 
                                 // Messages are stored [Newest -> Oldest], reversed for display [Oldest -> Newest].
                                 // Uses cached displayMessages to avoid O(n) reversal on every body evaluation.
+                                //
+                                // ⚠️ Grouped for DISPLAY: a background task's report is drawn inside
+                                // the turn above it, not as a new exchange — see `TranscriptGrouping`.
+                                let groupRoles = TranscriptGrouping.roles(oldestFirst: displayMessages)
                                 ForEach(displayMessages) { message in
-                                    let isLast = message.id == chatHistoryViewModel.currentChatMessages.first?.id
-
-                                    // ⚠️ A synthetic row is a turn NOBODY TYPED — the stub a woken
-                                    // background-task run persists so its report pairs. Rendering
-                                    // it through ChatBubbleView would draw a user bubble and put
-                                    // words in the user's mouth; see BackgroundTaskDividerView for
-                                    // why it is not simply hidden either.
-                                    if message.isSyntheticPrompt {
+                                    switch groupRoles[message.id] ?? .plain {
+                                    case .orphanStub:
+                                        // ⚠️ A synthetic row is a turn NOBODY TYPED — the stub a woken
+                                        // background-task run persists so its report pairs. With no
+                                        // turn in front to continue, it keeps the standalone divider;
+                                        // see BackgroundTaskDividerView for why it is not hidden.
                                         BackgroundTaskDividerView(message: message)
                                             .id(message.id)
-                                    } else {
-                                        ChatBubbleView(message: message)
+                                    case .plain, .head:
+                                        ChatBubbleView(message: message,
+                                                       groupStyle: groupRoles[message.id] == .plain ? .standalone : .head)
                                             .id(message.id)
-                                            // ⚠️ The tail-spacer stays on the BUBBLE branch. A
-                                            // divider is never the last thing in a conversation —
-                                            // the report it announces follows it — and giving a
-                                            // 0.5px rule a near-viewport minHeight would strand it
-                                            // in the middle of an empty screen.
-                                            .frame(
-                                                minHeight: isLast ? (geometry.size.height - 115) : nil,
-                                                alignment: .top
-                                            )
+                                    case .continuation(let continuation):
+                                        continuationView(continuation, message: message, roles: groupRoles)
+                                            .id(message.id)
                                     }
                                 }
 
@@ -251,7 +307,29 @@ struct ChatHistoryView: View {
                                 PendingBackgroundReportFooter(
                                     conversationID: mainAppViewModel.selectedConversationID
                                 )
+
+                                // A manual compaction ("Compact history" in the context gauge):
+                                // running, then its outcome. Its checkpoint card lands where the
+                                // summarized turns end — usually above the fold — so without this
+                                // the compaction started and finished with nothing on screen.
+                                ManualCompactionRow(
+                                    conversationID: mainAppViewModel.selectedConversationID,
+                                    newestMessageAt: chatHistoryViewModel.currentChatMessages.first?.timestamp,
+                                    canShowCheckpoint: { id in
+                                        chatHistoryViewModel.currentChatMessages.contains { $0.id == id }
+                                    },
+                                    onShowCheckpoint: { id in
+                                        withAnimation(motionSafe(.easeInOut(duration: 0.3))) {
+                                            proxy.scrollTo(id, anchor: .center)
+                                        }
+                                    }
+                                )
                             }
+
+                            // The end of the list — what "scroll to bottom" targets.
+                            Color.clear
+                                .frame(height: 1)
+                                .id(Self.bottomSentinelID)
                         }
                         .frame(maxWidth: ViewLayout.maxContentWidth)
                         .frame(maxWidth: .infinity)
@@ -259,6 +337,35 @@ struct ChatHistoryView: View {
                         .padding(.bottom, theme.spacingLarge)
                         .animation(motionSafe(.easeInOut(duration: 0.2)), value: searchViewModel.isSearchActive)
                     }
+                    // MARK: - Bottom anchoring (2026-09-27)
+                    // ⚠️ The scroll view keeps its own place; the code no longer scrolls it after
+                    // every change. What this replaced, and why it failed:
+                    //   • a near-viewport `minHeight` on the NEWEST row, to lift a new turn to the
+                    //     top. It hopped rows on every append (the user message, then the reply
+                    //     placeholder a moment later), changing the content height mid-animation —
+                    //     the transcript stopped in the middle after a new turn.
+                    //   • `proxy.scrollTo(newest, anchor: .bottom)` on load and on send. In a
+                    //     LazyVStack the rows below the viewport have ESTIMATED heights, so the
+                    //     target was computed against guesses and landed ~90% of the way down.
+                    //   • hiding the transcript, scrolling it, then revealing it on every switch.
+                    //
+                    // Three roles instead:
+                    //   .alignment     .top    — a conversation shorter than the window starts at
+                    //                            the top and grows downward.
+                    //   .initialOffset .bottom — a conversation opens already at its bottom. No
+                    //                            scroll happens, so nothing can land short.
+                    //   .sizeChanges   bottom while the reader IS at the bottom (so streaming and
+                    //                  new turns stay in view, and late row measurements keep it
+                    //                  pinned); top while they have scrolled away (so growth at
+                    //                  the bottom never drags what they are reading — [bm-2]).
+                    .defaultScrollAnchor(.top, for: .alignment)
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    .defaultScrollAnchor(Self.sizeChangeAnchor(isAwayFromBottom: showScrollToBottom), for: .sizeChanges)
+                    // A fresh scroll view per conversation, so `.initialOffset` applies to each one.
+                    // Keyed on the conversation the ROWS belong to — not the sidebar selection, which
+                    // leads the rows by the switch debounce and would open the OLD rows "at the
+                    // bottom" and then swap content underneath.
+                    .id(displayMessages.first?.conversationId)
                     .opacity(isContentReady ? 1 : 0)
                     // MARK: - Scroll-to-Bottom FAB Visibility
                     // "Content extends below the fold" — distance from the viewport bottom to
@@ -334,21 +441,11 @@ struct ChatHistoryView: View {
                             // Hide content while messages are being loaded.
                             isContentReady = false
                         } else {
-                            // Refresh cached display order after initial load
+                            // Refresh cached display order after initial load. No scroll: the new
+                            // rows get a fresh scroll view (`.id` above) that opens at its bottom.
                             displayMessages = chatHistoryViewModel.currentChatMessages.reversed()
                             lastNewestMessageID = chatHistoryViewModel.currentChatMessages.first?.id
-                            // Scroll while content is hidden (opacity 0) — invisible to the user.
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) {
-                                if let id = lastNewestMessageID {
-                                    proxy.scrollTo(id, anchor: .bottom)
-                                }
-                            }
-                            // Reveal content on the next frame, after scroll position is applied.
-                            DispatchQueue.main.async {
-                                isContentReady = true
-                            }
+                            isContentReady = true
                         }
                     }
                     // MARK: - Search Navigation
@@ -665,16 +762,27 @@ struct ChatHistoryView: View {
         }
     }
 
+    /// Scrolls to the END of the list — the sentinel after the last row — rather than to the
+    /// newest message. The newest message is a lazily measured row whose height may still be an
+    /// estimate; the sentinel is always last. Once there, `.sizeChanges` pins the bottom, so any
+    /// row that finishes measuring afterwards cannot leave the view short of it.
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
-        guard let newestMessageID = chatHistoryViewModel.currentChatMessages.first?.id else { return }
+        guard !chatHistoryViewModel.currentChatMessages.isEmpty else { return }
 
         if animated {
             withAnimation(motionSafe(.spring(response: 0.4, dampingFraction: 0.8))) {
-                proxy.scrollTo(newestMessageID, anchor: .bottom)
+                proxy.scrollTo(Self.bottomSentinelID, anchor: .bottom)
             }
         } else {
-            proxy.scrollTo(newestMessageID, anchor: .bottom)
+            proxy.scrollTo(Self.bottomSentinelID, anchor: .bottom)
         }
+    }
+
+    static let bottomSentinelID = "chat-history-bottom"
+
+    /// `.sizeChanges` anchor: follow growth at the bottom only while the reader is there.
+    nonisolated static func sizeChangeAnchor(isAwayFromBottom: Bool) -> UnitPoint {
+        isAwayFromBottom ? .top : .bottom
     }
 }
 

@@ -57,6 +57,11 @@ protocol ToolTurnAdapter: Sendable {
     ///   - Gemini: a `text` part preceding `functionCall` parts.
     func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?) -> [String: Any]
 
+    /// As above, plus provider data the model's previous response asked to have echoed back
+    /// (`ModernCognitiveStep.reasoningReplay`). Default: ignores `replay` — only adapters whose
+    /// wire format has a slot for it override this.
+    func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?, replay: JSONValue?) -> [String: Any]
+
     /// Serializes tool-result turn(s) for a batch of observations from one iteration.
     ///
     /// The returned array length varies by provider:
@@ -95,6 +100,10 @@ protocol ToolTurnAdapter: Sendable {
 }
 
 extension ToolTurnAdapter {
+    func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?, replay: JSONValue?) -> [String: Any] {
+        assistantTurn(toolCalls: toolCalls, reasoning: reasoning)
+    }
+
     /// Serializes a system alert (memory-pressure, circuit-breaker, format-correction)
     /// as a plain user turn. Default implementation is universal — every provider
     /// accepts `{"role": "user", "content": "..."}`. Providers can override if a

@@ -644,7 +644,12 @@ final class SchemaMigrationTests: XCTestCase {
         let context = ModelContext(container)
 
         // Content, not just "it opened" — a store can open with every row silently degraded.
-        XCTAssertEqual(try context.fetch(FetchDescriptor<ScheduledTaskModel>()).count, 1)
+        let scheduled = try context.fetch(FetchDescriptor<ScheduledTaskModel>())
+        XCTAssertEqual(scheduled.count, 1)
+        // ⚠️ `ScheduledTaskModel.runLimitSeconds` (2026-09-27) was also added after this fixture was
+        // written — the second in-place optional attribute on unreleased V1. A pre-change store must
+        // open and read it as "no own limit".
+        XCTAssertNil(scheduled.first?.runLimitSeconds)
         XCTAssertEqual(try context.fetch(FetchDescriptor<ChatMessageSD>()).count, 1)
         XCTAssertEqual(try context.fetch(FetchDescriptor<MCPToolItem>()).count, 1)
         XCTAssertEqual(try context.fetch(FetchDescriptor<MCPToolDefinitionModel>()).count, 1)

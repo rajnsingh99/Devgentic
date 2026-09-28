@@ -149,6 +149,27 @@ enum ChatOpsConnectionState: Equatable {
 /// paired"**. All three bridges declined to start and the Settings pane offered "Start Pairing" for
 /// a pairing that was intact the whole time. The user's only visible option was to redo a pairing
 /// they never undid — on all three platforms.
+/// What a credential wipe actually deleted. Register KC-12: "credentials cleared" used to be
+/// logged unconditionally over `OSStatus` values nobody looked at, so a Keychain that refused the
+/// delete reported a disconnected bridge while the bot token stayed stored and usable.
+struct ChatOpsCredentialClearSummary: Equatable, Sendable {
+
+    /// One credential whose Keychain delete did not succeed.
+    struct Failure: Equatable, Sendable {
+        let label: String
+        let status: OSStatus
+    }
+
+    var failures: [Failure] = []
+
+    /// `errSecItemNotFound` is NOT a failure — the goal of a clear is "nothing stored", and it
+    /// already was. Everything else (a locked Keychain's `errSecAuthFailed`, a denied ACL prompt's
+    /// `errSecInteractionNotAllowed`) means the credential is still on this Mac.
+    var allCleared: Bool { failures.isEmpty }
+
+    var failedLabels: [String] { failures.map(\.label) }
+}
+
 enum ChatOpsCredentialState: Equatable {
     case present
     case absent
@@ -201,9 +222,63 @@ final class ChatOpsConfigManager {
 
     static let shared = ChatOpsConfigManager()
 
-    private let keychain = SecureKeyStorage()
+    /// ⚠️ TEST SEAM (registers KC-11 / KC-12). The backend behind every credential read/write, so
+    /// the FAILED save/delete branches — the entire point of the explicit store/clear methods
+    /// below — are reachable from a test. Mirrors `HuggingFaceTokenStore.setBackingForTesting`;
+    /// production never reassigns it. Under the XCTest host the default already routes to
+    /// `TestHostKeychain`, which cannot fail — which is precisely why this seam is needed.
+    nonisolated(unsafe) private(set) var keychain: any KeychainAccessing = SecureKeyStorage()
+
+    /// Swaps the Keychain backend. Test-only — pass nil to restore the real one.
+    static func setKeychainForTesting(_ replacement: (any KeychainAccessing)?) {
+        shared.keychain = replacement ?? SecureKeyStorage()
+    }
+
     private let logger = DGLogger(category: "ChatOpsConfig")
     nonisolated private static let keychainService = Bundle.main.bundleIdentifier ?? "app.devgentic.macos"
+
+    // MARK: - Credential read cache (registers KC-29 + KC-47)
+    //
+    // The four credential getters used to issue an uncached synchronous `SecItemCopyMatching` on
+    // EVERY access — and the Settings pane evaluates several credentials per keystroke while the
+    // notification-dispatch path reads them as well. One memoized value per account fixes that,
+    // with the rule that makes it safe:
+    //
+    // ⚠️ A FAILED read is NEVER memoized. That is KC-8's bug shape — HuggingFaceTokenStore
+    // memoized "no token" for the whole process lifetime off one locked-Keychain read. Only a
+    // definitive `.found` / `.notFound` enters the cache; a `.failed` leaves no entry, so the
+    // next getter call retries the Keychain and a recovered Keychain is observed immediately.
+
+    private var credentialCache: [String: String?] = [:]
+
+    private func readCredential(_ account: String) -> String? {
+        if let cached = credentialCache[account] { return cached }
+        switch keychain.read(service: Self.keychainService, account: account) {
+        case .found(let value):
+            credentialCache[account] = .some(value)
+            return value
+        case .notFound:
+            credentialCache[account] = .some(nil)
+            return nil
+        case .failed(let status):
+            logger.error(
+                "[SECRETS] Could not read the ChatOps credential '\(account)' "
+                + "(\(SecureKeyStorage.osStatusName(status))). CONSEQUENCE: this read reports "
+                + "absent, but the result is deliberately NOT cached — the next read retries the "
+                + "Keychain, so a recovered keychain is observed on the following access. Nothing "
+                + "is written or deleted off this answer."
+            )
+            return nil
+        }
+    }
+
+    /// Drops the memoized credential values so the next read hits the Keychain. The legacy
+    /// migration in `init` writes through the same backend outside this cache, and a test that
+    /// swaps backends must call it too — a stale entry from the previous backend would otherwise
+    /// survive the swap.
+    func refreshCredentialCache() {
+        credentialCache.removeAll()
+    }
 
     /// Reads one ChatOps credential, distinguishing "not stored" from "could not look". Register KC-10.
     ///
@@ -283,15 +358,18 @@ final class ChatOpsConfigManager {
     var botToken: String? {
         get {
             access(keyPath: \.botToken)
-            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
+            // Cached three-state read (registers KC-29 / KC-47); a FAILED read is never
+            // memoized — see `readCredential`. The KC-10 distinction survives: the
+            // `credentialState`/`restoreStates` machine reads the backend DIRECTLY, so the
+            // user-facing state still sees truth, while this cached value only ever feeds
+            // "value or nothing" consumers.
+            return readCredential(AppSettings.chatOpsBotTokenKey)
         }
         set {
-            withMutation(keyPath: \.botToken) {
-                if let value = newValue {
-                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
-                } else {
-                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
-                }
+            if let value = newValue {
+                _ = storeBotToken(value)
+            } else {
+                _ = clearBotToken()
             }
         }
     }
@@ -563,15 +641,13 @@ final class ChatOpsConfigManager {
     var discordBotToken: String? {
         get {
             access(keyPath: \.discordBotToken)
-            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
+            return readCredential(AppSettings.chatOpsDiscordBotTokenKey)
         }
         set {
-            withMutation(keyPath: \.discordBotToken) {
-                if let value = newValue {
-                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
-                } else {
-                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
-                }
+            if let value = newValue {
+                _ = storeDiscordBotToken(value)
+            } else {
+                _ = clearDiscordBotToken()
             }
         }
     }
@@ -662,11 +738,136 @@ final class ChatOpsConfigManager {
         }
     }
 
+    // MARK: - Credential writes (registers KC-11 / KC-12)
+
+    /// The shared body behind every explicit credential write. Register KC-11: a Swift property
+    /// setter cannot return the `OSStatus`, so every failed Keychain save/delete was discarded at
+    /// these exact sites (`_ = keychain.save(…)`) and pairing kept reporting success over a
+    /// credential that was never stored. The property setters now delegate HERE; callers that act
+    /// on the result call these methods directly.
+    @discardableResult
+    private func writeCredential(
+        _ value: String?,
+        account: String,
+        label: String,
+        keyPath: KeyPath<ChatOpsConfigManager, String?>
+    ) -> OSStatus {
+        var status: OSStatus = errSecSuccess
+        withMutation(keyPath: keyPath) {
+            if let value {
+                status = keychain.save(value: value, service: Self.keychainService, account: account)
+                if status == errSecSuccess {
+                    credentialCache[account] = .some(value)
+                } else {
+                    // An uncertain state must not survive in the cache.
+                    credentialCache.removeValue(forKey: account)
+                }
+                if status != errSecSuccess {
+                    logger.error(
+                        "[SECRETS] Could not SAVE the \(label) to the Keychain (OSStatus \(status)). "
+                        + "CONSEQUENCE: the credential is stored NOWHERE — the caller must treat this "
+                        + "as a failure; reporting success would promise a pairing that cannot survive relaunch."
+                    )
+                }
+            } else {
+                status = keychain.delete(service: Self.keychainService, account: account)
+                if status == errSecSuccess || status == errSecItemNotFound {
+                    credentialCache[account] = .some(nil)
+                } else {
+                    credentialCache.removeValue(forKey: account)
+                }
+                if status != errSecSuccess && status != errSecItemNotFound {
+                    logger.error(
+                        "[SECRETS] Could not DELETE the \(label) from the Keychain (OSStatus \(status)). "
+                        + "CONSEQUENCE: the credential is still stored — the caller must not report it as cleared."
+                    )
+                }
+            }
+        }
+        return status
+    }
+
+    /// Stores the Telegram bot token. `- Returns:` the Keychain status; `errSecSuccess` = stored.
+    @discardableResult
+    func storeBotToken(_ value: String) -> OSStatus {
+        writeCredential(value, account: AppSettings.chatOpsBotTokenKey, label: "Telegram bot token", keyPath: \.botToken)
+    }
+
+    /// Deletes the Telegram bot token. `errSecItemNotFound` = already absent, which counts as cleared.
+    @discardableResult
+    func clearBotToken() -> OSStatus {
+        writeCredential(nil, account: AppSettings.chatOpsBotTokenKey, label: "Telegram bot token", keyPath: \.botToken)
+    }
+
+    /// Stores the Discord bot token. Register KC-11 — see `writeCredential`.
+    @discardableResult
+    func storeDiscordBotToken(_ value: String) -> OSStatus {
+        writeCredential(value, account: AppSettings.chatOpsDiscordBotTokenKey, label: "Discord bot token", keyPath: \.discordBotToken)
+    }
+
+    /// Deletes the Discord bot token. `errSecItemNotFound` = already absent, which counts as cleared.
+    @discardableResult
+    func clearDiscordBotToken() -> OSStatus {
+        writeCredential(nil, account: AppSettings.chatOpsDiscordBotTokenKey, label: "Discord bot token", keyPath: \.discordBotToken)
+    }
+
+    /// Stores the Slack bot token. Register KC-11 — see `writeCredential`.
+    @discardableResult
+    func storeSlackBotToken(_ value: String) -> OSStatus {
+        writeCredential(value, account: AppSettings.chatOpsSlackBotTokenKey, label: "Slack bot token", keyPath: \.slackBotToken)
+    }
+
+    /// Deletes the Slack bot token. `errSecItemNotFound` = already absent, which counts as cleared.
+    @discardableResult
+    func clearSlackBotToken() -> OSStatus {
+        writeCredential(nil, account: AppSettings.chatOpsSlackBotTokenKey, label: "Slack bot token", keyPath: \.slackBotToken)
+    }
+
+    /// Stores the Slack app-level token. Register KC-11 — see `writeCredential`.
+    @discardableResult
+    func storeSlackAppToken(_ value: String) -> OSStatus {
+        writeCredential(value, account: AppSettings.chatOpsSlackAppTokenKey, label: "Slack app token", keyPath: \.slackAppToken)
+    }
+
+    /// Deletes the Slack app-level token. `errSecItemNotFound` = already absent, which counts as cleared.
+    @discardableResult
+    func clearSlackAppToken() -> OSStatus {
+        writeCredential(nil, account: AppSettings.chatOpsSlackAppTokenKey, label: "Slack app token", keyPath: \.slackAppToken)
+    }
+
+    /// Shown when a pairing's token write was refused by the Keychain. A SEPARATE literal from
+    /// `unreadableMessage`, deliberately: that one says "do not re-pair" about a credential that
+    /// exists and is intact; this one is the opposite case — nothing was saved, and trying again
+    /// is exactly the right advice. A test pins that the two never collapse.
+    static let credentialSaveFailedMessage =
+        "The bot token could not be saved to the Keychain, so nothing was paired and nothing was "
+        + "overwritten. Unlock your login keychain — or click Allow if macOS asked for access — and try again."
+
+    /// The error copy for a disconnect whose credential delete failed. Register KC-12.
+    static func clearFailedMessage(labels: [String]) -> String {
+        "Disconnect could not delete \(labels.joined(separator: ", ")) from the Keychain, so this "
+        + "integration is NOT fully disconnected — the credential is still stored on this Mac. "
+        + "Unlock your login keychain, or allow Devgentic access, then disconnect again."
+    }
+
+    /// Records one credential-clear outcome. `errSecItemNotFound` is not a failure: the goal of a
+    /// clear is "nothing stored", and it already was.
+    private func recordClear(_ status: OSStatus, label: String, into summary: inout ChatOpsCredentialClearSummary) {
+        guard status != errSecSuccess, status != errSecItemNotFound else { return }
+        summary.failures.append(.init(label: label, status: status))
+    }
+
     // MARK: - Reset
 
-    /// Resets all Telegram ChatOps state (used on disconnect).
-    func reset() {
-        botToken = nil
+    /// Resets all Telegram ChatOps state (used on disconnect). Register KC-12.
+    /// - Returns: what the credential wipe actually did — the caller must log the failures
+    ///   instead of "credentials cleared". When a delete failed, the connection is left in
+    ///   `.error`, never `.disconnected` — reporting a clean disconnect over a stored token is
+    ///   the same lie `unreadableMessage` exists to prevent, one direction over.
+    @discardableResult
+    func reset() -> ChatOpsCredentialClearSummary {
+        var summary = ChatOpsCredentialClearSummary()
+        recordClear(clearBotToken(), label: "the Telegram bot token", into: &summary)
         authorizedUserID = nil
         securityTier = .readOnly
         toolApprovals = .ask
@@ -674,12 +875,17 @@ final class ChatOpsConfigManager {
         authorizedChatID = nil
         isEnabled = false
         activeConversationID = nil
-        connectionState = .disconnected
+        connectionState = summary.allCleared
+            ? .disconnected
+            : .error(Self.clearFailedMessage(labels: summary.failedLabels))
+        return summary
     }
 
-    /// Resets all Discord ChatOps state (used on disconnect).
-    func resetDiscord() {
-        discordBotToken = nil
+    /// Resets all Discord ChatOps state (used on disconnect). Register KC-12 — see `reset()`.
+    @discardableResult
+    func resetDiscord() -> ChatOpsCredentialClearSummary {
+        var summary = ChatOpsCredentialClearSummary()
+        recordClear(clearDiscordBotToken(), label: "the Discord bot token", into: &summary)
         discordAuthorizedUserID = nil
         // ⚠️ The tier goes with the pairing — a new one must start at Read Only, not inherit Full Access.
         discordSecurityTier = .readOnly
@@ -690,7 +896,10 @@ final class ChatOpsConfigManager {
         discordGuildID = nil
         isDiscordEnabled = false
         discordActiveConversationID = nil
-        discordConnectionState = .disconnected
+        discordConnectionState = summary.allCleared
+            ? .disconnected
+            : .error(Self.clearFailedMessage(labels: summary.failedLabels))
+        return summary
     }
 
     // MARK: - Slack Configuration
@@ -700,15 +909,13 @@ final class ChatOpsConfigManager {
     var slackBotToken: String? {
         get {
             access(keyPath: \.slackBotToken)
-            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
+            return readCredential(AppSettings.chatOpsSlackBotTokenKey)
         }
         set {
-            withMutation(keyPath: \.slackBotToken) {
-                if let value = newValue {
-                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
-                } else {
-                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
-                }
+            if let value = newValue {
+                _ = storeSlackBotToken(value)
+            } else {
+                _ = clearSlackBotToken()
             }
         }
     }
@@ -716,15 +923,13 @@ final class ChatOpsConfigManager {
     var slackAppToken: String? {
         get {
             access(keyPath: \.slackAppToken)
-            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
+            return readCredential(AppSettings.chatOpsSlackAppTokenKey)
         }
         set {
-            withMutation(keyPath: \.slackAppToken) {
-                if let value = newValue {
-                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
-                } else {
-                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
-                }
+            if let value = newValue {
+                _ = storeSlackAppToken(value)
+            } else {
+                _ = clearSlackAppToken()
             }
         }
     }
@@ -804,9 +1009,13 @@ final class ChatOpsConfigManager {
     }
 
     /// Resets all Slack ChatOps state (used on disconnect).
-    func resetSlack() {
-        slackBotToken = nil
-        slackAppToken = nil
+    /// Resets all Slack ChatOps state (used on disconnect). Register KC-12 — see `reset()`.
+    /// Slack folds TWO credentials; a failure on either one keeps the bridge in `.error`.
+    @discardableResult
+    func resetSlack() -> ChatOpsCredentialClearSummary {
+        var summary = ChatOpsCredentialClearSummary()
+        recordClear(clearSlackBotToken(), label: "the Slack bot token", into: &summary)
+        recordClear(clearSlackAppToken(), label: "the Slack app token", into: &summary)
         slackAuthorizedUserID = nil
         slackSecurityTier = .readOnly
         slackToolApprovals = .ask
@@ -815,7 +1024,10 @@ final class ChatOpsConfigManager {
         slackAuthorizedChannelID = nil
         isSlackEnabled = false
         slackActiveConversationID = nil
-        slackConnectionState = .disconnected
+        slackConnectionState = summary.allCleared
+            ? .disconnected
+            : .error(Self.clearFailedMessage(labels: summary.failedLabels))
+        return summary
     }
 
     // MARK: - Keychain Service Migration
@@ -825,7 +1037,7 @@ final class ChatOpsConfigManager {
     /// ⚠️⚠️ WHY THIS LIST EXISTS AT ALL. `keychainService` is `Bundle.main.bundleIdentifier`, and
     /// commit `2faad1c` changed that identifier from `com.dev.devgentic` to `app.devgentic.macos`
     /// as part of public-release prep. A Keychain item is addressed by (service, account), so on the
-    /// first launch after that build EVERY ChatOps credential became unreachable at once: all five
+    /// first launch after that build EVERY ChatOps credential became unreachable at once: all four
     /// reads returned nothing, `isConfigured` went false, all three bridges declined to start, and
     /// the Settings UI offered "Start Pairing" as though the user had never paired. Nothing was
     /// deleted — the items were still there, addressed by a name no code asked for any more — so the
@@ -835,9 +1047,11 @@ final class ChatOpsConfigManager {
     /// identifier, an Xcode target split) reproduces this exactly. Prepend the outgoing identifier
     /// here in the same commit that changes it, and this stays a migration rather than a data loss.
     ///
-    /// ⚠️ Non-ChatOps state keys off the same identifier and is NOT covered here — the RAG vector
-    /// store (`VectorStoreService`) and the SwiftData companion-store recovery path
-    /// (`StoreRecovery`) both derive paths from it. Those need their own migrations.
+    /// ⚠️ Non-ChatOps state keys off the same identifier and has its OWN migration paths, which
+    /// already exist and are tested: `VectorStoreService.legacyBundleIdentifiers` adopts a
+    /// pre-rename vector-db, and `StoreRecovery` enumerates the legacy store locations for the
+    /// reset dialog. A future rename must update THIS list and BOTH of those in the same commit —
+    /// do not build a second adoption path here, and do not assume the others do not exist.
     nonisolated private static let legacyKeychainServices = ["com.dev.devgentic"]
 
     /// Every account this manager stores under `keychainService`.
@@ -918,6 +1132,8 @@ final class ChatOpsConfigManager {
         // token that has not yet been moved onto the current Keychain service reads as absent —
         // which would leave all three providers "disconnected" on the one launch that matters.
         Self.migrateCredentialsFromLegacyServices(keychain: keychain)
+        // The migration wrote through the backend directly, outside the read cache.
+        refreshCredentialCache()
 
         // ⚠️ AFTER the credential migration, because it reads whether a provider is paired.
         seedPerProviderTiers()

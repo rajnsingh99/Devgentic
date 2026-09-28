@@ -116,6 +116,19 @@ struct DynamicMCPTool: DevgenticTool {
     /// trace span and a `recordToolReliability(isSuccess: true)`.
     @MainActor
     private func reconnectAndRetry(arguments: Arguments, initialError: Error) async throws -> String {
+        // ⚠️ NEVER RE-RUN A CANCELLED OR TIMED-OUT CALL (HITL Waiting Contract, decision F). This
+        // wrapper used to treat both as a dead connection, reconnect and RE-EXECUTE the tool up to
+        // three times — with its backoff sleeps swallowing the cancellation — so a Stop or a timeout
+        // could run the server-side action four times (Timeout inventory D-26). A cancelled call
+        // ends; a timed-out one may already have done its work, so it fails rather than repeats.
+        if Task.isCancelled || initialError is CancellationError {
+            logger.info("[MCP-TOOL] '\(name)' was cancelled. CONSEQUENCE: not reconnected and not re-run.")
+            throw CancellationError()
+        }
+        if WorkflowRetryPolicy.isTimeout(initialError) {
+            logger.notice("[MCP-TOOL] '\(name)' on '\(source.serverName)' TIMED OUT (\(initialError.localizedDescription)). CONSEQUENCE: not re-run — the server may already have carried it out; the session is left as is.")
+            throw initialError
+        }
         guard let serverDef = self.source.serverDefinition else {
             logger.error("""
                 [MCP-TOOL] '\(name)' cannot run and cannot recover: source \(source.id) \
@@ -139,7 +152,8 @@ struct DynamicMCPTool: DevgenticTool {
 
             MCPClientService.shared.connectionStates[source.id] = .reconnecting(attempt: attempt)
 
-            try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+            // `try`, not `try?`: a Stop during the backoff ends the loop instead of re-running the call.
+            try await Task.sleep(for: .seconds(backoffSeconds))
 
             // Reactive OAuth refresh on the first retry only. If the initial failure was a
             // 401 / token-expired, refreshing the bundle here means the subsequent `connect`

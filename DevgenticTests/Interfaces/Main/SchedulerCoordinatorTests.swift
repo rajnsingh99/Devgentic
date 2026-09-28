@@ -599,3 +599,252 @@ final class SchedulerCoordinatorTests: XCTestCase {
     }
 
 }
+
+
+// MARK: - HITL Waiting Contract, slice 3: the scheduled run's execution limit
+
+/// Behaves like a real stream: runs until cancelled (then completes, as `ActiveStreamManager`'s
+/// finalize does), or until `finishAfter` passes. Optionally parks on a gate INSIDE the run —
+/// from a task created within `startMessageStream`, so it inherits the run's `ParkScope` exactly
+/// as the real stream's producer task does.
+@MainActor
+private final class HoldingStreamStarter: MessageStreamStarting {
+    var finishAfter: Duration? = nil
+    var parkFor: Duration? = nil
+    private(set) var cancelled: [UUID] = []
+    private var completions: [UUID: () -> Void] = [:]
+    private(set) var parkOperation: UUID?
+    private(set) var lastMessage: ChatMessage?
+
+    @discardableResult
+    func startMessageStream(withConfig config: BackendRequestConfig, userMessage: ChatMessage,
+                            promptOverride: String?, files: [FileSystemItem], updating existingMessage: ChatMessage?,
+                            workflowExecutionState: WorkflowExecutionState?, resumeState: TimelineReconstruction?,
+                            onComplete: @escaping () -> Void) -> ChatMessage {
+        let message = ChatMessage(conversationId: userMessage.conversationId, sender: .agent, content: .plainText("working"))
+        lastMessage = message
+        completions[message.id] = onComplete
+        let conversation = userMessage.conversationId
+        let id = message.id
+        if let parkFor {
+            let op = UUID()
+            parkOperation = op
+            Task {   // inherits the run's ParkScope chain
+                let park = Task { await ExecutionSuspensionService.shared.suspendForGate(for: op, conversationID: conversation) }
+                try? await Task.sleep(for: parkFor)
+                await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "ok", resolvedBy: .localUI)
+                _ = await park.value
+                await MainActor.run { self.complete(id) }
+            }
+        } else if let finishAfter {
+            Task { @MainActor in
+                try? await Task.sleep(for: finishAfter)
+                self.complete(id)
+            }
+        }
+        return message
+    }
+
+    func cancelStream(for messageId: UUID) {
+        cancelled.append(messageId)
+        complete(messageId)
+    }
+
+    private func complete(_ id: UUID) {
+        completions.removeValue(forKey: id)?()
+    }
+}
+
+@MainActor
+final class SchedulerRunLimitTests: XCTestCase {
+
+    private let convID = UUID()
+    private var store: SchedulerStubStore!
+    private var registry: StubRunRegistry!
+
+    override func setUp() async throws {
+        store = SchedulerStubStore()
+        store.conversations[convID] = ConversationSD(id: convID, userDefinedTitle: "Scheduled")
+        registry = StubRunRegistry()
+    }
+
+    private func agentConfig(executionTimeout: TimeInterval?) -> BackendRequestConfig {
+        var agent = AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "m"), tools: [])
+        agent.executionTimeout = executionTimeout
+        return BackendRequestConfig(profile: BackendProfileSnapshot(id: UUID(), displayName: "Scheduled Agent",
+                                                                     details: .agent(agent)))
+    }
+
+    private func coordinator(_ streams: HoldingStreamStarter) -> SchedulerCoordinator {
+        SchedulerCoordinator(viewModel: nil, persistenceService: store, activeStreamManager: streams,
+                             fileProcessorService: FileProcessorService(), runRegistry: registry)
+    }
+
+    /// The limit fires, the run is recorded TIMED OUT (not "Cancelled by user", not "completed"),
+    /// and the caller returns promptly.
+    func testARunPastItsLimitIsStoppedAndRecordedAsTimedOut() async {
+        let streams = HoldingStreamStarter()
+        // Finishes on its own at 3 s — so a regression FAILS (the run completes) instead of hanging.
+        streams.finishAfter = .seconds(3)
+        let start = ContinuousClock.now
+        let result = await coordinator(streams).runScheduledMessage(
+            prompt: "report", config: agentConfig(executionTimeout: 0.5), conversationID: convID, attachedFileURLs: [])
+
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(3))
+        XCTAssertEqual(result.outcome, .timedOut)
+        XCTAssertTrue(result.summary.hasPrefix("Timed out"), result.summary)
+        XCTAssertEqual(streams.cancelled.count, 1, "the run must actually be stopped")
+        // Status sweep: the run's own message says TIMED OUT, with the contract's wording.
+        XCTAssertEqual(streams.lastMessage?.terminalOutcome, .timedOut)
+        XCTAssertEqual(streams.lastMessage?.terminalReason, ActiveStreamManager.executionTimeoutMessage(limit: 0.5))
+    }
+
+    /// D-20: the limit drains THIS run's parks only. An attended run's banner in the same
+    /// conversation — here, a park owned by another bound — must survive it.
+    func testTheLimitDoesNotResolveAnotherRunsBanner() async throws {
+        let otherBound = UUID(), op = UUID()
+        await ExecutionSuspensionService.shared.registerScope(otherBound, conversationID: convID)
+        let foreign = Task.detached { [convID] in
+            await ParkScope.$chain.withValue([otherBound]) {
+                await ExecutionSuspensionService.shared.suspendForGate(for: op, conversationID: convID)
+            }
+        }
+        for _ in 0..<400 {
+            if await ExecutionSuspensionService.shared.pendingSuspensionCount() > 0 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        let result = await coordinator(HoldingStreamStarter()).runScheduledMessage(
+            prompt: "report", config: agentConfig(executionTimeout: 0.3), conversationID: convID, attachedFileURLs: [])
+        XCTAssertEqual(result.outcome, .timedOut)
+        try await Task.sleep(for: .milliseconds(200))
+        let stillParked = await ExecutionSuspensionService.shared.pendingSuspensionCount()
+        XCTAssertEqual(stillParked, 1, "the scheduled run's limit resolved another run's banner (D-20)")
+
+        await ExecutionSuspensionService.shared.resumeGate(for: op, chosenOption: "X", resolvedBy: .localUI)
+        _ = await foreign.value
+        await ExecutionSuspensionService.shared.unregisterScope(otherBound)
+    }
+
+    /// Decision 1, through the real wiring: a park INSIDE the run pauses its limit. The run parks
+    /// for 1.2 s against a 0.5 s limit and then finishes — it must complete, not time out.
+    func testAParkInsideTheRunPausesItsLimit() async {
+        let streams = HoldingStreamStarter()
+        streams.parkFor = .milliseconds(1200)
+        let result = await coordinator(streams).runScheduledMessage(
+            prompt: "report", config: agentConfig(executionTimeout: 0.5), conversationID: convID, attachedFileURLs: [])
+        XCTAssertEqual(result.outcome, .completed,
+                       "a human wait inside the scheduled run was charged against its limit")
+        XCTAssertTrue(streams.cancelled.isEmpty)
+    }
+
+    func testTheLimitIsTheProfilesOwnElseThirtyMinutes() {
+        XCTAssertEqual(SchedulerCoordinator.scheduledRunLimit(for: agentConfig(executionTimeout: 90).profile), 90)
+        XCTAssertEqual(SchedulerCoordinator.scheduledRunLimit(for: agentConfig(executionTimeout: nil).profile), 30 * 60)
+        XCTAssertEqual(SchedulerCoordinator.scheduledRunLimit(for: agentConfig(executionTimeout: 0).profile), 30 * 60,
+                       "0 must never mean 'stop at once'")
+    }
+
+    // MARK: - Per-task limit (owner decision 2026-09-27)
+
+    func testATasksOwnLimitWinsOverItsProfileAndTheDefault() {
+        let profile = agentConfig(executionTimeout: 90).profile
+        XCTAssertEqual(SchedulerCoordinator.scheduledRunLimit(for: profile, taskLimit: 300), 300)
+        XCTAssertEqual(SchedulerCoordinator.scheduledRunLimit(for: profile, taskLimit: nil), 90)
+        XCTAssertEqual(SchedulerCoordinator.scheduledRunLimit(for: profile, taskLimit: 0), 90,
+                       "an unusable task limit falls through to the profile's, never 'stop at once'")
+    }
+
+    /// End to end: a bot profile has no limit of its own, so only the TASK's limit can stop it.
+    func testATasksOwnLimitStopsTheRun() async {
+        let bot = BackendRequestConfig(profile: BackendProfileSnapshot(
+            id: UUID(), displayName: "Bot",
+            details: .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "m")))))
+        let streams = HoldingStreamStarter()
+        streams.finishAfter = .seconds(3)   // a regression completes instead of hanging
+        let start = ContinuousClock.now
+        let result = await coordinator(streams).runScheduledMessage(
+            prompt: "report", config: bot, conversationID: convID, attachedFileURLs: [], runLimit: 0.4)
+        XCTAssertEqual(result.outcome, .timedOut)
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(3))
+    }
+
+    /// The model ↔ value mapping is hand-written (`toStruct` / `apply`), which is exactly where a
+    /// new field gets silently dropped. Round-trip both directions.
+    func testTheTasksLimitSurvivesTheStore() {
+        var task = ScheduledTaskModel(id: UUID()).toStruct()
+        XCTAssertNil(task.runLimit)
+        task.runLimit = 45 * 60
+        let model = ScheduledTaskModel(id: task.id)
+        model.apply(from: task)
+        XCTAssertEqual(model.runLimitSeconds, 45 * 60)
+        XCTAssertEqual(model.toStruct().runLimit, 45 * 60)
+        task.runLimit = nil
+        model.apply(from: task)
+        XCTAssertNil(model.toStruct().runLimit, "clearing the limit must persist too")
+    }
+
+    func testTheServicePassesTheTasksLimitToTheRun() throws {
+        let service = try source("Devgentic/Core/Service/Scheduler/SchedulerService.swift")
+        XCTAssertTrue(service.contains("runLimit: task.runLimit"),
+                      "the scheduler no longer hands the task's own limit to the run")
+    }
+
+    // MARK: - Decision C: nobody-to-ask refusals
+
+    /// The MCP brokers cannot read a run's attendance (their requests arrive on the transport's
+    /// own task), so they ask the suspension service. An unattended bound in the conversation —
+    /// and anything nested under it — must make the answer "no".
+    func testAttendanceIsKnownPerConversationForOutOfChainAsks() async {
+        let conversation = UUID(), run = UUID(), tool = UUID(), elsewhere = UUID()
+        let suspension = ExecutionSuspensionService.shared
+        var reachable = await suspension.canReachAHuman(inConversation: conversation)
+        XCTAssertTrue(reachable, "no open bound: an attended conversation")
+
+        await suspension.registerScope(run, conversationID: conversation, attended: false)
+        await suspension.registerScope(tool, under: [run])
+        await suspension.registerScope(elsewhere, conversationID: UUID(), attended: true)
+        reachable = await suspension.canReachAHuman(inConversation: conversation)
+        XCTAssertFalse(reachable, "an unattended run is open here — an MCP question must be refused")
+
+        await suspension.unregisterScope(run)
+        reachable = await suspension.canReachAHuman(inConversation: conversation)
+        XCTAssertFalse(reachable, "the nested tool bound inherits its run's attendance")
+        await suspension.unregisterScope(tool)
+        reachable = await suspension.canReachAHuman(inConversation: conversation)
+        XCTAssertTrue(reachable)
+        await suspension.unregisterScope(elsewhere)
+    }
+
+    /// The in-run asks that used to park with nobody to answer (decision C). Pinned at their
+    /// sites: each needs a live model to drive behaviourally.
+    func testTheUngatedAsksAreNowGatedOnAttendance() throws {
+        let planning = try source("Devgentic/Core/Backends/TextGen/Capabilities/PlanningCapability.swift")
+        XCTAssertTrue(planning.contains("&& WorkflowRunAttendance.canReachAHuman"),
+                      "clarify-before-planning parks in unattended runs again")
+        XCTAssertTrue(planning.contains("config.requiresPlanApproval && !subtasks.isEmpty && !WorkflowRunAttendance.canReachAHuman"),
+                      "plan review parks in unattended runs again")
+        let loop = try source("Devgentic/Core/Backends/TextGen/ReAct/Components/Execution/ToolExecutionLoop.swift")
+        guard let ask = loop.range(of: "if case .askUser(let reason) = boundary.outcome {") else {
+            return XCTFail("the out-of-project ask moved — this pin checks nothing")
+        }
+        let window = loop[ask.upperBound...].prefix(600)
+        XCTAssertTrue(window.contains("if !WorkflowRunAttendance.canReachAHuman"),
+                      "the out-of-project ask parks in unattended runs again")
+        for path in ["Devgentic/Interfaces/Main/Views/Tooling/Mcp/MCPElicitationBroker.swift",
+                     "Devgentic/Interfaces/Main/Views/Tooling/Mcp/MCPSamplingBroker.swift"] {
+            XCTAssertTrue(try source(path).contains("canReachAHuman(inConversation:"),
+                          "\(path) parks in unattended runs again")
+        }
+    }
+
+    private func source(_ path: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        guard let text = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else {
+            throw XCTSkip("\(path) not reachable — running outside a checkout")
+        }
+        return text
+    }
+}

@@ -41,6 +41,14 @@ enum MCPAuthenticationScheme: Codable, Hashable {
     /// start and we don't have to migrate every call site later.
     case oauth(issuer: URL)
 
+    /// True for `.oauth` — the scheme whose credential is the Keychain bundle that
+    /// `MCPOAuthBinding`'s URL invariant (register KC-14) governs. Exists because the case
+    /// carries a payload, so `== .oauth` does not compile.
+    var isOAuth: Bool {
+        if case .oauth = self { return true }
+        return false
+    }
+
     // MARK: - Codable
 
     /// Custom Codable so the JSON shape stays small and self-describing

@@ -260,6 +260,15 @@ final class DiscordChatOpsBridge {
             return
         }
 
+        // ⚠️ D-23: a work-starting command replayed long after it was sent is skipped, not run late.
+        if RemoteCommandAge.isAgeGated(command),
+           let age = RemoteCommandAge.staleAge(sentAt: RemoteCommandAge.discordSentAt(message.timestamp)) {
+            logger.warning("[CHATOPS] A Discord \(String(describing: command)) in channel \(channelID) was sent \(Int(age))s ago. CONSEQUENCE: NOT run (older than \(Int(RemoteCommandAge.maxAge))s); the operator is told to send it again.")
+            await tell(channelID, RemoteCommandAge.notice(age: age),
+                       whenLost: "the operator is not told their old command was skipped, so it looks as if the bot ignored it.")
+            return
+        }
+
         // Route
         await routeCommand(command, channelID: channelID)
     }

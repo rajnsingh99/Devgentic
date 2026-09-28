@@ -137,14 +137,10 @@ struct ToolLibraryContainerView: View {
                     if !isSelectionMode { selectedToolIDs.removeAll() }
                 }
 
-                IslandIconButton(
-                    symbol: allToolsSelected ? "checkmark.circle.fill" : "checkmark.circle",
-                    isActive: isShowingAllToolsDropdown || allToolsSelected,
-                    help: "Configure all visible tools",
-                    accessibilityLabel: "All tools execution mode"
-                ) {
-                    isShowingAllToolsDropdown.toggle()
-                }
+                AllToolsStateControl(
+                    state: allToolsState,
+                    isShowingDropdown: $isShowingAllToolsDropdown
+                )
                 .popover(isPresented: $isShowingAllToolsDropdown, arrowEdge: .bottom) {
                     allToolsDropdownContent
                         .frame(width: 290)
@@ -415,7 +411,7 @@ struct ToolLibraryContainerView: View {
             StateDropdownOptionRow(
                 state: .auto,
                 isSelected: allToolsState == .auto,
-                customTitle: "Auto Run All",
+                customTitle: "Auto Run",
                 customSubtitle: "Set all visible tools to run automatically",
                 theme: theme,
                 onSelect: {
@@ -429,7 +425,7 @@ struct ToolLibraryContainerView: View {
             StateDropdownOptionRow(
                 state: .ask,
                 isSelected: allToolsState == .ask,
-                customTitle: "Ask First All",
+                customTitle: "Ask First",
                 customSubtitle: "Set all visible tools to require confirmation",
                 theme: theme,
                 onSelect: {
@@ -449,7 +445,7 @@ struct ToolLibraryContainerView: View {
                 isSelected: allToolsState == .disabled,
                 isDisabled: allLocked,
                 disabledReason: allLocked ? "All visible tools are core tools required for Code Session" : nil,
-                customTitle: "Disable All",
+                customTitle: "Disabled",
                 customSubtitle: lockedToolNames.isEmpty
                     ? "Turn off all visible tools"
                     : "Turn off visible tools (core tools remain protected)",
@@ -688,6 +684,131 @@ struct ToolLibraryContainerView: View {
         case .agent(let config): return config.instructions ?? ""
         case .code(let config):  return config.instructions ?? ""
         default: return ""
+        }
+    }
+}
+
+// MARK: - All Tools Dynamic Island State Control
+
+/// Dynamic Island pill dropdown button for configuring execution state for all visible tools.
+/// Mirrors the "Ask First" / "Auto Run" / "Disabled" state control from individual tool rows.
+private struct AllToolsStateControl: View {
+    let state: ToolControlState?
+    @Binding var isShowingDropdown: Bool
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    private var displayTitle: String {
+        switch state {
+        case .auto: return "Auto Run"
+        case .ask, nil: return "Ask First"
+        case .disabled: return "Disabled"
+        }
+    }
+
+    @ViewBuilder
+    private var stateIcon: some View {
+        switch state {
+        case .auto:
+            Image(systemName: "bolt.fill")
+        case .ask, nil:
+            Image(systemName: "lock.shield.fill")
+        case .disabled:
+            Image(systemName: "circle.dashed")
+        }
+    }
+
+    private var stateBackground: AnyView {
+        switch state {
+        case .disabled:
+            return AnyView(
+                RoundedRectangle(cornerRadius: 13)
+                    .fill(isHovered || isShowingDropdown ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+            )
+        case .ask, nil:
+            return AnyView(
+                LinearGradient(
+                    colors: [theme.warningColor.opacity(0.88), theme.warningColor],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        case .auto:
+            return AnyView(
+                LinearGradient(
+                    colors: [theme.successColor.opacity(0.88), theme.successColor],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+    }
+
+    private var stateBorder: Color {
+        switch state {
+        case .disabled:
+            return theme.dividerColor.opacity(isHovered || isShowingDropdown ? 0.5 : 0.25)
+        case .ask, .auto, nil:
+            return Color.clear
+        }
+    }
+
+    private var stateForeground: Color {
+        switch state {
+        case .disabled:
+            return theme.secondaryText
+        case .ask, nil:
+            return theme.warningForegroundColor
+        case .auto:
+            return .white
+        }
+    }
+
+    private var stateShadowColor: Color {
+        if !isHovered && !isShowingDropdown { return Color.black.opacity(0.04) }
+        switch state {
+        case .disabled: return Color.black.opacity(0.08)
+        case .ask, nil: return theme.warningColor.opacity(0.3)
+        case .auto: return theme.successColor.opacity(0.3)
+        }
+    }
+
+    var body: some View {
+        Button {
+            isShowingDropdown.toggle()
+        } label: {
+            HStack(spacing: 5) {
+                stateIcon
+                    .font(.system(size: 10, weight: .bold))
+                
+                Text(displayTitle)
+                    .font(.system(size: 11, weight: .semibold))
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.8)
+                    .rotationEffect(.degrees(isShowingDropdown ? 180 : 0))
+            }
+            .padding(.horizontal, 9)
+            .frame(height: 26)
+            .background(stateBackground)
+            .foregroundColor(stateForeground)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(stateBorder, lineWidth: 1)
+            )
+            .shadow(color: stateShadowColor, radius: (isHovered || isShowingDropdown) ? 4 : 2, x: 0, y: (isHovered || isShowingDropdown) ? 2 : 1)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Capsule())
+        .pointingHandCursor()
+        .help("Configure all visible tools: Auto Run, Ask First, or Disabled")
+        .accessibilityLabel("All tools execution mode: \(displayTitle)")
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
         }
     }
 }

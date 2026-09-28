@@ -301,7 +301,9 @@ final class WorkflowRunHistoryStore {
     /// `WorkflowExecutor` lives in process), so any `.running` row at launch is
     /// from a previous session that crashed, was force-quit, or otherwise ended
     /// before the run could finalize. Mirrors `DownloadHistoryStore.reconcileOrphans`.
-    func reconcileOrphans() {
+    /// - Parameter startedBefore: only runs started before this instant are orphans (D-25) — a run
+    ///   started while the launch's skill-import sweep was still going is live.
+    func reconcileOrphans(startedBefore cutoff: Date = .distantFuture) {
         guard let context = mainContext else {
             logger.error("reconcileOrphans() called before container was configured — skip.")
             return
@@ -312,7 +314,11 @@ final class WorkflowRunHistoryStore {
         let descriptor = FetchDescriptor<WorkflowRunRecordSD>(predicate: predicate)
 
         do {
-            let orphans = try context.fetch(descriptor)
+            let running = try context.fetch(descriptor)
+            let orphans = running.filter { $0.timestamp < cutoff }
+            if orphans.count < running.count {
+                logger.info("Left \(running.count - orphans.count) .running run(s) alone — started during this launch, so they are live, not orphans.")
+            }
             guard !orphans.isEmpty else { return }
 
             for orphan in orphans {

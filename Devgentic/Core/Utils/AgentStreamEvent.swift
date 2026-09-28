@@ -65,7 +65,8 @@ enum AgentStreamEvent: Sendable {
     case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil, sourceNodeName: String? = nil)
 
     /// [E1] A workflow Gate node is asking the user to pick one of `options`. The choice routes the
-    /// workflow to the matching output port. `deadline` is the absolute auto-reject time (live countdown).
+    /// workflow to the matching output port. `deadline` is the absolute expiry time (live countdown): at
+    /// it the node fails as "Gate expired" and NO option port fires — it is never a rejection (INS-3).
     /// ⚠️ New associated values MUST be defaulted and appended. This event SUSPENDS the executor,
     /// and the sub-workflow forwarder ends in `default:` — a swallowed suspending
     /// event is a permanent hang, not a visible failure, because the executor is already parked on
@@ -88,6 +89,19 @@ enum AgentStreamEvent: Sendable {
     /// A chunk of the final text response (streaming token).
     /// This is what populates the main chat bubble.
     case content(String)
+
+    /// PROVISIONAL text of the model step in flight, CUMULATIVE (the whole text so far, not a delta).
+    ///
+    /// Streamed while the step is generating, when nobody yet knows whether it will end in tool calls
+    /// (then the text is monologue, and it reaches the timeline through `.reasoning` as before) or
+    /// with none (then it is the answer, and the authoritative `.content` follows). An EMPTY value
+    /// withdraws the draft. A draft is never persisted and is always superseded: by `.draftText("")`,
+    /// or by the first `.content`, which replaces it rather than appending to it.
+    ///
+    /// ⚠️ Safe to ignore. Every consumer that drops it (workflow forwarders, ChatOps, capability
+    /// wrappers) still receives exactly the events it always did — the draft only adds a live
+    /// preview for surfaces that render one.
+    case draftText(String)
     
     /// The agent needs clarification from the user before it can proceed.
     /// - question: The question to display to the user
@@ -405,6 +419,10 @@ enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
     case completedWithWarnings
     case failed
     case cancelled
+    /// A time limit ended the run — an execution limit (chat/Code turn, scheduled run). Its own
+    /// status, not `.failed` or "Cancelled by user" (HITL Waiting Contract §3). Only ever set on the
+    /// run's own message; executors and workflow nodes never emit it.
+    case timedOut
 
     var displayName: String {
         switch self {
@@ -412,8 +430,13 @@ enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
         case .completedWithWarnings: return "Completed with warnings"
         case .failed:                return "Failed"
         case .cancelled:             return "Cancelled"
+        case .timedOut:              return "Timed out"
         }
     }
+
+    /// The run did not produce its answer: `.failed` or `.timedOut`. Use this — never `== .failed`
+    /// — wherever a failure is rendered, or a timed-out run slips through as a success.
+    var isFailureLike: Bool { self == .failed || self == .timedOut }
 }
 
 /// Classification for `.toolFailed` events — drives negativeConstraints policy,
@@ -645,7 +668,15 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
         case "write_file", "move_file", "copy_file", "create_folder", "watch_folder", "fs_watch_folder":
             return .moderate
         case "read_file", "list_directory", "spotlight_search", "fs_smart_search", "read_file_metadata", "fs_read_metadata",
-             "get_system_stats", "web_search":
+             "get_system_stats", "web_search",
+             // The former Code-only read tools, in the Library since 2026-09-24. Read-only, and
+             // `LocalToolManager` already defaulted them to no confirmation — this tier said
+             // `.moderate`, so the banner and the default told two different stories.
+             // `git` is read-only by construction: status/log/diff/branch -a/stash_list/blame/show,
+             // with mutating arguments refused before dispatch.
+             "project_tree", "glob_files", "find_definition", "file_overview",
+             "code_search_text", "code_search_symbol", "code_search_files",
+             "diff_files", "git", "get_task_output":
             return .safe
         default:
             return .moderate
@@ -751,7 +782,7 @@ struct PendingGate: Sendable, Identifiable, Codable, Equatable {
     let id: UUID                // operationID for suspension correlation
     let prompt: String
     let options: [String]       // the choices; each maps to an output port of the same label
-    let deadline: Date?         // absolute auto-reject time for the live countdown (nil = indefinite)
+    let deadline: Date?         // absolute expiry time for the live countdown (nil = indefinite); expiry fails the node, it never rejects
 
     /// The text the decision is about, when there is one (Router ambiguity arbitration). Carried in
     /// the payload rather than re-read anywhere, because `highlights` is measured against exactly

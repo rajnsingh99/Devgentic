@@ -179,13 +179,17 @@ final class WorkflowRetryPolicyTests: XCTestCase {
 
     // MARK: - isTransientToolError — the Action path's honesty fix
 
-    func testComputeTimeoutIsTransient() {
+    /// ⚠️ REVERSED 2026-09-27 (HITL Waiting Contract, decision F). A timed-out tool may already have
+    /// done its work — only the reply was lost — so re-running it repeats the side effect (probe
+    /// P10: a deploy ran twice). This used to assert the opposite.
+    func testAToolTimeoutIsNeverTransient() {
         let timeout = AgentExecutionError(reason: .executionTimeout(elapsed: 30, limit: 30))
-        XCTAssertTrue(WorkflowRetryPolicy.isTransientToolError(timeout))
+        XCTAssertFalse(WorkflowRetryPolicy.isTransientToolError(timeout))
+        XCTAssertFalse(WorkflowRetryPolicy.isTransientToolError(URLError(.timedOut)),
+                       "a request that timed out may have been carried out server-side")
     }
 
     func testNetworkErrorIsTransient() {
-        XCTAssertTrue(WorkflowRetryPolicy.isTransientToolError(URLError(.timedOut)))
         XCTAssertTrue(WorkflowRetryPolicy.isTransientToolError(URLError(.networkConnectionLost)))
     }
 
@@ -265,5 +269,21 @@ final class WorkflowRetryPolicyTests: XCTestCase {
         XCTAssertFalse(WorkflowRetryPolicy.shouldRetryToolFailure(
             ToolArgumentError(), attempt: 0, maxRetries: 3, isCancelled: false
         ))
+    }
+
+    // MARK: - D-11: the error says what happened
+
+    /// Every surface renders `error.localizedDescription` through the `Error` existential — the
+    /// chat/Code "Response Error" card, the terminal reason, traces, Action-node attempt cards. With
+    /// no `LocalizedError` conformance that produced "The operation couldn't be completed.
+    /// (devgentic.AgentExecutionError error 1.)" for a timeout (Timeout inventory D-11).
+    func testAgentExecutionErrorReadsAsItsReasonThroughTheErrorExistential() {
+        let error: Error = AgentExecutionError(reason: .executionTimeout(elapsed: 31, limit: 30))
+        XCTAssertEqual(error.localizedDescription, "Execution timeout after 31s (limit: 30s)")
+        XCTAssertFalse(error.localizedDescription.contains("couldn"),
+                       "the timeout still renders as Foundation's placeholder text")
+
+        let loop: Error = AgentExecutionError(reason: .repetitiveActionLoop(action: "read_file", count: 3))
+        XCTAssertEqual(loop.localizedDescription, AgentFailureReason.repetitiveActionLoop(action: "read_file", count: 3).localizedDescription)
     }
 }

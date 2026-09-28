@@ -55,6 +55,34 @@ enum OrbStage: Equatable {
 }
 
 /// A phrase that controls Orb instead of being sent to the model.
+/// What a FINISHED capture becomes. Produced only by `OrbSessionController.classifyCapture(_:)`,
+/// which both recognizer loops switch on — one decision, not two drifting copies.
+enum OrbCaptureOutcome: Equatable {
+    /// A spoken cancel or stop. Nothing is sent.
+    case cancel
+    /// A control phrase for Orb itself, never forwarded to the model.
+    case voiceCommand(OrbVoiceCommand)
+    /// A real request — sent to the profile.
+    case dispatch
+    /// Something was heard, but fewer words than `minimumCommandWords`.
+    case belowFloor
+    /// Capture was armed and nothing was said.
+    case nothingHeard
+}
+
+/// What one transcript update from a NARRATION LISTENER does. Produced only by
+/// `OrbSessionController.narrationListenerAction(openedDuringNarration:stage:transcript:)`.
+enum OrbNarrationListenerAction: Equatable {
+    /// The session was not opened during narration — ordinary handling applies.
+    case notANarrationListener
+    /// The narration has ended and this session is closing: drop the update. Never falls through.
+    case dropStale
+    /// Still narrating, and no stop phrase yet.
+    case keepListening
+    /// Still narrating, and the user said stop.
+    case interrupt
+}
+
 enum OrbVoiceCommand: Equatable {
     case repeatAnswer
     case newConversation
@@ -77,7 +105,7 @@ final class OrbSessionController {
     // MARK: Tunables
 
     /// Bumped whenever a tester is asked to verify a change, so a log proves which binary ran.
-    static let featureMarker = "pr9 (all P1/P2/P3 closed — entry-point guards, playback fallback, panel + HITL logging)"
+    static let featureMarker = "pr10 (spoken stop — whole-utterance stop words; voice interrupt while speaking when AEC is live)"
     /// Canonical wake word — whatever the user configured, sanitized, defaulting to "orb".
     ///
     /// ⚠️ Read at USE time, never captured into a `let`. It was a `static let` until 2026-09-19,
@@ -124,6 +152,91 @@ final class OrbSessionController {
     /// Spoken phrases that ABORT an armed capture instead of becoming the command.
     /// The audible half of the cancel path — see `cancelCapture()` for why one was needed.
     static let cancelPhrases = ["never mind", "nevermind", "cancel that", "forget it"]
+
+    /// Short ways of saying "stop" — to a capture, or to Orb while he is speaking.
+    ///
+    /// ⚠️ A SEPARATE list from `cancelPhrases`, never additions to it, for two reasons:
+    ///  1. `isCancelPhrase` also matches as a SUFFIX, so "stop" there would cancel "make the build
+    ///     stop" and swallow a real request. These match the WHOLE utterance only.
+    ///  2. `isCancelPhrase` is also what DENIES a parked tool in the spoken-approval window ("only
+    ///     an explicit cancel phrase denies"). Widening it would silently widen that.
+    /// Device, 2026-09-19: "stop" reached the two-word dispatch floor and was logged as a Whisper
+    /// hallucination guard — the right outcome (nothing sent) for the wrong reason, in silence.
+    static let stopPhrases = ["stop", "stop it", "stop talking", "cancel", "enough",
+                              "quiet", "be quiet", "shush", "shut up"]
+
+    /// Whether the WHOLE utterance is a stop phrase, said once or repeated ("stop, stop"). Pure.
+    ///
+    /// ⚠️ Only safe on a FINISHED utterance. Whisper re-decodes every ~1.1 s, so "stop the server"
+    /// is a bare "stop" for one partial — matching this on the live path would cancel the request
+    /// mid-sentence. `classifyCapture` runs it only after endpointing has settled.
+    static func isStopPhrase(_ utterance: String) -> Bool {
+        let words = normalizedForStability(utterance).split(separator: " ").map(String.init)
+        guard !words.isEmpty else { return false }
+        return stopPhrases.contains { phrase in
+            let unit = phrase.split(separator: " ").map(String.init)
+            guard words.count % unit.count == 0 else { return false }
+            return stride(from: 0, to: words.count, by: unit.count)
+                .allSatisfy { Array(words[$0..<($0 + unit.count)]) == unit }
+        }
+    }
+
+    /// Whether a transcript heard WHILE ORB SPEAKS ends in a stop phrase. Pure.
+    ///
+    /// Deliberately looser than `isStopPhrase` — a suffix, not the whole utterance — because the
+    /// narration listener acts on nothing else: a stray word before "stop" (a cough, residue the
+    /// echo canceller let through) must not make the interrupt fail. A false match is bounded: the
+    /// answer stops early, and it is still in the chat window.
+    static func endsWithStopPhrase(_ transcript: String) -> Bool {
+        let normalized = normalizedForStability(transcript)
+        guard !normalized.isEmpty else { return false }
+        return stopPhrases.contains { normalized == $0 || normalized.hasSuffix(" " + $0) }
+    }
+
+    /// Whether a microphone may stay open while Orb speaks, listening ONLY for a stop. Pure.
+    ///
+    /// ⚠️ Echo cancellation is the whole precondition. Without it the microphone hears Orb, and a
+    /// recognizer transcribing Orb's own voice can interrupt — or, back in passive listening, wake
+    /// — itself. `OrbDuplexAudio.isEchoCancelling` is the same fact that decides whether an answer
+    /// renders through the shared engine at all (see `OrbStreamingSpeaker.begin`).
+    /// ⚠️ WhisperKit only: Apple Speech runs its own loop and releases the duplex engine first.
+    /// ⚠️ Never during an approval announcement ("I'll leave that one on screen"). Those spend a
+    /// second in `.announcing` between two `.awaitingApproval` stages, and an interrupt there
+    /// would drop the orb to passive listening with a run still parked.
+    static func listensDuringNarration(echoCancelling: Bool,
+                                       recognizerIsAppleSpeech: Bool,
+                                       announcingApproval: Bool) -> Bool {
+        echoCancelling && !recognizerIsAppleSpeech && !announcingApproval
+    }
+
+    /// What a transcript update from a narration listener does. Pure.
+    ///
+    /// ⚠️⚠️ THE SAFETY PROPERTY IS THAT NOTHING HERE FALLS THROUGH. A session opened during
+    /// narration yields `.dropStale`, `.keepListening` or `.interrupt` — never the ordinary path —
+    /// because the ordinary path includes the follow-up window, where ANY speech is dispatched.
+    /// After the answer ends the listener is closed asynchronously, and its late updates would
+    /// otherwise land in exactly that window carrying whatever it heard during the answer.
+    static func narrationListenerAction(openedDuringNarration: Bool,
+                                        stage: OrbStage,
+                                        transcript: String) -> OrbNarrationListenerAction {
+        guard openedDuringNarration else { return .notANarrationListener }
+        guard stage == .announcing else { return .dropStale }
+        return endsWithStopPhrase(transcript) ? .interrupt : .keepListening
+    }
+
+    /// What a FINISHED capture becomes. Pure, and the ONLY place this decision is made.
+    ///
+    /// ⚠️ ONE CLASSIFIER FOR BOTH LOOPS. The WhisperKit and Apple Speech loops each carried their
+    /// own copy of this cascade, and the copies had already drifted — Apple's spoken cancel logged
+    /// and played nothing. A stop phrase added to one copy is exactly what the other would miss.
+    /// Order is load-bearing: cancel and stop come before the dispatch floor, so a one-word "stop"
+    /// is a cancel and never reaches the floor.
+    static func classifyCapture(_ command: String) -> OrbCaptureOutcome {
+        if isCancelPhrase(command) || isStopPhrase(command) { return .cancel }
+        if let voiceCommand = voiceCommand(in: command) { return .voiceCommand(voiceCommand) }
+        if isDispatchable(command) { return .dispatch }
+        return command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .nothingHeard : .belowFloor
+    }
 
     /// Seconds to wait for `AVSpeechSynthesizer`'s `didFinish` before handing back anyway.
     /// Generous: it is a deadlock breaker, not a pacing control.
@@ -356,6 +469,10 @@ final class OrbSessionController {
 
     /// The HITL request already announced, so a re-render of the queue does not re-speak it.
     @ObservationIgnored private var announcedInteractionID: UUID?
+
+    /// Whether the OPEN microphone session was opened while Orb was speaking — a narration
+    /// listener, which acts on a stop phrase and nothing else, and whose audio is never classified.
+    @ObservationIgnored private var sessionOpenedDuringNarration = false
 
     @ObservationIgnored private var listenTask: Task<Void, Never>?
     @ObservationIgnored private var watchdogTask: Task<Void, Never>?
@@ -783,8 +900,51 @@ final class OrbSessionController {
     private func setStage(_ next: OrbStage, _ origin: String) {
         guard stage != next else { return }
         logger.info("[ORB_STAGE]\(self.tag) \(Self.name(of: self.stage)) → \(Self.name(of: next)) (\(origin))")
+        let previous = stage
         stage = next
         if Self.releasesEngineOnEntry(to: next) { releaseEngineForOfflineStage(origin) }
+        // ⚠️ Both edges of `.announcing` live HERE, not at the six places that enter it: the funnel
+        // is the one place a new entry point cannot forget. Exit first — it only ever closes.
+        if previous == .announcing { closeNarrationListener(origin) }
+        if next == .announcing { openNarrationListenerIfAdmissible(origin) }
+    }
+
+    /// Whether THIS narration may be listened over. See `listensDuringNarration`.
+    private var narrationListenerAdmissible: Bool {
+        Self.listensDuringNarration(
+            echoCancelling: OrbDuplexAudio.shared.isEchoCancelling,
+            recognizerIsAppleSpeech: OrbConfigManager.shared.recognizer.isAppleSpeech,
+            announcingApproval: announcedInteractionID != nil)
+    }
+
+    /// Entry edge of `.announcing`: keep a microphone open for a spoken stop, when echo
+    /// cancellation makes that safe. Without it the only interrupt is a click.
+    private func openNarrationListenerIfAdmissible(_ origin: String) {
+        guard !dismissed, narrationListenerAdmissible else { return }
+        logger.info("[ORB_SESSION]\(self.tag) Listening for a spoken stop while Orb speaks (\(origin)) — echo cancellation is live. CONSEQUENCE: only a stop phrase is acted on; everything else heard during the answer is discarded.")
+        // A session still open from before this narration (a passive session, when the answer was
+        // started from a tap) holds a transcript that is not about this answer. End it; the loop
+        // then reopens as a narration listener.
+        if isSessionActive, !sessionOpenedDuringNarration {
+            Task { _ = await WhisperRecognitionService.shared.stopStreaming() }
+        }
+        startListeningLoop()   // a no-op when a loop is already running — it picks the stage up itself
+    }
+
+    /// Exit edge of `.announcing`: the narration listener must never outlive the narration.
+    ///
+    /// ⚠️⚠️ THE SAFETY HALF. The follow-up window treats ANY speech as the next command, and
+    /// `liveTranscript` is reset only when a new session opens. A listener carried across this
+    /// edge would hand the window whatever it heard during the answer — Orb's own voice, if the
+    /// echo canceller leaked — as a command to dispatch. So: clear the transcript, end the
+    /// session, and let the loop open a fresh one (it discards this one unclassified).
+    private func closeNarrationListener(_ origin: String) {
+        guard sessionOpenedDuringNarration else { return }
+        liveTranscript = ""
+        lastNormalizedCommand = ""
+        guard isSessionActive else { return }
+        logger.info("[ORB_ASR]\(self.tag) Closing the narration listener (\(origin)). CONSEQUENCE: nothing it heard is carried into \(Self.name(of: self.stage)); a fresh session opens.")
+        Task { _ = await WhisperRecognitionService.shared.stopStreaming() }
     }
 
     /// Whether entering `stage` should hand the input device back. Pure.
@@ -1162,6 +1322,7 @@ final class OrbSessionController {
             // unconditional guard here would hold the microphone open in an empty room.
             guard stage == .passiveListening || stage == .commandCapture || stage == .followUpWindow
                     || (stage == .awaitingApproval && isVoiceApprovalArmed)
+                    || (stage == .announcing && narrationListenerAdmissible)
             else { return nil }
             // ⚠️ Hold-to-talk must not drift back into always-open listening. The stage can return
             // to `.passiveListening` while this loop is still running — an expired follow-up
@@ -1201,7 +1362,8 @@ final class OrbSessionController {
             // be released inside it — the release cannot stop a session that has not opened yet,
             // so without this the loop went on to open the microphone for a key nobody is holding.
             guard stage == .passiveListening || stage == .commandCapture || stage == .followUpWindow
-                    || (stage == .awaitingApproval && isVoiceApprovalArmed) else {
+                    || (stage == .awaitingApproval && isVoiceApprovalArmed)
+                    || (stage == .announcing && narrationListenerAdmissible) else {
                 logger.info("[ORB_SESSION]\(self.tag) Abandoning the session before it opened — the stage moved to \(Self.name(of: self.stage)) while audio settled. CONSEQUENCE: the microphone is not opened.")
                 return nil
             }
@@ -1210,6 +1372,7 @@ final class OrbSessionController {
             energyLevels = []
             manualCaptureBaseline = nil
             receivedAudio = false
+            sessionOpenedDuringNarration = (stage == .announcing)
             lastNormalizedCommand = ""
             sessionStart = Date()
             lastTranscriptChange = Date()
@@ -1258,6 +1421,16 @@ final class OrbSessionController {
 
             guard !dismissed, generation == listenGeneration else { return nil }
 
+            // ⚠️ A NARRATION LISTENER'S AUDIO IS NEVER CLASSIFIED — and this sits BEFORE the dead-
+            // audio check on purpose. The listener is closed the instant the answer ends, often
+            // before its first buffer, and counting that as a dead microphone would put a false
+            // NO AUDIO warning on a healthy orb after every short answer.
+            if sessionOpenedDuringNarration {
+                sessionOpenedDuringNarration = false
+                logger.info("[ORB_ASR]\(self.tag) Narration listener closed (now \(Self.name(of: self.stage))) — its audio is discarded, never classified. CONSEQUENCE: whatever the next stage needs opens a FRESH session with an empty transcript.")
+                continue
+            }
+
             // No samples at all → the engine never really started, however long the
             // session appeared to run. Back off and retry; give up with a real message
             // rather than pretending to listen forever.
@@ -1292,6 +1465,12 @@ final class OrbSessionController {
             if stage == .awaitingApproval, isVoiceApprovalArmed {
                 let spoken = commandPreview
                 logger.info("[ORB_ASR]\(self.tag) Approval window heard \(spoken.split(separator: " ").count) word(s).")
+                // ⚠️ D-23: silence is not an answer. A session that ended with nothing heard keeps
+                // the window listening until its own 30 s expiry, on both recognizers.
+                if spoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    logger.info("[ORB_ASR]\(self.tag) Approval session ended with nothing heard. CONSEQUENCE: listening again — the window stays open until it expires.")
+                    continue
+                }
                 handleVoiceApprovalUtterance(spoken)
                 return nil
             }
@@ -1299,24 +1478,28 @@ final class OrbSessionController {
             if stage == .commandCapture {
                 // commandPreview honors whichever way capture was armed (wake word or click).
                 let command = commandPreview
-                if Self.isCancelPhrase(command) {
-                    logger.info("[ORB_SESSION]\(self.tag) Capture ended on a spoken cancel — discarding it. CONSEQUENCE: nothing is sent; the loop re-arms for the wake word.")
+                switch Self.classifyCapture(command) {
+                case .cancel:
+                    // ⚠️ Audible. This path used to be silent while the tap cancel played an
+                    // earcon — and a spoken "stop" that produces no sound reads as "not heard".
+                    playEarcon(.interrupted)
+                    logger.info("[ORB_SESSION]\(self.tag) Capture ended on a spoken cancel (\(Self.wordCount(command)) word(s)) — discarding it. CONSEQUENCE: nothing is sent; the loop re-arms for the wake word.")
                     manualCaptureBaseline = nil
                     setStage(.passiveListening, "runListeningSessions")
-                } else if let voiceCommand = Self.voiceCommand(in: command) {
+                case .voiceCommand(let voiceCommand):
                     // A control phrase never reaches the model. Handled after the loop unwinds so
                     // the microphone session is fully closed before anything speaks.
                     logger.info("[ORB_SESSION]\(self.tag) Voice command recognised: \(String(describing: voiceCommand)).")
                     playEarcon(.captured)
                     pendingVoiceCommand = voiceCommand
                     return nil
-                } else if Self.isDispatchable(command) {
+                case .dispatch:
                     playEarcon(.captured)
                     return command
-                } else if !command.isEmpty {
+                case .belowFloor:
                     logger.warning("[ORB_ASR]\(self.tag) Discarded a \(Self.wordCount(command))-word capture below the \(Self.minimumCommandWords)-word dispatch floor. CONSEQUENCE: nothing is sent and capture re-arms — this is the guard against a Whisper silence-hallucination starting a tool-using run.")
                     setStage(.passiveListening, "runListeningSessions")
-                } else {
+                case .nothingHeard:
                     logger.info("[ORB_ASR]\(self.tag) Capture armed but nothing was heard. CONSEQUENCE: nothing is sent; the loop re-arms for the wake word or shortcut.")
                     setStage(.passiveListening, "runListeningSessions")
                 }
@@ -1508,24 +1691,38 @@ final class OrbSessionController {
             if stage == .awaitingApproval, isVoiceApprovalArmed {
                 let spoken = commandPreview
                 logger.info("[ORB_ASR]\(self.tag) Approval window heard \(spoken.split(separator: " ").count) word(s).")
+                // ⚠️ D-23: silence is not an answer. A session that ended with nothing heard keeps
+                // the window listening until its own 30 s expiry, on both recognizers.
+                if spoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    logger.info("[ORB_ASR]\(self.tag) Approval session ended with nothing heard. CONSEQUENCE: listening again — the window stays open until it expires.")
+                    continue
+                }
                 handleVoiceApprovalUtterance(spoken)
                 return nil
             }
 
             if stage == .commandCapture {
                 let command = commandPreview
-                if Self.isCancelPhrase(command) {
+                // ⚠️ The SAME classifier as the WhisperKit loop. This block was its own copy and had
+                // already drifted: its spoken cancel logged nothing and played nothing.
+                switch Self.classifyCapture(command) {
+                case .cancel:
+                    playEarcon(.interrupted)
+                    logger.info("[ORB_APPLE_ASR]\(self.tag) Capture ended on a spoken cancel (\(Self.wordCount(command)) word(s)) — discarding it. CONSEQUENCE: nothing is sent; capture re-arms.")
                     manualCaptureBaseline = nil
                     setStage(.passiveListening, "runAppleSpeechSessions")
-                } else if let voiceCommand = Self.voiceCommand(in: command) {
+                case .voiceCommand(let voiceCommand):
                     playEarcon(.captured)
                     pendingVoiceCommand = voiceCommand
                     return nil
-                } else if Self.isDispatchable(command) {
+                case .dispatch:
                     playEarcon(.captured)
                     return command
-                } else {
+                case .belowFloor:
                     logger.info("[ORB_APPLE_ASR]\(self.tag) Discarded a \(Self.wordCount(command))-word capture below the \(Self.minimumCommandWords)-word dispatch floor. CONSEQUENCE: nothing is sent; capture re-arms.")
+                    setStage(.passiveListening, "runAppleSpeechSessions")
+                case .nothingHeard:
+                    logger.info("[ORB_APPLE_ASR]\(self.tag) Capture armed but nothing was heard. CONSEQUENCE: nothing is sent; capture re-arms.")
                     setStage(.passiveListening, "runAppleSpeechSessions")
                 }
             }
@@ -1617,8 +1814,15 @@ final class OrbSessionController {
                         await endSession("approval answer stable for \(String(format: "%.1f", idle))s")
                         return
                     }
-                    if !hasWord && age > Self.emptyCaptureTimeout {
-                        await endSession("no approval answer within \(String(format: "%.1f", Self.emptyCaptureTimeout))s")
+                    // ⚠️ D-23: NO 8 s empty-capture end here. It made the real window on WhisperKit
+                    // 8 s, not the advertised 30 s — silence ended the session and the empty
+                    // utterance was read as "not a confirmation". The window's own 30 s expiry
+                    // (`readBackAndListen`) closes the microphone.
+                case .announcing where self.sessionOpenedDuringNarration:
+                    // Bounded like every other session: WhisperKit re-decodes its whole buffer,
+                    // and "read the rest" can narrate for minutes.
+                    if age > Self.passiveRecycleInterval {
+                        await endSession("recycling — the narration listener reached \(Int(age))s")
                         return
                     }
                 default:
@@ -1629,6 +1833,26 @@ final class OrbSessionController {
     }
 
     private func handleTranscriptUpdate(_ state: StreamingTranscriptionState) {
+        // ⚠️ A NARRATION LISTENER ACTS ON A STOP PHRASE AND NOTHING ELSE — not the wake word, not
+        // the follow-up window, not capture. And once the narration has ended (the session is
+        // closing asynchronously) its updates are stale and dropped outright, so nothing heard
+        // during the answer can reach a stage that dispatches. See `closeNarrationListener`.
+        switch Self.narrationListenerAction(openedDuringNarration: sessionOpenedDuringNarration,
+                                            stage: stage, transcript: state.fullText) {
+        case .notANarrationListener:
+            break
+        case .dropStale:
+            return
+        case .keepListening:
+            if !state.bufferEnergy.isEmpty { receivedAudio = true }
+            liveTranscript = state.fullText
+            return
+        case .interrupt:
+            if !state.bufferEnergy.isEmpty { receivedAudio = true }
+            logger.debug("[ORB_ASR]\(self.tag) Stop phrase heard during narration in: \"\(state.fullText)\"")
+            bargeIn(by: "voice")
+            return
+        }
         let text = state.fullText
         if text != liveTranscript {
             liveTranscript = text
@@ -1653,6 +1877,8 @@ final class OrbSessionController {
 
         // A spoken cancel aborts the capture rather than becoming the command. Checked before
         // the wake-word arm so it can only ever fire on an ALREADY-armed capture.
+        // ⚠️ Multi-word cancels ONLY on this live path. `stopPhrases` are checked when the capture
+        // FINISHES (`classifyCapture`): a partial transcript of "stop the server" is a bare "stop".
         if stage == .commandCapture, Self.isCancelPhrase(commandPreview) {
             cancelCapture()
             return
@@ -1934,6 +2160,8 @@ final class OrbSessionController {
             // `.announcing` for an unmeasured interval on the one path where the user most needs
             // an immediate answer. `what went wrong` does the work, on request.
             return String(localized: "That didn't work. Ask me what went wrong, or check the chat window.")
+        case .timedOut:
+            return String(localized: "That ran out of time and was stopped. Check the chat window for what it got done.")
         case .cancelled:
             return String(localized: "Stopped.")
         case nil:
@@ -1952,6 +2180,9 @@ final class OrbSessionController {
         case cutGreetingAndArm
         /// Nothing to capture into. The string is spoken to the LOG, not the user.
         case refuse(String)
+        /// Parked on a request whose spoken window has closed: the press re-opens THAT window
+        /// (read-back, then a fresh 30 s to answer) instead of capturing a new command (D-23).
+        case reopenVoiceApproval
     }
 
     /// ⚠️⚠️ `.welcoming` IS ADMITTED, AND IT IS THE COMMON CASE — NOT AN EDGE ONE.
@@ -1965,7 +2196,11 @@ final class OrbSessionController {
     /// cold open lost the whole first utterance and logged nothing explaining it.
     ///
     /// A held push-to-talk key is an explicit "I want to talk now", which outranks the greeting.
-    static func pushToTalkAdmission(stage: OrbStage) -> PushToTalkAdmission {
+    /// - Parameter canReopenApproval: the run is parked on a request that can be answered by voice
+    ///   and no window is armed. ⚠️ D-23: once the 30 s window closed there was no way back to the
+    ///   voice channel — every press was refused as "a turn is already in flight".
+    static func pushToTalkAdmission(stage: OrbStage, canReopenApproval: Bool = false) -> PushToTalkAdmission {
+        if stage == .awaitingApproval, canReopenApproval { return .reopenVoiceApproval }
         switch stage {
         case .passiveListening, .commandCapture:
             return .arm
@@ -1990,7 +2225,12 @@ final class OrbSessionController {
     func beginPushToTalk() {
         guard !dismissed, !pushToTalkHeld else { return }
 
-        switch Self.pushToTalkAdmission(stage: stage) {
+        switch Self.pushToTalkAdmission(stage: stage, canReopenApproval: reopenableApprovalToken() != nil) {
+        case .reopenVoiceApproval:
+            // ⚠️ `pushToTalkHeld` stays false: the window runs on its own clock, and the key-up must
+            // not treat this as a command capture.
+            if let token = reopenableApprovalToken() { reopenVoiceApproval(token, via: "push-to-talk") }
+            return
         case .refuse(let reason):
             // ⚠️ Never silent. The old guard returned with no line at all, so a device log of the
             // most common failure in the subsystem contained nothing that even mentioned the press.
@@ -2058,7 +2298,12 @@ final class OrbSessionController {
         // `setStage` now has a SIDE EFFECT: entering `.voiceUnavailable` releases the app-scoped
         // audio engine. A dead controller reaching that would release an engine a NEW panel had
         // warmed. Nothing does today; the guard is what keeps that true.
-        guard !dismissed, stage == .passiveListening else { return }
+        guard !dismissed else { return }
+        if let token = reopenableApprovalToken() {
+            reopenVoiceApproval(token, via: "a click on the orb")
+            return
+        }
+        guard stage == .passiveListening else { return }
         manualCaptureBaseline = liveTranscript
         setStage(.commandCapture, "armManualCapture")
         lastTranscriptChange = Date()
@@ -2439,13 +2684,14 @@ final class OrbSessionController {
 
     /// Barge-in: stop the narration and go straight back to listening.
     ///
-    /// ⚠️ A TAP-driven interrupt, not true barge-in. The microphone is still closed while Orb
-    /// speaks — there is no acoustic echo cancellation yet (audit blocker B3) — so the user
-    /// cannot talk over the answer. Phase 4's duplex audio graph is what makes that possible;
-    /// until then this is the only way to cut a long answer short.
-    func bargeIn() {
+    /// Reached by a TAP always, and by VOICE when echo cancellation is live — a narration listener
+    /// hears a stop phrase (`openNarrationListenerIfAdmissible`). Without AEC the microphone stays
+    /// closed while Orb speaks, and a click is the only way to cut a long answer short.
+    /// ⚠️ Until 2026-09-27 this said it was tap-only pending AEC. AEC had been live on hardware
+    /// since 2026-09-05; nothing had admitted the listening loop to `.announcing`.
+    func bargeIn(by source: String = "tap") {
         guard !dismissed, stage == .announcing else { return }
-        logger.info("[ORB_SESSION]\(self.tag) Narration interrupted by the user.")
+        logger.info("[ORB_SESSION]\(self.tag) Narration interrupted by the user (\(source)). CONSEQUENCE: the rest of the answer is not spoken; it stays in the chat window.")
         playEarcon(.interrupted)
         speaker.cancel()
         voice.stop()
@@ -2653,7 +2899,31 @@ final class OrbSessionController {
             try? await Task.sleep(nanoseconds: UInt64(Self.voiceApprovalWindow * 1_000_000_000))
             guard let self, !Task.isCancelled, self.isVoiceApprovalArmed else { return }
             self.disarmVoiceApproval(reason: repeated ? "window expired after a repeat" : "window expired")
+            // ⚠️ D-23: no answer is NOT a denial — the request stays open on screen (HITL is
+            // unbounded). What was missing was saying so, and a way back: the orb sat in
+            // `.awaitingApproval` with a closed mic and refused every press. It stays in that stage
+            // (releasing the duplex engine there is unsafe), but a press or click re-opens the window.
+            self.logger.notice("[ORB_HITL]\(self.tag) Voice window closed with no answer. CONSEQUENCE: nothing approved or denied; the request stays on screen, and push-to-talk or a click re-opens the spoken window.")
+            self.setStage(.announcing, "voice approval window expired")
+            self.speakWithWatchdog(String(localized: "No answer, so I'll leave that one on screen. Press to talk when you want to answer.")) { [weak self] in
+                self?.setStage(.awaitingApproval, "voice approval window expired")
+            }
         }
+    }
+
+    /// The spoken-approval token for the request on screen, when the window is closed and could be
+    /// re-opened: voice approvals on, the run parked, and the policy able to describe the request.
+    private func reopenableApprovalToken() -> OrbApprovalPolicy.VoiceApproval? {
+        guard stage == .awaitingApproval, !isVoiceApprovalArmed, OrbConfigManager.shared.voiceApprovals,
+              let convID = orbConversationID,
+              let pending = mainVM?.interactionCenter.current(for: convID) else { return nil }
+        return OrbApprovalPolicy.token(for: pending)
+    }
+
+    private func reopenVoiceApproval(_ token: OrbApprovalPolicy.VoiceApproval, via trigger: String) {
+        logger.notice("[ORB_HITL]\(self.tag) Voice approval RE-OPENED by \(trigger) for op \(token.operationID.uuidString.prefix(8)). CONSEQUENCE: the request is read back again and a fresh \(Int(Self.voiceApprovalWindow))s window opens.")
+        playEarcon(.listening)
+        beginVoiceApproval(token)
     }
 
     /// The sentence spoken before a voice approval can commit. Pure.

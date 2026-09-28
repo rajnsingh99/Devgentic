@@ -43,6 +43,9 @@ struct RunCommandTool: DevgenticTool {
     let description = "Runs a shell command and WAITS for it to finish, returning its output. Use this for builds, tests, linters, and anything whose result you need. Raise timeout_seconds for a slow build."
     /// A build that writes "error" to stderr is reporting a result, not failing this tool.
     let outputMayContainErrorText = true
+    /// Bounds itself at `timeout_seconds` (≤ `BatchCommandTool.maxTimeoutSeconds`) and returns the
+    /// partial output — so the dispatcher's timeout sits just above that ceiling (Contract dec. 2).
+    var selfBoundCeiling: TimeInterval? { TimeInterval(BatchCommandTool.maxTimeoutSeconds) }
 
     let conversationID: UUID?
 
@@ -57,7 +60,7 @@ struct RunCommandTool: DevgenticTool {
             properties: [
                 ("command", "string", "The shell command to run."),
                 ("working_directory", "string", "Working directory. Required — pass the project root or a subpath."),
-                ("timeout_seconds", "integer", "Maximum seconds to wait, max 900 (default 30). The command is killed at the bound, but whatever it printed first is still returned."),
+                ("timeout_seconds", "integer", "Maximum seconds to wait, max 1800 (default 1800). The command is killed at the bound, but whatever it printed first is still returned."),
                 ("task_name", "string", "Optional short label, e.g. 'Build and test'. Shown to the user instead of the raw command."),
             ],
             required: ["command", "working_directory"]
@@ -74,12 +77,24 @@ struct RunCommandTool: DevgenticTool {
             // 2026-09-24; `run_command` is now the shell, so it holds it here.
             throw ShellCommandError.refused(reason: reason)
         case .ready(let workingDirectory):
-            return try await BatchCommandTool.runForeground(
+            // ⚠️ D-17: a command killed at its OWN `timeout_seconds`, or stopped, is THROWN as such.
+            // Returned as text it was recorded as a SUCCESSFUL call — `outputMayContainErrorText`
+            // turns off output sniffing — so reliability stats, the loop detector and the timeline
+            // chip all saw a success. The dispatcher maps these to `.timedOut` / `.cancelled` and
+            // still hands the model the partial output.
+            switch try await BatchCommandTool.runForegroundOutcome(
                 command: arguments.command,
                 workingDirectory: workingDirectory,
                 timeout: BatchCommandTool.effectiveTimeout(arguments.timeout_seconds),
                 conversationID: conversationID,
-                name: arguments.task_name)
+                name: arguments.task_name) {
+            case .finished(let observation):
+                return observation
+            case .timedOut(let limit, let observation):
+                throw ShellCommandError.timedOut(limit: TimeInterval(limit), observation: observation)
+            case .stopped(let observation):
+                throw ShellCommandError.stopped(observation: observation)
+            }
         }
     }
 }
@@ -93,11 +108,16 @@ enum ShellCommandError: Error, LocalizedError {
     case refused(reason: String)
     /// The shell could not be started at all.
     case launchFailed(reason: String)
+    /// Killed at its own `timeout_seconds`; `observation` carries the partial output.
+    case timedOut(limit: TimeInterval, observation: String)
+    /// Stopped before it finished; `observation` carries the partial output.
+    case stopped(observation: String)
 
     var errorDescription: String? {
         switch self {
         case .refused(let reason):      return reason
         case .launchFailed(let reason): return "Error: the command could not be started: \(reason)"
+        case .timedOut(_, let observation), .stopped(let observation): return observation
         }
     }
 }
@@ -107,6 +127,9 @@ enum ShellCommandError: Error, LocalizedError {
 struct StartBackgroundTaskTool: DevgenticTool {
     let name = "start_background_task"
     let category = "System & Shell"
+    /// Bounds itself at `timeout_seconds` (≤ `BatchCommandTool.maxTimeoutSeconds`) and returns the
+    /// partial output — so the dispatcher's timeout sits just above that ceiling (Contract dec. 2).
+    var selfBoundCeiling: TimeInterval? { TimeInterval(BatchCommandTool.maxTimeoutSeconds) }
     let description = "Starts a shell command and returns IMMEDIATELY with a task id, without waiting. Use this only to leave something running that you are not waiting for, such as a dev server or a watcher. You get no output from this call — read it with get_task_output."
 
     let conversationID: UUID?
@@ -122,7 +145,7 @@ struct StartBackgroundTaskTool: DevgenticTool {
             properties: [
                 ("command", "string", "The shell command to start."),
                 ("working_directory", "string", "Working directory. Required — pass the project root or a subpath."),
-                ("timeout_seconds", "integer", "Seconds before the task is killed, max 900 (default 900). It runs unattended, so this is the only thing that stops a runaway."),
+                ("timeout_seconds", "integer", "Seconds before the task is killed, max 1800 (default 1800). It runs unattended, so this is the only thing that stops a runaway."),
                 ("task_name", "string", "Optional short label, e.g. 'Dev server'. Shown to the user instead of the raw command."),
                 ("notify_on_completion", "boolean", "Default false. Set it true ONLY if you are going to end your turn now and want to be given this task's result when it finishes. You will be asked to report on it and will have no tools, so do not set it for anything you intend to act on yourself — poll with get_task_output instead. Never set it for a dev server or a watcher: those do not finish."),
             ],

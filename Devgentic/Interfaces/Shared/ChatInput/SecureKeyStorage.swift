@@ -40,6 +40,107 @@ protocol KeychainAccessing: Sendable {
 /// A service for securely saving, retrieving, and deleting sensitive data like API keys from the system Keychain.
 struct SecureKeyStorage: KeychainAccessing {
 
+    /// ⚠️ TEST SEAM (register KC-9). When set, receives EXACTLY the message a first-time item ADD
+    /// would log — the one branch of `save` whose result used to be returned unlogged, so a
+    /// credential write that failed on its very first attempt (the pairing case: nothing existed
+    /// yet, `SecItemUpdate` missed, `SecItemAdd` was the only real write) did so in complete
+    /// silence. Same shape as `ShellProcess.stderrLogSinkForTesting`: one message for the logger
+    /// and the sink alike, so the seam cannot drift from the log.
+    nonisolated(unsafe) static var addResultLogSinkForTesting: (@Sendable (String) -> Void)?
+
+    /// The Keychain Access "Kind" column for every item this app writes. Registers KC-25 / KC-30.
+    static let itemDescription = "Devgentic credential"
+
+    /// The Keychain Access "Name" column. Registers KC-25 / KC-30.
+    ///
+    /// ⚠️ Without a label Keychain Access shows the bare service string, and most accounts are
+    /// opaque UUIDs — so the app's own "delete it manually from Keychain Access" advice (a failed
+    /// MCP purge, a failed profile-key delete) named items nobody could find. Every label starts
+    /// with "Devgentic", so searching Keychain Access for that one word lists everything the app
+    /// has ever stored; for an app with no uninstaller that is the whole "remove my credentials"
+    /// story (KC-36). Derived from the address rather than a per-store name table, so no second
+    /// copy of the service strings exists to drift from the ones KC-56 pins.
+    static func itemLabel(service: String, account: String) -> String {
+        "Devgentic — \(service) — \(account)"
+    }
+
+    /// The log line for a first-time item ADD — success and failure. Register KC-9.
+    ///
+    /// A pure function so both texts are pinnable without driving the real Security framework into
+    /// a failure it cannot be forced into deterministically. `logAddResult` is the only caller.
+    static func addResultMessage(status: OSStatus, service: String, account: String) -> String {
+        if status == errSecSuccess {
+            return "Added a new keychain item for service: \(service), account: \(account)."
+        }
+        return "[SECRETS] Failed to ADD a first-time keychain item for service '\(service)', "
+            + "account '\(account)' (\(osStatusName(status))). CONSEQUENCE: the credential is stored "
+            + "NOWHERE — the caller must treat this as a failure; a user who is told otherwise "
+            + "has a pairing, token or API key that silently will not exist after relaunch."
+    }
+
+    /// Logs the ADD result through `addResultMessage`, to the sink when one is installed.
+    private static func logAddResult(_ status: OSStatus, service: String, account: String) {
+        let message = addResultMessage(status: status, service: service, account: account)
+        if let sink = addResultLogSinkForTesting {
+            sink(message)
+            return
+        }
+        if status == errSecSuccess {
+            logger.log(message)
+        } else {
+            logger.error(message)
+        }
+    }
+
+    /// Human names for the OSStatus values this subsystem actually produces. Register KC-51: every
+    /// log used to carry a bare integer, and `OSStatus -25308` tells a reader nothing that
+    /// "errSecInteractionNotAllowed — the Keychain is locked, or an ACL prompt was denied" does.
+    /// Unmapped codes degrade to the raw number — a wrong name would be worse than none.
+    static func osStatusName(_ status: OSStatus) -> String {
+        switch status {
+        case errSecSuccess:                 return "errSecSuccess"
+        case errSecItemNotFound:            return "errSecItemNotFound (the item does not exist)"
+        case errSecAuthFailed:              return "errSecAuthFailed (locked Keychain, or an ACL prompt was denied)"
+        case errSecInteractionNotAllowed:   return "errSecInteractionNotAllowed (locked Keychain, or an ACL prompt is pending)"
+        case errSecMissingEntitlement:      return "errSecMissingEntitlement (keychain-access-groups / signing problem)"
+        case errSecDecode:                  return "errSecDecode (the item's payload could not be decoded)"
+        case errSecDuplicateItem:           return "errSecDuplicateItem"
+        case errSecParam:                   return "errSecParam"
+        default:                            return "OSStatus \(status) (unmapped)"
+        }
+    }
+
+    /// The log line for an in-place UPDATE of an existing item — both outcomes. Register KC-24:
+    /// every message this primitive emits carries a tag, the service AND account it concerns,
+    /// and — on failure — the consequence and a named OSStatus (KC-51).
+    static func updateResultMessage(status: OSStatus, service: String, account: String) -> String {
+        if status == errSecSuccess {
+            return "[SECRETS] Updated an existing keychain item for service '\(service)', account '\(account)'."
+        }
+        return "[SECRETS] Failed to UPDATE an existing keychain item for service '\(service)', "
+            + "account '\(account)' (\(osStatusName(status))). CONSEQUENCE: the caller receives the "
+            + "failure; an add attempt may follow, and if that also fails the credential is stored "
+            + "NOWHERE — see the ADD log line."
+    }
+
+    /// The log line for a DELETE — failure only (a successful delete and a delete of an absent
+    /// item are unremarkable). Register KC-24 / KC-51.
+    static func deleteResultMessage(status: OSStatus, service: String, account: String) -> String {
+        return "[SECRETS] Failed to DELETE a keychain item for service '\(service)', "
+            + "account '\(account)' (\(osStatusName(status))). CONSEQUENCE: the credential REMAINS "
+            + "stored — the caller must not report it as cleared or removed."
+    }
+
+    /// The log line for a FAILED READ. Register KC-24: this message omitted the ACCOUNT — but all
+    /// four ChatOps credentials share one service and every MCP secret shares another, so a read
+    /// failure without the account cannot be told apart from its siblings. Register B2: the
+    /// consequence is the whole reason this message exists.
+    static func readFailureMessage(status: OSStatus, service: String, account: String) -> String {
+        return "[SECRETS] Keychain read FAILED for service '\(service)', account '\(account)' "
+            + "(\(osStatusName(status))). CONSEQUENCE: the caller is told the read FAILED rather "
+            + "than that no value exists, so it must not overwrite or delete the stored credential."
+    }
+
     /// ⚠️⚠️ THE XCTEST HOST IS THE REAL APP, AND THIS IS WHERE THAT STOPPED REACHING THE LOGIN
     /// KEYCHAIN. Registers KC-54 / KC-55. Under XCTest every `SecureKeyStorage()` — including the
     /// ones inside `ProviderKeyStore`, `MCPSecretStore`, `HuggingFaceTokenStore`, `WebSearchKeyStore`
@@ -96,8 +197,12 @@ struct SecureKeyStorage: KeychainAccessing {
             kSecAttrAccount as String: account
         ]
 
+        // The label rides on the UPDATE too, so an item created by a build that predates KC-25
+        // is labelled the next time it is written — there is no separate backfill pass to forget.
         let attributesToUpdate: [String: Any] = [
-            kSecValueData as String: data
+            kSecValueData as String: data,
+            kSecAttrLabel as String: Self.itemLabel(service: service, account: account),
+            kSecAttrDescription as String: Self.itemDescription
         ]
 
         let status = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
@@ -106,16 +211,20 @@ struct SecureKeyStorage: KeychainAccessing {
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: account,
+                kSecAttrLabel as String: Self.itemLabel(service: service, account: account),
+                kSecAttrDescription as String: Self.itemDescription,
                 kSecValueData as String: data
             ]
             logger.log("No existing key found. Adding new key to keychain for service: \(service), account: \(account)")
-            return SecItemAdd(newQuery as CFDictionary, nil)
+            let addStatus = SecItemAdd(newQuery as CFDictionary, nil)
+            Self.logAddResult(addStatus, service: service, account: account)
+            return addStatus
         }
         
         if status == errSecSuccess {
-            logger.log("Successfully updated existing keychain item for service: \(service), account: \(account)")
+            logger.log(Self.updateResultMessage(status: status, service: service, account: account))
         } else {
-            logger.error("Error updating keychain item. Status: \(status)")
+            logger.error(Self.updateResultMessage(status: status, service: service, account: account))
         }
 
         return status
@@ -156,17 +265,20 @@ struct SecureKeyStorage: KeychainAccessing {
 
         if status == errSecItemNotFound { return .notFound }
 
-        guard status == errSecSuccess, let data = item as? Data,
-              let value = String(data: data, encoding: .utf8) else {
-            // ⚠️ A success status whose payload will not decode is a FAILURE, not an absence —
-            // the item exists and we could not read it, which is precisely the case that must not
-            // be mistaken for "none stored".
-            logger.error(
-                "[SECRETS] Keychain read failed for service '\(service)' (OSStatus \(status)). "
-                + "CONSEQUENCE: the caller is told the read FAILED rather than that no value "
-                + "exists, so it must not overwrite or delete the stored credential."
-            )
+        // ⚠️ A SUCCESS status whose payload will not come back as decodable data is a FAILURE,
+        // not an absence — the item exists and we could not read it, which is precisely the case
+        // that must not be mistaken for "none stored". Register B2.
+        guard status == errSecSuccess, let data = item as? Data else {
+            logger.error(Self.readFailureMessage(status: status, service: service, account: account))
             return .failed(status)
+        }
+        // Register KC-23: a decode failure used to return `.failed(errSecSuccess)` and log
+        // "OSStatus 0" — a self-contradicting log line. The item exists but its bytes are not
+        // valid UTF-8 (another tool wrote it, or a success arrived with no payload); that is
+        // errSecDecode, and the log now says so.
+        guard let value = String(data: data, encoding: .utf8) else {
+            logger.error(Self.readFailureMessage(status: errSecDecode, service: service, account: account))
+            return .failed(errSecDecode)
         }
 
         return .found(value)
@@ -190,7 +302,7 @@ struct SecureKeyStorage: KeychainAccessing {
 
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
-            logger.error("Error deleting from keychain. Status: \(status)")
+            logger.error(Self.deleteResultMessage(status: status, service: service, account: account))
         }
         return status
     }

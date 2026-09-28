@@ -338,4 +338,29 @@ final class GlobalRateLimiterTests: XCTestCase {
         let waitB = await limiter.wait(forKey: keyB, category: .anthropic)
         XCTAssertEqual(waitB, 0, "Different API keys should have independent buckets in workflow")
     }
+
+    // MARK: - D-09: an unusable Retry-After must never become debt
+
+    /// `Retry-After: inf` (or NaN, negative, or absurdly large) used to become −∞ debt, and the next
+    /// `wait` trapped in `UInt64(seconds * 1e9)` — an app crash from one response header (Timeout
+    /// inventory D-09). Asserted through `timeUntilNextToken`, which reads the same debt without
+    /// the trapping conversion, so a regression FAILS here instead of killing the test host.
+    func testDrainAndPenalize_UnusablePenalty_LeavesNoUnboundedDebt() async {
+        for penalty in [Double.infinity, -.infinity, .nan, -1, 1e30] {
+            let key = "anthropic:d09-\(penalty)"
+            await limiter.drainAndPenalize(key: key, category: .anthropic, penaltySeconds: penalty)
+            let wait = await limiter.timeUntilNextToken(forKey: key, category: .anthropic)
+            XCTAssertTrue(wait.isFinite, "penalty \(penalty) left a non-finite wait (\(wait)) — the next request would trap")
+            XCTAssertLessThanOrEqual(wait, 3600 + 2, "penalty \(penalty) was not clamped to the 1-hour ceiling (wait \(wait)s)")
+        }
+    }
+
+    /// The clamp must not swallow an honest Retry-After.
+    func testDrainAndPenalize_SanePenalty_IsStillHonoured() async {
+        let key = "anthropic:d09-sane"
+        await limiter.drainAndPenalize(key: key, category: .anthropic, penaltySeconds: 30)
+        let wait = await limiter.timeUntilNextToken(forKey: key, category: .anthropic)
+        XCTAssertGreaterThanOrEqual(wait, 30, "a 30 s Retry-After must still produce at least 30 s of debt, got \(wait)s")
+        XCTAssertLessThan(wait, 33)
+    }
 }

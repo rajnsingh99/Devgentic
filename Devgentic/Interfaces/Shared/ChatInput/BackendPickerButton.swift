@@ -28,14 +28,14 @@ struct BackendPickerButton: View {
 
     var body: some View {
         Button(action: { showingPopup = true }) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 ZStack {
                     Circle()
                         .fill(profileThemeColor.opacity(0.18))
-                        .frame(width: 12, height: 12)
+                        .frame(width: 10, height: 10)
                     Circle()
                         .fill(profileThemeColor)
-                        .frame(width: 6.5, height: 6.5)
+                        .frame(width: 5.5, height: 5.5)
                 }
 
                 Text(profileButtonText)
@@ -44,14 +44,15 @@ struct BackendPickerButton: View {
                     .lineLimit(1)
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8.5, weight: .semibold))
+                    .font(.system(size: 7.5, weight: .semibold))
                     .foregroundColor(theme.secondaryText.opacity(isHovering ? 0.9 : 0.65))
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
             .composerControlSurface(in: Capsule(), isHovered: isHovering)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .popover(isPresented: $showingPopup, arrowEdge: .bottom) {
             ProfileSelectorPopover(
                 configuration: backendConfiguration,

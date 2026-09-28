@@ -153,9 +153,27 @@ final class PairingWindowLifetimeTests: XCTestCase {
                 """)
             XCTAssertTrue(source.contains("deadlineTask?.cancel()"),
                           "\(path) never cancels its watchdog, so Cancel and success both leave it armed.")
-            XCTAssertTrue(source.contains("Task.sleep"),
-                          "\(path)'s watchdog does not actually wait on a clock.")
+            XCTAssertTrue(source.contains("await PairingWindowExpiry.waitOutWindow(timeout)"),
+                          "\(path)'s watchdog does not wait on the shared window clock.")
+            // D-10: the hand-rolled `UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000)` slept
+            // 300 NANOSECONDS (`??` binds looser than `*`). Any nanosecond conversion here is that
+            // trap waiting to come back.
+            let handConverted = source.components(separatedBy: "\n").filter {
+                $0.contains("pairingTimeout") && $0.contains("nanoseconds")
+            }
+            XCTAssertTrue(handConverted.isEmpty,
+                          "\(path) converts its pairing window to nanoseconds by hand again: \(handConverted)")
         }
+    }
+
+    /// D-10, behaviourally: the window is SECONDS. The broken conversion returned in 300 ns, so a
+    /// wait that comes back well before its timeout is exactly the defect.
+    func testTheWindowWaitLastsItsTimeoutInSeconds() async {
+        let start = ContinuousClock.now
+        await PairingWindowExpiry.waitOutWindow(0.3)
+        let elapsed = ContinuousClock.now - start
+        XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(290),
+            "the pairing window ended after \(elapsed) instead of 0.3 s — every pairing expires at once")
     }
 
     /// The services must be shared, or Cancel goes back to targeting an instance that never ran.

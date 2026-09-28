@@ -63,7 +63,10 @@ final class ProviderConfigSwitchProviderTests: XCTestCase {
 
     // MARK: - API key survival
 
-    func testSwitchPreservesAPIKey() {
+    /// The key must NOT follow the profile to another vendor: the first thing the new provider's
+    /// picker does is fetch its model list WITH the key, which sends the old vendor's credential
+    /// to the new vendor. Restoring on switch-back is the editor's in-memory stash, not this value.
+    func testSwitchClearsAPIKey() {
         var config = ProviderConfig(
             apiProvider: .openAI,
             modelName: "gpt-4o-mini",
@@ -72,8 +75,7 @@ final class ProviderConfigSwitchProviderTests: XCTestCase {
         )
         config.switchProvider(to: .anthropic)
 
-        XCTAssertEqual(config.apiKey, "sk-test-123",
-                       "Switching providers must not destroy a pasted secret — a mismatched key fails visibly in the model-list fetch")
+        XCTAssertNil(config.apiKey, "an OpenAI key must not be carried into an Anthropic profile")
     }
 
     // MARK: - Cloud → cloud custom endpoint
@@ -92,17 +94,16 @@ final class ProviderConfigSwitchProviderTests: XCTestCase {
         XCTAssertEqual(config.modelName, "")
     }
 
-    // MARK: - Reset matches a fresh config (minus the key)
+    // MARK: - Reset matches a fresh config
 
-    func testSwitchedConfigMatchesFreshConfigExceptKey() {
+    func testSwitchedConfigMatchesFreshConfig() {
         var switched = makeSeasonedOllamaConfig()
         switched.apiKey = "sk-test-123"
         switched.switchProvider(to: .openAI)
 
-        var fresh = ProviderConfig(apiProvider: .openAI, modelName: "")
-        fresh.apiKey = "sk-test-123"
+        let fresh = ProviderConfig(apiProvider: .openAI, modelName: "")
 
         XCTAssertEqual(switched, fresh,
-                       "switchProvider(to:) must equal a fresh config for the new provider plus the preserved key — if this fails, a new ProviderConfig field was added without deciding its switch behavior")
+                       "switchProvider(to:) must equal a fresh config for the new provider — if this fails, a new ProviderConfig field was added without deciding its switch behavior")
     }
 }

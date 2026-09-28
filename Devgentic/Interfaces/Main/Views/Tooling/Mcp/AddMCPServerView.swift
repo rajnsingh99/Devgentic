@@ -953,7 +953,11 @@ struct AddMCPServerView: View {
                     // RFC 8707: the MCP server itself is the resource these tokens are for.
                     // Binding the audience here is what stops a token minted for this server
                     // being replayed against another resource on the same issuer.
-                    resource: URL(string: formData.url.trimmingCharacters(in: .whitespaces))
+                    resource: URL(string: formData.url.trimmingCharacters(in: .whitespaces)),
+                    // Register KC-14: the bundle records WHICH URL the form held at sign-in
+                    // time. `MCPOAuthBinding` enforces the match at attach, persist and save,
+                    // so a URL edited after this moment cannot inherit these tokens.
+                    serverURL: URL(string: formData.url.trimmingCharacters(in: .whitespaces))
                 )
                 try Task.checkCancellation()
                 self.oauthBundle = bundle
@@ -1474,6 +1478,32 @@ struct AddMCPServerView: View {
         let secrets = buildRuntimeSecrets()
 
         if let existing = existingSource, let onToolUpdated = onToolUpdated {
+            // ⚠️ Register KC-14. The binding gate runs BEFORE the bundle persist below, so a
+            // refusal leaves nothing half-written: the bundle that will be in effect after
+            // this save must be bound to the URL being saved. A fresh sign-in binds to
+            // whatever the URL field held at sign-in time; a stored bundle must still match.
+            // `serverDefinition` is nil when the stored blob cannot be decoded, which the
+            // gate treats as "previous binding unknown" and fails closed for a legacy stored
+            // bundle (KC-37's lesson — never read an undecodable blob as "unchanged").
+            switch MCPOAuthBinding.editDecision(
+                isOAuth: config.auth.isOAuth,
+                newURL: config.url,
+                previousURL: existing.serverDefinition?.url,
+                freshBundle: oauthBundle,
+                storedRead: MCPSecretStore.shared.read(.oauthBundle, sourceID: existing.id)
+            ) {
+            case .proceed:
+                break
+            case .requiresReAuth(let error):
+                logger.warning("""
+                    [MCP-OAUTH] Refused to save '\(formData.serverName)' (\(existing.id)): the \
+                    OAuth binding does not cover URL '\(MCPRedaction.redact(url: config.url ?? "—"))'. \
+                    CONSEQUENCE: nothing was saved — no bundle was persisted and the row is \
+                    untouched; the user is asked to re-authenticate against the new URL.
+                    """)
+                activeError = error
+                return
+            }
             // ⚠️ Register KC-5. A re-authenticated OAuth bundle is persisted BEFORE the update, so
             // a Keychain refusal is shown instead of swallowed by `try?` and nothing is
             // half-applied. An unchanged bundle (a plain rename) is not rewritten.
@@ -1503,6 +1533,23 @@ struct AddMCPServerView: View {
             Task { await MCPClientService.shared.disconnect(sourceId: tempSourceId) }
             onDismiss?()
         } else if let onToolAdded = onToolAdded {
+            // ⚠️ Register KC-14, add path. Same invariant as the edit gate: a fresh sign-in
+            // must be bound to the URL being saved — the URL field may have been edited
+            // AFTER the sign-in, and a bundle bound to the old one must not ride along.
+            // Nothing is stored under the not-yet-chosen id, so the stored side cannot bind.
+            switch MCPOAuthBinding.editDecision(
+                isOAuth: config.auth.isOAuth,
+                newURL: config.url,
+                previousURL: nil,
+                freshBundle: oauthBundle,
+                storedRead: .notFound
+            ) {
+            case .proceed:
+                break
+            case .requiresReAuth(let error):
+                activeError = error
+                return
+            }
             switch onToolAdded(formData.serverName, config, secrets, tools, oauthBundle) {
             case .added:
                 Task { await MCPClientService.shared.disconnect(sourceId: tempSourceId) }

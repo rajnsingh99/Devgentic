@@ -127,13 +127,19 @@ struct MCPOAuthCoordinator {
     ///   issued token's audience to that one server, so it cannot be replayed against
     ///   another resource trusting the same issuer. Nil only when the caller genuinely has
     ///   no resource URL (a stdio server), in which case no binding is requested.
+    /// - Parameter serverURL: the MCP server URL the sign-in was performed FOR, recorded on
+    ///   the bundle for the LOCAL binding check (`MCPOAuthBinding`, register KC-14). Kept a
+    ///   separate parameter from `resource` on purpose: `resource` is the protocol-level
+    ///   audience request, `serverURL` is our own record and is never sent anywhere. Pass
+    ///   the same URL the form holds at sign-in time.
     static func performInitialAuthorization(
         issuer: URL,
         scopes: [String],
         redirectURI: URL,
         redirectHandler: MCPOAuthRedirectHandler,
         clientName: String = "Devgentic",
-        resource: URL? = nil
+        resource: URL? = nil,
+        serverURL: URL? = nil
     ) async throws -> MCPOAuthCredentialBundle {
 
         // 1. Discovery
@@ -236,7 +242,8 @@ struct MCPOAuthCoordinator {
             accessTokenExpiresAt: tokens.expiresAt,
             registrationAccessToken: registration.registrationAccessToken,
             registrationClientUri: registration.registrationClientUri,
-            resource: resource
+            resource: resource,
+            serverURL: serverURL
         )
         logger.info("Initial OAuth completed for issuer \(metadata.issuer.absoluteString)")
         return bundle
@@ -249,7 +256,8 @@ struct MCPOAuthCoordinator {
         issuer: URL,
         scopes: [String],
         clientName: String = "Devgentic",
-        resource: URL? = nil
+        resource: URL? = nil,
+        serverURL: URL? = nil
     ) async throws -> MCPOAuthCredentialBundle {
         let listener = try MCPOAuthLoopbackListener()
         LoopbackRegistry.shared.register(listener)
@@ -262,7 +270,8 @@ struct MCPOAuthCoordinator {
             redirectURI: listener.redirectURL,
             redirectHandler: handler,
             clientName: clientName,
-            resource: resource
+            resource: resource,
+            serverURL: serverURL
         )
     }
 
@@ -462,6 +471,17 @@ struct MCPOAuthCoordinator {
     ///   here would race `MCPSecretStore.purgeAll`, which runs synchronously on the delete
     ///   path and would leave this with nothing to revoke.
     static func revokeTokens(sourceID: UUID, bundle: MCPOAuthCredentialBundle) async {
+        // Register KC-64: delete the DYNAMIC CLIENT REGISTRATION first (RFC 7592), not just the
+        // tokens. The registration access token used to be persisted and never read — the client
+        // registration lived on at the provider forever. Best-effort and non-throwing, like the
+        // token revocation below; an AS without RFC 7592 answers 405 and we log and move on.
+        if let rat = bundle.registrationAccessToken, let uri = bundle.registrationClientUri {
+            _ = await MCPOAuthTokenExchange.deleteRegistration(
+                registrationClientUri: uri,
+                registrationAccessToken: rat
+            )
+        }
+
         let metadata: MCPOAuthMetadata
         do {
             metadata = try await MCPOAuthDiscovery.fetch(issuer: bundle.issuer)

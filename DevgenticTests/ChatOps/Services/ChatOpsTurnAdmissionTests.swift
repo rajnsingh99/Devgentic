@@ -162,6 +162,7 @@ final class ChatOpsTurnAdmissionTests: XCTestCase {
         var busy: Set<UUID> = []
         func hasActiveRun(inConversation conversation: UUID) -> Bool { busy.contains(conversation) }
         func pendingClarificationID(inConversation conversation: UUID) -> UUID? { nil }
+        func pendingQuestionNoun(inConversation conversation: UUID) -> String? { nil }
         @discardableResult
         func cancelRun(inConversation conversation: UUID) async -> Bool { busy.remove(conversation) != nil }
     }

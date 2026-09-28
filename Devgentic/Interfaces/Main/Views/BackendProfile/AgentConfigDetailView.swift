@@ -58,6 +58,7 @@ struct AgentConfigDetailView: View {
     @Environment(ToastManager.self) private var toastManager
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
 
     // Shared advanced config manager (replaces 5 @State config vars + isLoading flag)
     @State private var configManager = ProviderAdvancedConfigManager()
@@ -613,6 +614,7 @@ struct AgentConfigDetailView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack {
                                 ForEach(toolsBinding.wrappedValue.filter { $0.isEnabled }) { tool in
+                                    let isContrast = buttonAccentStyle == .themeContrast
                                     HStack(spacing: 4) {
                                         Image(systemName: "wrench.fill")
                                             .font(theme.fontCaption2)
@@ -622,10 +624,13 @@ struct AgentConfigDetailView: View {
                                     }
                                     .padding(.vertical, 6)
                                     .padding(.horizontal, 10)
-                                    .background(theme.accentColor.opacity(0.1))
-                                    .foregroundColor(theme.accentColor)
+                                    .background(isContrast ? theme.surfaceOverlayStrong : theme.accentColor.opacity(0.1))
+                                    .foregroundColor(isContrast ? theme.primaryText : theme.accentColor)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.accentColor.opacity(0.2), lineWidth: 1))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(isContrast ? theme.dividerColor.opacity(0.35) : theme.accentColor.opacity(0.2), lineWidth: 1)
+                                    )
                                 }
                             }
                         }
@@ -651,16 +656,27 @@ struct AgentConfigDetailView: View {
                     HStack(spacing: 8) {
                         Spacer()
 
-                        GlassActionButton(title: "Expand", icon: "arrow.up.left.and.arrow.down.right", isAccent: false) {
+                        TactileButton(
+                            title: "Expand",
+                            icon: "arrow.up.left.and.arrow.down.right",
+                            variant: .secondary,
+                            size: .compact
+                        ) {
                             promptWindowManager.showEditor(
                                 text: instructionsBinding,
                                 agentName: $editBuffer.draft.displayName,
                                 configuredTools: toolsBinding,
-                                themeManager: themeManager
+                                themeManager: themeManager,
+                                contextWindow: providerConfig.wrappedValue.modelMetadata?.contextWindow
                             )
                         }
 
-                        GlassActionButton(title: "Default Persona", icon: "sparkles", isAccent: true) {
+                        TactileButton(
+                            title: "Default Persona",
+                            icon: "sparkles",
+                            variant: .secondary,
+                            size: .compact
+                        ) {
                             instructionsBinding.wrappedValue = defaultSystemPersona
                         }
                     }
@@ -747,12 +763,13 @@ struct AgentConfigDetailView: View {
 
                             if !linkedSelections.isEmpty {
                                 let enabledCount = linkedSelections.filter { $0.isEnabled && !$0.isAwaitingRelink }.count
+                                let isContrast = buttonAccentStyle == .themeContrast
                                 Text("\(enabledCount) active")
                                     .font(theme.fontCodeCaption.weight(.medium))
-                                    .foregroundStyle(theme.accentColor)
+                                    .foregroundStyle(isContrast ? theme.primaryText : theme.accentColor)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(theme.accentColor.opacity(0.12), in: Capsule())
+                                    .background(isContrast ? theme.surfaceOverlayStrong : theme.accentColor.opacity(0.12), in: Capsule())
                             }
                         }
 
@@ -1257,22 +1274,25 @@ private struct SkillSelectionRow: View {
     let onOpenDetail: () -> Void
 
     @State private var isHovered = false
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
 
     var body: some View {
         Button(action: onOpenDetail) {
             HStack(spacing: 12) {
                 // 32x32 rounded icon badge
+                let isContrast = buttonAccentStyle == .themeContrast
+                let activeColor = isContrast ? theme.primaryText : theme.accentColor
                 ZStack {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill((selection.isEnabled ? theme.accentColor : theme.secondaryText).opacity(selection.isEnabled ? 0.15 : 0.08))
+                        .fill((selection.isEnabled ? activeColor : theme.secondaryText).opacity(selection.isEnabled ? (isContrast ? 0.12 : 0.15) : 0.08))
                     Image(systemName: "puzzlepiece")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(selection.isEnabled ? theme.accentColor : theme.secondaryText)
+                        .foregroundStyle(selection.isEnabled ? activeColor : theme.secondaryText)
                 }
                 .frame(width: 32, height: 32)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder((selection.isEnabled ? theme.accentColor : theme.dividerColor).opacity(selection.isEnabled ? 0.35 : 0.2), lineWidth: 0.5)
+                        .strokeBorder((selection.isEnabled ? activeColor : theme.dividerColor).opacity(selection.isEnabled ? 0.35 : 0.2), lineWidth: 0.5)
                 )
 
                 // Skill info

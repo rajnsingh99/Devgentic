@@ -117,10 +117,16 @@ final class ChatHistoryViewModel {
     /// `CodeViewerPresentation`). A MODE rather than a stored width so the panel keeps
     /// tracking the window through resizes — a "full" captured as points would stop being
     /// full the moment the window grew. Survives minimize/reopen; cleared with the tabs.
-    var codeViewerPresentation: CodeViewerPresentation = .overlay
+    /// Defaults to `.split`.
+    var codeViewerPresentation: CodeViewerPresentation = .split
     /// Where the full-width toggle returns to: entering `.full` from `.split` and toggling
     /// back should land in `.split`, not silently forget it.
-    @ObservationIgnored private var lastNonFullPresentation: CodeViewerPresentation = .overlay
+    @ObservationIgnored private var lastNonFullPresentation: CodeViewerPresentation = .split
+
+    /// How the background tasks panel occupies the window (overlay / split / full).
+    /// Defaults to `.split`.
+    var backgroundTasksPresentation: CodeViewerPresentation = .split
+    @ObservationIgnored private var lastNonFullBackgroundTasksPresentation: CodeViewerPresentation = .split
 
     /// The panel's width WHILE a divider drag is in flight; nil when no drag is running.
     ///
@@ -181,6 +187,25 @@ final class ChatHistoryViewModel {
     func hideBackgroundTasks() {
         isBackgroundTasksVisible = false
         backgroundTasksFocusTaskID = nil
+    }
+
+    /// Task cards saved in ONE conversation's timeline — the task list's history across launches
+    /// (see `BackgroundTaskHistory`). Holds only the most recently refreshed conversation: the pill
+    /// and the panel both follow `viewerOwningConversationID`, so no second one is ever read.
+    private(set) var savedBackgroundTasks: (conversationID: UUID, rows: [BackgroundTaskData])?
+
+    func refreshSavedBackgroundTasks(for conversationID: UUID) async {
+        let rows = await persistenceService.fetchBackgroundTaskRows(for: conversationID)
+        savedBackgroundTasks = (conversationID, rows)
+    }
+
+    /// The task list for a conversation: this launch's live tasks plus its saved history.
+    func backgroundTaskItems(for conversationID: UUID) -> [BackgroundTaskListItem] {
+        let saved = savedBackgroundTasks?.conversationID == conversationID ? savedBackgroundTasks?.rows ?? [] : []
+        return BackgroundTaskHistory.items(
+            live: BackgroundProcessRegistry.shared.snapshots(conversationID: conversationID),
+            saved: saved,
+            clearedBefore: BackgroundTaskHistory.clearedBefore(conversationID))
     }
     /// The floating reopen button shows when the panel was minimized but tabs remain.
     /// Same `hasCodeViewerTabs` reasoning as above.
@@ -891,8 +916,8 @@ final class ChatHistoryViewModel {
         if codeViewerTabs.isEmpty {
             activeCodeViewerTabID = nil
             isCodeViewerVisible = false
-            codeViewerPresentation = .overlay
-            lastNonFullPresentation = .overlay
+            codeViewerPresentation = .split
+            lastNonFullPresentation = .split
             codeApplyError = nil
             dropStashedTabs(reason: "the last tab was closed")
             logger.info("[CodeViewer] Last tab closed — viewer dismissed.")
@@ -991,8 +1016,8 @@ final class ChatHistoryViewModel {
             codeViewerTabs.removeAll()
             activeCodeViewerTabID = nil
             isCodeViewerVisible = false
-            codeViewerPresentation = .overlay
-            lastNonFullPresentation = .overlay
+            codeViewerPresentation = .split
+            lastNonFullPresentation = .split
             codeApplyError = nil
             dropStashedTabs(reason: "the user closed all tabs")
             logger.info("[CodeViewer] All tabs closed (\(count) dismissed).")
@@ -1013,7 +1038,7 @@ final class ChatHistoryViewModel {
         logger.info("[CodeViewer] Presentation → \(self.codeViewerPresentation.rawValue).")
     }
 
-    /// Toggles the EXPERIMENTAL side-by-side split with the chat. From full-width it goes
+    /// Toggles the side-by-side split with the chat. From full-width it goes
     /// straight to split (the user asked for split — routing through overlay first would
     /// just add a flicker).
     func toggleCodeViewerSplit() {
@@ -1022,6 +1047,28 @@ final class ChatHistoryViewModel {
             lastNonFullPresentation = codeViewerPresentation
         }
         logger.info("[CodeViewer] Presentation → \(self.codeViewerPresentation.rawValue).")
+    }
+
+    /// Toggles full-width presentation for the background tasks panel.
+    func toggleBackgroundTasksExpansion() {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            if backgroundTasksPresentation == .full {
+                backgroundTasksPresentation = lastNonFullBackgroundTasksPresentation
+            } else {
+                lastNonFullBackgroundTasksPresentation = backgroundTasksPresentation
+                backgroundTasksPresentation = .full
+            }
+        }
+        logger.info("[BackgroundTasks] Presentation → \(self.backgroundTasksPresentation.rawValue).")
+    }
+
+    /// Toggles side-by-side split with the chat for the background tasks panel. From full-width it goes straight to split.
+    func toggleBackgroundTasksSplit() {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            backgroundTasksPresentation = (backgroundTasksPresentation == .split) ? .overlay : .split
+            lastNonFullBackgroundTasksPresentation = backgroundTasksPresentation
+        }
+        logger.info("[BackgroundTasks] Presentation → \(self.backgroundTasksPresentation.rawValue).")
     }
 
     /// Hides the panel but KEEPS the tabs — the floating reopen button takes over.
@@ -1233,8 +1280,8 @@ final class ChatHistoryViewModel {
         codeViewerTabs.removeAll()
         activeCodeViewerTabID = nil
         isCodeViewerVisible = false
-        codeViewerPresentation = .overlay
-        lastNonFullPresentation = .overlay
+        codeViewerPresentation = .split
+        lastNonFullPresentation = .split
         codeApplyError = nil
         pendingCloseTabID = nil
         isPendingCloseAll = false

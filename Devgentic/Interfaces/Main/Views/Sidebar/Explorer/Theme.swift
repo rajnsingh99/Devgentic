@@ -113,7 +113,7 @@ struct ThemeDecorator: Theme {
     let accentColorOverride: AppAccentColor
     let codeThemeOverride: CodeViewerThemeOverride
 
-    init(base: any Theme, accentColorOverride: AppAccentColor, codeThemeOverride: CodeViewerThemeOverride = .material) {
+    init(base: any Theme, accentColorOverride: AppAccentColor, codeThemeOverride: CodeViewerThemeOverride = .cosmicDark) {
         self.base = base
         self.accentColorOverride = accentColorOverride
         self.codeThemeOverride = codeThemeOverride
@@ -124,8 +124,8 @@ struct ThemeDecorator: Theme {
     /// The theme from which code blocks and syntax highlighting derive their styling.
     var effectiveCodeTheme: any Theme {
         switch codeThemeOverride {
-        case .material: return AppThemes.MaterialTheme()
-        case .cosmicDark: return AppThemes.CosmicDarkTheme()
+        case .cosmicDark: return AppThemes.MaterialTheme()
+        case .highContrast: return AppThemes.HighContrastTheme()
         case .oneLight: return AppThemes.OneLightTheme()
         case .solarizedLight: return AppThemes.SolarizedLightTheme()
         }
@@ -717,17 +717,17 @@ extension AppThemes {
         var controlAccent: Color { Color(hex: "#80cbc4") }
         var userBubbleBackground: Color { Color(hex: "#80cbc4") }
         var inlineCodeHighlight: Color { Color(hex: "#c792ea") }    // Material Lilac
-        var codeBlockHeaderBackground: Color { Color(hex: "#1a1a1d") }
-        var codeBlockEditorBackground: Color { Color(hex: "#141416") }
+        var codeBlockHeaderBackground: Color { Color(hex: "#212121") }
+        var codeBlockEditorBackground: Color { Color(hex: "#1a1a1a") }
         var surfaceOverlay: Color { Color.white.opacity(0.06) }
         var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
         var streamingIndicator: Color { Color(hex: "#80cbc4") }
 
-        // Syntax — Material Darker palette (matching highlight.js material-darker)
+        // Syntax — Refined neutral dark palette
         var syntaxTheme: SyntaxTheme {
             SyntaxTheme(
-                background: NSColor(hex: "#141416"),
-                lineHighlight: NSColor(hex: "#1a1a1d"),
+                background: NSColor(hex: "#1a1a1a"),
+                lineHighlight: NSColor(hex: "#212121"),
                 selection: NSColor(hex: "#353535"),
                 text: NSColor(hex: "#eeffff"),
                 keywords: NSColor(hex: "#c792ea"),
@@ -739,7 +739,7 @@ extension AppThemes {
                 numbers: NSColor(hex: "#f78c6c"),
                 strings: NSColor(hex: "#c3e88d"),
                 characters: NSColor(hex: "#c3e88d"),
-                comments: NSColor(hex: "#78909c"),
+                comments: NSColor(hex: "#757575"),
                 bracketHighlight: NSColor(hex: "#80cbc4").withAlphaComponent(0.4)
             )
         }
@@ -775,6 +775,7 @@ extension AppThemes {
         let errorColor: Color = Color(hex: "#e91429")              // Spotify error red
         let successColor: Color = Color(hex: "#1DB954")
         let warningColor: Color = Color(hex: "#ffa500")
+        var warningForegroundColor: Color { .black }
 
         // Tier 2 — Overrides
         var controlBackground: Color { Color(hex: "#181818") }
@@ -807,6 +808,73 @@ extension AppThemes {
                 characters: NSColor(hex: "#f1fa8c"),
                 comments: NSColor(hex: "#7982a9"),          // Cool slate lavender
                 bracketHighlight: NSColor(hex: "#1DB954").withAlphaComponent(0.4)
+            )
+        }
+    }
+}
+
+
+
+
+// MARK: - High Contrast Theme
+
+extension AppThemes {
+    struct HighContrastTheme: Theme {
+        let id = "high_contrast"
+        let displayName = "High Contrast"
+        let colorScheme: ColorScheme? = .dark
+        /// Highlightr bundles a11y-dark for maximum contrast.
+        let codeHighlightThemeName = "a11y-dark"
+
+        // Tier 1 — Core (Pitch OLED Black Palette)
+        let primaryBackground: Color = Color(hex: "#000000")        // Pure Black
+        let secondaryBackground: Color = Color(hex: "#0c0c0c")      // Subtle contrast elevation
+        let tertiaryBackground: Color = Color(hex: "#1c1c1e")       // Card/Surface elevation
+
+        let primaryText: Color = .white                             // Crisp pure white
+        let secondaryText: Color = Color(hex: "#d1d1d6")           // High-contrast secondary text
+        let tertiaryText: Color = Color(hex: "#8e8e93")            // High-contrast muted text
+
+        let accentColor: Color = Color(hex: "#00e5ff")              // Vivid Electric Cyan
+        let dividerColor: Color = Color(hex: "#38383a")             // Sharp distinct borders
+        let selectionColor: Color = Color(hex: "#444446")
+
+        let errorColor: Color = Color(hex: "#ff453a")
+        let successColor: Color = Color(hex: "#30d158")
+        let warningColor: Color = Color(hex: "#ffd60a")
+        var warningForegroundColor: Color { .black }
+
+        // Tier 2 — Overrides
+        var controlBackground: Color { Color(hex: "#1c1c1e") }
+        var textBackground: Color { Color(hex: "#000000") }
+        var placeholderText: Color { Color(hex: "#8e8e93") }
+        var controlAccent: Color { Color(hex: "#00e5ff") }
+        var userBubbleBackground: Color { Color(hex: "#00e5ff") }
+        var inlineCodeHighlight: Color { Color(hex: "#00e5ff") }
+        var codeBlockHeaderBackground: Color { Color(hex: "#141416") }
+        var codeBlockEditorBackground: Color { Color(hex: "#000000") }
+        var surfaceOverlay: Color { Color.white.opacity(0.08) }
+        var surfaceOverlayStrong: Color { Color.white.opacity(0.14) }
+        var streamingIndicator: Color { Color(hex: "#00e5ff") }
+
+        // Syntax — High Contrast Palette (Pure Black + Vivid Tokens)
+        var syntaxTheme: SyntaxTheme {
+            SyntaxTheme(
+                background: NSColor(hex: "#000000"),
+                lineHighlight: NSColor(hex: "#1c1c1e"),
+                selection: NSColor(hex: "#3a3a3c"),
+                text: .white,
+                keywords: NSColor(hex: "#ff375f"),          // Hot neon pink
+                commands: NSColor(hex: "#00e5ff"),          // Electric cyan
+                types: NSColor(hex: "#ffd60a"),             // Bright gold
+                attributes: NSColor(hex: "#bf5af2"),        // Neon violet
+                variables: .white,
+                values: NSColor(hex: "#ff9f0a"),            // Vivid orange
+                numbers: NSColor(hex: "#ff9f0a"),
+                strings: NSColor(hex: "#30d158"),           // Bright neon green
+                characters: NSColor(hex: "#30d158"),
+                comments: NSColor(hex: "#8e8e93"),          // Clean light slate
+                bracketHighlight: NSColor(hex: "#00e5ff").withAlphaComponent(0.5)
             )
         }
     }

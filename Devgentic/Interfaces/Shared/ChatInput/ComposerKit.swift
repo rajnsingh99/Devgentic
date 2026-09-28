@@ -33,6 +33,8 @@ import AppKit
 enum ComposerStyle {
     static let editorFontSize: CGFloat = 14
     static var editorNSFont: NSFont { .systemFont(ofSize: editorFontSize) }
+    /// Standard compact composer action button size (down from 28 to 24 for refined macOS density).
+    static let buttonSize: CGFloat = 24
 }
 
 // MARK: - Capabilities
@@ -55,7 +57,7 @@ struct ComposerCapabilities {
 
 // MARK: - Icon button
 
-/// The standard 28×28 circular composer icon button (attach, screenshot, …).
+/// The standard circular composer icon button (attach, screenshot, …).
 /// Adapts between Apple Liquid Glass and Pro Solid Matte via `composerControlSurface`.
 struct ComposerIconButton: View {
     let systemName: String
@@ -72,9 +74,9 @@ struct ComposerIconButton: View {
             action()
         }) {
             Image(systemName: systemName)
-                .font(.system(.body, weight: .medium))
+                .font(.system(size: 11.5, weight: .medium))
                 .foregroundColor(isHovered && !disabled ? theme.primaryText : theme.secondaryText.opacity(0.85))
-                .frame(width: 28, height: 28)
+                .frame(width: ComposerStyle.buttonSize, height: ComposerStyle.buttonSize)
                 .composerControlSurface(in: Circle(), isHovered: isHovered && !disabled)
                 .shadow(color: isHovered && !disabled ? Color.black.opacity(0.2) : .clear, radius: 4, x: 0, y: 1)
                 .scaleEffect(isHovered && !disabled ? 1.06 : 1.0)
@@ -116,7 +118,7 @@ struct ComposerMicButton: View {
                     Circle()
                         .fill(Color.red.opacity(0.15)
                             .shadow(.drop(color: Color.red.opacity(0.3), radius: 2)))
-                        .frame(width: 28, height: 28)
+                        .frame(width: ComposerStyle.buttonSize, height: ComposerStyle.buttonSize)
                         .scaleEffect(pulseScale)
                         .onAppear {
                             guard !reduceMotion else { return }
@@ -128,9 +130,9 @@ struct ComposerMicButton: View {
                 }
 
                 Image(systemName: isRecording ? "stop.fill" : "mic.fill")
-                    .font(.system(.body, weight: .medium))
+                    .font(.system(size: 11.5, weight: .medium))
                     .foregroundColor(isRecording ? .red : (isReady ? (isHovered ? theme.primaryText : theme.secondaryText) : theme.secondaryText.opacity(0.3)))
-                    .frame(width: 28, height: 28)
+                    .frame(width: ComposerStyle.buttonSize, height: ComposerStyle.buttonSize)
                     .background(isHovered ? theme.surfaceOverlayStrong : Color.clear)
                     .clipShape(Circle())
                     .scaleEffect(isHovered ? 1.06 : 1.0)
@@ -143,6 +145,9 @@ struct ComposerMicButton: View {
         .accessibilityLabel(isRecording ? "Stop dictation"
                             : (isReady ? "Start voice dictation"
                                : "Voice dictation unavailable — no speech model downloaded"))
+        // Right-click: which microphone dictation records from (shared with the main composer).
+        .contextMenu { MicrophoneMenu() }
+        .onAppear { MicrophoneSelection.shared.refresh() }
     }
 }
 
@@ -179,7 +184,7 @@ struct ComposerPrimaryButton: View {
     private var backgroundColor: Color {
         if isDisabled {
             if surfaceStyle == .solid {
-                return theme.isDark ? Color(hex: "#26262B") : Color(hex: "#F4F4F5")
+                return theme.isDark ? Color(hex: "#26262B") : theme.tertiaryBackground
             }
             return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05)
         }
@@ -238,7 +243,7 @@ struct ComposerPrimaryButton: View {
             ZStack {
                 Circle()
                     .fill(backgroundColor)
-                    .frame(width: 28, height: 28)
+                    .frame(width: ComposerStyle.buttonSize, height: ComposerStyle.buttonSize)
                     .overlay(
                         Circle()
                             .strokeBorder(borderColor, lineWidth: 0.5)
@@ -250,7 +255,7 @@ struct ComposerPrimaryButton: View {
                         y: 1
                     )
                 Image(systemName: systemName)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 10.5, weight: .bold))
                     .foregroundColor(foregroundColor)
             }
             .scaleEffect(isHovered && !isDisabled ? 1.06 : 1.0)
@@ -283,14 +288,14 @@ struct ComposerSendStopButton: View {
                 ZStack {
                     Circle()
                         .fill(Color.red.opacity(isHovered ? 0.18 : 0.10))
-                        .frame(width: 28, height: 28)
+                        .frame(width: ComposerStyle.buttonSize, height: ComposerStyle.buttonSize)
                         .overlay(
                             Circle()
                                 .strokeBorder(Color.red.opacity(isHovered ? 0.45 : 0.25), lineWidth: 0.5)
                         )
                         .shadow(color: Color.red.opacity(isHovered ? 0.25 : 0.08), radius: 3, x: 0, y: 1)
                     Image(systemName: "stop.fill")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.red)
                 }
                 .scaleEffect(isHovered ? 1.06 : 1.0)

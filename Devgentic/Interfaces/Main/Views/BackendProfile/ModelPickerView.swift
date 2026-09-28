@@ -45,7 +45,9 @@ enum ConfiguredEndpoint: Equatable {
         switch self {
         case .vendorDefault:      return "the default endpoint"
         case .custom(let url):    return url.absoluteString
-        case .unusable(let raw):  return "an unusable endpoint ('\(raw)')"
+        // ⚠️ The raw value is withheld: the usual way this field becomes unusable is an API key
+        // pasted into it, and echoing it would put that key in the log.
+        case .unusable(let raw):  return "an unusable endpoint (\(raw.count) chars, not a URL — value withheld; it may be a pasted API key)"
         }
     }
 

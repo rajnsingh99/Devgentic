@@ -1448,13 +1448,18 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     /// against the new provider (e.g. an Ollama `localhost:11434` baseURL sent to OpenAI,
     /// or a tuned local `temperature` silently applied to a cloud model).
     ///
-    /// `apiKey` deliberately survives: switching away and back must not destroy a pasted
-    /// secret, local providers ignore it, and a key mismatched to the new cloud provider
-    /// fails visibly in the model-list fetch. `cognitiveCapability` is reset to `.none`;
+    /// `apiKey` is cleared too (changed 2026-09-27). It used to survive on the theory that "a key
+    /// mismatched to the new cloud provider fails visibly in the model-list fetch" — but that fetch
+    /// is itself a request to the NEW vendor carrying the OLD vendor's credential, so the "visible
+    /// failure" was the leak. Switching away and back still restores a pasted key: the editor keeps
+    /// a per-provider stash for the session (`ProviderConfigSection.stashedKeys`), and
+    /// `ProviderKeyShape` refuses at send time any key that plainly belongs to another vendor.
+    /// `cognitiveCapability` is reset to `.none`;
     /// profile-type-aware defaults are layered on by the `onProviderChanged` callbacks
     /// via `ProfileCapabilityFilter`.
     mutating func switchProvider(to newProvider: ApiProvider) {
         apiProvider = newProvider
+        apiKey = nil
         modelName = ""
         baseURL = nil
         advancedConfiguration = nil

@@ -113,8 +113,14 @@ actor ReActAgentExecutor: Executor {
                     var circuitBreaker = CognitiveCircuitBreaker(
                         maxConsecutiveToolFailures: input.resiliencePolicy.loop.maxConsecutiveToolFailures,
                         maxRepetitiveActions: input.resiliencePolicy.loop.maxRepetitiveActions,
-                        maxConsecutiveDenials: input.resiliencePolicy.loop.maxConsecutiveDenials
+                        maxConsecutiveDenials: input.resiliencePolicy.loop.maxConsecutiveDenials,
+                        // Every trigger kind honours the profile's tolerance today
+                        // (`AbortTrigger.honoursToolFailurePolicy`), so this is exact.
+                        repetitionEndsRun: input.errorRecovery.onToolFailure == .abort
                     )
+                    // Downgraded breaker triggers already shown to the user, so a loop that keeps
+                    // going warns ONCE, not every iteration (the model is still nudged every time).
+                    var announcedLoopWarnings: Set<String> = []
                     // [Loop Safety] Per-run memory of human interactions: replays identical
                     // clarification answers and auto-denies identical declined requests, so
                     // the user is never asked the same thing twice in one run. A capability
@@ -233,6 +239,14 @@ actor ReActAgentExecutor: Executor {
                     }
                     
                     // MARK: - Cognitive Loop
+                    // Set when the loop ends on the model's ANSWER (prose or `final_answer`). The
+                    // post-loop "exhausted?" test used to be the step count alone, so an answer on
+                    // the last allowed step was still replaced by the exhaustion template (D-19).
+                    var reachedAnswer = false
+                    // Largest request payload (chars) the user approved at the large-request gate
+                    // this run; 0 = none yet. See `LargeRequestGate.needsConfirmation`.
+                    var largeRequestApprovedThroughChars = 0
+
                     cognitiveLoop: while currentIteration < self.maxIterations {
                         try Task.checkCancellation()
                         currentIteration += 1
@@ -562,6 +576,67 @@ actor ReActAgentExecutor: Executor {
                             }
                         }
 
+                        // --- Large cloud request gate --- (see `LargeRequestGate`)
+                        // Native path only: that is the path that resends the whole turn array,
+                        // and the only one `largeRequestConfirmChars` is ever set for in practice.
+                        if nativeGenerator != nil, input.largeRequestConfirmChars > 0 {
+                            let payloadChars = liveConversationTurns.reduce(0) { $0 + approximateTurnChars($1) }
+                                + ToolSchemaSizes.chars(for: availableToolsThisIteration.map(\.name))
+                            if LargeRequestGate.needsConfirmation(
+                                payloadChars: payloadChars,
+                                thresholdChars: input.largeRequestConfirmChars,
+                                approvedThroughChars: largeRequestApprovedThroughChars
+                            ) {
+                                let tokens = LargeRequestGate.estimatedTokens(chars: payloadChars)
+                                let approvalNodeID = input.workflowContext?.nodeID
+                                if await SessionToolApprovals.shared.isAllowed(
+                                    toolName: LargeRequestGate.bannerToolName,
+                                    conversationID: input.conversationID,
+                                    nodeID: approvalNodeID
+                                ) {
+                                    logger.info("[LARGE_REQUEST] ~\(tokens) tokens to \(model.modelName) — allowed for this chat earlier, not asking. conv \(input.conversationID.uuidString.prefix(8))")
+                                    largeRequestApprovedThroughChars = payloadChars
+                                } else if !WorkflowRunAttendance.canReachAHuman {
+                                    // Nobody can answer a banner in an unattended run, and parking here
+                                    // would only end at the run's time limit. Warn and send.
+                                    logger.warning("[LARGE_REQUEST] ~\(tokens) tokens to \(model.modelName) in an UNATTENDED run. CONSEQUENCE: sent without asking — nobody can answer a banner here.")
+                                    continuation.yield(.warning(category: .contextPressure, message: "Sending a large request (~\(tokens.formatted()) tokens) to \(model.modelName)."))
+                                    largeRequestApprovedThroughChars = payloadChars
+                                } else {
+                                    let operationID = UUID()
+                                    logger.notice("[LARGE_REQUEST] ~\(tokens) tokens (\(payloadChars) chars) to \(model.modelName) is over the \(LargeRequestGate.thresholdTokens)-token warning level. CONSEQUENCE: the run PARKS on a confirmation banner before anything is sent.")
+                                    continuation.yield(.requestConfirmation(
+                                        toolName: LargeRequestGate.bannerToolName,
+                                        params: LargeRequestGate.bannerText(payloadChars: payloadChars, modelName: model.modelName),
+                                        operationID: operationID,
+                                        sourceNodeID: approvalNodeID,
+                                        sourceNodeName: input.workflowContext?.nodeName
+                                    ))
+                                    let approved = await ExecutionSuspensionService.shared.suspend(
+                                        for: operationID, conversationID: input.conversationID, nodeID: approvalNodeID)
+                                    // A Stop also resolves the park as `false`; let it take the
+                                    // cancellation path rather than reporting a decline nobody made.
+                                    try Task.checkCancellation()
+                                    guard approved else {
+                                        logger.notice("[LARGE_REQUEST] DECLINED by the user (~\(tokens) tokens). CONSEQUENCE: the run stops here; nothing was sent.")
+                                        let reason = "User declined a ~\(tokens)-token request to the cloud model"
+                                        if !input.suppressEpisodeManagement {
+                                            sessionState.closeActiveEpisode(outcome: .cancelled, message: reason)
+                                            await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                                        }
+                                        iterationFinishedNormally = true
+                                        continuation.yield(.content(LargeRequestGate.declinedText(payloadChars: payloadChars)))
+                                        flushTokenUsage()
+                                        continuation.yield(.executionFinished(outcome: .cancelled, reason: reason))
+                                        continuation.finish()
+                                        return
+                                    }
+                                    logger.info("[LARGE_REQUEST] APPROVED by the user (~\(tokens) tokens). CONSEQUENCE: sent; the next ask comes if the payload grows by another \(LargeRequestGate.thresholdTokens) tokens.")
+                                    largeRequestApprovedThroughChars = payloadChars
+                                }
+                            }
+                        }
+
                         // --- Structured Generation ---
                         let step: ModernCognitiveStep
                         do {
@@ -584,12 +659,32 @@ actor ReActAgentExecutor: Executor {
                             )
                             if let nativeGen = nativeGenerator {
                                 // G12 native path: thread the growing turn array through the provider.
-                                step = try await nativeGen.generateNativeStep(
-                                    model: spyModel,
-                                    nativeMessages: liveConversationTurns,
-                                    availableTools: availableToolsThisIteration,
-                                    iteration: currentIteration
-                                )
+                                //
+                                // Streamed as a provisional draft (`.draftText`) so a long step shows
+                                // text as it is written instead of nothing — a 68s cloud step used to
+                                // leave the bubble empty for all 68s. The draft is withdrawn below
+                                // unless the step turns out to be the final answer, whose `.content`
+                                // then replaces it.
+                                let draft = DraftTextRelay(enabled: Self.streamsDrafts(for: input)) { text in
+                                    continuation.yield(.draftText(text))
+                                }
+                                do {
+                                    step = try await nativeGen.generateNativeStep(
+                                        model: spyModel,
+                                        nativeMessages: liveConversationTurns,
+                                        availableTools: availableToolsThisIteration,
+                                        iteration: currentIteration,
+                                        onTextDelta: draft.onTextDelta
+                                    )
+                                } catch {
+                                    draft.withdraw()
+                                    throw error
+                                }
+                                let isFinalAnswer: Bool = {
+                                    if case .genuineCompletion = step.parseOutcome { return true }
+                                    return false
+                                }()
+                                if isFinalAnswer { draft.flush() } else { draft.withdraw() }
                             } else {
                                 // Legacy path (MLX, dialect generators): rebuilds messages from context each iter.
                                 step = try await input.generatorStrategy.generateCognitiveStep(
@@ -630,10 +725,17 @@ actor ReActAgentExecutor: Executor {
                             // small/Q4 model outputs. Logging "📄 Model Reasoning: " with
                             // nothing after the colon is misleading during triage; show
                             // an explicit `(none)` marker instead.
+                            // ⚠️ `step.reasoning` is the model's VISIBLE text — on a no-tool step it
+                            // is the final answer — not its thinking. It used to be logged as
+                            // "Model Reasoning", which read as the answer leaking into the thought
+                            // trace. The thinking trace is `step.thought`, logged separately.
                             if step.reasoning.isEmpty {
-                                logger.info("📄 Model Reasoning: (none)")
+                                logger.info("📄 Model text: (none)")
                             } else {
-                                logger.info("📄 Model Reasoning: \(step.reasoning)")
+                                logger.info("📄 Model text\(step.toolCalls.isEmpty ? " (final answer)" : ""): \(step.reasoning)")
+                            }
+                            if let thought = step.thought, !thought.isEmpty {
+                                logger.info("🧠 Thinking trace: \(thought.count) chars")
                             }
                             if step.toolCalls.isEmpty {
                                 logger.info("🛑 No tool calls produced.")
@@ -805,7 +907,9 @@ actor ReActAgentExecutor: Executor {
                         if let thought = step.thought, !thought.isEmpty {
                             let sanitized = OutputSanitizer.sanitizeForUI(thought)
                             if !sanitized.isEmpty {
-                                continuation.yield(.thought("Step \(currentIteration) — \(sanitized)"))
+                                // No "Step N —" prefix: each trace already sits in its own "Thinking"
+                                // row in order, so the number only pushed the model's words right.
+                                continuation.yield(.thought(sanitized))
                             }
                         }
 
@@ -816,7 +920,16 @@ actor ReActAgentExecutor: Executor {
                         // the reasoning amnesia where each iteration started with no
                         // trace of the previous one's monologue.
                         // Skip if empty or identical to `.thought` content to avoid duplication.
-                        if !step.reasoning.isEmpty && step.reasoning != step.thought {
+                        // ⚠️ Not for the FINAL answer. A no-tool step always ends the run with
+                        // this exact text as the reply (`EpisodeTerminationEvaluator` →
+                        // `.completed(finalThought: step.reasoning)`), and a `.reasoning` event is
+                        // rendered in the thinking timeline — so the whole answer used to appear
+                        // twice: once as a "thought", once as the message.
+                        let isFinalAnswer: Bool = {
+                            if case .genuineCompletion = step.parseOutcome { return true }
+                            return false
+                        }()
+                        if !isFinalAnswer, !step.reasoning.isEmpty && step.reasoning != step.thought {
                             let sanitized = OutputSanitizer.sanitizeForUI(step.reasoning)
                             if !sanitized.isEmpty {
                                 // The UI still shows it. On a failed parse this is the user's ONLY
@@ -871,7 +984,9 @@ actor ReActAgentExecutor: Executor {
                         let termStatus = terminationEvaluator.evaluate(step: step, currentIteration: currentIteration, maxIterations: self.maxIterations)
                         switch termStatus {
                         case .maxIterationsReached:
-                            break
+                            // The budget is spent and this step's calls cannot be read — end now
+                            // instead of running them (the evaluator logged which).
+                            iterationFinishedNormally = true; break cognitiveLoop
                         case .completed(let finalThought):
                             executionSummary.finalAgentThought = finalThought
                             // Terminal prose exit (genuineCompletion): there are no tool
@@ -888,6 +1003,7 @@ actor ReActAgentExecutor: Executor {
                                 content: "Model answered directly (no tool calls).",
                                 metadata: ["iteration": "\(currentIteration)"]
                             ))
+                            reachedAnswer = true
                             iterationFinishedNormally = true; break cognitiveLoop
                         case .suspectedFormatFailure(let originalReason, _):
                             // Identical-output detection. If the model emits byte-identical
@@ -1053,6 +1169,7 @@ actor ReActAgentExecutor: Executor {
                                 artifacts: terminal.artifacts
                             )
                             logger.info("🏁 Terminal signal received (final_answer). Exiting cognitive loop at iteration \(currentIteration).")
+                            reachedAnswer = true
                             iterationFinishedNormally = true; break cognitiveLoop
                         }
 
@@ -1142,7 +1259,8 @@ actor ReActAgentExecutor: Executor {
                             liveConversationTurns.append(
                                 nativeGen.toolTurnAdapter.assistantTurn(
                                     toolCalls: executedCalls,
-                                    reasoning: sanitizedReasoning
+                                    reasoning: sanitizedReasoning,
+                                    replay: step.reasoningReplay
                                 )
                             )
                             liveConversationTurns.append(
@@ -1286,7 +1404,10 @@ actor ReActAgentExecutor: Executor {
                             switch effectivePolicy {
                             case .skipAndContinue:
                                 // Log the failure but let the agent continue reasoning
-                                continuation.yield(.thought("⚠️ \(abortTrigger.category.displayName) — skipping and continuing."))
+                                if announcedLoopWarnings.insert(abortTrigger.announcementKey).inserted {
+                                    continuation.yield(.warning(category: .circuitBreaker,
+                                                                message: abortTrigger.continuingWarning))
+                                }
                                 // ⚠️ The trigger's OWN wording, never a generic "tools failed".
                                 let skipAlert = "\(abortTrigger.modelNarrative) Continue with the information you already have."
                                 memoryStrategy.recordSystemAlert(msg: skipAlert)
@@ -1296,8 +1417,15 @@ actor ReActAgentExecutor: Executor {
                                 // Don't abort — fall through to next iteration
 
                             case .fallbackPrompt:
-                                // Inject a fallback hint and let the agent try a different approach
-                                continuation.yield(.thought("⚠️ \(abortTrigger.category.displayName) — trying a different approach."))
+                                // Inject a fallback hint and let the agent try a different approach.
+                                // ⚠️ D-15 (owner decision 2026-09-27): a loop here WARNS and the run
+                                // continues. The notice was a `.thought` — easy to miss, and gone from
+                                // the warning stream — so a looping run with no cap and no limit gave
+                                // the user nothing to act on. Now a real warning, once per loop.
+                                if announcedLoopWarnings.insert(abortTrigger.announcementKey).inserted {
+                                    continuation.yield(.warning(category: .circuitBreaker,
+                                                                message: abortTrigger.continuingWarning))
+                                }
                                 let userMessage = input.errorRecovery.fallbackMessage ?? ErrorRecovery.defaultFallbackMessage
                                 // ⚠️⚠️ THE LINE THAT CORRUPTED A FILE. This read "Tools are failing
                                 // repeatedly: …" for EVERY trigger — including a repetition loop in
@@ -1394,7 +1522,7 @@ actor ReActAgentExecutor: Executor {
                     try Task.checkCancellation()
 
                     // --- Post-Loop Handoff ---
-                    let iterationExhausted = currentIteration >= self.maxIterations
+                    let iterationExhausted = currentIteration >= self.maxIterations && !reachedAnswer
 
                     if iterationExhausted {
                         // Consult ErrorRecovery.onIterationExhaustion policy
@@ -1537,6 +1665,8 @@ actor ReActAgentExecutor: Executor {
                             return "Task completed with warnings" + (terminalReason.map { ": \($0)" } ?? ".")
                         case .failed, .cancelled:
                             return "Task failed or reached max iterations."
+                        case .timedOut:   // never emitted by an executor; listed for exhaustiveness
+                            return "Task stopped at its execution limit."
                         }
                     }()
                     onTraceUpdate(AgentTraceLog(
@@ -1963,3 +2093,77 @@ fileprivate extension ToolObservation {
     }
 }
 
+
+
+// MARK: - Draft streaming
+
+extension ReActAgentExecutor {
+    /// Whether this run streams provisional step text. Off when the user turned streaming off, and in
+    /// workflow nodes, whose events are forwarded selectively and never render a draft.
+    static func streamsDrafts(for input: AgentInput) -> Bool {
+        guard input.workflowContext == nil else { return false }
+        let defaults = UserDefaults.standard
+        // Unset means the app default, which is ON (`SettingsCoordinator`).
+        guard defaults.object(forKey: AppSettings.useStreamingResponseKey) != nil else { return true }
+        return defaults.bool(forKey: AppSettings.useStreamingResponseKey)
+    }
+}
+
+/// Turns a model's text deltas into throttled, CUMULATIVE `.draftText` events for one step.
+///
+/// Cumulative, so dropping an intermediate emission loses nothing — each event is the whole text so
+/// far. Throttled to `interval` because a cloud model sends a token every few milliseconds and the
+/// chat re-renders on each event. Thread-safe: the provider calls `onTextDelta` from its stream loop.
+final class DraftTextRelay: @unchecked Sendable {
+    private let enabled: Bool
+    private let interval: TimeInterval
+    private let emit: @Sendable (String) -> Void
+    private let lock = NSLock()
+    private var text = ""
+    private var lastEmit = Date.distantPast
+    private var emittedText: String?
+
+    init(enabled: Bool, interval: TimeInterval = 0.1, emit: @escaping @Sendable (String) -> Void) {
+        self.enabled = enabled
+        self.interval = interval
+        self.emit = emit
+    }
+
+    /// Nil when disabled, so the generator makes the ordinary blocking call.
+    var onTextDelta: (@Sendable (String) -> Void)? {
+        guard enabled else { return nil }
+        return { [weak self] delta in self?.append(delta) }
+    }
+
+    private func append(_ delta: String) {
+        lock.lock()
+        text += delta
+        let now = Date()
+        let due = now.timeIntervalSince(lastEmit) >= interval
+        if due { lastEmit = now; emittedText = text }
+        let snapshot = text
+        lock.unlock()
+        if due { emit(snapshot) }
+    }
+
+    /// Emits any text the throttle held back, so the draft shows the whole answer until `.content`
+    /// replaces it.
+    func flush() {
+        lock.lock()
+        let pending = emittedText != nil && emittedText != text ? text : nil
+        if pending != nil { emittedText = text }
+        lock.unlock()
+        if let pending { emit(pending) }
+    }
+
+    /// Withdraws the draft if one was shown: the step was monologue before tool calls (it reaches the
+    /// timeline via `.reasoning`), an unparseable output, or it failed.
+    func withdraw() {
+        lock.lock()
+        let shown = emittedText != nil
+        emittedText = nil
+        text = ""
+        lock.unlock()
+        if shown { emit("") }
+    }
+}

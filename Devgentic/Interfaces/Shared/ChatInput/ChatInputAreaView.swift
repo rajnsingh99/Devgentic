@@ -93,7 +93,7 @@ struct ChatInputAreaView: View {
         paragraphStyle.lineSpacing = themeManager.chatLineSpacing
         return [
             .font: NSFont.systemFont(ofSize: themeManager.chatFontSize),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: NSColor(theme.primaryText),
             .paragraphStyle: paragraphStyle
         ]
     }
@@ -447,6 +447,11 @@ struct ChatInputAreaView: View {
               let config = profile?.resolvedLLMConfig else {
             return "Nothing to compact — this conversation has no history yet."
         }
+        // The transcript row (`ManualCompactionRow`) — the popover's own status vanishes with the
+        // popover, and the checkpoint card lands above the fold. `begin` refuses a second run in
+        // the same conversation, and then this call must not paint `.alreadyRunning` over it.
+        let activity = ManualCompactionActivity.shared
+        let ownsRow = activity.begin(conversationID)
         let history = await chatHistoryViewModel.resolveContextHistory(for: conversationID)
         let outcome = await HistoryCompactionService.shared.compactNow(
             chatHistory: history,
@@ -454,6 +459,7 @@ struct ChatInputAreaView: View {
             contextWindow: contextUsage?.windowTokens ?? 8_192,
             fallbackModel: config
         )
+        if ownsRow { activity.finish(conversationID, outcome: outcome) }
         recomputeContextGauge()
         return outcome.message
     }
@@ -710,13 +716,6 @@ struct ChatInputAreaView: View {
                 ) { profileID in
                     router.navigate(to: .profileDetail(profileID: profileID))
                 }
-            }
-
-            // [Orb] Experimental voice-HUD entry point, and the feature's ONLY hook
-            // into existing code — Orb otherwise lives entirely in its own floating
-            // NSPanel. Delete Devgentic/Orb/ plus these four lines to remove it.
-            if mainViewModel.interfaceMode == .chat {
-                OrbComposerButton()
             }
 
             // Voice — DynamicActionButton retained for its main-only machinery (voice states,

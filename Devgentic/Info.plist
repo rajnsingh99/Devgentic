@@ -53,6 +53,24 @@
 	<key>NSContactsUsageDescription</key>
 	<string>Devgentic needs access to your contacts so it can look up and update people you ask it to find.</string>
 
+	<!-- ⚠️⚠️ SPARKLE — BOTH VALUES ARE PERMANENT FOR EVERY COPY ALREADY INSTALLED. See
+	     SoftwareUpdater.swift for the full reasoning.
+	     SUFeedURL: frozen with the GitHub account + repo name (rajnsingh99/devgentic) — Pages 301s
+	     the path to any custom domain attached later, so this string never needs to change.
+	     SUPublicEDKey: the private half lives in the release machine's login Keychain (Sparkle's
+	     generate_keys, default account) and MUST have an offline backup. Replace this key and every
+	     install rejects every future update, forever.
+	     SUEnableAutomaticChecks is deliberately ABSENT: Sparkle then asks the user before the first
+	     automatic check (PRIVACY.md: nothing is sent on the app's own initiative). -->
+	<key>SUFeedURL</key>
+	<string>https://rajnsingh99.github.io/devgentic/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>HMJxVh5bFyBfwtKc11I6g14lBY1mQXx/DfoUhyCnGYI=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUEnableSystemProfiling</key>
+	<false/>
+
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict/>

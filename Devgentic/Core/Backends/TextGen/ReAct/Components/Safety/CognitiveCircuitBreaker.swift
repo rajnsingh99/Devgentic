@@ -32,12 +32,31 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     /// and bounded by the human in the loop + the iteration budget.
     private let maxConsecutiveDenials: Int
 
+    /// Whether a detected loop actually ENDS this run — true only when the profile's
+    /// `ErrorRecovery.onToolFailure` is `.abort`. Code (`.fallbackPrompt`) and `.skipAndContinue`
+    /// only warn and nudge (owner decision 2026-09-27, Timeout inventory D-15).
+    ///
+    /// ⚠️ Decides the pre-warning's WORDING only. It used to tell the user and the model "one more
+    /// identical call will abort this run" in every profile, which was false wherever the loop
+    /// merely nudges.
+    let repetitionEndsRun: Bool
+
     init(maxConsecutiveToolFailures: Int = 3,
          maxRepetitiveActions: Int = 3,
-         maxConsecutiveDenials: Int = 2) {
+         maxConsecutiveDenials: Int = 2,
+         repetitionEndsRun: Bool = true) {
         self.maxConsecutiveToolFailures = maxConsecutiveToolFailures
         self.maxRepetitiveActions = maxRepetitiveActions
         self.maxConsecutiveDenials = maxConsecutiveDenials
+        self.repetitionEndsRun = repetitionEndsRun
+    }
+
+    /// What the next identical call leads to, for the user and for the model.
+    private var nextRepeatConsequence: (ui: String, model: String) {
+        repetitionEndsRun
+            ? ("will abort this run", "will ABORT this session")
+            : ("will be flagged as a loop (the run continues)",
+               "will be flagged as a stuck loop and reported to the user")
     }
 
     // MARK: - State Tracking
@@ -221,12 +240,12 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             //   Model alert = directive injected into the next iteration's working
             //                 memory so the model sees the warning BEFORE it calls
             //                 the same tool a third time and gets killed.
-            let uiMessage = "Repetitive tool pattern detected: [\(toolNames)]. One more identical call will abort this run."
+            let uiMessage = "Repetitive tool pattern detected: [\(toolNames)]. One more identical call \(nextRepeatConsequence.ui)."
 
             let modelAlert = """
             ⚠️ REPETITION DETECTED — SYSTEM INTERVENTION
 
-            Tool(s) [\(toolNames)] just ran with identical arguments and produced identical output to the previous iteration. Running this exact call a third time will ABORT this session.
+            Tool(s) [\(toolNames)] just ran with identical arguments and produced identical output to the previous iteration. Running this exact call a third time \(nextRepeatConsequence.model).
 
             You MUST choose one of these three paths now:
 
@@ -252,12 +271,12 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
                 let count = globalToolFrequency[key, default: 0]
                 logger.info("⚠️ Global repetition warning: '\(toolName)' at \(count)/\(self.maxGlobalToolRepetitions) identical calls. One more will trigger abort.")
 
-                let uiMessage = "Tool '\(toolName)' keeps producing the same result. One more identical call will end this run."
+                let uiMessage = "Tool '\(toolName)' keeps producing the same result. One more identical call \(nextRepeatConsequence.ui)."
 
                 let modelAlert = """
                 ⚠️ REPETITION DETECTED — SYSTEM INTERVENTION
 
-                Tool '\(toolName)' has now returned identical output for the same arguments \(count) times across this run. Calling it again with the same arguments will ABORT this session.
+                Tool '\(toolName)' has now returned identical output for the same arguments \(count) times across this run. Calling it again with the same arguments \(nextRepeatConsequence.model).
 
                 You MUST choose one of these three paths now:
 

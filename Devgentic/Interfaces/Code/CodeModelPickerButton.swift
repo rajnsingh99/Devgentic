@@ -36,14 +36,14 @@ struct CodeModelPickerButton: View {
     var body: some View {
         @Bindable var csm = codeSessionManager
         Button(action: { csm.showModelPicker.toggle() }) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 ZStack {
                     Circle()
                         .fill(profileThemeColor.opacity(0.18))
-                        .frame(width: 12, height: 12)
+                        .frame(width: 10, height: 10)
                     Circle()
                         .fill(profileThemeColor)
-                        .frame(width: 6.5, height: 6.5)
+                        .frame(width: 5.5, height: 5.5)
                 }
 
                 Text(profileButtonText)
@@ -52,14 +52,15 @@ struct CodeModelPickerButton: View {
                     .lineLimit(1)
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8.5, weight: .semibold))
+                    .font(.system(size: 7.5, weight: .semibold))
                     .foregroundColor(theme.secondaryText.opacity(isHovering ? 0.9 : 0.65))
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
             .composerControlSurface(in: Capsule(), isHovered: isHovering)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .popover(isPresented: $csm.showModelPicker, arrowEdge: .bottom) {
             CodeModelSelectorPopover()
                 .frame(width: 356, height: 460)
@@ -151,6 +152,21 @@ private struct CodeModelSelectorPopover: View {
     @State private var apiKeyInput = ""
     @State private var cloudModelNameInput = ""
 
+    /// Bound only so toggling General Settings → "Show Remote Models" re-renders the
+    /// segments live; the filter itself lives in `ProfileCapabilityFilter`.
+    @AppStorage(AppSettings.showRemoteModelsKey) private var showRemoteModels: Bool = false
+
+    /// Providers offered as segments: the Code-supported list minus the remote models
+    /// the General Settings toggle hides — except the session's CURRENT provider, which
+    /// stays visible so an existing Code session isn't left with no selected segment;
+    /// the user can still see it and switch away.
+    private var selectableProviders: [ApiProvider] {
+        ProfileCapabilityFilter.filteringRemoteModels(
+            CodeSessionManager.supportedProviders,
+            keepingCurrent: codeSessionManager.provider
+        )
+    }
+
     private var isCloudProvider: Bool {
         [.anthropic, .openAI, .google].contains(codeSessionManager.provider)
     }
@@ -169,7 +185,7 @@ private struct CodeModelSelectorPopover: View {
             }
 
             Rectangle()
-                .fill(theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.07))
+                .fill(theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35))
                 .frame(height: 1)
                 .padding(.horizontal, 8)
 
@@ -184,11 +200,11 @@ private struct CodeModelSelectorPopover: View {
         .frame(width: popoverWidth, height: popoverHeight)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.isDark ? Color(hex: "#1E1E20") : Color(hex: "#F8F8F9"))
+                .fill(theme.secondaryBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(theme.isDark ? Color.white.opacity(0.09) : Color.black.opacity(0.08), lineWidth: 1)
+                .stroke(theme.isDark ? Color.white.opacity(0.09) : theme.dividerColor.opacity(0.50), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onAppear {
@@ -204,7 +220,7 @@ private struct CodeModelSelectorPopover: View {
     private var providerSegmentRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
-                ForEach(CodeSessionManager.supportedProviders, id: \.self) { provider in
+                ForEach(selectableProviders, id: \.self) { provider in
                     CodeSegmentTabButton(
                         title: providerDisplayName(provider),
                         count: modelCount(for: provider),
@@ -219,11 +235,11 @@ private struct CodeModelSelectorPopover: View {
             .padding(2.5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
+                    .fill(theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.60))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05), lineWidth: 0.5)
+                    .strokeBorder(theme.isDark ? Color.white.opacity(0.06) : theme.dividerColor.opacity(0.35), lineWidth: 0.5)
             )
         }
         .padding(.horizontal, 8)
@@ -251,15 +267,15 @@ private struct CodeModelSelectorPopover: View {
 
     private var searchBorderColor: Color {
         if isSearchFocused {
-            return theme.isDark ? Color.white.opacity(0.18) : Color.black.opacity(0.15)
+            return theme.accentColor.opacity(0.70)
         } else {
-            return theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.06)
+            return theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35)
         }
     }
 
     private var searchIconColor: Color {
         if isSearchFocused {
-            return theme.isDark ? Color.white.opacity(0.7) : Color.black.opacity(0.6)
+            return theme.accentColor
         } else {
             return theme.tertiaryText
         }
@@ -292,13 +308,14 @@ private struct CodeModelSelectorPopover: View {
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
+                .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -359,11 +376,11 @@ private struct CodeModelSelectorPopover: View {
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
+                        .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.06), lineWidth: 1)
+                        .strokeBorder(theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35), lineWidth: 1)
                 )
                 .onAppear { apiKeyInput = codeSessionManager.apiKey ?? "" }
                 .onChange(of: apiKeyInput) { _, _ in
@@ -385,11 +402,11 @@ private struct CodeModelSelectorPopover: View {
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
+                        .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.06), lineWidth: 1)
+                        .strokeBorder(theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35), lineWidth: 1)
                 )
                 .onAppear { cloudModelNameInput = codeSessionManager.modelName }
                 .onChange(of: cloudModelNameInput) { _, _ in
@@ -420,9 +437,11 @@ private struct CodeModelSelectorPopover: View {
     private func suggestionChip(_ suggestion: String) -> some View {
         let isSelected = cloudModelNameInput == suggestion
         let bg = isSelected
-            ? (theme.isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
-            : (theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
-        let border = theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+            ? (theme.isDark ? Color.white.opacity(0.12) : theme.primaryBackground)
+            : (theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.60))
+        let border = isSelected
+            ? (theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.40))
+            : (theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.25))
 
         return Button(action: {
             cloudModelNameInput = suggestion
@@ -443,6 +462,7 @@ private struct CodeModelSelectorPopover: View {
                 )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     private var cloudModelSuggestions: [String] {
@@ -588,7 +608,7 @@ private struct CodeModelSelectorPopover: View {
             if provider == .ollama {
                 localModels = try await fetchOllamaModelsWithDetails()
             } else if provider == .mlx {
-                localModels = listDownloadedMLXModels()
+                localModels = await listInstalledMLXModels()
             }
             logger.info(
                 "[CODE] Loaded \(localModels.count) local model(s) for the Code picker — "
@@ -641,52 +661,39 @@ private struct CodeModelSelectorPopover: View {
         return entries.sorted { $0.parameterSizeValue > $1.parameterSizeValue }
     }
 
-    /// Lists MLX models from the default HuggingFace cache directory with cognitive detection.
-    private func listDownloadedMLXModels() -> [CodeModelEntry] {
-        let cacheDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub")
-
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: cacheDir, includingPropertiesForKeys: nil
-        ) else { return [] }
-
-        return entries
-            .filter { $0.hasDirectoryPath && $0.lastPathComponent.hasPrefix("models--") }
-            .map { url in
-                let name = url.lastPathComponent
-                    .replacingOccurrences(of: "models--", with: "")
-                    .replacingOccurrences(of: "--", with: "/")
-
-                let snapshotsDir = url.appendingPathComponent("snapshots")
-                let modelPath: URL? = {
-                    guard let snapshots = try? FileManager.default.contentsOfDirectory(
-                        at: snapshotsDir, includingPropertiesForKeys: nil
-                    ) else { return nil }
-                    return snapshots.first { $0.hasDirectoryPath }
-                }()
-
-                let profile: CognitiveProfile
-                if let path = modelPath {
-                    profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: path, modelName: name)
-                } else {
-                    profile = CognitiveProfile(capability: .parallelActions, dialect: .heuristicJson)
-                }
-
-                // ⚠️ `parameterSizeValue` was hardcoded 0 here, which sorted every MLX model
-                // below every Ollama one for no stated reason. Parse the real value so ordering
-                // is honest; nothing gates on it.
-                let parsedSize = ModelFitAdvisor.parseParameterCount(profile.metadata?.parameterCount)
-                return CodeModelEntry(
-                    name: name,
-                    parameterSize: profile.metadata?.parameterCount,
-                    parameterSizeValue: parsedSize ?? 0,
-                    cognitiveProfile: profile,
-                    // Ollama's `think` parameter is the only extended-thinking surface the app
-                    // drives (`OllamaLLMProvider`), so an MLX model has none to report.
-                    supportsThinking: false
-                )
-            }
-            .sorted { $0.name < $1.name }
+    /// Lists the models the app's MLX model store has installed — the same list the profile
+    /// editor's MLX picker shows, and the one the runtime resolves a model name against
+    /// (`MLXModelService.installedModel(named:)`).
+    ///
+    /// ⚠️ This used to scan `~/.cache/huggingface/hub` itself. The store keeps models in its OWN
+    /// folder (`MLXModelService.modelsDirectory`, chosen in the model manager), so the Code picker
+    /// listed whatever other tools had left in the generic HuggingFace cache — on the reported
+    /// machine, one sentence-embedding model — and none of the installed chat models. Worse, the
+    /// name it saved for a model found only there could not be loaded, since the runtime looks
+    /// names up in the store.
+    private func listInstalledMLXModels() async -> [CodeModelEntry] {
+        let service = MLXModelService.shared
+        await service.ensureLoaded()
+        let entries = service.installedModels.map { model in
+            let profile = service.cachedCognitiveProfile(for: model)
+            // ⚠️ `parameterSizeValue` was hardcoded 0 here, which sorted every MLX model
+            // below every Ollama one for no stated reason. Parse the real value so ordering
+            // is honest; nothing gates on it.
+            let parsedSize = ModelFitAdvisor.parseParameterCount(profile.metadata?.parameterCount)
+            return CodeModelEntry(
+                // `displayName` is the canonical id the profile editor saves and the runtime
+                // resolves ("mlx-community/…").
+                name: model.displayName,
+                parameterSize: profile.metadata?.parameterCount,
+                parameterSizeValue: parsedSize ?? 0,
+                cognitiveProfile: profile,
+                // Ollama's `think` parameter is the only extended-thinking surface the app
+                // drives (`OllamaLLMProvider`), so an MLX model has none to report.
+                supportsThinking: false
+            )
+        }
+        logger.info("[CODE] MLX picker read \(entries.count) model(s) from the model store at \(service.modelsDirectory.path). CONSEQUENCE: the Code picker lists exactly what the MLX model manager has installed.")
+        return entries.sorted { $0.name < $1.name }
     }
 }
 
@@ -703,17 +710,17 @@ private struct CodeSegmentTabButton: View {
 
     private var badgeBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.09)
+            return theme.isDark ? Color.white.opacity(0.16) : theme.tertiaryBackground
         } else {
-            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+            return theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground.opacity(0.50)
         }
     }
 
     private var tabBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.13) : Color.black.opacity(0.09)
+            return theme.isDark ? Color.white.opacity(0.12) : theme.primaryBackground
         } else if isHovering {
-            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+            return theme.isDark ? Color.white.opacity(0.06) : theme.primaryBackground.opacity(0.50)
         } else {
             return Color.clear
         }
@@ -721,7 +728,7 @@ private struct CodeSegmentTabButton: View {
 
     private var tabBorder: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+            return theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.40)
         } else {
             return Color.clear
         }
@@ -759,6 +766,7 @@ private struct CodeSegmentTabButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hover in
             withAnimation(.easeInOut(duration: 0.12)) { isHovering = hover }
         }
@@ -777,9 +785,9 @@ private struct CodeModelRow: View {
 
     private var rowBackground: Color {
         if isHovering {
-            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+            return theme.isDark ? Color.white.opacity(0.08) : theme.tertiaryBackground.opacity(0.70)
         } else if isSelected {
-            return theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03)
+            return theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.40)
         } else {
             return Color.clear
         }
@@ -819,7 +827,7 @@ private struct CodeModelRow: View {
                         .padding(.vertical, 2)
                         .background(
                             Capsule()
-                                .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
+                                .fill(theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground)
                         )
                 }
 
@@ -842,6 +850,7 @@ private struct CodeModelRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hover in
             withAnimation(.easeInOut(duration: 0.1)) { isHovering = hover }
         }

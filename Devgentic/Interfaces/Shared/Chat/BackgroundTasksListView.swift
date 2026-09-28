@@ -29,10 +29,16 @@ struct BackgroundTasksListView: View {
     var focusTaskID: String? = nil
 
     @Environment(\.appTheme) private var theme
-    @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 15.0
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
+    @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 14.0
 
-    @State private var tasks: [BackgroundProcessRegistry.Snapshot] = []
+    /// Live tasks AND the conversation's saved history — see `BackgroundTaskHistory`. Keyed by
+    /// `id` (the run's log path), never by `taskID`, which repeats across launches.
+    @State private var tasks: [BackgroundTaskListItem] = []
     @State private var expanded: Set<String> = []
+    /// The focus already revealed — so a row the user then collapses is not re-opened every time
+    /// the list's membership changes.
+    @State private var revealedFocus: String?
     @State private var isFinishedExpanded: Bool = true
     @State private var now = Date()
 
@@ -50,12 +56,12 @@ struct BackgroundTasksListView: View {
     /// once a second forever.
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    private var runningTasks: [BackgroundProcessRegistry.Snapshot] {
-        tasks.filter { !$0.status.isTerminal }
+    private var runningTasks: [BackgroundTaskListItem] {
+        tasks.filter(\.isRunning)
     }
 
-    private var finishedTasks: [BackgroundProcessRegistry.Snapshot] {
-        tasks.filter { $0.status.isTerminal }
+    private var finishedTasks: [BackgroundTaskListItem] {
+        tasks.filter { !$0.isRunning }
     }
 
     // MARK: - Surfaces & Contrast (matches Screenshot 2 reference)
@@ -125,7 +131,10 @@ struct BackgroundTasksListView: View {
                                         Spacer()
 
                                         Button {
+                                            // Hides finished rows — live AND saved. Deletes no
+                                            // card and no log; see `BackgroundTaskHistory.markCleared`.
                                             BackgroundProcessRegistry.shared.clearFinished(conversationID: conversationID)
+                                            BackgroundTaskHistory.markCleared(conversationID)
                                             reload()
                                         } label: {
                                             Image(systemName: "trash")
@@ -155,19 +164,25 @@ struct BackgroundTasksListView: View {
                     }
                     .onAppear { reveal(in: proxy) }
                     .onChange(of: focusTaskID) { reveal(in: proxy) }
+                    // The saved history arrives AFTER the panel appears, so the focused row may
+                    // only exist from the second load on.
+                    .onChange(of: tasks.map(\.id)) { reveal(in: proxy) }
                 }
             }
         }
-        .background(theme.primaryBackground)
-        .onAppear(perform: reload)
-        .onChange(of: conversationID) { reload() }
+        .background(Color.clear)
+        .task(id: conversationID) {
+            reload()
+            await chatHistoryViewModel.refreshSavedBackgroundTasks(for: conversationID)
+            reload()
+        }
         .onReceive(tick) { instant in
-            guard tasks.contains(where: { !$0.status.isTerminal }) else { return }
+            guard tasks.contains(where: \.isRunning) else { return }
             now = instant
             reload()
             // Only rows someone has actually opened, and only while their task is still writing.
             // A finished task's log cannot change, and a collapsed one is not being read.
-            for task in tasks where !task.status.isTerminal && expanded.contains(task.id) {
+            for task in tasks where task.isRunning && expanded.contains(task.id) {
                 loadLog(task.id)
             }
         }
@@ -177,15 +192,17 @@ struct BackgroundTasksListView: View {
             else { return }
             reload()
             // A task just changed state — if its row is open, its final output is on disk now.
+            // The note carries the REGISTRY id; only a live row can match it.
             if let taskID = note.userInfo?[BackgroundTaskNotificationKey.taskID] as? String,
-               expanded.contains(taskID) {
-                loadLog(taskID)
+               let item = tasks.first(where: { $0.isLive && $0.taskID == taskID }),
+               expanded.contains(item.id) {
+                loadLog(item.id)
             }
         }
     }
 
     private func reload() {
-        tasks = BackgroundProcessRegistry.shared.snapshots(conversationID: conversationID)
+        tasks = chatHistoryViewModel.backgroundTaskItems(for: conversationID)
     }
 
     /// Pulls one task's FULL log into the cache.
@@ -193,9 +210,26 @@ struct BackgroundTasksListView: View {
     /// Deliberately the whole file rather than the registry's bounded tail: this view is where
     /// someone comes to actually read a build log, and 200 lines is not that. The bound that makes
     /// this affordable is WHEN it runs — on open, and then only while open — not how much it reads.
-    private func loadLog(_ taskID: String) {
-        logs[taskID] = BackgroundProcessRegistry.shared
-            .readLog(conversationID: conversationID, taskID: taskID)?.text ?? ""
+    ///
+    /// A row from an earlier launch reads its log FILE directly — the registry never heard of it.
+    /// Once retention has swept that file (7 days), the output tail saved on the card is what is
+    /// left, and the text says so rather than showing "No output." for a command that printed.
+    private func loadLog(_ itemID: String) {
+        guard let item = tasks.first(where: { $0.id == itemID }) else { return }
+        logs[itemID] = Self.logText(for: item, conversationID: conversationID)
+    }
+
+    static func logText(for item: BackgroundTaskListItem, conversationID: UUID,
+                        registry: BackgroundProcessRegistry = .shared) -> String {
+        if item.isLive {
+            return registry.readLog(conversationID: conversationID, taskID: item.taskID)?.text ?? ""
+        }
+        if let data = try? Data(contentsOf: item.logURL) {
+            return String(decoding: data, as: UTF8.self)
+        }
+        guard !item.savedTail.isEmpty else { return "" }
+        return String(localized: "[The full log was removed after 7 days. The end of its output, saved with the conversation:]")
+            + "\n" + item.savedTail
     }
 
     /// Opens or closes a row, loading its log on the way in and releasing it on the way out.
@@ -215,7 +249,9 @@ struct BackgroundTasksListView: View {
     /// opened every time they clicked a different card — the panel is persistent, so its state is
     /// theirs, not the caller's to reset.
     private func reveal(in proxy: ScrollViewProxy) {
-        guard let focusTaskID, tasks.contains(where: { $0.id == focusTaskID }) else { return }
+        guard let focusTaskID, focusTaskID != revealedFocus,
+              tasks.contains(where: { $0.id == focusTaskID }) else { return }
+        revealedFocus = focusTaskID
         expanded.insert(focusTaskID)
         loadLog(focusTaskID)          // expanded without going through `toggle`
         withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(focusTaskID, anchor: .top) }
@@ -239,7 +275,7 @@ struct BackgroundTasksListView: View {
     // MARK: - Running Card (Screenshot 2 Reference)
 
     @ViewBuilder
-    private func runningCard(_ task: BackgroundProcessRegistry.Snapshot) -> some View {
+    private func runningCard(_ task: BackgroundTaskListItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
                 toggle(task.id)
@@ -297,9 +333,10 @@ struct BackgroundTasksListView: View {
         )
         .contextMenu {
             Button("Stop Task") {
-                BackgroundProcessRegistry.shared.stop(conversationID: conversationID, taskID: task.id)
+                BackgroundProcessRegistry.shared.stop(conversationID: conversationID, taskID: task.taskID)
                 reload()
             }
+            .disabled(!task.isLive)
             Divider()
             Button("Copy Command") {
                 NSPasteboard.general.clearContents()
@@ -308,13 +345,14 @@ struct BackgroundTasksListView: View {
             Button("Reveal Log in Finder") {
                 NSWorkspace.shared.selectFile(task.logURL.path, inFileViewerRootedAtPath: "")
             }
+            .disabled(!FileManager.default.fileExists(atPath: task.logURL.path))
         }
     }
 
     // MARK: - Finished Card (Screenshot 2 Reference)
 
     @ViewBuilder
-    private func finishedCard(_ task: BackgroundProcessRegistry.Snapshot) -> some View {
+    private func finishedCard(_ task: BackgroundTaskListItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
                 toggle(task.id)
@@ -376,6 +414,7 @@ struct BackgroundTasksListView: View {
             Button("Reveal Log in Finder") {
                 NSWorkspace.shared.selectFile(task.logURL.path, inFileViewerRootedAtPath: "")
             }
+            .disabled(!FileManager.default.fileExists(atPath: task.logURL.path))
         }
     }
 
@@ -407,7 +446,7 @@ struct BackgroundTasksListView: View {
     // MARK: - Output Viewer
 
     @ViewBuilder
-    private func output(_ task: BackgroundProcessRegistry.Snapshot) -> some View {
+    private func output(_ task: BackgroundTaskListItem) -> some View {
         // ⚠️ CACHE ONLY — never `readLog` here. This is a `@ViewBuilder`; anything in it runs on
         // every body evaluation. See `logs`.
         let text = logs[task.id] ?? ""
@@ -432,26 +471,31 @@ struct BackgroundTasksListView: View {
 
     // MARK: - Subtitle Formatting
 
-    private func runningSubtitle(_ task: BackgroundProcessRegistry.Snapshot) -> String {
+    private func runningSubtitle(_ task: BackgroundTaskListItem) -> String {
         let seconds = Int(task.elapsed(now: now).rounded())
         let elapsed = seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
         return "Bash   \(elapsed)"
     }
 
-    private func finishedSubtitle(_ task: BackgroundProcessRegistry.Snapshot) -> String {
+    private func finishedSubtitle(_ task: BackgroundTaskListItem) -> String {
+        Self.finishedSubtitle(task, now: now)
+    }
+
+    static func finishedSubtitle(_ task: BackgroundTaskListItem, now: Date) -> String {
         let seconds = Int(task.elapsed(now: now).rounded())
         let elapsed = seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
+        let day = task.startedAt.formatted(date: .abbreviated, time: .shortened)
         switch task.status {
-        case .exited(let code):
-            if code == 0 {
-                return "Bash  Completed"
-            } else {
-                return "Bash  Exit \(code) · \(elapsed)"
-            }
+        case .exited:
+            let code = task.exitCode ?? 0
+            return code == 0 ? "Bash  Completed · \(day)" : "Bash  Exit \(code) · \(elapsed) · \(day)"
         case .timedOut:
-            return "Bash  Timed out · \(elapsed)"
+            return "Bash  Timed out · \(elapsed) · \(day)"
         case .stopped:
-            return "Bash  Stopped · \(elapsed)"
+            return "Bash  Stopped · \(elapsed) · \(day)"
+        case .interrupted:
+            // No duration: nobody knows when it died (see `BackgroundTaskObserver.reconcile`).
+            return "Bash  Ended when the app quit · \(day)"
         case .running:
             return "Bash  \(elapsed)"
         }

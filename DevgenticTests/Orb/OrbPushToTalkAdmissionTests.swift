@@ -44,6 +44,8 @@ final class OrbPushToTalkAdmissionTests: XCTestCase {
             switch OrbSessionController.pushToTalkAdmission(stage: stage) {
             case .arm, .cutGreetingAndArm:
                 continue
+            case .reopenVoiceApproval:
+                XCTFail("a cold-open stage cannot re-open a voice approval: \(stage)")
             case .refuse:
                 XCTAssertEqual(stage, .selectingProfile,
                                "Only the profile picker may refuse a cold-open press: \(stage)")
@@ -63,6 +65,18 @@ final class OrbPushToTalkAdmissionTests: XCTestCase {
         for stage in [OrbStage.executing, .announcing, .awaitingApproval] {
             guard case .refuse = OrbSessionController.pushToTalkAdmission(stage: stage) else {
                 return XCTFail("\(stage) should refuse — a turn is already running")
+            }
+        }
+    }
+
+    /// D-23: once the spoken window has closed, a press re-opens it for the request on screen —
+    /// and ONLY in `.awaitingApproval`; mid-execution a press still refuses.
+    func testAPressWhileParkedReopensTheVoiceWindow() {
+        XCTAssertEqual(OrbSessionController.pushToTalkAdmission(stage: .awaitingApproval, canReopenApproval: true),
+                       .reopenVoiceApproval)
+        for stage in [OrbStage.executing, .announcing] {
+            guard case .refuse = OrbSessionController.pushToTalkAdmission(stage: stage, canReopenApproval: true) else {
+                return XCTFail("\(stage) must still refuse")
             }
         }
     }

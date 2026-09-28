@@ -35,7 +35,7 @@ struct VSCodifiedSidebarContainerView: View {
     // Drag-resize state
     @State private var isResizing: Bool = false
     @State private var isHoveringHandle: Bool = false
-    @State private var resizeStartWidth: CGFloat = 320
+    @State private var dragStartWidth: CGFloat? = nil
 
     @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
@@ -86,10 +86,9 @@ struct VSCodifiedSidebarContainerView: View {
                         .padding(.vertical, 14)
                         .transition(.opacity)
 
-                    // Sidebar Content Pane + Drag Handle
+                    // Sidebar Content Pane
                     SideBarPaneView(selectedTab: selectedTabBinding, sidebarWidth: $sidebarWidth)
                         .frame(width: sidebarWidth)
-                        .overlay(alignment: .trailing) { resizeHandle }
                         .transition(.opacity)
                         .clipped()
                 }
@@ -127,6 +126,11 @@ struct VSCodifiedSidebarContainerView: View {
                         lineWidth: 1
                     )
             )
+            .overlay(alignment: .trailing) {
+                if isSidebarVisible {
+                    resizeHandle
+                }
+            }
             .padding(.leading, 12)
             .padding(.vertical, 12)
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSidebarVisible)
@@ -149,56 +153,57 @@ struct VSCodifiedSidebarContainerView: View {
     // MARK: - Resize Handle
 
     private var resizeHandle: some View {
-        ZStack {
-            Rectangle()
-                .fill(Color.clear)
-            
-            // Central hairline indicator with magnetic glow
+        let isHighlighted = isHoveringHandle || isResizing
+
+        return GeometryReader { geo in
+            let handleHeight = min(max(geo.size.height * 0.12, 60), 96)
+
             ZStack {
                 Rectangle()
-                    .fill(isResizing ? theme.accentColor : theme.secondaryText.opacity(0.4))
-                    .frame(width: 1.5)
-                    .shadow(color: isResizing ? theme.accentColor.opacity(0.8) : .clear, radius: 4)
+                    .fill(Color.clear)
+                    .frame(width: 14, height: geo.size.height)
+                    .contentShape(Rectangle())
 
-                if isHoveringHandle || isResizing {
-                    VStack(spacing: 3) {
-                        Circle().fill(theme.accentColor).frame(width: 2.5, height: 2.5)
-                        Circle().fill(theme.accentColor).frame(width: 2.5, height: 2.5)
-                        Circle().fill(theme.accentColor).frame(width: 2.5, height: 2.5)
-                    }
-                    .shadow(color: theme.accentColor.opacity(0.8), radius: 3)
-                }
+                Capsule()
+                    .fill(isHighlighted ? theme.accentColor : theme.secondaryText.opacity(0.4))
+                    .frame(width: isHighlighted ? 2.5 : 1.5, height: handleHeight)
+                    .shadow(color: isHighlighted ? theme.accentColor.opacity(0.6) : .clear, radius: 3)
             }
-            .padding(.vertical, 12)
-            .opacity(isHoveringHandle || isResizing ? 1.0 : 0.0)
+            .frame(width: 14, height: geo.size.height)
         }
-        .contentShape(Rectangle())
-        .frame(width: 8)
+        .frame(width: 14)
         .frame(maxHeight: .infinity)
+        .offset(x: 7)
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    let start = dragStartWidth ?? sidebarWidth
+                    if dragStartWidth == nil {
+                        dragStartWidth = start
+                        isResizing = true
+                    }
+                    let proposed = start + value.translation.width
+                    sidebarWidth = min(max(proposed, minSidebarWidth), maxSidebarWidth)
+                }
+                .onEnded { _ in
+                    isResizing = false
+                    dragStartWidth = nil
+                    if !isHoveringHandle {
+                        NSCursor.arrow.set()
+                    }
+                }
+        )
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHoveringHandle = hovering
             }
             if hovering {
-                NSCursor.resizeLeftRight.push()
-            } else {
-                NSCursor.pop()
+                NSCursor.resizeLeftRight.set()
+            } else if !isResizing {
+                NSCursor.arrow.set()
             }
         }
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    if !isResizing {
-                        isResizing = true
-                        resizeStartWidth = sidebarWidth
-                    }
-                    let proposed = resizeStartWidth + value.translation.width
-                    sidebarWidth = min(max(proposed, minSidebarWidth), maxSidebarWidth)
-                }
-                .onEnded { _ in
-                    isResizing = false
-                }
-        )
+        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
         .accessibilityLabel("Sidebar resize handle")
         .accessibilityHint("Drag to resize the sidebar")
     }

@@ -168,8 +168,8 @@ final class BackgroundDefaultTimeoutTests: XCTestCase {
     }
 
     func testForegroundDefaultIsUnchanged() {
-        XCTAssertEqual(BatchCommandTool.effectiveTimeout(nil), 30)
-        XCTAssertEqual(BatchCommandTool.effectiveTimeout(nil, background: false), 30)
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(nil), BatchCommandTool.defaultTimeoutSeconds)
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(nil, background: false), BatchCommandTool.defaultTimeoutSeconds)
     }
 
     /// An explicit value still wins in both modes, and the ceiling still binds.
@@ -184,6 +184,6 @@ final class BackgroundDefaultTimeoutTests: XCTestCase {
     func testNonPositiveFallsBackToTheModesDefault() {
         XCTAssertEqual(BatchCommandTool.effectiveTimeout(0, background: true),
                        BatchCommandTool.maxTimeoutSeconds)
-        XCTAssertEqual(BatchCommandTool.effectiveTimeout(-1, background: false), 30)
+        XCTAssertEqual(BatchCommandTool.effectiveTimeout(-1, background: false), BatchCommandTool.defaultTimeoutSeconds)
     }
 }

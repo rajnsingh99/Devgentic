@@ -337,6 +337,18 @@ class WhisperRecognitionService {
         }
         orbDuplexProcessor = duplexProcessor
 
+        // The microphone the user chose (right-click the mic → Microphone, or Settings). Applies
+        // to WhisperKit's own engine only — Orb's duplex engine keeps the system default, see
+        // `MicrophoneSelection`. nil = the system default, which is what WhisperKit opens anyway.
+        let recorder: any AudioProcessing
+        if let duplexProcessor {
+            recorder = duplexProcessor
+        } else if let deviceID = MicrophoneSelection.shared.deviceIDForSession(session.shortID) {
+            recorder = InputDeviceAudioProcessor(base: whisperKit.audioProcessor, deviceID: deviceID)
+        } else {
+            recorder = whisperKit.audioProcessor
+        }
+
         logger.log("Creating AudioStreamTranscriber...")
         let transcriber = AudioStreamTranscriber(
             audioEncoder: whisperKit.audioEncoder,
@@ -348,7 +360,7 @@ class WhisperRecognitionService {
             // WhisperKit's public `AudioProcessing` seam — no fork. Everything else (composer,
             // QuickAccess) keeps WhisperKit's engine untouched, and Orb falls back to it the
             // moment the flag is off or the duplex engine refuses to start.
-            audioProcessor: duplexProcessor ?? whisperKit.audioProcessor,
+            audioProcessor: recorder,
             decodingOptions: options,
             useVAD: true,
             stateChangeCallback: { [weak self] oldState, newState in

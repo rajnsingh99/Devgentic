@@ -68,6 +68,7 @@ struct CustomTextEditor: NSViewRepresentable {
     var escapePassesThrough: Bool = false
 
     let logger = DGLogger(category: "CustomTextEditor_Input")
+    @Environment(\.appTheme) private var theme
 
     struct AttributedTextInsertionAction: Equatable {
         let id = UUID()
@@ -83,7 +84,7 @@ struct CustomTextEditor: NSViewRepresentable {
         paragraphStyle.lineSpacing = lineSpacing
         return [
             .font: NSFont.systemFont(ofSize: fontSize),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: NSColor(theme.primaryText),
             .paragraphStyle: paragraphStyle
         ]
     }
@@ -97,8 +98,8 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.importsGraphics = false
         textView.drawsBackground = false
         textView.backgroundColor = NSColor.clear
-        textView.textColor = NSColor.textColor
-        textView.insertionPointColor = NSColor.labelColor
+        textView.textColor = NSColor(theme.primaryText)
+        textView.insertionPointColor = NSColor(theme.primaryText)
         
         textView.textContainerInset = NSSize(width: 2, height: 10)
         textView.textContainer?.lineFragmentPadding = 5
@@ -145,6 +146,15 @@ struct CustomTextEditor: NSViewRepresentable {
         if context.coordinator.lastKnownTextViewInstance !== textView {
             self.textViewRef?(textView)
             context.coordinator.lastKnownTextViewInstance = textView
+        }
+
+        // Dynamically update text color and insertion point if theme changed
+        let targetTextColor = NSColor(theme.primaryText)
+        if textView.textColor != targetTextColor {
+            textView.textColor = targetTextColor
+            textView.insertionPointColor = targetTextColor
+            context.coordinator.defaultTypingAttributes[.foregroundColor] = targetTextColor
+            textView.typingAttributes[.foregroundColor] = targetTextColor
         }
 
         // Dynamically update typing attributes and typography if font size or line spacing changed
@@ -246,7 +256,7 @@ struct CustomTextEditor: NSViewRepresentable {
             textView.replaceEntireContents(with: attributedString, selecting: NSRange(location: newLocation, length: 0))
 
             textView.typingAttributes = defaultTypingAttributes
-            textView.textColor = NSColor.textColor
+            textView.textColor = NSColor(theme.primaryText)
 
             context.coordinator.isProgrammaticallyChangingText = false
 
