@@ -347,17 +347,7 @@ final class WorkflowRunRecordSD {
     /// Versioned wrapper around the node snapshots. Records written before this
     /// existed store a bare `[WorkflowNodeResultSnapshot]`; `decodeNodeResults`
     /// falls back to that shape.
-    private struct VersionedNodeResults: Codable {
-        let version: Int
-        let nodes: [WorkflowRunRecord.WorkflowNodeResultSnapshot]
-    }
-
     /// ⚠️ Writes the SHARED `VersionedBlob` envelope, whose key is `schemaVersion`.
-    ///
-    /// This column had its own bespoke envelope (`VersionedNodeResults`, key `version`) months before
-    /// the app-wide scheme existed. Two spellings of one concept meant `BlobVersioning.version(of:)`
-    /// could not read this column at all — caught by `testEveryBlobColumnCarriesAVersion`, which is
-    /// precisely why that guard exists. `decodeNodeResults` therefore reads THREE shapes now.
     private static func encodeNodeResults(_ results: [WorkflowRunRecord.WorkflowNodeResultSnapshot]) -> Data? {
         do {
             return try JSONEncoder().encode(
@@ -387,18 +377,11 @@ final class WorkflowRunRecordSD {
         workflowName: String
     ) -> [WorkflowRunRecord.WorkflowNodeResultSnapshot] {
         let decoder = JSONDecoder()
-        // ⚠️ THREE shapes, newest first — all three exist on real disks and none may be dropped:
-        //   1. the shared `VersionedBlob` envelope (`schemaVersion`/`payload`), written since G19;
-        //   2. the bespoke `VersionedNodeResults` envelope (`version`/`nodes`), this column's own
-        //      earlier scheme;
-        //   3. a bare array, from before any envelope existed.
-        // A row only takes a new shape when its run is next written, so 2 and 3 persist indefinitely.
+        // The `VersionedBlob` envelope is the only shape read (2026-10-03 reset: the bespoke
+        // `version`/`nodes` envelope and the bare array that preceded it are no longer accepted).
         if let shared = VersionedBlob<[WorkflowRunRecord.WorkflowNodeResultSnapshot]>
             .decode(from: data, decoder: decoder) {
             return shared.payload
-        }
-        if let versioned = try? decoder.decode(VersionedNodeResults.self, from: data) {
-            return versioned.nodes
         }
         // Resilient fallback: decode node-by-node so ONE undecodable node (e.g. a
         // structural change beyond the lossy nodeTimeline) drops only that node
@@ -420,7 +403,7 @@ final class WorkflowRunRecordSD {
             logger.error(
                 "[PERSISTENCE] Node-results blob for run \(runID) ('\(workflowName)') "
                 + "(\(data.count) bytes) is not a recognised node array "
-                + "— neither a bare array nor a `payload`/`nodes` envelope. CONSEQUENCE: this run's "
+                + "— not a `payload` envelope. CONSEQUENCE: this run's "
                 + "node breakdown renders EMPTY, so the run report shows no steps. The stored bytes "
                 + "are NOT overwritten and stay readable by a build that understands the shape."
             )
@@ -455,23 +438,19 @@ final class WorkflowRunRecordSD {
         return survivors
     }
 
-    /// Envelope keys a persisted node array can live under, NEWEST FIRST.
+    /// The envelope key a persisted node array lives under — the shared `VersionedBlob` key.
     ///
-    /// ⚠️ `payload` is the CURRENT shared `VersionedBlob` key; `nodes` is this column's bespoke
-    /// legacy envelope. Omitting `payload` made the whole last-resort recovery tier DEAD against
-    /// every blob written since the versioned envelope landed — it recovered the two LEGACY shapes
-    /// and erased the current one, which is exactly backwards.
-    private static let nodeArrayEnvelopeKeys = ["payload", "nodes"]
+    /// ⚠️ It must match the WRITER's key. A one-word mismatch here once made this whole last-resort
+    /// recovery tier dead against every current blob.
+    private static let nodeArrayEnvelopeKeys = ["payload"]
 
-    /// The raw node array inside any of the three on-disk shapes, or nil if this is not one.
+    /// The raw node array inside the `payload` envelope, or nil if this is not one.
     ///
     /// `nonisolated static` and pure so the envelope-key set is testable (WF-UI5) — the defect was a
     /// one-word mismatch between the encoder and this reader, which is precisely the kind of thing a
     /// round-trip test pins and a reading does not.
     nonisolated static func rawNodeArray(inBlob data: Data) -> [Any]? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        if let array = root as? [Any] { return array }
-        guard let object = root as? [String: Any] else { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         for key in nodeArrayEnvelopeKeys {
             if let array = object[key] as? [Any] { return array }
         }
@@ -509,13 +488,10 @@ final class WorkflowRunRecordSD {
     }
 
     private static func decodeVariables(from data: Data) -> [String: String] {
-        // ⚠️ The bare-dictionary fallback is load-bearing: every row written before 2026-08-05 is
-        // unwrapped, and a row is only rewritten when its run is touched — so unwrapped blobs persist
-        // indefinitely. `VersionedBlob.decode` tries the envelope, then the bare payload.
         if let result = VersionedBlob<[String: String]>.decode(from: data) { return result.payload }
         logger.error(
-            "[PERSISTENCE] Failed to decode workflow variables (\(data.count) bytes) as either the "
-            + "versioned envelope or a bare dictionary. CONSEQUENCE: this run renders with NO "
+            "[PERSISTENCE] Failed to decode workflow variables (\(data.count) bytes) as the "
+            + "versioned envelope. CONSEQUENCE: this run renders with NO "
             + "variables; the stored bytes are untouched and stay readable by a build that understands "
             + "them."
         )

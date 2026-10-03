@@ -28,6 +28,10 @@ enum MCPOAuthBrowserError: LocalizedError {
     case stateMismatch
     case authorizationServerError(error: String, description: String?)
     case openBrowserFailed
+    /// Register KC-45: the loopback listener this flow depends on is not registered. This is
+    /// NOT "couldn't open the browser" — reporting it that way sent the user hunting for a
+    /// browser problem when the actual state was that nothing is listening for the redirect.
+    case noLoopbackListener
     case missingCode
 
     var errorDescription: String? {
@@ -38,6 +42,8 @@ enum MCPOAuthBrowserError: LocalizedError {
             return desc.map { "\(err): \($0)" } ?? "Authorization failed: \(err)"
         case .openBrowserFailed:
             return "Couldn't open the system browser. Try copying the URL manually."
+        case .noLoopbackListener:
+            return "The local redirect listener for this sign-in is no longer running. Restart the sign-in."
         case .missingCode:
             return "Authorization redirect did not include a `code` parameter."
         }
@@ -64,26 +70,26 @@ struct MCPOAuthBrowserRedirectHandler: MCPOAuthRedirectHandler {
         // We hand its `redirectURL` to the AS via the authorize URL's `redirect_uri`
         // — caller has already done that, since they built the authorize URL with
         // this listener's redirect URL.
-        guard NSWorkspace.shared.open(authorizeURL) else {
-            throw MCPOAuthBrowserError.openBrowserFailed
-        }
-        logger.info("Opened authorize URL in default browser")
-
-        // The actual listener was constructed by the caller (through the
-        // coordinator) and its URL was used to build `redirectURI`. We have
-        // to construct ours fresh here, but Phase 3's coordinator path
-        // builds the listener inside this handler (see `runFlow` below).
-        // The protocol method receives `redirectURI` already, so we re-bind
-        // an internal listener here that the coordinator's authorize URL
-        // is already pointing at.
         //
         // Implementation reality: the loopback listener has to be the
         // *same instance* whose URL got embedded in the authorize URL.
         // The coordinator hands us that URL via `redirectURI` — we look up
         // the live listener in `LoopbackRegistry` (a small per-flow map).
+        //
+        // ⚠️ REGISTER KC-45: LOOK BEFORE YOU LAUNCH. The browser open used to run FIRST and the
+        // registry lookup after it, so a flow whose listener had already been torn down still
+        // opened a browser tab, sent the user through their whole login, and only then died —
+        // with the miss reported as `openBrowserFailed` ("Try copying the URL manually"),
+        // naming a failure that never happened and advising a URL that has nothing to land on.
+        // Resolving the listener first means a miss throws before the browser is touched, and
+        // each failure carries its own message and its own remedy.
         guard let listener = LoopbackRegistry.shared.listener(for: redirectURI) else {
+            throw MCPOAuthBrowserError.noLoopbackListener
+        }
+        guard NSWorkspace.shared.open(authorizeURL) else {
             throw MCPOAuthBrowserError.openBrowserFailed
         }
+        logger.info("Opened authorize URL in default browser")
 
         let components: URLComponents
         do {

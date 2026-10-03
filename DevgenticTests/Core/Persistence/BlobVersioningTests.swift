@@ -119,14 +119,9 @@ final class BlobVersioningTests: XCTestCase {
         XCTAssertEqual(result.version, 2)
     }
 
-    /// ⚠️ The legacy fallback is load-bearing, not defensive. `nodeResultsData` has had an envelope
-    /// in code for a while and the rows in the developer's real store are STILL bare arrays — a row
-    /// is only rewritten when its run is touched. Dropping this path would erase them.
-    func testEnvelopeFallsBackToABareLegacyPayload() throws {
-        let legacy = Data(#"["a","b"]"#.utf8)
-        let result = try XCTUnwrap(VersionedBlob<[String]>.decode(from: legacy))
-        XCTAssertEqual(result.payload, ["a", "b"])
-        XCTAssertNil(result.version, "A bare payload predates versioning — that must be reported, not faked.")
+    /// A bare, unwrapped payload predates versioning and is no longer read (2026-10-03 reset).
+    func testABareLegacyPayloadIsNotAccepted() {
+        XCTAssertNil(VersionedBlob<[String]>.decode(from: Data(#"["a","b"]"#.utf8)))
     }
 
     /// Genuinely undecodable bytes must return nil, NOT an empty payload. "Unreadable" and "empty"

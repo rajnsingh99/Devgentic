@@ -55,15 +55,16 @@ final class WorkflowExecutionUITailTests: XCTestCase {
         XCTAssertEqual(nodes.count, 2)
     }
 
-    /// Both legacy shapes must keep working — the fix ADDS a key, it does not swap one.
-    func testTheLegacyEnvelopeAndBareArrayStillWork() throws {
+    /// Only the current envelope is read. The pre-`VersionedBlob` `nodes` envelope and the bare
+    /// array were dropped with the rest of the legacy blob handling (2026-10-03).
+    func testTheRetiredEnvelopeAndBareArrayAreRejected() throws {
         let legacy = try JSONSerialization.data(withJSONObject: [
             "version": 1, "nodes": [["id": "a"]]
         ])
-        XCTAssertEqual(try XCTUnwrap(WorkflowRunRecordSD.rawNodeArray(inBlob: legacy)).count, 1)
+        XCTAssertNil(WorkflowRunRecordSD.rawNodeArray(inBlob: legacy))
 
         let bare = try JSONSerialization.data(withJSONObject: [["id": "a"], ["id": "b"], ["id": "c"]])
-        XCTAssertEqual(try XCTUnwrap(WorkflowRunRecordSD.rawNodeArray(inBlob: bare)).count, 3)
+        XCTAssertNil(WorkflowRunRecordSD.rawNodeArray(inBlob: bare))
     }
 
     /// A blob that is not a node array at all must report nil rather than an empty array — the
@@ -73,17 +74,6 @@ final class WorkflowExecutionUITailTests: XCTestCase {
         XCTAssertNil(WorkflowRunRecordSD.rawNodeArray(inBlob: notNodes))
         XCTAssertNil(WorkflowRunRecordSD.rawNodeArray(inBlob: Data("not json".utf8)))
         XCTAssertNil(WorkflowRunRecordSD.rawNodeArray(inBlob: Data()))
-    }
-
-    /// ⚠️ The envelope key order matters: `payload` is checked FIRST. A blob carrying both keys is
-    /// only producible by a future writer, but if one appears the CURRENT shape must win.
-    func testThePayloadKeyOutranksTheLegacyKey() throws {
-        let both = try JSONSerialization.data(withJSONObject: [
-            "payload": [["id": "current"]],
-            "nodes": [["id": "legacy1"], ["id": "legacy2"]]
-        ])
-
-        XCTAssertEqual(try XCTUnwrap(WorkflowRunRecordSD.rawNodeArray(inBlob: both)).count, 1)
     }
 
     /// ⚠️ THE CRASH, not a drop. Without `.fragmentsAllowed` a SCALAR element makes

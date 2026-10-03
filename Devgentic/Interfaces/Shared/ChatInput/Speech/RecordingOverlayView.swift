@@ -40,7 +40,11 @@ struct RecordingOverlayView: View {
         .padding(.top, 6)
         .frame(minHeight: 58)
         // Match mainInputArea chrome exactly so toggling voice input doesn't visibly swap materials.
-        .appSurface(in: .rect(cornerRadius: 18), elevation: .elevated)
+        .appSurface(
+            in: .rect(cornerRadius: 18),
+            elevation: .elevated,
+            strokeWidth: theme.isDark ? 0.5 : 0.75
+        )
         .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
 

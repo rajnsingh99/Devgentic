@@ -315,25 +315,15 @@ struct WelcomeView: View {
                 .font(.caption2)
                 .foregroundColor(theme.tertiaryText.opacity(0.5))
 
-            Button {
+            TactileButton(
+                title: "All Shortcuts",
+                icon: "command",
+                variant: .subtle,
+                size: .compact,
+                tooltip: "View all keyboard shortcuts (⌘/)"
+            ) {
                 openWindow(id: "shortcuts-window")
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "command")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("All Shortcuts")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .foregroundColor(theme.accentColor)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(theme.accentColor.opacity(0.1))
-                )
             }
-            .buttonStyle(.plain)
-            .help("View all keyboard shortcuts (⌘/)")
         }
         .padding(.vertical, 8)
     }
@@ -350,19 +340,21 @@ struct WelcomeView: View {
                 .foregroundStyle(theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
-            Button("Settings") { router.navigateToSettings(.general) }
-                .font(.caption2)
-                .buttonStyle(.plain)
-                .foregroundStyle(theme.accentColor)
-            Button {
-                withAnimation { diagnosticsDisclosureSeen = true }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.caption2)
-                    .foregroundStyle(theme.tertiaryText)
+            TactileButton(
+                title: "Settings",
+                icon: "gearshape",
+                variant: .subtle,
+                size: .compact
+            ) {
+                router.navigateToSettings(.general)
             }
-            .buttonStyle(.plain)
-            .help("Dismiss")
+            TactileIconButton(
+                icon: "xmark",
+                tooltip: "Dismiss",
+                size: .compact
+            ) {
+                withAnimation { diagnosticsDisclosureSeen = true }
+            }
         }
         .padding(12)
         .frame(maxWidth: 520)

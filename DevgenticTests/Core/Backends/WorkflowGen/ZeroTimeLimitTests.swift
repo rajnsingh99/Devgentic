@@ -25,11 +25,10 @@ final class ZeroTimeLimitTests: XCTestCase {
     func testANodeWithAZeroHardTimeoutFallsBackToTheWorkflowDefault() {
         var node = WorkflowNode(id: UUID(), kind: .action(ActionNodeConfig()), position: .zero, displayName: "Call API")
         node.nodeConfig = WorkflowNodeConfig(maxNodeRetries: 0, hardTimeout: 0)
-        let config = WorkflowConfig(agentProfileIDs: [])
 
-        let budget = WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config)
+        let budget = WorkflowExecutor.outerTimeoutBudget(for: node)
         XCTAssertNotEqual(budget, 0, "a 0 hardTimeout used to fail the node the instant it started")
-        XCTAssertEqual(budget, config.effectiveNodeTimeout)
+        XCTAssertEqual(budget, WorkflowConfig.nodeTimeout)
     }
 
     /// Every other reader goes through the same rule.

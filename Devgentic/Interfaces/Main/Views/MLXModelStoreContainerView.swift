@@ -39,6 +39,11 @@ struct MLXModelStoreContainerView: View {
 
     @State private var isSearchExpanded = false
 
+    /// Pasted repo ids whose declared metadata says Devgentic can't run them → the reason.
+    /// Only unsupported ids are stored: absence means "supported or not yet known", and the
+    /// authoritative check in `fetchByRepoId` covers the not-yet-known case.
+    @State private var unsupportedPastedRepos: [String: String] = [:]
+
     init(filterForTools: Bool = false, profileID: UUID? = nil) {
         self.filterForTools = filterForTools
         self.profileID = profileID
@@ -70,6 +75,16 @@ struct MLXModelStoreContainerView: View {
             detail = value
         case .failure(let error):
             toastManager.show(error.errorDescription ?? "Couldn't reach HuggingFace.", style: .error)
+            return
+        }
+
+        // ⚠️ BEFORE any download slot is taken. The search listing already hides these, but a
+        // pasted id skips the listing entirely — `fetchModelDetail` has no `filter=mlx` — so a
+        // decision model (Laya, GLiNER2.5-Decide) could previously be pulled in full and fail at
+        // first use with an error that never named the cause.
+        if let reason = detail.unsupportedReason {
+            unsupportedPastedRepos[repoId] = reason
+            toastManager.show("\(repoId) is not supported. \(reason)", style: .warning)
             return
         }
 
@@ -149,7 +164,22 @@ struct MLXModelStoreContainerView: View {
                     // emptiness-gated button would appear and vanish on every typing pause. It
                     // would also be missing in the case that matters most: a search that DID
                     // return the repo, which the quantization / fit / tool-capable filters hid.
-                    if let repoId = MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText) {
+                    if let repoId = MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText),
+                       let reason = unsupportedPastedRepos[repoId] {
+                        // The icon-only toolbar button is replaced by a labelled, inert pill —
+                        // an unexplained dimmed icon would read as "still loading".
+                        Text("Not supported")
+                            .font(.system(.caption, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(.secondary.opacity(0.15)))
+                            .help(reason)
+                            .accessibilityLabel("\(repoId) is not supported")
+                            .accessibilityHint(reason)
+                    } else if let repoId = MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText) {
                         IslandIconButton(
                             symbol: "arrow.down.circle.fill",
                             style: .prominent,
@@ -187,6 +217,18 @@ struct MLXModelStoreContainerView: View {
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Pre-check a pasted repo id so the button reads "Not supported" BEFORE it's pressed.
+        // `.task(id:)` cancels and restarts on every keystroke that changes the id, so the sleep
+        // is the debounce: a half-typed `owner/rep` never reaches the network.
+        .task(id: MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText)) {
+            guard let repoId = MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText),
+                  unsupportedPastedRepos[repoId] == nil else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            if let reason = await MLXModelService.shared.unsupportedReason(forRepo: repoId) {
+                unsupportedPastedRepos[repoId] = reason
+            }
+        }
         .onAppear {
             if !viewModel.searchText.isEmpty {
                 isSearchExpanded = true

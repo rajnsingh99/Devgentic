@@ -45,6 +45,7 @@ final class CodeProjectSessionTests: XCTestCase {
         // Never the real Keychain: these tests write keys.
         keychain = ProgrammableKeychain()
         ProviderKeyStore.setStorageForTesting(keychain)
+        GlobalProviderKeys.setStorageForTesting(keychain)
 
         // Real folders — `openProject(forConversationPath:)` checks the folder exists.
         root = FileManager.default.temporaryDirectory.appendingPathComponent("CodeProjectSessionTests-\(UUID().uuidString)")
@@ -56,6 +57,7 @@ final class CodeProjectSessionTests: XCTestCase {
 
     override func tearDownWithError() throws {
         ProviderKeyStore.setStorageForTesting(nil)
+        GlobalProviderKeys.setStorageForTesting(nil)
         try? FileManager.default.removeItem(at: root)
         defaults.removePersistentDomain(forName: suiteName)
         defaults = nil

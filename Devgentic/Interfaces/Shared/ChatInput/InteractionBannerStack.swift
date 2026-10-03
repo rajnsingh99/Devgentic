@@ -528,8 +528,12 @@ private struct PermissionInteractionBanner: View {
                             Text(hasPendingEdits ? "Discard edits" : "Cancel")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundColor(theme.secondaryText)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .pointingHandCursor()
                         .help(hasPendingEdits
                               ? String(localized: "Restore the arguments the model proposed")
                               : String(localized: "Close the editor"))
@@ -800,6 +804,7 @@ private struct ClarificationInteractionBanner: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.streamingIndicator.opacity(0.35), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: !isSubmitting)
         .disabled(isSubmitting)
         .help(option)                              // full text on hover when truncated
         .accessibilityLabel("Answer: \(option)")
@@ -972,6 +977,7 @@ private struct GateInteractionBanner: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke((gate.highlights.isEmpty ? theme.warningColor : hue(for: option)).opacity(0.75), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: !isSubmitting)
         .disabled(isSubmitting)
         .help(option)
         .accessibilityLabel("Choose: \(option)")
@@ -1044,6 +1050,7 @@ private struct PlanReviewInteractionBanner: View {
                     .foregroundColor(theme.streamingIndicator.opacity(0.8))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
 
                 Spacer()
 
@@ -1058,6 +1065,7 @@ private struct PlanReviewInteractionBanner: View {
                         .foregroundColor(theme.tertiaryText)
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                 }
             }
 
@@ -1129,6 +1137,7 @@ private struct PlanReviewInteractionSubtaskRow: View {
                     .foregroundColor(theme.tertiaryText.opacity(0.5))
             }
             .buttonStyle(.plain)
+            .pointingHandCursor()
             .accessibilityLabel("Delete step")
         }
         .padding(.horizontal, 8)
@@ -1153,48 +1162,119 @@ private struct HITLActionButton: View {
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
     @State private var isHovering = false
+
+    private var isPrimaryContrast: Bool {
+        if case .primary = style, buttonAccentStyle == .themeContrast {
+            return true
+        }
+        return false
+    }
 
     private var bgColor: Color {
         switch style {
         case .ghost:
             return isHovering ? theme.surfaceOverlay : Color.clear
-        case .primary(let color):
-            return isDisabled ? color.opacity(0.25) : (isHovering ? color.opacity(0.9) : color)
+        case .primary:
+            if buttonAccentStyle == .themeContrast {
+                // Style 2: High-contrast solid keycap
+                if isDisabled {
+                    return theme.isDark ? Color.white.opacity(0.35) : Color.black.opacity(0.20)
+                }
+                return theme.isDark
+                    ? (isHovering ? Color.white : Color.white.opacity(0.95))
+                    : (isHovering ? Color.black : Color(red: 0.12, green: 0.12, blue: 0.14))
+            }
+            // Style 3: Tactile Glass Surface (translucent dark overlay)
+            return isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay
         }
     }
 
-    private var fgColor: Color {
+    private var iconColor: Color {
+        if isDisabled {
+            return labelColor
+        }
         switch style {
-        case .ghost:   return theme.secondaryText
-        case .primary: return .white
+        case .ghost:
+            return isHovering ? theme.primaryText : theme.secondaryText
+        case .primary(let color):
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            }
+            // Style 3: Vibrant semantic/accent icon
+            return color
+        }
+    }
+
+    private var labelColor: Color {
+        if isDisabled {
+            if isPrimaryContrast {
+                return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08).opacity(0.40) : Color.white.opacity(0.40)
+            }
+            return theme.secondaryText.opacity(0.45)
+        }
+        switch style {
+        case .ghost:
+            return isHovering ? theme.primaryText : theme.secondaryText
+        case .primary:
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            }
+            // Style 3: Clean primary white text
+            return isHovering ? theme.primaryText : theme.primaryText.opacity(0.95)
         }
     }
 
     private var borderColor: Color {
         switch style {
-        case .ghost:            return theme.dividerColor.opacity(0.4)
-        case .primary(let color): return color.opacity(0.3)
+        case .ghost:
+            return isHovering ? theme.secondaryText.opacity(0.25) : theme.dividerColor.opacity(0.4)
+        case .primary(let color):
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark ? Color.white.opacity(0.4) : Color.black.opacity(0.2)
+            }
+            // Style 3: Subtle border glowing with semantic color on hover
+            return isDisabled ? color.opacity(0.15) : (isHovering ? color.opacity(0.65) : color.opacity(0.32))
         }
     }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: icon).font(.system(.caption2, weight: .semibold))
-                Text(label).font(.system(.caption, weight: .medium))
+                Image(systemName: icon)
+                    .font(.system(.caption2, weight: .semibold))
+                    .foregroundColor(iconColor)
+                Text(label)
+                    .font(.system(.caption, weight: .semibold))
+                    .foregroundColor(labelColor)
             }
-            .foregroundColor(isDisabled ? fgColor.opacity(0.4) : fgColor)
             .padding(.horizontal, 11)
             .padding(.vertical, 6)
             .background(RoundedRectangle(cornerRadius: 7).fill(bgColor))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(borderColor, lineWidth: 1))
+            .shadow(
+                color: isHovering && !isDisabled && isPrimaryContrast
+                    ? Color.black.opacity(0.30)
+                    : (isHovering && !isDisabled ? semanticGlowColor.opacity(0.25) : Color.clear),
+                radius: 3,
+                x: 0,
+                y: 1
+            )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: !isDisabled)
         .disabled(isDisabled)
         .keyboardShortcut(keyboardShortcut)   // B1: nil = no shortcut
         .onHover { h in withAnimation(.easeInOut(duration: 0.15)) { isHovering = h } }
         .scaleEffect(isHovering && !isDisabled ? 1.02 : 1.0)
         .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isHovering)
+    }
+
+    private var semanticGlowColor: Color {
+        switch style {
+        case .ghost: return Color.clear
+        case .primary(let color): return color
+        }
     }
 }

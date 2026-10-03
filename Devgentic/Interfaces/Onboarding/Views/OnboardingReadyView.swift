@@ -261,6 +261,7 @@ struct OnboardingReadyView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHoveringLaunch = hovering

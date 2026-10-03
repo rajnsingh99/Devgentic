@@ -164,14 +164,44 @@ final class TraceStore: Sendable {
         try migrator.migrate(dbPool)
     }
     
+    // MARK: - Schema fingerprint
+
+    /// The live schema as sorted lines — every column, foreign key and index. What
+    /// `TraceStoreBaselineSchemaTests` pins the squashed baseline against.
+    func schemaFingerprint() throws -> [String] {
+        try dbPool.read { db in
+            var lines: [String] = []
+            let tables = try String.fetchAll(db, sql: """
+                SELECT name FROM sqlite_master WHERE type = 'table'
+                AND name NOT LIKE 'sqlite_%' AND name != 'grdb_migrations' ORDER BY name
+                """)
+            for table in tables {
+                for row in try Row.fetchAll(db, sql: #"SELECT name, type, "notnull", IFNULL(dflt_value, '') AS dflt, pk FROM pragma_table_info(?)"#, arguments: [table]) {
+                    let name: String = row["name"], type: String = row["type"], dflt: String = row["dflt"]
+                    let notNull: Int = row["notnull"], pk: Int = row["pk"]
+                    lines.append("col \(table).\(name)|\(type)|\(notNull)|\(dflt)|\(pk)")
+                }
+                for row in try Row.fetchAll(db, sql: #"SELECT "from" AS f, "table" AS t, "to" AS c, on_delete AS d FROM pragma_foreign_key_list(?)"#, arguments: [table]) {
+                    let from: String = row["f"], target: String = row["t"], column: String = row["c"], onDelete: String = row["d"]
+                    lines.append("fk \(table).\(from)>\(target).\(column)|\(onDelete)")
+                }
+            }
+            lines += try String.fetchAll(db, sql: "SELECT 'idx ' || sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL")
+            return lines.sorted()
+        }
+    }
+
     // MARK: - Migrations
-    
+
+    /// ⚠️ ONE BASELINE (2026-10-03 history reset, pre-release): the eight incremental migrations
+    /// that built this schema were squashed into the final shape below. The identifier stays
+    /// `v1_create_tables` ON PURPOSE: a database that already ran the old ladder has this id applied
+    /// and its tables already in this shape, so it opens unchanged — GRDB ignores the retired ids it
+    /// no longer knows. Add a NEW migration for any future schema change; never edit this one.
     private var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
-        
-        // v1: Initial schema
+
         migrator.registerMigration("v1_create_tables") { db in
-            
             // -- traces --
             try db.create(table: "traces") { t in
                 t.primaryKey("traceID", .text)
@@ -187,11 +217,16 @@ final class TraceStore: Sendable {
                 t.column("status", .text).notNull().defaults(to: "running")
                 t.column("errorSummary", .text)
                 t.column("metadataJSON", .text)
+                t.column("appVersion", .text)
+                t.column("buildNumber", .text)
+                t.column("inputTokens", .integer)
+                t.column("outputTokens", .integer)
+                t.column("estimatedCostUSD", .double)
+                t.column("tokensEstimated", .boolean)
             }
-            
             try db.create(index: "idx_traces_conversation", on: "traces", columns: ["conversationID"])
             try db.create(index: "idx_traces_message", on: "traces", columns: ["messageID"])
-            
+
             // -- spans --
             try db.create(table: "spans") { t in
                 t.primaryKey("spanID", .text)
@@ -205,10 +240,9 @@ final class TraceStore: Sendable {
                 t.column("status", .text).notNull().defaults(to: "running")
                 t.column("metadataJSON", .text)
             }
-            
             try db.create(index: "idx_spans_trace", on: "spans", columns: ["traceID"])
             try db.create(index: "idx_spans_parent", on: "spans", columns: ["parentSpanID"])
-            
+
             // -- span_events --
             try db.create(table: "span_events") { t in
                 t.autoIncrementedPrimaryKey("id")
@@ -220,108 +254,56 @@ final class TraceStore: Sendable {
                 t.column("content", .text)
                 t.column("detailJSON", .text)
                 t.column("severity", .text).defaults(to: "info")
+                // AgentErrorCategory.rawValue — lets analytics GROUP BY category without parsing
+                // detailJSON blobs. Written only in dev mode (TraceRecorder); reads work regardless.
+                t.column("errorCategory", .text)
+                // Shared by every event about the same underlying incident, so a propagation chain
+                // collapses to one root cause via GROUP BY.
+                t.column("errorChainID", .text)
+                // ExecutionPhase.rawValue — indexed for "show me all .parsing failures".
+                t.column("phase", .text)
+                // ReAct iteration number; nil outside the cognitive loop.
+                t.column("iterationNumber", .integer)
+                // For future causal-chain links; nullable and unenforced.
+                t.column("causedByEventID", .integer)
+                // Intrinsic duration of the event, distinct from the span that wraps it.
+                t.column("durationMs", .integer)
             }
-            
             try db.create(index: "idx_events_span", on: "span_events", columns: ["spanID"])
             try db.create(index: "idx_events_trace", on: "span_events", columns: ["traceID"])
-        }
-
-        // v2: Observability expansion — richer span-event columns for the canonical
-        // error taxonomy. All columns nullable so legacy rows continue to load.
-        // Writes to these columns are dev-mode-gated in TraceRecorder; reads work
-        // regardless. This migration is safe to run on databases already populated
-        // with v1 data.
-        migrator.registerMigration("v2_expand_span_events") { db in
-            try db.alter(table: "span_events") { t in
-                // AgentErrorCategory.rawValue — lets analytics GROUP BY category
-                // without parsing detailJSON blobs.
-                t.add(column: "errorCategory", .text)
-                // UUID shared across every SpanEvent emitted about the same underlying
-                // incident, so propagation chains collapse to a single "root cause"
-                // via GROUP BY. Populated only when a ClassifiedAgentError is being
-                // emitted (other event types pass nil).
-                t.add(column: "errorChainID", .text)
-                // ExecutionPhase.rawValue — redundant with category.phase but indexed
-                // for fast dashboard queries ("show me all .parsing failures").
-                t.add(column: "phase", .text)
-                // ReAct iteration number. Nil for events outside the cognitive loop.
-                t.add(column: "iterationNumber", .integer)
-                // For future causal-chain links — points at the event that triggered this
-                // one. Nullable FK; not enforced to keep propagation ordering flexible.
-                t.add(column: "causedByEventID", .integer)
-                // Intrinsic duration of the event (e.g., LLM response time, tool latency).
-                // Distinct from span.endedAt - span.startedAt (which wraps the operation).
-                t.add(column: "durationMs", .integer)
-            }
-
-            // Indices for the dashboard queries we expect to hammer:
-            //  - "show all errors of category X" (`idx_events_category`)
-            //  - "collapse this trace to N root causes" (`idx_events_chain`)
-            //  - "latency distribution for phase=tooling" (`idx_events_phase`)
-            try db.create(index: "idx_events_category",
-                          on: "span_events",
-                          columns: ["errorCategory"],
+            try db.create(index: "idx_events_category", on: "span_events", columns: ["errorCategory"],
                           condition: Column("errorCategory") != nil)
-            try db.create(index: "idx_events_chain",
-                          on: "span_events",
-                          columns: ["errorChainID"],
+            try db.create(index: "idx_events_chain", on: "span_events", columns: ["errorChainID"],
                           condition: Column("errorChainID") != nil)
-            try db.create(index: "idx_events_phase",
-                          on: "span_events",
-                          columns: ["phase"],
+            try db.create(index: "idx_events_phase", on: "span_events", columns: ["phase"],
                           condition: Column("phase") != nil)
-        }
+            try db.create(index: "idx_events_timestamp", on: "span_events", columns: ["timestamp"])
 
-        // v3: Per-trace configuration snapshot — one row per trace capturing the full
-        // effective request config (profile, model, tools, capabilities, retry policy,
-        // memory budget, hardware, feature flags). The #1 thing missing for offline
-        // bug reproduction.
-        //
-        // Indexed columns support common dashboard queries (GROUP BY provider, model,
-        // app version). The full TraceConfigSnapshot lives in `snapshotJSON`, so new
-        // non-indexed fields can be added without schema changes.
-        migrator.registerMigration("v3_create_trace_configs") { db in
+            // -- trace_configs --
             try db.create(table: "trace_configs") { t in
                 t.primaryKey("traceID", .text)
                     .references("traces", column: "traceID", onDelete: .cascade)
-
-                // Indexed identity / environment columns.
                 t.column("provider", .text).notNull()
                 t.column("modelName", .text).notNull()
                 t.column("profileType", .text).notNull()
                 t.column("appVersion", .text).notNull()
                 t.column("osVersion", .text).notNull()
-
-                // Indexed config-summary columns.
                 t.column("toolsCount", .integer).notNull().defaults(to: 0)
                 t.column("capabilitiesCount", .integer).notNull().defaults(to: 0)
                 t.column("instructionsHash", .text)
                 t.column("memoryBudgetBytes", .integer)
                 t.column("historyStrategy", .text)
                 t.column("thinkingEnabled", .boolean).notNull().defaults(to: false)
-
-                // Full sanitized snapshot. Extensible without schema changes.
                 t.column("snapshotJSON", .text).notNull()
             }
-
             try db.create(index: "idx_trace_configs_provider",     on: "trace_configs", columns: ["provider"])
             try db.create(index: "idx_trace_configs_model",        on: "trace_configs", columns: ["modelName"])
             try db.create(index: "idx_trace_configs_profile_type", on: "trace_configs", columns: ["profileType"])
             try db.create(index: "idx_trace_configs_app_version",  on: "trace_configs", columns: ["appVersion"])
-            try db.create(index: "idx_trace_configs_instr_hash",
-                          on: "trace_configs",
-                          columns: ["instructionsHash"],
+            try db.create(index: "idx_trace_configs_instr_hash", on: "trace_configs", columns: ["instructionsHash"],
                           condition: Column("instructionsHash") != nil)
-        }
 
-        // v4: In-app log ring buffer persistence. DGLogger calls the LogRecorder
-        // actor, which periodically flushes its in-memory buffer into this table.
-        // Enables the "last N hours of logs" panel in diagnostic export bundles —
-        // previously impossible because os.Logger only writes to the system log.
-        //
-        // Indexed on timestamp (for time-range queries), level (for severity
-        // filters), and traceID (for correlating logs to a specific run).
-        migrator.registerMigration("v4_create_log_entries") { db in
+            // -- log_entries --
             try db.create(table: "log_entries") { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("timestamp", .double).notNull()
@@ -334,68 +316,12 @@ final class TraceStore: Sendable {
                 t.column("phase", .text)
                 t.column("metadataJSON", .text)
             }
-
             try db.create(index: "idx_logs_timestamp", on: "log_entries", columns: ["timestamp"])
             try db.create(index: "idx_logs_level",     on: "log_entries", columns: ["level"])
-            try db.create(index: "idx_logs_trace",
-                          on: "log_entries",
-                          columns: ["traceID"],
+            try db.create(index: "idx_logs_trace", on: "log_entries", columns: ["traceID"],
                           condition: Column("traceID") != nil)
-        }
 
-        // v5: release attribution + token accounting + the missing span-events timestamp
-        // index. All additive/nullable — safe on populated v1–v4 databases.
-        migrator.registerMigration("v5_version_tokens_event_index") { db in
-            try db.alter(table: "traces") { t in
-                // §12.3 — build attribution on the trace itself. Config snapshots are
-                // captured only on the chat path, so headless/scheduler/sub-agent traces
-                // had no version anchor; these are stamped in `beginTrace`.
-                t.add(column: "appVersion", .text)
-                t.add(column: "buildNumber", .text)
-                // D1 — per-trace token totals + cost rollup, set at `endTrace`.
-                t.add(column: "inputTokens", .integer)
-                t.add(column: "outputTokens", .integer)
-                t.add(column: "estimatedCostUSD", .double)
-                t.add(column: "tokensEstimated", .boolean)
-            }
-            // #17 — span_events is filtered by timestamp in every metrics query but had no
-            // index (v4 added one only for log_entries).
-            try db.create(index: "idx_events_timestamp", on: "span_events", columns: ["timestamp"])
-        }
-
-        // v6: normalize legacy TEXT dates. Rows written before the GRDB date-strategy fix
-        // stored "YYYY-MM-DD HH:MM:SS.SSS" TEXT in these REAL columns. SQLite sorts TEXT
-        // above REAL, so such rows were IMMORTAL — `startedAt < cutoff` (purge, reconcile)
-        // never matched, while `startedAt >= since` (recent-bundle windows) ALWAYS matched,
-        // surfacing 1970-decoded garbage forever (audit #7). Convert parseable values to
-        // epoch seconds; drop the unsalvageable rest.
-        migrator.registerMigration("v6_normalize_legacy_text_dates") { db in
-            let targets: [(table: String, column: String, nullable: Bool)] = [
-                ("traces", "startedAt", false), ("traces", "endedAt", true),
-                ("spans", "startedAt", false), ("spans", "endedAt", true),
-                ("span_events", "timestamp", false),
-                ("log_entries", "timestamp", false)
-            ]
-            for t in targets {
-                try db.execute(sql: """
-                    UPDATE \(t.table) SET \(t.column) = CAST(strftime('%s', \(t.column)) AS REAL)
-                    WHERE typeof(\(t.column)) = 'text' AND strftime('%s', \(t.column)) IS NOT NULL
-                    """)
-                if t.nullable {
-                    try db.execute(sql: "UPDATE \(t.table) SET \(t.column) = NULL WHERE typeof(\(t.column)) = 'text'")
-                }
-            }
-            // Unparseable text in NOT NULL date columns = unsalvageable garbage rows.
-            try db.execute(sql: "DELETE FROM traces WHERE typeof(startedAt) = 'text'")   // cascades
-            try db.execute(sql: "DELETE FROM spans WHERE typeof(startedAt) = 'text'")    // cascades events
-            try db.execute(sql: "DELETE FROM span_events WHERE typeof(timestamp) = 'text'")
-            try db.execute(sql: "DELETE FROM log_entries WHERE typeof(timestamp) = 'text'")
-        }
-
-        // v7: durable HITL audit (C2). One row per HITL request, written at raise and updated on
-        // resolve. Independent of traces (no FK) so it survives even when a trace is purged, and so a
-        // request pending at quit/crash persists for the launch reconcile pass. All additive.
-        migrator.registerMigration("v7_create_hitl_audit") { db in
+            // -- hitl_audit --
             try db.create(table: "hitl_audit") { t in
                 t.primaryKey("operationID", .text)
                 t.column("conversationID", .text).notNull()
@@ -407,21 +333,11 @@ final class TraceStore: Sendable {
                 t.column("raisedAt", .double).notNull()
                 t.column("resolvedAt", .double)
                 t.column("outcome", .text)
+                t.column("traceID", .text)
+                t.column("spanID", .text)
             }
             try db.create(index: "idx_hitl_audit_conversation", on: "hitl_audit", columns: ["conversationID"])
             try db.create(index: "idx_hitl_audit_raisedAt", on: "hitl_audit", columns: ["raisedAt"])
-        }
-
-        // v8 (Run-Report Phase 5): join keys from an approval back to its run. Nullable and
-        // deliberately STILL not foreign keys — the v7 design (rows survive trace purge and
-        // process death for the launch reconcile) is load-bearing and unchanged; these columns
-        // only let the Run Report match an approval to its trace EXACTLY instead of guessing by
-        // conversation + time window. Old rows stay nil and keep using the window heuristic.
-        migrator.registerMigration("v8_hitl_trace_join") { db in
-            try db.alter(table: "hitl_audit") { t in
-                t.add(column: "traceID", .text)
-                t.add(column: "spanID", .text)
-            }
             try db.create(index: "idx_hitl_audit_trace", on: "hitl_audit", columns: ["traceID"],
                           condition: Column("traceID") != nil)
         }

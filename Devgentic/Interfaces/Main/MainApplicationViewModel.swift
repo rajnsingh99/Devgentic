@@ -460,15 +460,9 @@ final class MainApplicationViewModel {
             )
             }
 
-            // ⚠️ NO PROFILE RE-SAVE HERE ANY MORE (2026-08-29). This block existed solely to
-            // recompute `WorkflowConfig.agentProfileIDs` from the layout; that field is retired,
-            // because a workflow's nodes own their configuration and the layout is the only record
-            // of what a workflow contains.
-            //
-            // Nothing replaces it: unlike the canvas's own save, this drain has no editor draft to
-            // flush — it runs over cached canvas STATES whose views may not even be mounted, and
-            // the profile row it would have re-saved was never edited here. The layout write above
-            // plus the reconcile is the whole job.
+            // No profile re-save: this drain has no editor draft to flush — it runs over cached
+            // canvas STATES whose views may not even be mounted. The layout write above plus the
+            // reconcile is the whole job.
 
             state.markSaved()
             // The drain runs over states whose views may not be mounted, so no `onChange` will fire

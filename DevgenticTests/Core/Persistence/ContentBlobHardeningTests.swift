@@ -91,17 +91,12 @@ final class ContentBlobHardeningTests: XCTestCase {
         }
     }
 
-    /// ⚠️ The legacy `"image"` shim must keep working — it is decode-only and converts old rows.
-    /// A catch-all that swallowed it would silently stop upgrading legacy images.
-    func testLegacyImageShimStillConvertsRatherThanBecomingUnknown() throws {
-        let legacy = Data(#"{"type":"image","imageUrl":"https://example.com/a.png","imageAlt":"alt"}"#.utf8)
-        let content = try JSONDecoder().decode(MessageContent.self, from: legacy)
-
-        XCTAssertFalse(content.isUnrecognised,
-                       "The legacy image shim was captured as .unknown instead of converting.")
-        guard case .mediaArtifact = content else {
-            return XCTFail("Expected the legacy shim to produce .mediaArtifact, got \(content)")
-        }
+    /// The retired `"image"` type is no longer converted — it is preserved as unknown content, like
+    /// any other type this build does not write.
+    func testTheRetiredImageTypeIsPreservedAsUnknown() throws {
+        let old = Data(#"{"type":"image","imageUrl":"https://example.com/a.png","imageAlt":"alt"}"#.utf8)
+        let content = try JSONDecoder().decode(MessageContent.self, from: old)
+        XCTAssertTrue(content.isUnrecognised)
     }
 
     /// Unknown content must not leak into prompts, RAG or exports as invented text.

@@ -205,26 +205,6 @@ final class SkillFolderScannerTests: XCTestCase {
         XCTAssertEqual(manifests.first!.resourceCount, 2)
     }
 
-
-    // MARK: - Load Full Package
-
-    func testLoadFullPackage_includesBodyAndResources() throws {
-        try createSkill(name: "load-test", description: "Test loading.", hasScripts: true, hasReferences: true)
-
-        let manifests = try SkillFolderScanner.scan(rootFolder: tempDir)
-        let package = try SkillFolderScanner.loadFullPackage(for: manifests.first!)
-
-        // Body should contain the markdown content after frontmatter
-        XCTAssertTrue(package.body.contains("# load-test Skill"))
-        XCTAssertTrue(package.body.contains("Step 1: Do the thing."))
-
-        // Resources
-        XCTAssertEqual(package.resources.count, 2)
-        let scriptResource = package.resources.first(where: { $0.type == .script })
-        XCTAssertNotNil(scriptResource)
-        XCTAssertTrue(scriptResource!.content.contains("print('hello')"))
-    }
-
     // MARK: - Name Validation
 
     func testNameValidation_uppercaseRejected() throws {
@@ -292,31 +272,5 @@ final class SkillModelsTests: XCTestCase {
         XCTAssertEqual(decoded.resourceCount, manifest.resourceCount)
         XCTAssertEqual(decoded.hasScripts, manifest.hasScripts)
         XCTAssertEqual(decoded.compatibility, manifest.compatibility)
-    }
-
-    func testSkillFolderConfig_codableRoundTrip() throws {
-        let config = SkillFolderConfig(
-            folderURL: URL(fileURLWithPath: "/tmp/skills"),
-            manifests: [
-                SkillManifest(
-                    id: UUID(),
-                    name: "code-review",
-                    description: "Review code quality.",
-                    folderPath: "/tmp/skills/code-review",
-                    resourceCount: 1,
-                    hasScripts: false,
-                    compatibility: nil,
-                    isEnabled: true
-                )
-            ],
-            lastScannedAt: Date()
-        )
-
-        let data = try JSONEncoder().encode(config)
-        let decoded = try JSONDecoder().decode(SkillFolderConfig.self, from: data)
-
-        XCTAssertEqual(decoded.folderURL, config.folderURL)
-        XCTAssertEqual(decoded.manifests.count, 1)
-        XCTAssertEqual(decoded.manifests.first?.name, "code-review")
     }
 }

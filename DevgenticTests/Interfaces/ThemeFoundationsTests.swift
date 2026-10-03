@@ -86,21 +86,12 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertNotNil(black.color)
         XCTAssertNotNil(black.nsColor)
 
-        // Test backward compatibility with saved rawValues and aliases
+        // Canonical rawValues only — retired aliases are no longer read.
         XCTAssertEqual(AppAccentColor(rawValue: "modern_spotify"), .modernSpotify)
-        XCTAssertEqual(AppAccentColor(rawValue: "cosmic_cyan"), .modernSpotify)
-        XCTAssertEqual(AppAccentColor(rawValue: "spotify_green"), .spotify)
         XCTAssertEqual(AppAccentColor(rawValue: "white"), .white)
-        XCTAssertEqual(AppAccentColor(rawValue: "pure_white"), .white)
-        XCTAssertEqual(AppAccentColor(rawValue: "studio_white"), .white)
         XCTAssertEqual(AppAccentColor(rawValue: "grey"), .grey)
-        XCTAssertEqual(AppAccentColor(rawValue: "gray"), .grey)
-        XCTAssertEqual(AppAccentColor(rawValue: "slate_grey"), .grey)
-        XCTAssertEqual(AppAccentColor(rawValue: "slate_gray"), .grey)
         XCTAssertEqual(AppAccentColor(rawValue: "black"), .black)
-        XCTAssertEqual(AppAccentColor(rawValue: "onyx_black"), .black)
-        XCTAssertEqual(AppAccentColor(rawValue: "jet_black"), .black)
-        XCTAssertEqual(AppAccentColor(rawValue: "pure_black"), .black)
+        XCTAssertNil(AppAccentColor(rawValue: "spotify_green"))
 
         // Test isAccentLight and accentForegroundColor behavior
         let whiteDecorator = ThemeDecorator(base: AppThemes.MaterialTheme(), accentColorOverride: .white)
@@ -117,7 +108,7 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertEqual(blueDecorator.warningForegroundColor, Color(red: 0.08, green: 0.08, blue: 0.08))
     }
 
-    func testThemeManagerAvailableThemesAndMigration() {
+    func testThemeManagerAvailableThemes() {
         let manager = ThemeManager()
         let availableIDs = manager.availableThemes.map(\.id)
 
@@ -165,15 +156,12 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertEqual(manager.currentTheme.codeHighlightThemeName, "solarized-light")
         XCTAssertEqual(manager.currentTheme.syntaxTheme.background, AppThemes.SolarizedLightTheme().syntaxTheme.background)
 
-        // Backward compatibility mappings
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "default"), .cosmicDark)
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "material"), .cosmicDark)
+        // Canonical rawValues only — retired names are no longer read.
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "cosmic_dark"), .cosmicDark)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "high_contrast"), .highContrast)
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "dracula"), .highContrast)
-        XCTAssertEqual(CodeViewerThemeOverride(rawValue: "github_light"), .oneLight)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "one_light"), .oneLight)
         XCTAssertEqual(CodeViewerThemeOverride(rawValue: "solarized_light"), .solarizedLight)
+        XCTAssertNil(CodeViewerThemeOverride(rawValue: "dracula"))
 
         // 5. Reset to Cosmic Dark
         manager.applyCodeViewerTheme(.cosmicDark)

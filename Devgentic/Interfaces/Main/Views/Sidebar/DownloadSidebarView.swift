@@ -365,29 +365,22 @@ struct DownloadSidebarView: View {
             // it, so the whole screen was unreachable. This view even held
             // `@Environment(MainViewRouter.self)` for a call that was never written: the dependency
             // was injected, the navigation was not. Correct code, no caller.
-            Button {
+            TactileIconButton(
+                icon: "arrow.down.circle",
+                tooltip: "Open the Download Manager",
+                accessibilityLabel: "Open the Download Manager",
+                variant: .secondary,
+                size: 22
+            ) {
                 router.navigateToDownloadManager()
-            } label: {
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(.caption, weight: .semibold))
-                    .frame(width: 22, height: 22)
-                    .foregroundColor(theme.secondaryText)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(theme.surfaceOverlay)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .buttonStyle(.plain)
-            .pointingHandCursor()
-            .help("Open the Download Manager")
 
             if !historyRecords.isEmpty {
                 Menu {
                     Button(role: .destructive) {
                         showingClearHistoryAlert = true
                     } label: {
-                        Label("Clear History…", systemImage: "trash")
+                        Label("Clear History", systemImage: "trash")
                     }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -586,7 +579,7 @@ struct DownloadSidebarView: View {
         Button {
             recordPendingRedownload = record
         } label: {
-            Label("Re-download…", systemImage: "arrow.clockwise")
+            Label("Re-download", systemImage: "arrow.clockwise")
         }
 
         Divider()
@@ -807,24 +800,23 @@ private struct HistoryDownloadRowView: View {
             // ⚠️ Shown on hover or selection rather than only in the context menu: a paused or
             // failed download's bytes were easy to forget when both actions were hidden there.
             if partialBytes != nil, isHovering || isSelected, let onResume, let onDiscard {
-                HStack(spacing: 6) {
-                    Button(action: onResume) {
-                        Image(systemName: "play.circle")
-                            .foregroundColor(theme.accentColor)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Resume Download")
-                    .accessibilityLabel("Resume \(record.displayName)")
+                HStack(spacing: 4) {
+                    SidebarRowActionButton(
+                        icon: "play.circle",
+                        tint: theme.accentColor,
+                        tooltip: "Resume Download",
+                        accessibilityLabel: "Resume \(record.displayName)",
+                        action: onResume
+                    )
 
-                    Button(action: onDiscard) {
-                        Image(systemName: "trash.slash")
-                            .foregroundColor(theme.errorColor)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Discard Partial Files")
-                    .accessibilityLabel("Discard partial files for \(record.displayName)")
+                    SidebarRowActionButton(
+                        icon: "trash.slash",
+                        tint: theme.errorColor,
+                        tooltip: "Discard Partial Files",
+                        accessibilityLabel: "Discard partial files for \(record.displayName)",
+                        action: onDiscard
+                    )
                 }
-                .font(theme.fontCaption)
             }
         }
         .padding(.horizontal, 8)
@@ -889,6 +881,48 @@ private struct HistoryDownloadRowView: View {
             Image(systemName: "questionmark.circle")
                 .font(.system(.caption))
                 .foregroundColor(theme.tertiaryText)
+        }
+    }
+}
+
+// MARK: - Sidebar Row Action Button
+
+private struct SidebarRowActionButton: View {
+    let icon: String
+    let tint: Color
+    let tooltip: String
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    @State private var isButtonHovered = false
+    @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isButtonHovered ? tint : tint.opacity(0.85))
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(isButtonHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(isButtonHovered ? tint.opacity(0.35) : theme.dividerColor.opacity(0.3), lineWidth: 0.5)
+                )
+                .scaleEffect(isButtonHovered && !reduceMotion ? 1.08 : 1.0)
+                .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(tooltip)
+        .accessibilityLabel(accessibilityLabel)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isButtonHovered = hovering
+            }
         }
     }
 }

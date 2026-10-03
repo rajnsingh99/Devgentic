@@ -58,7 +58,7 @@ final class WhisperModelDownloadServiceTests: XCTestCase {
         XCTAssertTrue(service.isDownloading)
 
         // Attempting a second download should be a no-op
-        service.downloadModel("tiny")
+        service.downloadModel("base")
         XCTAssertEqual(service.downloadingModelId, "large-v3",
                         "Second download should not have started")
 
@@ -66,7 +66,7 @@ final class WhisperModelDownloadServiceTests: XCTestCase {
     }
 
     func testDownloadClearsErrorOnStart() async {
-        service.downloadModel("tiny")
+        service.downloadModel("base")
         XCTAssertNil(service.downloadError,
                       "downloadError should be nil at the start of a download")
 
@@ -119,7 +119,7 @@ final class WhisperModelDownloadServiceTests: XCTestCase {
         XCTAssertTrue(service.isDownloading)
 
         // Deleting a different model should be blocked
-        let result = await service.deleteModel("tiny")
+        let result = await service.deleteModel("base")
         XCTAssertNil(result, "Delete should return nil when a download is in progress for a different model")
 
         // Cleanup

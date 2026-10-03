@@ -242,14 +242,13 @@ final class ChatMessageObservableTests: XCTestCase {
     // MARK: - Schema Versioning
 
     func testEncodeIncludesSchemaVersion() throws {
-        // [P5] Was a documented known-failure for months: asserted 2 while the impl
-        // moved to 4. The constant tags the full-object JSON envelope ONLY (no
-        // production path round-trips it; the store persists version-less per-field
-        // blobs) — see the scope note at `currentSchemaVersion`.
+        // [P5] The constant tags the full-object JSON envelope ONLY (no production path
+        // round-trips it; the store versions its per-field blobs at the ChatMessageSD
+        // layer) — see the scope note at `currentSchemaVersion`.
         let msg = makeUserMessage(text: "envelope test")
         let data = try JSONEncoder().encode(msg)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        XCTAssertEqual(json["schemaVersion"] as? Int, 4)
+        XCTAssertEqual(json["schemaVersion"] as? Int, 1)
     }
 
     func testV2EncodeDoesNotIncludeLegacyKeys() throws {
@@ -363,7 +362,7 @@ final class ChatMessageObservableTests: XCTestCase {
         let data2 = try JSONEncoder().encode(decoded)
         let json = try JSONSerialization.jsonObject(with: data2) as! [String: Any]
 
-        XCTAssertEqual(json["schemaVersion"] as? Int, 4, "Re-encode stamps the current envelope version")
+        XCTAssertEqual(json["schemaVersion"] as? Int, 1, "Re-encode stamps the current envelope version")
     }
 
     // MARK: - Equatable

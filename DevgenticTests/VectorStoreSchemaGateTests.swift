@@ -21,56 +21,39 @@ final class VectorStoreSchemaGateTests: XCTestCase {
 
     private let current = VectorStoreService.currentSchemaVersion
 
-    func testCurrentMarker_OpensAsIs_RegardlessOfFlags() {
-        // The marker is the authority — preferences state is irrelevant once stamped.
+    func testCurrentMarker_OpensAsIs() {
         XCTAssertEqual(
-            VectorStoreService.schemaGateAction(markerVersion: current, databaseExists: true, legacyPhase3Flag: false),
-            .openAsIs,
-            "THE fix: a healthy marked database survives losing its preferences flags"
-        )
-        XCTAssertEqual(
-            VectorStoreService.schemaGateAction(markerVersion: current, databaseExists: true, legacyPhase3Flag: true),
+            VectorStoreService.schemaGateAction(markerVersion: current, databaseExists: true),
             .openAsIs
         )
     }
 
     func testFreshInstall_StampsWithoutWiping() {
         XCTAssertEqual(
-            VectorStoreService.schemaGateAction(markerVersion: nil, databaseExists: false, legacyPhase3Flag: false),
+            VectorStoreService.schemaGateAction(markerVersion: nil, databaseExists: false),
             .stampOnly
         )
     }
 
-    func testLegacyFlaggedUpgrade_StampsWithoutWiping() {
-        // Every existing install at rollout: database on the current schema
-        // (Phase-3 flag proves its wipe ran), marker not yet written. Must NOT
-        // wipe — this is the one-time migration onto the marker.
+    func testUnmarkedDatabase_Wipes() {
+        // No marker means a schema of unknown age; nothing upgrades it.
         XCTAssertEqual(
-            VectorStoreService.schemaGateAction(markerVersion: nil, databaseExists: true, legacyPhase3Flag: true),
-            .stampOnly
-        )
-    }
-
-    func testUnmarkedUnflaggedDatabase_Wipes() {
-        // Genuinely pre-Phase-3 schema (or unknowable) — the legitimate wipe.
-        XCTAssertEqual(
-            VectorStoreService.schemaGateAction(markerVersion: nil, databaseExists: true, legacyPhase3Flag: false),
+            VectorStoreService.schemaGateAction(markerVersion: nil, databaseExists: true),
             .wipeAndStamp
         )
     }
 
     func testOlderMarkedSchema_Wipes() {
         XCTAssertEqual(
-            VectorStoreService.schemaGateAction(markerVersion: current - 1, databaseExists: true, legacyPhase3Flag: true),
-            .wipeAndStamp,
-            "an explicitly older schema rebuilds even when legacy flags linger"
+            VectorStoreService.schemaGateAction(markerVersion: current - 1, databaseExists: true),
+            .wipeAndStamp
         )
     }
 
     func testNewerMarkedSchema_Wipes() {
         // Downgrade: a future build's schema is just as unreadable as an old one.
         XCTAssertEqual(
-            VectorStoreService.schemaGateAction(markerVersion: current + 1, databaseExists: true, legacyPhase3Flag: true),
+            VectorStoreService.schemaGateAction(markerVersion: current + 1, databaseExists: true),
             .wipeAndStamp
         )
     }

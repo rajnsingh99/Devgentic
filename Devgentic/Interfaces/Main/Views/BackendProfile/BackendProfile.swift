@@ -85,19 +85,8 @@ struct AgentConfig: Codable, Hashable, Sendable {
     var historyStrategy: HistoryStrategy?
 
     // Skills
-    /// ⚠️ LEGACY, read-only after v8. Retained for the dual-read window so a profile that has not
-    /// been re-saved — or a store opened by an older build — still resolves its skills. Delete no
-    /// earlier than the release AFTER the one that ships v8.
-    var skillConfig: SkillFolderConfig?
-
-    /// Registry references. Supersedes `skillConfig` — see `SkillSelection` for why a reference
-    /// rather than a copy.
-    ///
-    /// ⚠️ OPTIONAL, and that is mandatory rather than stylistic. A non-optional stored property on
-    /// a `Codable` type throws `keyNotFound` on every already-persisted blob, and that throw escapes
-    /// the `decodeIfPresent` at the ProfileDetails call site and fails the WHOLE decode — the
-    /// profile is then shown as unreadable. `nil` means "predates the cut-over, read `skillConfig`";
-    /// an empty array means "migrated, and links nothing".
+    /// Library references — see `SkillSelection` for why a reference rather than a copy. `nil`
+    /// and an empty array both mean "links nothing".
     var skillSelections: [SkillSelection]?
 
     // Code mode metadata (not persisted for agent profiles — only set on ephemeral Code profiles)
@@ -115,7 +104,6 @@ struct AgentConfig: Codable, Hashable, Sendable {
          resilienceOverrides: ResilienceOverrides? = nil,
          capabilities: AgentCapabilities = AgentCapabilities(),
          historyStrategy: HistoryStrategy? = nil,
-         skillConfig: SkillFolderConfig? = nil,
          skillSelections: [SkillSelection]? = nil,
          projectPath: String? = nil) {
         self.llmConfig = llmConfig
@@ -130,7 +118,6 @@ struct AgentConfig: Codable, Hashable, Sendable {
         self.resilienceOverrides = resilienceOverrides
         self.capabilities = capabilities
         self.historyStrategy = historyStrategy
-        self.skillConfig = skillConfig
         self.skillSelections = skillSelections
         self.projectPath = projectPath
     }
@@ -148,7 +135,7 @@ struct RetryPolicy: Codable, Hashable, Sendable {
         self.backoffStrategy = backoffStrategy
     }
 
-    // Backward-compat: silently ignore the removed retryableErrors field on decode
+    // Tolerant per-field: a missing or unreadable key falls back to its default.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.maxRetries = (try? container.decode(Int.self, forKey: .maxRetries)) ?? 3
@@ -180,8 +167,7 @@ struct ErrorRecovery: Codable, Hashable, Sendable {
         self.fallbackMessage = fallbackMessage
     }
 
-    // Backward-compat: tolerate missing/renamed keys per-field (same idiom as
-    // RetryPolicy above). With the synthesized decoder, one absent key here
+    // Tolerant per-field (same idiom as RetryPolicy above). With the synthesized decoder, one absent key here
     // failed the whole ProfileDetails decode, which destructively collapses the
     // profile to the default-bot fallback in BackendProfileSD.
     init(from decoder: Decoder) throws {
@@ -416,120 +402,23 @@ struct AgentDelegationConfig: Codable, Hashable, Sendable {
     }
 }
 
-/// Configuration for a Workflow profile (DAG of agent references + execution defaults).
+/// Configuration for a Workflow profile.
+///
+/// Holds no stored settings today: the graph lives in the layout (`WorkflowLayoutSD`), and retry,
+/// timeout and approval are per node (`WorkflowNodeConfig`). It stays a struct so `.workflow` has a
+/// payload to grow into without a format change.
 struct WorkflowConfig: Codable, Hashable, Sendable {
-    /// RETIRED 2026-08-29 — no longer recomputed, and read by nothing that matters.
-    ///
-    /// ⚠️ It was a parallel list of the profile ids a workflow's nodes referenced, resynced from the
-    /// layout on every canvas save. Two things ended it: a workflow's nodes now OWN their
-    /// configuration, so there is no shared profile to list; and the layout was always the real
-    /// record — `ProfileReferenceIndex` and `WorkflowExecutor` both deliberately read it instead,
-    /// because this list "is not kept in step".
-    ///
-    /// ⚠️ THE PROPERTY AND ITS CODING KEY STAY — but NOT to protect user data. Devgentic is
-    /// pre-release and the pre-ownership workflows this once guarded were deleted by the owner on
-    /// 2026-08-29, so there are no stale lists left to preserve. It stays because removing a key
-    /// from `ProfileDetails` means touching its 7-step migration ladder and the newer-build refusal,
-    /// which is more risk than an inert `[UUID]` costs. Any value still present is dead weight.
-    ///
-    /// ⚠️ Do NOT reintroduce a blocking validation rule on it. One existed ("Workflow must reference
-    /// at least one agent profile") and register B36 records why it was dangerous even while the
-    /// field WAS maintained: `BackendProfileStore` validates `strict: isUpdate`, so an empty list
-    /// makes every update of that workflow throw — including a rename. With nothing maintaining the
-    /// field, such a rule would make every workflow permanently unsaveable.
-    var agentProfileIDs: [UUID]
-
-    // MARK: - Execution Defaults (nil = use hardcoded system defaults)
-
     /// The config a NEWLY CREATED workflow profile gets.
-    ///
-    /// ⚠️ Exists so this decision is unit-testable. It used to live inline in `AddBackendProfileView`
-    /// as `WorkflowConfig(agentProfileIDs: [], nodeTimeoutEnabled: false)` — new workflows were
-    /// created UNBOUNDED — and a mutation flipping it back passed every test, because the tests
-    /// constructed `WorkflowConfig` directly and never went through the view.
-    ///
-    /// ⚠️ Bounded by default since 2026-08-13. Unbounded was defensible while the Workflow Settings
-    /// sheet let you turn the timeout back on; that sheet is gone, so a profile created unbounded
-    /// could never be bounded through any UI. A genuinely long-running node overrides with its own
-    /// `hardTimeout`, or its bound profile's `executionTimeout`.
     static func forNewProfile() -> WorkflowConfig {
-        WorkflowConfig(agentProfileIDs: [])
+        WorkflowConfig()
     }
 
-    /// ⚠️ RETIRED FROM THE UI 2026-08-13 — decode/encode-only, and the whole Workflow Settings sheet
-    /// is gone with it. STILL HONOURED at runtime when non-nil, so an existing workflow keeps the
-    /// number it chose.
+    /// The bound on a node that sets no `hardTimeout` and whose profile sets no `executionTimeout`.
     ///
-    /// The timeout itself is not optional — every node kind is bounded, and the clock excludes time
-    /// parked awaiting a human. What was removed is the per-workflow dial: a node that genuinely
-    /// needs longer sets its own `hardTimeout`, or its bound profile sets `executionTimeout`, and
-    /// both win over this.
-    var defaultNodeTimeout: TimeInterval?
-
-    /// ⚠️ RETIRED FROM THE UI 2026-08-13 — decode/encode-only. STILL HONOURED when explicitly
-    /// `false`, so a workflow that deliberately ran unbounded keeps doing so.
-    ///
-    /// ⚠️ New workflows no longer set it (`AddBackendProfileView`), so they are bounded by default.
-    /// Creating profiles that are unbounded AND have no UI to change it would strand them.
-    var nodeTimeoutEnabled: Bool?
-
-    /// ⚠️ RETIRED 2026-08-12 — decoded and re-encoded so stored profiles round-trip unchanged, but
-    /// NEVER read at run time. It never was: the executor only ever consulted per-node
-    /// `WorkflowNodeConfig.onFailure` (register WF15), and that per-node policy is itself gone —
-    /// failure routing is now the `error` port on the canvas.
-    var defaultFailurePolicy: NodeFailurePolicy?
-
-    /// ⚠️ RETIRED FROM THE UI 2026-08-13 — the workflow-level "Default Max Retries" stepper is gone.
-    /// Retries are a per-node decision because retry SAFETY differs by node kind: re-running a Code
-    /// node is pointless (deterministic — same input, same failure), re-running an Action node can
-    /// double-submit a side effect, and re-running a Loop or sub-workflow re-runs everything inside
-    /// it. Only Profile and Action nodes ever retried, and that is where the control lives.
-    ///
-    /// ⚠️ STILL HONOURED AT RUNTIME when non-nil, so a workflow that set it keeps its resilience.
-    /// Dropping it outright would silently stop retrying for anyone who had opted in, and a flaky
-    /// provider would start failing runs that used to succeed. Logged once per run with the
-    /// node-level equivalent.
-    var defaultMaxRetries: Int?
-
-    // MARK: - Context Pipeline
-
-    /// ⚠️ RETIRED 2026-08-13 — decode/encode-only, never read. A workflow no longer truncates
-    /// upstream output at all (user decision): fitting a node's input is a function of which model
-    /// that node runs, which is the author's choice, and a workflow-level character count could not
-    /// know it. The old defaults quietly cut a three-paragraph answer on every run.
-    ///
-    /// ⚠️ Deliberately NOT deleted, same reasoning as `onFailure`, `joinMode` and
-    /// `passthroughContent`: the layout blob has no per-element resilience (WF24), so dropping a
-    /// Codable key is not free.
-    var contextBudgetPerNode: Int?
-
-    /// Maximum total characters for all upstream context combined. nil = 6000.
-    var totalContextBudget: Int?
-
-    // MARK: - Advanced
-
-    /// ⚠️ RETIRED 2026-08-13 — decode/encode-only, never read. The "Max Nesting Depth" stepper is
-    /// gone, and with it the whole Workflow Settings sheet.
-    ///
-    /// It could only ever make the limit STRICTER: a hard `WorkflowDepth.maxDepth` is checked first,
-    /// so the stepper's 6–10 range did nothing at all, and there is no sensible reason to want
-    /// "fail at 2 levels" instead of the engine's limit. Over-deep nesting and sub-workflow cycles
-    /// are now reported by `WorkflowValidator` at design time — in the issues panel, as errors that
-    /// block the run — rather than as a failure five levels into execution.
-    ///
-    /// ⚠️ Deliberately NOT deleted, same reasoning as the other retirements: the layout blob has no
-    /// per-element resilience (WF24), so dropping a Codable key is not free.
-    var maxNestingDepth: Int?
-
-    // MARK: - Resolved Defaults
-
-    var resolvedNodeTimeout: TimeInterval { defaultNodeTimeout ?? 120 }
-    /// The workflow-default timeout to actually enforce on nodes that don't set their
-    /// own `hardTimeout`, or `nil` when the timeout is disabled (`nodeTimeoutEnabled == false`).
-    var effectiveNodeTimeout: TimeInterval? { (nodeTimeoutEnabled ?? true) ? resolvedNodeTimeout : nil }
-    /// ⚠️ LEGACY fallback only — see `defaultMaxRetries`. New workflows leave it nil, so a node
-    /// without its own `maxNodeRetries` does not retry.
-    var resolvedMaxRetries: Int { defaultMaxRetries ?? 0 }
+    /// Every node kind is bounded, and the clock excludes time parked awaiting a human. A node that
+    /// genuinely needs longer sets its own `hardTimeout`, or its bound profile sets
+    /// `executionTimeout`, and both win over this.
+    static let nodeTimeout: TimeInterval = 120
 }
 
 /// Configuration for an Image Generation profile.
@@ -542,421 +431,60 @@ struct ImageGenConfig: Codable, Hashable, Sendable {
 
 // MARK: - Schema Versioning
 
-/// Current schema version for ProfileDetails serialization.
-/// Increment this when the schema changes and add a migration step in `ProfileMigrator`.
+/// Version of the persisted `ProfileDetails` shape (`configData`).
+///
+/// ⚠️ HISTORY RESET 2026-10-03, pre-release with no users: versions 1–9 and every upgrade step
+/// between them were deleted, and this shape is the new version 1. A stored blob at any other
+/// version is NOT upgraded — it is refused and preserved (see `ProfileBlobGate`).
+///
+/// ⚠️ This number is independent of the SwiftData schema version (`DevgenticSchemaV1`) and of
+/// `MARKETING_VERSION`: SwiftData cannot see inside `configData`, so this is the only thing
+/// versioning what is actually in there. Bump it for a change to the PERSISTED shape of
+/// `ProfileDetails`, and decide then whether older blobs need an upgrade step.
 enum ProfileSchemaVersion: Int, Codable, Sendable {
-    case v1 = 1  // Initial versioned schema (pre-existing data treated as v1)
-    case v2 = 2  // Capability-based agents (architecture → capabilities migration)
-    case v3 = 3  // Inline sub-agents (delegation maxDelegationDepth/allowedAgentIDs → subAgents)
-    case v4 = 4  // Auto-spawn delegation (subAgents → maxConcurrentAgents + maxIterationsPerAgent)
-    case v5 = 5  // Skills support (SkillFolderConfig on AgentConfig)
-    case v6 = 6  // Workflow execution config (WorkflowConfig expansion)
-    case v7 = 7  // Repairs execute_shell tools stamped with a random sourceId
-    case v8 = 8  // Skills become registry references (skillConfig.manifests → skillSelections)
-    case v9 = 9  // Skills become LIBRARY references (folderPath → skillID, + pinnedVersionID)
+    case v1 = 1
 
-    static let current: ProfileSchemaVersion = .v9
+    static let current: ProfileSchemaVersion = .v1
 }
 
-/// Chains versioned transforms to migrate ProfileDetails JSON from older schemas to current.
-/// Each migration step operates on raw JSON dictionaries to avoid coupling to current model types.
-enum ProfileMigrator {
+/// Decides whether a stored `ProfileDetails` blob is one this build may decode.
+enum ProfileBlobGate {
 
     /// The blob shape this build writes and understands.
     ///
     /// ⚠️ DERIVED from `ProfileSchemaVersion.current`, never written as its own literal. These are
     /// the two halves of one fact — `current` is what the ENCODER stamps
     /// (`ProfileDetails.encode`), this is what the REFUSAL compares against — and as separate
-    /// literals they could silently disagree. The failure that creates is unusually nasty: bump one
-    /// and not the other and the app stamps every save with a version it then refuses to read back,
-    /// locking the user out of profiles this very build just wrote. Deriving makes that
-    /// unrepresentable rather than merely tested for.
-    ///
-    /// ⚠️ Add a new case to `ProfileSchemaVersion` ONLY together with a matching `migrateToV<n>` step,
-    /// and only for a change to the PERSISTED shape of `ProfileDetails`. This number is independent
-    /// of the SwiftData schema version (`DevgenticSchemaV1`) and of `MARKETING_VERSION`: SwiftData
-    /// cannot see inside `configData`, so this is the only thing versioning what is actually in there.
+    /// literals they could silently disagree, locking the user out of profiles this very build
+    /// just wrote.
     static var currentVersion: Int { ProfileSchemaVersion.current.rawValue }
 
-    /// What `migrateIfNeeded` concluded about a stored blob.
-    enum MigrationOutcome {
-        /// Ready to decode — either already current, or upgraded in memory.
-        case migrated(Data)
+    /// What `check` concluded about a stored blob.
+    enum Verdict {
+        /// The current shape (or not a JSON object at all — the decoder reports the real error).
+        case decodable
         /// Written by a NEWER build than this one. Refuse; do not guess.
         case tooNew(storedVersion: Int)
+        /// Written before the 2026-10-03 history reset. Nothing upgrades it any more.
+        case unsupported(storedVersion: Int)
     }
 
-    /// Migrates raw JSON data from any previous schema version to the current version, or refuses
-    /// when the data came from a newer build.
-    ///
-    /// ⚠️ The refusal is the point (register G18). The migration steps are shaped
-    /// `if storedVersion < N`, so a blob stamped ABOVE `currentVersion` matched no step, was passed
-    /// through untouched, and was then handed to a decoder that could not read it. The failure
-    /// surfaced as "this profile is corrupt" when the truth was "this profile is from the future" —
-    /// two situations with opposite remedies. Corrupt invites the user to reconfigure, which
-    /// overwrites the blob and makes the loss permanent; from-the-future needs them to update the
-    /// app and change NOTHING.
-    ///
-    /// This is not hypothetical for an unreleased app: the store lives in an unsandboxed shared
-    /// directory, so checking out an earlier commit and running it is enough.
-    static func migrateIfNeeded(_ data: Data) -> MigrationOutcome {
-        guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            // Not a JSON object at all. Nothing to migrate and nothing to conclude about its
-            // version — hand it to the decoder, which will report the real error.
-            return .migrated(data)
+    /// ⚠️ The newer-build refusal is the point (register G18): a blob from the future reported as
+    /// "corrupt" invites the user to reconfigure, which overwrites it and makes the loss permanent;
+    /// it needs an app update and NO change. This is not hypothetical for an unreleased app: the
+    /// store lives in an unsandboxed shared directory, so running an earlier commit is enough.
+    static func check(_ data: Data) -> Verdict {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .decodable
         }
-
         let storedVersion = (json["schemaVersion"] as? Int) ?? 0
-
-        if storedVersion > currentVersion {
-            return .tooNew(storedVersion: storedVersion)
-        }
-
-        // Apply migrations in order
-        if storedVersion < 1 {
-            json = migrateToV1(json)
-        }
-        if storedVersion < 2 {
-            json = migrateToV2(json)
-        }
-        if storedVersion < 3 {
-            json = migrateToV3(json)
-        }
-        if storedVersion < 4 {
-            json = migrateToV4(json)
-        }
-        if storedVersion < 5 {
-            json = migrateToV5(json)
-        }
-        if storedVersion < 6 {
-            json = migrateToV6(json)
-        }
-        if storedVersion < 7 {
-            json = migrateToV7(json)
-        }
-        if storedVersion < 8 {
-            json = migrateToV8(json)
-        }
-        if storedVersion < 9 {
-            json = migrateToV9(json)
-        }
-
-        guard let migrated = try? JSONSerialization.data(withJSONObject: json) else {
-            // ⚠️ The migration steps ran but the result could not be re-serialized, so what is
-            // returned is the ORIGINAL, UN-migrated blob wearing a `.migrated` label. The decoder's
-            // own legacy tolerance may still carry it, which is why this is a degradation rather
-            // than a failure — but it must not be silent, because the symptom (a profile that
-            // decodes with old-shaped fields) looks nothing like the cause.
-            logger.error(
-                "[PERSISTENCE] Profile blob migration produced JSON that could not be re-serialized "
-                + "(\(data.count) bytes). CONSEQUENCE: the ORIGINAL un-migrated bytes are returned "
-                + "instead; the decode may still succeed via legacy tolerance, or fail and mark the "
-                + "profile unreadable. The stored bytes are not modified either way."
-            )
-            return .migrated(data)
-        }
-        return .migrated(migrated)
-    }
-
-    // MARK: - Migration Steps
-
-    /// v0 → v1: Stamps schemaVersion, migrates legacy workflow "agents" array to "agentProfileIDs".
-    private static func migrateToV1(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 1
-
-        // Legacy workflow migration: embedded agent snapshots → UUID references
-        if let profileType = result["profileType"] as? String, profileType == "Workflow" {
-            if result["agentProfileIDs"] == nil, let agents = result["agents"] as? [[String: Any]] {
-                let ids = agents.compactMap { $0["id"] as? String }
-                result["agentProfileIDs"] = ids
-                result.removeValue(forKey: "agents")
-            }
-        }
-
-        return result
-    }
-
-    /// v1 → v2: Converts architecture enum to capabilities struct for Agent profiles.
-    private static func migrateToV2(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 2
-
-        guard let profileType = result["profileType"] as? String, profileType == "Agent" else {
-            return result
-        }
-
-        // Convert architecture → capabilities
-        let architecture = result["architecture"] as? String ?? "ReAct"
-        var capabilities: [String: Any] = [:]
-
-        switch architecture {
-        case "Plan & Execute":
-            capabilities["planning"] = [
-                "maxSubtasks": 5,
-                // #17: match the current default (parallel subtask execution is off — it's
-                // illusory under LLM-layer serialization and lacks cross-sibling HITL
-                // serialization). Was hardcoded true, an oversight when the default flipped.
-                "parallelSubtasks": false,
-                "subtaskToolFiltering": true
-            ]
-        case "Reflexion":
-            capabilities["selfReflection"] = [
-                "maxTrials": 3
-            ]
-        case "Supervisor":
-            capabilities["agentDelegation"] = [
-                "subAgents": [[String: Any]]()
-            ]
-        default:
-            break // ReAct / Workflow — no capabilities
-        }
-
-        result["capabilities"] = capabilities
-        result.removeValue(forKey: "architecture")
-
-        return result
-    }
-
-    /// v2 → v3: Converts delegation from profile-based (maxDelegationDepth/allowedAgentIDs) to inline sub-agents.
-    private static func migrateToV3(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 3
-
-        // Only agent profiles with delegation config need migration
-        guard let profileType = result["profileType"] as? String, profileType == "Agent",
-              var capabilities = result["capabilities"] as? [String: Any],
-              var delegation = capabilities["agentDelegation"] as? [String: Any]
-        else {
-            return result
-        }
-
-        // Replace old fields with empty subAgents array
-        delegation.removeValue(forKey: "maxDelegationDepth")
-        delegation.removeValue(forKey: "allowedAgentIDs")
-        delegation["subAgents"] = [[String: Any]]()
-
-        capabilities["agentDelegation"] = delegation
-        result["capabilities"] = capabilities
-
-        return result
-    }
-
-    /// v3 → v4: Converts inline sub-agents to auto-spawn delegation config.
-    private static func migrateToV4(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 4
-
-        guard let profileType = result["profileType"] as? String, profileType == "Agent",
-              var capabilities = result["capabilities"] as? [String: Any],
-              var delegation = capabilities["agentDelegation"] as? [String: Any]
-        else {
-            return result
-        }
-
-        // Extract settings from old subAgents array
-        var maxConcurrent = 3
-        var maxIterations = 10
-        if let subAgents = delegation["subAgents"] as? [[String: Any]], !subAgents.isEmpty {
-            maxConcurrent = max(subAgents.count, 1)
-            let iterations = subAgents.compactMap { $0["maxIterations"] as? Int }
-            if let maxIter = iterations.max() {
-                maxIterations = maxIter
-            }
-        }
-
-        // Replace with new fields
-        delegation.removeValue(forKey: "subAgents")
-        delegation["maxConcurrentAgents"] = maxConcurrent
-        delegation["maxIterationsPerAgent"] = maxIterations
-
-        capabilities["agentDelegation"] = delegation
-        result["capabilities"] = capabilities
-
-        return result
-    }
-
-    /// v4 → v5: Skills support. No data transformation needed — `skillConfig` is optional
-    /// and defaults to nil via `decodeIfPresent`. This migration just stamps the version.
-    private static func migrateToV5(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 5
-        return result
-    }
-
-    /// v5 → v6: Stamp-only. WorkflowConfig new fields are all optional; nil = system defaults.
-    private static func migrateToV6(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 6
-        return result
-    }
-
-    /// v7 → v8: Skills become registry references.
-    ///
-    /// Derives `skillSelections` from the manifest copies already in `skillConfig`, so a profile
-    /// that has never been re-saved still resolves its skills through the registry path.
-    ///
-    /// ⚠️ PURE, IDEMPOTENT, TOTAL — all three are required, not aspirational. `migrateIfNeeded`
-    /// has no `ModelContext`, no service access and no `async`; it runs on the READ path inside
-    /// `BackendProfileSD.decodeDetails`, on EVERY decode, and its result is NEVER written back. So:
-    ///
-    ///   - **Pure**: it cannot reach storage and must not try. Bringing the FOLDERS into the
-    ///     library is a separate launch-time pass (`SkillLibraryImportSweep`), which is why this
-    ///     step only needs what is already in the blob — `folderPath`, `name` and `isEnabled` are
-    ///     all present on every persisted `SkillManifest`.
-    ///   - **Idempotent**: it runs again on every single decode of the same bytes, so it must not
-    ///     compound. The `skillSelections == nil` guard is what makes a second pass a no-op.
-    ///   - **Total**: a malformed or partial `skillConfig` must yield a stamped blob, never a throw
-    ///     or a crash. Every read below is optional-chained for that reason; the worst outcome is
-    ///     an empty selection list, which the dual-read then covers from `skillConfig` anyway.
-    private static func migrateToV8(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 8
-
-        // Already migrated (or deliberately emptied) — leave it exactly as it is.
-        guard result["skillSelections"] == nil else { return result }
-
-        guard let skillConfig = result["skillConfig"] as? [String: Any],
-              let manifests = skillConfig["manifests"] as? [[String: Any]] else {
-            return result
-        }
-
-        let selections: [[String: Any]] = manifests.compactMap { manifest in
-            guard let folderPath = manifest["folderPath"] as? String,
-                  let name = manifest["name"] as? String else { return nil }
-            // `isEnabled` has been non-optional on SkillManifest since it shipped, but a blob
-            // written by a build that predates it would omit the key. Defaulting to true matches
-            // `SkillFolderScanner`, which hardcodes `isEnabled: true` on every freshly parsed skill.
-            let isEnabled = (manifest["isEnabled"] as? Bool) ?? true
-            return ["folderPath": folderPath, "name": name, "isEnabled": isEnabled]
-        }
-
-        result["skillSelections"] = selections
-        return result
-    }
-
-    /// v8 → v9: a selection stops addressing a FOLDER and starts addressing a library skill.
-    ///
-    /// Schema V6 retired the folder-indexed registry; a skill is now an opaque `skill_…` in the
-    /// library and its bytes live in the store. A v8 selection holds `folderPath`, which after V6
-    /// names nothing.
-    ///
-    /// ⚠️ **THIS STEP CANNOT RESOLVE THE ID, AND MUST NOT TRY.** `migrateIfNeeded` runs on the READ
-    /// path of every decode and is required to be pure, idempotent and total — no I/O, no store
-    /// lookups, no ordering assumptions. Mapping a folder to a skill needs the library, which needs
-    /// a container, which is exactly what a decode must not reach for. So this step only RESHAPES:
-    /// `folderPath` becomes `legacyFolderPath`, and `skillID` is left absent.
-    ///
-    /// The launch sweep does the re-link, because it is the one place that knows both halves — it
-    /// ingests each captured pre-V6 folder and therefore learns `folderPath → skillID`. Until it
-    /// runs, such a selection reports as awaiting re-link and is named in the UI rather than
-    /// silently dropped.
-    ///
-    /// - **Pure**: reads and writes `json` only.
-    /// - **Idempotent**: a selection that already carries `skillID` or `legacyFolderPath` is left
-    ///   exactly as it is, so running this twice changes nothing.
-    /// - **Total**: a malformed entry yields a stamped blob, never a throw. An entry with neither a
-    ///   usable `folderPath` nor a `skillID` is DROPPED rather than carried as an address-less row —
-    ///   it could never resolve or be re-linked, and a permanently unresolvable row in the UI is
-    ///   worse than one fewer link.
-    private static func migrateToV9(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 9
-
-        guard let selections = result["skillSelections"] as? [[String: Any]] else { return result }
-
-        let reshaped: [[String: Any]] = selections.compactMap { selection in
-            // Already v9-shaped (or already re-linked) — leave it untouched.
-            if selection["skillID"] != nil || selection["legacyFolderPath"] != nil { return selection }
-
-            guard let folderPath = selection["folderPath"] as? String, !folderPath.isEmpty else {
-                return nil
-            }
-            var moved = selection
-            moved.removeValue(forKey: "folderPath")
-            moved["legacyFolderPath"] = folderPath
-            // `name` has been non-optional on SkillSelection since it shipped, but a blob written
-            // by a build that predates it would omit the key. The folder's last component is the
-            // best available label and is what the old scanner required the name to equal anyway.
-            if moved["name"] == nil {
-                moved["name"] = (folderPath as NSString).lastPathComponent
-            }
-            if moved["isEnabled"] == nil { moved["isEnabled"] = true }
-            return moved
-        }
-
-        result["skillSelections"] = reshaped
-        return result
-    }
-
-    /// v6 → v7: Repairs `execute_shell` tools stamped with a random `sourceId`.
-    ///
-    /// ⚠️ A DATA repair, not a shape change — the only such step in this ladder, and deliberately
-    /// so. The profile's old skills card auto-added `execute_shell` with
-    /// `UUID(uuidString: "00000000-SKIL-AUTO-SHEL-000000000000") ?? UUID()`; that literal is not
-    /// valid hex, so the parse failed on every call and each import minted a fresh random id.
-    /// Tool dispatch and the Tool Library both key off `sourceId == ToolSource.builtInSourceID`,
-    /// so the affected profiles show the tool as OFF while it is live, append a duplicate when the
-    /// user ticks it, and can never remove the auto-added copy from any UI.
-    ///
-    /// Fixing the write site only helps NEW imports; every profile written before it stays broken
-    /// forever, and the damage is precisely that the user cannot repair it by hand. So the stored
-    /// bytes have to be normalized, and this ladder is the mechanism this codebase has for that.
-    ///
-    /// ⚠️ Merges rather than blindly rewrites: a profile can hold BOTH the auto-added copy and a
-    /// user-ticked one, which would collide on `(name, sourceId)` after the rewrite. The
-    /// built-in-sourced entry wins on `requiresConfirmation` and `isEnabled` because that one
-    /// records a deliberate choice the user made in the Tool Library; the auto-added copy records
-    /// only that an import happened. Never silently relax `requiresConfirmation` here.
-    private static func migrateToV7(_ json: [String: Any]) -> [String: Any] {
-        var result = json
-        result["schemaVersion"] = 7
-
-        guard var tools = result["tools"] as? [[String: Any]] else { return result }
-        let builtIn = ToolSource.builtInSourceID.uuidString
-
-        // Case-insensitive: UUID strings round-trip uppercase, but a hand-edited or legacy blob
-        // may hold either casing and a miss here would leave the profile unrepaired.
-        let orphans = tools.filter {
-            ($0["name"] as? String) == "execute_shell"
-                && ($0["sourceId"] as? String)?.caseInsensitiveCompare(builtIn) != .orderedSame
-        }
-        guard !orphans.isEmpty else { return result }
-
-        let canonical = tools.first {
-            ($0["name"] as? String) == "execute_shell"
-                && ($0["sourceId"] as? String)?.caseInsensitiveCompare(builtIn) == .orderedSame
-        }
-
-        // Drop every execute_shell entry, then reinsert exactly one repaired record.
-        tools.removeAll { ($0["name"] as? String) == "execute_shell" }
-
-        var repaired = canonical ?? orphans[0]
-        repaired["sourceId"] = builtIn
-        // The user's Tool Library choice wins where one exists; otherwise keep the auto-added
-        // record's own flags, defaulting `requiresConfirmation` to true for a shell tool whose
-        // blob predates that field.
-        if canonical == nil {
-            repaired["requiresConfirmation"] = (orphans[0]["requiresConfirmation"] as? Bool) ?? true
-        }
-        tools.append(repaired)
-        result["tools"] = tools
-
-        let preserved = canonical == nil ? "" : ", preserving the user's Tool Library settings"
-        logger.notice("""
-            [PERSISTENCE] Repaired \(orphans.count) execute_shell tool record(s) carrying a random \
-            sourceId; collapsed to a single built-in-sourced entry\(preserved). CONSEQUENCE: the \
-            Tool Library now shows the tool's real state and it can finally be removed.
-            """)
-
-        return result
+        if storedVersion > currentVersion { return .tooNew(storedVersion: storedVersion) }
+        if storedVersion < currentVersion { return .unsupported(storedVersion: storedVersion) }
+        return .decodable
     }
 }
 
-// MARK: - Profile Details Enum
 
-/// The discriminated union of profile configurations.
-/// Each case now carries a single config struct instead of loose associated values.
 enum ProfileDetails: Codable, Hashable, Sendable {
     case bot(BotConfig)
     case agent(AgentConfig)
@@ -973,22 +501,9 @@ enum ProfileDetails: Codable, Hashable, Sendable {
         // Bot / Agent / ImageGen share llmConfig
         case llmConfig, instructions
         // Agent-specific
-        case architecture // legacy — read for migration, never written
         case tools, description, knowledgeSources
         case maxIterations, executionTimeout, retryPolicy, errorRecovery, resilienceOverrides
-        case capabilities, historyStrategy, skillConfig, skillSelections
-        // Workflow-specific
-        case agentProfileIDs
-        case defaultNodeTimeout, defaultFailurePolicy, defaultMaxRetries
-        case contextBudgetPerNode, totalContextBudget
-        case maxNestingDepth
-        // ⚠️ `nodeTimeoutEnabled` was MISSING from all three of CodingKeys / encode / decode until
-        // 2026-08-05, so "disable the node timeout" was silently discarded on every save and came
-        // back nil — which `effectiveNodeTimeout` reads as "enabled", timing nodes out at the 120 s
-        // default the user had explicitly turned off. This coder hand-writes `WorkflowConfig`'s
-        // fields one at a time instead of delegating to its synthesized `Codable`, so nothing
-        // checks the list against the struct. If you add a field to `WorkflowConfig`, add it here.
-        case nodeTimeoutEnabled
+        case capabilities, historyStrategy, skillSelections
         // ImageGen-specific
         case negativePrompt, defaultAspectRatio, advancedSettings
         // Code-specific — folder root scoping for code tools (list_directory, glob_files, etc.)
@@ -1018,28 +533,9 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             let errorRecovery = try container.decodeIfPresent(ErrorRecovery.self, forKey: .errorRecovery)
             let resilienceOverrides = try container.decodeIfPresent(ResilienceOverrides.self, forKey: .resilienceOverrides)
 
-            // Decode capabilities — if missing (legacy v1), migrate from architecture string
-            let capabilities: AgentCapabilities
-            if let decoded = try container.decodeIfPresent(AgentCapabilities.self, forKey: .capabilities) {
-                capabilities = decoded
-            } else {
-                // Legacy migration: raw architecture string → capabilities
-                let legacyArch = try container.decodeIfPresent(String.self, forKey: .architecture)
-                var migrated = AgentCapabilities()
-                switch legacyArch {
-                case "Plan & Execute": migrated.planning = PlanningCapabilityConfig()
-                case "Reflexion": migrated.selfReflection = SelfReflectionConfig()
-                case "Supervisor": migrated.agentDelegation = AgentDelegationConfig()
-                default: break // "ReAct", "Workflow", nil → base capabilities
-                }
-                capabilities = migrated
-            }
-
+            let capabilities = try container.decodeIfPresent(AgentCapabilities.self, forKey: .capabilities)
+                ?? AgentCapabilities()
             let historyStrategy = try container.decodeIfPresent(HistoryStrategy.self, forKey: .historyStrategy)
-            let skillConfig = try container.decodeIfPresent(SkillFolderConfig.self, forKey: .skillConfig)
-            // ⚠️ `decodeIfPresent`, never `decode`. Absent means "predates v8" — the overwhelmingly
-            // common case on the first launch after the update — and a throw here fails the ENTIRE
-            // ProfileDetails decode, marking the profile unreadable.
             let skillSelections = try container.decodeIfPresent([SkillSelection].self, forKey: .skillSelections)
 
             self = .agent(AgentConfig(
@@ -1055,21 +551,11 @@ enum ProfileDetails: Codable, Hashable, Sendable {
                 resilienceOverrides: resilienceOverrides,
                 capabilities: capabilities,
                 historyStrategy: historyStrategy,
-                skillConfig: skillConfig,
                 skillSelections: skillSelections
             ))
 
         case .workflow:
-            let ids = try container.decodeIfPresent([UUID].self, forKey: .agentProfileIDs) ?? []
-            var config = WorkflowConfig(agentProfileIDs: ids)
-            config.defaultNodeTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .defaultNodeTimeout)
-            config.nodeTimeoutEnabled = try container.decodeIfPresent(Bool.self, forKey: .nodeTimeoutEnabled)
-            config.defaultFailurePolicy = try container.decodeIfPresent(NodeFailurePolicy.self, forKey: .defaultFailurePolicy)
-            config.defaultMaxRetries = try container.decodeIfPresent(Int.self, forKey: .defaultMaxRetries)
-            config.contextBudgetPerNode = try container.decodeIfPresent(Int.self, forKey: .contextBudgetPerNode)
-            config.totalContextBudget = try container.decodeIfPresent(Int.self, forKey: .totalContextBudget)
-            config.maxNestingDepth = try container.decodeIfPresent(Int.self, forKey: .maxNestingDepth)
-            self = .workflow(config)
+            self = .workflow(WorkflowConfig())
 
         case .imageGen:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
@@ -1101,10 +587,6 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             let resilienceOverrides = try container.decodeIfPresent(ResilienceOverrides.self, forKey: .resilienceOverrides)
             let capabilities = (try? container.decode(AgentCapabilities.self, forKey: .capabilities)) ?? AgentCapabilities()
             let historyStrategy = try container.decodeIfPresent(HistoryStrategy.self, forKey: .historyStrategy)
-            let skillConfig = try container.decodeIfPresent(SkillFolderConfig.self, forKey: .skillConfig)
-            // ⚠️ `decodeIfPresent`, never `decode`. Absent means "predates v8" — the overwhelmingly
-            // common case on the first launch after the update — and a throw here fails the ENTIRE
-            // ProfileDetails decode, marking the profile unreadable.
             let skillSelections = try container.decodeIfPresent([SkillSelection].self, forKey: .skillSelections)
             let projectPath = try container.decodeIfPresent(String.self, forKey: .projectPath)
             self = .code(AgentConfig(
@@ -1120,7 +602,6 @@ enum ProfileDetails: Codable, Hashable, Sendable {
                 resilienceOverrides: resilienceOverrides,
                 capabilities: capabilities,
                 historyStrategy: historyStrategy,
-                skillConfig: skillConfig,
                 skillSelections: skillSelections,
                 projectPath: projectPath
             ))
@@ -1157,19 +638,10 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             }
             try container.encode(config.capabilities, forKey: .capabilities)
             try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
-            try container.encodeIfPresent(config.skillConfig, forKey: .skillConfig)
             try container.encodeIfPresent(config.skillSelections, forKey: .skillSelections)
 
-        case .workflow(let config):
+        case .workflow:
             try container.encode(ProfileType.workflow, forKey: .profileType)
-            try container.encode(config.agentProfileIDs, forKey: .agentProfileIDs)
-            try container.encodeIfPresent(config.defaultNodeTimeout, forKey: .defaultNodeTimeout)
-            try container.encodeIfPresent(config.nodeTimeoutEnabled, forKey: .nodeTimeoutEnabled)
-            try container.encodeIfPresent(config.defaultFailurePolicy, forKey: .defaultFailurePolicy)
-            try container.encodeIfPresent(config.defaultMaxRetries, forKey: .defaultMaxRetries)
-            try container.encodeIfPresent(config.contextBudgetPerNode, forKey: .contextBudgetPerNode)
-            try container.encodeIfPresent(config.totalContextBudget, forKey: .totalContextBudget)
-            try container.encodeIfPresent(config.maxNestingDepth, forKey: .maxNestingDepth)
 
         case .imageGen(let config):
             try container.encode(ProfileType.imageGen, forKey: .profileType)
@@ -1181,7 +653,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
         case .code(let config):
             // ⚠️ MUST mirror `.agent` field-for-field, plus `projectPath`. It did not until
             // 2026-08-05: it silently dropped description, knowledgeSources, retryPolicy,
-            // errorRecovery, resilienceOverrides and skillConfig, even though its own comment on the
+            // errorRecovery, resilienceOverrides and skills, even though its own comment on the
             // decode arm claimed it decoded "identically to .agent plus projectPath".
             //
             // `CodeSessionManager` creates the code profile with
@@ -1212,7 +684,6 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             }
             try container.encode(config.capabilities, forKey: .capabilities)
             try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
-            try container.encodeIfPresent(config.skillConfig, forKey: .skillConfig)
             try container.encodeIfPresent(config.skillSelections, forKey: .skillSelections)
             try container.encodeIfPresent(config.projectPath, forKey: .projectPath)
         }
@@ -1369,6 +840,18 @@ enum ApiProvider: String, Codable, CaseIterable, Identifiable, Sendable {
     /// `.openAICompatible` is HTTP-based (it may point at a localhost server like
     /// LM Studio, but architecturally it's a remote endpoint that flows through
     /// CloudRequestPipeline, not the in-process/Ollama-managed local class).
+    /// Whether requests to this provider carry an API key at all. Ollama and MLX never do, so for
+    /// them there is nothing to store and every Keychain lookup is wasted — and, if a stray item
+    /// ever existed under a changed signature, a needless access prompt.
+    ///
+    /// ⚠️ Not the same as `!isLocal`: an OpenAI-compatible endpoint may be local and still take a key.
+    var usesAPIKey: Bool {
+        switch self {
+        case .ollama, .mlx: return false
+        case .openAI, .anthropic, .google, .openRouter, .openAICompatible: return true
+        }
+    }
+
     var isLocal: Bool {
         switch self {
         case .mlx, .ollama: return true
@@ -1502,7 +985,7 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     // MARK: - Codable Conformance
 
     enum CodingKeys: String, CodingKey {
-        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences, thinkingEnabled, supportedModalities, numCtxOverride
+        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, modelDialect, modelMetadata, chatTemplateSource, stopSequences, thinkingEnabled, supportedModalities, numCtxOverride
     }
 
     init(from decoder: Decoder) throws {
@@ -1513,14 +996,7 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         self.baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL)
         self.advancedConfiguration = try container.decodeIfPresent([String: JSONValue].self, forKey: .advancedConfiguration)
 
-        // --- COGNITIVE CAPABILITY MIGRATION LOGIC ---
-        if let capability = try container.decodeIfPresent(ModelCognitiveCapability.self, forKey: .cognitiveCapability) {
-            self.cognitiveCapability = capability
-        } else if let legacySupported = try container.decodeIfPresent(Bool.self, forKey: .supportsNativeTools) {
-            self.cognitiveCapability = legacySupported ? .parallelActions : .singleAction
-        } else {
-            self.cognitiveCapability = .none
-        }
+        self.cognitiveCapability = try container.decodeIfPresent(ModelCognitiveCapability.self, forKey: .cognitiveCapability) ?? .none
 
         self.modelDialect = try container.decodeIfPresent(ModelDialect.self, forKey: .modelDialect) ?? .nativeJSON
         self.modelMetadata = try container.decodeIfPresent(ModelMetadata.self, forKey: .modelMetadata)

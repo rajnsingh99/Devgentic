@@ -90,7 +90,7 @@ struct ProfileSidebarListView: View {
             // Header
             SidebarHeaderView(
                 title: "Profiles",
-                buttonTitle: "New",
+                buttonTitle: "New Profile",
                 systemImage: "plus",
                 shortcut: "⌘N",
                 onAction: { isAddingProfile = true }
@@ -101,7 +101,7 @@ struct ProfileSidebarListView: View {
             .padding(.bottom, 8)
 
             // Search
-            SidebarSearchBarView("Search profiles...", text: $searchText)
+            SidebarSearchBarView("Search profiles", text: $searchText)
                 .focused($isSearchFocused)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
@@ -150,6 +150,7 @@ struct ProfileSidebarListView: View {
                             title: "Couldn't Load Profiles",
                             subtitle: "\(loadError)\n\nYour profiles have not been deleted — they could not be read.",
                             buttonTitle: "Retry",
+                            buttonIcon: "arrow.clockwise",
                             systemImage: "exclamationmark.triangle",
                             onAction: { profileService.loadProfiles() }
                         )
@@ -158,24 +159,24 @@ struct ProfileSidebarListView: View {
                             title: "No Profiles",
                             subtitle: "Create an AI profile to get started.",
                             buttonTitle: "New Profile",
+                            buttonIcon: "plus",
                             systemImage: "cpu",
                             onAction: { isAddingProfile = true }
                         )
                     }
                 } else {
-                    VStack(spacing: 8) {
-                        Spacer()
-                        Text("No matches")
-                            .font(theme.fontSubheadline)
-                            .foregroundColor(theme.secondaryText)
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity)
+                    SidebarEmptyStateView(
+                        title: "No matches",
+                        subtitle: "No profiles found for \"\(searchText)\"",
+                        buttonTitle: "Clear Search",
+                        systemImage: "magnifyingglass",
+                        onAction: { searchText = "" }
+                    )
                 }
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(spacing: 4) {
+                        VStack(spacing: 2) {
                             ForEach(filteredProfiles) { profile in
                                 ProfileRowView(
                                     profile: profile,
@@ -322,7 +323,7 @@ struct ProfileSidebarListView: View {
         }
         .onAppear {
             if focusedProfileID == nil {
-                focusedProfileID = activeProfileID ?? filteredProfiles.first?.id
+                focusedProfileID = activeProfileID
             }
         }
         .onChange(of: activeProfileID) { _, newID in

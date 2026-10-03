@@ -17,32 +17,6 @@ import os
 
 private let logger = DGLogger(category: "WorkflowRunRecord")
 
-/// LEGACY ONLY — how records written before 2026-08-15 encoded "this node never ran".
-///
-/// ⚠️ DO NOT ADD CALLERS. This is a decoder for old data, not a way to classify a node.
-///
-/// Until 2026-08-15 the event channel had no way to say "skipped": `WorkflowExecutor` built
-/// `status: .skipped(reason:)` internally and then yielded `.workflowNodeFailed(…)`, so every
-/// not-run node was stored as `.failed` carrying the sentence "Upstream dependency failed" — a
-/// sentence that was itself untrue whenever the cause was ordinary routing. Every surface wanting
-/// "how many actually failed" had to subtract them by matching that prose. Nine did; three of them
-/// got it wrong, so the same node read "Not run" on screen and "Failed" to VoiceOver.
-///
-/// New records carry `NodeStatus.skipped(NodeSkipReason)` and need none of this. The prefix survives
-/// only so a run recorded by an older build still reads correctly after an upgrade.
-enum WorkflowNodeOutcome {
-    /// The exact sentence pre-2026-08-15 builds wrote for a cascade skip.
-    static let legacyUpstreamSkipReason = "Upstream dependency failed"
-
-    /// Prefix matched against an OLD record's `detail`.
-    static let legacyUpstreamSkipPrefix = "Upstream dependency"
-
-    /// True when a legacy `.failed` node did not actually run.
-    static func isLegacyUpstreamSkip(detail: String) -> Bool {
-        detail.hasPrefix(legacyUpstreamSkipPrefix)
-    }
-}
-
 /// Persistent record of a single workflow execution run.
 struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
 
@@ -238,11 +212,9 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         let hasWarnings: Bool?
         /// For a `.skipped` node: did it BEGIN EXECUTING before the skip settled?
         ///
-        /// ⚠️ OPTIONAL, and decoded with `decodeIfPresent`. A non-optional (even with a default)
-        /// would throw on every already-persisted record, and the resilient tier answers a failed
-        /// snapshot by DROPPING THE WHOLE NODE — status, duration and up to 400 persisted timeline
-        /// events. nil means "written before this build" and the display falls back to a legacy
-        /// heuristic rather than to a confident wrong answer.
+        /// ⚠️ OPTIONAL, and decoded with `decodeIfPresent`: a non-optional that failed to decode
+        /// would drop the WHOLE node in the resilient tier — status, duration and up to 400
+        /// persisted timeline events. nil reads as "did not start".
         let ranBeforeSkip: Bool?
 
         /// The node never ran.
@@ -252,19 +224,16 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         /// rewording the message would have silently broken every failure count in the app. The
         /// status now carries the fact structurally.
         ///
-        /// ⚠️ Records written before 2026-08-15 have no `.skipped` status — every skip in them is a
-        /// `.failed` carrying the old sentence — so the legacy prose test is retained ONLY as a
-        /// fallback for those, never for newly written rows.
         var didNotRun: Bool {
             if case .skipped = status { return true }
-            return status == .failed && WorkflowNodeOutcome.isLegacyUpstreamSkip(detail: detail)
+            return false
         }
 
         /// Failed on its own account. This is what a "N failed" badge means.
         ///
         /// A cancelled node is not a failure either — the user asked for it.
         var isGenuineFailure: Bool {
-            status == .failed && !WorkflowNodeOutcome.isLegacyUpstreamSkip(detail: detail)
+            status == .failed
         }
 
         /// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not rejected.
@@ -293,9 +262,6 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 case "completed": self = .completed
                 case "failed":    self = .failed
                 case "cancelled": self = .cancelled
-                // Bare "skipped" is what builds before 2026-08-15 wrote. They only ever produced
-                // the cascade case, so it maps to the honest equivalent rather than to `.other`.
-                case "skipped":   self = .skipped(.upstreamSkipped)
                 default:
                     if rawValue.hasPrefix("skipped:") {
                         let raw = String(rawValue.dropFirst("skipped:".count))
@@ -318,7 +284,7 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             }
         }
 
-        // Backward-compatible decoding (old records lack input fields / nodeTimeline)
+        // Tolerant decoding: optional fields may be absent
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             id = try c.decode(UUID.self, forKey: .id)
@@ -333,7 +299,7 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             //
             // ⚠️ But it used to be lossy AND SILENT, which meant a node's entire agent trace could
             // vanish with nothing in the log to say so. It also PRE-EMPTS the resilient tier: the
-            // `try?` swallows the failure here, so the outer `VersionedNodeResults` decode SUCCEEDS
+            // `try?` swallows the failure here, so the outer envelope decode SUCCEEDS
             // and `decodeNodeResultsResiliently` is never reached for a timeline failure.
             //
             // Since `TimelineEvent` gained its total catch-all, an individual event can no longer

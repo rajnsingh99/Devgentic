@@ -56,11 +56,10 @@ enum WorkflowRetryPolicy {
     ///     a Gate is not a retry.
     nonisolated static func structuralAttempts(
         isSubWorkflow: Bool,
-        maxNodeRetries: Int?,
-        fallbackRetries: Int
+        maxNodeRetries: Int?
     ) -> Int {
         guard isSubWorkflow else { return 1 }
-        return max((maxNodeRetries ?? fallbackRetries) + 1, 1)
+        return max((maxNodeRetries ?? 0) + 1, 1)
     }
 
     /// How many attempts a bot/agent node gets from `executeProfileNodeWithRetry`.
@@ -69,20 +68,16 @@ enum WorkflowRetryPolicy {
     /// a `ClosedRange` whose lowerBound exceeds its upperBound TRAPS — it does not yield an empty
     /// range — so a negative count ABORTS THE APP on an ordinary bot/agent dispatch. Neither feeder
     /// value is clamped on the way in: `WorkflowNodeConfig.init(from:)` decodes `maxNodeRetries` with
-    /// a bare `decodeIfPresent(...) ?? 0`, and `BackendProfile`'s workflow arm decodes
-    /// `defaultMaxRetries` the same way, so one negative in an externally-written blob arms EVERY
-    /// node that carries no count of its own.
+    /// a bare `decodeIfPresent(...) ?? 0`, so one negative in an externally-written blob arms it.
     ///
-    /// ⚠️ Clamped HERE, at the read, rather than at either decode boundary. There are two of those,
-    /// in two files, and clamping both would still leak — `WorkflowNodeConfig`'s memberwise init and
-    /// `materialised(inheritedRetryDefault:)` bypass `init(from:)` entirely, and `resolvedMaxRetries`
-    /// is a computed property any future writer can feed. A decode clamp would also silently rewrite
-    /// the user's stored blob on the next save.
+    /// ⚠️ Clamped HERE, at the read, rather than at the decode boundary: the memberwise init
+    /// bypasses `init(from:)` entirely, and a decode clamp would also silently rewrite the user's
+    /// stored blob on the next save.
     ///
     /// Same guarantee, same shape and the same reason as `structuralAttempts` above — which has
     /// carried this clamp, and a test naming the corrupt-stored-value case, since it was written.
-    nonisolated static func profileAttempts(maxNodeRetries: Int?, fallbackRetries: Int) -> Int {
-        max((maxNodeRetries ?? fallbackRetries) + 1, 1)
+    nonisolated static func profileAttempts(maxNodeRetries: Int?) -> Int {
+        max((maxNodeRetries ?? 0) + 1, 1)
     }
 
     /// Whether a node's result ENDS the attempt loop in `executeProfileNodeWithRetry`.

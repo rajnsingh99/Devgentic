@@ -40,13 +40,6 @@ final class SkillCommandReachabilityTests: XCTestCase {
         XCTAssertTrue(SkillCommandReachability.reachableNames(in: off).isEmpty)
     }
 
-    /// A pre-V6 selection the launch sweep has not matched yet resolves to nothing at run time, so
-    /// offering it would be offering a skill the run cannot load.
-    func testASelectionAwaitingRelinkIsNotReachable() {
-        let details = agent([SkillSelection(skillID: nil, legacyFolderPath: "/tmp/x", name: "legacy")])
-        XCTAssertTrue(SkillCommandReachability.reachableNames(in: details).isEmpty)
-    }
-
     func testNoProfileReachesNothing() {
         XCTAssertTrue(SkillCommandReachability.reachableNames(in: nil).isEmpty)
         XCTAssertFalse(SkillCommandReachability.pickerApplies(to: nil))

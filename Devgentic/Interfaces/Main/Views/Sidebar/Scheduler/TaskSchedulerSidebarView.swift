@@ -46,7 +46,7 @@ struct TaskSchedulerSidebarView: View {
             .padding(.bottom, 8)
 
             // Search
-            SidebarSearchBarView("Search tasks...", text: $viewModel.searchText)
+            SidebarSearchBarView("Search tasks", text: $viewModel.searchText)
                 .focused($isSearchFocused)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
@@ -68,13 +68,24 @@ struct TaskSchedulerSidebarView: View {
 
             // Content
             if viewModel.filteredTasks.isEmpty {
-                SidebarEmptyStateView(
-                    title: "No Scheduled Tasks",
-                    subtitle: "Schedule tasks to run automatically at specific times",
-                    buttonTitle: "Create Task",
-                    systemImage: "clock.badge",
-                    onAction: { router.navigateToNewTask() }
-                )
+                if !viewModel.searchText.isEmpty {
+                    SidebarEmptyStateView(
+                        title: "No matches",
+                        subtitle: "No tasks found for \"\(viewModel.searchText)\"",
+                        buttonTitle: "Clear Search",
+                        systemImage: "magnifyingglass",
+                        onAction: { viewModel.searchText = "" }
+                    )
+                } else {
+                    SidebarEmptyStateView(
+                        title: "No Scheduled Tasks",
+                        subtitle: "Schedule tasks to run automatically at specific times",
+                        buttonTitle: "New Task",
+                        buttonIcon: "plus",
+                        systemImage: "clock.badge",
+                        onAction: { router.navigateToNewTask() }
+                    )
+                }
             } else {
                 taskList
             }

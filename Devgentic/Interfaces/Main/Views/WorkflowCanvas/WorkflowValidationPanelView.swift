@@ -31,7 +31,9 @@ struct WorkflowValidationPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(height: 0.5)
             issueList
             if errorCount > 0 {
                 footer
@@ -47,7 +49,7 @@ struct WorkflowValidationPanelView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 12))
+                .font(theme.fontCaption.weight(.semibold))
                 .foregroundColor(.orange)
 
             // ⚠️ [CVV-8] TWO KEYS, not a concatenated plural letter. The literal DOES bind
@@ -55,7 +57,7 @@ struct WorkflowValidationPanelView: View {
             // translator can inflect. Split so the Int emits `%lld` and each key can carry its own
             // plural variations. Same treatment as the toolbar pill that opens this panel.
             Text(issues.count == 1 ? "1 issue" : "\(issues.count) issues")
-                .font(.system(size: 12, weight: .semibold))
+                .font(theme.fontCaption.weight(.semibold))
                 .foregroundColor(theme.primaryText)
 
             if errorCount > 0 {
@@ -68,12 +70,13 @@ struct WorkflowValidationPanelView: View {
 
             Spacer()
 
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(theme.secondaryText)
-            }
-            .buttonStyle(.plain)
+            TactileIconButton(
+                icon: "xmark",
+                tooltip: "Dismiss",
+                accessibilityLabel: "Dismiss",
+                size: .compact,
+                action: onDismiss
+            )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -100,7 +103,7 @@ struct WorkflowValidationPanelView: View {
             Image(systemName: issue.severity == .error
                   ? "xmark.circle.fill"
                   : "exclamationmark.triangle")
-                .font(.system(size: 12))
+                .font(theme.fontCaption.weight(.semibold))
                 .foregroundColor(issue.severity == .error
                                  ? theme.errorColor
                                  : theme.warningColor)
@@ -113,7 +116,7 @@ struct WorkflowValidationPanelView: View {
                     .lineLimit(1)
 
                 Text(issue.message)
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(2)
             }
@@ -133,17 +136,20 @@ struct WorkflowValidationPanelView: View {
             }
         }
         .allowsHitTesting(isTappable)
+        .pointingHandCursor(enabled: isTappable)
     }
 
     // MARK: - Footer
 
     private var footer: some View {
         VStack(spacing: 0) {
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(height: 0.5)
             Text(errorCount == 1
                  ? "1 error must be resolved before running"
                  : "\(errorCount) errors must be resolved before running")
-                .font(.system(.caption))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.errorColor)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -154,7 +160,7 @@ struct WorkflowValidationPanelView: View {
 
     private func countPill(count: Int, color: Color) -> some View {
         Text("\(count)")
-            .font(.system(size: 10, weight: .bold))
+            .font(theme.fontCaption2.weight(.bold))
             .foregroundColor(.white)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)

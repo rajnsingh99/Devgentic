@@ -158,6 +158,8 @@ final class BackendProfileStoreTests: XCTestCase {
     }
 
     func testInsertAndFetchAgentProfile() throws {
+        // One key per provider: an Anthropic profile carries the shared Anthropic key, not its own.
+        XCTAssertTrue(AppProviderKeyStore.save("sk-test", for: .anthropic))
         let tools = [makeTool(name: "bash")]
         let profile = BackendProfile(
             displayName: "Test Agent",
@@ -212,10 +214,9 @@ final class BackendProfileStoreTests: XCTestCase {
     }
 
     func testInsertAndFetchWorkflowProfile() throws {
-        let agentIDs = [UUID(), UUID(), UUID()]
         let profile = BackendProfile(
             displayName: "My Workflow",
-            details: .workflow(WorkflowConfig(agentProfileIDs: agentIDs))
+            details: .workflow(WorkflowConfig())
         )
         context.insert(profile)
         try context.save()
@@ -224,10 +225,8 @@ final class BackendProfileStoreTests: XCTestCase {
         XCTAssertEqual(fetched.count, 1)
         XCTAssertEqual(fetched.first?.profileType, .workflow)
 
-        if case .workflow(let config) = fetched.first?.details {
-            XCTAssertEqual(config.agentProfileIDs, agentIDs)
-        } else {
-            XCTFail("Expected workflow details")
+        guard case .workflow = fetched.first?.details else {
+            return XCTFail("Expected workflow details")
         }
     }
 
@@ -272,7 +271,7 @@ final class BackendProfileStoreTests: XCTestCase {
     func testWorkflowDenormalizedColumnsAreEmpty() throws {
         let profile = BackendProfile(
             displayName: "Workflow",
-            details: .workflow(WorkflowConfig(agentProfileIDs: [UUID()]))
+            details: .workflow(WorkflowConfig())
         )
         context.insert(profile)
         try context.save()
@@ -413,7 +412,7 @@ final class BackendProfileStoreTests: XCTestCase {
                 tools: [makeTool(name: "bash")],
                 capabilities: AgentCapabilities(agentDelegation: AgentDelegationConfig())
             ))),
-            ("workflow", .workflow(WorkflowConfig(agentProfileIDs: [UUID(), UUID()]))),
+            ("workflow", .workflow(WorkflowConfig())),
             ("imageGen", .imageGen(ImageGenConfig(
                 llmConfig: ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3"),
                 negativePrompt: "ugly",
@@ -449,43 +448,20 @@ final class BackendProfileStoreTests: XCTestCase {
         XCTAssertEqual(json?["schemaVersion"] as? Int, ProfileSchemaVersion.current.rawValue)
     }
 
-    // MARK: - Migration Pipeline
+    // MARK: - Version gate
 
-    func testMigratorStampsVersionOnLegacyData() throws {
-        // Simulate legacy data (no schemaVersion)
-        let legacyJSON: [String: Any] = [
-            "profileType": "Bot",
-            "llmConfig": [
-                "apiProvider": "Ollama (Local)",
-                "modelName": "llama3"
-            ]
-        ]
-        let legacyData = try JSONSerialization.data(withJSONObject: legacyJSON)
-        guard case .migrated(let migrated) = ProfileMigrator.migrateIfNeeded(legacyData) else {
-            return XCTFail("Expected a migratable blob, got a refusal")
-        }
-        let migratedJSON = try JSONSerialization.jsonObject(with: migrated) as? [String: Any]
-
-        XCTAssertEqual(migratedJSON?["schemaVersion"] as? Int, ProfileSchemaVersion.current.rawValue,
-                        "Migrator should stamp current schemaVersion on legacy data")
-    }
-
-    func testMigratorPreservesCurrentVersionData() throws {
-        // Data already at current version should pass through unchanged
+    func testAFreshlyEncodedProfileIsDecodable() throws {
         let details = ProfileDetails.bot(BotConfig(
             llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3")
         ))
         let data = try JSONEncoder().encode(details)
-        guard case .migrated(let migrated) = ProfileMigrator.migrateIfNeeded(data) else {
-            return XCTFail("Expected a migratable blob, got a refusal")
+        guard case .decodable = ProfileBlobGate.check(data) else {
+            return XCTFail("what this build encodes, this build must accept")
         }
-        let decoded = try JSONDecoder().decode(ProfileDetails.self, from: migrated)
-
-        if case .bot(let config) = decoded {
-            XCTAssertEqual(config.llmConfig.modelName, "llama3")
-        } else {
-            XCTFail("Expected bot details after migration passthrough")
+        guard case .bot(let config) = try JSONDecoder().decode(ProfileDetails.self, from: data) else {
+            return XCTFail("Expected bot details")
         }
+        XCTAssertEqual(config.llmConfig.modelName, "llama3")
     }
 
     // MARK: - Store-Level Strict Validation

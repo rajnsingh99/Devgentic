@@ -47,6 +47,11 @@ no header — don't add one, it would be lost on the next run.
 - **The Release configuration signs with the maintainer's Developer ID** (team `FM3V43ST5B`), so it
   fails on any other machine. Build Debug for day-to-day work; to build Release from source, sign ad hoc
   instead: `xcodebuild -configuration Release DEVGENTIC_SIGN_IDENTITY=- DEVELOPMENT_TEAM=`.
+- **Debug signs ad hoc, so every rebuild is a "new app" to macOS.** Saved API keys ask for Keychain
+  access again after each build, and microphone/folder permissions reset. If you have any signing
+  identity (a free Apple Development one works), copy `Config/Local.xcconfig.example` to
+  `Config/Local.xcconfig` (gitignored) and set it there; after one last round of prompts, rebuilds stop
+  asking. `Config/Debug.xcconfig` explains why.
 - **ObjectBox code generation is manual.** After changing a property on an ObjectBox entity, re-run the
   generator plugin; the failure mode when you don't is a confusing "instance member cannot be used on
   type" error at the new property's query accessor, not a missing-file error.

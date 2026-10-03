@@ -10,7 +10,8 @@
 //
 //  ⚠️ RECORDED 2026-09-23 AT THE HISTORY RESET. The development history (baselines V1, V2, V3 and V6)
 //  was collapsed into this one before any build reached anyone; see `DevgenticSchemaVersions.swift`.
-//  15 entities.
+//  15 entities. Amended once more before any build shipped, at the 2026-10-03 fresh start:
+//  `ConversationSD.backendType` and `ConversationSD.openAIThreadID` removed (both unread).
 //
 //  ⚠️ ONCE A BUILD SHIPS, THIS FILE IS A HISTORICAL RECORD AND IS NEVER EDITED. A schema change
 //  then gets a NEW `SchemaBaselineV2`, and the drift test is pointed at it; this file keeps saying
@@ -94,10 +95,8 @@ ENTITY ChatMessageSD
   UNIQUE (id)
 ENTITY ConversationSD
   ATTR backendEntityId: Optional<UUID> [optional]
-  ATTR backendType: Optional<String> [optional]
   ATTR id: UUID [required,unique] options=unique
   ATTR isPinned: Bool [required]
-  ATTR openAIThreadID: Optional<String> [optional]
   ATTR profileTypeRaw: Optional<String> [optional]
   ATTR projectPath: Optional<String> [optional]
   ATTR timestamp: Date [required]

@@ -42,7 +42,7 @@ struct FileSuggestionView: View {
             } else {
                 // CASE 3: Initial Trigger (@ typed, query is empty, results pending)
                 // This fixes the issue where the view didn't appear immediately on typing "@"
-                emptyStateView(text: "Type to search files...")
+                emptyStateView(text: "Type to search files")
             }
         }
     }

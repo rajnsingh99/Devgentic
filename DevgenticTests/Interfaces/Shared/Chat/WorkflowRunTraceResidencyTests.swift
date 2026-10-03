@@ -466,7 +466,7 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
     func testFinalizePersistsTheFullTraceWhileTheMirrorHoldsNone() async throws {
         let conversationID = try makeConversation()
         let profile = BackendProfileSnapshot(
-            id: UUID(), displayName: "Nightly", details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+            id: UUID(), displayName: "Nightly", details: .workflow(WorkflowConfig()))
 
         let registry = FakeRegistry()
         guard let ticket = WorkflowRunBootstrap.begin(
@@ -529,7 +529,7 @@ final class WorkflowRunTraceResidencyTests: XCTestCase {
     func testLoadRecordReturnsTheFullTraceForOneRun() async throws {
         let conversationID = try makeConversation()
         let profile = BackendProfileSnapshot(
-            id: UUID(), displayName: "Nightly", details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+            id: UUID(), displayName: "Nightly", details: .workflow(WorkflowConfig()))
 
         let registry = FakeRegistry()
         guard let ticket = WorkflowRunBootstrap.begin(

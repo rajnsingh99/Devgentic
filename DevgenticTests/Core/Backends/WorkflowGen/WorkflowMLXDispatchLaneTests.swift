@@ -136,7 +136,7 @@ final class WorkflowMLXDispatchLaneTests: XCTestCase {
         let sub = BackendProfileSnapshot(
             id: UUID(),
             displayName: "Nested",
-            details: .workflow(WorkflowConfig(agentProfileIDs: []))
+            details: .workflow(WorkflowConfig())
         )
         XCTAssertNil(WorkflowExecutor.mlxSlotKey(for: sub),
                      "`resolvedLLMConfig` is nil for .workflow — a sub-workflow node's demand lives in the CHILD layout")

@@ -61,6 +61,7 @@ struct WorkflowPortView: View {
         .animation(.easeInOut(duration: 0.15), value: isHovering || isNodeHovered || isCompatibleTarget || isPrimaryTarget)
         .contentShape(Circle().inset(by: -8))
         .accessibilityHidden(true) // Larger hit area
+        .pointingHandCursor(enabled: portType == .output)
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovering = hovering

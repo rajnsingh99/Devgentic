@@ -17,8 +17,6 @@ final class ConversationSD {
     var timestamp: Date
     var userDefinedTitle: String?
     var isPinned: Bool
-    var openAIThreadID: String?
-    var backendType: String?
     var backendEntityId: UUID?
     var profileTypeRaw: String?
     /// The project folder a Code conversation runs in — recorded on its first send and fixed from
@@ -36,20 +34,13 @@ final class ConversationSD {
     @Relationship(deleteRule: .cascade, inverse: \WorkflowRunRecordSD.conversation)
     var workflowRuns: [WorkflowRunRecordSD] = []
 
-    // RETIRED 2026-08-04: `codeViewerSessions`. The Code Viewer no longer persists anything —
-    // tabs live in `ChatHistoryViewModel.tabsByConversation` for the app session only — so the
-    // relationship and its `CodeViewerSessionSD` destination were both dropped.
-
     init(id: UUID = UUID(), timestamp: Date = Date(), userDefinedTitle: String? = nil,
-         isPinned: Bool = false, openAIThreadID: String? = nil,
-         backendType: String? = nil, backendEntityId: UUID? = nil,
+         isPinned: Bool = false, backendEntityId: UUID? = nil,
          profileTypeRaw: String? = nil, projectPath: String? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.userDefinedTitle = userDefinedTitle
         self.isPinned = isPinned
-        self.openAIThreadID = openAIThreadID
-        self.backendType = backendType
         self.backendEntityId = backendEntityId
         self.profileTypeRaw = profileTypeRaw
         self.projectPath = projectPath
@@ -62,8 +53,6 @@ final class ConversationSD {
             timestamp: timestamp,
             userDefinedTitle: userDefinedTitle,
             isPinned: isPinned,
-            openAIThreadID: openAIThreadID,
-            backendType: backendType.flatMap { BackendType(rawValue: $0) },
             backendEntityId: backendEntityId
         )
     }
@@ -106,8 +95,6 @@ final class ConversationSD {
             timestamp: timestamp,
             userDefinedTitle: userDefinedTitle,
             isPinned: isPinned,
-            openAIThreadID: openAIThreadID,
-            backendType: backendType.flatMap { BackendType(rawValue: $0) },
             backendEntityId: backendEntityId
         )
     }

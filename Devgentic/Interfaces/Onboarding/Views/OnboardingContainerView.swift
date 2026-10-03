@@ -217,6 +217,7 @@ private struct PastStageBubbleButton: View {
             .scaleEffect(isHovered ? 1.05 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering

@@ -405,108 +405,10 @@ actor WorkflowExecutor: Executor {
                         logger.error("[WF_PROFILES] profile \(profileID) conv \(conversationID): profile map \(injectedProfileMap == nil ? "resolved from store" : "INJECTED by caller") is MISSING \(missingProfileIDs.count) of \(requiredProfileIDs.count) referenced profile(s): \(missingProfileIDs.map(\.uuidString).sorted().joined(separator: ", ")). CONSEQUENCE: pre-flight validation will report each of those nodes as 'Profile not found — it may have been deleted' and the whole run is blocked before any node executes.")
                     }
 
-                    // =============================================================
-                    // 2b. EXTRACT WORKFLOW-LEVEL CONFIG
-                    // =============================================================
-
-                    let workflowConfig: WorkflowConfig
-                    if let injectedProfile = injectedProfileMap?[profileID],
-                       case .workflow(let config) = injectedProfile.details {
-                        workflowConfig = config
-                    } else if let workflowProfile = profileMap[profileID],
-                              case .workflow(let config) = workflowProfile.details {
-                        workflowConfig = config
-                    } else {
-                        // Fetch workflow's own profile (it's not in the node profile map).
-                        //
-                        // ⚠️ The fallback below is SILENT no more. This was `try?` into
-                        // `WorkflowConfig(agentProfileIDs: [])`, so a failed fetch — an unreadable
-                        // profile blob, or a container not yet configured — produced a run that
-                        // looked completely normal (the layout still loads from its own store) but
-                        // executed against hard-coded defaults: a 120 s node timeout although the
-                        // user turned timeouts OFF, a different context budget, a different failure
-                        // policy and retry count. The only trace was "Node X exceeded the 120s
-                        // timeout", which names a symptom that the user's own settings say cannot
-                        // happen — an unfalsifiable field report.
-                        //
-                        // Reachable for any sub-workflow child, which builds
-                        // its own executor for a profile it must fetch itself.
-                        let fetched: BackendProfileModel?
-                        do {
-                            fetched = try await MainActor.run { try BackendProfileStore.shared.fetchProfile(byId: profileID) }
-                        } catch {
-                            fetched = nil
-                            logger.error("[WF_CONFIG] profile \(profileID) conv \(conversationID): fetching the workflow's own profile FAILED (\(error.localizedDescription)). CONSEQUENCE: the run continues on hard-coded defaults — node timeout \(WorkflowConfig(agentProfileIDs: []).effectiveNodeTimeout.map { "\(Int($0))s" } ?? "off"), max nesting \(WorkflowDepth.maxDepth), retries \(WorkflowConfig(agentProfileIDs: []).resolvedMaxRetries) — and the user's saved execution settings are NOT in effect for this run.")
-                        }
-
-                        if case .workflow(let config) = fetched?.details {
-                            workflowConfig = config
-                        } else {
-                            let defaults = WorkflowConfig(agentProfileIDs: [])
-                            if fetched != nil {
-                                // Found, but it is not a workflow profile — a different failure
-                                // from "could not read it", and worth separating.
-                                logger.error("[WF_CONFIG] profile \(profileID) conv \(conversationID): resolved profile is '\(fetched?.profileType.rawValue ?? "unknown")', not a workflow, so it carries no workflow config. CONSEQUENCE: the run uses hard-coded defaults; the user's saved execution settings are NOT in effect.")
-                            } else {
-                                logger.error("[WF_CONFIG] profile \(profileID) conv \(conversationID): no workflow profile resolved. CONSEQUENCE: the run uses hard-coded defaults — node timeout \(defaults.effectiveNodeTimeout.map { "\(Int($0))s" } ?? "off"), max nesting \(WorkflowDepth.maxDepth), retries \(defaults.resolvedMaxRetries).")
-                            }
-                            workflowConfig = defaults
-                        }
-                    }
-
-                    logger.info("[WF_CONFIG] profile \(profileID) conv \(conversationID): node timeout \(workflowConfig.effectiveNodeTimeout.map { "\(Int($0))s" } ?? "OFF"), max nesting \(WorkflowDepth.maxDepth), max retries \(workflowConfig.resolvedMaxRetries).")
 
                     // =============================================================
                     // 2c. PRE-FLIGHT CONFIGURATION VALIDATION
                     // =============================================================
-
-                    // Retired per-node failure policies, reported once per run.
-                    //
-                    // The stored value is decoded (it must be — an unknown rawValue would take the
-                    // whole layout unreadable, WF24) and then IGNORED. A user who set "Stop
-                    // Workflow" is getting materially different behaviour now, so say so rather
-                    // than change it silently.
-                    let nodesWithRetiredPolicy = layout.nodes.compactMap { node -> (String, NodeFailurePolicy)? in
-                        guard let policy = node.nodeConfig?.onFailure, policy != .skipDependents else { return nil }
-                        return (node.displayName, policy)
-                    }
-                    if !nodesWithRetiredPolicy.isEmpty {
-                        let described = nodesWithRetiredPolicy.map { "\($0.0) → \($0.1.rawValue)" }.joined(separator: ", ")
-                        logger.notice("[WF_ROUTE] \(nodesWithRetiredPolicy.count) node(s) carry a RETIRED per-node failure policy, which is ignored: \(described). CONSEQUENCE: failure routing now comes from the canvas — an unwired `error` port stops that branch, a wired one runs the handler. `stopWorkflow` in particular no longer cancels parallel branches; they run to completion and their results still reach the final answer.")
-                    }
-
-                    // Same shape as the failure-policy line above: a stored `joinMode` from a
-                    // pre-2026-08-13 layout is honoured by neither branch of the derived join, and
-                    // a value silently ignored is exactly the kind of thing a field report blames.
-                    // ⚠️ `.all` is NOT reported — it was the default, so its presence says nothing
-                    // about intent, and logging every node on every run would bury the real signal.
-                    let nodesWithStoredJoinMode = layout.nodes.filter { $0.nodeConfig?.joinMode == .any }
-                    if !nodesWithStoredJoinMode.isEmpty {
-                        let named = nodesWithStoredJoinMode.map(\.displayName).joined(separator: ", ")
-                        logger.notice("[WF_ROUTE] \(nodesWithStoredJoinMode.count) node(s) carry a RETIRED 'Any one' fan-in setting, which is ignored: \(named). CONSEQUENCE: the join is now DERIVED from the graph — every incoming branch is required except a dead one whose live sibling is a mutually-exclusive alternative (different ports of a common Condition/Gate). For a merge under a Condition the behaviour is unchanged; for genuinely independent branches the node now SKIPS on a dead branch instead of running on partial input.")
-                    }
-
-                    // The node-timeout settings were retired with the whole Workflow Settings sheet
-                    // (2026-08-13). Stored values are still honoured so existing workflows keep
-                    // behaving identically — say so, since there is no longer any UI that reveals it.
-                    if workflowConfig.nodeTimeoutEnabled == false {
-                        logger.notice("[WF_CONFIG] This workflow carries a RETIRED 'node timeout OFF' setting, still honoured: its nodes run UNBOUNDED. CONSEQUENCE: a hung node is never stopped automatically. The Workflow Settings sheet was removed 2026-08-13 and there is no UI to change this — set a per-node hard timeout, or an `executionTimeout` on the bound profile, to bound the nodes that matter.")
-                    } else if let stored = workflowConfig.defaultNodeTimeout {
-                        logger.notice("[WF_CONFIG] This workflow carries a RETIRED workflow-level node timeout of \(Int(stored))s, still honoured. CONSEQUENCE: none — behaviour is unchanged. The control was removed 2026-08-13; per-node `hardTimeout` and the bound profile's `executionTimeout` both override it.")
-                    }
-
-                    // Same shape as the retired-policy lines above. A workflow-level retry default
-                    // is still honoured so an existing workflow keeps its resilience, but the
-                    // control is gone and the node-level equivalent is named here.
-                    if workflowConfig.resolvedMaxRetries > 0 {
-                        let affected = layout.nodes.filter { $0.nodeConfig?.maxNodeRetries == nil }
-                            .filter { node in
-                                if case .profile = node.kind { return true }
-                                if case .action = node.kind { return true }
-                                return false
-                            }
-                        logger.notice("[WF_CONFIG] This workflow carries a RETIRED workflow-level 'Default Max Retries' of \(workflowConfig.resolvedMaxRetries), still honoured by \(affected.count) node(s) that set no retry count of their own: \(affected.map(\.displayName).joined(separator: ", ")). CONSEQUENCE: none today — behaviour is unchanged. The control was removed 2026-08-13 because retry SAFETY differs by node kind; set Retries on those individual nodes to express it on the canvas. ⚠️ Only Profile and Action nodes retry at all — a Code, Router or Gate node never did.")
-                    }
 
                     // ⚠️ Resolved on the MainActor because `WorkflowLayoutStore` is isolated there
                     // — the same hop the layout load above already makes. The validator stays pure.
@@ -834,8 +736,7 @@ actor WorkflowExecutor: Executor {
                                 traceContext: traceContext,
                                 onTraceUpdate: onTraceUpdate,
                                 streamProvider: agentConnect,
-                                injectedProfileMap: injectedProfileMap,
-                                workflowConfig: workflowConfig
+                                injectedProfileMap: injectedProfileMap
                             )
                             state.recordResult(from: structResult.envelope)
                             if let ports = structResult.activePorts {
@@ -920,8 +821,7 @@ actor WorkflowExecutor: Executor {
                                                 traceContext: traceContext,
                                                 onTraceUpdate: onTraceUpdate,
                                                 streamProvider: agentConnect,
-                                                injectedProfileMap: injectedProfileMap,
-                                                workflowConfig: workflowConfig
+                                                injectedProfileMap: injectedProfileMap
                                             )
                                         }
                                     }
@@ -962,8 +862,7 @@ actor WorkflowExecutor: Executor {
                                 conversationID: conversationID,
                                 agentConnect: agentConnect,
                                 traceContext: traceContext, onTraceUpdate: onTraceUpdate,
-                                continuation: continuation,
-                                workflowConfig: workflowConfig
+                                continuation: continuation
                             )
                             state.recordResult(from: result)
                             // Activate error port on failure for error routing
@@ -1036,8 +935,7 @@ actor WorkflowExecutor: Executor {
                                                 conversationID: conversationID,
                                                 agentConnect: agentConnect,
                                                 traceContext: traceContext, onTraceUpdate: onTraceUpdate,
-                                                continuation: continuation,
-                                                workflowConfig: workflowConfig
+                                                continuation: continuation
                                             )
                                         }
                                     }
@@ -1418,8 +1316,7 @@ actor WorkflowExecutor: Executor {
         agentConnect: any WorkflowStreamProvider,
         traceContext: TraceContext,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void,
-        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
-        workflowConfig: WorkflowConfig
+        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
     ) async -> NodeResultEnvelope {
 
         let nodeID = node.id
@@ -1573,18 +1470,15 @@ actor WorkflowExecutor: Executor {
         }
 
         // --- Execute via AgentConnect (with timeout enforcement) ---
-        // Priority: WorkflowNodeConfig.hardTimeout → agent executionTimeout → default 120s
-        // `nil` → no timeout (the workflow's node-timeout setting is disabled and the
-        // node sets no explicit `hardTimeout`); the node then runs unbounded.
-        let configuredNodeTimeout: TimeInterval? = {
-            if let hardTimeout = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Node '\(displayName)' hardTimeout") { return hardTimeout }
-            // ⚠️ register B44 — routed through the shared accessor rather than a sixth private
-            // `if case .agent`. No behaviour change for anything reachable here (a workflow node
-            // binds a STORED profile and `.code` is ephemeral, never persisted), but leaving the
-            // pattern in place is how this defect kept reproducing itself across five call sites.
-            if let t = TimeLimit.usable(profile.details.executionTimeout, "Node '\(displayName)' profile execution timeout") { return t }
-            return TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout")
-        }()
+        // Priority: WorkflowNodeConfig.hardTimeout → agent executionTimeout → `WorkflowConfig.nodeTimeout`.
+        // ALWAYS bounded: the last link is a constant, so there is no "no timeout" profile node.
+        // ⚠️ register B44 — the profile's limit goes through the shared accessor rather than a sixth
+        // private `if case .agent`. Leaving that pattern in place is how the defect kept reproducing
+        // itself across five call sites.
+        let configuredNodeTimeout: TimeInterval =
+            TimeLimit.usable(node.nodeConfig?.hardTimeout, "Node '\(displayName)' hardTimeout")
+            ?? TimeLimit.usable(profile.details.executionTimeout, "Node '\(displayName)' profile execution timeout")
+            ?? WorkflowConfig.nodeTimeout
 
         var nodeOutput = ""
         var nodeArtifacts: [ToolOutput] = []
@@ -1605,14 +1499,12 @@ actor WorkflowExecutor: Executor {
         defer { Task { await ExecutionSuspensionService.shared.unregisterScope(nodeScope) } }
 
         // Nesting (owner decision 2026-09-27): fitted inside an enclosing run's limit, so the node's
-        // own timeout — and its error port — fires before the run is cut off. A node with no limit
-        // of its own inherits the fitted outer one.
-        let fittedNode = await ExecutionBudget.clamp(configuredNodeTimeout, what: "Node '\(displayName)'")
-        let nodeTimeout: TimeInterval? = fittedNode.limit.isFinite ? fittedNode.limit : nil
-        let nodeFrame: ExecutionBudget.Frame? = if let nodeTimeout {
-            await ExecutionBudget.frame(owner: "node '\(displayName)''s \(ToolExecutionMediator.describe(nodeTimeout)) limit",
-                                        limit: nodeTimeout, scope: nodeScope)
-        } else { nil }
+        // own timeout — and its error port — fires before the run is cut off. Clamping a finite
+        // limit only ever SHORTENS it, so the result is finite too.
+        let nodeTimeout = await ExecutionBudget.clamp(configuredNodeTimeout, what: "Node '\(displayName)'").limit
+        let nodeFrame = await ExecutionBudget.frame(
+            owner: "node '\(displayName)''s \(ToolExecutionMediator.describe(nodeTimeout)) limit",
+            limit: nodeTimeout, scope: nodeScope)
 
         do {
             // Race: stream consumption vs timeout (same pattern as AgentConnect).
@@ -1627,15 +1519,14 @@ actor WorkflowExecutor: Executor {
             let streamResult = try await withThrowingTaskGroup(
                 of: (String, [ToolOutput], [MediaArtifact], ExecutionOutcome?, String?, String?).self
             ) { group in
-                // Timeout sentinel — only when a timeout is configured. When disabled
-                // (`nodeTimeout == nil`) the group runs the stream task alone, unbounded.
+                // Timeout sentinel.
                 //
                 // ⚠️ The clock excludes time parked awaiting a human (2026-08-13). This used to be a
                 // raw `Task.sleep(nodeTimeout)`, which meant an agent that asked for a tool
                 // confirmation killed its own node at 120s if the user was slow to answer — a live
                 // defect, not a hypothetical. `withComputeTimeout` re-checks parked time when it
                 // wakes and extends by the shortfall.
-                if let nodeTimeout {
+                do {
                     let name = displayName
                     group.addTask {
                         try await Self.computeTimeoutSentinel(nodeTimeout, scope: nodeScope, nodeName: name)
@@ -1647,10 +1538,8 @@ actor WorkflowExecutor: Executor {
                 // node; when the node finishes first the group cancels it and the await resolves
                 // as a plain CancellationError, absorbed by group teardown.
                 //
-                // ⚠️ UNCONDITIONAL, deliberately unlike the timeout sentinel above: copying that
-                // `if let` shape would make Skip silently dead on exactly the nodes most worth
-                // skipping — the unbounded ones (timeout disabled), which are the ones that can
-                // run away. Sub-workflow nodes never reach this group (they dispatch down the
+                // ⚠️ UNCONDITIONAL: Skip must never depend on any other sentinel being present.
+                // Sub-workflow nodes never reach this group (they dispatch down the
                 // structural path), so a running-skip cannot fire for them — increment 8's
                 // deferral is enforced by construction, not by a guard.
                 do {
@@ -2230,7 +2119,7 @@ actor WorkflowExecutor: Executor {
     /// resolved `TransportResiliencePolicy`: ~3 transient + 5 throttle for cloud).
     /// The two compose multiplicatively in the worst case (maxNodeRetries × inner
     /// budget), but the product is bounded — never infinite — and `maxNodeRetries`
-    /// defaults to 0 (`WorkflowConfig.resolvedMaxRetries`), so transient transport
+    /// defaults to 0, so transient transport
     /// recovery is handled by the inner tier and node-level retries only stack when
     /// a user explicitly opts in. Keep `maxNodeRetries` modest for flaky providers.
     private nonisolated static func executeProfileNodeWithRetry(
@@ -2252,24 +2141,18 @@ actor WorkflowExecutor: Executor {
         agentConnect: any WorkflowStreamProvider,
         traceContext: TraceContext,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void,
-        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
-        workflowConfig: WorkflowConfig
+        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
     ) async -> NodeResultEnvelope {
 
-        // ⚠️ `resolvedMaxRetries` is a LEGACY fallback — the workflow-level stepper was retired
-        // 2026-08-13. It stays honoured so an existing workflow keeps its resilience; new workflows
-        // leave it nil, so a node with no `maxNodeRetries` of its own does not retry.
+        // A node with no `maxNodeRetries` of its own does not retry.
         // [EXC-8] Through `WorkflowRetryPolicy`, and as a COUNT of attempts rather than a ceiling,
         // so the loop below is a half-open range and the trap is unrepresentable rather than merely
         // clamped away. The raw value is kept only to report a corrupt one.
-        let rawRetries = node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries
-        let attempts = WorkflowRetryPolicy.profileAttempts(
-            maxNodeRetries: node.nodeConfig?.maxNodeRetries,
-            fallbackRetries: workflowConfig.resolvedMaxRetries
-        )
+        let rawRetries = node.nodeConfig?.maxNodeRetries ?? 0
+        let attempts = WorkflowRetryPolicy.profileAttempts(maxNodeRetries: node.nodeConfig?.maxNodeRetries)
         let maxRetries = attempts - 1
         if rawRetries < 0 {
-            logger.error("[WF_CONFIG] Node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] resolves to a NEGATIVE retry count (\(rawRetries)) — from its own stored `maxNodeRetries` if it has one, otherwise from this workflow's stored `defaultMaxRetries`; clamped to 0. CONSEQUENCE: the node runs exactly once instead of aborting the app on a range precondition — and since no in-app control can write this value, the workflow's saved blob was written by something else and its other stored numbers should be treated as suspect.")
+            logger.error("[WF_CONFIG] Node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] resolves to a NEGATIVE retry count (\(rawRetries)) from its stored `maxNodeRetries`; clamped to 0. CONSEQUENCE: the node runs exactly once instead of aborting the app on a range precondition — and since no in-app control can write this value, the workflow's saved blob was written by something else and its other stored numbers should be treated as suspect.")
         }
         let retryDelay = node.nodeConfig?.retryDelay ?? 0
         let upstreamResults = state.upstreamResultEnvelopes(for: node.id, edges: edges)
@@ -2354,8 +2237,7 @@ actor WorkflowExecutor: Executor {
                 conversationID: conversationID,
                 agentConnect: agentConnect,
                 traceContext: traceContext, onTraceUpdate: onTraceUpdate,
-                continuation: continuation,
-                workflowConfig: workflowConfig
+                continuation: continuation
             )
             lastResult = result
 
@@ -2514,7 +2396,7 @@ actor WorkflowExecutor: Executor {
     ///
     /// ⚠️ Only Action nodes retry. A Code, Router or Gate node never did, so giving them a
     /// multiplied budget would weaken a real bound in exchange for nothing.
-    static func plannedAttempts(for node: WorkflowNode, workflowConfig: WorkflowConfig) -> Int {
+    static func plannedAttempts(for node: WorkflowNode) -> Int {
         // Action nodes retry inside their own per-tool loop; sub-workflow nodes retry in the OUTER
         // loop in `executeStructuralNodeBounded`. Both need the budget sized to the whole retry
         // run, or attempt 1 eats it and the rest are unreachable (the WF-EX2 shape).
@@ -2526,9 +2408,9 @@ actor WorkflowExecutor: Executor {
         let isSubWorkflow = node.profileType == .workflow
         guard case .action = node.kind else {
             guard isSubWorkflow else { return 1 }
-            return max((node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries) + 1, 1)
+            return max((node.nodeConfig?.maxNodeRetries ?? 0) + 1, 1)
         }
-        return max((node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries) + 1, 1)
+        return max((node.nodeConfig?.maxNodeRetries ?? 0) + 1, 1)
     }
 
     /// The node's OUTER backstop — the per-attempt limit multiplied across every planned attempt,
@@ -2542,7 +2424,7 @@ actor WorkflowExecutor: Executor {
     ///
     /// `nil` (timeout off) stays `nil` — unbounded is unbounded however many attempts there are.
     ///
-    /// [WF-EX3] A sub-workflow node's `workflowConfig.effectiveNodeTimeout` FALLBACK is `nil`, not
+    /// [WF-EX3] A sub-workflow node's `WorkflowConfig.nodeTimeout` FALLBACK is `nil`, not
     /// the 120s default every other structural kind gets. Its child canvas is a fully independent
     /// `WorkflowExecutor` run — every inner node on it is already bounded by ITS OWN
     /// `outerTimeoutBudget`, computed from the CHILD's own config, recursively, regardless of
@@ -2554,10 +2436,10 @@ actor WorkflowExecutor: Executor {
     /// hardcodes `output: ""` on expiry). `node.nodeConfig?.hardTimeout` remains the explicit,
     /// opt-in escape hatch: an author who wants SOME ceiling on the whole nested run still gets
     /// one by setting it deliberately — this only changes what happens with NO explicit override.
-    static func outerTimeoutBudget(for node: WorkflowNode, workflowConfig: WorkflowConfig) -> TimeInterval? {
-        let fallback = node.profileType == .workflow ? nil : TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout")
+    static func outerTimeoutBudget(for node: WorkflowNode) -> TimeInterval? {
+        let fallback = node.profileType == .workflow ? nil : TimeLimit.usable(WorkflowConfig.nodeTimeout, "The workflow's node timeout")
         guard let perAttempt = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Node '\(node.displayName)' hardTimeout") ?? fallback else { return nil }
-        let attempts = plannedAttempts(for: node, workflowConfig: workflowConfig)
+        let attempts = plannedAttempts(for: node)
         let retryDelay = node.nodeConfig?.retryDelay ?? 0
         return Double(attempts) * perAttempt + Double(attempts - 1) * retryDelay
     }
@@ -2786,8 +2668,7 @@ actor WorkflowExecutor: Executor {
         traceContext: TraceContext = TraceContext(subAgentName: "structural", provider: .anthropic),
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void = { _ in },
         streamProvider: (any WorkflowStreamProvider)? = nil,
-        injectedProfileMap: [UUID: BackendProfileModel]? = nil,
-        workflowConfig: WorkflowConfig = WorkflowConfig(agentProfileIDs: [])
+        injectedProfileMap: [UUID: BackendProfileModel]? = nil
     ) async -> StructuralNodeResult {
         // The timeout is PER ATTEMPT, so the outer backstop must be sized to the whole retry budget.
         //
@@ -2813,10 +2694,10 @@ actor WorkflowExecutor: Executor {
         // budget that no longer exists for a sub-workflow node (it's read only by the log below).
         let isSubWorkflowNode = node.profileType == .workflow
         let perAttemptLimit = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Node '\(node.displayName)' hardTimeout")
-            ?? (isSubWorkflowNode ? nil : TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout"))
+            ?? (isSubWorkflowNode ? nil : TimeLimit.usable(WorkflowConfig.nodeTimeout, "The workflow's node timeout"))
         let retryDelay = node.nodeConfig?.retryDelay ?? 0
-        let attempts = Self.plannedAttempts(for: node, workflowConfig: workflowConfig)
-        let limit = Self.outerTimeoutBudget(for: node, workflowConfig: workflowConfig)
+        let attempts = Self.plannedAttempts(for: node)
+        let limit = Self.outerTimeoutBudget(for: node)
 
         if attempts > 1, let perAttemptLimit, let limit {
             // [WF-EX9] The OLD single message said "a retry now gets its own full budget" — true
@@ -2841,8 +2722,7 @@ actor WorkflowExecutor: Executor {
         // (3 outer × 3 inner = 9 invocations for a setting that reads 3).
         let outerAttempts = WorkflowRetryPolicy.structuralAttempts(
             isSubWorkflow: node.profileType == .workflow,
-            maxNodeRetries: node.nodeConfig?.maxNodeRetries,
-            fallbackRetries: workflowConfig.resolvedMaxRetries
+            maxNodeRetries: node.nodeConfig?.maxNodeRetries
         )
 
         let startTime = Date()
@@ -2913,8 +2793,7 @@ actor WorkflowExecutor: Executor {
                         conversationID: conversationID, continuation: continuation,
                         nodeIndex: nodeIndex, totalNodes: totalNodes,
                         traceContext: traceContext, onTraceUpdate: onTraceUpdate,
-                        streamProvider: streamProvider, injectedProfileMap: injectedProfileMap,
-                        workflowConfig: workflowConfig
+                        streamProvider: streamProvider, injectedProfileMap: injectedProfileMap
                     )
 
                     // [WF-EX9 hardening, post-audit] `executeStructuralNode` is non-throwing and does
@@ -3007,7 +2886,7 @@ actor WorkflowExecutor: Executor {
             // be completed. (Swift.CancellationError error 1.)")` — raw Swift internals shown as a
             // workflow error — OVERWROTE the honest `.canceled` the work side had already
             // reported, and activated the node's `error` branch. It fired on the DEFAULT path
-            // (`effectiveNodeTimeout` is `nodeTimeoutEnabled ?? true`), i.e. every Stop with a
+            // (every structural node is bounded), i.e. every Stop with a
             // structural node in flight, and it silently undid the cancelled-status work done
             // elsewhere in the model.
             //
@@ -3153,9 +3032,7 @@ actor WorkflowExecutor: Executor {
         // and the run throws `validationFailed` for profiles that exist and are visible in
         // the sidebar. Passing the INJECTION through instead means production (nil) lets the
         // body resolve its own profiles, while tests keep the map they deliberately supply.
-        injectedProfileMap: [UUID: BackendProfileModel]? = nil,
-        // Workflow defaults used by Action nodes for timeout/retry resolution.
-        workflowConfig: WorkflowConfig = WorkflowConfig(agentProfileIDs: [])
+        injectedProfileMap: [UUID: BackendProfileModel]? = nil
     ) async -> StructuralNodeResult {
 
         let nodeID = node.id
@@ -3558,12 +3435,8 @@ actor WorkflowExecutor: Executor {
 
             // Step 1: Pattern matching — always runs first.
             //
-            // ⚠️ ALL matching rules are collected; the loop no longer stops at the first hit.
-            // Routing is UNCHANGED — `matchedLabels.first` is exactly the rule the old `break`
-            // would have stopped on, because rule order is unchanged and each rule's verdict is
-            // computed from `fieldValue` and `values` alone, with no cross-rule state. What the
-            // extra work buys is knowing that an input was AMBIGUOUS, which is invisible today:
-            // a rule ordered second can match every input and nothing ever says so.
+            // ⚠️ ALL matching rules are collected, never just the first: rule order is NOT a
+            // priority. Several matches is an AMBIGUOUS input, resolved by `decisionPolicy` below.
             var matchedLabels: [String] = []
             for rule in config.rules {
                 let fieldValue: String
@@ -3611,13 +3484,10 @@ actor WorkflowExecutor: Executor {
                     matches = !values.contains { fieldValue == $0 }
                 case .other(let raw):
                     // Same contract as an unknown field: inert, loud, never a guess (WF-PE3).
-                    logger.error("[WF_ROUTE] Router rule '\(rule.label)' uses operator '\(raw)', which this build cannot evaluate — either a newer build wrote it, or it is the RETIRED `always` operator. CONSEQUENCE: the rule never matches on this build.")
+                    logger.error("[WF_ROUTE] Router rule '\(rule.label)' uses operator '\(raw)', which this build cannot evaluate (saved by a newer version). CONSEQUENCE: the rule never matches on this build.")
                     matches = false
                 case .isEmpty:     matches = fieldValue.isEmpty
                 case .isNotEmpty:  matches = !fieldValue.isEmpty
-                // ⚠️ `case .always` was HARD-DELETED 2026-08-16 — a stored "always" now decodes to
-                // `.other("always")` and lands in the never-matches arm above. The catch-all's job
-                // moved to `config.noMatchBehavior`; unmatched input follows that setting.
                 }
 
                 logger.debug("Router '\(displayName)' rule: field=\(String(describing: rule.field)) op=\(String(describing: rule.op)) value='\(rule.value)' → \(matches ? "MATCH" : "no match") (label: '\(rule.label)')")
@@ -3630,120 +3500,23 @@ actor WorkflowExecutor: Executor {
             // ⚠️ Deduped BY LABEL before anything counts them. Two rules may legitimately share a
             // label — they share one output port — and counting them separately would manufacture
             // an ambiguity against a single branch.
-            var seenLabels = Set<String>()
-            let distinctMatched = matchedLabels.filter { seenLabels.insert($0).inserted }
-
-            // Step 1b: ambiguity — more than one rule described the same input.
             //
-            // ⚠️ LEGACY PATH ONLY (2026-08-17). A node carrying a `decisionPolicy` resolves BOTH
-            // ambiguity and no-match through the unified consultation further down; this inline
-            // block is what governs a node saved before the redesign, and it must stay
-            // byte-identical for those. `nil` policy is not "unset", it is "the legacy trio governs".
-            var arbitratedLabel: String?
-            // [EXC-6] Set when the arbitration park ended because the run is being torn down. A
-            // local flag rather than a new `UndecidedDisposition`/`RouterUndecided` case on purpose:
-            // invariant 72 says those types must not be able to express a Stop — a Stop is not a
-            // routing situation, so it must not enter the policy table at all.
-            var arbitrationCanceled = false
-            if config.decisionPolicy == nil, distinctMatched.count > 1 {
-                logger.notice("[WF_ROUTE] Router '\(displayName)': \(matchedLabels.count) rules matched the same input — [\(matchedLabels.joined(separator: ", "))]. CONSEQUENCE: routing to '\(matchedLabels[0])' because it is FIRST in rule order\(config.askOnAmbiguity ? " unless a human picks otherwise" : ""); the other \(matchedLabels.count - 1) matching branch(es) will not run. If that tiebreak is not what you meant, reorder the rules or make them mutually exclusive.")
-
-                if config.askOnAmbiguity, !WorkflowRunAttendance.isAttended {
-                    // ⚠️ Unattended (scheduled / ChatOps): never park. Nobody can see the banner,
-                    // and the container either cancels the whole run at its deadline (scheduler) or
-                    // has no bound at all (ChatOps). First match is exactly what an unanswered
-                    // arbitration resolves to, so behaviour is identical minus the doomed wait.
-                    logger.notice("[WF_ROUTE] Router '\(displayName)': arbitration SKIPPED — this run is unattended (scheduled or bridge-initiated), so nobody could answer. CONSEQUENCE: routing to '\(matchedLabels[0])' (first match), the same branch an unanswered arbitration resolves to; the run keeps moving instead of parking until the container kills it.")
-                } else if config.askOnAmbiguity {
-                    // ⚠️ Reuses the GATE interaction verbatim — same event, same suspension, same
-                    // banner, same remote mirroring. Rule arbitration IS a gate: the user picks one
-                    // of N labels and that choice routes to the matching port. Critically, every
-                    // option here is a MATCHED RULE LABEL, and rule labels are already declared
-                    // output ports (`ConditionNodeConfig.outputPortLabels`), so `activePorts =
-                    // [chosen]` routes with no engine change. A free-form dynamic option set would
-                    // NOT work — the display travels in the payload but the routing target is bound
-                    // to config-derived edges.
-                    let operationID = UUID()
-
-                    // ⚠️ Spans are computed against the TRUNCATED preview, not the full text, so
-                    // an offset can never point past the string the banner actually renders.
-                    let preview = upstreamText.count > 500
-                        ? String(upstreamText.prefix(500)) + "…"
-                        : upstreamText
-                    let highlights = config.rules
-                        .filter { matchedLabels.contains($0.label) }
-                        .flatMap { Self.matchSpans(for: $0, in: preview) }
-
-                    // ⚠️ `deadline: nil` — the arbitration waits INDEFINITELY (user decision
-                    // 2026-08-13; the previous 120s auto-resolve took the decision away from someone
-                    // who had simply stepped away). nil also suppresses the banner's countdown, so
-                    // the UI matches the behaviour instead of showing a timer that never fires.
-                    //
-                    // ⚠️ The container owns the deadline now, exactly as it does for a Gate with no
-                    // configured timeout: Stop for an attended run, the 600s deadline for a
-                    // scheduled one. Structural nodes get no per-node timeout race (WF22), so there
-                    // is no other bound — and for a scheduled run the container deadline cancels the
-                    // WHOLE run, not just this node.
-                    continuation.yield(.requestGate(
-                        prompt: "\(matchedLabels.count) rules match this input — which branch should it take?",
-                        options: matchedLabels,
-                        operationID: operationID,
-                        deadline: nil,
-                        sourceNodeID: nodeID,
-                        inputText: preview,
-                        highlights: highlights
-                    ))
-
-                    logger.notice("[WF_ROUTE] Router '\(displayName)' PARKED INDEFINITELY for ambiguity arbitration (operationID: \(operationID), options: [\(matchedLabels.joined(separator: " | "))]). CONSEQUENCE: this run makes no further progress on this branch until a human answers. There is no per-node timeout — only the container bounds it (Stop, or a scheduled run's 600s deadline, which cancels the ENTIRE run). ⚠️ A scheduled run renders NO banner for this: switch 'Ask Me Which Branch' off on Routers used in unattended workflows.")
-
-                    let chosen = await ExecutionSuspensionService.shared.suspendForGate(
-                        for: operationID, conversationID: conversationID, nodeID: nodeID
-                    )
-
-                    // ⚠️ Only a label that actually matched may be honoured. The suspension resolves
-                    // from several surfaces (banner, QuickAccess, Slack/Discord/Telegram index
-                    // lookup); a stale or mis-indexed answer must not activate a port that this run
-                    // never matched, which would route on a rule the input does not satisfy.
-                    switch Self.settledArbitration(
-                        chosen: chosen, offered: matchedLabels, taskCancelled: Task.isCancelled
-                    ) {
-                    case .honored(let picked):
-                        arbitratedLabel = picked
-                        logger.notice("[WF_ROUTE] Router '\(displayName)': human chose '\(picked)' from [\(matchedLabels.joined(separator: ", "))].")
-                    case .canceled:
-                        arbitrationCanceled = true
-                    case .fallback:
-                        // ⚠️ FIRST MATCH, never `fallbackLabel`. Routing to the catch-all instead
-                        // would silently change where every unattended ambiguous input goes.
-                        //
-                        // ⚠️ [EXC-6] "Unanswered" here NO LONGER includes Stop or a closed
-                        // conversation — both cancel this task, and the `.canceled` arm above claims
-                        // them. What is left is a park force-resolved with nil WITHOUT cancellation
-                        // (e.g. `suspendForGate` auto-cancelling a superseded suspension).
-                        let reason = chosen == nil ? "unanswered (the park was resolved with no choice, and this task was not cancelled)" : "answered with '\(chosen!)', which is not among the matched rules"
-                        logger.notice("[WF_ROUTE] Router '\(displayName)': arbitration \(reason) — falling back to the first match '\(matchedLabels[0])'. CONSEQUENCE: routing is identical to this node having arbitration switched off; no branch is lost.")
-                    }
-                }
+            // ⚠️ [WF-EX1] An EMPTY label is absent, never a port. `WorkflowState.edgeIsLive` resolves
+            // an edge's port as `edge.sourcePortLabel ?? ""`, so activating `""` would fire every
+            // UNLABELLED edge out of this node and send the run down the default branch as though a
+            // rule had matched. The validator blocks blank labels at design time; this is the runtime
+            // backstop.
+            let distinctMatched = Self.routableMatches(matchedLabels)
+            if matchedLabels.contains("") {
+                logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: a rule with an EMPTY label matched and was DISCARDED. CONSEQUENCE: it cannot route anywhere — activating \"\" would fire every unlabelled edge out of this node. Give every rule a non-empty label.")
             }
 
-            if arbitrationCanceled {
-                // ⚠️ `.canceled`, not `.failed`, and `activePorts` stays nil — `edgeIsLive` treats a
-                // cancelled node as dead in both directions, so it routes NOWHERE. This mirrors the
-                // AI Classifier's own cancel arm below verbatim; marking it failed would fire the
-                // `error` port on every Stop.
-                output = ""
-                status = .canceled
-                logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: ambiguity arbitration CANCELLED (Stop, or the container deadline) while parked on [\(matchedLabels.joined(separator: " | "))]. CONSEQUENCE: recorded as cancelled rather than completed; NO port is activated and the first match is NOT taken — the run is being torn down, so the record no longer attributes to the user a routing decision they never made.")
-                break
-            }
-
-            // Step 2: LLM fallback — only fires when no pattern rule matched
             // Step 2: AI Classifier — kept in its own variable so the routing METHOD is a fact
             // rather than something re-derived from the label afterwards (see step 3).
             var classifierOutcome: ClassifierOutcome?     // nil = never consulted
             // ⚠️ `isEmpty`, NOT `count != 1`. The classifier is a NO-MATCH fallback; triggering it
             // on an ambiguous input would start calling a model for inputs that route fine today.
-            if matchedLabels.isEmpty && config.llmFallbackEnabled {
+            if distinctMatched.isEmpty && config.llmFallbackEnabled {
                 logger.info("Router '\(displayName)': no pattern match, delegating to AI Classifier")
                 do {
                     classifierOutcome = try await Self.evaluateConditionWithLLM(
@@ -3761,7 +3534,7 @@ actor WorkflowExecutor: Executor {
                     // ⚠️ WF-CC13, fixed alongside WF-CC10 because it cannot wait. This was a BARE
                     // catch, so a Stop landing in the classifier's `model.generate` was recorded
                     // as a classifier FAILURE, counted as one in TrendsView, and then routed
-                    // through `noMatchBehavior` — under `.endWorkflow` the node reported
+                    // through the no-match setting — under "end the branch" the node reported
                     // `.completed` and its passthrough became the run's final answer. Every other
                     // structural failure path in this file already has this arm; this one did not.
                     // It MUST ship with WF-CC10: without it, failing on a classifier fault would
@@ -3775,7 +3548,7 @@ actor WorkflowExecutor: Executor {
                         classifierOutcome = .cancelled
                     } else {
                         classifierOutcome = .failed(reason: error.localizedDescription)
-                        logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: AI Classifier FAILED — \(error.localizedDescription) (model: \(config.llmModelName ?? "none")). CONSEQUENCE: no routing verdict exists for this input, so the node fails onto its `error` port and 'When Nothing Matches' is deliberately NOT applied — that setting answers 'no rule described this input', and nothing here read the input at all. To recover automatically, wire this Router's `error` port to the branch you would have defaulted to.")
+                        logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: AI Classifier FAILED — \(error.localizedDescription) (model: \(config.llmModelName ?? "none")). CONSEQUENCE: no routing verdict exists for this input, so the node fails onto its `error` port and 'When Routing Can't Decide' is deliberately NOT applied — that setting answers 'no rule described this input', and nothing here read the input at all. To recover automatically, wire this Router's `error` port to the branch you would have defaulted to.")
                         // ⚠️ Prefix "AI Classifier failed:" is VERBATIM — several tests key on it,
                         // including one that asserts its ABSENCE. Do not reword.
                         continuation.yield(.thought("[\(displayName)] AI Classifier failed: \(error.localizedDescription)", sourceNodeID: nodeID))
@@ -3810,286 +3583,172 @@ actor WorkflowExecutor: Executor {
             }
 
             // ═══════════════════════════════════════════════════════════════════════════════
-            // Step 2b: THE UNIFIED DECISION (2026-08-17 redesign) — policy nodes only.
+            // Step 3: THE DECISION.
             //
             // One setting answers both "several rules matched" and "nothing matched", and the AI
             // Classifier inherits it: one token routes, zero is EMPTY, two or more is AMBIGUOUS
             // (which is what retires WF-OB2's per-launch-random pick).
-            //
-            // ⚠️ Everything below this block — `resolveRouterPort`, the `method` chain, the
-            // `noMatchBehavior` switch — is the LEGACY path and runs only when `decisionPolicy` is
-            // nil. Both are kept because the legacy 2×3 matrix does not collapse onto the new axis
-            // losslessly; a stored workflow keeps its exact behaviour until its author re-saves it.
             // ═══════════════════════════════════════════════════════════════════════════════
-            if let policy = config.decisionPolicy {
-                // Exactly one branch named → route, policy never consulted (spec point 1).
-                var decided: String? = distinctMatched.count == 1 ? distinctMatched[0] : nil
-                var situation: RouterUndecided?
-                var boundaryFailReason: String?
+            let policy = config.decisionPolicy
+            // Exactly one branch named → route, policy never consulted (spec point 1).
+            var decided: String? = distinctMatched.count == 1 ? distinctMatched[0] : nil
+            var situation: RouterUndecided?
+            var boundaryFailReason: String?
 
-                if decided == nil {
-                    if distinctMatched.count > 1 {
-                        situation = .ambiguous(candidates: distinctMatched, origin: .pattern)
-                    } else if let outcome = classifierOutcome {
-                        // ⚠️ `classify` sorts crash/Stop OUT before any situation value exists, so
-                        // no policy branch can route them (WF-CC10 / WF-CC13, now type-enforced).
-                        switch Self.classify(outcome: outcome) {
-                        case .decided(let label):        decided = label
-                        case .situation(let s):          situation = s
-                        case .boundaryFail(let reason):  boundaryFailReason = reason
-                        case .boundaryCancel:
-                            // Unreachable: the `.cancelled` settle above already broke out.
-                            boundaryFailReason = nil
-                        }
-                    } else {
-                        situation = .empty(.noRuleMatched)
+            if decided == nil {
+                if distinctMatched.count > 1 {
+                    situation = .ambiguous(candidates: distinctMatched, origin: .pattern)
+                } else if let outcome = classifierOutcome {
+                    // ⚠️ `classify` sorts crash/Stop OUT before any situation value exists, so
+                    // no policy branch can route them (WF-CC10 / WF-CC13, now type-enforced).
+                    switch Self.classify(outcome: outcome) {
+                    case .decided(let label):        decided = label
+                    case .situation(let s):          situation = s
+                    case .boundaryFail(let reason):  boundaryFailReason = reason
+                    case .boundaryCancel:
+                        // Unreachable: the `.cancelled` settle above already broke out.
+                        boundaryFailReason = nil
                     }
+                } else {
+                    situation = .empty(.noRuleMatched)
                 }
+            }
 
-                if let reason = boundaryFailReason {
-                    // ⚠️ The policy is deliberately NOT applied: it answers "no rule described this
-                    // input", and a classifier that threw never read the input at all.
-                    output = ""
-                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
-                    logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason). CONSEQUENCE: the node activates its `error` port; 'When Routing Can't Decide' is deliberately NOT applied to a classifier FAULT. To recover automatically, wire this Router's `error` port.")
-                    break
-                }
+            if let reason = boundaryFailReason {
+                // ⚠️ The policy is deliberately NOT applied: it answers "no rule described this
+                // input", and a classifier that threw never read the input at all.
+                output = ""
+                status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
+                logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason). CONSEQUENCE: the node activates its `error` port; 'When Routing Can't Decide' is deliberately NOT applied to a classifier FAULT. To recover automatically, wire this Router's `error` port.")
+                break
+            }
 
-                if let label = decided {
-                    activePorts = [label]
-                    output = upstreamText
-                    let via = distinctMatched.count == 1 ? "pattern" : "classifier"
-                    logger.info("[WF_ROUTE] Router '\(displayName)' activated port: '\(label)' via \(via) (policy not consulted — exactly one branch named), output \(output.count) chars")
-                    break
-                }
+            if decided == "" {
+                // [WF-EX1] The classifier named a rule whose label is blank — same backstop as above.
+                output = ""
+                status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': the AI Classifier chose a rule with an empty label, which no edge can carry"))
+                logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the AI Classifier resolved to a rule with an EMPTY label. CONSEQUENCE: the node fails onto its `error` port instead of activating \"\", which would fire every unlabelled edge out of this node. Give every rule a non-empty label.")
+                break
+            }
 
-                guard let undecided = situation else { break }   // unreachable by construction
+            if let label = decided {
+                activePorts = [label]
+                output = upstreamText
+                let via = distinctMatched.count == 1 ? "pattern" : "classifier"
+                logger.info("[WF_ROUTE] Router '\(displayName)' activated port: '\(label)' via \(via) (policy not consulted — exactly one branch named), output \(output.count) chars")
+                break
+            }
 
-                // Resolve, honouring an Ask by parking; whatever the human answers (or does not)
-                // funnels back through the SAME table via the fallback.
-                var disposition = Self.resolveUndecided(policy: policy, situation: undecided, rules: config.rules)
-                // [EXC-6] Same flag, same reason as the legacy arm's. Worse default here: the
-                // shipped `AskFallback` is `.failNode`, so a Stop used to fabricate a FAILURE and
-                // fire the node's `error` port on every teardown.
-                var routingCanceled = false
+            guard let undecided = situation else { break }   // unreachable by construction
 
-                if case .ask(let options, let prompt, let fallback) = disposition {
-                    if !WorkflowRunAttendance.isAttended {
-                        // ⚠️ Unattended (scheduled / chat bridge): never park. Nobody can see the
-                        // banner, and the container either cancels the whole run at its deadline or
-                        // has no bound at all.
-                        logger.notice("[WF_ROUTE] Router '\(displayName)': Ask SKIPPED — this run is unattended (scheduled or bridge-initiated), so nobody could answer. CONSEQUENCE: falling back to the configured 'If nobody can answer' action instead of parking until the container kills the run.")
+            // Resolve, honouring an Ask by parking; whatever the human answers (or does not)
+            // funnels back through the SAME table via the fallback.
+            var disposition = Self.resolveUndecided(policy: policy, situation: undecided, rules: config.rules)
+            // [EXC-6] Set when the park ended because the run is being torn down. A local flag
+            // rather than a new `UndecidedDisposition` case on purpose: invariant 72 says those
+            // types must not be able to express a Stop. The shipped `AskFallback` is
+            // `.failNode`, so applying it on a Stop used to fabricate a FAILURE and fire the
+            // node's `error` port on every teardown.
+            var routingCanceled = false
+
+            if case .ask(let options, let prompt, let fallback) = disposition {
+                if !WorkflowRunAttendance.isAttended {
+                    // ⚠️ Unattended (scheduled / chat bridge): never park. Nobody can see the
+                    // banner, and the container either cancels the whole run at its deadline or
+                    // has no bound at all.
+                    logger.notice("[WF_ROUTE] Router '\(displayName)': Ask SKIPPED — this run is unattended (scheduled or bridge-initiated), so nobody could answer. CONSEQUENCE: falling back to the configured 'If nobody can answer' action instead of parking until the container kills the run.")
+                    disposition = Self.resolveUndecided(
+                        policy: Self.policy(for: fallback), situation: undecided, rules: config.rules)
+                } else {
+                    let operationID = UUID()
+                    let preview = upstreamText.count > 500
+                        ? String(upstreamText.prefix(500)) + "…"
+                        : upstreamText
+                    // Highlights only make sense when specific rules matched; an EMPTY situation
+                    // has nothing to point at, and the banner renders fine with none.
+                    let highlights: [RuleMatchSpan]
+                    if case .ambiguous(let candidates, .pattern) = undecided {
+                        highlights = config.rules
+                            .filter { candidates.contains($0.label) }
+                            .flatMap { Self.matchSpans(for: $0, in: preview) }
+                    } else {
+                        highlights = []
+                    }
+
+                    continuation.yield(.requestGate(
+                        prompt: prompt,
+                        options: options,
+                        operationID: operationID,
+                        deadline: nil,
+                        sourceNodeID: nodeID,
+                        inputText: preview,
+                        highlights: highlights
+                    ))
+                    logger.notice("[WF_ROUTE] Router '\(displayName)' PARKED INDEFINITELY for a routing decision (operationID: \(operationID), options: [\(options.joined(separator: " | "))]). CONSEQUENCE: this branch makes no further progress until a human answers. There is no per-node timeout — only the container bounds it (Stop, or a scheduled run's 600s deadline, which cancels the ENTIRE run).")
+
+                    let chosen = await ExecutionSuspensionService.shared.suspendForGate(
+                        for: operationID, conversationID: conversationID, nodeID: nodeID
+                    )
+
+                    // ⚠️ Only an OFFERED option may be honoured. The suspension resolves from
+                    // several surfaces (banner, QuickAccess, chat bridges); a stale or
+                    // mis-indexed answer must not activate a port this situation never offered.
+                    switch Self.settledArbitration(
+                        chosen: chosen, offered: options, taskCancelled: Task.isCancelled
+                    ) {
+                    case .honored(let picked):
+                        logger.notice("[WF_ROUTE] Router '\(displayName)': human chose '\(picked)' from [\(options.joined(separator: ", "))].")
+                        disposition = .route(port: picked)
+                    case .canceled:
+                        routingCanceled = true
+                    case .fallback:
+                        // ⚠️ [EXC-6] No longer includes Stop or a closed conversation — the
+                        // `.canceled` arm above claims those.
+                        let why = chosen == nil
+                            ? "unanswered (the park was resolved with no choice, and this task was not cancelled)"
+                            : "answered with '\(chosen!)', which was not offered"
+                        logger.notice("[WF_ROUTE] Router '\(displayName)': routing decision \(why) — applying the configured 'If nobody can answer' action. CONSEQUENCE: identical to an unattended run, so an unanswered Ask and an unattendable one never diverge.")
                         disposition = Self.resolveUndecided(
                             policy: Self.policy(for: fallback), situation: undecided, rules: config.rules)
-                    } else {
-                        let operationID = UUID()
-                        let preview = upstreamText.count > 500
-                            ? String(upstreamText.prefix(500)) + "…"
-                            : upstreamText
-                        // Highlights only make sense when specific rules matched; an EMPTY situation
-                        // has nothing to point at, and the banner renders fine with none.
-                        let highlights: [RuleMatchSpan]
-                        if case .ambiguous(let candidates, .pattern) = undecided {
-                            highlights = config.rules
-                                .filter { candidates.contains($0.label) }
-                                .flatMap { Self.matchSpans(for: $0, in: preview) }
-                        } else {
-                            highlights = []
-                        }
-
-                        continuation.yield(.requestGate(
-                            prompt: prompt,
-                            options: options,
-                            operationID: operationID,
-                            deadline: nil,
-                            sourceNodeID: nodeID,
-                            inputText: preview,
-                            highlights: highlights
-                        ))
-                        logger.notice("[WF_ROUTE] Router '\(displayName)' PARKED INDEFINITELY for a routing decision (operationID: \(operationID), options: [\(options.joined(separator: " | "))]). CONSEQUENCE: this branch makes no further progress until a human answers. There is no per-node timeout — only the container bounds it (Stop, or a scheduled run's 600s deadline, which cancels the ENTIRE run).")
-
-                        let chosen = await ExecutionSuspensionService.shared.suspendForGate(
-                            for: operationID, conversationID: conversationID, nodeID: nodeID
-                        )
-
-                        // ⚠️ Only an OFFERED option may be honoured. The suspension resolves from
-                        // several surfaces (banner, QuickAccess, chat bridges); a stale or
-                        // mis-indexed answer must not activate a port this situation never offered.
-                        switch Self.settledArbitration(
-                            chosen: chosen, offered: options, taskCancelled: Task.isCancelled
-                        ) {
-                        case .honored(let picked):
-                            logger.notice("[WF_ROUTE] Router '\(displayName)': human chose '\(picked)' from [\(options.joined(separator: ", "))].")
-                            disposition = .route(port: picked)
-                        case .canceled:
-                            routingCanceled = true
-                        case .fallback:
-                            // ⚠️ [EXC-6] No longer includes Stop or a closed conversation — the
-                            // `.canceled` arm above claims those.
-                            let why = chosen == nil
-                                ? "unanswered (the park was resolved with no choice, and this task was not cancelled)"
-                                : "answered with '\(chosen!)', which was not offered"
-                            logger.notice("[WF_ROUTE] Router '\(displayName)': routing decision \(why) — applying the configured 'If nobody can answer' action. CONSEQUENCE: identical to an unattended run, so an unanswered Ask and an unattendable one never diverge.")
-                            disposition = Self.resolveUndecided(
-                                policy: Self.policy(for: fallback), situation: undecided, rules: config.rules)
-                        }
                     }
                 }
-                if routingCanceled {
-                    // ⚠️ `.canceled`, not the configured 'If nobody can answer' action — that action
-                    // answers "nobody could decide", and a Stop is not an inability to decide, it is
-                    // the run being torn down. With the shipped default (`.failNode`) applying it
-                    // fabricated a FAILURE and fired the `error` port on every Stop. `activePorts`
-                    // stays nil so nothing routes; mirrors the AI Classifier's cancel arm.
-                    output = ""
-                    status = .canceled
-                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: routing decision CANCELLED (Stop, or the container deadline) while parked for a human choice. CONSEQUENCE: recorded as cancelled rather than failed; NO port is activated, the error port does NOT fire, and 'If nobody can answer' is deliberately not applied.")
-                    break
-                }
-                switch disposition {
-                case .route(let port):
-                    activePorts = [port]
-                    output = upstreamText
-                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no single branch was named — routing to '\(port)' per 'When Routing Can't Decide'. CONSEQUENCE: the run continues down that branch exactly as if that rule had matched; any branches that DID match do not run.")
-
-                case .endBranch:
-                    output = upstreamText
-                    status = .completed
-                    activePorts = []
-                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no single branch was named — ENDING this branch per 'When Routing Can't Decide'. CONSEQUENCE: everything downstream skips as 'not chosen', nothing is reported as failed, and this Router's passthrough content becomes (part of) the final answer. Parallel branches are unaffected.")
-
-                case .fail(let reason):
-                    // ⚠️ `activePorts` left NIL so the driver's structural-failure path activates
-                    // `error`. Setting it here would suppress that.
-                    output = ""
-                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
-                    logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason) (\(config.rules.count) rule(s) evaluated against \(upstreamText.count) chars). CONSEQUENCE: this node activates its `error` port; a branch wired there runs, otherwise this branch stops and the reason appears in the run's final output.")
-
-                case .ask:
-                    // Unreachable: every Ask above resolves to route/fail/endBranch before here.
-                    output = ""
-                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': routing decision could not be resolved"))
-                    logger.error("[WF_ROUTE] Router '\(displayName)': an Ask disposition survived resolution — this is a bug in the unified decision path, not a configuration error.")
-                }
+            }
+            if routingCanceled {
+                // ⚠️ `.canceled`, not the configured 'If nobody can answer' action — that action
+                // answers "nobody could decide", and a Stop is not an inability to decide, it is
+                // the run being torn down. With the shipped default (`.failNode`) applying it
+                // fabricated a FAILURE and fired the `error` port on every Stop. `activePorts`
+                // stays nil so nothing routes; mirrors the AI Classifier's cancel arm.
+                output = ""
+                status = .canceled
+                logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: routing decision CANCELLED (Stop, or the container deadline) while parked for a human choice. CONSEQUENCE: recorded as cancelled rather than failed; NO port is activated, the error port does NOT fire, and 'If nobody can answer' is deliberately not applied.")
                 break
             }
+            switch disposition {
+            case .route(let port):
+                activePorts = [port]
+                output = upstreamText
+                logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no single branch was named — routing to '\(port)' per 'When Routing Can't Decide'. CONSEQUENCE: the run continues down that branch exactly as if that rule had matched; any branches that DID match do not run.")
 
-            // ⚠️ LEGACY-ONLY WF-OB2 REPAIR. A nil-policy node has no setting to consult about an
-            // ambiguous classifier reply, so it collapses to the FIRST-STATED candidate. That is
-            // still a behaviour change for untouched blobs — and it is strictly the bugfix: what it
-            // replaces was whichever label an unordered Dictionary happened to yield, which could
-            // differ between app launches for the same input. First-stated is deterministic and is
-            // the model's own answer (the rest of a "not X, it's Y" reply is hedging).
-            if config.decisionPolicy == nil, case .ambiguous(let candidates)? = classifierOutcome,
-               let firstStated = candidates.first {
-                logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the AI Classifier named \(candidates.count) categories — [\(candidates.joined(separator: ", "))] — and this Router predates the unified routing setting, so it takes the FIRST-STATED one, '\(firstStated)'. CONSEQUENCE: deterministic, unlike the previous behaviour which picked by hash order and could differ between launches. Open this node and save it to choose what should happen instead.")
-                classifierOutcome = .label(firstStated)
+            case .endBranch:
+                output = upstreamText
+                status = .completed
+                activePorts = []
+                logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no single branch was named — ENDING this branch per 'When Routing Can't Decide'. CONSEQUENCE: everything downstream skips as 'not chosen', nothing is reported as failed, and this Router's passthrough content becomes (part of) the final answer. Parallel branches are unaffected.")
+
+            case .fail(let reason):
+                // ⚠️ `activePorts` left NIL so the driver's structural-failure path activates
+                // `error`. Setting it here would suppress that.
+                output = ""
+                status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
+                logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason) (\(config.rules.count) rule(s) evaluated against \(upstreamText.count) chars). CONSEQUENCE: this node activates its `error` port; a branch wired there runs, otherwise this branch stops and the reason appears in the run's final output.")
+
+            case .ask:
+                // Unreachable: every Ask above resolves to route/fail/endBranch before here.
+                output = ""
+                status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': routing decision could not be resolved"))
+                logger.error("[WF_ROUTE] Router '\(displayName)': an Ask disposition survived resolution — this is a bug in the unified decision path, not a configuration error.")
             }
-
-            // Step 3: resolve the port.
-            //
-            // ⚠️ `matchedLabels.first` reproduces the pre-2026-08-13 first-match-wins exactly.
-            // `fallbackLabel` is a LEGACY compatibility path — the Static Fallback picker is gone and
-            // a default branch is now an ordinary last rule with the `always` operator. Configs
-            // saved before that still carry a fallback and are still honoured, because silently
-            // converting them on load would change where unmatched input goes in every existing
-            // workflow.
-            // ⚠️ Extracted to `resolveRouterPort` so this decision is unit-testable (WF-EX1). The
-            // classifier itself needs a real MLX model and cannot be reached from a test, but the
-            // rule that turns its answer into a port is pure — and that rule is where the defect was.
-            let resolution = Self.resolveRouterPort(
-                arbitrated: arbitratedLabel,
-                matched: matchedLabels,
-                classifier: classifierOutcome?.label,
-                legacyFallback: config.fallbackLabel
-            )
-            if case .none(let discardedEmptyLabel) = resolution, discardedEmptyLabel {
-                logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] resolved an EMPTY port label and DISCARDED it. CONSEQUENCE: the node fails onto its `error` port instead of activating a port no edge can legitimately carry — activating \"\" would have made every UNLABELLED edge out of this node fire, sending the run down the default branch as though a rule had matched. Give every rule a non-empty label.")
-            }
-            let resolvedPort = resolution.port
-
-            // ⚠️ The routing METHOD is TRACKED, not inferred. The old expression asked whether the
-            // matched label was ABSENT from `config.rules` — but the classifier only ever returns a
-            // rule label, so that test was always false and every classifier decision was reported
-            // as "pattern" (WF65). Inference was the bug.
-            // ⚠️ `var`, not `let`: the no-match arm below corrects it to "no-match-default".
-            // Without that, a `.route(...)` no-match logged "activated port 'General' via
-            // legacy-fallback" for a route no legacy fallback was involved in — this chain falls
-            // to its `else` when all three signals are nil (WF-CC10).
-            var method: String
-            if arbitratedLabel != nil {
-                method = "arbitrated"
-            } else if !matchedLabels.isEmpty {
-                method = "pattern"
-            } else if classifierOutcome?.label != nil {
-                method = "classifier"
-            } else {
-                method = "legacy-fallback"
-            }
-
-            // NO RULE MATCHED — a real outcome, not something to swallow. What happens next is the
-            // author's explicit choice (`noMatchBehavior`, 2026-08-16), replacing the deleted
-            // `always` catch-all idiom. Never a run-level stop (that would be `stopWorkflow`
-            // renamed, retired 2026-08-12): parallel branches keep their results in every case.
-            var noMatchPort: String?
-            var noMatchSettled = false
-            if resolvedPort == nil {
-                // ⚠️ Placed AFTER `resolveRouterPort`, deliberately: a non-empty legacy
-                // `fallbackLabel` resolves a port at step 3 and never reaches here, so this change
-                // leaves pre-2026-08-13 configs routing exactly where they route today. Declining
-                // the legacy catch-all on a classifier fault too would be a separate, currently
-                // unpinned behaviour change.
-                switch Self.resolveNoMatch(
-                    behavior: config.noMatchBehavior,
-                    outcome: classifierOutcome,
-                    rules: config.rules
-                ) {
-                case .fail(let reason):
-                    // ⚠️ `activePorts` is left NIL so the driver's structural-failure path activates
-                    // `error`. Setting it here would suppress that.
-                    output = ""
-                    status = .failed(.modelError(provider: "workflow", error: "Router '\(displayName)': \(reason)"))
-                    noMatchSettled = true
-                    logger.error("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] FAILED — \(reason) (\(config.rules.count) rule(s) evaluated against \(upstreamText.count) chars). CONSEQUENCE: this node activates its `error` port; a branch wired there runs, otherwise this branch stops and the reason appears in the run's final output. To send unmatched input somewhere instead, set the Router's 'When Nothing Matches' option — ⚠️ except after a classifier FAULT, which that setting deliberately does not cover.")
-
-                case .route(let port):
-                    noMatchPort = port
-                    method = "no-match-default"
-                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no port resolved — routing to DEFAULT '\(port)' per 'When Nothing Matches'. CONSEQUENCE: the run continues down that branch exactly as if the rule had matched. The classifier produced a verdict, or was never consulted; a classifier FAULT would have failed the node instead.")
-
-                case .endBranch:
-                    // Graceful end of THIS BRANCH: complete with an explicitly EMPTY port set, so
-                    // every outgoing edge is dead, downstream skips as `.notChosen` (quiet, not
-                    // red), and — terminality being computed over LIVE edges — this Router becomes
-                    // a terminal whose passthrough content is the run's final output.
-                    // ⚠️ Parallel siblings are untouched (invariant W28).
-                    output = upstreamText
-                    status = .completed
-                    activePorts = []
-                    noMatchSettled = true
-                    logger.notice("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: no port resolved — ENDING this branch per 'When Nothing Matches'. CONSEQUENCE: every node downstream of this Router skips as 'not chosen', nothing is reported as failed, and the Router's passthrough content becomes (part of) the run's final answer. Parallel branches are unaffected. A classifier FAULT would have failed the node instead.")
-                }
-            }
-            if noMatchSettled { break }
-
-            guard let activatedPort = resolvedPort ?? noMatchPort else {
-                // Unreachable: every no-match arm either settled above or set `noMatchPort`.
-                break
-            }
-
-            activePorts = [activatedPort]
-            if !config.fallbackLabel.isEmpty, method == "legacy-fallback" {
-                logger.notice("[WF_ROUTE] Router '\(displayName)' used its LEGACY catch-all '\(config.fallbackLabel)'. The Static Fallback picker was retired 2026-08-13 and stored values are still honoured so existing workflows keep behaving identically. CONSEQUENCE: none today — but to express this on the canvas instead, set the Router's 'When Nothing Matches' option to route to '\(config.fallbackLabel)'.")
-            }
-            // ⚠️ A Router ALWAYS passes the upstream content through. The "Pass Through Content"
-            // toggle was retired 2026-08-13: switched off it emitted a debug string in place of the
-            // payload, which nothing downstream could consume, and it suppressed text only —
-            // artifacts flowed either way.
-            output = upstreamText
-            if !config.passthroughContent {
-                logger.notice("[WF_ROUTE] Router '\(displayName)' carries a RETIRED 'Pass Through Content = off' setting, which is ignored. CONSEQUENCE: downstream nodes now receive the full upstream content instead of the routing-label string they used to get. If a downstream rule or prompt was written against text like \"route \u{2192} \(activatedPort)\", it will no longer match — key off the content itself.")
-            }
-            logger.info("[WF_ROUTE] Router '\(displayName)' activated port: '\(activatedPort)' via \(method), output \(output.count) chars")
 
         case .code(let config):
             // Template transform via WorkflowTemplate (single-pass, injection-safe).
@@ -4466,8 +4125,8 @@ actor WorkflowExecutor: Executor {
             // sized to `attempts × limit` in `executeStructuralNodeBounded` — read that before
             // changing either number, because they only work as a pair.
             let nodeTimeout: TimeInterval? = TimeLimit.usable(node.nodeConfig?.hardTimeout, "Action node '\(displayName)' hardTimeout")
-                ?? TimeLimit.usable(workflowConfig.effectiveNodeTimeout, "The workflow's node timeout")
-            let maxRetries = node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries
+                ?? TimeLimit.usable(WorkflowConfig.nodeTimeout, "The workflow's node timeout")
+            let maxRetries = node.nodeConfig?.maxNodeRetries ?? 0
             let retryDelay = node.nodeConfig?.retryDelay ?? 0
             logger.info("Action node '\(displayName)': invoking tool '\(toolRef.name)' (\(config.argumentBindings.count) binding(s), timeout \(nodeTimeout.map { "\(Int($0))s" } ?? "off"), retries \(maxRetries))")
 
@@ -4727,8 +4386,8 @@ actor WorkflowExecutor: Executor {
     ///
     /// ⚠️ `classifierLabel: String?` collapsed FOUR different sentences into `nil`: the classifier
     /// was never consulted, it answered "none of these", it answered unreadably, and it never
-    /// answered at all (it threw). `noMatchBehavior` answers "no rule described this input" — a
-    /// verdict about CONTENT. A classifier that threw produced no verdict, so applying that
+    /// answered at all (it threw). `decisionPolicy` answers "no single rule described this input" —
+    /// a verdict about CONTENT. A classifier that threw produced no verdict, so applying that
     /// setting turns an infrastructure fault into a routing decision, and under `.route` the run
     /// then reports SUCCESS with an arbitrary branch taken.
     ///
@@ -4737,20 +4396,19 @@ actor WorkflowExecutor: Executor {
     /// rule matched with a BLANK label: the classifier is skipped (its trigger is
     /// `matchedLabels.isEmpty`) yet the reason claimed it had weighed the input and returned nothing.
     enum ClassifierOutcome: Equatable, Sendable {
-        /// It named a rule label. NOT guaranteed non-empty — `resolveRouterPort` still owns
+        /// It named a rule label. NOT guaranteed non-empty — the Router's decision step owns
         /// empty-label rejection (WF-EX1) and this type must not grow a second opinion about it.
         case label(String)
         /// It answered, and the answer was the no-match sentinel. A verdict about the RULES;
-        /// remedy: add or widen one. FOLLOWS `noMatchBehavior` — this is the case that setting
-        /// was written for.
+        /// remedy: add or widen one. FOLLOWS `decisionPolicy`.
         case noMatch
         /// It answered, and the reply carried no recognisable token. A verdict about the MODEL;
-        /// remedy: pick a stronger one. ⚠️ Deliberately ALSO follows `noMatchBehavior`: the model
-        /// ran and could not decide, and "if it can't decide, When Nothing Matches applies" is
+        /// remedy: pick a stronger one. ⚠️ Deliberately ALSO follows `decisionPolicy`: the model
+        /// ran and could not decide, and "if it can't decide, When Routing Can't Decide applies" is
         /// what the Router inspector promises.
         case unreadable(preview: String)
         /// It never answered — threw before or during the model call. NOT a verdict about
-        /// anything. The ONLY case that bypasses `noMatchBehavior`.
+        /// anything. The ONLY case that bypasses `decisionPolicy`.
         case failed(reason: String)
         /// Torn down by Stop or the container deadline. ⚠️ Kept APART from `.failed` because this
         /// file's own rule is "cancellation is not a failure": a cancelled node records
@@ -4762,12 +4420,18 @@ actor WorkflowExecutor: Executor {
         /// ⚠️ A verdict the model DID produce, so it feeds the Router's decision policy exactly
         /// like several pattern rules matching — it is ambiguity, not a fault.
         case ambiguous(candidates: [String])
+    }
 
-        /// Adapter for `resolveRouterPort`, whose contract is "signals that are PRESENT".
-        var label: String? {
-            if case .label(let l) = self { return l }
-            return nil
-        }
+    /// The matched rule labels a Router may route on: deduped BY LABEL (two rules sharing a label
+    /// share one port, so counting both would manufacture an ambiguity against a single branch),
+    /// in rule order, with EMPTY labels dropped (WF-EX1 — activating `""` would fire every
+    /// unlabelled edge out of the node).
+    ///
+    /// ⚠️ Pure and `internal` SOLELY so it can be unit-tested: the validator blocks blank labels
+    /// at design time, so no run can reach this runtime backstop end to end.
+    nonisolated static func routableMatches(_ matched: [String]) -> [String] {
+        var seen = Set<String>()
+        return matched.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     // MARK: - Unified Router decision (2026-08-17 redesign)
@@ -4810,8 +4474,8 @@ actor WorkflowExecutor: Executor {
         case boundaryCancel
     }
 
-    /// ⚠️ THE crashed-vs-inconclusive differential lives here — moved out of `resolveNoMatch`'s
-    /// first guard so it stays unit-provable while becoming type-enforced downstream.
+    /// ⚠️ THE crashed-vs-inconclusive differential lives here, so it stays unit-provable while
+    /// being type-enforced downstream.
     ///
     /// ⚠️ Exhaustive with NO `default`: a new `ClassifierOutcome` case must break this build rather
     /// than silently inherit a routing verdict.
@@ -4847,8 +4511,7 @@ actor WorkflowExecutor: Executor {
     ///
     /// ⚠️ EXTRACTED PURE (WF-UI5) because the behaviour it fixes is structurally unobservable
     /// through the integration harness — cancelling the consuming task races the event's delivery
-    /// and wins, the same reason `settledStreamEndStatus` exists. Serves BOTH arbitration paths, the
-    /// legacy inline one and the unified consultation, so they cannot drift apart the way they had.
+    /// and wins, the same reason `settledStreamEndStatus` exists.
     ///
     /// ⚠️ `taskCancelled` is `Task.isCancelled` READ AT THE CALL SITE, never `error is
     /// CancellationError` (the WF-CC4 rule): `suspendForGate` returns `nil` on cancel and throws
@@ -4984,128 +4647,6 @@ actor WorkflowExecutor: Executor {
         }
     }
 
-    /// What the Router does when no port resolved.
-    enum NoMatchDisposition: Equatable {
-        case fail(reason: String)
-        case route(port: String)
-        case endBranch
-    }
-
-    /// ⚠️ Extracted PURE so the crashed-vs-inconclusive distinction is PROVABLE. The classifier
-    /// cannot be driven from a test — it reaches `MLXModelService.shared` / `MLXService.shared` as
-    /// concrete singletons with no injection seam — so an INCONCLUSIVE classifier is unreachable
-    /// end-to-end, and this function is the only place the two can be compared. Same concession,
-    /// and the same reason, as `resolveRouterPort`.
-    static func resolveNoMatch(
-        behavior: RouterNoMatchBehavior,
-        outcome: ClassifierOutcome?,
-        rules: [ConditionRule]
-    ) -> NoMatchDisposition {
-        // ⚠️ WF-CC10 LIVES IN THIS BLOCK AND NOWHERE ELSE.
-        // A classifier that never executed did not find the input unmatched — it never read it.
-        // `noMatchBehavior` is the answer to a question that was never asked, so it is not applied.
-        // Same reasoning as the deleted-route arm below: fail honestly rather than guess.
-        // ⚠️ `.cancelled` never reaches here — its caller settles the node as `.canceled` first.
-        if case .failed(let reason) = outcome {
-            return .fail(reason: "the AI Classifier could not be consulted (\(reason)), so nothing classified this input and no branch was chosen")
-        }
-
-        let detail: String
-        switch outcome {
-        // ⚠️ `.failed` is listed only because Swift does not narrow the enum after the `if case`
-        // early-return above — it is unreachable here. Kept in the exhaustive switch rather than
-        // hidden behind a `default:` so that adding a ClassifierOutcome case still breaks the build.
-        case nil, .label, .cancelled, .failed, .ambiguous:
-            // nil = the classifier was off, or a rule matched (possibly with a BLANK label, which
-            // `resolveRouterPort` then discarded). `.label` reaching here means the label was
-            // blank. `.ambiguous` is unreachable on this LEGACY path: the call site collapses it to
-            // its first-stated candidate before this runs, because a nil-policy node has no setting
-            // to consult (that collapse is the WF-OB2 bugfix — deterministic first-stated replacing
-            // a per-launch random pick). None of these may mention a classifier verdict.
-            detail = "no rule matched"
-        case .noMatch:
-            detail = "no rule matched, and the AI Classifier reported that none of the \(rules.count) categories fit"
-        case .unreadable(let preview):
-            detail = "no rule matched, and the AI Classifier's reply (\"\(preview)\") carried no recognisable label"
-        }
-
-        switch behavior {
-        case .failNode:
-            return .fail(reason: detail)
-        case .endWorkflow:
-            return .endBranch
-        case .route(let ruleID):
-            // ⚠️ Resolved by the rule's STABLE ID, so renames cannot strand it. A deleted target is
-            // a design-time validation ERROR; reaching this at run time means validation was
-            // bypassed, so fail honestly rather than guess.
-            guard let target = rules.first(where: { $0.id == ruleID }) else {
-                return .fail(reason: "\(detail), and its 'When Nothing Matches' route points at a rule that no longer exists")
-            }
-            return .route(port: target.label)
-        }
-    }
-
-    // MARK: - Router Port Resolution
-
-    /// Which output port a Router activates, or nothing at all.
-    enum RouterPortResolution: Equatable {
-        case port(String)
-        /// No port resolved — the node must FAIL onto its `error` port.
-        /// `discardedEmptyLabel` is true when a candidate existed but was an empty string, which is
-        /// worth logging separately because it means a rule was saved with a blank label.
-        case none(discardedEmptyLabel: Bool)
-
-        var port: String? {
-            if case .port(let p) = self { return p }
-            return nil
-        }
-    }
-
-    /// Turns the three routing signals into the port to activate.
-    ///
-    /// ⚠️ `internal`, not `private`, SOLELY so it can be unit-tested — the same concession
-    /// `AgentConnect.resolveExecutableTools` makes. The classifier that feeds it reaches for
-    /// `MLXModelService.shared`/`MLXService.shared` directly and cannot be driven from a test, so
-    /// extracting the pure half is what makes WF-EX1 verifiable at all.
-    ///
-    /// ⚠️ AN EMPTY LABEL IS ABSENT, NOT A PORT — the whole point of this function (WF-EX1).
-    /// `evaluateConditionWithLLM` used to return `matched ?? config.fallbackLabel`, and since the
-    /// Static Fallback picker was retired 2026-08-13 `fallbackLabel` is empty on every Router made
-    /// since — so an unreadable model reply produced `""`. A `??` chain treats `""` as PRESENT, so it
-    /// sailed past the `guard let` written to fail the node and activated a port named `""`.
-    /// `WorkflowState.edgeIsLive` resolves an edge's port as `edge.sourcePortLabel ?? ""`, so that
-    /// empty port matched every UNLABELLED edge out of the Router: the run took the default branch as
-    /// though a rule had matched, and still reported success.
-    ///
-    /// Normalising HERE, once, rather than at each producer, means every future signal added to this
-    /// chain inherits the guarantee instead of re-learning it the same way.
-    ///
-    /// Priority is unchanged: HITL arbitration → first pattern match → classifier → legacy catch-all.
-    static func resolveRouterPort(
-        arbitrated: String?,
-        matched: [String],
-        classifier: String?,
-        legacyFallback: String
-    ) -> RouterPortResolution {
-        // ⚠️ The legacy fallback is handled AFTER the loop, deliberately. An empty `legacyFallback`
-        // is the ORDINARY state of every Router created since the Static Fallback picker was retired
-        // — it means "no catch-all configured", not "someone saved a blank label". Feeding it through
-        // the same empty-detection as the real signals would raise `discardedEmptyLabel` on every
-        // no-match run and turn a genuine diagnostic into noise.
-        var sawEmptyCandidate = false
-        for candidate in [arbitrated, matched.first, classifier] {
-            guard let candidate else { continue }
-            if candidate.isEmpty {
-                // Not an answer, but a signal worth reporting — keep looking.
-                sawEmptyCandidate = true
-                continue
-            }
-            return .port(candidate)
-        }
-        if !legacyFallback.isEmpty { return .port(legacyFallback) }
-        return .none(discardedEmptyLabel: sawEmptyCandidate)
-    }
-
     // MARK: - AI Classifier Evaluation
 
     /// [WF-SE2] The classifier's user-turn XML, pulled out as a pure function so the escaping
@@ -5215,10 +4756,7 @@ actor WorkflowExecutor: Executor {
         )
 
         // Build opaque token mapping (fresh per invocation, prevents content collision)
-        let tokenMapper = ClassificationTokenMapper(
-            labels: classificationLabels,
-            fallbackLabel: config.fallbackLabel
-        )
+        let tokenMapper = ClassificationTokenMapper(labels: classificationLabels)
 
         let tokenMapDebug = tokenMapper.labelToToken
             .sorted(by: { $0.key < $1.key })
@@ -5227,7 +4765,7 @@ actor WorkflowExecutor: Executor {
         // ⚠️ The no-match token is logged alongside the label map because without it a support bundle
         // cannot decode the reply: a lone unfamiliar 4-char code in the trace is indistinguishable
         // from a hallucinated one, and the two have opposite remedies.
-        logger.debug("AI Classifier '\(displayName)' token map: [\(tokenMapDebug)]\(tokenMapper.fallbackIsNoMatchSentinel ? ", no-match token → \(tokenMapper.fallbackToken) (routes nowhere)" : ", catch-all → \(tokenMapper.fallbackToken)")")
+        logger.debug("AI Classifier '\(displayName)' token map: [\(tokenMapDebug)], no-match token → \(tokenMapper.fallbackToken) (routes nowhere)")
 
         // XML-structured prompt with opaque tokens — optimized for small MLX models
         let systemPrompt = """
@@ -5348,11 +4886,9 @@ actor WorkflowExecutor: Executor {
         // ⚠️ `parse(_:)`, NOT `parseResponse(_:)` (register EIO-1). The old adapter collapsed
         // `.ambiguous` to nil, so a reply naming two labels fell through to `.unreadable` — the
         // entire ambiguity half of the Router decision machine (`decisionPolicy`, the arbitration
-        // banner's candidate highlights, the legacy first-stated collapse) was dead code, and the
-        // user was told the model "carried no recognisable label" when it had named two. Under
-        // `.failNode` that pointed the remedy at "pick a stronger model" when the real fix is to
-        // disambiguate the rules; for a legacy nil-policy Router it changed real routing (fell to
-        // `noMatchBehavior` instead of the model's first-stated answer).
+        // banner's candidate highlights) was dead code, and the user was told the model "carried no
+        // recognisable label" when it had named two. Under `.failNode` that pointed the remedy at
+        // "pick a stronger model" when the real fix is to disambiguate the rules.
         let parsed = tokenMapper.parse(response)
         let responsePreview = String(response.trimmingCharacters(in: .whitespacesAndNewlines).prefix(50))
 
@@ -5364,8 +4900,7 @@ actor WorkflowExecutor: Executor {
 
         case .ambiguous(let candidates):
             // A verdict the model DID produce — two or more real tokens, first-appearance order.
-            // Feeds `decisionPolicy` exactly like several pattern rules matching; never laundered
-            // through `fallbackLabel`, which would turn a genuine ambiguity into a catch-all route.
+            // Feeds `decisionPolicy` exactly like several pattern rules matching.
             continuation.yield(.thought("[\(displayName)] AI Classifier: \"\(responsePreview)\" → \(candidates.count) categories named: \(candidates.joined(separator: ", "))", sourceNodeID: nodeID))
             logger.notice("[WF_ROUTE] Router AI Classifier '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the reply named \(candidates.count) distinct label(s) — [\(candidates.joined(separator: ", "))], first-appearance order. CONSEQUENCE: this is AMBIGUITY, not an unreadable reply — the node's decision policy (route first / ask / fail) now applies, exactly as it does when several pattern rules match.")
             return .ambiguous(candidates: candidates)
@@ -5374,27 +4909,15 @@ actor WorkflowExecutor: Executor {
             // ⚠️ Reported separately from an unparseable reply (WF-OB1). The model DID answer, and
             // its answer was "none of these" — a statement about the RULES, not a misbehaving
             // model; the remedy is to add or widen a rule.
-            //
-            // ⚠️ The legacy `fallbackLabel` substitution applies HERE and on `.unreadable` only —
-            // the two undecided verdicts it existed to catch — never to `.ambiguous`, and `.label`
-            // needs no fallback.
-            if !config.fallbackLabel.isEmpty {
-                logger.info("Router AI Classifier '\(displayName)': explicit no-match, using legacy fallbackLabel '\(config.fallbackLabel)'.")
-                return .label(config.fallbackLabel)
-            }
+
             continuation.yield(.thought("[\(displayName)] AI Classifier: none of the categories matched", sourceNodeID: nodeID))
-            logger.notice("[WF_ROUTE] Router AI Classifier '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the model explicitly reported that NONE of the \(classificationLabels.count) categor(ies) fit. CONSEQUENCE: no port is resolved, so the node follows its 'When Nothing Matches' setting — this is the classifier working correctly on input the rules do not cover, not a model failure. Add a rule that covers this input.")
+            logger.notice("[WF_ROUTE] Router AI Classifier '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the model explicitly reported that NONE of the \(classificationLabels.count) categor(ies) fit. CONSEQUENCE: no port is resolved, so the node follows its 'When Routing Can't Decide' setting — this is the classifier working correctly on input the rules do not cover, not a model failure. Add a rule that covers this input.")
             return .noMatch
 
         case .unreadable:
-            if !config.fallbackLabel.isEmpty {
-                logger.info("Router AI Classifier '\(displayName)': unreadable reply, using legacy fallbackLabel '\(config.fallbackLabel)'.")
-                return .label(config.fallbackLabel)
-            }
-            // ⚠️ The two log lines above and below used to say "the node fails onto its `error`
-            // port". That has been false since `noMatchBehavior` shipped 2026-08-16 — true only
-            // under `.failNode`. A log line must state its TRUE consequence (WF-CC10).
-            logger.error("[WF_ROUTE] Router AI Classifier '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the model reply \"\(responsePreview)\" contained NONE of the \(classificationLabels.count) label token(s) and not the no-match token either — an unusable answer. CONSEQUENCE: no port is resolved, so the node follows its 'When Nothing Matches' setting; the model RAN, so this is treated as an undecided verdict rather than a classifier fault. If this recurs, the model is too small to follow the token protocol; pick a stronger one for this Router.")
+            // ⚠️ This log line used to say "the node fails onto its `error` port" — true only under
+            // `.failNode`. A log line must state its TRUE consequence (WF-CC10).
+            logger.error("[WF_ROUTE] Router AI Classifier '\(displayName)' [node \(nodeID.uuidString.prefix(8))]: the model reply \"\(responsePreview)\" contained NONE of the \(classificationLabels.count) label token(s) and not the no-match token either — an unusable answer. CONSEQUENCE: no port is resolved, so the node follows its 'When Routing Can't Decide' setting; the model RAN, so this is treated as an undecided verdict rather than a classifier fault. If this recurs, the model is too small to follow the token protocol; pick a stronger one for this Router.")
             continuation.yield(.thought("[\(displayName)] AI Classifier: \"\(responsePreview)\" → no recognisable label", sourceNodeID: nodeID))
             return .unreadable(preview: responsePreview)
         }

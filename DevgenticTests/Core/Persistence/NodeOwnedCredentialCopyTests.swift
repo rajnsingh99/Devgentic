@@ -17,8 +17,13 @@
 //  key); the rest was asserted by comment. If any link is broken, every imported cloud node is
 //  unrunnable — and the failure is silent, because the node looks correctly configured.
 //
-//  ⚠️ These tests touch the REAL Keychain (same as `ProviderKeyStorageTests`) and clean up in
-//  tearDown. The sentinel is deliberately recognisable so a leaked item is identifiable by hand.
+//  ⚠️ These tests run against the redirected in-memory Keychain (`TestHostKeychain`, registers
+//  KC-54/55) — every `SecureKeyStorage()` routes there under XCTest, so nothing written here
+//  reaches the developer's login Keychain. The sentinel is deliberately recognisable so a leaked
+//  item would be identifiable by hand. Since register KC-63 the store is wiped in setUp AND
+//  tearDown: it is one dictionary for the whole process, so without that wipe a sentinel that
+//  escaped its per-profile cleanup would hand the next test a state that depends on what ran
+//  before it.
 //
 
 import XCTest
@@ -32,9 +37,20 @@ final class NodeOwnedCredentialCopyTests: XCTestCase {
     private var createdProfileIDs: [UUID] = []
     private let workflowID = UUID()
 
+    override func setUp() {
+        super.setUp()
+        // ⚠️ KC-63: the in-memory Keychain is ONE dictionary for the whole process. Starting every
+        // test from an empty store is what keeps results here independent of execution order —
+        // see the deliberate-leak pair at the bottom of this file, which fails without this wipe.
+        TestHostKeychain.shared.removeAll()
+    }
+
     override func tearDown() {
         for id in createdProfileIDs { ProviderKeyStore.delete(for: id) }
         createdProfileIDs = []
+        // The explicit per-profile deletes above are the polite cleanup; this wipe is the
+        // guarantee — nothing this class wrote outlives the class, whatever threw in between.
+        TestHostKeychain.shared.removeAll()
         super.tearDown()
     }
 
@@ -49,12 +65,17 @@ final class NodeOwnedCredentialCopyTests: XCTestCase {
 
     /// A shared cloud profile, persisted through the real store so its key lands in the Keychain
     /// under its own id — the state a user's library is actually in before they import.
+    ///
+    /// ⚠️ OpenAI-COMPATIBLE on purpose: since 2026-10-03 it is the cloud provider whose key is still
+    /// stored per profile, which is the copy-under-its-own-identity behaviour pinned here. An
+    /// Anthropic node needs no copy at all — every profile on Anthropic reads the one shared key.
     @discardableResult
     private func seedCloudSource(named name: String = "Cloud Researcher") throws -> BackendProfileModel {
         let source = BackendProfileSnapshot(
             displayName: name,
             details: .agent(AgentConfig(
-                llmConfig: ProviderConfig(apiProvider: .anthropic, modelName: "claude-opus-5", apiKey: sentinel),
+                llmConfig: ProviderConfig(apiProvider: .openAICompatible, modelName: "local-model", apiKey: sentinel,
+                                          baseURL: "https://llm.example.test/v1"),
                 tools: [],
                 instructions: "Research things."
             ))
@@ -135,7 +156,6 @@ final class NodeOwnedCredentialCopyTests: XCTestCase {
 
         XCTAssertFalse(blob.contains(sentinel),
                        "an owned row's credential must be stripped into the Keychain like any other")
-        XCTAssertFalse(row.hasInlineAPIKeyInStoredBlob)
     }
 
     // MARK: - Independence
@@ -198,6 +218,37 @@ final class NodeOwnedCredentialCopyTests: XCTestCase {
         XCTAssertNil(try refetch(fresh.id)?.details.providerAPIKey)
         if case .found = ProviderKeyStore.read(for: fresh.id) {
             XCTFail("a fresh MLX node must not create a Keychain item")
+        }
+    }
+
+    // MARK: - Isolation (KC-63)
+
+    /// Fixed, so the deliberate leak below and the probe after it address the SAME item. Chosen to
+    /// be recognizable-by-hand in Keychain Access and never used by anything else in this file.
+    private let leakProbeID = UUID(uuidString: "DEADBEEF-C063-4000-8000-0000000000C3")!
+
+    /// ⚠️ DELIBERATELY LEAKS. This test writes a sentinel and cleans up NOTHING, standing in for a
+    /// run aborted between a save and its tearDown delete — the leak that used to make this class's
+    /// results depend on test order, because the shared in-memory Keychain was never restored.
+    /// XCTest runs methods alphabetically, so `testAZombieItemFromAnEarlierTestIsNeverSeenHere`
+    /// runs immediately after this one and must not be able to see it.
+    func testALeakedItemIsDeliberatelyLeftBehindHere() {
+        ProviderKeyStore.save(sentinel, for: leakProbeID)
+        guard case .found(let leaked) = ProviderKeyStore.read(for: leakProbeID) else {
+            return XCTFail("precondition: the sentinel was written")
+        }
+        XCTAssertEqual(leaked, sentinel)
+    }
+
+    /// The other half of the isolation pair — see the leak above. ⚠️ If this fails, the shared
+    /// in-memory Keychain is carrying state across tests again: setUp/tearDown no longer wipes it,
+    /// and this class's results (and the classes that run after it) depend on execution order.
+    func testAZombieItemFromAnEarlierTestIsNeverSeenHere() {
+        guard case .notFound = ProviderKeyStore.read(for: leakProbeID) else {
+            return XCTFail("""
+                A credential left by an earlier test is visible here. The shared in-memory test \
+                Keychain is not being restored between tests, so results depend on test order.
+                """)
         }
     }
 }

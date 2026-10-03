@@ -55,26 +55,17 @@ final class WorkflowTestScenario {
             position: position,
             displayName: name
         )
-        // Profile nodes require a non-empty task description, or workflow pre-flight
-        // validation fails the run with `.validationFailed`. Tests don't assert on
-        // it (mock streams are scripted by profile ID), so a generic default keeps
-        // `executeWorkflow` from throwing before any node runs.
-        node.nodeConfig = WorkflowNodeConfig(taskDescription: "Respond to the input.")
         nodes.append(node)
         return nodeID
     }
 
     /// Adds a node backed by a *workflow* profile — a nested sub-workflow step.
     ///
-    /// Deliberately leaves `nodeConfig` nil (no task description): a sub-workflow node takes its
-    /// directive from upstream output, and `WorkflowValidator` exempts it for that reason. Tests
-    /// that pass a description explicitly can still do so; the default is the shape that used to
-    /// brick the whole workflow.
+    /// Leaves `nodeConfig` nil: a sub-workflow node takes its input from upstream output.
     @discardableResult
     func addSubWorkflowNode(
         name: String,
         workflowProfileID: UUID,
-        taskDescription: String? = nil,
         position: CGPoint = .zero
     ) -> UUID {
         let nodeID = UUID()
@@ -84,7 +75,7 @@ final class WorkflowTestScenario {
         profileMap[workflowProfileID] = BackendProfileSnapshot(
             id: workflowProfileID,
             displayName: name,
-            details: .workflow(WorkflowConfig(agentProfileIDs: []))
+            details: .workflow(WorkflowConfig())
         )
 
         var node = WorkflowNode(
@@ -93,9 +84,6 @@ final class WorkflowTestScenario {
             position: position,
             displayName: name
         )
-        if let taskDescription {
-            node.nodeConfig = WorkflowNodeConfig(taskDescription: taskDescription)
-        }
         nodes.append(node)
         return nodeID
     }
@@ -111,7 +99,6 @@ final class WorkflowTestScenario {
         argumentBindings: [String: String] = [:],
         requiresConfirmation: Bool = false,
         sourceId: UUID = ToolSource.builtInSourceID,
-        onFailure: NodeFailurePolicy? = nil,
         unattendedAutoApprove: Bool? = nil,
         position: CGPoint = .zero
     ) -> UUID {
@@ -130,9 +117,6 @@ final class WorkflowTestScenario {
             position: position,
             displayName: name
         )
-        if let onFailure {
-            node.nodeConfig = WorkflowNodeConfig(onFailure: onFailure)
-        }
         if let unattendedAutoApprove {
             if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
             node.nodeConfig?.unattendedAutoApprove = unattendedAutoApprove
@@ -159,6 +143,12 @@ final class WorkflowTestScenario {
     }
 
     /// Adds a condition node with pattern-matching rules.
+    ///
+    /// `fallbackLabel` names the branch an UNDECIDED input takes (nothing matched, or several rules
+    /// did): the Router's `decisionPolicy` is set to `.route` to that rule. Empty means `.failNode`.
+    /// When a test models a "match → A, else → B" router as a single rule plus a distinct fallback,
+    /// the else-branch is materialised as a real never-matching rule, because production validation
+    /// requires ≥2 rules and the canvas exposes one output port per rule.
     @discardableResult
     func addConditionNode(
         name: String,
@@ -171,12 +161,6 @@ final class WorkflowTestScenario {
     ) -> UUID {
         let nodeID = UUID()
         var config = ConditionNodeConfig()
-        // Production validation requires ≥2 rules and that `fallbackLabel` names a
-        // real rule (the canvas exposes one output port per rule). When a test models
-        // a "match → A, else → B" router as a single rule + a distinct fallback,
-        // materialize the else-branch as a real never-matching rule so the layout is
-        // valid. Runtime routing is unchanged — the executor still activates the
-        // fallback port when no user rule matches (`matchedLabel ?? fallbackLabel`).
         var effectiveRules = rules
         if !fallbackLabel.isEmpty, !effectiveRules.contains(where: { $0.label == fallbackLabel }) {
             effectiveRules.append(ConditionRule(
@@ -187,7 +171,11 @@ final class WorkflowTestScenario {
             ))
         }
         config.rules = effectiveRules
-        config.fallbackLabel = fallbackLabel
+        if let target = effectiveRules.first(where: { !fallbackLabel.isEmpty && $0.label == fallbackLabel }) {
+            config.decisionPolicy = .route(ruleID: target.id)
+        } else {
+            config.decisionPolicy = .failNode
+        }
 
         let node = WorkflowNode(
             id: nodeID,
@@ -270,27 +258,10 @@ final class WorkflowTestScenario {
 
     // MARK: - Node Configuration
 
-    /// Sets per-node execution config (failure policy, retries, timeout).
+    /// Sets per-node execution config (retries, timeout).
     func setNodeConfig(_ config: WorkflowNodeConfig, for nodeID: UUID) {
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
-        var cfg = config
-        // Preserve the node's existing task description when the override doesn't
-        // set one. Profile nodes require a non-empty taskDescription for pre-flight
-        // validation, and most callers only mean to tweak failure/retry policy.
-        if cfg.taskDescription.isEmpty,
-           let existing = nodes[index].nodeConfig?.taskDescription, !existing.isEmpty {
-            cfg.taskDescription = existing
-        }
-        nodes[index].nodeConfig = cfg
-    }
-
-    /// Sets the per-node task description for workflow execution.
-    func setTaskDescription(_ description: String, for nodeID: UUID) {
-        guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
-        if nodes[index].nodeConfig == nil {
-            nodes[index].nodeConfig = WorkflowNodeConfig()
-        }
-        nodes[index].nodeConfig?.taskDescription = description
+        nodes[index].nodeConfig = config
     }
 }
 

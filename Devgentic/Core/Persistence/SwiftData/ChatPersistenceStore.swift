@@ -23,9 +23,8 @@ protocol ChatPersistenceProtocol: Sendable {
     func addMessages(_ messages: [ChatMessage], toConversation conversationId: UUID) async
     func getConversation(withId id: UUID) -> ConversationSD?
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage]
-    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String)
     func deleteConversation(with id: UUID)
-    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
+    func updateBackendForConversation(id: UUID, backendEntityId: UUID?)
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String)
     /// Records the project folder a Code conversation runs in. See `ConversationSD.projectPath`.
     func updateProjectPath(for conversationId: UUID, projectPath: String)
@@ -136,8 +135,6 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             timestamp: conversation.timestamp,
             userDefinedTitle: conversation.userDefinedTitle,
             isPinned: conversation.isPinned,
-            openAIThreadID: conversation.openAIThreadID,
-            backendType: conversation.backendType?.rawValue,
             backendEntityId: conversation.backendEntityId
         )
 
@@ -635,23 +632,6 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
     }
 
-    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {
-        guard let conversation = getConversation(withId: conversationId) else {
-            logger.warning("Attempted to update thread ID for non-existent conversation: \(conversationId.uuidString)")
-            return
-        }
-        conversation.openAIThreadID = threadId
-        if saveContext() {
-            logger.info("[PERSISTENCE] Updated conversation \(conversationId.uuidString) with OpenAI thread ID.")
-        } else {
-            logger.error(
-                "[PERSISTENCE] OpenAI thread ID for conversation \(conversationId.uuidString) was NOT "
-                + "persisted. CONSEQUENCE: the assistant thread is re-created on the next launch and "
-                + "server-side history for this conversation is orphaned."
-            )
-        }
-    }
-
     func deleteConversation(with id: UUID) {
         guard let context = mainContext,
               let conversation = getConversation(withId: id) else {
@@ -690,15 +670,14 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
     }
 
-    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {
+    func updateBackendForConversation(id: UUID, backendEntityId: UUID?) {
         guard let conversation = getConversation(withId: id) else {
             logger.warning("Attempted to update backend for non-existent conversation: \(id.uuidString)")
             return
         }
-        conversation.backendType = backendType?.rawValue
         conversation.backendEntityId = backendEntityId
         if saveContext() {
-            logger.info("[PERSISTENCE] Updated conversation \(id.uuidString) backend: \(backendType?.rawValue ?? "none").")
+            logger.info("[PERSISTENCE] Updated conversation \(id.uuidString) profile: \(backendEntityId?.uuidString ?? "none").")
         } else {
             logger.error(
                 "[PERSISTENCE] Backend change for conversation \(id.uuidString) was NOT persisted. "

@@ -52,14 +52,14 @@ final class OnboardingDownloadPollTests: XCTestCase {
         XCTAssertTrue(vm.contains("switch Self.pollVerdict("), "the poll no longer decides through pollVerdict")
     }
 
-    /// D-25 wiring: the launch passes the instant captured before the skill sweep to both reconciles.
+    /// D-25 wiring: the launch passes the instant captured before the launch work to both reconciles.
     func testTheLaunchReconcilesOnlyRowsFromBeforeThisLaunch() throws {
         let app = try source("Devgentic/DevgenticApp.swift")
         XCTAssertTrue(app.contains("DownloadHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)"))
         XCTAssertEqual(app.components(separatedBy: "WorkflowRunHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)").count - 1, 2)
         guard let captured = app.range(of: "let launchInstant = Date()"),
-              let sweep = app.range(of: "await SkillLaunchSequence.run(") else { return XCTFail("launch sequence moved") }
-        XCTAssertLessThan(captured.lowerBound, sweep.lowerBound, "the instant must be captured BEFORE the skill sweep")
+              let launchWork = app.range(of: "SkillStore.shared.configureContainer(container)") else { return XCTFail("launch sequence moved") }
+        XCTAssertLessThan(captured.lowerBound, launchWork.lowerBound, "the instant must be captured BEFORE the launch work")
         let store = try source("Devgentic/Core/Persistence/SwiftData/DownloadHistoryStore.swift")
         XCTAssertTrue(store.contains("active.filter { $0.startedAt < cutoff }"), "the download reconcile ignores the launch instant")
     }

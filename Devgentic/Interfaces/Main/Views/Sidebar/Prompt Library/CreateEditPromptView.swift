@@ -94,19 +94,23 @@ struct CreateEditPromptView: View {
             Divider()
 
             HStack {
-                Button("Cancel") {
+                TactileButton(title: "Cancel", variant: .subtle, size: .compact) {
                     attemptDismiss()
                 }
                 .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
-                Button(viewModel.isCreating ? "Create Prompt" : "Save Changes") {
+                TactileButton(
+                    title: viewModel.isCreating ? "Create Prompt" : "Save Changes",
+                    icon: viewModel.isCreating ? "plus" : "checkmark",
+                    variant: .primary,
+                    size: .compact,
+                    isDisabled: !viewModel.canSave
+                ) {
                     _ = viewModel.save()
                     dismiss()
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!viewModel.canSave)
                 .keyboardShortcut(.defaultAction)
             }
             .padding()

@@ -585,6 +585,7 @@ struct CodeToolsGuideView: View {
             )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     // MARK: - Detail Content View
@@ -647,6 +648,7 @@ struct CodeToolsGuideView: View {
                     .foregroundColor(theme.secondaryText.opacity(0.7))
             }
             .buttonStyle(.plain)
+            .pointingHandCursor()
             .keyboardShortcut(.cancelAction)
             .help("Close (Esc)")
         }
@@ -880,11 +882,15 @@ struct CodeToolsGuideView: View {
             Text("No tools found matching '\(searchText)'")
                 .font(theme.fontHeadline)
                 .foregroundColor(theme.secondaryText)
-            Button("Reset Search & Filters") {
+            TactileButton(
+                title: "Reset Search & Filters",
+                icon: "arrow.counterclockwise",
+                variant: .secondary,
+                size: .regular
+            ) {
                 searchText = ""
                 selectedFilter = .all
             }
-            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity)
         .padding(48)

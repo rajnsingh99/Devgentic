@@ -174,8 +174,7 @@ struct ConversationRowView_Previews: PreviewProvider {
         isStreaming: Bool = false,
         hasError: Bool = false,
         timestamp: Date,
-        isPinned: Bool = false,
-        backendType: BackendType? = nil
+        isPinned: Bool = false
     ) -> Conversation {
         let message = ChatMessage(
             conversationId: previewConversationId,
@@ -189,8 +188,7 @@ struct ConversationRowView_Previews: PreviewProvider {
             messages: [message],
             timestamp: timestamp,
             userDefinedTitle: title,
-            isPinned: isPinned,
-            backendType: backendType
+            isPinned: isPinned
         )
     }
 
@@ -198,24 +196,21 @@ struct ConversationRowView_Previews: PreviewProvider {
         let normalConv = createSample(
             title: "SwiftUI Layout Refactor",
             lastMessageContent: .plainText("Using LazyVStack for better performance..."),
-            timestamp: Calendar.current.date(byAdding: .minute, value: -5, to: .now)!,
-            backendType: .remote
+            timestamp: Calendar.current.date(byAdding: .minute, value: -5, to: .now)!
         )
 
         let streamingConv = createSample(
             title: "Debugging CoreData",
             lastMessageContent: .plainText("Analyzing the fetch request predicate..."),
             isStreaming: true,
-            timestamp: .now,
-            backendType: .ollama
+            timestamp: .now
         )
 
         let pinnedConv = createSample(
             title: "Project Architecture",
             lastMessageContent: .plainText("Let me outline the MVVM pattern..."),
             timestamp: Calendar.current.date(byAdding: .hour, value: -2, to: .now)!,
-            isPinned: true,
-            backendType: .agent
+            isPinned: true
         )
 
         ScrollView {

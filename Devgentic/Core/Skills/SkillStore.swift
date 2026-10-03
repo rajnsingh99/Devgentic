@@ -77,13 +77,6 @@ final class SkillStore {
 
     private var modelContainer: ModelContainer?
 
-    /// The container, for the one caller that needs the container itself rather than a context.
-    ///
-    /// ⚠️ Exposed ONLY for re-running `SkillLibraryImportSweep` from the library UI, which takes a
-    /// container because it also writes profiles. Nothing else should reach for this — every other
-    /// caller wants `fetchSkills` and the `Result` that distinguishes "unreadable" from "empty".
-    var currentContainer: ModelContainer? { modelContainer }
-
     /// Bumped on every mutation, observed by every view that renders library data.
     ///
     /// ⚠️ Views read through this store's `Result` API rather than `@Query` — which is what buys the
@@ -99,12 +92,10 @@ final class SkillStore {
     /// Injects the container. **Assigns immediately** — the caller is already on the main actor.
     ///
     /// ⚠️⚠️ THIS WAS `nonisolated` WITH A DEFERRED `Task { @MainActor in … }`, COPIED FROM THE STORE
-    /// IT REPLACED, AND IT BROKE THE WHOLE V6 MIGRATION. The launch site is itself inside a
+    /// IT REPLACED, AND IT BROKE THE LIBRARY AT LAUNCH. The launch site is itself inside a
     /// `Task { @MainActor in … }`, so the deferred assignment queued BEHIND the code that needed it:
-    /// `SkillLibraryImportSweep.run` executed with `modelContainer` still nil, every store call
-    /// returned `.containerUnavailable`, the sweep aborted, and — because an aborted pass keeps the
-    /// capture file — it failed identically on every subsequent launch. A user upgrading from V5
-    /// would have seen an empty Skills library, forever, with the cause visible only in the log.
+    /// everything that read the library first got `.containerUnavailable`, and the user saw an
+    /// empty Skills library with the cause visible only in the log.
     ///
     /// The old store could defer because it was configured OUTSIDE the task, from a nonisolated
     /// context. This one is not, so it must not.

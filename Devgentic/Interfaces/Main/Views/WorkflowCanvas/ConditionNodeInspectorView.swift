@@ -7,7 +7,7 @@
 //  Created by Raj Singh on 11/04/26.
 //
 //  Configuration sheet for Condition nodes — card-based layout.
-//  Pattern matching rules → AI Classifier → Static Fallback cascade.
+//  Pattern matching rules → AI Classifier → 'When Routing Can't Decide'.
 //  Uses SettingsCard components for visual consistency with Bot/Agent config views.
 //
 
@@ -22,21 +22,16 @@ struct ConditionNodeInspectorView: View {
 
     // MARK: - State
 
-    /// The config as it was when the panel opened, so Save preserves fields this view does not edit.
-    ///
-    /// ⚠️ `fallbackLabel` is the one that bites: its picker was retired, but the stored value is
-    /// still honoured by the engine, and rebuilding the config from scratch on Save wiped it.
+    /// The config as it was when the panel opened, so Save preserves fields this view does not edit
+    /// — including any field added to `ConditionNodeConfig` in future without touching this view.
     @State private var loadedConfig = ConditionNodeConfig()
 
     @State private var rules: [ConditionRule] = []
     @State private var llmFallbackEnabled: Bool = false
     @State private var llmPrompt: String = ""
     @State private var llmModelName: String? = nil
-    @State private var askOnAmbiguity: Bool = true
-    @State private var noMatchBehavior: RouterNoMatchBehavior = .failNode
 
-    /// The unified "when routing can't decide" setting (2026-08-17 redesign). Seeded from the
-    /// legacy pair when the node predates it — see `seedPolicyFromLegacy`.
+    /// The unified "when routing can't decide" setting (2026-08-17 redesign).
     @State private var decisionPolicy: RouterDecisionPolicy = .ask(fallback: .failNode)
     /// The nested "if nobody can answer" control, held separately so switching away from Ask and
     /// back does not lose the user's fallback choice mid-edit.
@@ -48,13 +43,18 @@ struct ConditionNodeInspectorView: View {
     /// does not fit under the old cap, and a field that silently truncates the text it just
     /// pre-filled is worse than no pre-fill.
     private let maxPromptLength = 1200
+    var showsHeader: Bool = true
 
     // MARK: - Body
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            if showsHeader {
+                header
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+            }
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 20) {
                     guideCard
@@ -66,17 +66,34 @@ struct ConditionNodeInspectorView: View {
             }
         }
         .frame(
-            minWidth: 800,
-            idealWidth: 950,
+            minWidth: showsHeader ? 800 : nil,
+            idealWidth: showsHeader ? 950 : nil,
             maxWidth: .infinity,
-            minHeight: 680,
-            idealHeight: 800,
+            minHeight: showsHeader ? 680 : nil,
+            idealHeight: showsHeader ? 800 : nil,
             maxHeight: .infinity
         )
         .background(theme.primaryBackground)
         .onAppear {
             loadFromNode()
+            if !showsHeader {
+                NodeInspectorPendingCommit.shared.register {
+                    persistConfigToNode()
+                }
+            }
         }
+        .onDisappear {
+            if !showsHeader {
+                persistConfigToNode()
+                NodeInspectorPendingCommit.shared.clear()
+            }
+        }
+        .onChange(of: rules) { persistIfEmbedded() }
+        .onChange(of: decisionPolicy) { persistIfEmbedded() }
+        .onChange(of: askFallback) { persistIfEmbedded() }
+        .onChange(of: llmFallbackEnabled) { persistIfEmbedded() }
+        .onChange(of: llmPrompt) { persistIfEmbedded() }
+        .onChange(of: llmModelName) { persistIfEmbedded() }
         // ⚠️ `.task`, not `.onAppear`: A15 made the model scan asynchronous, so a synchronous
         // read right after a fire-and-forget refresh snapshots the EMPTY pre-scan list into
         // `@State` with nothing observing it afterwards. Opening this inspector before the
@@ -106,12 +123,13 @@ struct ConditionNodeInspectorView: View {
                 .textFieldStyle(.plain)
                 .foregroundColor(theme.secondaryText)
             Spacer()
-            Button {
+            TactileIconButton(
+                icon: "questionmark.circle",
+                tooltip: showGuide ? "Hide guide" : "Show guide",
+                accessibilityLabel: showGuide ? "Hide guide" : "Show guide",
+                size: .compact
+            ) {
                 withAnimation(.easeInOut(duration: 0.2)) { showGuide.toggle() }
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(theme.fontBody)
-                    .foregroundColor(theme.secondaryText)
             }
             GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
             GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
@@ -179,7 +197,7 @@ struct ConditionNodeInspectorView: View {
     private func guideStep(number: String, title: String, subtitle: String, description: String, color: Color) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(number)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(theme.fontCaption2.weight(.bold))
                 .foregroundColor(.white)
                 .frame(width: 20, height: 20)
                 .background(Circle().fill(color))
@@ -187,16 +205,17 @@ struct ConditionNodeInspectorView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(title)
-                        .font(theme.fontCaption.weight(.semibold))
+                        .font(theme.fontCaption2.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                     Text(subtitle)
-                        .font(.system(size: 10))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.tertiaryText)
                         .italic()
                 }
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.0)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -205,11 +224,11 @@ struct ConditionNodeInspectorView: View {
     private func guideTip(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "lightbulb.fill")
-                .font(theme.fontCaption)
+                .font(theme.fontCaption2)
                 .foregroundColor(.yellow)
                 .padding(.top, 2)
             Text(text)
-                .font(.system(.caption))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
                 .italic()
                 .fixedSize(horizontal: false, vertical: true)
@@ -227,10 +246,8 @@ struct ConditionNodeInspectorView: View {
 
     // MARK: - 2. Routing Decision Card (unified, 2026-08-17)
 
-    /// ⚠️ REPLACES two adjacent cards — "When Rules Overlap" (an `askOnAmbiguity` Bool) and "When
-    /// Nothing Matches" (a `noMatchBehavior` enum). They answered the SAME question in different
-    /// shapes: what does the Router do when it cannot pick exactly one branch. The two triggers are
-    /// mutually exclusive by construction (either zero rules matched or several did), so one
+    /// ONE card for what the Router does when it cannot pick exactly one branch. The two triggers
+    /// are mutually exclusive by construction (either zero rules matched or several did), so one
     /// setting is coherent rather than a false merge.
     ///
     /// ⚠️ Named for what it COVERS. "Unmatched Input" became a lie the moment the same setting also
@@ -241,11 +258,12 @@ struct ConditionNodeInspectorView: View {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Undecided Input")
-                            .font(theme.fontBody.weight(.medium))
+                            .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
                         Text(decisionDescription)
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 24)
@@ -267,15 +285,19 @@ struct ConditionNodeInspectorView: View {
                 // degrade was hardcoded to "first match" and invisible; a 3am workflow author had no
                 // way to see what would actually happen.
                 if case .ask = decisionPolicy {
-                    Divider()
+                    Rectangle()
+                        .fill(theme.dividerColor.opacity(0.6))
+                        .frame(height: 0.5)
+                        .padding(.vertical, 6)
                     HStack(alignment: .top, spacing: 16) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("If nobody can answer")
-                                .font(theme.fontBody.weight(.medium))
+                                .font(theme.fontFootnote.weight(.semibold))
                                 .foregroundColor(theme.primaryText)
                             Text(askFallbackDescription)
-                                .font(.system(.caption))
+                                .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer(minLength: 24)
@@ -335,16 +357,15 @@ struct ConditionNodeInspectorView: View {
             VStack(alignment: .leading, spacing: 12) {
                 // Counter
                 HStack {
-                    // ⚠️ NOT "first match wins" — that is the LEGACY arm (`decisionPolicy == nil`). On a node
-                    // carrying a policy, which is every node ever saved from this panel,
-                    // `decided = distinctMatched.count == 1 ? distinctMatched[0] : nil`, so several
-                    // matches fall through to "When Routing Can't Decide" instead.
+                    // ⚠️ NOT "first match wins": `decided = distinctMatched.count == 1 ? distinctMatched[0]
+                    // : nil`, so several matches fall through to "When Routing Can't Decide".
                     Text("Rules are evaluated top-to-bottom. Exactly one match routes to that rule's port; if several match, the setting below decides.")
-                        .font(.system(.caption))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
+                        .lineSpacing(2.5)
                     Spacer()
                     Text("\(rules.count) / \(ConditionNodeConfig.maxRules)")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .font(theme.fontCodeCaption.weight(.medium))
                         .foregroundColor(theme.tertiaryText)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
@@ -375,11 +396,19 @@ struct ConditionNodeInspectorView: View {
     @ViewBuilder
     private func ruleCard(rule: Binding<ConditionRule>, canDelete: Bool) -> some View {
         VStack(spacing: 8) {
-            // Row 1: Label + Field + Op + Delete
-            HStack(spacing: 6) {
-                // Label
-                TextField("Label", text: rule.label)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            // Row 1: Port label + Condition fields + Delete
+            HStack(spacing: 8) {
+                // Port Label Indicator & TextField
+                HStack(spacing: 6) {
+                    Text("Port")
+                        .font(theme.fontCaption2.weight(.medium))
+                        .foregroundColor(theme.secondaryText)
+                    TextField(
+                        "",
+                        text: rule.label,
+                        prompt: Text("Label").foregroundColor(theme.placeholderText)
+                    )
+                    .font(theme.fontCode.weight(.semibold))
                     .textFieldStyle(.plain)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
@@ -387,7 +416,7 @@ struct ConditionNodeInspectorView: View {
                         RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
                             .fill(labelValidationColor(for: rule.wrappedValue))
                     )
-                    .frame(maxWidth: 100)
+                    .frame(width: 85)
                     .onChange(of: rule.wrappedValue.label) {
                         let sanitized = String(
                             rule.wrappedValue.label
@@ -398,8 +427,11 @@ struct ConditionNodeInspectorView: View {
                             rule.wrappedValue.label = sanitized
                         }
                     }
+                }
 
-                Spacer()
+                Text("when")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.tertiaryText)
 
                 // Field picker
                 Picker("", selection: rule.field) {
@@ -408,20 +440,19 @@ struct ConditionNodeInspectorView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .font(.system(size: 11))
+                .font(theme.fontFootnote)
                 .frame(width: 90)
 
                 // Operator picker
                 //
                 // [INS-10] The options are `allCases` PLUS the rule's own operator when that is not
                 // in `allCases`. `ConditionOp.other(_)` is a real, reachable case — it holds a newer
-                // build's operator (WF-PE3) and the RETIRED `always`, which the enum's own note says
-                // "now decodes to `.other("always")`". With no matching tag the Picker rendered
-                // BLANK, so a legacy catch-all rule showed an empty operator with nothing to explain
-                // it, on a rule the engine treats as permanently inert.
+                // build's operator (WF-PE3). With no matching tag the Picker rendered BLANK, so such
+                // a rule showed an empty operator with nothing to explain it, on a rule the engine
+                // treats as inert.
                 //
                 // ⚠️ Offering it does NOT rewrite it: re-selecting the same value is a no-op, and
-                // choosing a real operator is the user's explicit migration. That is the house
+                // choosing a real operator is the user's explicit decision. That is the house
                 // pattern for preserved-but-unknown values (`WorkflowNodeKind.unsupported`,
                 // `StickyNoteColor.other`) — show it honestly, never silently replace it.
                 Picker("", selection: rule.op) {
@@ -431,8 +462,10 @@ struct ConditionNodeInspectorView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .font(.system(size: 11))
-                .frame(width: 130)
+                .font(theme.fontFootnote)
+                .frame(minWidth: 125, idealWidth: 140)
+
+                Spacer()
 
                 // Delete
                 if canDelete {
@@ -442,22 +475,24 @@ struct ConditionNodeInspectorView: View {
                         }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 13))
+                            .font(theme.fontFootnote)
                             .foregroundColor(theme.tertiaryText)
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help("Delete rule")
                 }
             }
 
             // Validation text
             if !ConditionNodeConfig.isValidLabel(rule.wrappedValue.label) {
                 Text("Label must be 1\u{2013}10 alphanumeric characters.")
-                    .font(.system(size: 9))
+                    .font(theme.fontCaption2)
                     .foregroundColor(.red.opacity(0.8))
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else if isDuplicateLabel(rule.wrappedValue) {
                 Text("Duplicate label.")
-                    .font(.system(size: 9))
+                    .font(theme.fontCaption2)
                     .foregroundColor(.orange.opacity(0.8))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -465,13 +500,14 @@ struct ConditionNodeInspectorView: View {
             // Variable name field (conditional)
             if rule.wrappedValue.field == .variable {
                 TextField(
-                    "Variable name",
+                    "",
                     text: Binding(
                         get: { rule.wrappedValue.variableName ?? "" },
                         set: { rule.wrappedValue.variableName = $0.isEmpty ? nil : $0 }
-                    )
+                    ),
+                    prompt: Text("Variable name").foregroundColor(theme.placeholderText)
                 )
-                .font(.system(size: 12, design: .monospaced))
+                .font(theme.fontCode)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
@@ -490,22 +526,26 @@ struct ConditionNodeInspectorView: View {
             // predicate, in inverted form, in different files — adding an operator means editing
             // both or the value box and the validator disagree.
             if rule.wrappedValue.op != .isEmpty && rule.wrappedValue.op != .isNotEmpty {
-                TextField("Value (comma-separated for multiple)...", text: rule.value)
-                    .font(.system(size: 12))
-                    .textFieldStyle(.plain)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(
-                        RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
-                            .fill(rule.wrappedValue.value.isEmpty ? Color.red.opacity(0.06) : theme.controlBackground)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
-                            .stroke(rule.wrappedValue.value.isEmpty ? Color.red.opacity(0.3) : theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
-                    )
+                TextField(
+                    "",
+                    text: rule.value,
+                    prompt: Text("Value (comma-separated for multiple)").foregroundColor(theme.placeholderText)
+                )
+                .font(theme.fontCode)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
+                        .fill(rule.wrappedValue.value.isEmpty ? Color.red.opacity(0.06) : theme.controlBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
+                        .stroke(rule.wrappedValue.value.isEmpty ? Color.red.opacity(0.3) : theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
+                )
                 if rule.wrappedValue.value.isEmpty {
                     Text("Match value is required for \"\(rule.wrappedValue.op.displayName)\" operator.")
-                        .font(.system(size: 9))
+                        .font(theme.fontCaption2)
                         .foregroundColor(.red.opacity(0.8))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -522,9 +562,7 @@ struct ConditionNodeInspectorView: View {
         )
     }
 
-    // MARK: - 4. Static Fallback Card
-
-    // MARK: - 5. AI Classifier Card
+    // MARK: - 4. AI Classifier Card
 
     private var aiClassifierCard: some View {
         SettingsCard(title: "AI Classifier", icon: "brain", theme: theme) {
@@ -533,11 +571,12 @@ struct ConditionNodeInspectorView: View {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Semantic Classification")
-                            .font(theme.fontBody.weight(.medium))
+                            .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
                         Text("A local MLX model classifies input into your rule labels when no pattern matches.")
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 24)
@@ -556,21 +595,23 @@ struct ConditionNodeInspectorView: View {
                 }
 
                 if llmFallbackEnabled {
-                    Divider()
+                    Rectangle()
+                        .fill(theme.dividerColor.opacity(0.3))
+                        .frame(height: 0.5)
 
                     // MLX Model picker
                     VStack(alignment: .leading, spacing: 6) {
                         Text("MLX Model")
-                            .font(theme.fontCaption.weight(.medium))
-                            .foregroundColor(theme.secondaryText)
+                            .font(theme.fontFootnote.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
 
                         if installedModels.isEmpty {
                             HStack(spacing: 6) {
                                 Image(systemName: "exclamationmark.triangle")
-                                    .font(.system(size: 10))
+                                    .font(theme.fontCaption2)
                                     .foregroundColor(.orange)
                                 Text("No MLX models found. Install a model first.")
-                                    .font(theme.fontCaption)
+                                    .font(theme.fontCaption2)
                                     .foregroundColor(theme.tertiaryText)
                             }
                         } else {
@@ -578,13 +619,13 @@ struct ConditionNodeInspectorView: View {
                                 get: { llmModelName ?? "" },
                                 set: { llmModelName = $0.isEmpty ? nil : $0 }
                             )) {
-                                Text("Select model...").tag("")
+                                Text("Select model").tag("")
                                 ForEach(installedModels) { model in
                                     Text(model.displayName).tag(model.displayName)
                                 }
                             }
                             .labelsHidden()
-                            .font(.system(size: 12))
+                            .font(theme.fontFootnote)
                         }
                     }
 
@@ -592,52 +633,60 @@ struct ConditionNodeInspectorView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("Routing Prompt")
-                                .font(theme.fontCaption.weight(.medium))
-                                .foregroundColor(theme.secondaryText)
+                                .font(theme.fontFootnote.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
                             if llmPrompt != ConditionNodeConfig.defaultRoutingPrompt {
-                                Button("Reset to default") {
+                                TactileButton(title: "Reset to default", variant: .subtle, size: .compact) {
                                     llmPrompt = ConditionNodeConfig.defaultRoutingPrompt
                                 }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 9))
-                                .foregroundColor(theme.accentColor)
                             }
                             Spacer()
                             Text("\(llmPrompt.count)/\(maxPromptLength)")
-                                .font(.system(size: 9, design: .monospaced))
+                                .font(theme.fontCodeCaption)
                                 .foregroundColor(llmPrompt.count > maxPromptLength ? .red : theme.tertiaryText)
                         }
 
-                        TextEditor(text: $llmPrompt)
-                            .font(.system(size: 12))
-                            .frame(minHeight: 50, maxHeight: 80)
-                            .padding(8)
-                            .scrollContentBackground(.hidden)
-                            .background(
-                                RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
-                                    .fill(theme.controlBackground)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
-                                    .stroke(theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
-                            )
-                            .onChange(of: llmPrompt) {
-                                if llmPrompt.count > maxPromptLength {
-                                    llmPrompt = String(llmPrompt.prefix(maxPromptLength))
-                                }
+                        ZStack(alignment: .topLeading) {
+                            if llmPrompt.isEmpty {
+                                Text("Enter routing prompt instructions")
+                                    .font(theme.fontCodeCaption)
+                                    .foregroundColor(theme.placeholderText)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 10)
+                                    .allowsHitTesting(false)
                             }
+                            TextEditor(text: $llmPrompt)
+                                .font(theme.fontCodeCaption)
+                                .frame(minHeight: 50, maxHeight: 80)
+                                .padding(6)
+                                .scrollContentBackground(.hidden)
+                        }
+                        .background(
+                            RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
+                                .fill(theme.controlBackground)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
+                                .stroke(theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
+                        )
+                        .onChange(of: llmPrompt) {
+                            if llmPrompt.count > maxPromptLength {
+                                llmPrompt = String(llmPrompt.prefix(maxPromptLength))
+                            }
+                        }
 
                         // ⚠️ The placeholder is the whole point: it expands to the CURRENT rule
                         // labels every run, so adding or renaming a rule never rewrites this text
                         // and never leaves it stale.
                         Text("\(ConditionNodeConfig.rulesPlaceholder) is replaced with your rule labels each run — edit the wording freely, but keep the placeholder so the model always sees the current branches.")
-                            .font(.system(size: 9))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.tertiaryText)
+                            .lineSpacing(2.0)
                             .fixedSize(horizontal: false, vertical: true)
 
                         Text("Describe what to classify. e.g., \"Is this a technical question or a general inquiry?\"")
-                            .font(.system(size: 10))
-                            .foregroundColor(theme.tertiaryText)
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
                             .italic()
                     }
 
@@ -682,23 +731,12 @@ struct ConditionNodeInspectorView: View {
         installedModels = service.installedModels
     }
 
-    /// Seeds the unified control for a node that predates it (`decisionPolicy == nil`).
-    ///
-    /// ⚠️ THE MIGRATION TABLE, in code. It is a best-effort approximation and cannot be exact: the
-    /// legacy pair is 2×3 and this axis is 4, so some combinations shift. Every shift is on the
-    /// AMBIGUITY side, because the legacy ambiguity default was a silent "first matching rule" —
-    /// implicit rule-order priority — and that option was deliberately dropped from the redesign
-    /// (user decision 2026-08-17). Nothing is written until the user hits Save, so seeing this
-    /// pre-selected IS the notice.
-    ///
-    /// ⚠️ A legacy catch-all (`fallbackLabel`) outranks `noMatchBehavior` at runtime today, so it
-    /// seeds the route — otherwise saving would silently move where unmatched input goes.
     /// Which route target a policy names that no longer exists on this node, and what to write
     /// instead (register INS-7).
     ///
-    /// ⚠️ Pure and `static` for the same reason `seedPolicy` is: a repair that CHANGES the author's
-    /// stored routing decision must be provable from a test, and the `if case` chain it replaces
-    /// lived inside `saveAndDismiss`, which a test cannot reach.
+    /// ⚠️ Pure and `static`: a repair that CHANGES the author's stored routing decision must be
+    /// provable from a test, and the `if case` chain it replaces lived inside `saveAndDismiss`,
+    /// which a test cannot reach.
     ///
     /// ⚠️ EXHAUSTIVE, with no `default:` — a new `RouterDecisionPolicy` case must break this build
     /// rather than silently persist a target nothing checks.
@@ -735,40 +773,11 @@ struct ConditionNodeInspectorView: View {
 
     /// One line per silent repair, naming what the user loses.
     ///
-    /// ⚠️ `when` is supplied by the caller because the three repairs do NOT share a consequence: the
-    /// no-match repair patches `noMatchBehavior` (so only input matching NO rule is affected), while
-    /// the policy and ask-fallback repairs patch `decisionPolicy` (which also governs input matching
-    /// SEVERAL rules). A single blended sentence would be wrong for two of the three.
+    /// ⚠️ `when` is supplied by the caller because the two repairs do NOT share a consequence: the
+    /// policy repair applies to every undecided input, the ask-fallback repair only to runs where
+    /// nobody answers.
     private func logDanglingRepair(target ruleID: UUID, what: String, when: String) {
         inspectorLogger.notice("[WF_CANVAS] Router '\(node.displayName)' [node \(node.id.uuidString.prefix(8))]: the \(what) pointed at rule \(ruleID.uuidString.prefix(8)), which was deleted in this editing session — saving 'fail the node' instead. CONSEQUENCE: \(when) now FAILS onto this node's error port rather than routing to the branch you had chosen; pick a new target in 'When Routing Can't Decide' if that is not what you want.")
-    }
-
-    static func seedPolicy(from config: ConditionNodeConfig) -> RouterDecisionPolicy {
-        if let existing = config.decisionPolicy { return existing }
-
-        // Where does unmatched input go today? The catch-all wins if there is one.
-        let noMatchTarget: RouterDecisionPolicy
-        if !config.fallbackLabel.isEmpty,
-           let rule = config.rules.first(where: { $0.label == config.fallbackLabel }) {
-            noMatchTarget = .route(ruleID: rule.id)
-        } else {
-            switch config.noMatchBehavior {
-            case .failNode:            noMatchTarget = .failNode
-            case .endWorkflow:         noMatchTarget = .endBranch
-            case .route(let ruleID):   noMatchTarget = .route(ruleID: ruleID)
-            }
-        }
-
-        // `askOnAmbiguity` on → the author wanted to be asked, so Ask, with the no-match behaviour
-        // as the fallback. Off → they wanted it resolved silently, so keep the no-match behaviour
-        // for both triggers.
-        guard config.askOnAmbiguity else { return noMatchTarget }
-        switch noMatchTarget {
-        case .failNode:          return .ask(fallback: .failNode)
-        case .endBranch:         return .ask(fallback: .endBranch)
-        case .route(let ruleID): return .ask(fallback: .route(ruleID: ruleID))
-        case .ask:               return .ask(fallback: .failNode)   // unreachable
-        }
     }
 
     private func loadFromNode() {
@@ -778,11 +787,8 @@ struct ConditionNodeInspectorView: View {
         llmFallbackEnabled = config.llmFallbackEnabled
         llmPrompt = config.llmPrompt
         llmModelName = config.llmModelName
-        askOnAmbiguity = config.askOnAmbiguity
-        noMatchBehavior = config.noMatchBehavior
-        let seeded = Self.seedPolicy(from: config)
-        decisionPolicy = seeded
-        if case .ask(let f) = seeded { askFallback = f }
+        decisionPolicy = config.decisionPolicy
+        if case .ask(let f) = config.decisionPolicy { askFallback = f }
 
         while rules.count < ConditionNodeConfig.minRules {
             rules.append(ConditionRule(label: nextAvailableLabel(), field: .upstreamOutput, op: .contains, value: ""))
@@ -805,51 +811,43 @@ struct ConditionNodeInspectorView: View {
         // CORRECT — an edge on a shared label genuinely has no single owner — but it means the edge
         // stays on the surviving rule rather than following the renamed one. The log says that
         // rather than promising a re-point that cannot happen.
+        persistConfigToNode()
+        closeInspector()
+    }
+
+    private func persistIfEmbedded() {
+        guard !showsHeader else { return }
+        persistConfigToNode()
+    }
+
+    private func persistConfigToNode() {
         var seen = Set<String>()
-        for i in rules.indices {
-            let original = rules[i].label
+        var cleanedRules = rules
+        for i in cleanedRules.indices {
+            let original = cleanedRules[i].label
             let deduped = ConditionNodeConfig.deduplicatedLabel(original, taken: seen)
             if deduped != original {
                 inspectorLogger.notice("[WF_CANVAS] Router '\(node.displayName)' [node \(node.id.uuidString.prefix(8))]: rule label '\(original)' duplicated another rule and was renamed to '\(deduped)' on Save. CONSEQUENCE: the run no longer refuses to start on a duplicate-label error, and this rule now has its own output port — but any edge already drawn from the shared '\(original)' port STAYS on the rule that kept that label, because an edge on a shared label has no single owner. Re-wire this rule's branch if it should have followed the rename.")
             }
-            rules[i].label = deduped
+            cleanedRules[i].label = deduped
             seen.insert(deduped)
         }
 
-        // ⚠️ Start from the config we LOADED, never a fresh one. Building from scratch silently
-        // dropped every field this view does not edit — `fallbackLabel` above all, whose picker was
-        // retired but whose stored value is still honoured by the engine. A legacy Router with a
-        // catch-all label lost it on the first Save from this panel, and unmatched input stopped
-        // routing to the catch-all and started FAILING the node instead. The same shape would drop
-        // any field added to `ConditionNodeConfig` in future without touching this view.
+        // ⚠️ Start from the config we LOADED, never a fresh one: building from scratch silently
+        // drops any field this view does not edit.
         var config = loadedConfig
-        config.rules = rules
+        config.rules = cleanedRules
         config.llmFallbackEnabled = llmFallbackEnabled
         config.llmPrompt = String(llmPrompt.prefix(maxPromptLength))
-        config.llmPortLabels = []
         config.llmModelName = llmModelName
-        config.askOnAmbiguity = askOnAmbiguity
-        // ⚠️ A route target whose rule was deleted IN THIS EDITING SESSION falls back to failNode
-        // rather than persisting a dangling id — the validator would flag it, but not writing it
-        // is better than writing-then-flagging.
-        if case .route(let ruleID) = noMatchBehavior, !rules.contains(where: { $0.id == ruleID }) {
-            logDanglingRepair(target: ruleID, what: "'When nothing matches' target", when: "input that matches no rule")
-            config.noMatchBehavior = .failNode
-        } else {
-            config.noMatchBehavior = noMatchBehavior
-        }
 
-        // ⚠️ THE MIGRATION HAPPENS HERE — on an explicit Save, never at decode. The legacy 2×3
-        // matrix does not collapse onto this axis losslessly, so seeding at decode would silently
-        // change stored workflows their author never opened. Writing it here means the user has
-        // seen the merged control and its captions before it takes effect.
         var policyToWrite = decisionPolicy
         if case .ask = policyToWrite { policyToWrite = .ask(fallback: askFallback) }
-        // Same dangling-target repair as above, for both the policy and its fallback.
-        // [INS-7] These three repairs SILENTLY changed the author's stored routing decision — the
-        // sibling repair 20 lines below (clearing a legacy catch-all) has always logged; these did
-        // not. The decision is extracted so it can be truth-tabled.
-        switch Self.danglingRouteRepair(in: policyToWrite, against: rules) {
+        // ⚠️ A route target whose rule was deleted IN THIS EDITING SESSION falls back to failNode
+        // rather than persisting a dangling id — the validator would flag it, but not writing it
+        // is better than writing-then-flagging. [INS-7] Logged, because it changes the author's
+        // stored routing decision; extracted so it can be truth-tabled.
+        switch Self.danglingRouteRepair(in: policyToWrite, against: cleanedRules) {
         case .none:
             break
         case .policy(let ruleID):
@@ -861,26 +859,10 @@ struct ConditionNodeInspectorView: View {
         }
         config.decisionPolicy = policyToWrite
 
-        // ⚠️ The legacy catch-all is CLEARED once a policy governs, or it would silently pre-empt
-        // it: `resolveRouterPort` honours a non-empty `fallbackLabel` before any no-match logic
-        // runs, and on the classifier side it also displaces the no-match sentinel. Safe because
-        // the decode-time repair guarantees it names a real rule, whose port survives as an
-        // ordinary rule port with its edges intact.
-        if !config.fallbackLabel.isEmpty {
-            inspectorLogger.notice("[WF_CANVAS] Router '\(node.displayName)': clearing legacy catch-all '\(config.fallbackLabel)' because this node now carries a routing policy. CONSEQUENCE: unmatched input follows 'When Routing Can't Decide' instead of silently routing to that rule; the rule itself and its edges are untouched.")
-            config.fallbackLabel = ""
-        }
         node.kind = .condition(config)
 
-        // [INS-11] The `if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }` that
-        // stood here is GONE. Its comment said "persist fan-in behaviour", but `joinMode` was
-        // retired 2026-08-13 (decode/encode only) and a Router has no other per-node config this
-        // panel edits — so the line's only effect was to turn `nil` into `.some(defaults)`, which
-        // `replaceNode`'s equality guard cannot absorb. That made every Save a real mutation:
-        // opening a Router, changing nothing and pressing Save dirtied the canvas and burned an
-        // undo slot. (Harmless at RUN time for this kind — only Profile and Action nodes read
-        // retries — which is exactly why nothing was noticing.)
-
-        closeInspector()
+        // [INS-11] Never materialise `nodeConfig` here: this panel edits no per-node config, and
+        // turning `nil` into `.some(defaults)` defeats `replaceNode`'s equality guard, so a Save
+        // that changed nothing would dirty the canvas and burn an undo slot.
     }
 }

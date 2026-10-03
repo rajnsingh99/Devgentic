@@ -65,17 +65,8 @@ final class SettingsCoordinator {
         // `bool(forKey:)` and would read an absent key as false — the opposite of the shipped
         // default.
 
-        // Web search: the key lives in the Keychain (register KC-2 — it was the one credential the
-        // current design wrote to UserDefaults in plaintext). Presence determines enablement;
-        // active state starts off.
-        //
-        // ⚠️ The plaintext→Keychain migration rewrites the developer's REAL preferences domain, and
-        // the XCTest host runs this initializer in full — so it is refused there, like every other
-        // launch step `TestHost.permits` guards. The read itself is safe: under XCTest the Keychain
-        // is an in-memory stand-in.
-        if TestHost.permits("migrate the web-search API key from UserDefaults into the Keychain", logger: logger) {
-            WebSearchKeyStore.migrateFromUserDefaults()
-        }
+        // Web search: the key lives in the Keychain. Presence determines enablement; active state
+        // starts off. Under XCTest the Keychain is an in-memory stand-in, so this read is safe there.
         switch WebSearchKeyStore.read() {
         case .found(let key):
             vm.webSearchAPIKey = key
@@ -140,7 +131,6 @@ final class SettingsCoordinator {
             vm.isWebSearchActive = false
             return false
         }
-        purgeLegacyPlaintextCopy()
         vm.webSearchAPIKey = apiKey
         vm.isWebSearchEnabled = true
         vm.isWebSearchActive = true
@@ -151,7 +141,6 @@ final class SettingsCoordinator {
     func disableAndRemoveWebSearch() {
         guard let vm = viewModel else { return }
         let removed = WebSearchKeyStore.delete()
-        purgeLegacyPlaintextCopy()
         vm.webSearchAPIKey = nil
         vm.isWebSearchEnabled = false
         vm.isWebSearchActive = false
@@ -160,17 +149,5 @@ final class SettingsCoordinator {
         }
         // A failed delete is logged by the store with its consequence: the feature is off for this
         // session, but the key survives and web search comes back on the next launch.
-    }
-
-    /// Removes the plaintext copy an earlier build may have left in UserDefaults.
-    ///
-    /// Load-bearing after a successful save: `WebSearchKeyStore.migrateFromUserDefaults` lets the
-    /// plaintext value WIN, so a stale copy left behind would be migrated over the key just saved
-    /// on the next launch. ⚠️ Refused under XCTest — `UserDefaults.standard` is the developer's
-    /// real domain there, and the migration that would normally have removed this copy is refused
-    /// too, so a test must not be the thing that deletes it.
-    private func purgeLegacyPlaintextCopy() {
-        guard TestHost.permits("remove the plaintext web-search API key from UserDefaults", logger: logger) else { return }
-        UserDefaults.standard.removeObject(forKey: WebSearchKeyStore.legacyDefaultsKey)
     }
 }

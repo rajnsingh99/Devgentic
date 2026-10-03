@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright © 2025-2026 Raj Singh
 name: CLA
 
 # Asks first-time contributors to sign CLA.md, and records the signature in a

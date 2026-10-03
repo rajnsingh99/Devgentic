@@ -118,26 +118,81 @@ final class PairingWindowLifetimeTests: XCTestCase {
 
     /// ⚠️ A TIMEOUT MUST NOT TOUCH CREDENTIALS. The old arms ran `config.botToken = nil` — a Keychain
     /// DELETE — on a token the user had already pasted and the platform had already validated.
+    ///
+    /// ⚠️ KC-61: this scan used to read only the 400 characters AROUND the `expire` call, so a
+    /// credential-clearing statement anywhere else in the enclosing timeout path was invisible —
+    /// `pollForPairing` alone is hundreds of lines, and its head runs long before the window opens.
+    /// Now every `PairingWindowExpiry.expire` call site (each service has two: the poll's terminal
+    /// arm and the watchdog arm) resolves its whole enclosing function and that body is scanned,
+    /// and the pattern list names the KC-11 explicit clear methods and the resets too, since a
+    /// credential is cleared through those as well as through property assignment.
     func testNoPairingServiceClearsCredentialsOnTimeout() throws {
         for path in ["Devgentic/ChatOps/Services/ChatOpsPairingService.swift",
                      "Devgentic/ChatOps/Services/DiscordPairingService.swift",
                      "Devgentic/ChatOps/Services/SlackPairingService.swift"] {
-            let source = try ChatOpsSecurityTierMatrixTests.readSource(path)
-            guard let expiry = source.range(of: "PairingWindowExpiry.expire") else {
-                return XCTFail("\(path) no longer routes its expiry through PairingWindowExpiry.")
-            }
-            // The 400 characters around the expiry call must not delete a credential.
-            let lower = source.index(expiry.lowerBound, offsetBy: -400, limitedBy: source.startIndex) ?? source.startIndex
-            let window = source[lower..<expiry.upperBound]
-            for credential in ["BotToken = nil", "botToken = nil", "AppToken = nil", "appToken = nil"] {
-                XCTAssertFalse(window.contains(credential), """
-                    \(path) clears `\(credential)` on the timeout path. That token was VALIDATED; \
-                    running out of time to send a PIN says nothing about it, and wiping it silently \
-                    resets the pane and makes the user paste it again. Only `disconnect()` clears \
-                    credentials.
-                    """)
+            let source = try ChatOpsSecurityTierMatrixTests.readSourceStrippingComments(path)
+            let sites = Self.expireCallSites(in: source)
+            XCTAssertFalse(sites.isEmpty,
+                           "\(path) no longer routes its expiry through PairingWindowExpiry.")
+            for site in sites {
+                let body = try XCTUnwrap(
+                    Self.enclosingFunction(of: site, in: source),
+                    "\(path): could not resolve the function containing an expiry call")
+                for credential in Self.credentialClearingPatterns {
+                    XCTAssertFalse(body.contains(credential), """
+                        \(path) clears `\(credential)` on the timeout path. That token was VALIDATED; \
+                        running out of time to send a PIN says nothing about it, and wiping it silently \
+                        resets the pane and makes the user paste it again. Only `disconnect()` clears \
+                        credentials.
+                        """)
+                }
             }
         }
+    }
+
+    /// Statements that delete a credential. ⚠️ Scanned over the WHOLE timeout function, not a
+    /// window — see `testNoPairingServiceClearsCredentialsOnTimeout`. The property setters route
+    /// through `clearBotToken()`-style methods since KC-11, so both shapes are named.
+    private static let credentialClearingPatterns = [
+        "BotToken = nil", "botToken = nil", "AppToken = nil", "appToken = nil",
+        "clearBotToken(", "clearDiscordBotToken(", "clearSlackBotToken(", "clearSlackAppToken(",
+        "config.reset(", "config.resetDiscord(", "config.resetSlack(",
+    ]
+
+    /// Every range of a `PairingWindowExpiry.expire` call in `source`.
+    private static func expireCallSites(in source: String) -> [Range<String.Index>] {
+        var sites: [Range<String.Index>] = []
+        var search = source.startIndex..<source.endIndex
+        while let range = source.range(of: "PairingWindowExpiry.expire", range: search) {
+            sites.append(range)
+            search = range.upperBound..<source.endIndex
+        }
+        return sites
+    }
+
+    /// The text of the function declaration enclosing `callSite`: the nearest `func` keyword
+    /// before it, forward to the matching closing brace. Comments are stripped by the caller, so
+    /// doc text cannot shadow the declaration and braces in comments cannot unbalance the count.
+    private static func enclosingFunction(of callSite: Range<String.Index>, in source: String) -> Substring? {
+        guard let declaration = source.range(
+            of: "func ", options: .backwards, range: source.startIndex..<callSite.lowerBound),
+            let bodyStart = source.range(of: "{", range: declaration.upperBound..<source.endIndex)
+        else { return nil }
+        var depth = 0
+        var index = bodyStart.lowerBound
+        while index < source.endIndex {
+            switch source[index] {
+            case "{": depth += 1
+            case "}":
+                depth -= 1
+                if depth == 0 {
+                    return source[declaration.lowerBound..<source.index(after: index)]
+                }
+            default: break
+            }
+            index = source.index(after: index)
+        }
+        return nil
     }
 
     /// ⚠️ THE DEADLINE MUST BE WALL-CLOCK, NOT TRAFFIC-DRIVEN. Discord and Slack tested it inside a

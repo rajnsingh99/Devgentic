@@ -211,19 +211,14 @@ struct WorkflowEdgeView: View {
                             )
                     }
 
-                    Button(action: onDelete) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(theme.errorColor)
-                            .frame(width: 20, height: 20)
-                            .background(
-                                Circle()
-                                    .fill(theme.primaryBackground)
-                                    .overlay(Circle().stroke(theme.errorColor.opacity(0.4), lineWidth: 0.75))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Delete connection")
+                    TactileIconButton(
+                        icon: "xmark",
+                        tooltip: "Delete connection",
+                        accessibilityLabel: "Delete connection",
+                        variant: .destructive,
+                        size: 20,
+                        action: onDelete
+                    )
                 }
                 .padding(3)
                 .background(

@@ -217,36 +217,20 @@ final class ProfileValidatorTests: XCTestCase {
 
     // MARK: - Workflow Validation
     //
-    // ⚠️ THE EMPTY-WORKFLOW RULE IS RETIRED (2026-08-29), and these tests now pin that it STAYS
-    // retired. It was `.blocking` and keyed on `WorkflowConfig.agentProfileIDs` being empty; that
-    // field is no longer maintained, because a workflow's nodes own their configuration and the
-    // LAYOUT is the only record of what a workflow contains. Reinstating the rule would make every
-    // workflow permanently unsaveable — `BackendProfileStore` validates `strict: isUpdate`, so an
-    // empty list throws on every update including a rename (register B36).
+    // A workflow profile has no profile-level rule: "nothing to run" is `WorkflowValidator`'s job,
+    // on the layout. A blocking rule here would make every workflow unsaveable on update, since
+    // `BackendProfileStore` validates `strict: isUpdate` (register B36).
 
-    func testEmptyWorkflowIsSaveableInStrictMode() {
-        let config = WorkflowConfig(agentProfileIDs: [])
-        let profile = BackendProfileSnapshot(displayName: "Workflow", details: .workflow(config))
+    func testWorkflowProfileIsSaveableInStrictMode() {
+        let profile = BackendProfileSnapshot(displayName: "Workflow", details: .workflow(WorkflowConfig()))
         let errors = ProfileValidator.validate(profile, strict: true)
-        XCTAssertFalse(errors.contains(where: { $0.field == "workflow" }),
-                       "an empty agentProfileIDs must NOT block a save — the field is retired, so "
-                       + "the rule would make every workflow unsaveable, renames included")
+        XCTAssertFalse(errors.contains(where: { $0.field == "workflow" }))
         XCTAssertTrue(errors.blocking.isEmpty, "got: \(errors.blocking.map(\.message))")
     }
 
-    func testEmptyWorkflowPassesInLenientMode() {
-        let config = WorkflowConfig(agentProfileIDs: [])
-        let profile = BackendProfileSnapshot(displayName: "Workflow", details: .workflow(config))
+    func testWorkflowProfilePassesInLenientMode() {
+        let profile = BackendProfileSnapshot(displayName: "Workflow", details: .workflow(WorkflowConfig()))
         let errors = ProfileValidator.validate(profile)
-        XCTAssertFalse(errors.contains(where: { $0.field == "workflow" }))
-    }
-
-    /// A stale list left over from before the field was retired must not affect validation either
-    /// way — existing profiles keep their values, inert.
-    func testWorkflowWithAStaleAgentListStillPasses() {
-        let config = WorkflowConfig(agentProfileIDs: [UUID(), UUID()])
-        let profile = BackendProfileSnapshot(displayName: "Workflow", details: .workflow(config))
-        let errors = ProfileValidator.validate(profile, strict: true)
         XCTAssertFalse(errors.contains(where: { $0.field == "workflow" }))
     }
 

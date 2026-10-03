@@ -407,12 +407,12 @@ private struct WorkflowRunCardView: View {
             .glassEffect(.regular, in: .rect(cornerRadius: 12))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                    .stroke(isHovering ? theme.accentColor.opacity(0.35) : theme.surfaceOverlayStrong, lineWidth: 0.5)
             )
-            .shadow(color: Color.black.opacity(0.04), radius: 1, y: 1)
+            .shadow(color: Color.black.opacity(isHovering ? 0.08 : 0.04), radius: isHovering ? 3 : 1, y: 1)
         }
         .buttonStyle(.plain)
-        .scaleEffect(isHovering && !reduceMotion ? 1.012 : 1.0)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.75)) {
                 isHovering = hovering
@@ -427,7 +427,7 @@ private struct WorkflowRunCardView: View {
     }
 
     private var cardBackground: Color {
-        if isHovering { return theme.surfaceOverlay }
-        return Color.clear
+        if isHovering { return theme.surfaceOverlay.opacity(0.85) }
+        return theme.surfaceOverlay.opacity(0.35)
     }
 }

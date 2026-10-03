@@ -159,38 +159,6 @@ final class ChatOpsLifecycleStateTests: XCTestCase {
         }
     }
 
-    /// ⚠️ THE MIGRATION IS WHAT STOPS THE SPLIT BEING A SILENT DOWNGRADE. Discord and Slack start
-    /// reading keys that do not exist yet, so an install running at Full Access would drop to Read
-    /// Only on upgrade and its approvals would begin failing with no stated cause.
-    func testAnAlreadyPairedProviderInheritsTheTierItWasRunningUnder() throws {
-        let source = try ChatOpsSecurityTierMatrixTests.readSource("Devgentic/ChatOps/Models/ChatOpsConfig.swift")
-        // ⚠️ THE CALL, INSIDE `init`, NOT JUST THE NAME. Asserting `source.contains("seedPerProviderTiers()")`
-        //   passes while the call is commented out, because the FUNCTION DEFINITION still carries the
-        //   name — confirmed by mutation, which sailed through. Scope the search to the initialiser
-        //   and strip comments, or the test pins nothing.
-        guard let initStart = source.range(of: "private init() {"),
-              let initEnd = source.range(of: "\n    }", range: initStart.upperBound..<source.endIndex) else {
-            return XCTFail("could not locate `private init()`")
-        }
-        let initBody = String(source[initStart.upperBound..<initEnd.lowerBound])
-            .split(separator: "\n")
-            .map { line -> Substring in
-                guard let comment = line.range(of: "//") else { return line }
-                return line[line.startIndex..<comment.lowerBound]
-            }
-            .joined(separator: "\n")
-        XCTAssertTrue(initBody.contains("seedPerProviderTiers()"), """
-            `private init()` no longer calls the per-provider tier migration, so every already-paired \
-            Discord and Slack silently drops to Read Only on the next launch and its remote approvals \
-            begin failing with a message naming no cause.
-            """)
-        XCTAssertTrue(source.contains("where isPaired && UserDefaults.standard.string(forKey: key) == nil"), """
-            The seeding no longer restricts itself to already-PAIRED providers with no stored tier. \
-            Seeding an unpaired provider would hand a future pairing an inherited Full Access, which \
-            is the hole the split exists to close.
-            """)
-    }
-
     /// Disconnecting must drop the tier, so a fresh pairing cannot inherit Full Access.
     func testDisconnectingResetsThatProvidersTier() throws {
         let source = try ChatOpsSecurityTierMatrixTests.readSource("Devgentic/ChatOps/Models/ChatOpsConfig.swift")

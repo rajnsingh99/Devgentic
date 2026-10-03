@@ -475,6 +475,7 @@ struct ChatInputAreaView: View {
         .appSurface(
             in: .rect(cornerRadius: 18),
             elevation: .elevated,
+            strokeWidth: theme.isDark ? 0.5 : 0.75,
             isFocused: isFocused
         )
         .overlay {

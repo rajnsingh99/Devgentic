@@ -61,9 +61,7 @@ final class ComposerSuggestionKeyRoutingTests: XCTestCase {
     /// extraction was created to fix, so leaving it unguarded repeats it one level up.
     ///
     /// Asserted on the source because `keyDown` is an `NSTextView` override reached only by a real
-    /// key event — there is no seam a unit test can reach. Modelled on
-    /// `SkillLaunchSequenceTests.testDevgenticAppStillRunsTheLaunchSequence`, which guards the same
-    /// class of defect at launch.
+    /// key event — there is no seam a unit test can reach.
     func testTheComposerStillRoutesKeysThroughTheDecision() throws {
         let source = try Self.read("Devgentic/Interfaces/Shared/ChatInput/CustomTextEditor.swift")
 

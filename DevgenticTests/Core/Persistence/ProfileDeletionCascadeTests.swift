@@ -25,11 +25,9 @@ import XCTest
 
 final class WorkflowProfileDeletionValidationTests: XCTestCase {
 
-    private func profileNode(id: UUID = UUID(), profileID: UUID, task: String = "Do the thing") -> WorkflowNode {
-        var node = WorkflowNode(id: id, profileID: profileID, position: .zero,
-                                displayName: "Researcher", profileType: .agent)
-        node.nodeConfig = WorkflowNodeConfig(taskDescription: task)
-        return node
+    private func profileNode(id: UUID = UUID(), profileID: UUID) -> WorkflowNode {
+        WorkflowNode(id: id, profileID: profileID, position: .zero,
+                     displayName: "Researcher", profileType: .agent)
     }
 
     private func agent(id: UUID) -> BackendProfileModel {

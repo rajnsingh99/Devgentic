@@ -23,7 +23,7 @@ final class WorkflowRetryPolicyTests: XCTestCase {
     /// The N4 fix: sub-workflow nodes were rendered a Retries stepper that did nothing.
     func testSubWorkflowGetsTheConfiguredAttempts() {
         XCTAssertEqual(
-            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: 3, fallbackRetries: 0),
+            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: 3),
             4, "3 retries means 4 attempts"
         )
     }
@@ -32,27 +32,27 @@ final class WorkflowRetryPolicyTests: XCTestCase {
     /// also ran on their retry count, a setting of 3 would produce 9 tool invocations.
     func testNonSubWorkflowStructuralNodesGetExactlyOneOuterAttempt() {
         XCTAssertEqual(
-            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: false, maxNodeRetries: 3, fallbackRetries: 2),
+            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: false, maxNodeRetries: 3),
             1, "Action / condition / code / gate / trigger must not be looped by the outer retry"
         )
     }
 
     func testZeroRetriesMeansOneAttempt() {
         XCTAssertEqual(
-            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: 0, fallbackRetries: 0), 1
+            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: 0), 1
         )
     }
 
-    /// The legacy workflow-level stepper (retired 2026-08-13) still applies when a node sets nothing.
-    func testFallsBackToTheWorkflowLevelRetryCount() {
+    /// A node that sets no retry count of its own does not retry.
+    func testNoPerNodeCountMeansOneAttempt() {
         XCTAssertEqual(
-            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: nil, fallbackRetries: 2), 3
+            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: nil), 1
         )
     }
 
     func testAttemptsAreNeverBelowOne() {
         XCTAssertEqual(
-            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: -5, fallbackRetries: 0), 1,
+            WorkflowRetryPolicy.structuralAttempts(isSubWorkflow: true, maxNodeRetries: -5), 1,
             "a corrupt stored value must not produce a zero-attempt node that never runs"
         )
     }

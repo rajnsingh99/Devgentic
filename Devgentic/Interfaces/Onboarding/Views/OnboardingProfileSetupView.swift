@@ -214,6 +214,7 @@ struct OnboardingProfileSetupView: View {
             )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     // MARK: - Engine Option Card
@@ -266,6 +267,7 @@ struct OnboardingProfileSetupView: View {
             )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     // MARK: - Starter Model Status Banner

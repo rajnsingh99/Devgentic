@@ -107,7 +107,25 @@ final class BackendProfileService {
     /// On initialization, it immediately loads the profiles from persistence.
     init(store: BackendProfileStoreProtocol = BackendProfileStore.shared) {
         self.profileStore = store
+        Self.noteConstruction(usingSharedStore: store is BackendProfileStore)
         loadProfiles()
+    }
+
+    /// How many services have been built on the real store this process. The app needs exactly
+    /// one; tests build their own on in-memory stores and are not counted.
+    private static var sharedStoreInstanceCount = 0
+
+    /// ⚠️ A second app-level service is a construction bug, not a feature: each one does a full
+    /// profile fetch (and a Keychain read per keyed profile) and holds its own copy of the list.
+    /// Logged loudly so it is visible in a launch log instead of inferred from duplicate reads.
+    private static func noteConstruction(usingSharedStore: Bool) {
+        guard usingSharedStore else { return }
+        sharedStoreInstanceCount += 1
+        if sharedStoreInstanceCount == 1 {
+            logger.info("[PROFILE] BackendProfileService created (the app's single instance).")
+        } else {
+            logger.error("[PROFILE] BackendProfileService created AGAIN — instance #\(sharedStoreInstanceCount) on the shared store. CONSEQUENCE: a redundant full profile fetch, plus a Keychain read per keyed profile, for an instance the UI may not use; views and the delete cascade can disagree about which list is current. Look for a new construction site, or a `@State` default re-evaluated by a re-created App struct.")
+        }
     }
 
     // MARK: - Persistence Methods
@@ -327,18 +345,13 @@ final class BackendProfileService {
     /// ⚠️⚠️ ANY WRITER OF A WHOLE PROFILE MUST START HERE, not from `profiles`. That array is a
     /// snapshot of VALUE TYPES taken when it was last loaded, and several things write profile rows
     /// out of band without refreshing it — `BackendOrchestrationService` auto-healing an unsupported
-    /// thinking flag, `MLXContextWindowHealer` backfilling a context window, and (since V6)
-    /// `SkillLibraryImportSweep`, which re-links every pre-V6 skill reference at launch by setting
-    /// `details` on the SwiftData row directly.
+    /// thinking flag, and `MLXContextWindowHealer` backfilling a context window.
     ///
     /// A writer that reads `profiles`, mutates one facet and calls `saveProfile` writes the WHOLE
     /// stale snapshot back — `BackendProfileStore.saveProfile` does `existing.details =
     /// snapshot.details` — so an unrelated edit silently reverts whatever was written out of band.
     /// That is how the editor path was fixed; this is the same rule, named so the next writer can
     /// reach for it instead of rediscovering the bug.
-    ///
-    /// ⚠️ The sweep write is the worst case of the class: it is the one pass that carries a pre-V6
-    /// user's skills into the library, and reverting it loses the migration rather than one setting.
     func freshProfile(id: UUID) -> BackendProfileModel? {
         let cached = profiles.first(where: { $0.id == id })
         do {
@@ -347,8 +360,8 @@ final class BackendProfileService {
             logger.error(
                 "[PROFILE] Could not re-read profile \(id) from the store before a whole-profile "
                 + "write: \(error.localizedDescription). CONSEQUENCE: falling back to the in-memory "
-                + "copy, which may predate an out-of-band write (auto-healed thinking flag, "
-                + "backfilled context window, or the V6 skill re-link) — saving could revert it."
+                + "copy, which may predate an out-of-band write (auto-healed thinking flag or "
+                + "backfilled context window) — saving could revert it."
             )
         }
         return cached
@@ -531,16 +544,12 @@ final class BackendProfileService {
             logOutput += "[LLM / PROVIDER CONFIGURATION]\n"
             logOutput += formatLLMConfig(config.llmConfig)
 
-        case .workflow(let config):
+        case .workflow:
             logOutput += "[WORKFLOW CONFIGURATION]\n"
-            // ⚠️ The LAYOUT's counts, not `agentProfileIDs`. That field is retired and stale by
-            // design; printing it in a support bundle would describe a graph the app no longer runs.
-            // These counts are denormalized columns, so this costs no blob decode.
+            // The layout is the record of what a workflow contains. These counts are denormalized
+            // columns, so this costs no blob decode.
             let counts = WorkflowLayoutStore.shared.storedCounts(for: profile.id)
             logOutput += "Nodes: \(counts.nodes), Edges: \(counts.edges), Notes: \(counts.annotations)\n"
-            if !config.agentProfileIDs.isEmpty {
-                logOutput += "Retired agentProfileIDs still stored: \(config.agentProfileIDs.count) (inert)\n"
-            }
 
         case .imageGen(let config):
             logOutput += "[IMAGE GENERATOR CONFIGURATION]\n"
@@ -561,13 +570,34 @@ final class BackendProfileService {
         return logOutput
     }
 
+    /// What tool-calling mode this config's runs use, and WHERE that answer comes from.
+    ///
+    /// ⚠️ This line used to read "Supports Native Tools: Capability: None" straight off the stored
+    /// value — "None" for a profile with no model chosen yet, and for every cloud bot, whose runs
+    /// never consult it. Runs now detect local models live (`LiveModelDetection`), so the summary
+    /// reports that same answer and says when it differs from the stored copy.
+    static func toolCallingSummary(for config: ProviderConfig) -> String {
+        if config.apiProvider.usesCloudDefaults {
+            return "native (\(config.apiProvider.rawValue) — not measured; cloud runs always offer native tools)"
+        }
+        guard !config.modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "not yet detected (no model selected)"
+        }
+        guard let detected = LiveModelDetection.detectedFromCache(config) else {
+            return "\(config.cognitiveCapability.rawValue) (stored when the model was picked; not in the detection cache yet — the next run re-detects)"
+        }
+        guard detected.cognitiveCapability == config.cognitiveCapability else {
+            return "\(detected.cognitiveCapability.rawValue) (detected now; the profile still stores \(config.cognitiveCapability.rawValue) until its next save — runs use the detected value)"
+        }
+        return "\(detected.cognitiveCapability.rawValue) (detected)"
+    }
+
     private func formatLLMConfig(_ config: ProviderConfig) -> String {
         var str = "Provider: \(config.apiProvider.rawValue)\n"
         str += "Model Name: \(config.modelName)\n"
         str += "Base URL: \(config.baseURL ?? "Default (Not set)")\n"
 
-        let flagIndicator = "Capability: \(config.cognitiveCapability.rawValue)"
-        str += "Supports Native Tools: \(flagIndicator)\n"
+        str += "Tool Calling: \(Self.toolCallingSummary(for: config))\n"
 
         if let key = config.apiKey, !key.isEmpty {
             let masked = key.count > 8 ? "\(key.prefix(4))...\(key.suffix(4))" : "****"

@@ -491,8 +491,12 @@ func refreshInstalledModels() {
             // unrecognised fell through to the `.textGeneration` default — a first-run user's
             // top two recommendations were a 2.5 GB download that fails at inference.
             let usable = rawModels.filter { raw in
-                guard MLXPipelineFilter.shouldExclude(pipelineTag: raw.pipeline_tag) else { return true }
-                self.logger.info("[MLXSTORE] Excluding '\(raw.id)' from the store — pipeline '\(raw.pipeline_tag ?? "?")' is not something MLXService can run as an LLM. CONSEQUENCE: it is hidden from results rather than offered with a misleading Chat badge.")
+                // ⚠️ `ModelSupportPolicy`, not `MLXPipelineFilter` alone: the pasted-repo-ID path and
+                // the card's "Not supported" pill read the SAME policy, so the listing and the
+                // button can never disagree about what is runnable. It also adds the declared
+                // `system-one` tag, which a repo can carry under an otherwise-unfamiliar pipeline.
+                guard ModelSupportPolicy.unsupportedReason(pipelineTag: raw.pipeline_tag, tags: raw.tags ?? []) != nil else { return true }
+                self.logger.info("[MLXSTORE] Excluding '\(raw.id)' from the store — pipeline '\(raw.pipeline_tag ?? "?")' is not something MLXService can run as an LLM (decision/classifier, speech, image or embedding model). CONSEQUENCE: it is hidden from results rather than offered with a misleading Chat badge.")
                 return false
             }
             if usable.count != rawModels.count {
@@ -508,6 +512,7 @@ func refreshInstalledModels() {
                     sizeBytes: self.modelSizeBytes[raw.id],
                     quantization: MLXQuantization.parse(fromRepoId: raw.id),
                     isGated: (raw.gated?.isGated ?? false) || (raw.private ?? false),
+                    pipelineTag: raw.pipeline_tag,
                     capabilities: caps,
                     tags: raw.tags ?? [],
                     downloads: raw.downloads,
@@ -871,6 +876,24 @@ func refreshInstalledModels() {
     ///
     /// Deliberately NOT called from the list path — that would reintroduce the N+1 fan-out A9
     /// fixed. One request, on demand, when the user opens a model.
+    /// Why Devgentic can't run `repoId`, or nil when it can — or when that couldn't be determined.
+    ///
+    /// One model-info GET, no README: this runs as the user pastes an id, before they've asked
+    /// for anything. ⚠️ A failed lookup returns nil ("unknown → stays enabled") rather than
+    /// blocking: an offline blip must not turn a valid download into "Not supported". The
+    /// authoritative check is the one `fetchByRepoId` repeats from `fetchModelDetail` before a
+    /// download slot is taken.
+    func unsupportedReason(forRepo repoId: String) async -> String? {
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repoId)") else { return nil }
+        do {
+            let response = try await HFRequest.get(HFModelDetail.self, from: url)
+            return ModelSupportPolicy.unsupportedReason(pipelineTag: response.pipeline_tag, tags: response.tags ?? [])
+        } catch {
+            logger.info("[MLXSTORE] Support pre-check for '\(repoId)' failed (\(error.localizedDescription)). CONSEQUENCE: the pasted-repo button stays enabled; the authoritative check runs again when the user presses it.")
+            return nil
+        }
+    }
+
     func fetchModelDetail(repoId: String) async -> Result<MLXModelDetail, HFRequestError> {
         guard var components = URLComponents(string: "https://huggingface.co/api/models/\(repoId)") else {
             return .failure(.invalidURL)

@@ -31,7 +31,6 @@ final class SkillLinkEditingTests: XCTestCase {
         let next = SkillLinkEditing.linking([], toSkillID: "skill_1", name: "code-review")
         XCTAssertEqual(next.map(\.skillID), ["skill_1"])
         XCTAssertEqual(next.first?.name, "code-review")
-        XCTAssertFalse(try! XCTUnwrap(next.first).isAwaitingRelink)
     }
 
     /// ⚠️ THE FILTER-THEN-APPEND RULE. Appending without removing the old entry leaves TWO
@@ -68,15 +67,6 @@ final class SkillLinkEditingTests: XCTestCase {
         let existing = [linked("skill_1", "alpha")]
         XCTAssertEqual(SkillLinkEditing.unlinking(existing, skillID: "skill_missing").map(\.skillID),
                        ["skill_1"])
-    }
-
-    /// ⚠️ A selection AWAITING RE-LINK has a nil `skillID`, so it must not be swept away by an
-    /// unlink of some other skill — its folder address is the only record left of what the user had.
-    func testUnlinkingDoesNotRemoveASelectionAwaitingRelink() {
-        let pending = SkillSelection(skillID: nil, legacyFolderPath: "/tmp/legacy", name: "legacy")
-        let next = SkillLinkEditing.unlinking([pending, linked("skill_1", "alpha")], skillID: "skill_1")
-        XCTAssertEqual(next.count, 1)
-        XCTAssertTrue(try! XCTUnwrap(next.first).isAwaitingRelink)
     }
 
     // MARK: - Pinning

@@ -1,0 +1,17 @@
+// Debug build settings for the app target. Release does not use this file.
+//
+// ⚠️ DEBUG SIGNS AD HOC BY DEFAULT so a fresh clone builds on any Mac, with no certificate.
+// The cost is that an ad-hoc signature's identity is the build's own hash, which changes on every
+// build. macOS ties two things to that identity:
+//   • Keychain items: each one trusts the exact build that created it, so every rebuild asks again
+//     for every saved API key — and "Always Allow" lasts only until the next build.
+//   • Privacy grants (microphone, Documents, Screen Recording): reset on every rebuild.
+//
+// To sign Debug with a stable identity instead, create Config/Local.xcconfig (gitignored) from
+// Config/Local.xcconfig.example. One last round of keychain prompts follows the switch; after
+// that, rebuilds stop asking.
+
+DEVGENTIC_DEBUG_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM = FM3V43ST5B
+
+#include? "Local.xcconfig"

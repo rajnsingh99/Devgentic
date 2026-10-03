@@ -152,17 +152,28 @@ struct AddBackendProfileView: View {
 
             // 3. Footer Action Bar
             HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                TactileButton(
+                    title: "Cancel",
+                    variant: .secondary,
+                    size: .regular
+                ) {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
                 
                 Spacer()
                 
-                Button("Create Profile") { handleContinue() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(isContinueButtonDisabled)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityLabel("Create new profile")
+                TactileButton(
+                    title: "Create Profile",
+                    icon: "plus",
+                    variant: .primary,
+                    size: .regular,
+                    isDisabled: isContinueButtonDisabled
+                ) {
+                    handleContinue()
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Create new profile")
             }
             .padding()
             .background(theme.secondaryBackground)
@@ -206,16 +217,8 @@ struct AddBackendProfileView: View {
                 tools: []
             ))
         case .workflow:
-            // ⚠️ New workflows are BOUNDED (2026-08-13). They used to be created with
-            // `nodeTimeoutEnabled: false` — unbounded until the user opted in — which was defensible
-            // while the timeout only reached profile and Action nodes and the sheet let you turn it
-            // on. Both of those changed: the timeout now applies to every node kind and excludes
-            // time parked awaiting a human (so a slow HITL no longer trips it), and the Workflow
-            // Settings sheet is gone. Creating a profile that can never be bounded through any UI
-            // would be the worst of both.
-            //
-            // A genuinely long-running node still has two overrides: the node's own `hardTimeout`,
-            // and the bound profile's `executionTimeout`. Both win over this default.
+            // Every node is bounded by `WorkflowConfig.nodeTimeout` unless it sets its own
+            // `hardTimeout` or its bound profile sets `executionTimeout`.
             details = .workflow(.forNewProfile())
         case .imageGen:
             // Default routed through ProfileCapabilityFilter so a fresh profile doesn't

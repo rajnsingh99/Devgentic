@@ -1,0 +1,10 @@
+// Copy to Config/Local.xcconfig (gitignored) to sign Debug builds with a stable identity.
+// See Config/Debug.xcconfig for why that matters.
+//
+// Use any code-signing identity in your keychain — list them with:
+//   security find-identity -v -p codesigning
+// "Apple Development" (free with an Apple ID in Xcode → Settings → Accounts) works as well as a
+// Developer ID. Set DEVELOPMENT_TEAM to the Team ID in that identity's name.
+
+DEVGENTIC_DEBUG_SIGN_IDENTITY = Developer ID Application
+DEVELOPMENT_TEAM = FM3V43ST5B

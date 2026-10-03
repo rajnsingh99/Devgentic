@@ -54,6 +54,31 @@ enum MCPOAuthDiscoveryError: LocalizedError {
 
 struct MCPOAuthDiscovery {
 
+    /// The RFC 8414 §3.1 authorization-server metadata URL for an issuer.
+    ///
+    /// ⚠️ NOT AN APPEND (register KC-44). §3.1 builds the well-known URI by INSERTING
+    /// `/.well-known/oauth-authorization-server` between the HOST component and the PATH
+    /// component of the issuer identifier — `https://as.example.com/realms/acme` discovers at
+    /// `https://as.example.com/.well-known/oauth-authorization-server/realms/acme`. Appending the
+    /// segment to the whole issuer instead asks for
+    /// `…/realms/acme/.well-known/oauth-authorization-server`, which no conforming server serves,
+    /// so discovery 404'd for every issuer that carries a path (Keycloak realms, Auth0 tenants,
+    /// Okta custom URL spaces) and OAuth presented as unavailable.
+    ///
+    /// The OIDC fallback keeps its append (`{issuer}/.well-known/openid-configuration`) — that is
+    /// the construction OpenID Connect Discovery 1.0 specifies, so the two fallbacks legitimately
+    /// differ. Pure function; table-tested in MCPOAuthDiscoveryWellKnownTests.
+    static func wellKnownURL(for issuer: URL) -> URL? {
+        var components = URLComponents(url: issuer, resolvingAgainstBaseURL: false)
+        let issuerPath = components?.path ?? ""
+        let trimmed = issuerPath.count > 1 && issuerPath.hasSuffix("/")
+            ? String(issuerPath.dropLast())
+            : issuerPath
+        components?.path = "/.well-known/oauth-authorization-server"
+            + (trimmed.isEmpty || trimmed == "/" ? "" : trimmed)
+        return components?.url
+    }
+
     /// Best-effort discovery: try the OAuth metadata path first, then the
     /// OIDC path as a fallback (many providers serve the same document at
     /// both URLs). Returns nil for "no metadata found, but the server
@@ -63,7 +88,11 @@ struct MCPOAuthDiscovery {
     static func probe(issuer: URL, session: URLSession = .shared) async throws -> MCPOAuthMetadata? {
         try validate(issuer: issuer)
 
-        let oauthPath  = issuer.appendingPathComponent(".well-known/oauth-authorization-server")
+        // RFC 8414 §3.1 insertion for the OAuth document; the OIDC fallback appends, per its
+        // own spec — see `wellKnownURL`.
+        guard let oauthPath = Self.wellKnownURL(for: issuer) else {
+            throw MCPOAuthDiscoveryError.invalidIssuerURL(issuer.absoluteString)
+        }
         let oidcPath   = issuer.appendingPathComponent(".well-known/openid-configuration")
 
         // Try OAuth first, fall through to OIDC. We only swallow 404 — any
@@ -86,7 +115,10 @@ struct MCPOAuthDiscovery {
     /// is OAuth-configured (the issuer was committed to `MCPAuthenticationScheme.oauth`).
     static func fetch(issuer: URL, session: URLSession = .shared) async throws -> MCPOAuthMetadata {
         try validate(issuer: issuer)
-        let url = issuer.appendingPathComponent(".well-known/oauth-authorization-server")
+        // RFC 8414 §3.1 insertion — see `wellKnownURL`.
+        guard let url = Self.wellKnownURL(for: issuer) else {
+            throw MCPOAuthDiscoveryError.invalidIssuerURL(issuer.absoluteString)
+        }
         if let m = try await fetch(from: url, expectedIssuer: issuer, session: session) {
             return m
         }

@@ -60,9 +60,8 @@ private final class DestinationStubStore: ChatPersistenceProtocol {
     func addConversation(from conversation: Conversation) {}
     func addMessages(_ messages: [ChatMessage], toConversation conversationId: UUID) async {}
     func getConversation(withId id: UUID) -> ConversationSD? { nil }
-    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {}
     func deleteConversation(with id: UUID) {}
-    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {}
+    func updateBackendForConversation(id: UUID, backendEntityId: UUID?) {}
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {}
     func togglePinStatus(for conversationId: UUID) {}
 }

@@ -103,6 +103,7 @@ struct ExplorerSidebarView: View {
                         title: "Load Error",
                         subtitle: LocalizedStringKey(errorMessage),
                         buttonTitle: "Retry",
+                        buttonIcon: "arrow.clockwise",
                         systemImage: "exclamationmark.triangle",
                         onAction: {
                             if let rootURL = viewModel.selectedRootURL {
@@ -139,6 +140,7 @@ struct ExplorerSidebarView: View {
                     title: "No Project Open",
                     subtitle: "Open a folder to start working with your codebase context.",
                     buttonTitle: "Open Folder",
+                    buttonIcon: "folder.badge.plus",
                     systemImage: "folder.badge.plus",
                     onAction: {
                         viewModel.selectRootDirectory()
@@ -637,7 +639,7 @@ struct ExplorerItemContentRow: View {
             Button {
                 viewModel.startRename(item)
             } label: {
-                Label("Rename…", systemImage: "pencil")
+                Label("Rename", systemImage: "pencil")
             }
 
             Button(role: .destructive) {

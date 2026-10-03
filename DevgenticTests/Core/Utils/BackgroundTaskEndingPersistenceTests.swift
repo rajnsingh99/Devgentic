@@ -51,7 +51,7 @@ final class BackgroundTaskEndingPersistenceTests: XCTestCase {
         store.addConversation(from: Conversation(
             id: conversationID, messages: [], timestamp: Date(),
             userDefinedTitle: "bg ending", isPinned: false,
-            backendType: nil, backendEntityId: nil
+            backendEntityId: nil
         ))
 
         observer = BackgroundTaskObserver(registry: registry, persistence: store)

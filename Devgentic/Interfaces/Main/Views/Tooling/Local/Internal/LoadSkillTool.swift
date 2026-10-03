@@ -22,6 +22,9 @@ private let logger = DGLogger(category: "LoadSkillTool")
 enum SkillLoadError: LocalizedError {
     case notInLibrary(String)
     case versionMissing(String, String)
+    /// A manifest with no library version — only a folder scan produces one, and it never
+    /// reaches a run.
+    case notResolvedFromLibrary(String)
 
     var errorDescription: String? {
         switch self {
@@ -29,6 +32,8 @@ enum SkillLoadError: LocalizedError {
             return "Skill '\(name)' is no longer in the library — it was removed after this run started."
         case .versionMissing(let name, let version):
             return "Skill '\(name)' no longer has the version this profile reads (\(version))."
+        case .notResolvedFromLibrary(let name):
+            return "Skill '\(name)' was not resolved from the skill library, so there is nothing to load."
         }
     }
 }
@@ -40,8 +45,7 @@ enum SkillLoadError: LocalizedError {
 /// - The `<available_skills>` block in the system prompt shows skill names + descriptions.
 /// - The agent calls `load_skill(skill_name: "...")` when a task matches a skill description.
 /// - This tool reads the RESOLVED version out of the library — including a pinned one — and
-///   returns its body. A manifest with no `versionID` is a legacy blob reference and is read from
-///   disk instead; see `loadPackage`.
+///   returns its body.
 /// - The agent then follows the loaded instructions to complete the task.
 struct LoadSkillTool: DevgenticTool {
 
@@ -128,14 +132,13 @@ struct LoadSkillTool: DevgenticTool {
 
     // MARK: - Execution
 
-    /// Loads a skill's content, from the library or — for a legacy profile — from disk.
+    /// Loads a skill's content from the library.
     ///
     /// ⚠️⚠️ THIS BRANCH EXISTS BECAUSE ITS ABSENCE BROKE EVERY SKILL LOAD. When skills moved into
     /// the library, `SkillResolution` started putting a `skill_…` id in `folderPath` (the boundary
     /// type still calls it that), and this tool went on handing it to a disk reader — so the loader
     /// tried to open a file literally named `skill_<uuid>/SKILL.md` and every `load_skill` call
-    /// failed. Nothing caught it: the tool's own tests build manifests with real temp folders, which
-    /// is the LEGACY contract, and no test covered the resolution-to-load seam. That seam now has
+    /// failed. Nothing caught it: no test covered the resolution-to-load seam. That seam now has
     /// one (`LoadSkillToolTests.testLoadsFromTheLibraryWhenResolutionSuppliedAVersion`).
     ///
     /// ⚠️ Loads the RESOLVED version, not the latest. A profile that pinned an older version must
@@ -144,9 +147,7 @@ struct LoadSkillTool: DevgenticTool {
     private static func loadPackage(for manifest: SkillManifest,
                                     resourceRoot: inout URL?) throws -> SkillPackage {
         guard let versionID = manifest.versionID else {
-            // Legacy arm: `folderPath` really is a path, from a profile blob that predates the
-            // library and has not been through the import sweep.
-            return try SkillFolderScanner.loadFullPackage(for: manifest)
+            throw SkillLoadError.notResolvedFromLibrary(manifest.name)
         }
 
         // ⚠️ `try?` FLATTENS the double optional here: `fetchSkill` returns
@@ -203,7 +204,7 @@ struct LoadSkillTool: DevgenticTool {
 
         // ⚠️ The version id is the correlation key for everything below — a pinned profile and an
         // unpinned one loading the "same" skill are different bodies, and only this id tells them apart.
-        logger.notice("[SKILL_LOAD] Loading '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "LEGACY-DISK-PATH") includeResources=\(includeResources) declaredTools=\(manifest.allowedTools?.joined(separator: ",") ?? "none") bundledFiles=\(manifest.resourceCount). CONSEQUENCE: the body of THIS version reaches the model — a profile pinning an older version reads that one, so compare this id against the library before concluding an edit did not take.")
+        logger.notice("[SKILL_LOAD] Loading '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "none") includeResources=\(includeResources) declaredTools=\(manifest.allowedTools?.joined(separator: ",") ?? "none") bundledFiles=\(manifest.resourceCount). CONSEQUENCE: the body of THIS version reaches the model — a profile pinning an older version reads that one, so compare this id against the library before concluding an edit did not take.")
 
         do {
             var resourceRoot: URL?
@@ -231,10 +232,10 @@ struct LoadSkillTool: DevgenticTool {
                 }
             }
 
-            logger.notice("[SKILL_LOAD] Loaded '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "legacy"): \(result.count) chars, \(package.resources.count) resource(s), filesOnDisk=\(resourceRoot?.path ?? "NONE"). CONSEQUENCE: this text is now in the model's context for the rest of the run\(resourceRoot == nil && package.resources.isEmpty == false ? " — but the bundled files could NOT be written to disk, so any path the instructions name does not exist" : "").")
+            logger.notice("[SKILL_LOAD] Loaded '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "none"): \(result.count) chars, \(package.resources.count) resource(s), filesOnDisk=\(resourceRoot?.path ?? "NONE"). CONSEQUENCE: this text is now in the model's context for the rest of the run\(resourceRoot == nil && package.resources.isEmpty == false ? " — but the bundled files could NOT be written to disk, so any path the instructions name does not exist" : "").")
             return result
         } catch {
-            logger.error("[SKILL_LOAD] FAILED to load '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "legacy"): \(error.localizedDescription). CONSEQUENCE: the model gets an error string instead of instructions and will most likely proceed WITHOUT the skill — the skill was resolved at run start, so this means it was deleted, un-drafted or re-versioned mid-run, or a pinned version is gone.")
+            logger.error("[SKILL_LOAD] FAILED to load '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "none"): \(error.localizedDescription). CONSEQUENCE: the model gets an error string instead of instructions and will most likely proceed WITHOUT the skill — the skill was resolved at run start, so this means it was deleted, un-drafted or re-versioned mid-run, or a pinned version is gone.")
             // ⚠️ LABELLED TOO, and this site is easy to miss because it looks like app voice rather
             // than rendering: the name still comes from the manifest, and `SkillLoadError`'s own
             // messages interpolate it as well. A hostile name reaches the model through the FAILURE

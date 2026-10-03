@@ -190,18 +190,6 @@ struct WorkflowCanvasView: View {
         UnreadableLayoutInfo.active(unreadableLayout, displayedProfileID: profile.id)
     }
 
-    /// The retry count a node INHERITS from this workflow when it carries none of its own
-    /// (register INS-8).
-    ///
-    /// ⚠️ Reads the LEGACY workflow-level default. The workflow-level retry control was retired, but
-    /// `WorkflowExecutor` still honours a stored `resolvedMaxRetries` for every node whose
-    /// `nodeConfig` is nil — and it logs how many nodes that is. The inspectors need the same number
-    /// or their steppers show 0 for a node the engine will retry.
-    private var inheritedRetryDefault: Int {
-        if case .workflow(let config) = profile.details { return config.resolvedMaxRetries }
-        return 0
-    }
-
     /// True only when the canvas holds NOTHING the user put there.
     ///
     /// ⚠️ ANNOTATIONS COUNT AS CONTENT (register CVV-9). Gated on `nodes` alone, a canvas holding
@@ -346,8 +334,8 @@ struct WorkflowCanvasView: View {
             if let notice = activeNewerVersionNotice {
                 VStack {
                     Label(notice, systemImage: "arrow.up.circle.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(theme.primaryText)
+                        .font(theme.fontCaption.weight(.medium))
+                        .foregroundStyle(theme.primaryText)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
                         .background(
@@ -369,8 +357,8 @@ struct WorkflowCanvasView: View {
                 VStack {
                     Spacer()
                     Label(refusal.userMessage, systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(theme.primaryText)
+                        .font(theme.fontCaption.weight(.medium))
+                        .foregroundStyle(theme.primaryText)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
                         .background(
@@ -597,43 +585,22 @@ struct WorkflowCanvasView: View {
     }
 
     private func showInspectorPanel(for node: WorkflowNode) {
-        // [INS-4] PER KIND, from `WorkflowNodeKind.inspectorMinimumSize` — the same table the
-        // inspector views' own root frames read. One shared 800×520 was passed for all five while
-        // Router declares 680, Action 620, Gate 560 and Profile 540, so the content was laid out
-        // taller than its host window and the clipped strip is the header carrying Cancel and Save.
-        let inspectorMinimum = node.kind.inspectorMinimumSize
         NodeInspectorPanelManager.shared.show(
-            minSize: NSSize(width: inspectorMinimum.width, height: inspectorMinimum.height),
+            minSize: NSSize(width: 1040, height: 680),
             theme: theme,
             onClose: { canvasState.targetConfigNode = nil }
         ) {
-            switch node.kind {
-            case .condition:
-                ConditionNodeInspectorView(node: bindingForNode(node.id))
-            case .code:
-                CodeNodeInspectorView(node: bindingForNode(node.id))
-            case .gate:
-                GateNodeInspectorView(node: bindingForNode(node.id))
-            case .action:
-                ActionNodeInspectorView(
-                    node: bindingForNode(node.id),
-                    availableVariables: canvasState.knownVariableNames,
-                    inheritedRetryDefault: inheritedRetryDefault
-                )
-            case .profile:
-                ProfileNodeInspectorView(
-                    node: bindingForNode(node.id),
-                    profile: profileService.profiles.first(where: { $0.id == node.profileID }),
-                    inheritedRetryDefault: inheritedRetryDefault,
-                    endCoalescingRun: { canvasState.endUndoCoalescingRun() }
-                )
-                .environment(profileService)
-                .environment(toastManager)
-                .environment(router)
-                .environment(themeManager)
-            default:
-                EmptyView()
-            }
+            UnifiedNodeConfigurationView(
+                canvasState: canvasState,
+                initialSelectedNodeID: node.id,
+                profileService: profileService,
+                toastManager: toastManager,
+                router: router,
+                themeManager: themeManager,
+                onClose: {
+                    NodeInspectorPanelManager.shared.close()
+                }
+            )
         }
     }
 
@@ -858,25 +825,24 @@ struct WorkflowCanvasView: View {
                 .foregroundColor(.purple.opacity(0.5))
 
             Text("Workflow Canvas")
-                .font(.title2)
+                .font(theme.fontTitle2)
                 .fontWeight(.bold)
                 .foregroundColor(theme.primaryText)
 
             Text("Add profiles to build your workflow pipeline.\nConnect outputs to inputs to define execution order.")
-                .font(.subheadline)
+                .font(theme.fontSubheadline)
                 .foregroundColor(theme.secondaryText)
                 .multilineTextAlignment(.center)
                 .lineSpacing(4)
 
-            Button {
+            TactileButton(
+                title: "Add First Profile",
+                icon: "plus.circle.fill",
+                variant: .primary,
+                size: .regular
+            ) {
                 showingProfilePicker = true
-            } label: {
-                Label("Add First Profile", systemImage: "plus.circle.fill")
-                    .font(theme.fontBody.weight(.medium))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-            .tint(.purple)
         }
         .padding(40)
     }
@@ -894,7 +860,7 @@ struct WorkflowCanvasView: View {
                 .foregroundColor(theme.warningColor)
 
             Text("This canvas could not be read")
-                .font(.title2)
+                .font(theme.fontTitle2)
                 .fontWeight(.bold)
                 .foregroundColor(theme.primaryText)
 
@@ -905,21 +871,21 @@ struct WorkflowCanvasView: View {
                 ? "It last held \(info.summary), but the saved layout can't be decoded by this version.\n\nYour data has not been deleted — edits are being refused so it stays recoverable by a future build."
                 : "The saved layout can't be decoded by this version.\n\nYour data has not been deleted — edits are being refused so it stays recoverable by a future build."
             )
-            .font(.subheadline)
+            .font(theme.fontSubheadline)
             .foregroundColor(theme.secondaryText)
             .multilineTextAlignment(.center)
             .lineSpacing(4)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 420)
 
-            Button(role: .destructive) {
+            TactileButton(
+                title: "Discard and Start Over",
+                icon: "trash",
+                variant: .destructive,
+                size: .regular
+            ) {
                 showingDiscardUnreadableAlert = true
-            } label: {
-                Label("Discard and Start Over", systemImage: "trash")
-                    .font(theme.fontBody.weight(.medium))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
         }
         .padding(40)
         .accessibilityElement(children: .combine)
@@ -1253,10 +1219,8 @@ struct WorkflowCanvasView: View {
 
         // [WF-PE3] The remaining two non-persisting outcomes — `.failed` (the context save threw:
         // disk full, SwiftData error) and `.notConfigured` (no container) — used to FALL THROUGH
-        // here: the profile was rewritten from an in-memory graph that never reached disk (with
-        // the since-retired `agentProfileIDs` recomputed from it), and the user saw no error at
-        // all — just the dirty
-        // indicator staying lit, indistinguishable from the app being slow. The store now
+        // here: the profile was rewritten from an in-memory graph that never reached disk, and the
+        // user saw no error at all — just the dirty indicator staying lit, indistinguishable from the app being slow. The store now
         // guarantees `.failed` means "not on disk AND nothing left pending on the shared context"
         // (see `WorkflowLayoutStore.save`'s rollback), so bailing here is sufficient: nothing
         // below may run, and unlike the two refusals above this one gets a toast because no
@@ -1315,20 +1279,13 @@ struct WorkflowCanvasView: View {
         )
         }
 
-        // ⚠️ NO `agentProfileIDs` SYNC ANY MORE (2026-08-29). This used to recompute the workflow
-        // profile's parallel list of referenced agent ids from the layout. The field is retired:
-        // a workflow's nodes own their configuration, so the LAYOUT is the only record of what a
-        // workflow contains — which `ProfileReferenceIndex` and `WorkflowExecutor` already read
-        // directly, and which the composer's node count now reads too.
-        //
-        // ⚠️ The save itself STAYS, but ONLY WHEN THE PROFILE ACTUALLY CHANGED. In the profile
+        // ⚠️ The profile is saved ONLY WHEN IT ACTUALLY CHANGED. In the profile
         // editor this `profile` binding IS `editBuffer.draft`, so this write is how a workflow's own
         // edits (its name, its execution settings) reach disk — and `rebaseEditBuffer` is what stops
         // a just-saved workflow from being reported as permanently dirty.
         //
-        // ⚠️ THE GUARD IS NOT AN OPTIMISATION. Until 2026-08-30 this saved unconditionally, and once
-        // the `agentProfileIDs` sync was retired there was usually nothing left to write — an
-        // on-device pass logged FIVE `[PROFILE_SAVE] ⚠️ REDUNDANT` lines for one short session. Each
+        // ⚠️ THE GUARD IS NOT AN OPTIMISATION. Until 2026-08-30 this saved unconditionally, and
+        // there was usually nothing to write — an on-device pass logged FIVE `[PROFILE_SAVE] ⚠️ REDUNDANT` lines for one short session. Each
         // costs a write, a WAL entry, and a `lastSelected` bump, and that bump REORDERS the user's
         // "recently used" list: editing a canvas silently promoted its workflow to the top of every
         // profile picker. The store detects and logs the redundancy but still performs the write —

@@ -39,7 +39,15 @@ final class ProfileEditBuffer {
 
     /// Whether the draft differs from the last-persisted original.
     /// Computed from value comparison — no Combine pipeline needed.
-    var isDirty: Bool { draft != original }
+    ///
+    /// ⚠️ Detected model measurements are IGNORED here (`ignoringDetectedMeasurements`). The model
+    /// pickers re-detect on every open, so a refresh alone used to light Save for an edit the user
+    /// never made. They are still written by the next real save, and every run detects live anyway
+    /// (`LiveModelDetection`), so nothing depends on persisting a refresh. A real model change
+    /// still counts: it changes the model name.
+    var isDirty: Bool {
+        draft.ignoringDetectedMeasurements() != original.ignoringDetectedMeasurements()
+    }
 
     // MARK: - Init
 

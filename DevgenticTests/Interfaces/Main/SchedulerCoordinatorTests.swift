@@ -68,9 +68,8 @@ private final class SchedulerStubStore: ChatPersistenceProtocol {
     /// tests need a real row. Registered by `seedConversation`.
     var conversations: [UUID: ConversationSD] = [:]
     func getConversation(withId id: UUID) -> ConversationSD? { conversations[id] }
-    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {}
     func deleteConversation(with id: UUID) {}
-    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {}
+    func updateBackendForConversation(id: UUID, backendEntityId: UUID?) {}
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {}
     func togglePinStatus(for conversationId: UUID) {}
 }
@@ -369,7 +368,7 @@ final class SchedulerCoordinatorTests: XCTestCase {
         BackendRequestConfig(profile: BackendProfileSnapshot(
             id: UUID(),
             displayName: "Scheduled Workflow",
-            details: .workflow(WorkflowConfig(agentProfileIDs: []))
+            details: .workflow(WorkflowConfig())
         ))
     }
 

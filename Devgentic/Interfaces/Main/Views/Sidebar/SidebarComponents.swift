@@ -17,38 +17,78 @@ struct SidebarHeaderActionButton: View {
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
+
+    private var isThemeContrast: Bool {
+        buttonAccentStyle == .themeContrast
+    }
+
+    private var foregroundColor: Color {
+        if isThemeContrast {
+            return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        }
+        return theme.primaryText
+    }
+
+    private var iconColor: Color {
+        if isThemeContrast {
+            return foregroundColor
+        }
+        return theme.accentColor
+    }
+
+    private var backgroundColor: Color {
+        if isThemeContrast {
+            return theme.isDark
+                ? Color.white.opacity(isHovered ? 1.0 : 0.95)
+                : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
+        }
+        return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
+    }
+
+    private var strokeColor: Color {
+        if isThemeContrast {
+            return theme.isDark ? Color.white : Color(red: 0.12, green: 0.12, blue: 0.14)
+        }
+        return isHovered ? theme.accentColor.opacity(0.45) : theme.secondaryText.opacity(0.18)
+    }
+
+    private var shadowColor: Color {
+        if isThemeContrast {
+            return Color.black.opacity(isHovered ? 0.35 : 0.20)
+        }
+        return isHovered ? theme.accentColor.opacity(0.15) : theme.shadowColor.opacity(0.3)
+    }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: systemImage)
                     .font(theme.fontCaption2.weight(.bold))
-                    .foregroundColor(theme.accentColor)
+                    .foregroundColor(iconColor)
                 Text(title)
                     .font(theme.fontCaption2.weight(.semibold))
-                    .foregroundColor(theme.primaryText)
+                    .foregroundColor(foregroundColor)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                    .fill(backgroundColor)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(
-                        isHovered ? theme.accentColor.opacity(0.45) : theme.secondaryText.opacity(0.18),
-                        lineWidth: 1
-                    )
+                    .strokeBorder(strokeColor, lineWidth: 1)
             )
             .shadow(
-                color: isHovered ? theme.accentColor.opacity(0.15) : theme.shadowColor.opacity(0.3),
+                color: shadowColor,
                 radius: isHovered ? 4 : 2,
                 x: 0,
                 y: 1
             )
-            .scaleEffect(isHovered ? 1.03 : 1.0)
+            .scaleEffect(isHovered && !reduceMotion ? 1.03 : 1.0)
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -235,25 +275,50 @@ struct CategoryChip: View {
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
     @State private var isHovered = false
 
+    private var isThemeContrast: Bool {
+        buttonAccentStyle == .themeContrast
+    }
+
     private var textColor: Color {
-        if isSelected { return theme.primaryText }
+        if isSelected {
+            if isThemeContrast {
+                return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            }
+            return theme.primaryText
+        }
         return isHovered ? theme.primaryText : theme.secondaryText
     }
 
     private var fillColor: Color {
-        if isSelected { return theme.surfaceOverlayStrong }
+        if isSelected {
+            if isThemeContrast {
+                return theme.isDark ? Color.white : Color(red: 0.12, green: 0.12, blue: 0.14)
+            }
+            return theme.surfaceOverlayStrong
+        }
         return isHovered ? theme.surfaceOverlay : theme.surfaceOverlay.opacity(0.4)
     }
 
     private var strokeColor: Color {
-        if isSelected { return theme.accentColor.opacity(0.55) }
+        if isSelected {
+            if isThemeContrast {
+                return theme.isDark ? Color.white : Color(red: 0.12, green: 0.12, blue: 0.14)
+            }
+            return theme.accentColor.opacity(0.55)
+        }
         return isHovered ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.12)
     }
 
     private var shadowColor: Color {
-        if isSelected { return theme.accentColor.opacity(0.18) }
+        if isSelected {
+            if isThemeContrast {
+                return Color.black.opacity(0.25)
+            }
+            return theme.accentColor.opacity(0.18)
+        }
         return isHovered ? theme.shadowColor.opacity(0.35) : Color.clear
     }
 
@@ -299,11 +364,11 @@ struct SidebarEmptyStateView: View {
     let title: LocalizedStringKey
     let subtitle: LocalizedStringKey
     var buttonTitle: LocalizedStringKey? = nil
+    var buttonIcon: String? = nil
     let systemImage: String
     var onAction: (() -> Void)? = nil
 
     @Environment(\.appTheme) private var theme
-    @State private var isHovered = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -343,44 +408,13 @@ struct SidebarEmptyStateView: View {
             }
 
             if let buttonTitle, let onAction {
-                Button(action: onAction) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus")
-                            .font(theme.fontSubheadline.weight(.bold))
-                            .foregroundColor(theme.accentColor)
-                        Text(buttonTitle)
-                            .font(theme.fontSubheadline.weight(.semibold))
-                            .foregroundColor(theme.primaryText)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(
-                                isHovered ? theme.accentColor.opacity(0.55) : theme.accentColor.opacity(0.35),
-                                lineWidth: 1
-                            )
-                    )
-                    .shadow(
-                        color: isHovered ? theme.accentColor.opacity(0.2) : theme.shadowColor.opacity(0.3),
-                        radius: isHovered ? 6 : 4,
-                        x: 0,
-                        y: 2
-                    )
-                    .scaleEffect(isHovered ? 1.03 : 1.0)
-                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
-                .onHover { hovering in
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
-                        isHovered = hovering
-                    }
-                }
+                TactileButton(
+                    title: buttonTitle,
+                    icon: buttonIcon,
+                    variant: .primary,
+                    size: .regular,
+                    action: onAction
+                )
             }
 
             Spacer()

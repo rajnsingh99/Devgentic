@@ -29,23 +29,6 @@ enum AppAccentColor: String, CaseIterable {
     case grey = "grey"
     case black = "black"
 
-    init?(rawValue: String) {
-        switch rawValue {
-        case "default": self = .default
-        case "blue": self = .blue
-        case "green": self = .green
-        case "spotify", "spotify_green": self = .spotify
-        case "purple": self = .purple
-        case "orange": self = .orange
-        case "pink": self = .pink
-        case "modern_spotify", "cosmic_cyan", "cyan": self = .modernSpotify
-        case "white", "pure_white", "studio_white": self = .white
-        case "grey", "gray", "slate_grey", "slate_gray": self = .grey
-        case "black", "onyx_black", "jet_black", "pure_black": self = .black
-        default: return nil
-        }
-    }
-
     var color: Color? {
         switch self {
         case .default: return nil

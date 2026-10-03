@@ -68,7 +68,7 @@ final class ExportProjectionTests: XCTestCase {
         ]
         store.addConversation(from: Conversation(id: conversationID, messages: [], timestamp: epoch,
                                                   userDefinedTitle: "Export me", isPinned: false,
-                                                  backendType: nil, backendEntityId: nil))
+                                                  backendEntityId: nil))
         await store.addMessages(messages, toConversation: conversationID)
         return messages
     }

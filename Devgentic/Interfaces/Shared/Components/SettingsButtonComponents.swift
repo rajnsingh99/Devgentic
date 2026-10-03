@@ -65,6 +65,9 @@ enum SettingsButtonSize {
     }
 }
 
+typealias TactileButtonVariant = SettingsButtonVariant
+typealias TactileButtonSize = SettingsButtonSize
+
 // MARK: - TactileButton
 
 /// A refined, tactile button with clear dark-mode boundaries, subtle depth, and smooth spring feedback.
@@ -190,7 +193,7 @@ struct TactileButton: View {
             if isPrimaryContrast {
                 return theme.isDark ? Color.white.opacity(0.40) : Color.black.opacity(0.40)
             } else if variant == .primary {
-                return theme.isAccentLight ? Color.black.opacity(0.40) : Color.white.opacity(0.45)
+                return theme.secondaryText.opacity(0.45)
             } else {
                 return theme.secondaryText.opacity(0.45)
             }
@@ -199,11 +202,12 @@ struct TactileButton: View {
         switch variant {
         case .primary:
             if buttonAccentStyle == .themeContrast {
-                // Dark theme: White button -> Dark text
+                // Dark theme: White button -> Dark text (STYLE 2)
                 // Light theme: Dark button -> White text
                 return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
             }
-            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            // Glassmorphic mode: Primary text label (STYLE 3)
+            return isHovered ? theme.primaryText : theme.primaryText.opacity(0.95)
 
         case .secondary:
             return isHovered ? theme.primaryText : theme.primaryText.opacity(0.92)
@@ -222,6 +226,10 @@ struct TactileButton: View {
         if !isEnabled { return foregroundColor }
         switch variant {
         case .primary:
+            if buttonAccentStyle == .accent {
+                // Glassmorphic mode: Accent-colored icon (STYLE 3)
+                return theme.accentColor
+            }
             return foregroundColor
         case .secondary:
             if buttonAccentStyle == .accent && isHovered {
@@ -245,7 +253,7 @@ struct TactileButton: View {
                     ? Color.white.opacity(0.08)
                     : Color.black.opacity(0.06)
             } else if variant == .primary {
-                return theme.isAccentLight ? Color.black.opacity(0.06) : theme.accentColor.opacity(0.20)
+                return Color.white.opacity(0.04)
             } else {
                 return Color.white.opacity(0.04)
             }
@@ -258,7 +266,8 @@ struct TactileButton: View {
                     ? Color.white.opacity(isHovered ? 1.0 : 0.95)
                     : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
             }
-            return theme.accentColor.opacity(isHovered ? 1.0 : 0.92)
+            // Glassmorphic mode: Refined dark surface overlay (STYLE 3)
+            return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
 
         case .secondary:
             return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
@@ -279,7 +288,7 @@ struct TactileButton: View {
             if isPrimaryContrast {
                 return theme.isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.10)
             } else if variant == .primary {
-                return theme.accentColor.opacity(0.25)
+                return theme.dividerColor.opacity(0.20)
             } else {
                 return theme.dividerColor.opacity(0.20)
             }
@@ -292,9 +301,10 @@ struct TactileButton: View {
                     ? Color.white
                     : Color(red: 0.12, green: 0.12, blue: 0.14)
             }
-            return theme.isAccentLight
-                ? theme.dividerColor.opacity(isHovered ? 0.80 : 0.40)
-                : Color.white.opacity(isHovered ? 0.40 : 0.20)
+            // Glassmorphic mode: Subtle border with accent hover glow (STYLE 3)
+            return isHovered
+                ? theme.accentColor.opacity(0.45)
+                : theme.secondaryText.opacity(0.18)
 
         case .secondary:
             if buttonAccentStyle == .themeContrast {
@@ -324,7 +334,8 @@ struct TactileButton: View {
                     ? Color.black.opacity(isHovered ? 0.35 : 0.20)
                     : Color.black.opacity(isHovered ? 0.25 : 0.12)
             }
-            return theme.accentColor.opacity(isHovered ? 0.30 : 0.15)
+            // Glassmorphic mode: Subtle shadow with accent glow on hover (STYLE 3)
+            return isHovered ? theme.accentColor.opacity(0.15) : theme.shadowColor.opacity(0.3)
         case .secondary:
             if buttonAccentStyle == .accent && isHovered {
                 return theme.accentColor.opacity(0.18)
@@ -370,6 +381,28 @@ struct TactileIconButton: View {
         self.size = size
         self.isEnabled = isDisabled != nil ? !isDisabled! : isEnabled
         self.action = action
+    }
+
+    init(
+        icon: String,
+        tooltip: String? = nil,
+        accessibilityLabel: String? = nil,
+        variant: SettingsButtonVariant = .secondary,
+        size: SettingsButtonSize,
+        isEnabled: Bool = true,
+        isDisabled: Bool? = nil,
+        action: @escaping () -> Void
+    ) {
+        self.init(
+            icon: icon,
+            tooltip: tooltip,
+            accessibilityLabel: accessibilityLabel,
+            variant: variant,
+            size: size == .compact ? 26 : 32,
+            isEnabled: isEnabled,
+            isDisabled: isDisabled,
+            action: action
+        )
     }
 
     @State private var isHovered = false
@@ -430,7 +463,7 @@ struct TactileIconButton: View {
             if isPrimaryContrast {
                 return theme.isDark ? Color.white.opacity(0.40) : Color.black.opacity(0.40)
             } else if variant == .primary {
-                return theme.isAccentLight ? Color.black.opacity(0.40) : Color.white.opacity(0.45)
+                return theme.secondaryText.opacity(0.45)
             } else {
                 return theme.secondaryText.opacity(0.45)
             }
@@ -441,7 +474,7 @@ struct TactileIconButton: View {
             if buttonAccentStyle == .themeContrast {
                 return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
             }
-            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            return theme.accentColor
         case .secondary:
             return isHovered ? (buttonAccentStyle == .themeContrast ? theme.primaryText : theme.accentColor) : theme.secondaryText
         case .subtle:
@@ -458,7 +491,7 @@ struct TactileIconButton: View {
                     ? Color.white.opacity(0.08)
                     : Color.black.opacity(0.06)
             } else if variant == .primary {
-                return theme.isAccentLight ? Color.black.opacity(0.06) : theme.accentColor.opacity(0.20)
+                return Color.white.opacity(0.04)
             } else {
                 return Color.white.opacity(0.04)
             }
@@ -471,7 +504,7 @@ struct TactileIconButton: View {
                     ? Color.white.opacity(isHovered ? 1.0 : 0.95)
                     : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
             }
-            return theme.accentColor.opacity(isHovered ? 1.0 : 0.88)
+            return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
         case .secondary:
             return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
         case .subtle:
@@ -489,7 +522,7 @@ struct TactileIconButton: View {
             if isPrimaryContrast {
                 return theme.isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.10)
             } else if variant == .primary {
-                return theme.accentColor.opacity(0.25)
+                return theme.dividerColor.opacity(0.20)
             } else {
                 return theme.dividerColor.opacity(0.18)
             }
@@ -500,9 +533,9 @@ struct TactileIconButton: View {
             if buttonAccentStyle == .themeContrast {
                 return theme.isDark ? Color.white : Color(red: 0.12, green: 0.12, blue: 0.14)
             }
-            return theme.isAccentLight
-                ? theme.dividerColor.opacity(isHovered ? 0.80 : 0.40)
-                : Color.white.opacity(isHovered ? 0.35 : 0.18)
+            return isHovered
+                ? theme.accentColor.opacity(0.45)
+                : theme.secondaryText.opacity(0.18)
         case .secondary:
             if buttonAccentStyle == .themeContrast {
                 return isHovered ? theme.primaryText.opacity(0.35) : theme.secondaryText.opacity(0.18)

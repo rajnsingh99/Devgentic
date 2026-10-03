@@ -51,11 +51,6 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
         XCTAssertEqual(try roundTrip(ConditionField(rawValue: "nodeMetadata")!).rawValue, "nodeMetadata")
     }
 
-    func testUnknownFailurePolicyAndJoinModeSurviveTheRoundTrip() throws {
-        XCTAssertEqual(try roundTrip(NodeFailurePolicy(rawValue: "retryTwice")!).rawValue, "retryTwice")
-        XCTAssertEqual(try roundTrip(JoinMode(rawValue: "quorum")!).rawValue, "quorum")
-    }
-
     func testUnknownStickyColorSurvivesAndDrawsTheDefault() throws {
         let color = StickyNoteColor(rawValue: "teal")!
         XCTAssertEqual(try roundTrip(color).rawValue, "teal")
@@ -67,8 +62,6 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
     func testAllCasesExcludeTheCatchAll() {
         XCTAssertFalse(ConditionOp.allCases.contains(where: { if case .other = $0 { return true }; return false }))
         XCTAssertFalse(ConditionField.allCases.contains(where: { if case .other = $0 { return true }; return false }))
-        XCTAssertFalse(NodeFailurePolicy.allCases.contains(where: { if case .other = $0 { return true }; return false }))
-        XCTAssertFalse(JoinMode.allCases.contains(where: { if case .other = $0 { return true }; return false }))
         XCTAssertFalse(StickyNoteColor.allCases.contains(where: { if case .other = $0 { return true }; return false }))
     }
 
@@ -129,14 +122,9 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
 
     // MARK: - WF-PE4: the kind-decode diagnostic
 
-    /// A MODERN non-profile node whose `kind` fails must surface the TRUE error — not
-    /// `keyNotFound(profileID)`, a legacy key with nothing to do with the failure.
-    /// [WF-PE4 rewrite, 2026-08-24] This test used to pin "an unknown kind on a modern node must
-    /// THROW the real error" — the diagnostic half of the defect, when the throw itself still cost
-    /// the whole layout. The contract is now stronger: an unknown kind decodes as a PRESERVED
-    /// `.unsupported` placeholder (never a guessed runnable kind — the half of the old assertion
-    /// that still matters), and the throw survives only for genuine corruption
-    /// (`testMissingKindWithNoLegacyKeysStillFailsTheDecode`).
+    /// An unknown kind decodes as a PRESERVED `.unsupported` placeholder — never a guessed runnable
+    /// kind — and the throw survives only for genuine corruption
+    /// (`testMissingKindStillFailsTheDecode`).
     func testUnknownKindOnAModernNodeBecomesAPlaceholderNotAGuess() throws {
         let json = """
         {"id":"\(UUID().uuidString)","kind":{"teleport":{}},"positionX":0,"positionY":0,"displayName":"Future Node"}
@@ -148,18 +136,22 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
         XCTAssertEqual(node.displayName, "Future Node")
     }
 
-    /// A LEGACY node (no `kind`, `profileID` present) must still decode via the fallback.
-    func testLegacyProfileNodeStillDecodes() throws {
-        let pid = UUID()
+    /// The retired `profileID` + `profileType` node shape (no `kind`) is NOT decoded: a missing
+    /// `kind` is corruption, so the unreadable-layout machinery owns it.
+    func testTheRetiredProfileNodeShapeIsRejected() {
         let json = """
-        {"id":"\(UUID().uuidString)","profileID":"\(pid.uuidString)","profileType":"Bot","positionX":10,"positionY":20,"displayName":"Old Bot"}
+        {"id":"\(UUID().uuidString)","profileID":"\(UUID().uuidString)","profileType":"Bot","positionX":10,"positionY":20,"displayName":"Old Bot"}
         """
-        let node = try JSONDecoder().decode(WorkflowNode.self, from: json.data(using: .utf8)!)
-        guard case .profile(let decodedID, let type) = node.kind else {
-            return XCTFail("legacy node did not reconstruct as a profile node")
-        }
-        XCTAssertEqual(decodedID, pid)
-        XCTAssertEqual(type, .bot)
+        XCTAssertThrowsError(try JSONDecoder().decode(WorkflowNode.self, from: json.data(using: .utf8)!))
+    }
+
+    /// A profile node encodes its `kind` only — no duplicate top-level `profileID`/`profileType`.
+    func testAProfileNodeEncodesItsKindOnly() throws {
+        let node = WorkflowNode(profileID: UUID(), position: .zero, displayName: "Bot", profileType: .bot)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(node)) as? [String: Any])
+        XCTAssertNotNil(object["kind"])
+        XCTAssertNil(object["profileID"])
+        XCTAssertNil(object["profileType"])
     }
 
     // MARK: - WF-TS5: the limit of this guarantee
@@ -264,9 +256,9 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
         XCTAssertEqual(decoded.unsupportedNodes.count, 1)
     }
 
-    /// The corruption boundary: a node with NO kind and NO legacy profileID is not version skew,
-    /// and must still fail the decode so the unreadable-layout machinery owns it.
-    func testMissingKindWithNoLegacyKeysStillFailsTheDecode() {
+    /// The corruption boundary: a node with NO kind is not version skew, and must still fail the
+    /// decode so the unreadable-layout machinery owns it.
+    func testMissingKindStillFailsTheDecode() {
         let json = Data("""
         {"nodes": [{"id": "11111111-1111-1111-1111-111111111111", "positionX": 0, "positionY": 0, "displayName": "No Kind"}], "edges": []}
         """.utf8)
@@ -276,20 +268,20 @@ final class WorkflowLayoutForwardCompatTests: XCTestCase {
 
     // MARK: - [WF-SE6] unattendedAutoApprove round-trips (and its absence decodes as nil)
 
-    /// The new SECURITY field must survive its own round-trip, and a pre-v3 blob without the key
-    /// must decode nil (= off) — this addition is why `layoutBlobVersion` bumped 2 → 3.
+    /// The SECURITY field must survive its own round-trip, and a config without the key must
+    /// decode nil (= off).
     func testUnattendedAutoApproveRoundTripsAndDefaultsNil() throws {
         var config = WorkflowNodeConfig()
         config.unattendedAutoApprove = true
         let decoded = try roundTrip(config)
         XCTAssertEqual(decoded.unattendedAutoApprove, true)
 
-        let legacy = Data("""
+        let partial = Data("""
         {"maxNodeRetries": 2}
         """.utf8)
-        let old = try JSONDecoder().decode(WorkflowNodeConfig.self, from: legacy)
-        XCTAssertNil(old.unattendedAutoApprove, "a pre-v3 config decodes with the setting OFF, never guessed")
-        XCTAssertEqual(old.maxNodeRetries, 2)
+        let decodedPartial = try JSONDecoder().decode(WorkflowNodeConfig.self, from: partial)
+        XCTAssertNil(decodedPartial.unattendedAutoApprove, "an absent key decodes with the setting OFF, never guessed")
+        XCTAssertEqual(decodedPartial.maxNodeRetries, 2)
     }
 
     /// The run gate: an unsupported node raises a BLOCKING validation error, so the user learns

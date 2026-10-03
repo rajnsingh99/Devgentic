@@ -185,7 +185,9 @@ struct WorkflowExecutionTimelineView: View {
         VStack(spacing: 0) {
             runHeader
             unsavedEditsDisclosure
-            Divider().opacity(0.4)
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(height: 0.5)
 
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
@@ -278,20 +280,15 @@ struct WorkflowExecutionTimelineView: View {
                 .fixedSize()
 
             if let onRerun, !displayData.isRunning {
-                Button(action: onRerun) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("Re-run")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundColor(theme.secondaryText.opacity(rerunBlocked ? 0.45 : 1.0))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(theme.surfaceOverlay))
+                TactileButton(
+                    title: "Re-run",
+                    icon: "arrow.clockwise",
+                    variant: .secondary,
+                    size: .compact,
+                    isDisabled: rerunBlocked
+                ) {
+                    onRerun()
                 }
-                .buttonStyle(.plain)
-                .disabled(rerunBlocked)
                 .help(rerunBlocked
                       ? "Another run is in progress — wait for it to finish"
                       : "Run this workflow again with the same input")
@@ -466,6 +463,7 @@ struct WorkflowExecutionTimelineView: View {
                         .background(Capsule().fill(theme.surfaceOverlay))
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                     .help(isRequested
                           ? "Cancel the skip — this node will run normally"
                           : "Skip this node when the run reaches it — its input is passed downstream unchanged (downstream gets the node's input, not its output)")
@@ -474,7 +472,7 @@ struct WorkflowExecutionTimelineView: View {
 
                 // RUNNING-skip (Phase B increment 5): bot/agent rows of a LIVE run, mid-flight.
                 // NOT undoable — the engine's racer child tears the node down the moment it fires,
-                // so once clicked the button becomes a disabled "Skipping…" (driven observably by
+                // so once clicked the button becomes a disabled "Skipping" (driven observably by
                 // the store's in-flight state; the row itself flips to Skipped when the engine's
                 // event lands). Sub-workflow rows never qualify (`isRunningSkippable` excludes
                 // them — the structural path has no racer; increment 8 is deferred).
@@ -487,7 +485,7 @@ struct WorkflowExecutionTimelineView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "forward.end")
                                 .font(.system(size: 9, weight: .semibold))
-                            Text(inFlight ? "Skipping…" : "Skip")
+                            Text(inFlight ? "Skipping" : "Skip")
                                 .font(.system(size: 11, weight: .medium))
                         }
                         .foregroundColor(inFlight ? theme.tertiaryText : theme.secondaryText)
@@ -497,6 +495,7 @@ struct WorkflowExecutionTimelineView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(inFlight)
+                    .pointingHandCursor(enabled: !inFlight)
                     .help(inFlight
                           ? "Skip is in progress — the node's in-flight work is being torn down"
                           : "Skip this node NOW — its in-flight work is discarded and its input is passed downstream unchanged (not undoable; downstream gets the node's input, not its output)")
@@ -506,6 +505,7 @@ struct WorkflowExecutionTimelineView: View {
                 if isSelected {
                     expandedContent(for: node, edgeColor: rowColor)
                         .padding(.top, 6)
+                        .transition(.opacity)
                 }
             }
             .padding(.bottom, 18)
@@ -525,6 +525,7 @@ struct WorkflowExecutionTimelineView: View {
             }
         }
         .onTapGesture { selectedNodeID = node.nodeID }
+        .pointingHandCursor()
         .accessibilityAddTraits(.isButton)
         // ⚠️ Must agree with the visible tag, and now does BY CONSTRUCTION — both read
         // `nodeTagLabel`. This used to read the RAW status, so on every conditional run VoiceOver
@@ -639,6 +640,7 @@ struct WorkflowExecutionTimelineView: View {
                     // WF-RU4's softening. One colour decision per row, computed above.
                     finalOutcomeExpanded(status: status, edgeColor: statusColor)
                         .padding(.top, 6)
+                        .transition(.opacity)
                 }
             }
             .padding(.bottom, 4)
@@ -657,6 +659,7 @@ struct WorkflowExecutionTimelineView: View {
             }
         }
         .onTapGesture { selectedNodeID = nil }
+        .pointingHandCursor()
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("Final Outcome, \(visibleTagLabel)")
         .accessibilityHint(isSelected ? "Selected" : "Show final output")
@@ -729,6 +732,7 @@ struct WorkflowExecutionTimelineView: View {
             if let tagAction {
                 statusTag(label: tagLabel, color: tagColor, icon: tagIcon)
                     .onTapGesture { tagAction() }
+                    .pointingHandCursor()
                     .help(Text("Show me where to respond"))
             } else {
                 statusTag(label: tagLabel, color: tagColor, icon: tagIcon)
@@ -946,7 +950,9 @@ struct WorkflowExecutionTimelineView: View {
                                 events: node.nodeTimeline,
                                 isStreaming: false,
                                 chatFidelity: true,
-                                conversationID: conversationID
+                                conversationID: conversationID,
+                                terminalOutcome: .cancelled,
+                                isInterrupted: true
                             )
                         }
                         inlineStatusLine(message: notRunMessage(for: node), showsSpinner: false)
@@ -959,7 +965,9 @@ struct WorkflowExecutionTimelineView: View {
                                 events: node.nodeTimeline,
                                 isStreaming: false,
                                 chatFidelity: true,
-                                conversationID: conversationID
+                                conversationID: conversationID,
+                                terminalOutcome: .cancelled,
+                                isInterrupted: true
                             )
                         }
                         inlineStatusLine(message: String(localized: "Cancelled before this node finished."), showsSpinner: false)
@@ -992,7 +1000,9 @@ struct WorkflowExecutionTimelineView: View {
                                 isStreaming: false,
                                 chatFidelity: true,
                                 finalContentText: node.detail,
-                                conversationID: conversationID
+                                conversationID: conversationID,
+                                terminalOutcome: isError ? .failed : .completed,
+                                isInterrupted: false
                             )
                         }
 
@@ -1169,12 +1179,16 @@ private struct TimelineCopyChip: View {
             .padding(.vertical, 5)
             .background(
                 Capsule()
-                    .fill(isHovering ? theme.surfaceOverlay.opacity(0.8) : theme.surfaceOverlay.opacity(0.4))
+                    .fill(isHovering ? theme.surfaceOverlayStrong : theme.surfaceOverlay.opacity(0.4))
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(isHovering ? theme.accentColor.opacity(0.3) : theme.dividerColor.opacity(0.2), lineWidth: 0.5)
             )
             .contentShape(Capsule())
-            .scaleEffect(isHovering ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .accessibilityLabel(isCopied ? "Copied" : "Copy output")
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {

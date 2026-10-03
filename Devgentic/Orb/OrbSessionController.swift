@@ -2375,7 +2375,7 @@ final class OrbSessionController {
         observeInteractions()
         // Bind the profile so restart-resume, ChatOps, and the sidebar all resolve it.
         persistence.updateBackendForConversation(
-            id: convID, backendType: nil, backendEntityId: config.profile.id
+            id: convID, backendEntityId: config.profile.id
         )
 
         // Best of both worlds: the orb stays wordless while the actual run — streamed

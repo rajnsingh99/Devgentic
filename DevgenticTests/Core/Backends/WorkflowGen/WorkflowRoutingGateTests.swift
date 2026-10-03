@@ -6,9 +6,7 @@
 //
 //  Pins the routing model after the 2026-08-12 simplification (user's design decision).
 //
-//  The per-node failure policy is GONE. `skipDependents` never had a runtime read — it was the
-//  fall-through; `continueAll` and `stopWorkflow` are decode-only. Failure routing is now
-//  expressed on the CANVAS:
+//  There is no per-node failure policy. Failure routing is expressed on the CANVAS:
 //
 //    • error port unwired → the branch stops
 //    • error port wired   → the downstream runs and receives the failure
@@ -44,10 +42,8 @@ final class WorkflowRoutingGateTests: XCTestCase {
         return state
     }
 
-    /// `policy` is deliberately settable so these tests prove a STORED policy changes nothing.
-    private func nodes(policy: NodeFailurePolicy? = nil) -> [WorkflowNode] {
-        var upstream = WorkflowNode(id: upstreamID, kind: .code(CodeNodeConfig()), position: .zero, displayName: "Fetcher")
-        if let policy { upstream.nodeConfig = WorkflowNodeConfig(onFailure: policy) }
+    private func nodes() -> [WorkflowNode] {
+        let upstream = WorkflowNode(id: upstreamID, kind: .code(CodeNodeConfig()), position: .zero, displayName: "Fetcher")
         let downstream = WorkflowNode(id: downstreamID, kind: .code(CodeNodeConfig()), position: .zero, displayName: "Summarizer")
         return [upstream, downstream]
     }
@@ -113,24 +109,22 @@ final class WorkflowRoutingGateTests: XCTestCase {
                          "a skip propagates as a failure signal")
     }
 
-    // MARK: - Retired policies change nothing
+    // MARK: - A failure activates only the error port
 
-    func testStoredContinueAllPolicyChangesNothing() {
-        for policy in [NodeFailurePolicy.continueAll, .stopWorkflow, .skipDependents] {
-            assertGatesAgree(state(.failed(.modelError(provider: "t", error: "boom")), activatesErrorPort: true),
-                             nodes(policy: policy), [edge(nil)],
-                             runs: false, receivesData: false,
-                             "stored policy '\(policy.rawValue)' must be ignored")
-        }
+    func testAFailureLeavesTheDefaultEdgeDead() {
+        assertGatesAgree(state(.failed(.modelError(provider: "t", error: "boom")), activatesErrorPort: true),
+                         nodes(), [edge(nil)],
+                         runs: false, receivesData: false,
+                         "with only the error port active, the default edge is dead")
     }
 
-    func testStoredPolicyDoesNotResurrectLabeledPorts() {
-        // A gate option that was never chosen must stay dead regardless of stored policy.
+    func testAFailureDoesNotResurrectLabeledPorts() {
+        // A gate option that was never chosen must stay dead.
         var state = WorkflowState()
         state.recordResult(from: envelope(.failed(.modelError(provider: "t", error: "boom"))))
         state.setActiveOutputPorts(["error"], for: upstreamID)
 
-        assertGatesAgree(state, nodes(policy: .continueAll), [edge("Approve")],
+        assertGatesAgree(state, nodes(), [edge("Approve")],
                          runs: false, receivesData: false,
                          "an unchosen option port must never fire")
     }
@@ -211,29 +205,6 @@ final class WorkflowRoutingGateTests: XCTestCase {
 
         XCTAssertFalse(s.shouldExecuteNode(downstreamID, edges: edges, nodes: [dead, healthy, merge]),
                        "nothing is exclusive here, so the dead branch is REQUIRED — no silent partial input")
-    }
-
-    /// A stored `joinMode` from a pre-2026-08-13 layout must change nothing.
-    func testStoredJoinModeIsIgnored() {
-        for stored in [JoinMode.all, .any] {
-            let otherID = UUID()
-            var s = WorkflowState()
-            s.recordResult(from: envelope(.failed(.modelError(provider: "t", error: "boom"))))
-            s.setActiveOutputPorts(["error"], for: upstreamID)
-            s.recordResult(from: NodeResultEnvelope(
-                taskID: UUID(), nodeID: otherID, sourceProfileID: UUID(),
-                profileName: "Healthy", profileType: .bot, status: .completed,
-                output: "ok", artifacts: [], metadata: .simple(start: Date(), end: Date(), output: "ok")))
-
-            let dead = WorkflowNode(id: upstreamID, kind: .code(CodeNodeConfig()), position: .zero, displayName: "Fetcher")
-            let healthy = WorkflowNode(id: otherID, kind: .code(CodeNodeConfig()), position: .zero, displayName: "Healthy")
-            var merge = WorkflowNode(id: downstreamID, kind: .code(CodeNodeConfig()), position: .zero, displayName: "Merge")
-            merge.nodeConfig = WorkflowNodeConfig(joinMode: stored)
-            let edges = [edge(nil), WorkflowEdge(sourceNodeID: otherID, targetNodeID: downstreamID)]
-
-            XCTAssertFalse(s.shouldExecuteNode(downstreamID, edges: edges, nodes: [dead, healthy, merge]),
-                           "stored joinMode '\(stored.rawValue)' must not change the derived verdict")
-        }
     }
 
     // MARK: - Join semantics survive    // MARK: - Join semantics survive

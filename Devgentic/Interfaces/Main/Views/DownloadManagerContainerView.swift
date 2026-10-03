@@ -106,16 +106,9 @@ struct DownloadManagerContainerView: View {
                 }
 
                 if !historyRecords.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("History (\(historyRecords.count))")
-                                .font(theme.fontSubheadline.weight(.bold))
-                                .foregroundColor(theme.primaryText)
-                                .textCase(.uppercase)
-                                .tracking(0.5)
-
-                            Spacer()
-
+                    sectionView(
+                        title: "History (\(historyRecords.count))",
+                        trailing: {
                             TactileButton(
                                 title: "Clear History",
                                 icon: "trash",
@@ -125,7 +118,7 @@ struct DownloadManagerContainerView: View {
                                 showingClearAlert = true
                             }
                         }
-
+                    ) {
                         ForEach(historyRecords) { record in
                             HistoryDownloadCardView(record: record)
                         }
@@ -214,16 +207,175 @@ struct DownloadManagerContainerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func sectionView<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+    private func sectionView<Content: View, Trailing: View>(
+        title: String,
+        @ViewBuilder trailing: () -> Trailing,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(theme.fontSubheadline.weight(.bold))
-                .foregroundColor(theme.primaryText)
-                .textCase(.uppercase)
-                .tracking(0.5)
+            HStack {
+                Text(title)
+                    .font(theme.fontSubheadline.weight(.bold))
+                    .foregroundColor(theme.primaryText)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+
+                Spacer()
+
+                trailing()
+            }
 
             content()
         }
+    }
+
+    private func sectionView<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        sectionView(title: title, trailing: { EmptyView() }, content: content)
+    }
+}
+
+// MARK: - Download Action Buttons
+
+private struct DownloadActionPillButton: View {
+    let title: LocalizedStringKey
+    let icon: String
+    var tint: Color? = nil
+    var isDestructive: Bool = false
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var activeTint: Color {
+        if isDestructive {
+            return theme.errorColor
+        }
+        return tint ?? theme.accentColor
+    }
+
+    private var foregroundColor: Color {
+        if isDestructive {
+            return isHovered ? .white : theme.errorColor
+        }
+        return isHovered ? activeTint : activeTint.opacity(0.9)
+    }
+
+    private var backgroundColor: Color {
+        if isDestructive {
+            return isHovered ? theme.errorColor : theme.errorColor.opacity(0.10)
+        }
+        return isHovered ? activeTint.opacity(0.18) : activeTint.opacity(0.08)
+    }
+
+    private var borderColor: Color {
+        if isDestructive {
+            return isHovered ? theme.errorColor : theme.errorColor.opacity(0.25)
+        }
+        return isHovered ? activeTint.opacity(0.40) : activeTint.opacity(0.18)
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11.5, weight: .semibold))
+            }
+            .foregroundColor(foregroundColor)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(backgroundColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(borderColor, lineWidth: 1)
+            )
+            .scaleEffect(isHovered && !reduceMotion ? 1.02 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct DownloadActionIconButton: View {
+    let icon: String
+    var tooltip: String? = nil
+    var accessibilityLabel: String? = nil
+    var tint: Color? = nil
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isHovered ? (tint ?? theme.primaryText) : (tint ?? theme.secondaryText))
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(isHovered ? theme.secondaryText.opacity(0.35) : theme.dividerColor.opacity(0.4), lineWidth: 1)
+                )
+                .scaleEffect(isHovered && !reduceMotion ? 1.04 : 1.0)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(tooltip ?? "")
+        .accessibilityLabel(accessibilityLabel ?? tooltip ?? "")
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+private struct DownloadMoreActionsMenuLabel: View {
+    @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Image(systemName: "ellipsis")
+            .font(.system(size: 12, weight: .semibold))
+            .frame(width: 26, height: 26)
+            .foregroundColor(isHovered ? theme.primaryText : theme.secondaryText)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(isHovered ? theme.secondaryText.opacity(0.35) : theme.dividerColor.opacity(0.4), lineWidth: 1)
+            )
+            .scaleEffect(isHovered && !reduceMotion ? 1.04 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .pointingHandCursor()
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    isHovered = hovering
+                }
+            }
     }
 }
 
@@ -233,6 +385,8 @@ private struct ActiveDownloadCardView: View {
 
     let record: DownloadRecord
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered: Bool = false
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
@@ -297,36 +451,47 @@ private struct ActiveDownloadCardView: View {
                     // G2 shipped this on the sidebar but not here, so the Downloads screen
                     // could only cancel — discarding bytes the user meant to keep.
                     if record.backend == .mlx {
-                        Button {
+                        DownloadActionPillButton(
+                            title: "Pause",
+                            icon: "pause.circle",
+                            tint: theme.secondaryText
+                        ) {
                             MLXModelService.shared.pauseDownload()
-                        } label: {
-                            Label("Pause", systemImage: "pause.circle")
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
                         }
-                        .buttonStyle(.plain)
                         .help("Stops the download but keeps everything already fetched, so it can continue later.")
                     }
 
-                    Button {
+                    DownloadActionPillButton(
+                        title: "Cancel",
+                        icon: "xmark.circle",
+                        isDestructive: true
+                    ) {
                         DownloadManager.shared.cancelDownload(record)
-                    } label: {
-                        Label("Cancel", systemImage: "xmark.circle")
-                            .font(.caption)
-                            .foregroundColor(theme.errorColor)
                     }
-                    .buttonStyle(.plain)
                     .help("Stops the download and discards the partial files.")
                 }
             }
         }
         .padding(16)
-        .background(theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(theme.dividerColor, lineWidth: 1)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHovered ? theme.controlBackground : theme.secondaryBackground)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.dividerColor, lineWidth: 1)
+        )
+        .shadow(
+            color: isHovered ? theme.shadowColor.opacity(0.12) : Color.clear,
+            radius: 8,
+            y: 2
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onHover { hovering in
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
     }
 }
 
@@ -337,6 +502,8 @@ private struct HistoryDownloadCardView: View {
     let record: DownloadRecord
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered: Bool = false
     @State private var showingRedownloadAlert: Bool = false
     /// Bytes still on disk for a row the user asked to remove — non-nil only while the
     /// "this would strand them" confirmation is up.
@@ -368,11 +535,11 @@ private struct HistoryDownloadCardView: View {
         HStack(spacing: 16) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(tint.opacity(0.08))
+                    .fill(tint.opacity(0.12))
                     .frame(width: 44, height: 44)
                 Image(systemName: icon)
                     .font(.title3)
-                    .foregroundColor(tint.opacity(0.6))
+                    .foregroundColor(tint.opacity(0.85))
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -394,6 +561,15 @@ private struct HistoryDownloadCardView: View {
                     }
                 }
                 .font(.caption)
+
+                if record.status == .failed, let error = record.errorMessage, !error.isEmpty {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundColor(theme.errorColor)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
             }
 
             Spacer()
@@ -403,25 +579,23 @@ private struct HistoryDownloadCardView: View {
             // ⚠️ On the row, not in the menu: tucked away, a paused or failed download's bytes
             // were easy to forget — gigabytes the user never knew were still there.
             if isResumableMLX {
-                HStack(spacing: 12) {
-                    Button {
+                HStack(spacing: 8) {
+                    DownloadActionPillButton(
+                        title: "Resume",
+                        icon: "play.circle",
+                        tint: theme.accentColor
+                    ) {
                         resume()
-                    } label: {
-                        Label("Resume", systemImage: "play.circle")
-                            .font(.caption)
-                            .foregroundColor(theme.accentColor)
                     }
-                    .buttonStyle(.plain)
                     .help("Continues from the files already downloaded.")
 
-                    Button {
+                    DownloadActionPillButton(
+                        title: "Discard",
+                        icon: "trash.slash",
+                        isDestructive: true
+                    ) {
                         confirmingDiscard = true
-                    } label: {
-                        Label("Discard", systemImage: "trash.slash")
-                            .font(.caption)
-                            .foregroundColor(theme.errorColor)
                     }
-                    .buttonStyle(.plain)
                     .help("Deletes the partial files and removes this row.")
                 }
             }
@@ -430,7 +604,7 @@ private struct HistoryDownloadCardView: View {
                 Button {
                     showingRedownloadAlert = true
                 } label: {
-                    Label("Re-download…", systemImage: "arrow.clockwise")
+                    Label("Re-download", systemImage: "arrow.clockwise")
                 }
                 Button(role: .destructive) {
                     requestRemoval()
@@ -438,11 +612,7 @@ private struct HistoryDownloadCardView: View {
                     Label("Remove from History", systemImage: "trash")
                 }
             } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(.body, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .foregroundColor(theme.secondaryText)
-                    .background(Circle().fill(theme.surfaceOverlay))
+                DownloadMoreActionsMenuLabel()
             }
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
@@ -450,12 +620,25 @@ private struct HistoryDownloadCardView: View {
             .accessibilityLabel("Actions for \(record.displayName)")
         }
         .padding(16)
-        .background(theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(theme.dividerColor, lineWidth: 1)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHovered ? theme.controlBackground : theme.secondaryBackground)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.dividerColor, lineWidth: 1)
+        )
+        .shadow(
+            color: isHovered ? theme.shadowColor.opacity(0.12) : Color.clear,
+            radius: 8,
+            y: 2
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onHover { hovering in
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
         .alert(
             "Re-download \(record.displayName)?",
             isPresented: $showingRedownloadAlert
@@ -516,9 +699,8 @@ private struct HistoryDownloadCardView: View {
             Label("Completed", systemImage: "checkmark.circle.fill")
                 .foregroundColor(theme.successColor)
         case .failed:
-            Label(record.errorMessage ?? "Failed", systemImage: "exclamationmark.triangle.fill")
+            Label("Failed", systemImage: "exclamationmark.triangle.fill")
                 .foregroundColor(theme.errorColor)
-                .lineLimit(1)
         case .cancelled:
             Label("Cancelled", systemImage: "minus.circle.fill")
                 .foregroundColor(theme.warningColor)
@@ -609,9 +791,9 @@ private struct HistoryDownloadCardView: View {
             case .alreadyInProgress:
                 toastManager.show("Already downloading", style: .warning)
             case .resumedFromHistory:
-                toastManager.show("Re-downloading \(record.displayName)…", style: .success)
+                toastManager.show("Re-downloading \(record.displayName)", style: .success)
             case .startedFresh:
-                toastManager.show("Downloading \(record.displayName)…", style: .success)
+                toastManager.show("Downloading \(record.displayName)", style: .success)
             case .failed(let reason):
                 toastManager.show(reason, style: .error)
             }
@@ -672,7 +854,11 @@ private struct LeftoverDownloadsSection: View {
                 .foregroundColor(theme.secondaryText)
 
             ForEach(leftovers) { leftover in
-                row(leftover)
+                LeftoverDownloadCardView(
+                    leftover: leftover,
+                    onResume: { resume(leftover) },
+                    onDiscard: { pendingDiscard = [leftover] }
+                )
             }
         }
         .alert(
@@ -695,72 +881,6 @@ private struct LeftoverDownloadsSection: View {
         }
     }
 
-    private func row(_ leftover: MLXModelService.OrphanedPartialDownload) -> some View {
-        HStack(spacing: 16) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(ModelBackendType.mlx.tintColor.opacity(0.08))
-                    .frame(width: 44, height: 44)
-                Image(systemName: "arrow.down.circle.dotted")
-                    .font(.title3)
-                    .foregroundColor(ModelBackendType.mlx.tintColor)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                // A repo id is an identifier, not prose.
-                Text(verbatim: leftover.repoId)
-                    .font(.headline)
-                    .foregroundColor(theme.primaryText)
-                    .lineLimit(1)
-                Text("\(Self.size(leftover.bytes)) on disk · not in your download history")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
-            }
-
-            Spacer()
-
-            HStack(spacing: 12) {
-                Button {
-                    resume(leftover)
-                } label: {
-                    Label("Resume", systemImage: "play.circle")
-                        .font(.caption)
-                        .foregroundColor(theme.accentColor)
-                }
-                .buttonStyle(.plain)
-                .help("Continues from the files already downloaded.")
-
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([leftover.path])
-                } label: {
-                    Image(systemName: "folder")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
-                }
-                .buttonStyle(.plain)
-                .help("Show in Finder")
-                .accessibilityLabel("Show \(leftover.repoId) in Finder")
-
-                Button {
-                    pendingDiscard = [leftover]
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                        .font(.caption)
-                        .foregroundColor(theme.errorColor)
-                }
-                .buttonStyle(.plain)
-                .help("Deletes these partial files.")
-            }
-        }
-        .padding(16)
-        .background(theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(theme.dividerColor, lineWidth: 1)
-        )
-    }
-
     private func resume(_ leftover: MLXModelService.OrphanedPartialDownload) {
         Task { @MainActor in
             switch await DownloadCoordinator.resumeMLXDownload(repoId: leftover.repoId) {
@@ -769,7 +889,7 @@ private struct LeftoverDownloadsSection: View {
             case .alreadyInstalled:
                 toastManager.show("\(leftover.repoId) is already installed", style: .success)
             default:
-                toastManager.show("Resuming \(leftover.repoId)…", style: .success)
+                toastManager.show("Resuming \(leftover.repoId)", style: .success)
             }
         }
     }
@@ -785,3 +905,94 @@ private struct LeftoverDownloadsSection: View {
         }
     }
 }
+
+// MARK: - Leftover download card
+
+private struct LeftoverDownloadCardView: View {
+    let leftover: MLXModelService.OrphanedPartialDownload
+    let onResume: () -> Void
+    let onDiscard: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered: Bool = false
+
+    private static func size(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(ModelBackendType.mlx.tintColor.opacity(0.12))
+                    .frame(width: 44, height: 44)
+                Image(systemName: "arrow.down.circle.dotted")
+                    .font(.title3)
+                    .foregroundColor(ModelBackendType.mlx.tintColor.opacity(0.85))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                // A repo id is an identifier, not prose.
+                Text(verbatim: leftover.repoId)
+                    .font(.headline)
+                    .foregroundColor(theme.primaryText)
+                    .lineLimit(1)
+                Text("\(Self.size(leftover.bytes)) on disk · not in your download history")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                DownloadActionPillButton(
+                    title: "Resume",
+                    icon: "play.circle",
+                    tint: theme.accentColor
+                ) {
+                    onResume()
+                }
+                .help("Continues from the files already downloaded.")
+
+                DownloadActionIconButton(
+                    icon: "folder",
+                    tooltip: "Show in Finder",
+                    accessibilityLabel: "Show \(leftover.repoId) in Finder"
+                ) {
+                    NSWorkspace.shared.activateFileViewerSelecting([leftover.path])
+                }
+
+                DownloadActionPillButton(
+                    title: "Delete",
+                    icon: "trash",
+                    isDestructive: true
+                ) {
+                    onDiscard()
+                }
+                .help("Deletes these partial files.")
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isHovered ? theme.controlBackground : theme.secondaryBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.dividerColor, lineWidth: 1)
+        )
+        .shadow(
+            color: isHovered ? theme.shadowColor.opacity(0.12) : Color.clear,
+            radius: 8,
+            y: 2
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onHover { hovering in
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+

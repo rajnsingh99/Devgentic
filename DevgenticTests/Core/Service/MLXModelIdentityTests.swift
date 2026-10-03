@@ -106,19 +106,17 @@ final class MLXModelIdentityTests: XCTestCase {
         )
     }
 
-    /// Migration path: profiles saved before the canonical-id fix stored a bare, author-less
-    /// name. Those must still resolve, but the match is ambiguous so it is reported as such.
-    func testBareNameFromAnOlderProfileStillResolvesButIsFlaggedLegacy() async {
+    /// A bare, author-less name is NOT the same model as a qualified one — two orgs can ship the
+    /// same folder name.
+    func testABareNameDoesNotMatchAQualifiedOne() async {
         XCTAssertEqual(
             MLXModelIdentity.match(installed: "NexVeridian/Qwen3-Coder-Next-8bit",
                                    candidate: "Qwen3-Coder-Next-8bit"),
-            .legacyBareName
+            .none
         )
     }
 
-    /// The legacy tolerance applies only when exactly one side carries an author — otherwise
-    /// it would resurrect the cross-org false positive above.
-    func testLegacyToleranceDoesNotApplyWhenBothAreQualified() async {
+    func testDifferentOrgsWithTheSameNameDoNotMatch() async {
         XCTAssertEqual(
             MLXModelIdentity.match(installed: "orgA/Foo", candidate: "orgB/Foo"),
             .none
@@ -183,8 +181,8 @@ final class MLXModelServiceIdentityTests: XCTestCase {
         await service.forceRefreshInstalledModelsAsync()
 
         XCTAssertTrue(service.isInstalled(repoId: "NexVeridian/Qwen3-Coder-Next-8bit"))
-        // Migration: a profile saved before the fix stored the bare name.
-        XCTAssertTrue(service.isInstalled(repoId: "Qwen3-Coder-Next-8bit"))
+        // A bare, author-less name is not the same model (the old bare-name tolerance is gone).
+        XCTAssertFalse(service.isInstalled(repoId: "Qwen3-Coder-Next-8bit"))
     }
 
     /// A17 at the service level: a distinct variant must still offer a Download button.

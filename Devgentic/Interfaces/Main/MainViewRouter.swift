@@ -171,10 +171,8 @@ final class MainViewRouter {
             // hold `SkillSD` objects — so any test that swapped `SkillStore`'s container left those
             // views dereferencing models destroyed by `ModelContext.reset`, killing the host.
             //
-            // The codebase already had this rule: `SkillLibraryMigration.captureURL` redirects on
-            // `TestHost.isRunning` for exactly this reason, and its comment says the per-test
-            // override was not enough "precisely because the write happened somewhere no test
-            // explicitly called". Same shape, same fix.
+            // A per-test override is not enough here, precisely because the write happens somewhere
+            // no test explicitly calls — so the guard keys on `TestHost.isRunning` itself.
             guard !TestHost.isRunning else { return }
             UserDefaults.standard.set(SidebarTab.skills.rawValue, forKey: SidebarTab.storageKey)
         }

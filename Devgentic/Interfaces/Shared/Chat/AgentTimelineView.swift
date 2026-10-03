@@ -128,13 +128,15 @@ struct AgentTimelineView: View {
         streamingStartedAt: Date? = nil,
         finalContentText: String? = nil,
         conversationID: UUID? = nil,
-        scrollable: Bool = false
+        scrollable: Bool = false,
+        terminalOutcome: ExecutionOutcome? = nil,
+        isInterrupted: Bool = false
     ) {
         self.continuationLead = nil
         self.events = events
         self.revision = revision
-        self.terminalOutcome = nil
-        self.isInterrupted = false
+        self.terminalOutcome = terminalOutcome
+        self.isInterrupted = isInterrupted
         self.conversationID = conversationID
         self.isStreaming = isStreaming
         self.finalContentText = finalContentText

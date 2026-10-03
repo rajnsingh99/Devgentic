@@ -11,104 +11,6 @@
 import XCTest
 @testable import devgentic
 
-// MARK: - ProfileDetails Codable Round-Trip Tests
-
-final class ProfileDetailsSkillCodableTests: XCTestCase {
-
-    func testRoundTrip_agentConfigWithSkillConfig() throws {
-        let skillConfig = SkillFolderConfig(
-            folderURL: URL(fileURLWithPath: "/Users/test/my-skills"),
-            manifests: [
-                SkillManifest(
-                    id: UUID(),
-                    name: "code-review",
-                    description: "Review PRs against team standards.",
-                    folderPath: "/Users/test/my-skills/code-review",
-                    resourceCount: 2,
-                    hasScripts: true,
-                    compatibility: "Requires Python 3.14+",
-                    isEnabled: true
-                ),
-                SkillManifest(
-                    id: UUID(),
-                    name: "data-analysis",
-                    description: "Analyze datasets and produce reports.",
-                    folderPath: "/Users/test/my-skills/data-analysis",
-                    resourceCount: 0,
-                    hasScripts: false,
-                    compatibility: nil,
-                    isEnabled: true
-                )
-            ],
-            lastScannedAt: Date()
-        )
-
-        let agentConfig = AgentConfig(
-            llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3"),
-            tools: [],
-            instructions: "You are a helpful assistant.",
-            skillConfig: skillConfig
-        )
-
-        let details = ProfileDetails.agent(agentConfig)
-
-        // Encode
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(details)
-
-        // Decode
-        let decoder = JSONDecoder()
-        let decoded = try decoder.decode(ProfileDetails.self, from: data)
-
-        // Verify
-        guard case .agent(let decodedConfig) = decoded else {
-            XCTFail("Expected .agent case")
-            return
-        }
-
-        XCTAssertNotNil(decodedConfig.skillConfig)
-        XCTAssertEqual(decodedConfig.skillConfig?.manifests.count, 2)
-        XCTAssertEqual(decodedConfig.skillConfig?.manifests.first?.name, "code-review")
-        XCTAssertEqual(decodedConfig.skillConfig?.manifests.first?.hasScripts, true)
-        XCTAssertEqual(decodedConfig.skillConfig?.manifests.first?.compatibility, "Requires Python 3.14+")
-        XCTAssertEqual(decodedConfig.skillConfig?.manifests.last?.name, "data-analysis")
-        XCTAssertEqual(decodedConfig.skillConfig?.folderURL.path, "/Users/test/my-skills")
-        XCTAssertEqual(decodedConfig.instructions, "You are a helpful assistant.")
-    }
-
-    func testDecode_agentConfigWithoutSkillConfig_nilSkills() throws {
-        // Simulate a v4 profile JSON without skillConfig (backward compatibility)
-        let json: [String: Any] = [
-            "schemaVersion": 4,
-            "profileType": "Agent",
-            // ⚠️ `ApiProvider` is a display-string enum — `.ollama.rawValue` is "Ollama (Local)",
-            // not "ollama". This fixture hard-coded the case name and had been failing to decode
-            // ever since; derive it so a future rawValue change updates the fixture too.
-            "llmConfig": [
-                "apiProvider": ApiProvider.ollama.rawValue,
-                "modelName": "llama3"
-            ],
-            "tools": [] as [[String: Any]],
-            "capabilities": [String: Any]()
-        ]
-
-        let data = try JSONSerialization.data(withJSONObject: json)
-
-        // Migrate (v4 → v5 stamps version, but no data changes needed)
-        guard case .migrated(let migratedData) = ProfileMigrator.migrateIfNeeded(data) else {
-            return XCTFail("Expected a migratable blob, got a refusal")
-        }
-        let decoded = try JSONDecoder().decode(ProfileDetails.self, from: migratedData)
-
-        guard case .agent(let config) = decoded else {
-            XCTFail("Expected .agent case")
-            return
-        }
-
-        XCTAssertNil(config.skillConfig, "Old profiles without skillConfig should decode with nil")
-    }
-}
-
 // MARK: - System Prompt Injection Tests
 
 final class SkillPromptInjectionTests: XCTestCase {
@@ -255,18 +157,6 @@ final class LoadSkillToolTests: XCTestCase {
         )
     }
 
-    func testCall_validSkillName_returnsBody() async throws {
-        let manifest = try createSkillOnDisk(name: "test-skill", body: "# Process\n1. Read the file.\n2. Analyze it.")
-        let tool = LoadSkillTool(manifests: [manifest])
-
-        let args = LoadSkillTool.Arguments.mock(skillName: "test-skill")
-        let result = try await tool.call(arguments: args)
-
-        XCTAssertTrue(result.contains("# Skill: test-skill"))
-        XCTAssertTrue(result.contains("# Process"))
-        XCTAssertTrue(result.contains("Read the file"))
-    }
-
     func testCall_invalidSkillName_returnsError() async throws {
         let manifest = try createSkillOnDisk(name: "real-skill")
         let tool = LoadSkillTool(manifests: [manifest])
@@ -279,26 +169,17 @@ final class LoadSkillToolTests: XCTestCase {
         XCTAssertTrue(result.contains("real-skill"))
     }
 
-    func testCall_withResources_includesResourceContent() async throws {
-        let manifest = try createSkillOnDisk(name: "scripted-skill", hasScripts: true)
+    /// A manifest straight from a folder scan carries no library version. Only resolution produces
+    /// a loadable manifest, so the tool refuses this one instead of reading the folder.
+    func testCall_unversionedManifest_isRefused() async throws {
+        let manifest = try createSkillOnDisk(name: "scanned-skill")
+        XCTAssertNil(manifest.versionID, "precondition: a scan does not version")
         let tool = LoadSkillTool(manifests: [manifest])
 
-        let args = LoadSkillTool.Arguments.mock(skillName: "scripted-skill", includeResources: true)
-        let result = try await tool.call(arguments: args)
+        let result = try await tool.call(arguments: .mock(skillName: "scanned-skill"))
 
-        XCTAssertTrue(result.contains("# Skill Resources"))
-        XCTAssertTrue(result.contains("validate.py"))
-        XCTAssertTrue(result.contains("print('validate')"))
-    }
-
-    func testCall_withoutResources_excludesResourceContent() async throws {
-        let manifest = try createSkillOnDisk(name: "scripted-skill", hasScripts: true)
-        let tool = LoadSkillTool(manifests: [manifest])
-
-        let args = LoadSkillTool.Arguments.mock(skillName: "scripted-skill", includeResources: false)
-        let result = try await tool.call(arguments: args)
-
-        XCTAssertFalse(result.contains("# Skill Resources"))
+        XCTAssertTrue(result.contains("Error loading skill"), result)
+        XCTAssertTrue(result.contains("was not resolved from the skill library"), result)
     }
 }
 

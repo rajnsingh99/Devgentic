@@ -675,9 +675,11 @@ final class ActiveStreamManager {
                     // (reads from CodeSessionManager.projectMemoryContent) for a
                     // complete Code-mode snapshot. Current capture records only
                     // the project path — memory length/hash stay nil.
+                    // ⚠️ The LIVE-detected capability, not the stored copy, so a trace records the
+                    // tool-calling mode the run actually used (`LiveModelDetection`).
                     let snapshot = TraceConfigSnapshot.capture(
                         traceID: traceContext.traceID,
-                        config: config,
+                        config: BackendRequestConfig(profile: await LiveModelDetection.resolving(config.profile)),
                         historyTurnCount: history.count,
                         files: files,
                         codeMemoryContent: nil

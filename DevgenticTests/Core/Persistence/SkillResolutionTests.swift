@@ -14,8 +14,7 @@
 //  ⚠️ REWRITTEN 2026-09-14 from the registry-backed version. These were quarantined, not deleted,
 //  because the behaviours they encode are still owed by the replacement: library authority for
 //  description, deterministic name-collision handling, and unresolved selections being REPORTED
-//  rather than silently dropped. Two behaviours are new and did not exist before — version pinning,
-//  and selections awaiting re-link.
+//  rather than silently dropped. One behaviour is new and did not exist before — version pinning.
 //
 
 import XCTest
@@ -50,14 +49,9 @@ final class SkillResolutionTests: XCTestCase {
         try store.create(name: name, description: description, body: "# \(name)", isDraft: isDraft).get()
     }
 
-    private func config(selections: [SkillSelection]? = nil, legacy: SkillFolderConfig? = nil) -> AgentConfig {
+    private func config(selections: [SkillSelection]? = nil) -> AgentConfig {
         AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3"),
-                    tools: [], skillConfig: legacy, skillSelections: selections)
-    }
-
-    private func legacyManifest(_ name: String) -> SkillManifest {
-        SkillManifest(id: UUID(), name: name, description: "Legacy.", folderPath: "/tmp/skills/\(name)",
-                      resourceCount: 0, hasScripts: false, compatibility: nil, isEnabled: true)
+                    tools: [], skillSelections: selections)
     }
 
     // MARK: - The library path
@@ -73,7 +67,6 @@ final class SkillResolutionTests: XCTestCase {
 
         XCTAssertEqual(outcome.manifests.map(\.name), ["alpha", "beta"])
         XCTAssertTrue(outcome.unresolved.isEmpty)
-        XCTAssertFalse(outcome.usedLegacyPath)
     }
 
     /// ⚠️ THE POINT OF THE WHOLE REFERENCE MODEL. The selection carries a stale `name` and no
@@ -198,26 +191,6 @@ final class SkillResolutionTests: XCTestCase {
         XCTAssertEqual(outcome.unresolved.count, 1)
     }
 
-    // MARK: - Awaiting re-link (new in V6)
-
-    /// ⚠️ Counted SEPARATELY from `unresolved`, because the remedies are opposite: an unresolved
-    /// selection should be removed by the user, one awaiting re-link should be left alone because
-    /// the import sweep repairs it. Reporting them together tells someone to delete links that are
-    /// about to fix themselves.
-    func testAPreV6SelectionIsReportedAsAwaitingRelinkNotAsMissing() throws {
-        let alpha = try seed("alpha")
-        let outcome = try XCTUnwrap(SkillResolution.resolve(
-            for: config(selections: [
-                .link(skillID: alpha.id, name: "alpha"),
-                SkillSelection(skillID: nil, legacyFolderPath: "/old/skills/beta", name: "beta")
-            ]), profileName: "P"))
-
-        XCTAssertEqual(outcome.manifests.map(\.name), ["alpha"])
-        XCTAssertEqual(outcome.awaitingRelink.map(\.name), ["beta"])
-        XCTAssertTrue(outcome.unresolved.isEmpty,
-                      "a selection the sweep has not reached yet is not a missing skill")
-    }
-
     // MARK: - Name collisions
 
     /// Skills are addressed by NAME at run time but keyed by an opaque id, so two `code-review`s are
@@ -257,24 +230,7 @@ final class SkillResolutionTests: XCTestCase {
                      "an explicit nil keeps the 'no load_skill tool, no prompt layer' behaviour distinct from an empty list")
     }
 
-    func testEmptySelectionsDoNotFallThroughToTheLegacyBlob() throws {
-        let legacy = SkillFolderConfig(folderURL: URL(fileURLWithPath: "/tmp/skills"),
-                                       manifests: [legacyManifest("alpha")], lastScannedAt: Date())
-        XCTAssertNil(SkillResolution.resolve(for: config(selections: [], legacy: legacy), profileName: "P"),
-                     "an empty list means 'migrated, links nothing' — it must not be overridden by stale copies")
-    }
-
-    // MARK: - Legacy arm
-
-    /// ⚠️ Still reachable, and still worth keeping until `skillConfig` itself goes: a blob stamped
-    /// v8+ that carries `skillConfig` but no `skillSelections`.
-    func testLegacyBlobIsReadWhenNoSelectionsExist() throws {
-        let legacy = SkillFolderConfig(folderURL: URL(fileURLWithPath: "/tmp/skills"),
-                                       manifests: [legacyManifest("alpha"), legacyManifest("beta")],
-                                       lastScannedAt: Date())
-        let outcome = try XCTUnwrap(SkillResolution.resolve(for: config(legacy: legacy), profileName: "Old"))
-
-        XCTAssertTrue(outcome.usedLegacyPath)
-        XCTAssertEqual(outcome.manifests.map(\.name), ["alpha", "beta"])
+    func testAnEmptySelectionListResolvesToNil() {
+        XCTAssertNil(SkillResolution.resolve(for: config(selections: []), profileName: "P"))
     }
 }

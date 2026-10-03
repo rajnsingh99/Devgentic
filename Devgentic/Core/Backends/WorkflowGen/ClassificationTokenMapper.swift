@@ -27,39 +27,26 @@ struct ClassificationTokenMapper: Sendable {
     /// Maps original label → opaque token.
     let labelToToken: [String: String]
 
-    /// The token the prompt advertises for "none of these fit".
+    /// The token the prompt advertises for "none of these fit" — a dedicated sentinel that maps to
+    /// NO label. Answering it means "no category matched", which the Router's decision policy then
+    /// handles like any other undecided input.
     ///
-    /// Two meanings, distinguished by `fallbackIsNoMatchSentinel`:
-    ///   • a configured catch-all's token — answering it ROUTES to that branch (legacy behaviour); or
-    ///   • a dedicated sentinel that maps to NO label — answering it means "no category matched",
-    ///     which resolves to no port and fails the node onto its `error` port.
+    /// ⚠️ WF-OB1: this used to be an arbitrary entry of an unordered Dictionary when no catch-all
+    /// was configured — a REAL branch nobody chose, and which one could differ between app launches
+    /// (Swift seeds Dictionary hashing per process). The escape hatch is KEPT rather than removed:
+    /// dropping the "if unsure" line would leave a genuinely-unsure model no way to say so, and it
+    /// would simply guess a real token.
+    ///
+    /// ⚠️ Generated with `excluding:` the label tokens, so it can never collide with a real label's
+    /// token.
     let fallbackToken: String
-
-    /// True when `fallbackToken` is the no-match sentinel rather than a real branch's token.
-    ///
-    /// ⚠️ THE WHOLE POINT OF WF-OB1. This used to be `l2t[fallbackLabel] ?? l2t.values.first`, so
-    /// when no catch-all was configured the "if unsure" token was **an arbitrary entry of an
-    /// unordered Dictionary** — a REAL branch that nobody chose. Since the Static Fallback picker was
-    /// retired 2026-08-13 that is the state of every Router created since, so the default behaviour
-    /// was: every ambiguous input is funnelled down one arbitrarily-picked branch, which then
-    /// produces a confident-looking answer. Swift seeds Dictionary hashing per process, so *which*
-    /// branch could differ between app launches — the same workflow, the same input, a different
-    /// route, with nothing in the UI or the log saying the choice was arbitrary.
-    ///
-    /// ⚠️ The escape hatch is KEPT rather than removed. Dropping the "if unsure" line entirely would
-    /// leave a genuinely-unsure model with no way to say so, and it would simply guess a real token —
-    /// trading a visibly-arbitrary route for an invisible one. A sentinel that maps to nothing lets
-    /// the model decline, and lets the Router fail honestly.
-    let fallbackIsNoMatchSentinel: Bool
 
     // MARK: - Initialization
 
-    /// Creates a fresh mapping for the given labels and fallback.
+    /// Creates a fresh mapping for the given labels.
     /// Generates unique 4-char uppercase alphanumeric tokens.
-    /// - Parameters:
-    ///   - labels: The classification labels (from rule definitions).
-    ///   - fallbackLabel: The catch-all label (must be one of `labels`).
-    init(labels: [String], fallbackLabel: String) {
+    /// - Parameter labels: The classification labels (from rule definitions).
+    init(labels: [String]) {
         var t2l: [String: String] = [:]
         var l2t: [String: String] = [:]
         var usedTokens: Set<String> = []
@@ -73,22 +60,7 @@ struct ClassificationTokenMapper: Sendable {
 
         tokenToLabel = t2l
         labelToToken = l2t
-
-        // ⚠️ A catch-all is used ONLY when one was actually configured and still names a real rule.
-        // Everything else — an empty `fallbackLabel` (the default since 2026-08-13), or one naming a
-        // rule that has since been renamed or deleted — gets the sentinel, NOT a substitute branch.
-        // Guessing here is what WF-OB1 was.
-        //
-        // ⚠️ The sentinel is generated with `excluding: usedTokens`, so it can never collide with a
-        // real label's token. The previous `?? "XXXX"` literal could, in principle, be generated for
-        // a real label — 1 in 32⁴, but a silent two-branches-one-token collision if it ever landed.
-        if !fallbackLabel.isEmpty, let configured = l2t[fallbackLabel] {
-            fallbackToken = configured
-            fallbackIsNoMatchSentinel = false
-        } else {
-            fallbackToken = Self.generateUniqueToken(excluding: usedTokens)
-            fallbackIsNoMatchSentinel = true
-        }
+        fallbackToken = Self.generateUniqueToken(excluding: usedTokens)
     }
 
     /// True when `response` carries the no-match sentinel and no real label token.
@@ -100,7 +72,6 @@ struct ClassificationTokenMapper: Sendable {
     /// produces. Those are different situations for the user: one means the rules do not cover the
     /// input, the other means the model misbehaved.
     func isExplicitNoMatch(_ response: String) -> Bool {
-        guard fallbackIsNoMatchSentinel else { return false }
         guard parseResponse(response) == nil else { return false }
         // [EIO-10] The SAME boundary test `parse` uses. This sibling was left on bare containment in
         // the first pass, so the two sentinel checks could disagree about the same reply — one seeing
@@ -200,8 +171,7 @@ struct ClassificationTokenMapper: Sendable {
         // ⚠️ The sentinel is consulted ONLY when no real token was found. A reply carrying a real
         // token AND the sentinel routes on the real token — today's semantics, preserved exactly.
         // The sentinel gets the same boundary treatment, for the same reason.
-        if fallbackIsNoMatchSentinel,
-           Self.firstStandaloneOccurrence(of: fallbackToken, in: uppercased) != nil {
+        if Self.firstStandaloneOccurrence(of: fallbackToken, in: uppercased) != nil {
             return .explicitNoMatch
         }
         return .unreadable

@@ -165,11 +165,11 @@ final class WorkflowNodeInspectorTests: XCTestCase {
 
     // MARK: - INS-10 — a preserved-but-unevaluable operator must have a tag to bind to
 
-    /// The reachable case: the retired `always` decodes to `.other("always")`, which is not in
+    /// The reachable case: a newer build's operator decodes to `.other(raw)`, which is not in
     /// `allCases`, so the Picker had no matching tag and rendered blank.
-    func testARetiredOperatorIsOfferedSoThePickerCanRenderIt() {
-        let retired = ConditionOp(rawValue: "always")
-        XCTAssertEqual(retired, .other("always"))
+    func testAnUnknownOperatorIsOfferedSoThePickerCanRenderIt() {
+        let retired = ConditionOp(rawValue: "fuzzyMatch")
+        XCTAssertEqual(retired, .other("fuzzyMatch"))
         XCTAssertFalse(ConditionOp.allCases.contains(retired!),
                        "if this ever becomes false the row is moot — check why")
 
@@ -188,66 +188,15 @@ final class WorkflowNodeInspectorTests: XCTestCase {
         )
     }
 
-    /// The label the user sees must not claim the operator came from a NEWER build — `.other` also
-    /// holds the retired `always`, which came from an older one.
-    func testAnUnavailableOperatorIsLabelledUnavailableNotNewer() {
-        XCTAssertEqual(ConditionOp.other("always").displayName, "always (unavailable)")
-    }
-
-    // MARK: - INS-8 — the editor must show the retry count the engine will actually use
-
-    /// A node with no config of its own INHERITS the workflow default, because
-    /// `maxNodeRetries` is non-optional and the executor's `?? resolvedMaxRetries` fallback is
-    /// reachable only while `nodeConfig` is nil. Showing 0 there claimed "no retries" for a node
-    /// the engine would retry.
-    func testAnUneditedSaveOnALegacyWorkflowStillWritesNothing() {
-        // The panel seeds the stepper with the inherited 2, so "unedited" means maxRetries == 2 —
-        // NOT 0. Collapsing against the bare defaults would call that a change and write a config.
-        XCTAssertNil(ActionNodeInspectorView.executionConfigToPersist(
-            existing: nil, maxRetries: 2, retryDelay: 0, hardTimeout: nil,
-            unattendedAutoApprove: false, inheritedRetryDefault: 2
-        ))
-    }
-
-    /// …and a real edit away from the inherited value MUST be written, or the user cannot override it.
-    func testEditingAwayFromTheInheritedDefaultIsPersisted() {
-        let persisted = ActionNodeInspectorView.executionConfigToPersist(
-            existing: nil, maxRetries: 0, retryDelay: 0, hardTimeout: nil,
-            unattendedAutoApprove: false, inheritedRetryDefault: 2
-        )
-        XCTAssertEqual(persisted?.maxNodeRetries, 0,
-                       "explicitly choosing 0 on a workflow that inherits 2 is a real change")
-    }
-
-    /// With no inherited default — the overwhelmingly common case — the collapse is unchanged.
-    func testTheCollapseIsUnchangedWhenNothingIsInherited() {
-        XCTAssertNil(ActionNodeInspectorView.executionConfigToPersist(
-            existing: nil, maxRetries: 0, retryDelay: 0, hardTimeout: nil,
-            unattendedAutoApprove: false, inheritedRetryDefault: 0
-        ))
-        XCTAssertNotNil(ActionNodeInspectorView.executionConfigToPersist(
-            existing: nil, maxRetries: 2, retryDelay: 0, hardTimeout: nil,
-            unattendedAutoApprove: false, inheritedRetryDefault: 0
-        ))
-    }
-
-    /// ⚠️ THE REGRESSION THIS ROW'S FIRST FIX INTRODUCED. Applying `inheritedRetryDefault` to the
-    /// editor's READ but not to the config it MATERIALISES meant that touching the timeout — a
-    /// control the user does not associate with retries — created a bare config and silently pinned
-    /// the node to 0 retries, while the stepper the user was looking at said 2.
-    func testMaterialisingAConfigCarriesTheInheritedRetryCount() {
-        XCTAssertEqual(WorkflowNodeConfig.materialised(inheritedRetryDefault: 2).maxNodeRetries, 2)
-    }
-
-    /// …and with nothing inherited it is exactly the defaults, so the common case is unchanged.
-    func testMaterialisingWithNothingInheritedIsTheBareDefaults() {
-        XCTAssertEqual(WorkflowNodeConfig.materialised(inheritedRetryDefault: 0), WorkflowNodeConfig())
+    /// An operator this build cannot evaluate is labelled as unavailable.
+    func testAnUnavailableOperatorIsLabelledUnavailable() {
+        XCTAssertEqual(ConditionOp.other("fuzzyMatch").displayName, "fuzzyMatch (unavailable)")
     }
 
     // MARK: - INS-11 — a Save that changes nothing must write nothing
 
     /// The crux: `nil` must stay `nil`. Materialising `WorkflowNodeConfig()` defeats
-    /// `replaceNode`'s equality guard AND pins an inherited retry budget to 0.
+    /// `replaceNode`'s equality guard.
     func testAnUneditedSaveLeavesANilConfigNil() {
         XCTAssertNil(ActionNodeInspectorView.executionConfigToPersist(
             existing: nil, maxRetries: 0, retryDelay: 0, hardTimeout: nil, unattendedAutoApprove: false
@@ -286,9 +235,6 @@ final class WorkflowNodeInspectorTests: XCTestCase {
 
         XCTAssertNotNil(persisted, "an existing config stays materialised even at the defaults")
         XCTAssertEqual(persisted?.maxNodeRetries, 0, "…and the edit to 0 is honoured")
-        XCTAssertEqual(persisted?.joinMode, existing.joinMode,
-                       "a field this panel does not edit must survive the round trip — the helper "
-                       + "starts from `existing`, and rebuilding from scratch would drop it")
     }
 
     /// End to end: an unedited Save must leave the canvas clean and burn no undo step.

@@ -107,11 +107,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             Self.logger.error("Previous session did not exit cleanly (crash or force-quit). MetricKit diagnostics, if any, arrive shortly; .ips reports are folded into diagnostic bundles.")
         }
 
-        // Seed the per-family Response Synthesis toggles from the legacy single
-        // toggle exactly once. Must run before any agent run can resolve its
-        // synthesis opt-in. Idempotent and cheap (a guarded UserDefaults read).
-        SynthesisOptIn.migrateLegacyToggleIfNeeded()
-
         // Point MCPClientService at the app's tool store and HITL brokers. MUST run before
         // anything can connect a server: the launch sweep lives in the SwiftUI scene's
         // startup task, and the Add-server form's Test Connection is user-driven — both are

@@ -150,100 +150,6 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
     func configureContainer(_ container: ModelContainer) {
         self.modelContainer = container
         logger.info("BackendProfileStore configured with SwiftData ModelContainer.")
-        // ⚠️ REFUSED under XCTest. The test host is the real app on the REAL store, but its Keychain
-        // is an in-memory stand-in (`TestHostKeychain`, registers KC-54/55) — so a "successful" key
-        // write here proves nothing, and the strip that follows it would move a real credential out
-        // of a real profile blob into a store that vanishes with the process.
-        if TestHost.permits("migrate profile API keys out of the SwiftData blobs into the Keychain", logger: logger) {
-            migrateAPIKeysToKeychain()
-        }
-        // register A53 — the blob sweep above only reaches credentials stored in SwiftData.
-        // `GeminiService` also wrote raw keys into UserDefaults; those need their own removal.
-        ProviderKeyStore.purgeLegacyPlaintextKeys()
-        // register KC-0 — the bundle-id rename orphaned the previous preferences domain with its
-        // plaintext credentials intact, where the purge above cannot see them. Refused under
-        // XCTest: it rewrites a real file in ~/Library/Preferences/.
-        if TestHost.permits("purge plaintext credentials from orphaned preference domains", logger: logger) {
-            ProviderKeyStore.purgeOrphanedLegacyDomains()
-        }
-    }
-
-    /// One-time sweep moving API keys out of the stored blobs and into the Keychain.
-    ///
-    /// ⚠️ Fixing the write path only protects FUTURE saves — every profile written before it keeps
-    /// its key in `configData` until something rewrites that row, which for a profile the user
-    /// never edits again is never. For a credential-at-rest fix that is not good enough, so this
-    /// actively rewrites them at launch. Same launch-hook shape as
-    /// `DownloadHistoryStore.reconcileOrphans`.
-    ///
-    /// ⚠️ Deliberately does NOT go through `saveProfile`: that stamps `lastSelected`, which would
-    /// reorder the user's entire "recently used" sidebar on one launch as a side effect of a
-    /// security fix. Assigning `details` is enough — the setter strips the key and re-encodes.
-    private func migrateAPIKeysToKeychain() {
-        guard let context = mainContext else { return }
-
-        var descriptor = FetchDescriptor<BackendProfile>()
-        descriptor.fetchLimit = 500
-        guard let models = try? context.fetch(descriptor) else {
-            logger.error(
-                "[SECRETS] Could not fetch profiles for the API-key migration. CONSEQUENCE: any "
-                + "keys still stored inline remain in the profile blob until the next launch."
-            )
-            return
-        }
-
-        var attempted = 0
-        var migrated = 0
-        var stillInline = 0
-        for model in models {
-            guard model.hasInlineAPIKeyInStoredBlob else { continue }
-            attempted += 1
-            // Assigning through the setter performs the strip-and-store: it writes the key to the
-            // Keychain and re-encodes `configData` without it.
-            model.details = model.details
-
-            // ⚠️ register B25 — count what actually HAPPENED, not what was tried. This used to be
-            // an unconditional `migrated += 1` right after the assignment, and the assignment
-            // succeeds even when the Keychain write inside it failed: the setter deliberately
-            // keeps the key inline in that case rather than destroying it. So on a launch where
-            // the Keychain was unavailable — a login-item start before unlock is the ordinary
-            // case — every row kept its inline key and the log still announced that N keys were
-            // "no longer readable from DevgenticSD.store". A security claim stated as achieved
-            // when it was not is worse than no log line at all.
-            if model.hasInlineAPIKeyInStoredBlob {
-                stillInline += 1
-            } else {
-                migrated += 1
-            }
-        }
-
-        if stillInline > 0 {
-            logger.error(
-                "[SECRETS] \(stillInline) of \(attempted) profile(s) still hold their API key "
-                + "INLINE after the migration pass — the Keychain write failed for them, so the "
-                + "key was deliberately left in the blob rather than destroyed. CONSEQUENCE: those "
-                + "credentials remain readable from DevgenticSD.store and from any backup of "
-                + "Application Support; the sweep retries on the next launch."
-            )
-        }
-
-        guard attempted > 0 else { return }
-        do {
-            try context.save()
-            if migrated > 0 {
-                logger.notice(
-                    "[SECRETS] Migrated \(migrated) provider API key(s) out of the profile blobs and "
-                    + "into the Keychain. CONSEQUENCE: those keys are no longer readable from "
-                    + "DevgenticSD.store or from any backup of Application Support."
-                )
-            }
-        } catch {
-            logger.error(
-                "[SECRETS] The API-key migration could not be saved: \(error.localizedDescription). "
-                + "CONSEQUENCE: \(migrated) key(s) are now in the Keychain but ALSO still in the "
-                + "profile blobs; the sweep retries on the next launch."
-            )
-        }
     }
 
     private var mainContext: ModelContext? {
@@ -527,7 +433,7 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         let replacement: ProfileDetails
         switch ProfileType(rawValue: model.profileTypeRaw) {
         case .agent:    replacement = .agent(AgentConfig(llmConfig: llm))
-        case .workflow: replacement = .workflow(WorkflowConfig(agentProfileIDs: []))
+        case .workflow: replacement = .workflow(WorkflowConfig())
         case .imageGen: replacement = .imageGen(ImageGenConfig(llmConfig: llm))
         case .code:     replacement = .code(AgentConfig(llmConfig: llm))
         case .bot, nil: replacement = .bot(BotConfig(llmConfig: llm))

@@ -194,46 +194,7 @@ enum SkillFolderScanner {
         )
     }
 
-    /// Loads the full skill package (body + resources) from disk.
-    /// Called at runtime by `LoadSkillTool` — never cached, always reads fresh from disk.
-    static func loadFullPackage(for manifest: SkillManifest) throws -> SkillPackage {
-        let skillFile = URL(fileURLWithPath: manifest.folderPath).appendingPathComponent("SKILL.md")
-        let content = try String(contentsOf: skillFile, encoding: .utf8)
-        let body = extractBody(from: content)
-        let resources = try loadResources(from: URL(fileURLWithPath: manifest.folderPath))
-
-        // ⚠️ `try?`, and the swallow is deliberate. A frontmatter that no longer parses must NOT
-        // take the body down with it.
-        //
-        // ⚠️ This whole function is the LEGACY arm now — `LoadSkillTool` reaches it only for a
-        // manifest with no `versionID`, i.e. one from a pre-library profile blob. The library path
-        // reads `SkillVersionSD` and never touches disk. The user
-        // edited their SKILL.md and broke a colon; the instructions are still there and still
-        // loadable, and refusing the whole skill over a metadata line would be the app deciding a
-        // recoverable problem is fatal. The declaration simply reads as absent, and the scan that
-        // populates the library reports the parse error where the user can act on it.
-        let declared = (try? YAMLFrontmatterParser.parse(from: content))?.list("allowed-tools")
-        if declared == nil, manifest.allowedTools != nil {
-            logger.notice("[SKILL_LOAD] Skill '\(manifest.name)' declared allowed-tools when it was scanned but its frontmatter no longer parses that field. CONSEQUENCE: the body still loads and the run is unaffected — only the declaration shown alongside it is missing. Re-check the frontmatter in \(skillFile.path).")
-        }
-
-        return SkillPackage(manifest: manifest, body: body, resources: resources)
-    }
-
     // MARK: - Private Helpers
-
-    /// Extracts the markdown body from SKILL.md content.
-    ///
-    /// ⚠️ DELEGATES. This used to be its own copy of the split rule, and `SkillIngest` claimed to be
-    /// "the one that remains" while this one was still live on the legacy load path — a comment
-    /// asserting an invariant the code did not hold. One implementation, so a split can never
-    /// disagree with itself about where the frontmatter ends.
-    private static func extractBody(from content: String) -> String {
-        SkillBodyExtraction.body(of: content)
-    }
-
-    /// Maximum file size (in bytes) for a single resource file. Files larger than this are skipped.
-    private static let maxResourceFileSize: Int = 10 * 1024 * 1024 // 10 MB
 
     /// Lists valid resource files in a subdirectory (excluding hidden files, symlinks, directories).
     ///
@@ -293,38 +254,6 @@ enum SkillFolderScanner {
     /// Checks whether the skill has any executable script files.
     private static func hasScriptFiles(in folder: URL) -> Bool {
         !validFiles(in: folder.appendingPathComponent("scripts")).isEmpty
-    }
-
-    /// Loads all resource files from known subdirectories as `SkillResource` entries.
-    /// Skips binary files (non-UTF-8), hidden files, symlinks, and files exceeding size limit.
-    private static func loadResources(from folder: URL) throws -> [SkillResource] {
-        let fm = FileManager.default
-        let subdirTypes: [(String, SkillResourceType)] = [
-            ("reference", .reference),
-            ("references", .reference),
-            ("templates", .template),
-            ("scripts", .script),
-            ("assets", .other)
-        ]
-        var resources: [SkillResource] = []
-        for (subdir, type) in subdirTypes {
-            let dir = folder.appendingPathComponent(subdir)
-            for file in validFiles(in: dir) {
-                // Skip files exceeding size limit
-                if let attrs = try? fm.attributesOfItem(atPath: file.path),
-                   let size = attrs[.size] as? Int, size > maxResourceFileSize {
-                    continue
-                }
-                // Skip binary/non-UTF-8 files gracefully
-                guard let content = try? String(contentsOf: file, encoding: .utf8) else { continue }
-                resources.append(SkillResource(
-                    relativePath: "\(subdir)/\(file.lastPathComponent)",
-                    content: content,
-                    type: type
-                ))
-            }
-        }
-        return resources
     }
 
     /// Validates a skill name's SHAPE only — no directory-equality requirement.

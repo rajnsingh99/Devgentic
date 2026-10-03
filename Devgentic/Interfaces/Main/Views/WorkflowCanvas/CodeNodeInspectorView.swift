@@ -24,13 +24,18 @@ struct CodeNodeInspectorView: View {
     @State private var template: String = "{{ input }}"
     @State private var outputVariable: String = ""
     @State private var showGuide: Bool = false
+    var showsHeader: Bool = true
 
     // MARK: - Body
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            if showsHeader {
+                header
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+            }
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 20) {
                     guideCard
@@ -41,15 +46,30 @@ struct CodeNodeInspectorView: View {
             }
         }
         .frame(
-            minWidth: 800,
-            idealWidth: 950,
+            minWidth: showsHeader ? 800 : nil,
+            idealWidth: showsHeader ? 950 : nil,
             maxWidth: .infinity,
-            minHeight: 520,
-            idealHeight: 650,
+            minHeight: showsHeader ? 520 : nil,
+            idealHeight: showsHeader ? 650 : nil,
             maxHeight: .infinity
         )
         .background(theme.primaryBackground)
-        .onAppear { loadFromNode() }
+        .onAppear {
+            loadFromNode()
+            if !showsHeader {
+                NodeInspectorPendingCommit.shared.register {
+                    persistConfigToNode()
+                }
+            }
+        }
+        .onDisappear {
+            if !showsHeader {
+                persistConfigToNode()
+                NodeInspectorPendingCommit.shared.clear()
+            }
+        }
+        .onChange(of: template) { persistIfEmbedded() }
+        .onChange(of: outputVariable) { persistIfEmbedded() }
     }
 
     // MARK: - Header
@@ -71,12 +91,13 @@ struct CodeNodeInspectorView: View {
                 .textFieldStyle(.plain)
                 .foregroundColor(theme.secondaryText)
             Spacer()
-            Button {
+            TactileIconButton(
+                icon: "questionmark.circle",
+                tooltip: showGuide ? "Hide guide" : "Show guide",
+                accessibilityLabel: showGuide ? "Hide guide" : "Show guide",
+                size: .compact
+            ) {
                 withAnimation(.easeInOut(duration: 0.2)) { showGuide.toggle() }
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(theme.fontBody)
-                    .foregroundColor(theme.secondaryText)
             }
             GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
             GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
@@ -137,7 +158,7 @@ struct CodeNodeInspectorView: View {
     private func guideStep(number: String, title: String, subtitle: String, description: String, color: Color) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(number)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(theme.fontCaption2.weight(.bold))
                 .foregroundColor(.white)
                 .frame(width: 20, height: 20)
                 .background(Circle().fill(color))
@@ -145,16 +166,17 @@ struct CodeNodeInspectorView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(title)
-                        .font(theme.fontCaption.weight(.semibold))
+                        .font(theme.fontCaption2.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                     Text(subtitle)
-                        .font(.system(size: 10))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.tertiaryText)
                         .italic()
                 }
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.0)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -163,11 +185,11 @@ struct CodeNodeInspectorView: View {
     private func guideTip(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "lightbulb.fill")
-                .font(theme.fontCaption)
+                .font(theme.fontCaption2)
                 .foregroundColor(.yellow)
                 .padding(.top, 2)
             Text(text)
-                .font(.system(.caption))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
                 .italic()
                 .fixedSize(horizontal: false, vertical: true)
@@ -189,7 +211,7 @@ struct CodeNodeInspectorView: View {
         SettingsCard(title: "Template", icon: "text.alignleft", theme: theme) {
             VStack(alignment: .leading, spacing: 10) {
                 TextEditor(text: $template)
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(theme.fontCode)
                     .frame(minHeight: 120, maxHeight: 200)
                     .padding(8)
                     .scrollContentBackground(.hidden)
@@ -204,7 +226,7 @@ struct CodeNodeInspectorView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Available placeholders:")
-                        .font(.caption.weight(.semibold))
+                        .font(theme.fontCaption2.weight(.semibold))
                         .foregroundColor(theme.secondaryText)
                     HStack(spacing: 12) {
                         placeholderChip("{{ input }}", description: "Upstream output")
@@ -222,22 +244,27 @@ struct CodeNodeInspectorView: View {
     private var outputVariableCard: some View {
         SettingsCard(title: "Output Variable", icon: "tray.and.arrow.down", theme: theme) {
             VStack(alignment: .leading, spacing: 8) {
-                TextField("Variable name (optional)", text: $outputVariable)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13, design: .monospaced))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
-                            .fill(theme.controlBackground)
+                TextField(
+                    "",
+                    text: $outputVariable,
+                    prompt: Text("Variable name (optional)").foregroundColor(theme.placeholderText)
+                )
+                .textFieldStyle(.plain)
+                .font(theme.fontCode)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
+                        .fill(theme.controlBackground)
                     )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
-                            .stroke(theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
-                    )
+                .overlay(
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
+                        .stroke(theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
+                )
                 Text("If set, the result is stored as a shared workflow variable accessible by downstream nodes.")
-                    .font(.caption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 16)
@@ -250,7 +277,7 @@ struct CodeNodeInspectorView: View {
     private func placeholderChip(_ code: String, description: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(code)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .font(theme.fontCodeCaption.weight(.medium))
                 .foregroundColor(theme.accentColor)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
@@ -259,7 +286,7 @@ struct CodeNodeInspectorView: View {
                         .fill(theme.accentColor.opacity(0.1))
                 )
             Text(description)
-                .font(.system(size: 9))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.tertiaryText)
         }
     }
@@ -272,20 +299,26 @@ struct CodeNodeInspectorView: View {
         outputVariable = config.outputVariable ?? ""
     }
 
-    private func saveAndDismiss() {
+    private func persistConfigToNode() {
         let config = CodeNodeConfig(
             template: template.isEmpty ? "{{ input }}" : template,
             outputVariable: outputVariable.isEmpty ? nil : outputVariable
         )
         node.kind = .code(config)
 
-        // [INS-11] The `if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }` that
-        // stood here is GONE. Its comment claimed to "persist fan-in behaviour", but `joinMode` was
-        // retired 2026-08-13 (decode/encode only) and a Code node has no other per-node config this
-        // panel edits — so the line's only effect was turning `nil` into `.some(defaults)`, which
-        // `replaceNode`'s equality guard cannot absorb. Opening a Code node, changing nothing and
-        // pressing Save therefore dirtied the canvas and burned one of the 25 undo slots.
+        // [INS-11] Never materialise `nodeConfig` here: this panel edits no per-node config, and
+        // turning `nil` into `.some(defaults)` defeats `replaceNode`'s equality guard, so a Save
+        // that changed nothing would dirty the canvas and burn an undo slot.
+    }
 
+    private func persistIfEmbedded() {
+        guard !showsHeader else { return }
+        persistConfigToNode()
+    }
+
+    private func saveAndDismiss() {
+        persistConfigToNode()
+        NodeInspectorPendingCommit.shared.clear()
         closeInspector()
     }
 }

@@ -103,7 +103,7 @@ struct PromptLibrarySidebarView: View {
             } else {
                 headerRow(viewModel: viewModel)
 
-                SidebarSearchBarView("Search prompts...", text: $viewModel.searchText)
+                SidebarSearchBarView("Search prompts", text: $viewModel.searchText)
                     .focused($isSearchFocused)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
@@ -118,11 +118,6 @@ struct PromptLibrarySidebarView: View {
                     errorBanner
                 }
             }
-
-            Divider()
-                .background(theme.dividerColor)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 4)
 
             promptList(viewModel: viewModel)
         }
@@ -190,7 +185,7 @@ struct PromptLibrarySidebarView: View {
             sortMenu(viewModel: viewModel)
 
             SidebarHeaderActionButton(
-                title: "New",
+                title: "New Prompt",
                 systemImage: "plus",
                 shortcut: "⌘N"
             ) {
@@ -328,7 +323,7 @@ struct PromptLibrarySidebarView: View {
             }
             .buttonStyle(.plain)
             .padding(.trailing, 10)
-            .help("Manage tags…")
+            .help("Manage tags")
             .accessibilityLabel("Manage tags")
         }
         .padding(.bottom, 10)
@@ -376,19 +371,19 @@ struct PromptLibrarySidebarView: View {
     @ViewBuilder
     private func promptList(viewModel: PromptBrowseViewModel) -> some View {
         if viewModel.filteredPrompts.isEmpty {
+            let hasFilters = !viewModel.searchText.isEmpty || viewModel.selectedCategory != .all || viewModel.selectedTag != nil
             SidebarEmptyStateView(
-                title: viewModel.searchText.isEmpty && viewModel.selectedCategory == .all && viewModel.selectedTag == nil
-                    ? "No Prompts"
-                    : "No results",
+                title: hasFilters ? "No results" : "No Prompts",
                 subtitle: emptyStateSubtitle(viewModel: viewModel),
-                buttonTitle: viewModel.searchText.isEmpty ? "Create Prompt" : "Clear filters",
+                buttonTitle: hasFilters ? "Clear filters" : "New Prompt",
+                buttonIcon: hasFilters ? nil : "plus",
                 systemImage: "tray",
                 onAction: {
-                    if viewModel.searchText.isEmpty && viewModel.selectedCategory == .all && viewModel.selectedTag == nil {
+                    if hasFilters {
+                        viewModel.clearFilters()
+                    } else {
                         createEditVM.loadCreateDraft()
                         showingCreateSheet = true
-                    } else {
-                        viewModel.clearFilters()
                     }
                 }
             )
@@ -470,8 +465,11 @@ struct PromptLibrarySidebarView: View {
                 }
                 .onAppear {
                     if focusedPromptID == nil {
-                        focusedPromptID = activePromptID ?? viewModel.filteredPrompts.first?.id
+                        focusedPromptID = activePromptID
                     }
+                }
+                .onChange(of: activePromptID) { _, newID in
+                    focusedPromptID = newID
                 }
             }
         }
@@ -499,7 +497,7 @@ struct PromptLibrarySidebarView: View {
         PromptRowView(
             prompt: prompt,
             isSelected: activePromptID == prompt.id,
-            isKeyboardFocused: focusedPromptID == prompt.id,
+            isKeyboardFocused: isListFocused && focusedPromptID == prompt.id,
             onSelect: {
                 focusedPromptID = prompt.id
                 router.navigateToPrompt(prompt.id)
@@ -595,25 +593,17 @@ struct PromptLibrarySidebarView: View {
             )
             .help(selectedIDs.count == viewModel.filteredPrompts.count ? "Clear selection" : "Select all visible prompts")
 
-            Button {
+            TactileIconButton(
+                icon: "trash",
+                tooltip: "Delete selected (⌘⌫)",
+                accessibilityLabel: "Delete \(selectedIDs.count) selected prompts",
+                variant: .destructive,
+                size: 26,
+                isDisabled: selectedIDs.isEmpty
+            ) {
                 showingBatchDeleteAlert = true
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "trash")
-                        .font(theme.fontCaption.weight(.semibold))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(theme.errorColor.opacity(0.15))
-                .foregroundColor(theme.errorColor)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            .buttonStyle(.plain)
-            .disabled(selectedIDs.isEmpty)
-            .opacity(selectedIDs.isEmpty ? 0.5 : 1)
             .keyboardShortcut(.delete, modifiers: [.command])
-            .help("Delete selected (⌘⌫)")
-            .accessibilityLabel("Delete \(selectedIDs.count) selected prompts")
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)

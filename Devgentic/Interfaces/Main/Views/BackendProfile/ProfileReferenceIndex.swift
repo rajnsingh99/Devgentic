@@ -75,9 +75,7 @@ enum ProfileReferenceIndex {
 
     /// Workflows with at least one node bound to this profile.
     ///
-    /// ⚠️ Reads each workflow's LAYOUT rather than its `WorkflowConfig.agentProfileIDs`. The layout
-    /// is what the executor actually runs; `agentProfileIDs` is a parallel list that nothing keeps
-    /// in step, so trusting it would both miss real references and invent ones that are not there.
+    /// Reads each workflow's LAYOUT — the record of what the executor actually runs.
     private static func workflowReferences(
         to profileID: UUID,
         in profiles: [BackendProfileModel]

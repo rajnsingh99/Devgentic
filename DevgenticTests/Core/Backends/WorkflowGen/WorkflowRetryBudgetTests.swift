@@ -8,7 +8,7 @@
 //
 //  The node's OUTER backstop (`executeStructuralNodeBounded`) and the PER-ATTEMPT bound inside the
 //  Action path were computed from the identical expression — `node.nodeConfig?.hardTimeout ??
-//  workflowConfig.effectiveNodeTimeout`. So attempt 1 consumed the entire node budget and the outer
+//  WorkflowConfig.nodeTimeout`. So attempt 1 consumed the entire node budget and the outer
 //  sentinel fired the instant attempt 2 began: a node configured "60s, 3 retries" got exactly ONE
 //  attempt. Any Action node whose tool failed more slowly than `limit / attempts` had its configured
 //  retries disabled, with nothing anywhere saying so — and slow failure (a hanging endpoint) is
@@ -54,8 +54,6 @@ final class WorkflowRetryBudgetTests: XCTestCase {
         return node
     }
 
-    private let config = WorkflowConfig(agentProfileIDs: [])
-
     // MARK: - The defect
 
     /// THE BUG, stated as an invariant: the outer backstop must never be smaller than one attempt
@@ -63,8 +61,8 @@ final class WorkflowRetryBudgetTests: XCTestCase {
     func testOuterBudgetCoversEveryPlannedAttempt() {
         let node = actionNode(timeout: 60, retries: 3)
 
-        let attempts = WorkflowExecutor.plannedAttempts(for: node, workflowConfig: config)
-        let budget = WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config)
+        let attempts = WorkflowExecutor.plannedAttempts(for: node)
+        let budget = WorkflowExecutor.outerTimeoutBudget(for: node)
 
         XCTAssertEqual(attempts, 4, "3 retries means 4 attempts")
         XCTAssertEqual(budget, 240, "each attempt must get its own full 60s")
@@ -78,7 +76,7 @@ final class WorkflowRetryBudgetTests: XCTestCase {
         let node = actionNode(timeout: 30, retries: 2, delay: 5)
 
         // 3 attempts × 30s + 2 gaps × 5s
-        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 100)
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node), 100)
     }
 
     // MARK: - No behaviour change where none is wanted
@@ -88,8 +86,8 @@ final class WorkflowRetryBudgetTests: XCTestCase {
     func testNoRetriesLeavesTheBudgetUnchanged() {
         let node = actionNode(timeout: 60, retries: 0)
 
-        XCTAssertEqual(WorkflowExecutor.plannedAttempts(for: node, workflowConfig: config), 1)
-        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 60)
+        XCTAssertEqual(WorkflowExecutor.plannedAttempts(for: node), 1)
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node), 60)
     }
 
     /// ⚠️ Only Action nodes retry. A Code node carrying a stored retry count must NOT get a
@@ -98,19 +96,10 @@ final class WorkflowRetryBudgetTests: XCTestCase {
     func testNonActionKindsNeverGetAMultipliedBudget() {
         let node = codeNode(timeout: 60, retries: 5)
 
-        XCTAssertEqual(WorkflowExecutor.plannedAttempts(for: node, workflowConfig: config), 1,
+        XCTAssertEqual(WorkflowExecutor.plannedAttempts(for: node), 1,
                        "a Code node does not retry, whatever its stored config says")
-        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 60,
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node), 60,
                        "the bound on a non-retrying kind must not be widened")
-    }
-
-    /// Timeout off stays off — unbounded is unbounded however many attempts are planned.
-    func testTimeoutOffStaysOff() {
-        var offConfig = WorkflowConfig(agentProfileIDs: [])
-        offConfig.nodeTimeoutEnabled = false
-        let node = actionNode(timeout: nil, retries: 3)
-
-        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: offConfig))
     }
 
     /// A per-node `hardTimeout` overrides the workflow default, and the multiplication applies to
@@ -118,7 +107,7 @@ final class WorkflowRetryBudgetTests: XCTestCase {
     func testPerNodeTimeoutOverridesTheWorkflowDefaultBeforeMultiplying() {
         let node = actionNode(timeout: 10, retries: 1)
 
-        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 20,
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node), 20,
                        "2 attempts × the node's own 10s, not the workflow default")
     }
 
@@ -136,7 +125,7 @@ final class WorkflowRetryBudgetTests: XCTestCase {
     /// unlike every other structural kind, which still gets the workflow's 120s default.
     func testSubWorkflowWithNoExplicitTimeout_IsUnbounded() {
         let node = subWorkflowNode(timeout: nil, retries: 0)
-        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config),
+        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node),
                      "a sub-workflow node with no explicit hardTimeout must not inherit the workflow's 120s default")
     }
 
@@ -145,19 +134,8 @@ final class WorkflowRetryBudgetTests: XCTestCase {
     /// attempts exactly like any other structural node.
     func testSubWorkflowWithExplicitHardTimeout_IsStillBounded() {
         let node = subWorkflowNode(timeout: 300, retries: 2)
-        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 900,
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node), 900,
                        "3 attempts × the node's own 300s hardTimeout")
-    }
-
-    /// The workflow-level default must not leak into a sub-workflow node's fallback even when one
-    /// is explicitly configured on the workflow — the exemption is unconditional, not "whichever
-    /// default happens to be smaller."
-    func testSubWorkflowIgnoresTheWorkflowDefault_EvenWhenOneIsSet() {
-        var wideConfig = WorkflowConfig(agentProfileIDs: [])
-        wideConfig.defaultNodeTimeout = 45
-        let node = subWorkflowNode(timeout: nil, retries: 0)
-        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: wideConfig),
-                     "the workflow-level default must never become a sub-workflow node's fallback")
     }
 
     /// ⚠️ Adversarial-review gap: every other "unbounded" test above uses `retries: 0`. The nil
@@ -167,7 +145,7 @@ final class WorkflowRetryBudgetTests: XCTestCase {
     /// finite budget out of a nil per-attempt value.
     func testSubWorkflowWithNoExplicitTimeout_StaysUnboundedWithRetriesConfigured() {
         let node = subWorkflowNode(timeout: nil, retries: 2)
-        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config),
+        XCTAssertNil(WorkflowExecutor.outerTimeoutBudget(for: node),
                      "an unbounded sub-workflow node must stay unbounded regardless of how many retries are configured")
     }
 
@@ -182,7 +160,7 @@ final class WorkflowRetryBudgetTests: XCTestCase {
             position: .zero, displayName: "Bot"
         )
         node.nodeConfig = WorkflowNodeConfig(maxNodeRetries: 0, hardTimeout: nil)
-        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node, workflowConfig: config), 120,
+        XCTAssertEqual(WorkflowExecutor.outerTimeoutBudget(for: node), 120,
                        "only .workflow-typed profile nodes get the unbounded fallback")
     }
 }

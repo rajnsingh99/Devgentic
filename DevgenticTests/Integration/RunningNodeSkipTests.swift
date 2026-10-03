@@ -56,20 +56,9 @@ final class RunningNodeSkipTests: XCTestCase {
 
     private func makeStream(
         _ scenario: WorkflowTestScenario,
-        userInput: String,
-        workflowConfig: WorkflowConfig? = nil
+        userInput: String
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         let workflowProfileID = UUID()
-        var profileMap = scenario.profileMap
-        if let workflowConfig {
-            // Inject the run's own workflow profile so the executor resolves THIS config
-            // instead of hard-coded defaults (`testInjectedWorkflowConfig…` proves the lever).
-            profileMap[workflowProfileID] = BackendProfileSnapshot(
-                id: workflowProfileID,
-                displayName: "Test Workflow",
-                details: .workflow(workflowConfig)
-            )
-        }
         let executor = WorkflowExecutor(workflowProfileID: workflowProfileID)
         // [WF-CC14] ROOT depth, deliberately: the run must `beginRun` so the store owns the
         // conversation — a mid-run `requestRunningSkip` targets the ACTIVE run's token. (The old
@@ -80,7 +69,7 @@ final class RunningNodeSkipTests: XCTestCase {
             traceContext: self.traceContext,
             onTraceUpdate: { _ in },
             layout: scenario.layout,
-            profileMap: profileMap,
+            profileMap: scenario.profileMap,
             streamProvider: self.mockProvider
         )
     }
@@ -91,10 +80,9 @@ final class RunningNodeSkipTests: XCTestCase {
     private func executeWithDeadline(
         _ scenario: WorkflowTestScenario,
         userInput: String = "Test input",
-        workflowConfig: WorkflowConfig? = nil,
         seconds: TimeInterval = 20
     ) async throws -> [AgentStreamEvent] {
-        let stream = makeStream(scenario, userInput: userInput, workflowConfig: workflowConfig)
+        let stream = makeStream(scenario, userInput: userInput)
 
         // ⚠️ Both racers are DIRECT group children, never wrapped `Task`s awaited via `.value`:
         // `Task.value` is not cancellation-responsive, so a wrapped deadline made `cancelAll` a
@@ -280,51 +268,6 @@ final class RunningNodeSkipTests: XCTestCase {
                        "an entry node's pass-through is the user query — the answer, since it is the only terminal")
         XCTAssertFalse(events.contains { if case .error = $0 { return true }; return false },
                        "a user skip is not a failure")
-    }
-
-    /// Timeout disabled (`nodeTimeoutEnabled: false` on the injected workflow profile): the
-    /// racer group has NO timeout child, and the skip must still work. Kills the copy-paste
-    /// mutation that wraps the skip sentinel in `if let nodeTimeout` — under that mutation this
-    /// test dies on the deadline while the timeout-enabled tests all still pass.
-    func testRunningSkip_WorksWithNodeTimeoutDisabled() async throws {
-        let scenario = WorkflowTestScenario()
-        let a = scenario.addBotNode(name: "Bot A")
-        let b = scenario.addBotNode(name: "Bot B")
-        scenario.connect(from: a, to: b)
-
-        let bPID = scenario.profileID(for: b)!
-        mockProvider.scriptStream(for: scenario.profileID(for: a)!, events: [.content("alpha")])
-        mockProvider.scriptSlowStream(for: bPID, initialEvents: [])
-
-        var config = WorkflowConfig(agentProfileIDs: [])
-        config.nodeTimeoutEnabled = false
-
-        skipWhenInvoked(node: b, profileID: bPID)
-        let events = try await executeWithDeadline(scenario, workflowConfig: config)
-
-        XCTAssertEqual(skipReasons(in: events)[b], .byUser,
-                       "skip must work on an UNBOUNDED node — those are the ones most worth skipping")
-    }
-
-    /// Canary for the config-injection lever the test above depends on: a 1-second injected node
-    /// timeout must kill a `.slow` node. If injection silently stopped resolving, the no-timeout
-    /// test would run WITH a timeout and its mutation-kill claim would be vacuous — this canary
-    /// is what makes that regression loud.
-    func testInjectedWorkflowConfig_ControlsNodeTimeout() async throws {
-        let scenario = WorkflowTestScenario()
-        let a = scenario.addBotNode(name: "Bot A")
-        mockProvider.scriptSlowStream(for: scenario.profileID(for: a)!, initialEvents: [])
-
-        var config = WorkflowConfig(agentProfileIDs: [])
-        config.nodeTimeoutEnabled = true
-        config.defaultNodeTimeout = 1
-
-        let events = try await executeWithDeadline(scenario, workflowConfig: config, seconds: 15)
-        let aFailed = events.contains {
-            if case .workflowNodeFailed(let id, _, _, _) = $0 { return id == a }
-            return false
-        }
-        XCTAssertTrue(aFailed, "the injected 1s timeout must fire — this is the lever testRunningSkip_WorksWithNodeTimeoutDisabled stands on")
     }
 
     /// A park held under the node's identity but OUTSIDE the producer's task tree — the one shape
@@ -908,17 +851,17 @@ final class RanBeforeSkipLabellingTests: XCTestCase {
         XCTAssertEqual(snap.duration, 1.7)
     }
 
-    /// For those nil records the label falls back to what IS on disk. A pre-dispatch skip is
-    /// stamped with two adjacent `Date()` calls (duration ~0) and accumulates no timeline, so the
-    /// heuristic errs toward the old wording and never toward a false "it ran".
-    func testLegacyRecordsUseDurationAndTraceAsTheFallback() {
+    /// A snapshot without the field never claims the node ran: unknown reads as "Not run",
+    /// whatever its duration. (The duration/trace heuristic for pre-field records was removed
+    /// with the rest of the legacy-record handling, 2026-10-03.)
+    func testASnapshotWithoutTheFieldReadsAsNotRun() {
         func row(duration: TimeInterval) -> WorkflowRunDisplayData.NodeDisplayData {
             .init(id: UUID(), nodeID: UUID(), profileName: "n", status: .skipped, detail: "d",
                   duration: duration, input: nil, inputSourceLabel: nil, nodeTimeline: [],
                   isStreaming: false, ranBeforeSkip: nil, supportsTimeline: false)
         }
         let data = WorkflowRunDisplayData.from(live: WorkflowExecutionState())
-        XCTAssertEqual(data.skipTagLabel(for: row(duration: 1.7)), "Skipped")
+        XCTAssertEqual(data.skipTagLabel(for: row(duration: 1.7)), "Not run")
         XCTAssertEqual(data.skipTagLabel(for: row(duration: 0.0)), "Not run")
     }
 }

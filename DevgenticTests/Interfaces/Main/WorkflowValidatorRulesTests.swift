@@ -77,7 +77,7 @@ final class WorkflowValidatorRulesTests: XCTestCase {
     /// would mask the rule a control test exists to clear.
     private func workflowProfile(_ id: UUID, name: String = "Nested") -> (UUID, BackendProfileModel) {
         (id, BackendProfileSnapshot(id: id, displayName: name,
-                                    details: .workflow(WorkflowConfig(agentProfileIDs: []))))
+                                    details: .workflow(WorkflowConfig())))
     }
 
     private func errors(_ issues: [WorkflowValidationIssue], containing text: String) -> [WorkflowValidationIssue] {
@@ -307,45 +307,6 @@ final class WorkflowValidatorRulesTests: XCTestCase {
         XCTAssertEqual(warnings(issues, containing: "isn't currently available").count, 1)
     }
 
-    // MARK: - Router no-match behaviour (2026-08-16)
-
-    /// A default route whose target rule was deleted must BLOCK the run — at run time the engine
-    /// fails the node rather than guess, so the only good outcome is catching it at design time.
-    func testNoMatchRouteToDeletedRuleIsAnError() {
-        var config = ConditionNodeConfig()
-        config.rules = [rule("A"), rule("B")]
-        config.noMatchBehavior = .route(ruleID: UUID())   // no rule carries this id
-        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
-        let issues = validate(layout([node, codeNode()]))
-        XCTAssertEqual(errors(issues, containing: "'When Nothing Matches' route points at a rule that was deleted").count, 1)
-    }
-
-    /// …and a route to a LIVE rule is clean — a rule that flags everything passes every positive-only test.
-    func testNoMatchRouteToLiveRuleIsClean() {
-        var config = ConditionNodeConfig()
-        let target = rule("B")
-        config.rules = [rule("A"), target]
-        config.noMatchBehavior = .route(ruleID: target.id)
-        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
-        let issues = validate(layout([node, codeNode()]))
-        XCTAssertTrue(errors(issues, containing: "When Nothing Matches").isEmpty)
-    }
-
-    /// A legacy `always` rule (hard-deleted operator, decodes to `.other("always")`) gets its own
-    /// WARNING pointing at the replacement — NOT the generic "saved by a newer version / Update
-    /// Devgentic" ERROR, which would block the run and point in exactly the wrong direction.
-    func testRetiredAlwaysOperatorWarnsWithoutBlocking() {
-        var config = ConditionNodeConfig()
-        config.rules = [rule("A"), ConditionRule(label: "Rest", field: .upstreamOutput, op: .other("always"), value: "")]
-        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
-        let issues = validate(layout([node, codeNode()]))
-
-        XCTAssertTrue(issues.contains { $0.severity == .warning && $0.message.contains("retired 'always matches' operator") },
-                      "the retired op must be named with its replacement — got: \(issues.map(\.message))")
-        XCTAssertTrue(errors(issues, containing: "newer version").isEmpty,
-                      "the generic newer-build ERROR must not fire for 'always' — it blocks the run and says 'Update Devgentic', both wrong")
-    }
-
     // MARK: - Sub-workflow nesting (WF-VA1 ≡ WF-NS5 ≡ WF-SE4)
     // (Originally exercised through Loop bodies; rewritten onto sub-workflow nodes when the Loop
     //  was retired 2026-08-15. The RULES under test — the shared extractor, cycle detection, the
@@ -454,10 +415,8 @@ final class WorkflowValidatorRulesTests: XCTestCase {
     }
 
     private func botNode(_ profile: BackendProfileModel) -> WorkflowNode {
-        var node = WorkflowNode(kind: .profile(profileID: profile.id, profileType: .bot),
-                                position: .zero, displayName: profile.displayName)
-        node.nodeConfig = WorkflowNodeConfig(taskDescription: "Do the thing.")
-        return node
+        WorkflowNode(kind: .profile(profileID: profile.id, profileType: .bot),
+                     position: .zero, displayName: profile.displayName)
     }
 
     /// Two entry nodes feeding one sink — the fan-out shape that puts them on one level.
@@ -712,16 +671,5 @@ final class WorkflowValidatorRulesTests: XCTestCase {
             annotations: []
         )
         XCTAssertTrue(warnings(validate(l), containing: "error port is not wired").isEmpty)
-    }
-
-    /// ⚠️ A MIGRATED node must not be flagged for a stale legacy value the engine no longer reads.
-    func testAStaleLegacyRouteIsNotFlaggedOnceAPolicyGoverns() {
-        var config = ConditionNodeConfig()
-        config.rules = [rule("Urgent"), rule("Billing")]
-        config.noMatchBehavior = .route(ruleID: UUID())   // dangling, but superseded
-        config.decisionPolicy = .failNode
-        let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
-        XCTAssertTrue(errors(validate(layout([node])), containing: "When Nothing Matches").isEmpty,
-                      "the legacy setting is inert once a policy governs — flagging it would send the user to fix something with no effect")
     }
 }

@@ -19,11 +19,11 @@ struct SkillManifest: Codable, Hashable, Sendable, Identifiable {
     let id: UUID
     let name: String              // From YAML frontmatter — validated per agentskills.io spec
     let description: String       // From YAML frontmatter — used for LLM routing
-    /// ⚠️ NOT A PATH AT RUN TIME. On the library path this carries the skill's opaque id
+    /// ⚠️ NOT A PATH AT RUN TIME. A manifest reaching a run carries the skill's opaque id
     /// (`skill_…`), set by `SkillResolution.manifest(for:version:)`; it is a real filesystem path
-    /// only on the LEGACY arm. Believing the old comment here — "absolute path to skill
-    /// subdirectory" — is what produced a `load_skill` that tried to open `skill_<uuid>/SKILL.md`
-    /// and failed on every call. `versionID` below is how a reader tells the two apart.
+    /// only while a folder is being scanned for ingest. Believing an old comment here — "absolute
+    /// path to skill subdirectory" — is what produced a `load_skill` that tried to open
+    /// `skill_<uuid>/SKILL.md` and failed on every call.
     let folderPath: String
     let resourceCount: Int        // Number of files in reference/ + templates/ + scripts/
     let hasScripts: Bool          // true if scripts/ subdirectory contains any files
@@ -46,11 +46,9 @@ struct SkillManifest: Codable, Hashable, Sendable, Identifiable {
     ///    the profile (`Bash` is `batch_command` in a Code profile, where `execute_shell` is not
     ///    even offered) and because a rewritten name hides the most useful fact about it — that it
     ///    came from somewhere else.
-    /// 3. **Set on both paths now.** A manifest reaching a run is built by
+    /// 3. **Set at run time.** A manifest reaching a run is built by
     ///    `SkillResolution.manifest(for:version:)`, which carries the resolved version's
-    ///    declaration. On the legacy arm it comes from `parseManifest` reading the file. (An earlier
-    ///    version of this note said it was nil at run time and re-read from disk — true of the
-    ///    retired registry, false since V6.)
+    ///    declaration.
     ///
     /// `nil` means the field was absent — the author said nothing. That is meaningfully different
     /// from `[]`, which is `allowed-tools: []`: an author saying the skill needs no tools at all.
@@ -64,8 +62,7 @@ struct SkillManifest: Codable, Hashable, Sendable, Identifiable {
     /// lets `LoadSkillTool` fetch the exact snapshot that was resolved, including a PINNED one: the
     /// skill's latest version is not necessarily the version this profile reads.
     ///
-    /// `nil` means the manifest came from the LEGACY blob, whose `folderPath` really is a path.
-    /// That is the one remaining case the disk loader is for.
+    /// `nil` only for a manifest parsed from a folder during ingest, which never reaches a run.
     var versionID: String?
 
 }
@@ -112,65 +109,6 @@ enum SkillResourceType: String, Codable, Sendable {
     }
 }
 
-// MARK: - Skill Folder Configuration (Per-Profile Persistence)
-
-/// ⚠️ LEGACY, READ-ONLY HISTORY. Nothing writes this any more — the profile editor stopped on
-/// 2026-09-14 and skills live in the library. It is still DECODED, because a blob stamped v8+ that
-/// carries it without `skillSelections` is the one case `SkillResolution`'s legacy arm serves, and
-/// because `migrateToV8` derives selections from its manifests.
-///
-/// It described a per-profile mechanism: folder URLs plus a full copy of every scanned manifest,
-/// encoded in the ProfileDetails blob. Five profiles using one folder meant five copies that could
-/// disagree about a skill's description — which is why a profile now stores a reference instead.
-struct SkillFolderConfig: Codable, Hashable, Sendable {
-    /// All source folder URLs the user has imported.
-    var folderURLs: [URL]
-    var manifests: [SkillManifest]
-    var lastScannedAt: Date
-
-    /// Backward-compat: primary folder URL (first in the list).
-    var folderURL: URL { folderURLs.first ?? URL(fileURLWithPath: "/") }
-
-    init(folderURL: URL, manifests: [SkillManifest], lastScannedAt: Date) {
-        self.folderURLs = [folderURL]
-        self.manifests = manifests
-        self.lastScannedAt = lastScannedAt
-    }
-
-    init(folderURLs: [URL], manifests: [SkillManifest], lastScannedAt: Date) {
-        self.folderURLs = folderURLs
-        self.manifests = manifests
-        self.lastScannedAt = lastScannedAt
-    }
-
-    // Custom Codable for backward compat: decode old `folderURL` single field
-    private enum CodingKeys: String, CodingKey {
-        case folderURL, folderURLs, manifests, lastScannedAt
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        manifests = try container.decode([SkillManifest].self, forKey: .manifests)
-        lastScannedAt = try container.decode(Date.self, forKey: .lastScannedAt)
-
-        // Try multi-folder first, fall back to legacy single-folder
-        if let urls = try? container.decode([URL].self, forKey: .folderURLs) {
-            folderURLs = urls
-        } else if let url = try? container.decode(URL.self, forKey: .folderURL) {
-            folderURLs = [url]
-        } else {
-            folderURLs = []
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(folderURLs, forKey: .folderURLs)
-        try container.encode(manifests, forKey: .manifests)
-        try container.encode(lastScannedAt, forKey: .lastScannedAt)
-    }
-}
-
 // MARK: - Skill Selection (what a profile stores about one skill)
 
 /// A profile's reference to one library skill: an ADDRESS, plus the two preferences the profile owns.
@@ -187,25 +125,12 @@ struct SkillFolderConfig: Codable, Hashable, Sendable {
 ///
 /// For skills the copy IS the payload: `description` is rendered verbatim into `<available_skills>`
 /// and is what the model routes on. A stale copy does not sit inert — it routes the model on text
-/// that no longer exists. `SkillFolderConfig.manifests` had exactly that problem: edit a SKILL.md
-/// and only the profile that happened to Rescan saw it. The library is authoritative for every
-/// disk-derived field; the profile supplies only the two below.
+/// that no longer exists. The library is authoritative for every disk-derived field; the profile
+/// supplies only the two below.
 struct SkillSelection: Codable, Hashable, Sendable, Identifiable {
 
     /// The library skill this points at.
-    ///
-    /// ⚠️ OPTIONAL, and nil means exactly one thing: a selection carried over from a pre-V6 profile
-    /// that has not been re-linked yet. A sentinel string would have been tidier to read and worse
-    /// to reason about — every consumer would have to know the magic value, and one that forgot
-    /// would treat it as a real id and resolve nothing, silently. `nil` cannot be mistaken for an id.
-    let skillID: String?
-
-    /// The folder this selection addressed before V6. **Migration input only.**
-    ///
-    /// ⚠️ Never consulted for resolution, and nothing may start doing so. It exists so the launch
-    /// sweep can match a pre-V6 selection to the skill it ingested from that folder and write a real
-    /// `skillID` back. Nil for anything created after V6.
-    let legacyFolderPath: String?
+    let skillID: String
 
     /// Last-known name. Denormalized for two reasons, neither of which is authority: an unresolvable
     /// selection renders as a NAMED, removable row instead of a bare id, and it can be reported
@@ -226,23 +151,15 @@ struct SkillSelection: Codable, Hashable, Sendable, Identifiable {
     /// ⚠️ Identity is the SKILL ID, on the type, so no call site can key on the wrong field. The
     /// `Tool.id { name }`-plus-separate-`sourceId` split is precisely the shape that once produced
     /// an invisible duplicate skill no UI could remove.
-    ///
-    /// A not-yet-re-linked selection still needs a stable identity for `ForEach`, so it falls back
-    /// to its legacy path — prefixed, so it can never collide with a real `skill_…`.
-    var id: String { skillID ?? "legacy:\(legacyFolderPath ?? name)" }
-
-    /// True for a pre-V6 selection the launch sweep has not matched to a library skill yet.
-    var isAwaitingRelink: Bool { skillID == nil }
+    var id: String { skillID }
 
     init(
-        skillID: String?,
-        legacyFolderPath: String? = nil,
+        skillID: String,
         name: String,
         pinnedVersionID: String? = nil,
         isEnabled: Bool = true
     ) {
         self.skillID = skillID
-        self.legacyFolderPath = legacyFolderPath
         self.name = name
         self.pinnedVersionID = pinnedVersionID
         self.isEnabled = isEnabled
@@ -256,17 +173,7 @@ struct SkillSelection: Codable, Hashable, Sendable, Identifiable {
         pinnedVersionID: String? = nil,
         isEnabled: Bool = true
     ) -> SkillSelection {
-        SkillSelection(skillID: skillID, legacyFolderPath: nil, name: name,
-                       pinnedVersionID: pinnedVersionID, isEnabled: isEnabled)
-    }
-
-    /// Returns a copy pointing at a library skill, preserving the user's own preferences.
-    ///
-    /// ⚠️ Keeps `isEnabled` and `pinnedVersionID`. Re-linking is a repair of an ADDRESS; silently
-    /// re-enabling a skill the user had switched off, or dropping a pin they set, would make a
-    /// repair look like a settings reset.
-    func relinked(to skillID: String, name: String) -> SkillSelection {
-        SkillSelection(skillID: skillID, legacyFolderPath: nil, name: name,
+        SkillSelection(skillID: skillID, name: name,
                        pinnedVersionID: pinnedVersionID, isEnabled: isEnabled)
     }
 }

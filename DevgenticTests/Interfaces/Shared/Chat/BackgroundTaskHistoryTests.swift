@@ -134,7 +134,7 @@ final class BackgroundTaskHistoryTests: XCTestCase {
         store.configureContainer(container)
         store.addConversation(from: Conversation(id: conversationID, messages: [], timestamp: t0,
                                                  userDefinedTitle: "bg history", isPinned: false,
-                                                 backendType: nil, backendEntityId: nil))
+                                                 backendEntityId: nil))
         return (store, previous)
     }
 

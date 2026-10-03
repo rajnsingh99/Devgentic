@@ -26,7 +26,6 @@ import Hub
 
 enum MLXModelIdentity {
 
-    @MainActor private static let logger = DGLogger(category: "MLXModelIdentity")
 
     // MARK: - Derivation
 
@@ -73,13 +72,8 @@ enum MLXModelIdentity {
     /// How a match was reached. Callers that care about ambiguity can inspect this;
     /// most just use `matches`.
     enum MatchKind: Equatable {
-        /// Full repo ids agree — the only unambiguous outcome.
+        /// Full repo ids agree.
         case exact
-        /// Only the bare model names agree. Ambiguous across publishers: two orgs can ship
-        /// the same folder name. Tolerated because profiles saved before the canonical-id
-        /// fix stored the bare name, and dropping them would orphan the user's configured
-        /// model. Always logged.
-        case legacyBareName
         case none
     }
 
@@ -93,31 +87,12 @@ enum MLXModelIdentity {
         let rhs = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !lhs.isEmpty, !rhs.isEmpty else { return .none }
 
-        if lhs.caseInsensitiveCompare(rhs) == .orderedSame { return .exact }
-
-        // Legacy tolerance: exactly one side carries an author. Compare whole path
-        // components — never a substring.
-        let lhsBare = lhs.components(separatedBy: "/").last ?? lhs
-        let rhsBare = rhs.components(separatedBy: "/").last ?? rhs
-        let onlyOneIsQualified = lhs.contains("/") != rhs.contains("/")
-        if onlyOneIsQualified, lhsBare.caseInsensitiveCompare(rhsBare) == .orderedSame {
-            return .legacyBareName
-        }
-        return .none
+        return lhs.caseInsensitiveCompare(rhs) == .orderedSame ? .exact : .none
     }
 
-    /// Convenience boolean. Logs whenever the ambiguous legacy branch is what produced the
-    /// match, naming both identifiers, so a wrong resolution is diagnosable from the log.
+    /// Convenience boolean.
     @MainActor
     static func matches(installed: String, candidate: String) -> Bool {
-        switch match(installed: installed, candidate: candidate) {
-        case .exact:
-            return true
-        case .legacyBareName:
-            logger.warning("[MLXSTORE] Identity matched only on the bare model name: installed='\(installed)' candidate='\(candidate)'. CONSEQUENCE: this is ambiguous across publishers — if two orgs ship this folder name the wrong model may be resolved. Re-select the model in the profile to store its full repo id.")
-            return true
-        case .none:
-            return false
-        }
+        match(installed: installed, candidate: candidate) == .exact
     }
 }

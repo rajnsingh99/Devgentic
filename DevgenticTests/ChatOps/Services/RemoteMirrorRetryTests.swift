@@ -63,6 +63,20 @@ final class RemoteMirrorRetryTests: XCTestCase {
             lock.withLock { _edits.append(newText) }
         }
 
+        /// Holds `render` open after it has been entered, so a resolution can land INSIDE the post —
+        /// the window where the mirror has claimed the operation but has no message id yet.
+        /// `renders` is counted on entry, so `waitForRenders` still clears while the post is held.
+        private var _gateRenders = false
+        private var _rendersReleased = false
+        var gateRenders: Bool {
+            get { lock.withLock { _gateRenders } }
+            set { lock.withLock { _gateRenders = newValue } }
+        }
+        var rendersReleased: Bool {
+            get { lock.withLock { _rendersReleased } }
+            set { lock.withLock { _rendersReleased = newValue } }
+        }
+
         /// ⚠️ Returns a real id: the mirror only records `hitlMessageIDs[operationID]` when the
         /// render hands one back, and without that entry no observer can edit anything.
         @discardableResult
@@ -71,6 +85,9 @@ final class RemoteMirrorRetryTests: XCTestCase {
             // fan-out workflow parks one per node), and returning a constant would hide exactly the
             // collision slice 4 exists to fix.
             let n = lock.withLock { () -> Int in _renders += 1; _views.append(view); return _renders }
+            while gateRenders && !rendersReleased {
+                try? await Task.sleep(nanoseconds: 2_000_000)
+            }
             return "remote-msg-\(n)"
         }
     }
@@ -83,9 +100,8 @@ final class RemoteMirrorRetryTests: XCTestCase {
         func addMessages(_ messages: [ChatMessage], toConversation conversationId: UUID) async {}
         func getConversation(withId id: UUID) -> ConversationSD? { nil }
         func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] { [] }
-        func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {}
         func deleteConversation(with id: UUID) {}
-        func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {}
+        func updateBackendForConversation(id: UUID, backendEntityId: UUID?) {}
         func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {}
         func togglePinStatus(for conversationId: UUID) {}
     }
@@ -129,6 +145,8 @@ final class RemoteMirrorRetryTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        // A gated render left holding would poll for the life of the process.
+        transport?.rendersReleased = true
         mirror.teardown()
         mirror = nil
         streamManager = nil
@@ -499,5 +517,88 @@ final class RemoteMirrorRetryTests: XCTestCase {
             A reply to an unrelated message must correlate to nothing. Guessing here would resolve \
             a parked clarification with text the user never intended as its answer.
             """)
+    }
+
+    // MARK: - A resolution that lands while its prompt is still being posted
+
+    /// Parks a tool confirmation, holds its post open, and resolves it from Telegram inside the
+    /// post. Returns the operation id once the post has been released and an edit observed.
+    private func resolveWhilePosting() async -> UUID {
+        transport.shouldThrow = false
+        transport.gateRenders = true
+        streamManager.interactionCenter = center
+
+        let operationID = UUID()
+        center.enqueue(PendingHITL(
+            id: operationID,
+            origin: HITLOrigin(interface: .chat, conversationID: conversationID, title: "Run a tool"),
+            kind: .toolConfirmation(PendingToolConfirmation(
+                id: operationID, toolName: "write_file", params: "{}"
+            ))
+        ))
+
+        message.content = .plainText("working")
+        _ = await waitForRenders(toReach: 1)
+        XCTAssertNil(mirror.operationID(forRemoteMessageID: "remote-msg-1"),
+                     "precondition: the post is held open, so no message id is recorded yet")
+
+        // The user DENIES on Telegram while the prompt is still being posted.
+        NotificationCenter.default.post(name: .hitlPermissionResolved, object: nil, userInfo: [
+            HITLResolvedKey.operationID: operationID,
+            HITLResolvedKey.conversationID: conversationID!,
+            HITLResolvedKey.approved: false,
+            HITLResolvedKey.outcome: "denied",
+            HITLResolvedKey.source: MessageSource.telegram.rawValue,
+        ])
+        // Let the resolution reach the mirror before the post is allowed to complete.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertNil(transport.lastEditedText, "nothing is posted yet, so there is nothing to edit")
+
+        transport.rendersReleased = true
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, transport.lastEditedText == nil {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return operationID
+    }
+
+    /// ⚠️ The mid-post prompt used to be rewritten as "✅ Already answered on another surface." —
+    /// a ✅ on a DENIAL, attributed to "another surface" when it was answered from this very chat.
+    ///
+    /// Mutation that must turn this red: stop consuming `resolutionsDuringRender` in the render
+    /// window (the interaction-center fallback then writes the generic text).
+    func testAPromptAnsweredWhileStillPostingShowsTheRealOutcome() async {
+        _ = await resolveWhilePosting()
+
+        let text = transport.lastEditedText
+        XCTAssertNotNil(text, "the prompt must be rewritten — otherwise its buttons stay live on a decided prompt")
+        XCTAssertTrue(text?.contains("denied") ?? false,
+                      "a denial must read as a denial, not a generic ✅: \(text ?? "nil")")
+        XCTAssertFalse(text?.contains("another surface") ?? true,
+                       "it was answered from this chat, not another surface: \(text ?? "nil")")
+    }
+
+    /// The claim must be released on this path, or the operation stays marked as mirrored and a
+    /// later park of the same id is silently never shown remotely.
+    ///
+    /// Mutation that must turn this red: drop `mirroredOperations.remove(pending.id)` from the
+    /// parked-verdict branch of the render window.
+    func testAPromptAnsweredWhileStillPostingReleasesItsClaim() async {
+        let operationID = await resolveWhilePosting()
+        XCTAssertNotNil(transport.lastEditedText, "precondition: the mid-post resolution was applied")
+
+        // Probed by re-parking: `ActiveStreamManager` already removed the item from the centre, and
+        // the mirror skips any id still claimed — so only a released claim lets this render again.
+        transport.gateRenders = false
+        center.enqueue(PendingHITL(
+            id: operationID,
+            origin: HITLOrigin(interface: .chat, conversationID: conversationID, title: "Run a tool"),
+            kind: .toolConfirmation(PendingToolConfirmation(
+                id: operationID, toolName: "write_file", params: "{}"
+            ))
+        ))
+        message.content = .plainText("working again")
+        let renders = await waitForRenders(toReach: 2)
+        XCTAssertEqual(renders, 2, "the mid-post resolution never released its claim, so this operation can never be mirrored again")
     }
 }

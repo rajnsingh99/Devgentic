@@ -135,6 +135,44 @@ struct SecureKeyStorage: KeychainAccessing {
     /// four ChatOps credentials share one service and every MCP secret shares another, so a read
     /// failure without the account cannot be told apart from its siblings. Register B2: the
     /// consequence is the whole reason this message exists.
+    // MARK: - Access-prompt tracing
+
+    /// A `SecItem*` call slower than this almost certainly showed the macOS "Devgentic wants to use
+    /// your confidential information" dialog: the call BLOCKS until the user answers it, while an
+    /// ordinary hit or miss returns in well under 10 ms.
+    static let accessPromptSuspectThreshold: TimeInterval = 0.25
+
+    /// Correlates the start and end of one call in the log.
+    private static let traceSequence = OSAllocatedUnfairLock(initialState: 0)
+
+    /// Runs one `SecItem*` call and logs its operation, item, status and duration.
+    ///
+    /// ⚠️ DIAGNOSTIC for the keychain prompt seen at launch. The prompt appears when an item's
+    /// ACL names a different code signature from the running build (an ad-hoc Debug build reading
+    /// an item a Developer ID build wrote, or vice versa). The slow-call branch logs the CALL STACK,
+    /// which names the launch path that reached the Keychain. Find it with:
+    /// `log show --last 10m --predicate 'eventMessage CONTAINS "[KEYCHAIN_TRACE]"' --info`
+    static func traced(
+        _ operation: String,
+        service: String,
+        account: String,
+        _ call: () -> OSStatus
+    ) -> OSStatus {
+        let id = traceSequence.withLock { value -> Int in value += 1; return value }
+        let started = Date()
+        let status = call()
+        let elapsed = Date().timeIntervalSince(started)
+        let ms = Int((elapsed * 1000).rounded())
+        let line = "[KEYCHAIN_TRACE] #\(id) \(operation) service='\(service)' account='\(account)' → \(osStatusName(status)) in \(ms) ms"
+        if elapsed >= accessPromptSuspectThreshold {
+            let stack = Thread.callStackSymbols.dropFirst(2).prefix(14).joined(separator: "\n")
+            logger.notice("\(line) — SLOW: a Keychain access prompt was probably shown and waited on. CONSEQUENCE: this call blocked its thread until the user answered. Caller stack:\n\(stack)")
+        } else {
+            logger.info(line)
+        }
+        return status
+    }
+
     static func readFailureMessage(status: OSStatus, service: String, account: String) -> String {
         return "[SECRETS] Keychain read FAILED for service '\(service)', account '\(account)' "
             + "(\(osStatusName(status))). CONSEQUENCE: the caller is told the read FAILED rather "
@@ -205,7 +243,9 @@ struct SecureKeyStorage: KeychainAccessing {
             kSecAttrDescription as String: Self.itemDescription
         ]
 
-        let status = SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
+        let status = Self.traced("update", service: service, account: account) {
+            SecItemUpdate(query as CFDictionary, attributesToUpdate as CFDictionary)
+        }
         if status == errSecItemNotFound {
             let newQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -216,7 +256,9 @@ struct SecureKeyStorage: KeychainAccessing {
                 kSecValueData as String: data
             ]
             logger.log("No existing key found. Adding new key to keychain for service: \(service), account: \(account)")
-            let addStatus = SecItemAdd(newQuery as CFDictionary, nil)
+            let addStatus = Self.traced("add", service: service, account: account) {
+                SecItemAdd(newQuery as CFDictionary, nil)
+            }
             Self.logAddResult(addStatus, service: service, account: account)
             return addStatus
         }
@@ -261,7 +303,9 @@ struct SecureKeyStorage: KeychainAccessing {
         ]
 
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = Self.traced("read", service: service, account: account) {
+            SecItemCopyMatching(query as CFDictionary, &item)
+        }
 
         if status == errSecItemNotFound { return .notFound }
 
@@ -300,7 +344,9 @@ struct SecureKeyStorage: KeychainAccessing {
             kSecAttrAccount as String: account
         ]
 
-        let status = SecItemDelete(query as CFDictionary)
+        let status = Self.traced("delete", service: service, account: account) {
+            SecItemDelete(query as CFDictionary)
+        }
         if status != errSecSuccess && status != errSecItemNotFound {
             logger.error(Self.deleteResultMessage(status: status, service: service, account: account))
         }
@@ -359,5 +405,15 @@ final class TestHostKeychain: KeychainAccessing, @unchecked Sendable {
     /// Empties the store. For test isolation only.
     func removeAll() {
         lock.withLock { items.removeAll() }
+        // The shared provider keys are cached above this store; a cache left behind would keep
+        // answering with keys that no longer exist here.
+        GlobalProviderKeys.discardCache()
+        ProviderKeyStore.discardCache()
+    }
+
+    /// Empties one service. For test isolation only — see `GlobalProviderKeys.resetForTestIsolation`.
+    func removeAll(service: String) {
+        let prefix = service + "\u{0}"
+        lock.withLock { items = items.filter { !$0.key.hasPrefix(prefix) } }
     }
 }

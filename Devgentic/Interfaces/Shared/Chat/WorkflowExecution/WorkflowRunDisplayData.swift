@@ -583,10 +583,8 @@ struct WorkflowRunDisplayData {
 extension WorkflowRunDisplayData {
 
     /// A node that never executed — rendered neutrally, never as the red of a genuine crash.
-    /// The legacy branch covers records written before 2026-08-15 (no `.skipped` status to read).
     func nodeDidNotRun(_ node: NodeDisplayData) -> Bool {
-        if node.status == .skipped { return true }
-        return node.status == .failed && WorkflowNodeOutcome.isLegacyUpstreamSkip(detail: node.detail)
+        node.status == .skipped
     }
 
     /// The status word shown for a node that did not run — THE single source for the visible tag,
@@ -623,20 +621,14 @@ extension WorkflowRunDisplayData {
         return node.status.label
     }
 
-    /// Whether a skipped node had already started when the skip landed.
-    ///
-    /// `nil` means the record was written before the fact was persisted. The legacy tier reads the
-    /// two signals that ARE already on disk: a pre-dispatch skip is stamped with two adjacent
-    /// `Date()` calls so its duration is ~0 by construction, and it never accumulates a timeline.
-    /// It has false negatives (a node skipped microseconds after starting), so it errs toward the
-    /// OLD wording and never toward a false "it ran".
+    /// Whether a skipped node had already started when the skip landed. Unknown reads as "did
+    /// not start" — never as a false "it ran".
     func nodeRanBeforeSkip(_ node: NodeDisplayData) -> Bool {
-        if let known = node.ranBeforeSkip { return known }
-        return node.duration > 0.05 || !node.nodeTimeline.isEmpty
+        node.ranBeforeSkip ?? false
     }
 
     /// What to tell the user about a node that did not run. The engine writes the structural cause
-    /// into `detail` (`NodeSkipReason.displayText`); the fallback covers pre-2026-08-15 records.
+    /// into `detail` (`NodeSkipReason.displayText`).
     func notRunMessage(for node: NodeDisplayData) -> String {
         let detail = node.detail.trimmingCharacters(in: .whitespacesAndNewlines)
         return detail.isEmpty ? String(localized: "Not run") : detail

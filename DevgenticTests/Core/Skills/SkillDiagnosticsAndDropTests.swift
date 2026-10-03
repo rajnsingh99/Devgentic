@@ -13,48 +13,26 @@ import UniformTypeIdentifiers
 
 // MARK: - Code mode's inert-skills warning
 
-/// ⚠️⚠️ THE WARNING WENT SILENT AT THE MIGRATION AND NOTHING NOTICED. It read only the pre-V6
-/// `skillConfig` blob, so once skills moved into `skillSelections` it could never fire — for exactly
-/// the profiles that reach it. The state it exists to expose (a Code profile carrying skills the
-/// runtime discards) became invisible.
+/// ⚠️⚠️ THE WARNING ONCE WENT SILENT AND NOTHING NOTICED: it read a field nothing wrote any more, so
+/// the state it exists to expose (a Code profile carrying skills the runtime discards) became
+/// invisible.
 final class CodeModeSkillDiagnosticsTests: XCTestCase {
 
-    private func config(selections: [SkillSelection]? = nil,
-                        legacy: SkillFolderConfig? = nil) -> AgentConfig {
-        var c = AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3"),
-                            tools: [], skillSelections: selections)
-        c.skillConfig = legacy
-        return c
+    private func config(selections: [SkillSelection]? = nil) -> AgentConfig {
+        AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3"),
+                    tools: [], skillSelections: selections)
     }
 
-    /// **Mutation check:** drop the `skillSelections` arm and this goes red — which is the exact
-    /// state the code shipped in.
-    func testAV6ShapedProfileIsReported() {
+    func testALinkedSkillIsReported() {
         let names = CodeModeSkillDiagnostics.inertSkillNames(
             in: config(selections: [.link(skillID: "skill_1", name: "code-review")]))
         XCTAssertEqual(names, ["code-review"])
     }
 
-    /// The legacy arm still matters for a profile that has not been through the sweep.
-    func testAPreV6ProfileIsStillReported() {
-        let manifest = SkillManifest(id: UUID(), name: "legacy-skill", description: "d",
-                                     folderPath: "/tmp/x", resourceCount: 0, hasScripts: false,
-                                     compatibility: nil, isEnabled: true, allowedTools: nil)
+    func testTheSameNameLinkedTwiceIsReportedOnce() {
         let names = CodeModeSkillDiagnostics.inertSkillNames(
-            in: config(legacy: SkillFolderConfig(folderURL: URL(fileURLWithPath: "/tmp"),
-                                                 manifests: [manifest], lastScannedAt: Date())))
-        XCTAssertEqual(names, ["legacy-skill"])
-    }
-
-    /// A half-migrated profile holding the same skill in both shapes must be reported once.
-    func testASkillPresentInBothShapesIsReportedOnce() {
-        let manifest = SkillManifest(id: UUID(), name: "code-review", description: "d",
-                                     folderPath: "/tmp/x", resourceCount: 0, hasScripts: false,
-                                     compatibility: nil, isEnabled: true, allowedTools: nil)
-        let names = CodeModeSkillDiagnostics.inertSkillNames(
-            in: config(selections: [.link(skillID: "skill_1", name: "code-review")],
-                       legacy: SkillFolderConfig(folderURL: URL(fileURLWithPath: "/tmp"),
-                                                 manifests: [manifest], lastScannedAt: Date())))
+            in: config(selections: [.link(skillID: "skill_1", name: "code-review"),
+                                    .link(skillID: "skill_2", name: "code-review")]))
         XCTAssertEqual(names, ["code-review"])
     }
 

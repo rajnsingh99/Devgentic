@@ -116,16 +116,10 @@ extension ScheduledTaskModel {
                 return nil
             }
             // ⚠️ ENVELOPE (G19): the payload is a bare `[String]` ARRAY, which has nowhere to put a
-            // version key. The bare-array fallback inside `VersionedBlob.decode` is load-bearing —
-            // every task row written before 2026-08-05 is unwrapped, and a row is only rewritten
-            // when the task is edited.
-            if let result = VersionedBlob<[String]>.decode(from: data) {
-                return result.payload.compactMap { URL(fileURLWithPath: $0) }
-            }
+            // version key. Decoded directly so a failure carries the real error for the caller to
+            // log, and the writer refuses, rather than silently reporting "no attachments".
             do {
-                // Neither shape decoded — fall through to the real error so the caller logs it and
-                // the writer refuses, rather than silently reporting "no attachments".
-                return try JSONDecoder().decode([String].self, from: data)
+                return try JSONDecoder().decode(VersionedBlob<[String]>.self, from: data).payload
                     .compactMap { URL(fileURLWithPath: $0) }
             } catch {
                 logger.error(

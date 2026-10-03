@@ -179,7 +179,7 @@ struct ChatOpsSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                platformSelector
+                channelsHubCard
                 platformContent
             }
             .padding(24)
@@ -207,28 +207,206 @@ struct ChatOpsSettingsView: View {
         }
     }
 
-    // MARK: - Platform Selector
+    // MARK: - Subtitle Helpers
 
-    private var platformSelector: some View {
-        SettingsCard(title: "Platform", icon: "antenna.radiowaves.left.and.right", theme: theme) {
-            HStack(spacing: 0) {
-                ForEach(Array(ChatOpsPlatform.allCases.enumerated()), id: \.element.id) { index, platform in
-                    if index > 0 {
-                        Divider()
-                            .frame(height: 44)
-                            .background(theme.dividerColor)
+    private var telegramSubtitle: String {
+        if let username = botUsername, !username.isEmpty {
+            return "@\(username) • Long Polling"
+        }
+        return ChatOpsPlatform.telegram.subtitle
+    }
+
+    private var discordSubtitle: String {
+        if let username = discordBotUsername, !username.isEmpty {
+            return "\(username) • WebSocket Gateway"
+        }
+        return ChatOpsPlatform.discord.subtitle
+    }
+
+    private var slackSubtitle: String {
+        if let username = slackBotUsername, !username.isEmpty {
+            return "\(username) • Socket Mode"
+        }
+        return ChatOpsPlatform.slack.subtitle
+    }
+
+    // MARK: - Channels Hub Card
+
+    private var channelsHubCard: some View {
+        SettingsCard(title: "Connected Channels", icon: "antenna.radiowaves.left.and.right", theme: theme) {
+            VStack(spacing: 0) {
+                ChannelHubRow(
+                    platform: .telegram,
+                    isSelected: selectedPlatform == .telegram,
+                    statusText: config.connectionState.statusText(listenerEnabled: config.isEnabled),
+                    statusColor: statusColor(for: config.connectionState),
+                    subtitle: telegramSubtitle,
+                    isEnabled: Binding(
+                        get: { config.isEnabled },
+                        set: { config.isEnabled = $0 }
+                    ),
+                    onToggleChange: { newValue in
+                        if newValue {
+                            if config.connectionState.isConnected {
+                                viewModel.startChatOps()
+                            }
+                        } else {
+                            viewModel.stopChatOps()
+                        }
+                    },
+                    onSelect: {
+                        selectedPlatform = .telegram
+                    },
+                    theme: theme
+                )
+
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                ChannelHubRow(
+                    platform: .discord,
+                    isSelected: selectedPlatform == .discord,
+                    statusText: config.discordConnectionState.statusText(listenerEnabled: config.isDiscordEnabled),
+                    statusColor: statusColor(for: config.discordConnectionState),
+                    subtitle: discordSubtitle,
+                    isEnabled: Binding(
+                        get: { config.isDiscordEnabled },
+                        set: { config.isDiscordEnabled = $0 }
+                    ),
+                    onToggleChange: { newValue in
+                        if newValue {
+                            if config.discordConnectionState.isConnected {
+                                viewModel.startDiscordChatOps()
+                            }
+                        } else {
+                            viewModel.stopDiscordChatOps()
+                        }
+                    },
+                    onSelect: {
+                        selectedPlatform = .discord
+                    },
+                    theme: theme
+                )
+
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                ChannelHubRow(
+                    platform: .slack,
+                    isSelected: selectedPlatform == .slack,
+                    statusText: config.slackConnectionState.statusText(listenerEnabled: config.isSlackEnabled),
+                    statusColor: statusColor(for: config.slackConnectionState),
+                    subtitle: slackSubtitle,
+                    isEnabled: Binding(
+                        get: { config.isSlackEnabled },
+                        set: { config.isSlackEnabled = $0 }
+                    ),
+                    onToggleChange: { newValue in
+                        if newValue {
+                            if config.slackConnectionState.isConnected {
+                                viewModel.startSlackChatOps()
+                            }
+                        } else {
+                            viewModel.stopSlackChatOps()
+                        }
+                    },
+                    onSelect: {
+                        selectedPlatform = .slack
+                    },
+                    theme: theme
+                )
+            }
+        }
+    }
+
+    // MARK: - Shared Helpers & Placeholders
+
+    private func setupBanner(message: LocalizedStringKey) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle.fill")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.accentColor)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.secondaryText)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.accentColor.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(theme.accentColor.opacity(0.18), lineWidth: 1)
+        )
+    }
+
+    private func disabledChannelCard(for platform: ChatOpsPlatform) -> some View {
+        let isPaired: Bool = {
+            switch platform {
+            case .telegram: return config.connectionState.isConnected
+            case .discord: return config.discordConnectionState.isConnected
+            case .slack: return config.slackConnectionState.isConnected
+            }
+        }()
+
+        return SettingsCard(title: "\(platform.rawValue) Configuration", icon: platform.icon, theme: theme) {
+            VStack(spacing: 16) {
+                HStack(spacing: 14) {
+                    ZStack {
+                        Circle()
+                            .fill(platform.color.opacity(0.12))
+                            .frame(width: 44, height: 44)
+                        Image(systemName: platform.icon)
+                            .font(.system(size: 20))
+                            .foregroundColor(platform.color)
                     }
-                    PlatformTab(
-                        platform: platform,
-                        isSelected: selectedPlatform == platform,
-                        isConnected: (platform == .telegram && config.connectionState.isConnected) ||
-                                     (platform == .discord && config.discordConnectionState.isConnected) ||
-                                     (platform == .slack && config.slackConnectionState.isConnected),
-                        theme: theme
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(isPaired ? "\(platform.rawValue) Listener Paused" : "\(platform.rawValue) ChatOps Disabled")
+                            .font(theme.fontBody.weight(.semibold))
+                            .foregroundColor(theme.primaryText)
+                        Text(isPaired
+                            ? "\(platform.rawValue) is paired, but the background listener is currently paused. Resume to receive and process messages."
+                            : "Enable \(platform.rawValue) in the Channels Hub above or click below to configure credentials and pair your chat.")
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    Spacer()
+
+                    TactileButton(
+                        title: isPaired ? "Resume Listener" : "Enable \(platform.rawValue)",
+                        icon: "bolt.fill",
+                        variant: .primary,
+                        size: .compact
                     ) {
-                        selectedPlatform = platform
+                        enablePlatform(platform)
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+            }
+        }
+    }
+
+    private func enablePlatform(_ platform: ChatOpsPlatform) {
+        switch platform {
+        case .telegram:
+            config.isEnabled = true
+            if config.connectionState.isConnected {
+                viewModel.startChatOps()
+            }
+        case .discord:
+            config.isDiscordEnabled = true
+            if config.discordConnectionState.isConnected {
+                viewModel.startDiscordChatOps()
+            }
+        case .slack:
+            config.isSlackEnabled = true
+            if config.slackConnectionState.isConnected {
+                viewModel.startSlackChatOps()
             }
         }
     }
@@ -258,11 +436,18 @@ struct ChatOpsSettingsView: View {
 
     private var telegramSettings: some View {
         VStack(spacing: 24) {
-            botConfigCard
-            pairingCard
-            securityCard(for: .telegram)
-            connectionCard
+            if config.isEnabled {
+                if !config.connectionState.isConnected {
+                    setupBanner(message: "Configure your Telegram bot token and complete pairing below to activate ChatOps.")
+                }
+                botConfigCard
+                pairingCard
+                securityCard(for: .telegram)
+            } else {
+                disabledChannelCard(for: .telegram)
+            }
         }
+        .animation(.default, value: config.isEnabled)
     }
 
     // MARK: - Bot Configuration Card
@@ -421,11 +606,25 @@ struct ChatOpsSettingsView: View {
                         description: "Paired with chat ID \(chatID). Messages from this chat are authorized.",
                         theme: theme
                     ) {
-                        HStack(spacing: 4) {
-                            Circle().fill(.green).frame(width: 7, height: 7)
-                            Text("Active")
-                                .font(theme.fontCaption2.weight(.medium))
-                                .foregroundColor(.green)
+                        HStack(spacing: 12) {
+                            HStack(spacing: 4) {
+                                Circle().fill(.green).frame(width: 7, height: 7)
+                                Text("Active")
+                                    .font(theme.fontCaption2.weight(.medium))
+                                    .foregroundColor(.green)
+                            }
+
+                            TactileButton(
+                                title: "Disconnect",
+                                icon: "xmark.circle",
+                                variant: .destructive,
+                                size: .compact
+                            ) {
+                                Task {
+                                    viewModel.chatOpsBridge?.stop()
+                                    await pairingService.disconnect()
+                                }
+                            }
                         }
                     }
 
@@ -502,83 +701,27 @@ struct ChatOpsSettingsView: View {
         }
     }
 
-    // MARK: - Connection Card
-
-    private var connectionCard: some View {
-        SettingsCard(title: "Connection", icon: "bolt.horizontal.fill", theme: theme) {
-            VStack(spacing: 0) {
-                SettingsRow(
-                    title: "Enable ChatOps",
-                    description: "Start the Telegram long-polling listener. Your Mac will receive messages while this is on.",
-                    theme: theme
-                ) {
-                    Toggle("", isOn: Binding(
-                        get: { config.isEnabled },
-                        set: { newValue in
-                            config.isEnabled = newValue
-                            if newValue {
-                                viewModel.startChatOps()
-                            } else {
-                                viewModel.stopChatOps()
-                            }
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    .tint(theme.accentColor)
-                    .disabled(!config.connectionState.isConnected)
-                }
-
-                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                SettingsRow(
-                    title: "Status",
-                    description: "Current connection state of the ChatOps bridge.",
-                    theme: theme
-                ) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(statusColor)
-                            .frame(width: 7, height: 7)
-                        Text(config.connectionState.statusText(listenerEnabled: config.isEnabled))
-                            .font(theme.fontCaption2.weight(.medium))
-                            .foregroundColor(theme.primaryText)
-                    }
-                }
-
-                if config.connectionState.isConnected {
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    HStack {
-                        Spacer()
-                        TactileButton(
-                            title: "Disconnect",
-                            icon: "xmark.circle",
-                            variant: .destructive,
-                            size: .compact
-                        ) {
-                            Task {
-                                viewModel.chatOpsBridge?.stop()
-                                await pairingService.disconnect()
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                }
-            }
-        }
-    }
-
     // MARK: - Helpers
 
-    private var statusColor: Color {
-        switch config.connectionState {
+    private func statusColor(for state: ChatOpsConnectionState) -> Color {
+        switch state {
         case .connected: return .green
         case .awaitingPairing, .validating: return .orange
         case .error: return .red
         case .disconnected: return .gray
         }
+    }
+
+    private var statusColor: Color {
+        statusColor(for: config.connectionState)
+    }
+
+    private var discordStatusColor: Color {
+        statusColor(for: config.discordConnectionState)
+    }
+
+    private var slackStatusColor: Color {
+        statusColor(for: config.slackConnectionState)
     }
 
     private func validateToken() {
@@ -605,11 +748,18 @@ struct ChatOpsSettingsView: View {
 
     private var discordSettings: some View {
         VStack(spacing: 24) {
-            discordBotConfigCard
-            discordPairingCard
-            securityCard(for: .discord)
-            discordConnectionCard
+            if config.isDiscordEnabled {
+                if !config.discordConnectionState.isConnected {
+                    setupBanner(message: "Configure your Discord bot token and complete pairing below to activate ChatOps.")
+                }
+                discordBotConfigCard
+                discordPairingCard
+                securityCard(for: .discord)
+            } else {
+                disabledChannelCard(for: .discord)
+            }
         }
+        .animation(.default, value: config.isDiscordEnabled)
     }
 
     // MARK: - Discord Bot Configuration Card
@@ -783,11 +933,25 @@ struct ChatOpsSettingsView: View {
                         description: "Paired with channel \(config.discordAuthorizedChannelID ?? "unknown"). Messages from this channel are authorized.",
                         theme: theme
                     ) {
-                        HStack(spacing: 4) {
-                            Circle().fill(.green).frame(width: 7, height: 7)
-                            Text("Active")
-                                .font(theme.fontCaption2.weight(.medium))
-                                .foregroundColor(.green)
+                        HStack(spacing: 12) {
+                            HStack(spacing: 4) {
+                                Circle().fill(.green).frame(width: 7, height: 7)
+                                Text("Active")
+                                    .font(theme.fontCaption2.weight(.medium))
+                                    .foregroundColor(.green)
+                            }
+
+                            TactileButton(
+                                title: "Disconnect",
+                                icon: "xmark.circle",
+                                variant: .destructive,
+                                size: .compact
+                            ) {
+                                Task {
+                                    viewModel.discordChatOpsBridge?.stop()
+                                    await discordPairingService.disconnect()
+                                }
+                            }
                         }
                     }
 
@@ -820,83 +984,6 @@ struct ChatOpsSettingsView: View {
         }
     }
 
-    // MARK: - Discord Connection Card
-
-    private var discordConnectionCard: some View {
-        SettingsCard(title: "Connection", icon: "bolt.horizontal.fill", theme: theme) {
-            VStack(spacing: 0) {
-                SettingsRow(
-                    title: "Enable ChatOps",
-                    description: "Start the Discord WebSocket Gateway listener. Your Mac will receive messages while this is on.",
-                    theme: theme
-                ) {
-                    Toggle("", isOn: Binding(
-                        get: { config.isDiscordEnabled },
-                        set: { newValue in
-                            config.isDiscordEnabled = newValue
-                            if newValue {
-                                viewModel.startDiscordChatOps()
-                            } else {
-                                viewModel.stopDiscordChatOps()
-                            }
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    .tint(theme.accentColor)
-                    .disabled(!config.discordConnectionState.isConnected)
-                }
-
-                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                SettingsRow(
-                    title: "Status",
-                    description: "Current connection state of the Discord bridge.",
-                    theme: theme
-                ) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(discordStatusColor)
-                            .frame(width: 7, height: 7)
-                        Text(config.discordConnectionState.statusText(listenerEnabled: config.isDiscordEnabled))
-                            .font(theme.fontCaption2.weight(.medium))
-                            .foregroundColor(theme.primaryText)
-                    }
-                }
-
-                if config.discordConnectionState.isConnected {
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    HStack {
-                        Spacer()
-                        TactileButton(
-                            title: "Disconnect",
-                            icon: "xmark.circle",
-                            variant: .destructive,
-                            size: .compact
-                        ) {
-                            Task {
-                                viewModel.discordChatOpsBridge?.stop()
-                                await discordPairingService.disconnect()
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                }
-            }
-        }
-    }
-
-    private var discordStatusColor: Color {
-        switch config.discordConnectionState {
-        case .connected: return .green
-        case .awaitingPairing, .validating: return .orange
-        case .error: return .red
-        case .disconnected: return .gray
-        }
-    }
-
     private func validateDiscordToken() {
         isDiscordValidating = true
         discordValidationError = nil
@@ -921,12 +1008,19 @@ struct ChatOpsSettingsView: View {
 
     private var slackSettings: some View {
         VStack(spacing: 24) {
-            slackBotConfigCard
-            slackAppTokenCard
-            slackPairingCard
-            securityCard(for: .slack)
-            slackConnectionCard
+            if config.isSlackEnabled {
+                if !config.slackConnectionState.isConnected {
+                    setupBanner(message: "Configure your Slack bot tokens and complete pairing below to activate ChatOps.")
+                }
+                slackBotConfigCard
+                slackAppTokenCard
+                slackPairingCard
+                securityCard(for: .slack)
+            } else {
+                disabledChannelCard(for: .slack)
+            }
         }
+        .animation(.default, value: config.isSlackEnabled)
     }
 
     // MARK: - Slack Bot Token Card
@@ -1113,11 +1207,25 @@ struct ChatOpsSettingsView: View {
                         description: "Paired with channel \(config.slackAuthorizedChannelID ?? "unknown"). Messages from this channel are authorized.",
                         theme: theme
                     ) {
-                        HStack(spacing: 4) {
-                            Circle().fill(.green).frame(width: 7, height: 7)
-                            Text("Active")
-                                .font(theme.fontCaption2.weight(.medium))
-                                .foregroundColor(.green)
+                        HStack(spacing: 12) {
+                            HStack(spacing: 4) {
+                                Circle().fill(.green).frame(width: 7, height: 7)
+                                Text("Active")
+                                    .font(theme.fontCaption2.weight(.medium))
+                                    .foregroundColor(.green)
+                            }
+
+                            TactileButton(
+                                title: "Disconnect",
+                                icon: "xmark.circle",
+                                variant: .destructive,
+                                size: .compact
+                            ) {
+                                Task {
+                                    viewModel.slackChatOpsBridge?.stop()
+                                    await slackPairingService.disconnect()
+                                }
+                            }
                         }
                     }
 
@@ -1151,83 +1259,6 @@ struct ChatOpsSettingsView: View {
         }
     }
 
-    // MARK: - Slack Connection Card
-
-    private var slackConnectionCard: some View {
-        SettingsCard(title: "Connection", icon: "bolt.horizontal.fill", theme: theme) {
-            VStack(spacing: 0) {
-                SettingsRow(
-                    title: "Enable ChatOps",
-                    description: "Start the Slack Socket Mode listener. Your Mac will receive messages while this is on.",
-                    theme: theme
-                ) {
-                    Toggle("", isOn: Binding(
-                        get: { config.isSlackEnabled },
-                        set: { newValue in
-                            config.isSlackEnabled = newValue
-                            if newValue {
-                                viewModel.startSlackChatOps()
-                            } else {
-                                viewModel.stopSlackChatOps()
-                            }
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    .tint(theme.accentColor)
-                    .disabled(!config.slackConnectionState.isConnected)
-                }
-
-                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                SettingsRow(
-                    title: "Status",
-                    description: "Current connection state of the Slack bridge.",
-                    theme: theme
-                ) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(slackStatusColor)
-                            .frame(width: 7, height: 7)
-                        Text(config.slackConnectionState.statusText(listenerEnabled: config.isSlackEnabled))
-                            .font(theme.fontCaption2.weight(.medium))
-                            .foregroundColor(theme.primaryText)
-                    }
-                }
-
-                if config.slackConnectionState.isConnected {
-                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
-
-                    HStack {
-                        Spacer()
-                        TactileButton(
-                            title: "Disconnect",
-                            icon: "xmark.circle",
-                            variant: .destructive,
-                            size: .compact
-                        ) {
-                            Task {
-                                viewModel.slackChatOpsBridge?.stop()
-                                await slackPairingService.disconnect()
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                }
-            }
-        }
-    }
-
-    private var slackStatusColor: Color {
-        switch config.slackConnectionState {
-        case .connected: return .green
-        case .awaitingPairing, .validating: return .orange
-        case .error: return .red
-        case .disconnected: return .gray
-        }
-    }
-
     private func validateSlackTokens() {
         isSlackValidating = true
         slackValidationError = nil
@@ -1251,64 +1282,106 @@ struct ChatOpsSettingsView: View {
     }
 }
 
-// MARK: - Platform Tab
+// MARK: - Channel Hub Row
 
-private struct PlatformTab: View {
+private struct ChannelHubRow: View {
     let platform: ChatOpsPlatform
     let isSelected: Bool
-    let isConnected: Bool
+    let statusText: String
+    let statusColor: Color
+    let subtitle: String
+    @Binding var isEnabled: Bool
+    let onToggleChange: (Bool) -> Void
+    let onSelect: () -> Void
     let theme: any Theme
-    let action: () -> Void
 
     @State private var isHovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: platform.icon)
-                        .font(theme.fontBody.weight(.medium))
-                        .foregroundStyle(isSelected ? platform.color : theme.secondaryText.opacity(0.5))
-
-                    if isConnected {
-                        Circle()
-                            .fill(.green)
-                            .frame(width: 6, height: 6)
-                            .offset(x: 3, y: -3)
+        HStack(spacing: 12) {
+            // Clickable region to select channel
+            Button(action: onSelect) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(platform.color.opacity(0.12))
+                            .frame(width: 36, height: 36)
+                        Image(systemName: platform.icon)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(platform.color)
                     }
-                }
 
-                Text(platform.localizedTitle)
-                    .font(theme.fontSubheadline.weight(isSelected ? .semibold : .regular))
-                    .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 8) {
+                            Text(platform.localizedTitle)
+                                .font(theme.fontBody.weight(isSelected ? .semibold : .medium))
+                                .foregroundColor(theme.primaryText)
 
-                if !platform.isAvailable {
-                    Text("Soon")
-                        .font(.system(size: 9, weight: .bold)) // Fixed size: badge chip ≤9pt
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(theme.secondaryText.opacity(0.5))
-                        )
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(statusColor)
+                                    .frame(width: 6, height: 6)
+                                Text(statusText)
+                                    .font(theme.fontCaption2.weight(.medium))
+                                    .foregroundColor(theme.primaryText.opacity(0.85))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(statusColor.opacity(0.12))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(statusColor.opacity(0.25), lineWidth: 0.5)
+                            )
+                        }
+
+                        Text(subtitle)
+                            .font(theme.fontCaption2)
+                            .foregroundColor(theme.secondaryText)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
                 }
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(
-                isSelected
-                    ? platform.color.opacity(0.06)
-                    : (isHovering ? theme.surfaceOverlay : Color.clear)
-            )
+            .buttonStyle(.plain)
+
+            // Independent switch toggle
+            Toggle("", isOn: Binding(
+                get: { isEnabled },
+                set: { newValue in
+                    isEnabled = newValue
+                    onToggleChange(newValue)
+                }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .tint(theme.accentColor)
+
+            // Chevron indicator
+            Button(action: onSelect) {
+                Image(systemName: isSelected ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                    .foregroundColor(isSelected ? platform.color : theme.secondaryText.opacity(0.4))
+                    .frame(width: 20, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            isSelected
+                ? platform.color.opacity(0.06)
+                : (isHovering ? theme.surfaceOverlay : Color.clear)
+        )
         .onHover { hovering in
             isHovering = hovering
             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
         .animation(.easeInOut(duration: 0.15), value: isSelected)
-        .animation(.easeInOut(duration: 0.1), value: isHovering)
     }
 }

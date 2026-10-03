@@ -375,10 +375,16 @@ final class OnboardingViewModel {
         let trimmedName = profileDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmedName.isEmpty ? "Local Assistant" : trimmedName
 
-        let defaultLLMConfig = ProviderConfig(
+        let bareLLMConfig = ProviderConfig(
             apiProvider: selectedBackend,
             modelName: selectedModelIdentifier
         )
+        // ⚠️ Apply detection to what is stored. This used to save the bare config — capability
+        // "Text Only", no context window — so the profile read as unable to call tools (and the
+        // validator said so) until someone opened its editor and saved. Runs detect live regardless
+        // (`LiveModelDetection`); this keeps the STORED copy and every display of it honest. Cache-
+        // only: if the model is not in memory yet, the bare config is kept and runs still resolve.
+        let defaultLLMConfig = LiveModelDetection.detectedFromCache(bareLLMConfig) ?? bareLLMConfig
 
         let details: ProfileDetails
         switch selectedProfileType {

@@ -157,7 +157,7 @@ struct DynamicActionButton: View {
                 .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
                 .animation(.easeInOut(duration: 0.18), value: symbolName)
 
-            if voiceInputState == .modelLoading || voiceInputState == .modelPreparing {
+            if mode == .mic && isFetchingModel {
                 modelProgressOverlay
             }
         }
@@ -174,7 +174,7 @@ struct DynamicActionButton: View {
             .fill(theme.controlBackground.opacity(0.85))
             .frame(width: buttonSize, height: buttonSize)
             .overlay {
-                if voiceInputState == .modelLoading, downloadService.downloadProgress > 0 {
+                if isDownloadingModel, downloadService.downloadProgress > 0 {
                     ZStack {
                         Circle()
                             .stroke(theme.accentColor.opacity(0.25), lineWidth: 2)
@@ -195,6 +195,18 @@ struct DynamicActionButton: View {
                 }
             }
             .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+    }
+
+    /// ⚠️ TWO SOURCES. `voiceInputState` follows the RECOGNITION service, which only reports a
+    /// download while it is loading a model itself. A pull started from the model picker runs in
+    /// the DOWNLOAD service and never reaches `voiceInputState` — the button sat on a plain mic for
+    /// the whole download, so users tapped again and again for feedback.
+    private var isDownloadingModel: Bool {
+        voiceInputState == .modelLoading || downloadService.isDownloading
+    }
+
+    private var isFetchingModel: Bool {
+        isDownloadingModel || voiceInputState == .modelPreparing
     }
 
     // MARK: - Action
@@ -262,7 +274,7 @@ struct DynamicActionButton: View {
             case .permissionsDeniedMic, .error: return "mic.slash.fill"
             case .requestingPermissions: return "mic.badge.plus"
             case .modelLoading, .modelPreparing: return "arrow.down.circle"
-            default: return "mic.fill" // [Composer parity] QA resting glyph (was waveform)
+            default: return downloadService.isDownloading ? "arrow.down.circle" : "mic.fill" // [Composer parity] QA resting glyph (was waveform)
             }
         }
     }
@@ -291,7 +303,9 @@ struct DynamicActionButton: View {
             case .permissionsDeniedMic, .error: return theme.errorColor.opacity(0.8)
             case .requestingPermissions: return theme.controlAccent
             case .modelLoading, .modelPreparing: return theme.accentColor
-            default: return isHovering ? theme.primaryText : theme.secondaryText // [Composer parity]
+            default:
+                if downloadService.isDownloading { return theme.accentColor }
+                return isHovering ? theme.primaryText : theme.secondaryText // [Composer parity]
             }
         }
     }
@@ -315,6 +329,10 @@ struct DynamicActionButton: View {
         case .stopVoice: return String(localized: "Stop dictation (⌘⇧V)")
         case .stopStreaming: return String(localized: "Stop generating (⌘.)")
         case .mic:
+            if downloadService.isDownloading, voiceInputState != .modelLoading {
+                let percent = Int(downloadService.downloadProgress * 100)
+                return String(localized: "Downloading speech model… \(percent)% — click to see progress")
+            }
             switch voiceInputState {
             case .available:
                 return String(localized: "Start voice dictation (⌘⇧V) · \(inputViewModel.currentSpeechModelName) — hold or right-click to change model")

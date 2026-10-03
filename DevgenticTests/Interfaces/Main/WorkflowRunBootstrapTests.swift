@@ -71,7 +71,7 @@ final class WorkflowRunBootstrapTests: XCTestCase {
         BackendProfileSnapshot(
             id: UUID(),
             displayName: "Nightly Report",
-            details: .workflow(WorkflowConfig(agentProfileIDs: []))
+            details: .workflow(WorkflowConfig())
         )
     }
 

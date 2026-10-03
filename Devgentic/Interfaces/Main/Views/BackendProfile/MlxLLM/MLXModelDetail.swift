@@ -37,6 +37,9 @@ struct MLXModelDetail: Sendable, Equatable {
     let downloads: Int?
     let likes: Int?
     let tags: [String]
+    /// HuggingFace's declared `pipeline_tag`, verbatim. Feeds `ModelSupportPolicy` — the pasted
+    /// repo-ID path never passes through the search listing's pipeline filter.
+    let pipelineTag: String?
     let baseModels: [String]
     /// True when HuggingFace requires an access token. The app has no token support yet
     /// (G4), so this is surfaced as a warning rather than a prompt.
@@ -69,6 +72,11 @@ struct MLXModelDetail: Sendable, Equatable {
 
 extension MLXModelDetail {
 
+    /// Why Devgentic can't run this repo, or nil when it can (or when nothing declares otherwise).
+    var unsupportedReason: String? {
+        ModelSupportPolicy.unsupportedReason(pipelineTag: pipelineTag, tags: tags)
+    }
+
     /// Builds the domain model from a decoded API response.
     init(repoId: String, response: HFModelDetail) {
         self.repoId = repoId
@@ -95,6 +103,7 @@ extension MLXModelDetail {
         self.downloads = response.downloads
         self.likes = response.likes
         self.tags = response.tags ?? []
+        self.pipelineTag = response.pipeline_tag
         self.baseModels = response.cardData?.base_model?.values ?? []
         self.isGated = response.gated?.isGated ?? false
         self.readme = nil

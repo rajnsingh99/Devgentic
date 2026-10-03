@@ -102,7 +102,7 @@ struct SkillNavigationPane: View {
             header
 
             if !skills.isEmpty {
-                SidebarSearchBarView("Search skills...", text: $searchText)
+                SidebarSearchBarView("Search skills", text: $searchText)
                     .focused($isSearchFocused)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
@@ -120,11 +120,6 @@ struct SkillNavigationPane: View {
                     .padding(.horizontal, 12)
                 }
                 .padding(.bottom, 10)
-
-                Divider()
-                    .background(theme.dividerColor.opacity(0.4))
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 4)
             }
 
             if let storeFailure {
@@ -164,7 +159,7 @@ struct SkillNavigationPane: View {
         }
         .onAppear {
             if focusedSkillID == nil {
-                focusedSkillID = activeSkillID ?? filteredSkills.first?.id
+                focusedSkillID = activeSkillID
             }
         }
         .onChange(of: activeSkillID) { _, newID in
@@ -196,32 +191,21 @@ struct SkillNavigationPane: View {
             Spacer()
 
             // Import Button
-            Button {
+            TactileIconButton(
+                icon: "arrow.down.doc",
+                tooltip: "Import skills from a folder, archive or .md file (⌘I)",
+                accessibilityLabel: "Import skills",
+                variant: .secondary,
+                size: 26
+            ) {
                 showingImport = true
-            } label: {
-                Image(systemName: "arrow.down.doc")
-                    .font(theme.fontCaption.weight(.semibold))
-                    .foregroundColor(theme.secondaryText)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(theme.surfaceOverlay)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 1)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            .buttonStyle(.plain)
-            .pointingHandCursor()
-            .help("Import skills from a folder, archive or .md file (⌘I)")
             .keyboardShortcut("i", modifiers: [.command])
             .accessibilityIdentifier("skills.add")
 
             // New Skill Button
             SidebarHeaderActionButton(
-                title: "New",
+                title: "New Skill",
                 systemImage: "plus",
                 shortcut: "⌘N"
             ) {
@@ -238,7 +222,7 @@ struct SkillNavigationPane: View {
     private var skillsList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 3) {
+                LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(filteredSkills, id: \.id) { skill in
                         skillRow(skill)
                             .id(skill.id)
@@ -329,29 +313,23 @@ struct SkillNavigationPane: View {
             title: "No Skills",
             subtitle: "Create a custom skill or import from a package to empower your agents.",
             buttonTitle: "New Skill",
+            buttonIcon: "plus",
             systemImage: "puzzlepiece",
             onAction: { showingCreate = true }
         )
     }
 
     private var noMatchesView: some View {
-        VStack(spacing: 8) {
-            Spacer(minLength: 20)
-            Text("No matching skills")
-                .font(theme.fontSubheadline)
-                .foregroundColor(theme.secondaryText)
-
-            Button("Clear filters") {
+        SidebarEmptyStateView(
+            title: "No matches",
+            subtitle: "No skills found for \"\(searchText)\"",
+            buttonTitle: "Clear Search",
+            systemImage: "magnifyingglass",
+            onAction: {
                 searchText = ""
                 selectedCategory = .all
             }
-            .buttonStyle(.plain)
-            .font(theme.fontCaption.weight(.medium))
-            .foregroundColor(theme.accentColor)
-
-            Spacer(minLength: 20)
-        }
-        .frame(maxWidth: .infinity)
+        )
     }
 
     private func skillRow(_ skill: SkillSD) -> some View {
@@ -363,26 +341,7 @@ struct SkillNavigationPane: View {
             focusedSkillID = skill.id
             router.navigate(to: .skillDetail(skillID: skill.id))
         } label: {
-            HStack(spacing: 0) {
-                // Left indicator rail = STATE: accent when selected, focused, or hovered
-                if isSelected || isHovered || isFocused {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(
-                            LinearGradient(
-                                colors: isSelected ? [theme.accentColor, theme.accentColor.opacity(0.45)] : [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .frame(width: 3)
-                        .padding(.vertical, isSelected ? 2 : 5)
-                        .padding(.trailing, 5)
-                        .shadow(color: isSelected ? theme.accentColor.opacity(0.4) : .clear, radius: 4)
-                        .transition(.opacity.combined(with: .scale))
-                } else {
-                    Spacer().frame(width: 8)
-                }
-
+            HStack(spacing: 8) {
                 // Text
                 VStack(alignment: .leading, spacing: 2) {
                     Text(skill.displayName)
@@ -408,32 +367,10 @@ struct SkillNavigationPane: View {
                         .background(.orange.opacity(0.12), in: Capsule())
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                ZStack {
-                    if isSelected {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(theme.accentColor.opacity(0.08))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
-                            )
-                            .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
-                    } else if isFocused {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(theme.surfaceOverlayStrong)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .stroke(theme.accentColor.opacity(0.35), lineWidth: 1)
-                            )
-                    } else if isHovered {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(theme.surfaceOverlay)
-                    }
-                }
-            )
+            .sidebarRowBackground(isSelected: isSelected, isHovering: isHovered || isFocused)
             .overlay(alignment: .trailing) {
                 if isHovered {
                     Button {

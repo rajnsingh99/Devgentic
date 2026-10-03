@@ -48,20 +48,13 @@ struct DevgenticApp: App {
                 "[STARTUP] SwiftData container opened — \(schema.entities.count) entities, store: \(storeURL.path)"
             )
             // ⚠️ Decide ONCE, here, before anything destructive can run — and reuse the same value
-            // below. `MCPToolStore.configureContainer` carries a blob-rewriting secrets migration and
-            // is called synchronously on this line, i.e. before the `Task` block could have evaluated
-            // anything, so the decision has to exist by now or that migration is ungated (G44).
-            // Evaluating once also removes a second hazard: `recordSuccessfulOpen()` writes the
-            // fingerprint later in that same block, so a second evaluation would not agree with this
-            // one.
+            // below: `recordSuccessfulOpen()` writes the fingerprint later in that same block, so a
+            // second evaluation would not agree with this one.
             let launchSweepDecision = DevgenticSchema.evaluateLaunchSweep()
 
             // Inject into singleton stores so non-SwiftUI code can access the container.
             BackendProfileStore.shared.configureContainer(container)
-            MCPToolStore.shared.configureContainer(
-                container,
-                migrateLegacySecrets: launchSweepDecision == .run
-            )
+            MCPToolStore.shared.configureContainer(container)
             PromptStore.shared.configureContainer(container)
             ChatPersistenceStore.shared.configureContainer(container)
             WorkflowLayoutStore.shared.configureContainer(container)
@@ -76,31 +69,10 @@ struct DevgenticApp: App {
             Task { @MainActor in
                 DownloadHistoryStore.shared.configureContainer(container)
 
-                let startupLoggerForSkills = DGLogger(category: "DevgenticApp")
-
-                // ⚠️ THE V4 ADOPTION SWEEP IS GONE (V6). It copied skills out of profile blobs
-                // into the folder registry, and both of those are retired: the registry entities no
-                // longer exist in the schema, and a profile's legacy `skillConfig` is read-only
-                // history that `SkillResolution` still falls back to. What replaces it is
-                // `SkillLibraryImportSweep` below, which imports content rather than indexing paths.
-
-                // Configures the store and, outside the test host, finishes the V3→V6 skills
-                // upgrade by recovering each profile's pre-V6 folder links and ingesting them.
-                //
-                // ⚠️ OUTSIDE the launch-sweep gate below, deliberately: that gate defers on
-                // `.deferSchemaChanged`, which is precisely the launch this must run on — the first
-                // one after the schema changed, and the one on which the user's whole Skills
-                // library would otherwise appear empty.
-                //
-                // ⚠️ The ORDER and the PRESENCE of these two steps have each broken in production.
-                // Both are asserted in `SkillLaunchSequenceTests`; the sequence lives in
-                // `SkillLaunchSequence` so that they can be.
-                // ⚠️ AWAITED, not fired into a detached Task. The ingest inside it now suspends — it
-                // walks and reads every file of every skill, which on an unmounted volume blocks for
-                // the mount timeout — so awaiting here frees the MAIN ACTOR for that whole phase
-                // while keeping this step strictly before the gate below, which is the ordering the
-                // test asserts. Detaching it would make that ordering a race.
-                await SkillLaunchSequence.run(container: container, logger: startupLoggerForSkills)
+                // ⚠️ Configured synchronously, before anything below can ask the library for skills:
+                // a store asked before this answers `.containerUnavailable`, which once produced a
+                // permanently empty library.
+                SkillStore.shared.configureContainer(container)
 
                 // Everything below MUTATES OR DELETES rows, so it runs only when the schema is
                 // unchanged since the last clean open. A lightweight migration can succeed
@@ -616,7 +588,9 @@ struct DevgenticApp: App {
     @State private var mainApplicationViewModel: MainApplicationViewModel
     @State private var chatHistoryViewModel: ChatHistoryViewModel
     @State private var mainViewRouter = MainViewRouter()
-    @State private var backendProfileService = BackendProfileService()
+    /// ⚠️ Constructed ONCE in `init()` and handed to `State(wrappedValue:)` — never a property
+    /// default. See the note at its construction.
+    @State private var backendProfileService: BackendProfileService
     @State private var toastManager = ToastManager()
     @State private var codeSessionManager = CodeSessionManager()
     /// Owns long-lived destination view models (Ollama/MLX stores) so their
@@ -703,13 +677,22 @@ struct DevgenticApp: App {
         // The binding now happens in `body` via `.task`, where reading the property (not the
         // projected `_` value) returns the instance SwiftUI actually kept.
 
+        // ⚠️ Built as a LOCAL, wired, then installed — the `mainVM` pattern above. It used to be a
+        // `@State` property default with `onProfileDeleted` wired through
+        // `self._backendProfileService.wrappedValue`: the same read-a-@State-in-init shape as the
+        // CodeSessionManager note above. The launch trace showed the initializer running TWICE —
+        // a second full profile fetch (and a Keychain read per profile) for an instance nothing
+        // kept — and the delete cascade risked landing on the discarded one.
+        //
         // Cascade a profile delete into the view model's per-profile canvas cache. Without this a
         // deleted workflow's DIRTY canvas survives in memory and the quit-time drain re-creates its
-        // layout row as an orphan. `[weak mainVM]` because the service outlives nothing here but the
-        // closure is stored for the process lifetime.
-        self._backendProfileService.wrappedValue.onProfileDeleted = { [weak mainVM] profileID in
+        // layout row as an orphan. `[weak mainVM]` because the closure is stored for the process
+        // lifetime.
+        let profileService = BackendProfileService()
+        profileService.onProfileDeleted = { [weak mainVM] profileID in
             mainVM?.discardWorkflowCanvasState(for: profileID)
         }
+        self._backendProfileService = State(wrappedValue: profileService)
 
         // MARK: - Notification system bootstrap
         // Register the local delivery channel with the dispatcher so tasks can

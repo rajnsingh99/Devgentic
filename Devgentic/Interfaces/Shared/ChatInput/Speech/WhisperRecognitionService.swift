@@ -244,7 +244,12 @@ class WhisperRecognitionService {
 
             // Phase 1: Download model files (or resolve from cache)
             logger.log("Initializing WhisperKit (download phase)...")
-            whisperKit = try await WhisperKit(model: modelName, prewarm: false, load: false)
+            whisperKit = try await WhisperKit(
+                model: modelName,
+                downloadBase: WhisperModelDownloadService.downloadBase,
+                prewarm: false,
+                load: false
+            )
 
             // Phase 2: Prewarm and load into memory
             logger.log("Prewarming and loading model into memory...")

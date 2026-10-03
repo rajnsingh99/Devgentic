@@ -71,10 +71,9 @@ final class VectorStoreService: @unchecked Sendable {
     // MARK: - Schema Versioning
 
     /// Current on-disk schema generation. Bump ONLY for representational changes
-    /// ObjectBox cannot auto-migrate (additive property changes need no bump —
-    /// `sourceIdentifier` was added without one). 3 = native [Float] embedding +
-    /// HNSW index (the "Phase 3" schema).
-    static let currentSchemaVersion = 3
+    /// ObjectBox cannot auto-migrate (additive property changes need no bump).
+    /// 1 = native [Float] embedding + HNSW index (history reset 2026-10-03, pre-release).
+    static let currentSchemaVersion = 1
 
     /// Marker file INSIDE the vector-db directory. The wipe decision keys on this,
     /// not on preferences: a UserDefaults flag lives beside the data and can
@@ -85,28 +84,20 @@ final class VectorStoreService: @unchecked Sendable {
     /// filename the migration and the schema gate both key on rather than a copy of it.
     static let schemaMarkerFilename = "schema-version"
 
-    /// Legacy UserDefaults gates, superseded by the marker. Read ONCE so existing
-    /// installs (already on the v3 schema, proven by the Phase-3 flag) get stamped
-    /// WITHOUT wiping; removed only after the marker is safely on disk.
-    private static let legacyPhase2Key = "Phase2_VectorDB_Wiped"
-    private static let legacyPhase3Key = "Phase3_HNSW_Schema_Migrated"
-
     /// What init should do about the on-disk schema. Pure — extracted for tests.
     enum SchemaGateAction: Equatable {
         /// Marker matches the current schema: open, touch nothing.
         case openAsIs
-        /// Fresh directory, or a legacy-flagged install already on the current
-        /// schema: write the marker, wipe nothing.
+        /// Fresh directory: write the marker, wipe nothing.
         case stampOnly
-        /// Unreadable schema (older, unmarked-and-unflagged, or from a NEWER
-        /// build): destroy and rebuild — the only lossy path, and it's loud.
+        /// Unreadable schema (older, unmarked, or from a NEWER build): set aside and rebuild —
+        /// the only lossy path, and it's loud.
         case wipeAndStamp
     }
 
-    static func schemaGateAction(markerVersion: Int?, databaseExists: Bool, legacyPhase3Flag: Bool) -> SchemaGateAction {
+    static func schemaGateAction(markerVersion: Int?, databaseExists: Bool) -> SchemaGateAction {
         if markerVersion == currentSchemaVersion { return .openAsIs }
-        guard databaseExists else { return .stampOnly }
-        return (markerVersion == nil && legacyPhase3Flag) ? .stampOnly : .wipeAndStamp
+        return databaseExists ? .wipeAndStamp : .stampOnly
     }
 
     // MARK: - Initialization
@@ -151,128 +142,6 @@ final class VectorStoreService: @unchecked Sendable {
     /// for a Reveal-in-Finder affordance, where an empty path simply reveals nothing.
     static var storeDirectoryPath: String { (try? storeDirectoryURL())?.path ?? "" }
 
-    /// Bundle identifiers this app has shipped under, newest first, excluding the current one.
-    ///
-    /// ⚠️⚠️ THE STORE PATH IS KEYED ON THE BUNDLE IDENTIFIER, AND THAT IDENTIFIER HAS CHANGED ONCE
-    /// ALREADY. Commit `2faad1c` renamed it `com.dev.devgentic` → `app.devgentic.macos` for the
-    /// public release, so `storeDirectoryURL()` began pointing at a directory that did not exist.
-    /// Nothing failed and nothing was deleted: the app simply created an empty store next to a full
-    /// one and carried on. That is the worst shape this failure could take, because every protection
-    /// in this file guards against DELETION — `quarantineSupersededStore` exists precisely so a
-    /// schema bump cannot destroy an index that "CANNOT be rebuilt (there is no
-    /// reindex-from-transcripts mechanism)" — and a rename walks straight past all of it by never
-    /// touching the old data at all.
-    ///
-    /// ⚠️ Add the outgoing identifier here in the same commit that changes it. The ChatOps Keychain
-    /// service has the same requirement for the same reason — see `ChatOpsConfigManager`.
-    static let legacyBundleIdentifiers = ["com.dev.devgentic"]
-
-    /// Vector-db directories left behind under a previous bundle identifier.
-    static func legacyStoreDirectoryURLs() -> [URL] {
-        guard let appSupport = try? FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: false) else { return [] }
-        return legacyBundleIdentifiers.map {
-            appSupport.appendingPathComponent($0).appendingPathComponent("vector-db")
-        }
-    }
-
-    /// Whether a directory holds an actual database rather than just our schema marker.
-    ///
-    /// ⚠️ The SAME definition the schema gate uses below, deliberately shared: a migration that
-    /// disagreed with the gate about what "a database is here" means would either skip a real store
-    /// or overwrite one.
-    static func containsDatabase(at url: URL) -> Bool {
-        let contents = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
-        return contents.contains { $0 != schemaMarkerFilename }
-    }
-
-    /// Moves a vector store written under a previous bundle identifier to the current location.
-    ///
-    /// ⚠️⚠️ ONLY WHEN THE DESTINATION HOLDS NO DATABASE, AND THE RESTRAINT IS THE POINT. Once the
-    /// renamed build has launched once, BOTH directories hold a store — a full old one and a new one
-    /// that may since have indexed real content. Choosing between two live databases and discarding
-    /// one is not a decision code should take silently at launch, which is the whole lesson of
-    /// `quarantineSupersededStore`. So the automatic path handles only the unambiguous case (nothing
-    /// to lose at the destination), and the ambiguous case is REPORTED with both paths and sizes so
-    /// the user can decide with the facts in front of them.
-    ///
-    /// - Returns: true when a store was adopted.
-    ///
-    /// - Parameter legacyCandidates: injected so a test can drive the REAL decision against a
-    ///   temporary directory. ⚠️ Defaulted rather than hardcoded because a test that reimplemented
-    ///   this logic against its own paths would pass with this function deleted — which is the
-    ///   coverage illusion this codebase audits for.
-    /// What the bundle-identifier gate did.
-    ///
-    /// ⚠️ AN ENUM RATHER THAN A `Bool`, AND THE REASON IS A TEST THAT COULD NOT FAIL. With a
-    /// boolean, removing the "never overwrite a live store" guard changed nothing observable:
-    /// `FileManager.moveItem` refuses an existing destination anyway, so the mutation fell into the
-    /// catch and still returned false, with every assertion still green. The guard's real product is
-    /// not the refusal — it is REPORTING the ambiguous case as its own thing, with both paths and
-    /// sizes, so the user can decide. Naming that outcome is what makes it assertable.
-    enum LegacyAdoption: Equatable {
-        /// A legacy store was moved to the current location.
-        case adopted(bytes: Int64)
-        /// Both locations hold a database. Reported, never resolved automatically.
-        case ambiguous(legacy: URL, destination: URL)
-        /// No legacy store to adopt.
-        case none
-        /// A legacy store was found and the move failed. Nothing was deleted.
-        case failed(String)
-    }
-
-    @discardableResult
-    static func adoptLegacyStoreIfUnambiguous(destination: URL,
-                                              legacyCandidates: [URL]? = nil,
-                                              logger: DGLogger) -> LegacyAdoption {
-        for legacy in (legacyCandidates ?? legacyStoreDirectoryURLs()) where containsDatabase(at: legacy) {
-            let legacyBytes = directorySize(at: legacy)
-
-            guard !containsDatabase(at: destination) else {
-                logger.error(
-                    "[RAG] A vector index written under a previous bundle identifier is sitting "
-                    + "unused at \(legacy.path) (\(legacyBytes) bytes), and the current location "
-                    + "\(destination.path) (\(directorySize(at: destination)) bytes) ALREADY holds a "
-                    + "store, so it was NOT adopted automatically. CONSEQUENCE: semantic recall of "
-                    + "everything indexed before the bundle identifier changed is unavailable, and "
-                    + "there is no reindex-from-transcripts mechanism to rebuild it. Nothing has been "
-                    + "deleted. Recover by quitting the app and replacing the current directory with "
-                    + "the legacy one — this is not done for you because the current store may hold "
-                    + "content indexed since the rename, and discarding it silently would be the same "
-                    + "class of mistake in the other direction."
-                )
-                return .ambiguous(legacy: legacy, destination: destination)
-            }
-
-            do {
-                try FileManager.default.createDirectory(
-                    at: destination.deletingLastPathComponent(),
-                    withIntermediateDirectories: true)
-                try FileManager.default.moveItem(at: legacy, to: destination)
-                logger.warning(
-                    "[RAG] Adopted the vector index written under a previous bundle identifier: moved "
-                    + "\(legacyBytes) bytes from \(legacy.path) to \(destination.path). CONSEQUENCE: "
-                    + "semantic recall of everything indexed before the rename survives it, instead of "
-                    + "the app silently starting an empty index beside a full one it could no longer "
-                    + "address. The store still passes the schema gate below on its own merits."
-                )
-                return .adopted(bytes: legacyBytes)
-            } catch {
-                // MOVE, never copy-then-delete, and a failure leaves the legacy store exactly where
-                // it is — the same refusal `quarantineSupersededStore` makes for the same reason.
-                logger.error(
-                    "[RAG] Could not adopt the legacy vector index at \(legacy.path) (\(error)). "
-                    + "CONSEQUENCE: it is left in place and NOT deleted, and this launch starts with "
-                    + "an empty index — semantic recall of pre-rename content is unavailable until the "
-                    + "move succeeds on a later launch or is done by hand."
-                )
-                return .failed(error.localizedDescription)
-            }
-        }
-        return .none
-    }
-
     /// Private initializer to set up the ObjectBox store and entity box.
     ///
     /// ⚠️ HNSW migration note: If migrating a large pre-existing dataset, the ObjectBox engine
@@ -284,35 +153,18 @@ final class VectorStoreService: @unchecked Sendable {
         do {
             let appSupport = try Self.storeDirectoryURL()
 
-            // --- BUNDLE-IDENTIFIER GATE (runs BEFORE the schema gate) ---
-            // The store path is keyed on the bundle identifier, which has changed once already.
-            // An adopted store then goes through the schema gate below on its own merits — which is
-            // why this runs first rather than after: a legacy store on an old schema must still be
-            // quarantined rather than opened, and the gate is what knows how to do that.
-            Self.adoptLegacyStoreIfUnambiguous(destination: appSupport, logger: logger)
-
             // --- SCHEMA GATE (in-directory marker, not preferences) ---
-            // Replaces the Phase 2/3 UserDefaults-gated wipes: the destroy decision
-            // now keys on a version marker stored WITH the data, so it physically
-            // cannot disagree with it. Existing installs (already on the current
-            // schema, proven by the legacy Phase-3 flag) are stamped without wiping.
+            // The destroy decision keys on a version marker stored WITH the data, so it physically
+            // cannot disagree with it.
             let markerURL = appSupport.appendingPathComponent(Self.schemaMarkerFilename)
             let existingContents = (try? FileManager.default.contentsOfDirectory(atPath: appSupport.path)) ?? []
             let databaseExists = existingContents.contains { $0 != Self.schemaMarkerFilename }
             let markerVersion = (try? String(contentsOf: markerURL, encoding: .utf8))
                 .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
-            switch Self.schemaGateAction(
-                markerVersion: markerVersion,
-                databaseExists: databaseExists,
-                legacyPhase3Flag: UserDefaults.standard.bool(forKey: Self.legacyPhase3Key)
-            ) {
-            case .openAsIs:
+            switch Self.schemaGateAction(markerVersion: markerVersion, databaseExists: databaseExists) {
+            case .openAsIs, .stampOnly:
                 break
-            case .stampOnly:
-                if databaseExists {
-                    logger.info("Vector store: current-schema database predates the marker (legacy flag verified) — stamping v\(Self.currentSchemaVersion), no wipe.")
-                }
             case .wipeAndStamp:
                 Self.quarantineSupersededStore(
                     at: appSupport,
@@ -326,13 +178,8 @@ final class VectorStoreService: @unchecked Sendable {
             if markerVersion != Self.currentSchemaVersion {
                 do {
                     try String(Self.currentSchemaVersion).write(to: markerURL, atomically: true, encoding: .utf8)
-                    // Superseded — removed only now that the marker is safely on
-                    // disk, so a failed write can never strand an install both
-                    // flagless AND markerless (which would wipe it next launch).
-                    UserDefaults.standard.removeObject(forKey: Self.legacyPhase2Key)
-                    UserDefaults.standard.removeObject(forKey: Self.legacyPhase3Key)
                 } catch {
-                    logger.error("Vector store: failed writing schema marker (\(error.localizedDescription)); keeping legacy flags as the fallback gate.")
+                    logger.error("Vector store: failed writing schema marker (\(error.localizedDescription)). CONSEQUENCE: the next launch finds a database with no marker and sets it aside as an unreadable schema, starting an empty index.")
                 }
             }
 

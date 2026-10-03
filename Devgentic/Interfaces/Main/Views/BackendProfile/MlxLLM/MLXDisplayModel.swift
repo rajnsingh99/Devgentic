@@ -80,6 +80,10 @@ struct MLXDisplayModel: Identifiable, Hashable {
     /// token configured, and gating on a listing flag would block a download that works.
     var isGated: Bool = false
 
+    /// HuggingFace's declared `pipeline_tag`. Only the remote-search mapping fills it in; nil
+    /// means "unknown", which `ModelSupportPolicy` treats as supported.
+    var pipelineTag: String? = nil
+
     // Metadata
     let capabilities: Set<MLXModelCapability>
     let tags: [String]
@@ -90,6 +94,12 @@ struct MLXDisplayModel: Identifiable, Hashable {
 
     
     // UI Helpers
+
+    /// Non-nil when Devgentic can never run this model (decision/classifier, speech, image…).
+    var unsupportedReason: String? {
+        ModelSupportPolicy.unsupportedReason(pipelineTag: pipelineTag, tags: tags)
+    }
+
     var displayName: String {
         // "mlx-community/Llama-3.2-3B" -> "Llama-3.2-3B"
         return id.components(separatedBy: "/").last ?? id

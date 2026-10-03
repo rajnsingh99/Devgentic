@@ -118,11 +118,14 @@ struct OnboardingModelDownloadView: View {
                             .font(.system(size: 12))
                             .foregroundColor(.red)
                         Spacer()
-                        Button("Retry") {
+                        TactileButton(
+                            title: "Retry",
+                            icon: "arrow.clockwise",
+                            variant: .primary,
+                            size: .compact
+                        ) {
                             viewModel.startModelDownload()
                         }
-                        .font(.system(size: 11, weight: .semibold))
-                        .buttonStyle(.borderedProminent)
                     }
                     .padding(12)
                     .background(Color.red.opacity(0.1))
@@ -267,6 +270,7 @@ private struct FastForwardButton: View {
             .scaleEffect(isHovered ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering

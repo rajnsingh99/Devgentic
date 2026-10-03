@@ -32,6 +32,7 @@ struct WorkflowDedicatedView: View {
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(BackendProfileService.self) private var profileService
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
     @State private var viewMode: ViewMode = .execution
     @State private var selectedHistoricalRunID: UUID?
 
@@ -400,7 +401,7 @@ struct WorkflowDedicatedView: View {
                     // The getter cannot fail a binding, so a profile deleted mid-edit falls back to
                     // an empty shell rather than trapping. The `.onChange` below tears the canvas
                     // down on the next update; this only has to survive until then.
-                    ?? BackendProfileModel(id: id, displayName: "", details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+                    ?? BackendProfileModel(id: id, displayName: "", details: .workflow(WorkflowConfig()))
             },
             set: { newValue in
                 guard let index = profileService.profiles.firstIndex(where: { $0.id == id }) else {
@@ -621,7 +622,9 @@ struct WorkflowDedicatedView: View {
                 // Title bar
                 executionTitleBar(data: data)
 
-                Divider()
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
 
                 // One vertical execution timeline — absorbs the status strip (its
                 // run-state + total time live in the timeline header), the card strip,
@@ -695,7 +698,11 @@ struct WorkflowDedicatedView: View {
     private func executionTitleBar(data: WorkflowRunDisplayData) -> some View {
         HStack(spacing: 10) {
             // Left: Back button + title
-            Button {
+            TactileIconButton(
+                icon: "chevron.left",
+                tooltip: "Back to chat",
+                size: .compact
+            ) {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     selectedHistoricalRunID = nil
                     selectedNodeID = nil
@@ -711,17 +718,7 @@ struct WorkflowDedicatedView: View {
                         viewModel.workflowExecutionStates.removeValue(forKey: cid)
                     }
                 }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(8)
-                    .background(Circle().fill(theme.surfaceOverlay))
             }
-            .buttonStyle(.plain)
-            // The primary way out of this view, and it announced as "button" — a glyph is
-            // not a name.
-            .help("Back to chat")
             .accessibilityLabel("Back to chat")
 
             Text("Workflow execution")
@@ -779,7 +776,12 @@ struct WorkflowDedicatedView: View {
     @ViewBuilder
     private func reportButton(data: WorkflowRunDisplayData) -> some View {
         if let cid = conversationID {
-            Button {
+            TactileButton(
+                title: "Report",
+                icon: "chart.bar.doc.horizontal",
+                variant: .secondary,
+                size: .compact
+            ) {
                 ReportInspectorPanelManager.shared.show(
                     messageID: data.runID ?? UUID(),
                     conversationID: cid,
@@ -788,15 +790,7 @@ struct WorkflowDedicatedView: View {
                     isDeveloperMode: isDeveloperMode,
                     answerPreview: data.finalOutput.isEmpty ? nil : data.finalOutput
                 )
-            } label: {
-                Label("Report", systemImage: "chart.bar.doc.horizontal")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(theme.surfaceOverlay))
             }
-            .buttonStyle(.plain)
             .fixedSize(horizontal: true, vertical: false)   // same reason as the segmented control
             .help("What happened during this run")
             .accessibilityLabel("Open the run report for this workflow run")
@@ -979,19 +973,13 @@ struct WorkflowDedicatedView: View {
                     .foregroundColor(theme.primaryText)
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button {
+                TactileButton(
+                    title: "Fix in Canvas",
+                    variant: .primary,
+                    size: .compact
+                ) {
                     withAnimation { viewMode = .canvas }
-                } label: {
-                    Text("Fix in Canvas")
-                        .font(theme.fontCaption.weight(.bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(theme.accentColor))
                 }
-                .buttonStyle(.plain)
-                .scaleEffect(isHoveringFix ? 1.04 : 1.0)
-                .onHover { isHoveringFix = $0 }
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -1106,7 +1094,9 @@ struct WorkflowDedicatedView: View {
                         .padding(.vertical, 10)
                 }
 
-                Divider()
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
 
                 // Run history list
                 WorkflowRunHistoryListView(
@@ -1124,65 +1114,103 @@ struct WorkflowDedicatedView: View {
 
     private var viewModeSegmentedControl: some View {
         HStack(spacing: 0) {
-            Button(action: {
+            viewModeSegmentButton(
+                title: "Canvas",
+                icon: "rectangle.3.group",
+                mode: .canvas
+            ) {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     viewMode = .canvas
                 }
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "rectangle.3.group")
-                        .font(.system(size: 11, weight: .bold))
-                        .accessibilityHidden(true)
-                    Text("Canvas")
-                        .font(.system(size: 11, weight: .bold))
-                }
-                .foregroundColor(viewMode == .canvas ? .white : theme.secondaryText)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(viewMode == .canvas ? theme.accentColor : Color.clear))
             }
-            .buttonStyle(.plain)
-            // Which half is active was encoded ONLY in the capsule fill and the text colour
-            // — invisible to VoiceOver, which read both halves identically.
-            .accessibilityLabel("Canvas view")
-            .accessibilityAddTraits(viewMode == .canvas ? [.isButton, .isSelected] : .isButton)
 
-            Button(action: {
+            viewModeSegmentButton(
+                title: "Execution",
+                icon: "list.bullet.rectangle",
+                mode: .execution
+            ) {
                 let binding = $viewMode
                 viewModel.workflowEditGuard.attempt {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         binding.wrappedValue = .execution
                     }
                 }
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "list.bullet.rectangle")
-                        .font(.system(size: 11, weight: .bold))
-                        .accessibilityHidden(true)
-                    Text("Execution")
-                        .font(.system(size: 11, weight: .bold))
-                }
-                .foregroundColor(viewMode == .execution ? .white : theme.secondaryText)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(viewMode == .execution ? theme.accentColor : Color.clear))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Execution view")
-            .accessibilityAddTraits(viewMode == .execution ? [.isButton, .isSelected] : .isButton)
         }
         .padding(3)
         .background(Capsule().fill(theme.surfaceOverlay))
         .shadow(color: Color.black.opacity(0.15), radius: 4, y: 2)
-        // ⚠️ THE FIX FOR "Canva s" / "Executi on". In a crowded HStack SwiftUI compresses flexible
-        // children, and a bare `Text` answers by WRAPPING — so adding the Report button pushed
-        // these two labels into two lines each. Raising `ViewLayout.maxContentWidth` does NOT fix
-        // it: that is a MAX and only binds when the window is WIDE, while the clipping happens
-        // when it is narrow (the app's own `minWidth` is 760 and this bar wants ~780). Making the
-        // control refuse to shrink moves the squeeze onto the title, which truncates cleanly —
-        // the right thing to sacrifice, since the title is the one element you can infer.
-        // Applied here rather than at the call site so all four usages are covered.
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func viewModeSegmentButton(
+        title: LocalizedStringKey,
+        icon: String,
+        mode: ViewMode,
+        action: @escaping () -> Void
+    ) -> some View {
+        let isSelected = viewMode == mode
+        let isThemeContrast = buttonAccentStyle == .themeContrast
+
+        let textColor: Color = {
+            if isSelected {
+                if isThemeContrast {
+                    return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+                }
+                return theme.primaryText
+            }
+            return theme.secondaryText
+        }()
+
+        let iconColor: Color = {
+            if isSelected {
+                if isThemeContrast {
+                    return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+                }
+                return theme.accentColor
+            }
+            return theme.secondaryText
+        }()
+
+        let fillColor: Color = {
+            if isSelected {
+                if isThemeContrast {
+                    return theme.isDark ? Color.white : Color(red: 0.12, green: 0.12, blue: 0.14)
+                }
+                return theme.surfaceOverlayStrong
+            }
+            return Color.clear
+        }()
+
+        let strokeColor: Color = {
+            if isSelected {
+                if isThemeContrast {
+                    return theme.isDark ? Color.white : Color(red: 0.12, green: 0.12, blue: 0.14)
+                }
+                return theme.accentColor.opacity(0.55)
+            }
+            return Color.clear
+        }()
+
+        return Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(iconColor)
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(textColor)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(fillColor))
+            .overlay(Capsule().strokeBorder(strokeColor, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .accessibilityLabel(mode == .canvas ? "Canvas view" : "Execution view")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
 }

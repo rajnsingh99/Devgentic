@@ -53,6 +53,24 @@ enum CompatibleEndpointPreset {
             keyHint: nil,
             usesHuggingFaceToken: false
         ),
+        Preset(
+            name: "vLLM",
+            url: "http://localhost:8000/v1",
+            keyHint: nil,
+            usesHuggingFaceToken: false
+        ),
+        Preset(
+            name: "LocalAI",
+            url: "http://localhost:8080/v1",
+            keyHint: nil,
+            usesHuggingFaceToken: false
+        ),
+        Preset(
+            name: "Ollama",
+            url: "http://localhost:11434/v1",
+            keyHint: nil,
+            usesHuggingFaceToken: false
+        ),
     ]
 
     /// The preset a base URL currently matches, if any — so the UI can show which is selected and

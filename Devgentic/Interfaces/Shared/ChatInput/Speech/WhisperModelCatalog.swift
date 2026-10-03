@@ -27,9 +27,8 @@ struct WhisperModelInfo: Identifiable {
 
 /// Single source of truth for the list of available WhisperKit models.
 enum WhisperModelCatalog {
+    /// Base and above only. Tiny was withdrawn: its accuracy is too low to be worth offering.
     static let availableModels: [WhisperModelInfo] = [
-        WhisperModelInfo(id: "tiny",       displayName: "Tiny (Multilingual)",    size: "~75 MB",  estimatedBytes: 78_643_200),
-        WhisperModelInfo(id: "tiny.en",    displayName: "Tiny (English)",         size: "~75 MB",  estimatedBytes: 78_643_200),
         WhisperModelInfo(id: "base",       displayName: "Base (Multilingual)",    size: "~142 MB", estimatedBytes: 148_897_792),
         WhisperModelInfo(id: "base.en",    displayName: "Base (English)",         size: "~142 MB", estimatedBytes: 148_897_792),
         WhisperModelInfo(id: "small",      displayName: "Small (Multilingual)",   size: "~466 MB", estimatedBytes: 488_636_416),

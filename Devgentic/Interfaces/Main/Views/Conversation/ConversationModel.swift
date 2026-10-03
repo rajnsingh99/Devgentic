@@ -80,8 +80,6 @@ struct Conversation: Identifiable, Codable, Equatable {
     var userDefinedTitle: String?
     var isPinned: Bool // New property for pinning
     
-    var openAIThreadID: String?
-    var backendType: BackendType?
     var backendEntityId: UUID?
 
     // MARK: - Display Properties
@@ -174,14 +172,12 @@ struct Conversation: Identifiable, Codable, Equatable {
         lhs.id == rhs.id && lhs.messages == rhs.messages && lhs.isPinned == rhs.isPinned
     }
 
-    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil, isPinned: Bool = false, openAIThreadID: String? = nil, backendType: BackendType? = nil, backendEntityId: UUID? = nil) {
+    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil, isPinned: Bool = false, backendEntityId: UUID? = nil) {
         self.id = id
         self.messages = messages
         self.timestamp = timestamp
         self.userDefinedTitle = userDefinedTitle
         self.isPinned = isPinned // Initialize new property
-        self.openAIThreadID = openAIThreadID
-        self.backendType = backendType
         self.backendEntityId = backendEntityId
     }
 }

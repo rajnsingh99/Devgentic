@@ -674,7 +674,7 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         switch type {
         case .bot:      details = .bot(BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "m")))
         case .agent:    details = .agent(AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "m")))
-        case .workflow: details = .workflow(WorkflowConfig(agentProfileIDs: []))
+        case .workflow: details = .workflow(WorkflowConfig())
         case .imageGen: details = .imageGen(ImageGenConfig(
             llmConfig: ProviderConfig(apiProvider: .openAI, modelName: "gpt-image-1")))
         case .code:     details = .code(AgentConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "m")))
@@ -718,7 +718,7 @@ final class WorkflowCanvasMutationTests: XCTestCase {
         let selfID = UUID()
         let other = profile("Other", .bot)
         let itself = BackendProfileSnapshot(id: selfID, displayName: "Me",
-                                            details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+                                            details: .workflow(WorkflowConfig()))
 
         let offered = WorkflowProfilePickerView.offeredProfiles(
             from: [itself, other],

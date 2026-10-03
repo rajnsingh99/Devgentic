@@ -60,7 +60,7 @@ final class ExecutionTimeoutExtractionTests: XCTestCase {
         let llm = ProviderConfig(apiProvider: .ollama, modelName: "llama3")
         XCTAssertNil(executionTimeout(for: .bot(BotConfig(llmConfig: llm))))
         XCTAssertNil(executionTimeout(for: .imageGen(ImageGenConfig(llmConfig: llm))))
-        XCTAssertNil(executionTimeout(for: .workflow(WorkflowConfig(agentProfileIDs: []))))
+        XCTAssertNil(executionTimeout(for: .workflow(WorkflowConfig())))
     }
 
     /// ⚠️ The guard against this regressing. The original bug was an `if case .agent` with a
@@ -74,7 +74,7 @@ final class ExecutionTimeoutExtractionTests: XCTestCase {
             .code(agentConfig(timeout: 1)),
             .bot(BotConfig(llmConfig: llm)),
             .imageGen(ImageGenConfig(llmConfig: llm)),
-            .workflow(WorkflowConfig(agentProfileIDs: [])),
+            .workflow(WorkflowConfig()),
         ]
         // Two of five carry a timeout; if that ratio changes, the extraction needs revisiting.
         XCTAssertEqual(all.filter { executionTimeout(for: $0) != nil }.count, 2)

@@ -987,9 +987,6 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// empty). Deliberately unlocalized — persisted, and other layers classify by it.
     static let stoppedRunPlaceholder = "*Operation was stopped before a response could be generated.*"
 
-    /// Legacy variant emitted by the pre-refactor executor; persisted rows still carry it.
-    static let legacyStoppedRunPlaceholder = "*Operation stopped by user.*"
-
     /// True when `text` IS a synthetic stopped-run placeholder (exact match after
     /// trimming — a message that merely QUOTES the phrase inside real prose is real
     /// content and must not be treated as synthetic). Used by the RAG gate so
@@ -997,7 +994,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// 2026-07-19: a cancelled run's placeholder was embedded and stored).
     static func isSyntheticPlaceholder(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed == stoppedRunPlaceholder || trimmed == legacyStoppedRunPlaceholder
+        return trimmed == stoppedRunPlaceholder
     }
 
     /// Merges an incoming streamed text chunk into the current content. Returns the
@@ -1530,26 +1527,14 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     
     // MARK: - Codable (Schema Versioned)
 
-    /// Current schema version. Increment when adding/removing persisted fields.
-    /// - v1: Legacy format with separate `thoughts`/`artifacts` arrays + `agentState` encoded
-    /// - v2: Unified `timelineEvents`, removed `thoughts`/`artifacts`/`agentState` from encoding
-    // v3: `TimelineEvent.reasoning` case added alongside `.thought` to split the
-    // LLM's visible monologue from system narration. v2 data decodes unchanged
-    // because Swift's automatic Codable-for-enums handles new cases additively;
-    // bumping the version is hygiene for future migration decisions.
-    // v4: `TimelineEvent.planExecution` / `.reflectionRun` capability cards added
-    // (nested per-step / per-attempt sub-timelines). Additive — v3 data decodes
-    // unchanged; legacy planning/reflection runs keep their flat milestone chips.
+    /// Current schema version of the FULL-OBJECT JSON envelope. Increment when adding/removing
+    /// persisted fields.
     //
-    // ⚠️ [P5] SCOPE: this version tags the FULL-OBJECT JSON envelope only — which no
-    // production code path round-trips (repo-verified 2026-07-19; tests are the sole
-    // consumer). The SwiftData store persists PER-FIELD blobs (contentData,
-    // timelineEventsData, …) that carry NO version tag, so bumping this constant does
-    // NOT protect on-disk data. Migrations for persisted data belong at the
-    // ChatMessageSD layer (like the legacy `.image` decode shim in MessageContent).
-    // The v1 thoughts/artifacts migration that used to live here was deleted for the
-    // same reason: no durable v1 envelope exists anywhere for it to migrate.
-    private static let currentSchemaVersion = 4
+    // ⚠️ [P5] SCOPE: this version tags the full-object envelope only — which no production code
+    // path round-trips (tests are the sole consumer). The SwiftData store persists PER-FIELD blobs
+    // (contentData, timelineEventsData, …) versioned at the ChatMessageSD layer, so bumping this
+    // constant does NOT protect on-disk data.
+    private static let currentSchemaVersion = 1
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -1653,7 +1638,7 @@ enum MessageContent: Equatable, Codable {
     case unknown(type: String, payload: PreservedJSON)
 
     enum CodingKeys: String, CodingKey {
-        case type, text, language, code, title, details, imageUrl, imageAlt, imageData, artifact, summary
+        case type, text, language, code, title, details, artifact, summary
         case category, suggestion   // structured error enrichment (Round 2 Phase 4)
     }
 
@@ -1679,33 +1664,6 @@ enum MessageContent: Equatable, Codable {
             let category = try container.decodeIfPresent(AgentErrorCategory.self, forKey: .category)
             let suggestion = try container.decodeIfPresent(String.self, forKey: .suggestion)
             self = .error(title: title, details: details, category: category, suggestion: suggestion)
-        case "image":
-            // Legacy shim (2026-07-17): `.image` was removed as a case — MediaArtifact is
-            // the single image representation, so ONE renderer serves everything. Messages
-            // persisted under the old shape convert here and re-encode as artifacts on the
-            // next save; this branch is decode-only and never written back.
-            let urlString = try container.decodeIfPresent(String.self, forKey: .imageUrl)
-            let alt = try container.decodeIfPresent(String.self, forKey: .imageAlt)
-            let imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
-            if let imageData {
-                self = .mediaArtifact(MediaArtifact(
-                    kind: .image,
-                    reference: .ephemeralData(imageData),
-                    // The legacy case never stored a mime type; sniff the bytes.
-                    mimeType: "image/\(ImageExport.fileExtension(for: imageData))",
-                    label: alt
-                ))
-            } else if let url = urlString.flatMap({ URL(string: $0) }) {
-                // URL-only legacy images rendered "Image Not Available" anyway (remote
-                // references are never auto-fetched); the artifact error card says so too,
-                // just through the live renderer.
-                self = .mediaArtifact(MediaArtifact(
-                    kind: .image, reference: .remoteURL(url),
-                    mimeType: "image/png", label: alt
-                ))
-            } else {
-                self = .plainText("[Image unavailable\(alt.map { ": \($0)" } ?? "")]")
-            }
         case "mediaArtifact":
             let artifact = try container.decode(MediaArtifact.self, forKey: .artifact)
             self = .mediaArtifact(artifact)

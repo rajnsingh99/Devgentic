@@ -333,10 +333,8 @@ struct WorkflowState: Sendable {
     ///
     /// ## The join is DERIVED from the graph — there is no user setting
     ///
-    /// The old `joinMode` picker ("Fan-in Behavior": Wait for all / Any one) was retired on
-    /// 2026-08-13 by user decision. It asked the user a question the topology already answers, and
-    /// its two values could not express the correct behaviour for a node that has both independent
-    /// and mutually-exclusive upstreams. The rule now is:
+    /// A user setting ("Wait for all / Any one") cannot express the correct behaviour for a node
+    /// that has both independent and mutually-exclusive upstreams. The rule is:
     ///
     /// > **AND across independent inputs, OR within alternatives.**
     /// >

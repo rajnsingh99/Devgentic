@@ -285,8 +285,7 @@ struct ServerDefinition: Codable, Hashable {
     let url: String?
 
     /// How the remote server authenticates this client. The corresponding
-    /// secret (if any) lives in Keychain. Defaults to `.none` for new entries
-    /// and for legacy data prior to the secrets migration.
+    /// secret (if any) lives in Keychain. Defaults to `.none`.
     let auth: MCPAuthenticationScheme
 
     /// Remote transport selection. Ignored for local-process servers, which are always
@@ -312,9 +311,7 @@ struct ServerDefinition: Codable, Hashable {
 
     // MARK: - Codable (forward-compatible)
 
-    /// Custom decode so older persisted JSON (no `auth` field) still loads as
-    /// `auth = .none`. Migration takes care of promoting legacy `authentication`
-    /// payloads up-front; this just guards against any blob that slips through.
+    /// Custom decode so JSON without an `auth` field loads as `auth = .none`.
     private enum CodingKeys: String, CodingKey {
         case command, args, envKeys, url, auth, transport
     }
@@ -340,17 +337,6 @@ struct ServerDefinition: Codable, Hashable {
         try container.encode(auth, forKey: .auth)
         try container.encode(transport, forKey: .transport)
     }
-}
-
-/// Pre-Phase-1 persisted shape. Used only by the secrets migration path —
-/// reads legacy blobs, lifts secrets into Keychain, re-encodes as
-/// `ServerDefinition`. Do not use for new code.
-struct LegacyServerDefinition: Codable {
-    let command: String?
-    let args: [String]?
-    let env: [String: String]?
-    let url: String?
-    let authentication: [String: String]?
 }
 
 /// Runtime secret bundle passed into `MCPClientService.connect`. Carries the

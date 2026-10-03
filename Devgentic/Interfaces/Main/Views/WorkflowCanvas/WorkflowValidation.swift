@@ -711,12 +711,7 @@ enum WorkflowValidator {
             // A rule this build cannot evaluate — an op or field written by a NEWER version and
             // preserved verbatim by the raw-preserving catch-alls (WF-PE3). The engine treats such
             // a rule as inert (never matches), so say so HERE, at design time, with the remedy.
-            // ⚠️ "always" is EXCLUDED here: it is not a newer build's operator but a RETIRED one
-            // (hard-deleted 2026-08-16), and it gets its own non-blocking WARNING below. Treating
-            // it as this generic case did two wrong things at once — BLOCKED every old catch-all
-            // workflow from running at all, and told the user to "Update Devgentic", pointing in
-            // exactly the wrong direction for an operator no future build will ever bring back.
-            if case .other(let raw) = rule.op, raw != "always" {
+            if case .other(let raw) = rule.op {
                 issues.append(WorkflowValidationIssue(
                     nodeID: node.id,
                     nodeName: node.displayName,
@@ -772,45 +767,11 @@ enum WorkflowValidator {
             }
         }
 
-        // P0-7: `fallbackLabel` must point to an actual rule label.
-        // If the user renames a rule after creation without updating
-        // `fallbackLabel`, the executor activates a port no downstream
-        // edge subscribes to — silent dead-end at run time.
-        let ruleLabels = Set(config.rules.map(\.label))
-        // ⚠️ The `always` operator was HARD-DELETED 2026-08-16; a stored "always" decodes to
-        // `.other("always")` and NEVER MATCHES on this build. That is a behaviour change for old
-        // catch-all workflows, so it is called out specifically — the generic newer-version-operator
-        // wording ("update Devgentic") would send the user in exactly the wrong direction.
-        for rule in config.rules where rule.op == ConditionOp.other("always") {
-            issues.append(WorkflowValidationIssue(
-                nodeID: node.id,
-                nodeName: node.displayName,
-                severity: .warning,
-                message: "Rule '\(rule.label)' uses the retired 'always matches' operator and now never matches. Delete the rule and use the Router's 'When Nothing Matches' option instead — it replaces the catch-all rule."
-            ))
-        }
-
-        // The no-match default must point at a rule that still exists. The target is stored by the
-        // rule's STABLE ID (renames are safe); only deletion can break it, and that must surface at
-        // design time — at run time the executor fails the node rather than guess.
-        // ⚠️ The LEGACY setting — checked only when no policy governs, or a migrated node would be
-        // flagged for a stale value the engine no longer reads.
-        if config.decisionPolicy == nil,
-           case .route(let ruleID) = config.noMatchBehavior,
-           !config.rules.contains(where: { $0.id == ruleID }) {
-            issues.append(WorkflowValidationIssue(
-                nodeID: node.id,
-                nodeName: node.displayName,
-                severity: .error,
-                message: "The 'When Nothing Matches' route points at a rule that was deleted. Re-pick a default route in the Router inspector."
-            ))
-        }
-
-        // The unified routing policy's route target must point at a rule that still exists — the
-        // same contract, on the setting that replaced it (2026-08-17). Stored by STABLE ID, so
-        // renames are safe and only deletion can break it; at run time the executor fails the node
-        // rather than guess, so this must surface at design time.
-        if let policy = config.decisionPolicy {
+        // The routing policy's route target must point at a rule that still exists. Stored by
+        // STABLE ID, so renames are safe and only deletion can break it; at run time the executor
+        // fails the node rather than guess, so this must surface at design time.
+        do {
+            let policy = config.decisionPolicy
             let danglingTarget: UUID?
             switch policy {
             case .route(let ruleID):
@@ -842,15 +803,6 @@ enum WorkflowValidator {
                     message: "This Router asks you to choose, and falls back to failing when nobody can answer — but its error port is not wired. On a scheduled or chat-bridge run, undecided input will stop this branch with no handler. Wire the error port, or pick a different fallback."
                 ))
             }
-        }
-
-        if !config.fallbackLabel.isEmpty, !ruleLabels.contains(config.fallbackLabel) {
-            issues.append(WorkflowValidationIssue(
-                nodeID: node.id,
-                nodeName: node.displayName,
-                severity: .error,
-                message: "Fallback label '\(config.fallbackLabel)' doesn't match any rule label — downstream routing will dead-end."
-            ))
         }
     }
 

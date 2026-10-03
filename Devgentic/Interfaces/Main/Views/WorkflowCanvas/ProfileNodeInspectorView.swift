@@ -27,9 +27,6 @@ private let logger = DGLogger(category: "ProfileNodeInspector")
 struct ProfileNodeInspectorView: View {
     @Binding var node: WorkflowNode
     let profile: BackendProfileModel?
-    /// The workflow-level retry count this node INHERITS when it carries no count of its own
-    /// (register INS-8). Same value and same reason as the Action inspector's.
-    var inheritedRetryDefault: Int = 0
     /// Ends the canvas's undo-coalescing run, so Cancel's restore becomes its own undo step rather
     /// than folding into the edits it discards (register INS-2). A closure rather than a
     /// `WorkflowCanvasState` reference, so this panel keeps its single dependency on the node binding.
@@ -56,18 +53,20 @@ struct ProfileNodeInspectorView: View {
     /// made before the first layout pass.
     private let openSnapshot: NodeInspectorOpenSnapshot
 
+    var showsHeader: Bool = true
+
     // MARK: - Init
 
     init(
         node: Binding<WorkflowNode>,
         profile: BackendProfileModel?,
-        inheritedRetryDefault: Int = 0,
-        endCoalescingRun: @escaping () -> Void = {}
+        endCoalescingRun: @escaping () -> Void = {},
+        showsHeader: Bool = true
     ) {
         self._node = node
         self.profile = profile
-        self.inheritedRetryDefault = inheritedRetryDefault
         self.endCoalescingRun = endCoalescingRun
+        self.showsHeader = showsHeader
         self.openSnapshot = NodeInspectorOpenSnapshot(node.wrappedValue)
         if let profile {
             self._editBuffer = State(initialValue: ProfileEditBuffer(profile: profile))
@@ -96,21 +95,12 @@ struct ProfileNodeInspectorView: View {
     //
     // Each binding lazy-instantiates `nodeConfig` on write so the user doesn't
     // need to remember to "enable" the section before editing. Reads always
-    // surface the effective default (matches what the executor would pick up
-    // from `WorkflowConfig` defaults if the per-node override is unset).
+    // surface the effective default (what the executor uses when the per-node
+    // override is unset).
 
     private func ensureNodeConfig() {
         guard node.nodeConfig == nil else { return }
-        // ⚠️ [INS-8] SEED the inherited retry count. `maxNodeRetries` is a non-optional Int, so the
-        // executor's `?? workflowConfig.resolvedMaxRetries` fallback is reachable only while
-        // `nodeConfig` is nil — materialising a BARE config therefore pins the node to 0 retries.
-        // That fired from the timeout, retry-delay and auto-approve setters, none of which the user
-        // thinks of as touching retries: on a legacy workflow the stepper visibly dropped from its
-        // inherited value to 0 as a side effect of pressing "Set" on the timeout.
-        node.nodeConfig = .materialised(inheritedRetryDefault: inheritedRetryDefault)
-        if inheritedRetryDefault > 0 {
-            logger.notice("[WF_CANVAS] Node '\(node.displayName)' [node \(node.id.uuidString.prefix(8))] had no per-node config; creating one and PINNING this workflow's retired default of \(inheritedRetryDefault) retries onto the node. CONSEQUENCE: the node keeps the retry count it was already running with, but it now carries its own copy — changing the workflow-level default will no longer move it.")
-        }
+        node.nodeConfig = WorkflowNodeConfig()
     }
 
     private var hardTimeoutBinding: Binding<TimeInterval?> {
@@ -125,12 +115,7 @@ struct ProfileNodeInspectorView: View {
 
     private var maxRetriesBinding: Binding<Int> {
         Binding(
-            // [INS-8] `?? inheritedRetryDefault`, not `?? 0` — `maxNodeRetries` is a non-optional
-            // Int, so the executor's `?? workflowConfig.resolvedMaxRetries` fallback is reachable
-            // only while `nodeConfig` is nil. Showing 0 there claimed "no retries" for a node the
-            // engine would retry, on the one control whose own explainer warns about duplicated
-            // tool side effects.
-            get: { node.nodeConfig?.maxNodeRetries ?? inheritedRetryDefault },
+            get: { node.nodeConfig?.maxNodeRetries ?? 0 },
             set: { newValue in
                 ensureNodeConfig()
                 node.nodeConfig?.maxNodeRetries = max(0, min(newValue, 5))
@@ -164,8 +149,12 @@ struct ProfileNodeInspectorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            if showsHeader {
+                header
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+            }
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 24) {
                     guideCard
@@ -176,11 +165,11 @@ struct ProfileNodeInspectorView: View {
             }
         }
         .frame(
-            minWidth: 800,
-            idealWidth: 950,
+            minWidth: showsHeader ? 800 : nil,
+            idealWidth: showsHeader ? 950 : nil,
             maxWidth: .infinity,
-            minHeight: 540,
-            idealHeight: 680,
+            minHeight: showsHeader ? 540 : nil,
+            idealHeight: showsHeader ? 680 : nil,
             maxHeight: .infinity
         )
         .background(theme.primaryBackground)
@@ -190,6 +179,11 @@ struct ProfileNodeInspectorView: View {
                 editBuffer = ProfileEditBuffer(profile: profile)
             }
         }
+        .onDisappear {
+            if !showsHeader, let editBuffer {
+                Self.commitBufferedEdits(editBuffer, service: profileService, nodeDisplayName: node.displayName)
+            }
+        }
     }
 
     // MARK: - Header
@@ -197,16 +191,20 @@ struct ProfileNodeInspectorView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: profileIcon)
-                .font(.system(size: 14, weight: .semibold))
+                .font(theme.fontSubheadline.weight(.semibold))
                 .foregroundColor(theme.accentColor)
             // Editable node label — mirrors the inline-rename pattern from
             // `AgentConfigDetailView`'s identity header. The node's name is
             // independent of the underlying agent profile's name; a node
             // can use the same profile but display a role-specific label.
-            TextField("Node Name", text: $node.displayName)
-                .font(.system(size: 14, weight: .semibold))
-                .textFieldStyle(.plain)
-                .foregroundColor(theme.primaryText)
+            TextField(
+                "",
+                text: $node.displayName,
+                prompt: Text("Node Name").foregroundColor(theme.placeholderText)
+            )
+            .font(theme.fontSubheadline.weight(.semibold))
+            .textFieldStyle(.plain)
+            .foregroundColor(theme.primaryText)
             Spacer()
 
             if let editBuffer, editBuffer.isDirty {
@@ -290,11 +288,12 @@ struct ProfileNodeInspectorView: View {
     private func profileGuideLine(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Text("•")
-                .font(.system(size: 11, weight: .bold))
+                .font(theme.fontCaption2.weight(.bold))
                 .foregroundColor(.blue)
             Text(text)
-                .font(.system(size: 11))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
+                .lineSpacing(2.0)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -310,8 +309,9 @@ struct ProfileNodeInspectorView: View {
         SettingsCard(title: "Workflow Orchestration", icon: "gearshape", theme: theme) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("These overrides apply only to this node's role in the workflow. The agent's own Execution settings (max iterations, parse-retries, etc.) stay untouched.")
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
                     .padding(.bottom, 4)
 
                 // Per-Node Timeout (optional; "Default" + Set button vs Stepper + Remove)
@@ -322,7 +322,9 @@ struct ProfileNodeInspectorView: View {
                     timeoutControl
                 }
 
-                Divider().opacity(0.3)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
 
                 // Node-Level Retries
                 behaviorRow(
@@ -347,7 +349,9 @@ struct ProfileNodeInspectorView: View {
 
                 // Retry Delay — contextual; only meaningful when retries > 0
                 if maxRetriesBinding.wrappedValue > 0 {
-                    Divider().opacity(0.3)
+                    Rectangle()
+                        .fill(theme.dividerColor.opacity(0.3))
+                        .frame(height: 0.5)
 
                     behaviorRow(
                         label: "Retry Delay",
@@ -372,7 +376,9 @@ struct ProfileNodeInspectorView: View {
                 // graph's own nodes carry their own. Rendering it there would persist a
                 // security-relevant toggle that silently does nothing, which is worse than absent.
                 if !isSubWorkflowNode {
-                    Divider().opacity(0.3)
+                    Rectangle()
+                        .fill(theme.dividerColor.opacity(0.3))
+                        .frame(height: 0.5)
 
                     behaviorRow(
                         label: "Unattended Auto-Approve",
@@ -397,7 +403,7 @@ struct ProfileNodeInspectorView: View {
 
     /// Per-node timeout control. Mirrors the agent's `ExecutionLimitsSection`
     /// pattern: "Default" with a Set button (nil state) vs stepper + Remove
-    /// button (explicit state). Default = inherits `WorkflowConfig.resolvedNodeTimeout` —
+    /// button (explicit state). Default = inherits `WorkflowConfig.nodeTimeout` —
     /// EXCEPT for a sub-workflow node (WF-EX3), where "Default" means NO outer ceiling at all;
     /// its child canvas already bounds every one of its own nodes independently. Pressing "Set"
     /// still seeds 120s as a starting point to adjust, same as any other node kind.
@@ -423,8 +429,8 @@ struct ProfileNodeInspectorView: View {
         } else {
             HStack(spacing: 8) {
                 Text("Default")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.tertiaryText)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
                 GlassActionButton(title: "Set", icon: "clock", isAccent: true) {
                     hardTimeoutBinding.wrappedValue = 120
                 }
@@ -439,17 +445,18 @@ struct ProfileNodeInspectorView: View {
         explainer: String,
         @ViewBuilder control: () -> Control
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(theme.secondaryText)
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
                 Text(explainer)
-                    .font(.system(size: 10))
-                    .foregroundColor(theme.tertiaryText)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 12)
+            Spacer(minLength: 16)
             control()
         }
     }
@@ -463,9 +470,9 @@ struct ProfileNodeInspectorView: View {
                 if let error = inlineProfileError {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11))
+                            .font(theme.fontCaption2)
                         Text(error)
-                            .font(theme.fontCaption)
+                            .font(theme.fontCaption2)
                     }
                     .foregroundColor(theme.errorColor)
                     .padding(8)
@@ -516,15 +523,16 @@ struct ProfileNodeInspectorView: View {
                 Text(isSubWorkflowNode
                      ? WorkflowValidator.missingWorkflowMessage
                      : WorkflowValidator.missingConfigurationMessage)
-                    .font(.system(size: 11))
+                    .font(theme.fontFootnote.weight(.semibold))
                     .foregroundColor(theme.errorColor)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text(isSubWorkflowNode
                      ? "Its steps lived on that workflow's own canvas, so they cannot be recovered from here."
                      : "Its model, instructions and tools were stored with this node and are not recoverable.")
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(16)
@@ -535,11 +543,11 @@ struct ProfileNodeInspectorView: View {
         SettingsCard(title: "Sub-Workflow Canvas", icon: "arrow.triangle.branch", theme: theme) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("This node executes the nested workflow '\(editBuffer?.draft.displayName ?? "Workflow")'. Its steps, nodes, and routing logic are authored directly on that workflow's canvas.")
-                    .font(theme.fontBody)
+                    .font(theme.fontFootnote)
                     .foregroundColor(theme.secondaryText)
 
                 Text("To modify the sub-workflow's execution graph, open it from the Workflows sidebar.")
-                    .font(theme.fontCaption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.tertiaryText)
             }
             .padding(16)
@@ -550,7 +558,7 @@ struct ProfileNodeInspectorView: View {
         SettingsCard(title: "Code Session", icon: "chevron.left.forwardslash.chevron.right", theme: theme) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Code sessions are configured via the Code interface.")
-                    .font(theme.fontBody)
+                    .font(theme.fontFootnote)
                     .foregroundColor(theme.secondaryText)
             }
             .padding(16)
@@ -641,10 +649,8 @@ struct ProfileNodeInspectorView: View {
         // stood here is GONE. Every orchestration control already calls `ensureNodeConfig()` on a
         // real write, so nothing below needs it — its only effect was to turn `nil` into
         // `.some(defaults)` on a Done the user made without editing anything, which
-        // `replaceNode`'s equality guard cannot absorb. That dirtied the canvas, burned an undo
-        // slot, AND pinned a legacy workflow's inherited retry budget to 0, because
-        // `maxNodeRetries` is non-optional and the executor's `?? resolvedMaxRetries` fallback is
-        // reachable only while `nodeConfig` is nil.
+        // `replaceNode`'s equality guard cannot absorb. That dirtied the canvas and burned an undo
+        // slot.
         // If profile was edited, validate and save
         if let editBuffer, editBuffer.isDirty {
             var instructions: String?

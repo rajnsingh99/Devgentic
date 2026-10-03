@@ -35,24 +35,17 @@ final class WorkflowNodeOutcomeTests: XCTestCase {
 
     // MARK: - CH47
 
-    /// LEGACY records (written before 2026-08-15) encode a skip as `.failed` + "Upstream
-    /// dependency…", so a raw `.failed` count reported the whole cascade as failures: a 6-node
-    /// workflow whose node 2 crashed said "5 failed". Old rows must still read correctly.
-    func testLegacyUpstreamSkipIsNotAGenuineFailure() {
-        let cascadeSkip = node(.failed, detail: "Upstream dependency failed")
-        XCTAssertTrue(cascadeSkip.didNotRun)
-        XCTAssertFalse(cascadeSkip.isGenuineFailure, "a node that never ran did not fail")
-
-        let realFailure = node(.failed, detail: "Model returned an error")
-        XCTAssertFalse(realFailure.didNotRun)
-        XCTAssertTrue(realFailure.isGenuineFailure)
+    /// A failed node is a genuine failure whatever its prose says — status is the only signal.
+    func testAFailedNodeIsAGenuineFailureWhateverItsDetailSays() {
+        let failed = node(.failed, detail: "Upstream dependency failed")
+        XCTAssertFalse(failed.didNotRun)
+        XCTAssertTrue(failed.isGenuineFailure)
     }
 
     /// The CURRENT encoding: the status carries the fact, and no reason is ever a failure.
     ///
-    /// ⚠️ The detail deliberately says "Model returned an error" — prose that the legacy matcher
-    /// would classify as a genuine failure. A `.skipped` node must be recognised by its STATUS, or
-    /// this is still prose-driven control flow wearing a new name.
+    /// ⚠️ The detail deliberately says "Model returned an error". A `.skipped` node must be
+    /// recognised by its STATUS, or this is prose-driven control flow wearing a new name.
     func testEverySkipReasonCountsAsDidNotRunAndNeverAsAFailure() {
         for reason in NodeSkipReason.allCases {
             let n = node(.skipped(reason), detail: "Model returned an error")
@@ -107,13 +100,11 @@ final class WorkflowNodeOutcomeTests: XCTestCase {
         XCTAssertEqual(NodeStatus.cancelled, NodeStatus(rawValue: NodeStatus.cancelled.rawValue))
     }
 
-    /// A record written by an OLDER build has a bare "skipped" with no reason. It must still read as
-    /// a skip — never fall through to `.other`, which the display maps to a neutral "Waiting" and
-    /// would leave the node looking like it is still queued forever.
-    func testLegacyBareSkippedStatusStillDecodesAsASkip() {
+    /// A bare "skipped" (no reason) is not a status this build writes, so it is carried verbatim
+    /// as `.other` rather than guessed at.
+    func testABareSkippedStatusIsNotGuessedAt() {
         let decoded = WorkflowRunRecord.WorkflowNodeResultSnapshot.NodeStatus(rawValue: "skipped")
-        XCTAssertEqual(decoded, .skipped(.upstreamSkipped),
-                       "pre-2026-08-15 rows only ever encoded the cascade case")
+        XCTAssertEqual(decoded, .other("skipped"))
     }
 
     /// An unknown reason from a NEWER build must degrade to the neutral cause, never to one that

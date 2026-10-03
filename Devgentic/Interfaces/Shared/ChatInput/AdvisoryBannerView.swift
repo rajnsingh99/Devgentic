@@ -65,20 +65,14 @@ struct AdvisoryBannerView: View {
             Spacer(minLength: 8)
 
             if let label = advisory.actionLabel, let action = advisory.action {
-                Button(label) { perform(action) }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                TactileButton(title: label, variant: .secondary, size: .compact) {
+                    perform(action)
+                }
             }
 
-            Button {
+            TactileIconButton(icon: "xmark", tooltip: "Dismiss warning", size: .compact) {
                 AdvisoryCenter.shared.dismiss(advisory)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(theme.secondaryText)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss warning")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -134,27 +128,22 @@ struct QuickAccessAdvisoryBanner: View {
             Spacer(minLength: 6)
 
             if case .openProfileSettings(let profileID) = advisory.action {
-                Button {
+                TactileIconButton(
+                    icon: "gearshape",
+                    tooltip: "Open profile settings in the main window",
+                    size: .compact
+                ) {
                     onOpenProfileSettings(profileID)
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(theme.secondaryText)
                 }
-                .buttonStyle(.plain)
-                .help("Open profile settings in the main window")
-                .accessibilityLabel("Open profile settings")
             }
 
-            Button {
+            TactileIconButton(
+                icon: "xmark",
+                tooltip: "Dismiss warning",
+                size: .compact
+            ) {
                 AdvisoryCenter.shared.dismiss(advisory)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(theme.secondaryText)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss warning")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

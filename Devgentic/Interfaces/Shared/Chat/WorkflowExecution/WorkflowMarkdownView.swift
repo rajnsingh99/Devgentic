@@ -105,7 +105,9 @@ struct WorkflowMarkdownView: View {
             .padding(.bottom, theme.spacingSmall)
 
         case .horizontalRule:
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(height: 0.5)
                 .padding(.vertical, theme.spacingMedium)
 
         case .table(let headers, let rows, let alignments):
@@ -127,7 +129,7 @@ struct WorkflowMarkdownView: View {
                             .accessibilityAddTraits(.isImage)
                     case .failure:
                         Label("Failed to load image", systemImage: "photo.on.rectangle.angled")
-                            .font(.caption)
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
                             .accessibilityLabel(altText?.isEmpty == false ? "Image failed to load: \(altText!)" : "Image failed to load")
                     case .empty:
@@ -136,7 +138,7 @@ struct WorkflowMarkdownView: View {
                             VStack {
                                 ProgressView()
                                 if let alt = altText, !alt.isEmpty {
-                                    Text(alt).font(.caption).foregroundColor(theme.secondaryText)
+                                    Text(alt).font(theme.fontCaption2).foregroundColor(theme.secondaryText)
                                 }
                             }
                             Spacer()

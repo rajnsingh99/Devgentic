@@ -42,11 +42,16 @@ struct GateNodeInspectorView: View {
     @State private var hasTimeout: Bool = false
     @State private var timeoutSeconds: Double = 300
     @State private var showGuide: Bool = false
+    var showsHeader: Bool = true
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            if showsHeader {
+                header
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+            }
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 20) {
                     guideCard
@@ -58,15 +63,32 @@ struct GateNodeInspectorView: View {
             }
         }
         .frame(
-            minWidth: 800,
-            idealWidth: 950,
+            minWidth: showsHeader ? 800 : nil,
+            idealWidth: showsHeader ? 950 : nil,
             maxWidth: .infinity,
-            minHeight: 560,
-            idealHeight: 700,
+            minHeight: showsHeader ? 560 : nil,
+            idealHeight: showsHeader ? 700 : nil,
             maxHeight: .infinity
         )
         .background(theme.primaryBackground)
-        .onAppear { loadFromNode() }
+        .onAppear {
+            loadFromNode()
+            if !showsHeader {
+                NodeInspectorPendingCommit.shared.register {
+                    persistConfigToNode()
+                }
+            }
+        }
+        .onDisappear {
+            if !showsHeader {
+                persistConfigToNode()
+                NodeInspectorPendingCommit.shared.clear()
+            }
+        }
+        .onChange(of: prompt) { persistIfEmbedded() }
+        .onChange(of: options) { persistIfEmbedded() }
+        .onChange(of: hasTimeout) { persistIfEmbedded() }
+        .onChange(of: timeoutSeconds) { persistIfEmbedded() }
     }
 
     // MARK: - Header
@@ -88,12 +110,13 @@ struct GateNodeInspectorView: View {
                 .textFieldStyle(.plain)
                 .foregroundColor(theme.secondaryText)
             Spacer()
-            Button {
+            TactileIconButton(
+                icon: "questionmark.circle",
+                tooltip: showGuide ? "Hide guide" : "Show guide",
+                accessibilityLabel: showGuide ? "Hide guide" : "Show guide",
+                size: .compact
+            ) {
                 withAnimation(.easeInOut(duration: 0.2)) { showGuide.toggle() }
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(theme.fontBody)
-                    .foregroundColor(theme.secondaryText)
             }
             GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
             GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
@@ -166,7 +189,7 @@ struct GateNodeInspectorView: View {
     private func guideStep(number: String, title: String, subtitle: String, description: String, color: Color) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(number)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(theme.fontCaption2.weight(.bold))
                 .foregroundColor(.white)
                 .frame(width: 20, height: 20)
                 .background(Circle().fill(color))
@@ -174,16 +197,17 @@ struct GateNodeInspectorView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(title)
-                        .font(theme.fontCaption.weight(.semibold))
+                        .font(theme.fontCaption2.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                     Text(subtitle)
-                        .font(.system(size: 10))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.tertiaryText)
                         .italic()
                 }
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.0)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -192,11 +216,11 @@ struct GateNodeInspectorView: View {
     private func guideTip(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "lightbulb.fill")
-                .font(theme.fontCaption)
+                .font(theme.fontCaption2)
                 .foregroundColor(.yellow)
                 .padding(.top, 2)
             Text(text)
-                .font(.system(.caption))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
                 .italic()
                 .fixedSize(horizontal: false, vertical: true)
@@ -218,7 +242,7 @@ struct GateNodeInspectorView: View {
         SettingsCard(title: "Approval Prompt", icon: "text.bubble", theme: theme) {
             VStack(alignment: .leading, spacing: 8) {
                 TextEditor(text: $prompt)
-                    .font(.system(size: 13))
+                    .font(theme.fontFootnote)
                     .frame(minHeight: 60, maxHeight: 120)
                     .scrollContentBackground(.hidden)
                     .background(
@@ -230,8 +254,9 @@ struct GateNodeInspectorView: View {
                             .stroke(theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
                     )
                 Text("Shown to the user when the gate pauses execution.")
-                    .font(.caption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
@@ -252,10 +277,14 @@ struct GateNodeInspectorView: View {
                         // false approve/reject claim as the footer did.
                         Image(systemName: "arrow.right.circle")
                             .foregroundColor(theme.secondaryText)
-                            .font(.system(size: 14))
-                        TextField("Option \(index + 1)", text: $row.text)
+                            .font(theme.fontFootnote)
+                        TextField(
+                            "",
+                            text: $row.text,
+                            prompt: Text("Option \(index + 1)").foregroundColor(theme.placeholderText)
+                        )
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12))
+                        .font(theme.fontFootnote)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
                         .background(
@@ -269,10 +298,12 @@ struct GateNodeInspectorView: View {
                                 options.removeAll { $0.id == row.id }
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 13))
+                                    .font(theme.fontFootnote)
                                     .foregroundColor(theme.tertiaryText)
                             }
                             .buttonStyle(.plain)
+                            .pointingHandCursor()
+                            .help("Delete option")
                         }
                     }
                 }
@@ -289,8 +320,9 @@ struct GateNodeInspectorView: View {
                 // so EVERY option activates its own same-named port. A user who believed it wired one
                 // "reject" branch and silently got nothing from the other options.
                 Text("Every option becomes its own output port — wire each one to what should happen when it is chosen.")
-                    .font(.caption)
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
@@ -305,7 +337,7 @@ struct GateNodeInspectorView: View {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Enable Timeout")
-                            .font(theme.fontBody.weight(.medium))
+                            .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
                         // [INS-3] "Auto-rejects" was a promise the engine does not keep. The
                         // timeout arm sets `output = "Gate not answered (timed out)"` and
@@ -315,8 +347,9 @@ struct GateNodeInspectorView: View {
                         // The truthful description already existed in the collapsed guide above,
                         // which defaults to hidden.
                         Text("If nobody answers in time the node FAILS and its error port activates — no option branch is taken. Wire the error port to handle it.")
-                            .font(.system(.caption))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
+                            .lineSpacing(2.5)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 24)
@@ -326,13 +359,15 @@ struct GateNodeInspectorView: View {
                 }
 
                 if hasTimeout {
-                    Divider()
+                    Rectangle()
+                        .fill(theme.dividerColor.opacity(0.3))
+                        .frame(height: 0.5)
                         .padding(.vertical, 12)
 
                     HStack {
                         Slider(value: $timeoutSeconds, in: 30...900, step: 30)
                         Text("\(Int(timeoutSeconds))s")
-                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .font(theme.fontFootnote.monospacedDigit())
                             .foregroundColor(theme.primaryText)
                             .frame(width: 50, alignment: .trailing)
                     }
@@ -356,7 +391,7 @@ struct GateNodeInspectorView: View {
         }
     }
 
-    private func saveAndDismiss() {
+    private func persistConfigToNode() {
         let config = GateNodeConfig(
             prompt: prompt.isEmpty ? "Approve this workflow step?" : prompt,
             options: options.map(\.text).filter { !$0.isEmpty },
@@ -364,12 +399,19 @@ struct GateNodeInspectorView: View {
         )
         node.kind = .gate(config)
 
-        // [INS-11] The `if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }` that
-        // stood here is GONE — same reason as the Router's. `joinMode` was retired 2026-08-13 and a
-        // Gate has no other per-node config this panel edits, so the line's only effect was turning
-        // `nil` into `.some(defaults)`, which `replaceNode`'s equality guard cannot absorb: a Save
-        // that changed nothing still dirtied the canvas and burned an undo slot.
+        // [INS-11] Never materialise `nodeConfig` here: this panel edits no per-node config, and
+        // turning `nil` into `.some(defaults)` defeats `replaceNode`'s equality guard, so a Save
+        // that changed nothing would dirty the canvas and burn an undo slot.
+    }
 
+    private func persistIfEmbedded() {
+        guard !showsHeader else { return }
+        persistConfigToNode()
+    }
+
+    private func saveAndDismiss() {
+        persistConfigToNode()
+        NodeInspectorPendingCommit.shared.clear()
         closeInspector()
     }
 }

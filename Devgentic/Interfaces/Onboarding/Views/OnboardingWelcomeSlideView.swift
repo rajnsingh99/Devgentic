@@ -373,6 +373,7 @@ private struct CarouselArrowButton: View {
                 .scaleEffect(isHovered ? 1.08 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering

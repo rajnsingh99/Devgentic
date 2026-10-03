@@ -495,7 +495,6 @@ enum BundleExporter {
             AppSettings.ciFeatureSuggestionKey,
             AppSettings.ciFeatureMorningBriefKey,
             AppSettings.ciFeatureUserPersonalKey,
-            AppSettings.ciFeatureResponseSynthesisKey,
             AppSettings.ciFeatureResponseSynthesisMLXKey,
             AppSettings.ciFeatureResponseSynthesisOllamaKey,
             AppSettings.ciFeatureResponseSynthesisRemoteKey,

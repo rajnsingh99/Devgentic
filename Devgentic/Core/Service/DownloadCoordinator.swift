@@ -142,6 +142,16 @@ enum DownloadCoordinator {
             return .failed("Can't start a download while another model is being removed.")
         }
 
+        // ⚠️ Authoritative "can we run this at all" check — only possible for `hf.co/<owner>/<repo>`
+        // names, the one form that has pre-download metadata. A library name (`llama3.2:3b`) has
+        // none, so it falls through. A failed lookup is also "unknown → proceed": an offline blip
+        // must not turn a valid pull into a refusal. This is the choke point every coordinator
+        // caller shares (store pill, Downloads sidebar retry, Download Manager, onboarding).
+        if let repoId = ModelSupportPolicy.huggingFaceRepoId(fromOllamaName: trimmed),
+           let reason = await MLXModelService.shared.unsupportedReason(forRepo: repoId) {
+            return .failed("Not supported. \(reason)")
+        }
+
         // OllamaService.pullModel is async; fire-and-forget so callers get
         // the outcome synchronously. Progress flows via @Observable state.
         Task { await ollama.pullModel(name: trimmed, baseURL: ollama.ollamaBaseURL) }

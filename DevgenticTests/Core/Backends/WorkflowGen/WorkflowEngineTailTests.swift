@@ -32,29 +32,16 @@ final class WorkflowEngineTailTests: XCTestCase {
     /// The filed defect: `for attempt in 0...maxRetries` with a negative count is a `ClosedRange`
     /// precondition failure — it ABORTS THE APP, it does not produce an empty range.
     func testANegativeRetryCountYieldsExactlyOneAttempt() {
-        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: -1, fallbackRetries: 0), 1)
-        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: -99, fallbackRetries: 0), 1)
-    }
-
-    /// ⚠️ The FALLBACK is a second, independent way a negative arrives — `resolvedMaxRetries` comes
-    /// from `defaultMaxRetries`, decoded with no clamp, and it arms every node whose `nodeConfig`
-    /// is nil. Probing only the per-node value would miss it entirely.
-    func testANegativeWorkflowLevelFallbackAlsoYieldsOneAttempt() {
-        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: nil, fallbackRetries: -3), 1)
+        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: -1), 1)
+        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: -99), 1)
     }
 
     /// The ordinary values are unchanged — a clamp that also changed real counts would be a
     /// behaviour change wearing a bug fix's clothes.
     func testOrdinaryRetryCountsAreUnchanged() {
-        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: 0, fallbackRetries: 0), 1)
-        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: 3, fallbackRetries: 0), 4)
-        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: nil, fallbackRetries: 2), 3)
-    }
-
-    /// The per-node value WINS over the fallback, including when it is an explicit 0 — otherwise a
-    /// user who deliberately switched retries off on one node would silently inherit the workflow's.
-    func testAnExplicitZeroOverridesTheFallback() {
-        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: 0, fallbackRetries: 5), 1)
+        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: 0), 1)
+        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: 3), 4)
+        XCTAssertEqual(WorkflowRetryPolicy.profileAttempts(maxNodeRetries: nil), 1, "no per-node count means no retry")
     }
 
     // MARK: - EXC-6 — a Stop is not a routing decision

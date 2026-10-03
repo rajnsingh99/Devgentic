@@ -63,9 +63,8 @@ private final class MockChatPersistenceStore: ChatPersistenceProtocol {
         return Array(sorted[start..<end])
     }
 
-    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {}
     func deleteConversation(with id: UUID) { conversations.removeValue(forKey: id) }
-    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {}
+    func updateBackendForConversation(id: UUID, backendEntityId: UUID?) {}
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {}
     func togglePinStatus(for conversationId: UUID) {}
 }

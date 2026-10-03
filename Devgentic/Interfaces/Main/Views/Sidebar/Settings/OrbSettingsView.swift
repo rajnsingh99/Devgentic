@@ -174,14 +174,15 @@ struct OrbSettingsView: View {
                         .disabled(!config.isEnabled)
                         .opacity(config.isEnabled ? 1 : 0.5)
 
-                        Button("Reset") {
+                        TactileIconButton(
+                            icon: "arrow.counterclockwise",
+                            tooltip: "Reset to ⌥J",
+                            size: 24,
+                            isDisabled: !config.isEnabled
+                        ) {
                             config.resetShortcutToDefault()
                             AppDelegate.shared?.applyOrbHotkeyConfig()
                         }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(theme.accentColor)
-                        .help("Reset to ⌥J")
                     }
                 }
             }

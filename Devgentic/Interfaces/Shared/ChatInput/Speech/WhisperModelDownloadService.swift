@@ -58,6 +58,16 @@ final class WhisperModelDownloadService {
     // MARK: - Private
 
     private let repo = "argmaxinc/whisperkit-coreml"
+
+    /// Where WhisperKit models are stored: Application Support, beside the MLX model store.
+    ///
+    /// ⚠️⚠️ EVERY `HubApi` / `WhisperKit` CALL MUST PASS THIS. Their default is
+    /// `~/Documents/huggingface`, and merely checking that path raises the macOS "access your
+    /// Documents folder" prompt. This service is built with the composer at launch, so the default
+    /// put that prompt on every first launch, before the user had touched voice input.
+    nonisolated static let downloadBase = URL.applicationSupportDirectory
+        .appending(path: "huggingface/whisperkit", directoryHint: .isDirectory)
+
     private var downloadTask: Task<Void, Never>?
 
     /// Minimum number of `.mlmodelc`/`.mlpackage` files required for a model
@@ -76,7 +86,7 @@ final class WhisperModelDownloadService {
 
     /// Scans the HuggingFace Hub local cache for already-downloaded WhisperKit model variants.
     func refreshDownloadedModels() {
-        let hubApi = HubApi()
+        let hubApi = HubApi(downloadBase: Self.downloadBase)
         let repoObj = Hub.Repo(id: repo, type: .models)
         let repoDir = hubApi.localRepoLocation(repoObj)
 
@@ -164,6 +174,7 @@ final class WhisperModelDownloadService {
 
                 let _ = try await WhisperKit.download(
                     variant: modelId,
+                    downloadBase: Self.downloadBase,
                     from: self.repo
                 ) { [weak self] progress in
                     Task { @MainActor [weak self] in
@@ -269,7 +280,7 @@ final class WhisperModelDownloadService {
             await recognitionService.unloadCurrentModel()
         }
 
-        let hubApi = HubApi()
+        let hubApi = HubApi(downloadBase: Self.downloadBase)
         let repoObj = Hub.Repo(id: repo, type: .models)
         let repoDir = hubApi.localRepoLocation(repoObj)
         let fm = FileManager.default

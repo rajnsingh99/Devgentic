@@ -1556,20 +1556,6 @@ final class WorkflowCanvasState {
                 map.removeValue(forKey: oldLabel)
                 logger.warning("[WF_CANVAS] Port rename from shared label '\(oldLabel)' NOT applied: another rule still carries that label, so an edge on '\(oldLabel)' may belong to it. CONSEQUENCE: those edges stay on the surviving port instead of following the renamed twin.")
             }
-            // ⚠️ [WF-CS12] The legacy catch-all's port belongs to the RULE it names — decode
-            // guarantees a non-empty `fallbackLabel` names a real rule — so a fallback change is a
-            // port rename ONLY for a phantom label naming no rule (pre-normalization data built in
-            // memory). Clearing it (new value empty) deletes that phantom port; deletions dangle
-            // for the validator, they don't re-point. The old unconditional write here ran AFTER
-            // the rules loop and CLOBBERED the rename entry of the very rule the catch-all names —
-            // the normal case, since the inspector clears the catch-all on every Save — re-pointing
-            // that rule's edges to a nonexistent "" port whenever it was renamed in the same Save.
-            if oldConfig.fallbackLabel != newConfig.fallbackLabel,
-               !oldConfig.fallbackLabel.isEmpty,
-               !newConfig.fallbackLabel.isEmpty,
-               !oldConfig.rules.contains(where: { $0.label == oldConfig.fallbackLabel }) {
-                map[oldConfig.fallbackLabel] = newConfig.fallbackLabel
-            }
 
         case (.gate(let oldConfig), .gate(let newConfig)):
             map = gateRenameMap(old: oldConfig.options, new: newConfig.options)

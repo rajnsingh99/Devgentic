@@ -149,10 +149,22 @@ final class ChatOpsSilentDropTests: XCTestCase {
                 Route it through `editResolvedPrompt(_:messageID:to:operationID:kind:)`.
                 """)
         }
-        // All four observers must go through the helper — one missed observer is one prompt kind
-        // whose buttons stay live.
-        let uses = source.components(separatedBy: "await self.editResolvedPrompt(").count - 1
-        XCTAssertEqual(uses, 4, "expected the tool-approval, clarification, plan-review and gate observers to all rewrite through the helper")
+        // ⚠️ ANCHORED ON THE PROPERTY, NOT ON A CALL COUNT. This used to require exactly four literal
+        // `await self.editResolvedPrompt(` sites; routing all four observers through ONE applier
+        // (which is also where a resolution arriving mid-post is parked) holds the invariant
+        // strictly better. What must stay true: every observer that computes a resolved status
+        // HANDS IT OVER — one that computes a verdict and drops it is one prompt kind whose buttons
+        // stay live on a decided prompt.
+        let verdicts = source.components(separatedBy: "let statusText").count - 1
+        let handoffs = source.components(separatedBy: "await self.applyResolution(").count - 1
+        XCTAssertGreaterThanOrEqual(verdicts, 4, """
+            expected the tool-approval, clarification, plan-review and gate observers to each \
+            compute a resolved status; found \(verdicts)
+            """)
+        XCTAssertEqual(handoffs, verdicts, """
+            \(verdicts) resolution observers compute a status but only \(handoffs) hand it to the \
+            shared applier — the odd one out rewrites the prompt on its own or drops the resolution.
+            """)
     }
 
     // MARK: - Terminal arms

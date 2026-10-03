@@ -167,8 +167,8 @@ struct AgentCapabilitiesSection: View {
             //
             // ⚠️ Register A66. Removing the toggle removed the OFF switch too, and the gate in
             // `AgentConnect.resolveTools` is the mere PRESENCE of `capabilities.agentDelegation`
-            // — there is no `isEnabled` flag. `ProfileMigrator` created that config for legacy
-            // "Supervisor" profiles, so those agents inject `call_agent` on every single run,
+            // — there is no `isEnabled` flag. Old "Supervisor" profiles were converted to that
+            // config, so those agents inject `call_agent` on every single run,
             // permanently, with nothing on screen to say so and no way to stop it.
             //
             // ⚠️ This row appears ONLY when the profile already has delegation, and turning it
@@ -182,7 +182,12 @@ struct AgentCapabilitiesSection: View {
                     title: "Agent Delegation",
                     description: "This agent can spawn sub-agents (call_agent). Devgentic no longer offers this — sub-agents share one model, so they queue rather than run in parallel. Turning it off removes the tool; it can't be turned back on."
                 ) {
-                    Button("Turn Off") {
+                    TactileButton(
+                        title: "Turn Off",
+                        icon: "slash.circle",
+                        variant: .destructive,
+                        size: .compact
+                    ) {
                         logger.notice(
                             "[PROFILE] User turned OFF agent delegation for this profile. "
                             + "CONSEQUENCE: `call_agent` will no longer be injected on runs, and the "
@@ -190,7 +195,6 @@ struct AgentCapabilitiesSection: View {
                         )
                         capabilities.agentDelegation = nil
                     }
-                    .buttonStyle(.bordered)
                     .accessibilityLabel("Turn off agent delegation")
                 }
             }

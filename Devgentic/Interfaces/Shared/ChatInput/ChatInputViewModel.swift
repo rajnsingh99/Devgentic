@@ -252,8 +252,9 @@ final class ChatInputViewModel {
         setupKeyboardShortcutObserver()
 
         Task {
-            await checkMicPermissions()
             observeRecognitionLoadingState()
+            // AFTER the observer: its initial-state pass would otherwise overwrite a denial.
+            syncMicPermissionStatus()
         }
     }
 
@@ -848,28 +849,23 @@ final class ChatInputViewModel {
         }
     }
 
-    private func checkMicPermissions() async {
-        // ⚠️⚠️ CALLED FROM `init`, SO MERELY CONSTRUCTING THE COMPOSER ASKS FOR THE MICROPHONE. In a
-        // test host that is a real, modal, user-visible permission prompt raised by a process nobody
-        // is watching and which exits when the suite finishes — and once answered it is remembered,
-        // so a denial recorded here follows the developer's real app afterwards.
-        guard TestHost.permits("request microphone permission", logger: logger) else { return }
-
-        self.voiceInputState = .requestingPermissions
-        logger.info("Requesting microphone permission...")
-        let granted = await AVAudioApplication.requestRecordPermission()
-        if !granted {
-            logger.warning("Microphone permission denied by user.")
+    /// Mirrors the CURRENT microphone permission into the button state. NEVER PROMPTS.
+    ///
+    /// ⚠️⚠️ DO NOT CALL `requestRecordPermission()` HERE. This runs from `init`, and the composer is
+    /// built at app scope — asking here raised the macOS microphone prompt on every first launch,
+    /// before the user had touched voice input. The prompt belongs to the mic tap:
+    /// `startStreaming()` requests it, so an undetermined status needs nothing from this function.
+    private func syncMicPermissionStatus() {
+        switch AVAudioApplication.shared.recordPermission {
+        case .denied:
+            logger.info("[VOICE] Microphone permission is denied. CONSEQUENCE: the mic button opens System Settings → Microphone instead of recording.")
             self.voiceInputState = .permissionsDeniedMic
-        } else {
-            logger.info("Microphone permission granted.")
-            // Restore state based on model loading — don't leave it stuck
-            // on .requestingPermissions, which disables the mic button.
-            if let service = recognitionService as? WhisperRecognitionService {
-                handleModelLoadingState(service.loadingState)
-            } else {
-                self.voiceInputState = .idle
-            }
+        case .undetermined:
+            logger.info("[VOICE] Microphone permission not yet requested — deferred to the first mic tap.")
+        case .granted:
+            break
+        @unknown default:
+            break
         }
     }
 

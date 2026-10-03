@@ -405,9 +405,9 @@ struct ConversationSidebarView: View {
 
     private var searchPlaceholder: String {
         switch viewModel.interfaceMode {
-        case .workflow: return "Search workflows..."
-        case .code:     return "Search sessions and projects..."
-        case .chat:     return "Search conversations..."
+        case .workflow: return "Search workflows"
+        case .code:     return "Search sessions and projects"
+        case .chat:     return "Search conversations"
         }
     }
 
@@ -419,15 +419,23 @@ struct ConversationSidebarView: View {
         viewModel.interfaceMode == .workflow ? "Select a workflow profile and run it" : "Start a new chat to begin exploring"
     }
 
+    private var noMatchesSubtitle: LocalizedStringKey {
+        switch viewModel.interfaceMode {
+        case .workflow: return "No workflows found for “\(searchText)”"
+        case .code:     return "No sessions found for “\(searchText)”"
+        case .chat:     return "No conversations found for “\(searchText)”"
+        }
+    }
+
     private var emptyStateIcon: String {
         viewModel.interfaceMode == .workflow ? "point.3.connected.trianglepath.dotted" : "bubble.left.and.text.bubble.right"
     }
 
     private var emptyStateActionTitle: LocalizedStringKey {
         switch viewModel.interfaceMode {
-        case .workflow: return "Select a Workflow"
-        case .code:     return "Start a Code Session"
-        case .chat:     return "Start a Conversation"
+        case .workflow: return "New Workflow"
+        case .code:     return "New Session"
+        case .chat:     return "New Chat"
         }
     }
 
@@ -486,20 +494,31 @@ struct ConversationSidebarView: View {
                 .padding(.bottom, 10)
             }
 
-            if filteredConversationCount == 0 && searchText.isEmpty {
-                SidebarEmptyStateView(
-                    title: emptyStateTitle,
-                    subtitle: emptyStateSubtitle,
-                    buttonTitle: emptyStateActionTitle,
-                    systemImage: emptyStateIcon,
-                    onAction: {
-                        if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
-                            viewModel.deselectConversationAndShowWelcome()
-                        } else {
-                            viewModel.startNewConversation()
+            if filteredConversationCount == 0 {
+                if !searchText.isEmpty {
+                    SidebarEmptyStateView(
+                        title: "No matches",
+                        subtitle: noMatchesSubtitle,
+                        buttonTitle: "Clear Search",
+                        systemImage: "magnifyingglass",
+                        onAction: { searchText = "" }
+                    )
+                } else {
+                    SidebarEmptyStateView(
+                        title: emptyStateTitle,
+                        subtitle: emptyStateSubtitle,
+                        buttonTitle: emptyStateActionTitle,
+                        buttonIcon: "plus",
+                        systemImage: emptyStateIcon,
+                        onAction: {
+                            if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
+                                viewModel.deselectConversationAndShowWelcome()
+                            } else {
+                                viewModel.startNewConversation()
+                            }
                         }
-                    }
-                )
+                    )
+                }
             } else {
                 conversationList
             }
@@ -549,6 +568,7 @@ struct ConversationSidebarView: View {
                             title: pinnedEmptyTitle,
                             subtitle: "Right-click a conversation to pin it",
                             buttonTitle: newButtonTitle,
+                            buttonIcon: "plus",
                             systemImage: "pin",
                             onAction: {
                                 if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
@@ -828,25 +848,17 @@ struct ConversationSidebarView: View {
             )
             .help(selectedConversationIDs == visibleConversationIDs ? "Clear selection" : "Select all visible conversations")
 
-            Button {
+            TactileIconButton(
+                icon: "trash",
+                tooltip: "Delete selected (⌘⌫)",
+                accessibilityLabel: "Delete \(selectedConversationIDs.count) selected conversations",
+                variant: .destructive,
+                size: 26,
+                isDisabled: selectedConversationIDs.isEmpty
+            ) {
                 deleteSelectedConversations()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "trash")
-                        .font(.system(.caption, weight: .semibold))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(theme.errorColor.opacity(0.15))
-                .foregroundColor(theme.errorColor)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            .buttonStyle(.plain)
-            .disabled(selectedConversationIDs.isEmpty)
-            .opacity(selectedConversationIDs.isEmpty ? 0.5 : 1)
             .keyboardShortcut(.delete, modifiers: [.command])
-            .help("Delete selected (⌘⌫)")
-            .accessibilityLabel("Delete \(selectedConversationIDs.count) selected conversations")
         }
         .padding(.horizontal, 12)
         .padding(.top, 12)

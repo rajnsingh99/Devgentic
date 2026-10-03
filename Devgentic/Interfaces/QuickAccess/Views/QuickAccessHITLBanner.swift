@@ -237,19 +237,100 @@ struct QuickAccessHITLBanner: View {
     // [M10] LocalizedStringKey (not String) so the literal call-site labels ("Deny", "Approve", …)
     // are extracted into Localizable.xcstrings instead of shipping verbatim English.
     private func actionButton(_ title: LocalizedStringKey, color: Color, filled: Bool, action: @escaping () -> Void) -> some View {
+        QuickAccessBannerActionButton(
+            title: title,
+            color: color,
+            filled: filled,
+            action: action
+        )
+    }
+}
+
+private struct QuickAccessBannerActionButton: View {
+    let title: LocalizedStringKey
+    let color: Color
+    let filled: Bool
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    private var isContrastPrimary: Bool {
+        filled && buttonAccentStyle == .themeContrast
+    }
+
+    private var backgroundColor: Color {
+        if filled {
+            if buttonAccentStyle == .themeContrast {
+                if !isEnabled {
+                    return theme.isDark ? Color.white.opacity(0.35) : Color.black.opacity(0.20)
+                }
+                return theme.isDark
+                    ? (isHovered ? Color.white : Color.white.opacity(0.95))
+                    : (isHovered ? Color.black : Color(red: 0.12, green: 0.12, blue: 0.14))
+            }
+            // Style 3 (Tactile Glass)
+            return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
+        } else {
+            return isHovered ? theme.surfaceOverlay : Color.clear
+        }
+    }
+
+    private var foregroundColor: Color {
+        if !isEnabled {
+            if isContrastPrimary {
+                return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08).opacity(0.4) : Color.white.opacity(0.4)
+            }
+            return theme.secondaryText.opacity(0.45)
+        }
+        if filled {
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            }
+            // Style 3: Clean primary text
+            return isHovered ? theme.primaryText : theme.primaryText.opacity(0.95)
+        } else {
+            return isHovered ? theme.primaryText : color
+        }
+    }
+
+    private var strokeColor: Color {
+        if filled {
+            if buttonAccentStyle == .themeContrast {
+                return theme.isDark ? Color.white.opacity(0.4) : Color.black.opacity(0.2)
+            }
+            // Style 3: Semantic stroke glowing on hover
+            return isHovered ? color.opacity(0.65) : color.opacity(0.35)
+        } else {
+            return isHovered ? color.opacity(0.5) : color.opacity(0.25)
+        }
+    }
+
+    var body: some View {
         Button(action: action) {
             Text(title)
                 .font(.system(.caption, weight: .semibold))
-                .foregroundColor(filled ? .white : color)
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(
-                    Capsule().fill(filled ? color : Color.clear)
-                )
-                .overlay(
-                    Capsule().stroke(color.opacity(filled ? 0 : 0.5), lineWidth: 1)
+                .foregroundColor(foregroundColor)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(backgroundColor))
+                .overlay(Capsule().stroke(strokeColor, lineWidth: 1))
+                .shadow(
+                    color: isHovered && isEnabled && isContrastPrimary
+                        ? Color.black.opacity(0.25)
+                        : (isHovered && isEnabled && filled ? color.opacity(0.25) : Color.clear),
+                    radius: 3,
+                    x: 0,
+                    y: 1
                 )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor(enabled: isEnabled)
+        .onHover { h in withAnimation(.easeInOut(duration: 0.15)) { isHovered = h } }
+        .scaleEffect(isHovered && isEnabled ? 1.02 : 1.0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isHovered)
     }
 }
 
@@ -274,6 +355,7 @@ private struct FlowRow: View {
                             .overlay(Capsule().stroke(theme.accentColor.opacity(0.4), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                 }
             }
         }

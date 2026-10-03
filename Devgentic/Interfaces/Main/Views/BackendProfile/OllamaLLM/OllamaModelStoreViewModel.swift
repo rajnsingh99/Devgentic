@@ -17,7 +17,10 @@ class OllamaModelStoreViewModel {
 
     // MARK: - Inputs
     var searchText: String = "" {
-        didSet { applyFilterAndSort(models: service.localModels, query: searchText, sort: sortOption) }
+        didSet {
+            applyFilterAndSort(models: service.localModels, query: searchText, sort: sortOption)
+            scheduleSupportCheck()
+        }
     }
     var sortOption: SortOption = .name {
         didSet { applyFilterAndSort(models: service.localModels, query: searchText, sort: sortOption) }
@@ -36,6 +39,20 @@ class OllamaModelStoreViewModel {
     // Live per-row progress comes from `DownloadManager` via `ModelDownloadStatusView`.
     var isDownloading: Bool = false
     var downloadErrorMessage: String? = nil
+
+    /// `owner/repo` of an `hf.co/…` pull name → why Devgentic can't run it. Only UNSUPPORTED
+    /// repos are stored: absence means "supported, not an hf.co name, or not yet known", and
+    /// `DownloadCoordinator.startOllamaDownloadIfNeeded` repeats the check authoritatively.
+    var unsupportedPullReasons: [String: String] = [:]
+
+    /// Why the name currently typed in the search box can't be pulled, or nil. Drives the
+    /// "Not supported" pill that replaces the Pull/Download button.
+    var unsupportedPullReason: String? {
+        guard let repo = ModelSupportPolicy.huggingFaceRepoId(fromOllamaName: searchText) else { return nil }
+        return unsupportedPullReasons[repo]
+    }
+
+    @ObservationIgnored private var supportCheckTask: Task<Void, Never>?
 
     /// The service's own pull narration, mirrored so it can actually be rendered.
     ///
@@ -188,9 +205,32 @@ class OllamaModelStoreViewModel {
         }
     }
     
+    /// Debounced HuggingFace metadata check for an `hf.co/…` name, so the pull control reads
+    /// "Not supported" before it is pressed. Library names have no metadata and are skipped.
+    private func scheduleSupportCheck() {
+        supportCheckTask?.cancel()
+        guard let repo = ModelSupportPolicy.huggingFaceRepoId(fromOllamaName: searchText),
+              unsupportedPullReasons[repo] == nil else { return }
+        supportCheckTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            if let reason = await MLXModelService.shared.unsupportedReason(forRepo: repo) {
+                self?.unsupportedPullReasons[repo] = reason
+            }
+        }
+    }
+
     func downloadModel(name: String) {
         guard !name.isEmpty else { return }
         Task {
+            // ⚠️ Same authoritative check the coordinator makes — this entry point (Return in the
+            // search box, the island Pull button) calls `pullModel` directly and never reaches it.
+            if let repo = ModelSupportPolicy.huggingFaceRepoId(fromOllamaName: name),
+               let reason = await MLXModelService.shared.unsupportedReason(forRepo: repo) {
+                unsupportedPullReasons[repo] = reason
+                logger.notice("[OLLAMA_STORE] Pull of '\(name)' refused — \(reason) CONSEQUENCE: nothing is pulled; the Pull control now reads 'Not supported' for this name.")
+                return
+            }
             await service.pullModel(name: name, baseURL: service.ollamaBaseURL)
         }
     }

@@ -55,6 +55,10 @@ Packages/
 Icon?
 ._*
 
+# ── Local build settings ────────────────────────────────────────────────────────
+# Per-machine signing identity for Debug builds (see Config/Debug.xcconfig).
+Config/Local.xcconfig
+
 # ── Local scratch ───────────────────────────────────────────────────────────────
 # ⚠️ NOT `logs/` or `*.log`: the repo-root `logs/` directory holds captured investigation
 # transcripts that are deliberately tracked and cited from `observability_baseline.md`.

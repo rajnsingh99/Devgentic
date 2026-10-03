@@ -64,8 +64,8 @@ enum SkillCommandReachability {
         // lie this type exists to prevent.
         case .code, .bot, .workflow, .imageGen: return []
         }
-        // Disabled and not-yet-re-linked selections are excluded: neither reaches a run.
-        return Set(selections.filter { $0.isEnabled && !$0.isAwaitingRelink }.map(\.name))
+        // Disabled selections are excluded: they do not reach a run.
+        return Set(selections.filter(\.isEnabled).map(\.name))
     }
 
     /// Whether the `/` picker should appear at all for this profile.

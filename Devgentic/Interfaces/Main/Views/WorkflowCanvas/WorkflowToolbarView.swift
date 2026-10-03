@@ -179,9 +179,10 @@ struct WorkflowToolbarView: View {
                         Text("\(canvasState.validationErrors.count)")
                             .font(.system(size: 11, weight: .bold, design: .monospaced))
                     }
-                    .foregroundColor(.red)
+                    .foregroundStyle(theme.errorColor)
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             } else if !canvasState.validationWarnings.isEmpty {
                 Button {
                     canvasState.showValidationPanel.toggle()
@@ -192,9 +193,10 @@ struct WorkflowToolbarView: View {
                         Text("\(canvasState.validationWarnings.count)")
                             .font(.system(size: 11, weight: .bold, design: .monospaced))
                     }
-                    .foregroundColor(.orange)
+                    .foregroundStyle(theme.warningColor)
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
         }
         .padding(.horizontal, 10)
@@ -235,8 +237,9 @@ struct WorkflowToolbarView: View {
                 canvasState.zoomIn()
             }
 
-            Divider()
-                .frame(height: 14)
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(width: 0.5, height: 14)
                 .padding(.horizontal, 2)
 
             ToolbarIconButton(icon: "arrow.counterclockwise", help: "Reset zoom") {
@@ -293,6 +296,7 @@ struct WorkflowToolbarView: View {
                     paletteItem(icon: "person.crop.rectangle.stack", label: "Bot / Agent / Workflow", color: theme.accentColor)
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
 
             // Logic
@@ -315,6 +319,7 @@ struct WorkflowToolbarView: View {
                     paletteItem(icon: "arrow.triangle.branch", label: "Router (match → branch)", color: theme.nodeIdentityColor(for: .router))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
 
             // Utility
@@ -329,6 +334,7 @@ struct WorkflowToolbarView: View {
                     paletteItem(icon: "chevron.left.forwardslash.chevron.right", label: "Code / Transform", color: theme.nodeIdentityColor(for: .code))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
 
                 Button {
                     showNodePalette = false
@@ -340,6 +346,7 @@ struct WorkflowToolbarView: View {
                     paletteItem(icon: "hand.raised", label: "HITL Gate", color: theme.nodeIdentityColor(for: .gate))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
 
                 Button {
                     showNodePalette = false
@@ -351,6 +358,7 @@ struct WorkflowToolbarView: View {
                     paletteItem(icon: "bolt.horizontal.fill", label: "Action (Run a Tool)", color: theme.nodeIdentityColor(for: .action))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
 
             // Annotate
@@ -365,6 +373,7 @@ struct WorkflowToolbarView: View {
                     paletteItem(icon: "note.text", label: "Sticky Note", color: .yellow)
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
         }
         .padding(16)
@@ -387,22 +396,39 @@ struct WorkflowToolbarView: View {
     }
 
     private func paletteItem(icon: String, label: LocalizedStringKey, color: Color) -> some View {
+        PaletteItemRow(icon: icon, label: label, color: color)
+    }
+}
+
+private struct PaletteItemRow: View {
+    let icon: String
+    let label: LocalizedStringKey
+    let color: Color
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundColor(color)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(color)
                 .frame(width: 20)
             Text(label)
                 .font(theme.fontCaption)
-                .foregroundColor(theme.primaryText)
+                .foregroundStyle(theme.primaryText)
             Spacer()
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 5)
         .padding(.horizontal, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(theme.controlBackground)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovered ? theme.surfaceOverlayStrong : theme.controlBackground)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(isHovered ? color.opacity(0.35) : theme.dividerColor.opacity(0.2), lineWidth: 0.5)
+        )
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -424,27 +450,67 @@ struct ToolbarPillButton: View {
 
     @State private var isHovered = false
     @Environment(\.appTheme) private var theme
+    @Environment(\.buttonAccentStyle) private var buttonAccentStyle
+
+    private var isMaterialPrimary: Bool {
+        isPrimary && buttonAccentStyle == .themeContrast
+    }
+
+    private var isAccentPrimary: Bool {
+        isPrimary && buttonAccentStyle == .accent
+    }
 
     // ⚠️ EXTRACTED, EXPLICITLY TYPED, AND THEY MUST STAY THAT WAY. Inline these back into `body`
     // and the Swift 6.3 type checker (Xcode 27) fails the file outright with "unable to type-check
     // this expression in reasonable time" — five nested `Color` ternaries in one literal, three of
     // them through `??`, is past what it will solve. Each annotation below closes one branch of the
     // search. No behaviour changes: every expression is the one that was inline.
-    private var iconColor: Color { isPrimary ? .white : (color ?? theme.accentColor) }
-    private var titleColor: Color { isPrimary ? .white : (color ?? theme.primaryText) }
+    private var iconColor: Color {
+        if isMaterialPrimary {
+            return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        } else if isAccentPrimary {
+            return theme.accentColor
+        }
+        return color ?? theme.accentColor
+    }
+
+    private var titleColor: Color {
+        if isMaterialPrimary {
+            return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+        } else if isAccentPrimary {
+            return isHovered ? theme.primaryText : theme.primaryText.opacity(0.95)
+        }
+        return color ?? theme.primaryText
+    }
 
     private var fillColor: Color {
-        if isPrimary { return isHovered ? theme.accentColor.opacity(0.9) : theme.accentColor }
+        if isMaterialPrimary {
+            return theme.isDark
+                ? Color.white.opacity(isHovered ? 1.0 : 0.95)
+                : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
+        }
         return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
     }
 
     private var borderColor: Color {
-        if isPrimary { return isHovered ? Color.white.opacity(0.35) : theme.accentColor.opacity(0.5) }
+        if isMaterialPrimary {
+            return theme.isDark
+                ? Color.white
+                : Color(red: 0.12, green: 0.12, blue: 0.14)
+        } else if isAccentPrimary {
+            return isHovered ? theme.accentColor.opacity(0.55) : theme.secondaryText.opacity(0.18)
+        }
         return isHovered ? (color ?? theme.accentColor).opacity(0.45) : theme.secondaryText.opacity(0.18)
     }
 
     private var shadowColor: Color {
-        if isPrimary { return isHovered ? theme.accentColor.opacity(0.45) : theme.accentColor.opacity(0.25) }
+        if isMaterialPrimary {
+            return theme.isDark
+                ? Color.black.opacity(isHovered ? 0.35 : 0.20)
+                : Color.black.opacity(isHovered ? 0.25 : 0.12)
+        } else if isAccentPrimary {
+            return isHovered ? theme.accentColor.opacity(0.25) : theme.shadowColor.opacity(0.08)
+        }
         return isHovered ? theme.shadowColor.opacity(0.18) : theme.shadowColor.opacity(0.08)
     }
 
@@ -474,6 +540,7 @@ struct ToolbarPillButton: View {
             .scaleEffect(isHovered ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
                 isHovered = hovering
@@ -515,6 +582,7 @@ struct ToolbarIconButton: View {
                 .scaleEffect(isHovered ? 1.08 : 1.0)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
         .help(help)
         .onHover { hovering in
             withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {

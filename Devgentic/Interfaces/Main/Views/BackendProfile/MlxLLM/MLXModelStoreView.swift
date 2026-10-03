@@ -690,6 +690,7 @@ struct ModelCardView: View {
                 isInstalled: isInstalled,
                 profileID: profileID,
                 showInstalledLabel: false,
+                unsupportedReason: model.unsupportedReason,
                 onDownloadRequested: {
                     let verdict = fitAssessment.verdict
                     if verdict == .risky || verdict == .incompatible {

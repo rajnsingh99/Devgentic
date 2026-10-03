@@ -35,39 +35,6 @@ final class ImageAccessibilityTests: XCTestCase {
         XCTAssertEqual(altText, "A red bar chart of Q4 revenue")
     }
 
-    /// The `.image` case was REMOVED (2026-07-17) — MediaArtifact is the single image
-    /// representation. This pins the decode shim: a message persisted under the legacy
-    /// shape must decode as an artifact, carrying its bytes and its alt text (as label).
-    func testLegacyPersistedImageDecodesAsMediaArtifact() throws {
-        let payload = Self.makeRedPNG().base64EncodedString()
-        let legacyJSON = Data(#"{"type":"image","imageAlt":"A red bar chart of Q4 revenue","imageData":"\#(payload)"}"#.utf8)
-
-        let decoded = try JSONDecoder().decode(MessageContent.self, from: legacyJSON)
-        guard case .mediaArtifact(let artifact) = decoded else {
-            return XCTFail("Legacy image must decode as .mediaArtifact, got \(decoded)")
-        }
-        XCTAssertEqual(artifact.kind, .image)
-        XCTAssertEqual(artifact.label, "A red bar chart of Q4 revenue", "alt becomes the label")
-        guard case .ephemeralData(let data) = artifact.reference else {
-            return XCTFail("Inline legacy bytes must become an ephemeralData reference")
-        }
-        XCTAssertEqual(data, Self.makeRedPNG(), "Bytes must survive the conversion verbatim")
-    }
-
-    /// URL-only legacy images (no inline data) become remote-reference artifacts, whose
-    /// unresolvable reference lands in the live renderer's error card — the same outcome
-    /// the legacy path showed, through one renderer instead of two.
-    func testLegacyUrlOnlyImageDecodesAsRemoteArtifact() throws {
-        let legacyJSON = Data(#"{"type":"image","imageUrl":"https://example.com/x.png","imageAlt":"chart"}"#.utf8)
-        let decoded = try JSONDecoder().decode(MessageContent.self, from: legacyJSON)
-        guard case .mediaArtifact(let artifact) = decoded,
-              case .remoteURL(let url) = artifact.reference else {
-            return XCTFail("URL-only legacy image must become a remoteURL artifact")
-        }
-        XCTAssertEqual(url.absoluteString, "https://example.com/x.png")
-        XCTAssertEqual(artifact.label, "chart")
-    }
-
     /// RAG/export already relied on alt — proof it was reaching the UI layer intact, and
     /// that only the render sites were dropping it.
     func testAltTextIsWhatPlainTextFlatteningUses() {

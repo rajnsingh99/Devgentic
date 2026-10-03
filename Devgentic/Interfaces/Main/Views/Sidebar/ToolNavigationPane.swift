@@ -171,14 +171,14 @@ struct ToolNavigationPane: View {
     private var titleRow: some View {
         HStack(spacing: 8) {
             Text("Tool Library")
-                .font(.system(size: 15, weight: .semibold))
+                .font(theme.fontBody.weight(.semibold))
                 .foregroundColor(theme.primaryText)
 
             Spacer()
 
             // Manual configuration, distinct from the Marketplace's registry-driven flow.
             SidebarHeaderActionButton(
-                title: "Add Custom",
+                title: "Add Server",
                 systemImage: "plus",
                 shortcut: "⌘N"
             ) {
@@ -187,9 +187,9 @@ struct ToolNavigationPane: View {
             .keyboardShortcut("n", modifiers: [.command])
             .help("Configure an MCP server by hand (⌘N)")
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 12)
         .padding(.top, 12)
-        .padding(.bottom, 10)
+        .padding(.bottom, 8)
     }
 
     private var sectionSwitcher: some View {
@@ -381,11 +381,11 @@ struct ToolNavigationPane: View {
                 }
             }
             Divider()
-            Button("Edit Configuration…") {
+            Button("Edit Configuration") {
                 router.navigate(to: .editMCPServer(sourceID: source.id))
             }
             Divider()
-            Button("Remove Server…", role: .destructive) {
+            Button("Remove Server", role: .destructive) {
                 pendingDeletion = source
             }
         }

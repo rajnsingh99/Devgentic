@@ -1146,11 +1146,7 @@ struct EpisodicHistoryFormatter {
                 // Single source of truth for the literals (ChatMessage owns them —
                 // resolveFinalizedContent is the producer). `.contains` semantics kept
                 // here deliberately: this CLASSIFIES rows, it doesn't gate indexing.
-                let cancellationPlaceholders = [
-                    ChatMessage.legacyStoppedRunPlaceholder,
-                    ChatMessage.stoppedRunPlaceholder
-                ]
-                let wasCancelled = cancellationPlaceholders.contains(where: { responseText.contains($0) })
+                let wasCancelled = responseText.contains(ChatMessage.stoppedRunPlaceholder)
                     || message.terminalOutcome == .cancelled
 
                 let outcome: String?

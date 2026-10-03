@@ -58,9 +58,13 @@ class AgentConnect: @unchecked Sendable {
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
 
         logger.info("Request reached TextGen Unified Pipeline for profile: \(profile.displayName)")
-        
+        let requestedProfile = profile
+
         return AsyncThrowingStream { continuation in
             let task = Task {
+                // A local model's capability is looked up NOW, not trusted from the profile — see
+                // `LiveModelDetection`. Idempotent when the orchestrator already resolved it.
+                let profile = await LiveModelDetection.resolving(requestedProfile)
                 do {
                     // 1. Extract Configuration & Tools based on Profile Type
                     let llmConfig: ProviderConfig
@@ -146,20 +150,14 @@ class AgentConnect: @unchecked Sendable {
                         isBotFlow = false
                         // ⚠️ Code profiles do NOT get skills, and this is a decision, not an
                         // oversight — but persistence disagrees with it: the `.code` arm of
-                        // ProfileDetails encodes and decodes `skillConfig` like any other, so a
-                        // profile converted from `.agent`, or one written by an older build, can
-                        // carry skills the runtime then discards here in silence. The config
+                        // ProfileDetails encodes and decodes `skillSelections` like any other, so a
+                        // profile converted from `.agent` can carry skills the runtime then
+                        // discards here in silence. The config
                         // editor never offers the section for `.code` (its binding matches
                         // `case .agent` only), so a user in this state has no way to see it.
                         // Logged rather than honoured: turning it on is a product decision about
                         // Code mode's ephemeral profile identity, not a bug fix.
                         skillManifests = nil
-                        // ⚠️⚠️ READ BOTH SHAPES. This looked ONLY at `config.skillConfig?.manifests`
-                        // — the pre-V6 blob — so after the migration moved every profile's skills
-                        // into `skillSelections` it could never fire again. The one state it exists
-                        // to make visible, a Code profile carrying skills the runtime discards, went
-                        // silent for exactly the profiles that reach it. The legacy arm stays for a
-                        // profile that has not been through the sweep.
                         let unique = CodeModeSkillDiagnostics.inertSkillNames(in: config)
                         if !unique.isEmpty {
                             logger.notice("[CODE] Profile carries \(unique.count) enabled skill(s) that Code mode does NOT load: \(unique.joined(separator: ", ")). CONSEQUENCE: they are absent from <available_skills> and `load_skill` is not registered, so the model cannot reach them — the skills are configured but inert. Move the work to an Agent profile if they are needed.")
@@ -764,9 +762,13 @@ class AgentConnect: @unchecked Sendable {
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
 
         logger.info("[Workflow] Node stream: profile='\(profile.displayName)' type=\(profile.profileType.rawValue) node='\(workflowContext.nodeName)'")
+        let requestedProfile = profile
 
         return AsyncThrowingStream { continuation in
             let task = Task {
+                // Workflow nodes never open an editor, so they are exactly the runs a stale stored
+                // capability would otherwise follow forever — see `LiveModelDetection`.
+                let profile = await LiveModelDetection.resolving(requestedProfile)
                 do {
                     // 1. Extract profile config (same switch as streamAgentResponse lines 54-96)
                     let llmConfig: ProviderConfig
@@ -804,8 +806,9 @@ class AgentConnect: @unchecked Sendable {
                         isBotFlow = false
                         // Same deliberate exclusion as the chat path above; see the note there.
                         skillManifests = nil
-                        if let orphaned = config.skillConfig?.manifests.filter(\.isEnabled), !orphaned.isEmpty {
-                            logger.notice("[CODE] Workflow-node Code profile carries \(orphaned.count) enabled skill(s) that Code mode does NOT load: \(orphaned.map(\.name).joined(separator: ", ")). CONSEQUENCE: they are absent from <available_skills> and unreachable by the model for this node.")
+                        let orphaned = CodeModeSkillDiagnostics.inertSkillNames(in: config)
+                        if !orphaned.isEmpty {
+                            logger.notice("[CODE] Workflow-node Code profile carries \(orphaned.count) enabled skill(s) that Code mode does NOT load: \(orphaned.joined(separator: ", ")). CONSEQUENCE: they are absent from <available_skills> and unreachable by the model for this node.")
                         }
 
                     case .workflow, .imageGen:
@@ -1684,8 +1687,8 @@ class AgentConnect: @unchecked Sendable {
         // ⚠️ register B15 — agent delegation is WITHDRAWN, and the runtime now enforces that
         // rather than obeying whatever the stored blob says. The toggle was removed from the UI
         // long ago (A66), but the gate here is the mere PRESENCE of `capabilities.agentDelegation`
-        // — there is no `isEnabled` flag — so every legacy "Supervisor" profile that
-        // `ProfileMigrator.migrateToV2` created went on injecting `call_agent` on every run, with
+        // — there is no `isEnabled` flag — so every profile carrying that config (old "Supervisor"
+        // profiles were converted to it) went on injecting `call_agent` on every run, with
         // nothing on screen to say so.
         //
         // Enforced at CONSUMPTION with one named constant, exactly like

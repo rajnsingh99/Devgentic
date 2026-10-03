@@ -19,16 +19,6 @@ enum CodeViewerThemeOverride: String, CaseIterable {
     case oneLight = "one_light"
     case solarizedLight = "solarized_light"
 
-    init?(rawValue: String) {
-        switch rawValue {
-        case "default", "material", "cosmic_dark": self = .cosmicDark // Migrates Material / Cosmic Dark
-        case "high_contrast", "dracula": self = .highContrast         // Migrates High Contrast
-        case "one_light", "github_light": self = .oneLight
-        case "solarized_light": self = .solarizedLight
-        default: return nil
-        }
-    }
-
     var displayName: String {
         switch self {
         case .cosmicDark: return "Cosmic Dark"
@@ -59,8 +49,8 @@ enum SurfaceStyle: String, CaseIterable, Identifiable {
 
     var subtitle: LocalizedStringKey {
         switch self {
-        case .glassmorphic: return "Translucent glass surfaces paired with vibrant accent buttons."
-        case .solid: return "Solid opaque surfaces paired with high-contrast buttons."
+        case .glassmorphic: return "Translucent glass surfaces paired with tactile glass accent buttons."
+        case .solid: return "Solid opaque surfaces paired with high-contrast monochrome buttons."
         }
     }
 
@@ -259,20 +249,8 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
     private var defaults: UserDefaults { Self.defaults }
 
     init() {
-        // Load the saved app theme (migrating legacy "dracula", "one_dark", "default", or "github_light").
-        let rawSavedThemeID = Self.defaults.string(forKey: Self.selectedThemeKey)
-        let savedThemeID: String
-        if rawSavedThemeID == "dracula" || rawSavedThemeID == "one_dark" || rawSavedThemeID == "default" || rawSavedThemeID == nil {
-            savedThemeID = "material"
-            if rawSavedThemeID != nil {
-                Self.defaults.set("material", forKey: Self.selectedThemeKey)
-            }
-        } else if rawSavedThemeID == "github_light" {
-            savedThemeID = "one_light"
-            Self.defaults.set("one_light", forKey: Self.selectedThemeKey)
-        } else {
-            savedThemeID = rawSavedThemeID ?? "material"
-        }
+        // Load the saved app theme. An unknown id falls back to the first theme below.
+        let savedThemeID = Self.defaults.string(forKey: Self.selectedThemeKey) ?? "material"
 
         let allThemes: [any Theme] = [
             AppThemes.MaterialTheme(),

@@ -49,6 +49,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		35D5C0F1A0000000000000A1 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
 		35F483F82E23C8680031D7CB /* EntityInfo-devgentic.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EntityInfo-devgentic.generated.swift"; sourceTree = "<group>"; };
 		35FCBA882DB5526B00D39123 /* devgentic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = devgentic.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35FCBA992DB5526B00D39123 /* devgenticTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -119,6 +120,14 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		35D5C0F1A0000000000000A2 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				35D5C0F1A0000000000000A1 /* Debug.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
 		35DB4C1E2DC53B9D002B3BF7 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
@@ -143,6 +152,7 @@
 				35DB4C1E2DC53B9D002B3BF7 /* Frameworks */,
 				35FCBA892DB5526B00D39123 /* Products */,
 				35F483F92E23C8680031D7CB /* generated */,
+				35D5C0F1A0000000000000A2 /* Config */,
 			);
 			sourceTree = "<group>";
 		};
@@ -523,17 +533,17 @@
 		};
 		35FCBAAE2DB5526B00D39123 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 35D5C0F1A0000000000000A1 /* Debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = devgentic/devgentic.entitlements;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
-				CODE_SIGN_STYLE = Automatic;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "$(DEVGENTIC_DEBUG_SIGN_IDENTITY)";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
-				DEVELOPMENT_TEAM = FM3V43ST5B;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				EXCLUDED_SOURCE_FILE_NAMES = (
@@ -615,6 +625,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = devgenticTests.TestIsolationObserver;
 				MACOSX_DEPLOYMENT_TARGET = 26.1;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.devgentic.macos.tests;
@@ -633,6 +644,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = devgenticTests.TestIsolationObserver;
 				MACOSX_DEPLOYMENT_TARGET = 26.1;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.devgentic.macos.tests;

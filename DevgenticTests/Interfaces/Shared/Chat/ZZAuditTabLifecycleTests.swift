@@ -29,9 +29,8 @@ private final class GatedStore: ChatPersistenceProtocol {
         }
         return [ChatMessage(conversationId: conversationId, sender: .user, content: .plainText("anchor"))]
     }
-    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {}
     func deleteConversation(with id: UUID) {}
-    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {}
+    func updateBackendForConversation(id: UUID, backendEntityId: UUID?) {}
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {}
     func togglePinStatus(for conversationId: UUID) {}
 

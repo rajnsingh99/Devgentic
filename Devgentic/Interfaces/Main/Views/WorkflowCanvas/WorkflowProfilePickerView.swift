@@ -16,11 +16,16 @@ struct WorkflowProfilePickerView: View {
     let workflowProfileID: UUID
     /// False when embedded inside `WorkflowAddNodeSheet`, which draws its own header.
     var showsHeader: Bool = true
+    var showsFooter: Bool? = nil
     let onSelect: (BackendProfileModel) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
     @State private var searchText = ""
+
+    private var effectiveShowsFooter: Bool {
+        showsFooter ?? showsHeader
+    }
 
     /// The profile types this picker offers as workflow nodes.
     ///
@@ -96,103 +101,156 @@ struct WorkflowProfilePickerView: View {
             if showsHeader {
                 HStack(spacing: 12) {
                     Image(systemName: "plus.square.on.square")
-                        .font(.title2)
-                        .foregroundColor(theme.accentColor)
+                        .font(theme.fontTitle2)
+                        .foregroundStyle(theme.accentColor)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Add Profile to Workflow")
-                            .font(.headline)
-                            .foregroundColor(theme.primaryText)
+                            .font(theme.fontHeadline)
+                            .foregroundStyle(theme.primaryText)
                         Text("Select a profile to add as a node.")
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(theme.secondaryText)
                     }
                     Spacer()
+                    TactileButton(title: "Cancel", variant: .subtle, size: .compact) {
+                        dismiss()
+                    }
                 }
                 .padding()
                 .background(theme.primaryBackground)
 
-                Divider()
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
             }
 
-            // Search
-            HStack {
+            // Search Bar
+            HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundColor(theme.secondaryText)
-                TextField("Search profiles...", text: $searchText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.secondaryText)
+                TextField("", text: $searchText, prompt: Text("Search profiles").foregroundColor(theme.placeholderText))
                     .textFieldStyle(.plain)
+                    .font(theme.fontFootnote)
+                    .foregroundStyle(theme.primaryText)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .accessibilityLabel("Clear search")
+                }
             }
-            .padding(10)
-            .background(theme.secondaryBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .padding(.horizontal)
+            .padding(.horizontal, 10)
             .padding(.vertical, 8)
+            .background(theme.secondaryBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(theme.dividerColor.opacity(0.3), lineWidth: 1)
+            )
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(height: 0.5)
 
             // Profile List
             if availableProfiles.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "tray")
-                        .font(.largeTitle)
-                        .foregroundColor(theme.secondaryText)
-                    Text("No profiles to import from.")
-                        .foregroundColor(theme.secondaryText)
+                        .font(.system(size: 36))
+                        .foregroundStyle(theme.secondaryText)
+                    Text("No profiles to import from")
+                        .font(theme.fontSubheadline.weight(.semibold))
+                        .foregroundStyle(theme.primaryText)
                     Text("Go back and choose \u{201C}New node\u{201D} to build one from scratch instead.")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
+                        .font(theme.fontCaption)
+                        .foregroundStyle(theme.secondaryText)
                         .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding()
                 .background(theme.primaryBackground)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 18) {
                         if !agentProfiles.isEmpty {
-                            profileSection(title: "Agents", type: .agent, color: .green, profiles: agentProfiles)
+                            profileSection(title: "Agents", type: .agent, profiles: agentProfiles)
                         }
                         if !botProfiles.isEmpty {
-                            profileSection(title: "Bots", type: .bot, color: .blue, profiles: botProfiles)
+                            profileSection(title: "Bots", type: .bot, profiles: botProfiles)
                         }
                         if !workflowProfiles.isEmpty {
-                            profileSection(title: "Workflows", type: .workflow, color: .purple, profiles: workflowProfiles)
+                            profileSection(title: "Workflows", type: .workflow, profiles: workflowProfiles)
                         }
                         if filteredProfiles.isEmpty && !searchText.isEmpty {
-                            Text("No matches for \"\(searchText)\"")
-                                .foregroundColor(theme.secondaryText)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .padding()
+                            VStack(spacing: 8) {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 24))
+                                    .foregroundStyle(theme.tertiaryText)
+                                Text("No matches for \"\(searchText)\"")
+                                    .font(theme.fontFootnote)
+                                    .foregroundStyle(theme.secondaryText)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 32)
                         }
                     }
-                    .padding()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
                 .background(theme.primaryBackground)
             }
 
-            Divider()
+            // Footer (only shown in standalone mode; suppressed when embedded in WorkflowAddNodeSheet)
+            if effectiveShowsFooter {
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
 
-            // Footer
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
+                HStack {
+                    Spacer()
+                    TactileButton(title: "Cancel", variant: .subtle, size: .compact) {
+                        dismiss()
+                    }
                     .keyboardShortcut(.cancelAction)
+                }
+                .padding()
+                .background(theme.secondaryBackground)
             }
-            .padding()
-            .background(theme.secondaryBackground)
         }
-        .frame(width: 420, height: 480)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: showsHeader ? 480 : nil, height: showsHeader ? 520 : nil)
     }
 
     @ViewBuilder
-    private func profileSection(title: String, type: ProfileType, color: Color, profiles: [BackendProfileModel]) -> some View {
+    private func profileSection(title: String, type: ProfileType, profiles: [BackendProfileModel]) -> some View {
+        let color = type.displayColor
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                ProfileTypeIcon(type: type, size: 14, color: color)
+                ProfileTypeIcon(type: type, size: 13, color: color)
                 Text(title)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .foregroundColor(color)
+                    .font(theme.fontCaption.weight(.semibold))
+                    .foregroundStyle(color)
+
+                Text("\(profiles.count)")
+                    .font(theme.fontCaption2.weight(.medium))
+                    .foregroundStyle(theme.secondaryText)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule().fill(theme.surfaceOverlay)
+                    )
             }
+            .padding(.leading, 2)
 
             ForEach(profiles) { profile in
                 pickableProfileRow(profile: profile, color: color)
@@ -202,38 +260,94 @@ struct WorkflowProfilePickerView: View {
 
     @ViewBuilder
     private func pickableProfileRow(profile: BackendProfileModel, color: Color) -> some View {
-        Button {
-            onSelect(profile)
-            dismiss()
-        } label: {
-            HStack(spacing: 12) {
-                ProfileTypeIcon(type: profile.profileType, size: 18, color: color)
-                    .frame(width: 24)
+        PickableProfileCard(
+            profile: profile,
+            color: color,
+            onSelect: {
+                onSelect(profile)
+                dismiss()
+            }
+        )
+    }
+}
 
-                VStack(alignment: .leading, spacing: 2) {
+// MARK: - Pickable Profile Card
+
+private struct PickableProfileCard: View {
+    let profile: BackendProfileModel
+    let color: Color
+    let onSelect: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(color.opacity(isHovered ? 0.20 : 0.12))
+                        .frame(width: 34, height: 34)
+                    ProfileTypeIcon(type: profile.profileType, size: 18, color: color)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
                     Text(profile.displayName)
-                        .font(theme.fontSubheadline.weight(.medium))
-                        .foregroundColor(theme.primaryText)
-                    Text(profile.profileType.localizedTitle)
-                        .font(.system(.caption))
-                        .foregroundColor(theme.secondaryText)
+                        .font(theme.fontFootnote.weight(.semibold))
+                        .foregroundStyle(theme.primaryText)
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        Text(profile.profileType.localizedTitle)
+                            .font(theme.fontCaption2)
+                            .foregroundStyle(theme.secondaryText)
+
+                        if let model = profile.resolvedLLMConfig?.modelName, !model.isEmpty {
+                            Text("•")
+                                .font(theme.fontCaption2)
+                                .foregroundStyle(theme.tertiaryText)
+                            Text(model)
+                                .font(theme.fontCaption2)
+                                .foregroundStyle(theme.secondaryText)
+                                .lineLimit(1)
+                        }
+                    }
                 }
 
                 Spacer()
 
-                Image(systemName: "plus.circle")
-                    .foregroundColor(theme.accentColor)
+                HStack(spacing: 4) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .bold))
+                    Text("Import")
+                        .font(theme.fontCaption.weight(.medium))
+                }
+                .foregroundStyle(isHovered ? theme.accentColor : theme.secondaryText)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule()
+                        .fill(isHovered ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.dividerColor.opacity(0.25), lineWidth: 0.75)
+                )
             }
-            .padding(10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.controlBackground)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isHovered ? theme.surfaceOverlayStrong : theme.controlBackground)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isHovered ? color.opacity(0.4) : theme.dividerColor.opacity(0.25), lineWidth: 1)
             )
+            .shadow(color: isHovered ? theme.shadowColor.opacity(0.12) : .clear, radius: 4, y: 1)
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { isHovered = $0 }
     }
 }

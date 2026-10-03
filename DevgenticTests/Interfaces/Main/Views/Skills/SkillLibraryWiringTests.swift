@@ -213,10 +213,8 @@ final class SkillRouteStackHygieneTests: XCTestCase {
 /// left those views dereferencing models destroyed by `ModelContext.reset`, which killed the host
 /// mid-suite and reported as an unrelated crash.
 ///
-/// The codebase already had this rule — `SkillLibraryMigration.captureURL` redirects on
-/// `TestHost.isRunning`, and its own comment records that a per-test override was not enough
-/// "precisely because the write happened somewhere no test explicitly called". This is that rule
-/// applied to the second place it was missing.
+/// A per-test override is not enough here, precisely because the write happens somewhere no test
+/// explicitly calls — so the guard keys on `TestHost.isRunning` itself.
 @MainActor
 final class SkillRouterTestHostSideEffectTests: XCTestCase {
 

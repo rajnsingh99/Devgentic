@@ -83,14 +83,6 @@ final class SecureKeyStorageTestHostRedirectTests: XCTestCase {
         XCTAssertEqual(ProviderKeyStore.load(for: profileID), "sk-ant-sentinel")
     }
 
-    /// The KC-55 case: the migration `ChatOpsConfigManager.init` runs reads through a plain
-    /// `SecureKeyStorage()`, so under XCTest it sees an empty Keychain and has nothing to move or
-    /// delete. Pinned at the seam the manager actually uses.
-    func testTheChatOpsMigrationSeesAnEmptyKeychainUnderXCTest() {
-        TestHostKeychain.shared.removeAll()
-        XCTAssertEqual(ChatOpsConfigManager.migrateCredentialsFromLegacyServices(keychain: SecureKeyStorage()), 0)
-    }
-
     /// ⚠️ THE DRIFT TEST. The opt-in exists for one test file. If it ever appears in production
     /// source, some store has quietly rejoined the login Keychain under XCTest — for every test
     /// that touches it.

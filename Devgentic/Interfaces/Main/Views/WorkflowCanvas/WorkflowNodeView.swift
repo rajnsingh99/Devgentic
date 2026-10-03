@@ -347,6 +347,7 @@ struct WorkflowNodeView: View {
         }
         .gesture(nodeDragGesture)
         .onHover { isHovering = $0 }
+        .pointingHandCursor()
     }
 
     // MARK: - Drag to Move
@@ -501,7 +502,7 @@ struct ProfileNodeCard: View {
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
                 Text(subtitle)
-                    .font(.system(.caption2))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
             }
             Spacer(minLength: 0)
@@ -658,7 +659,7 @@ struct GateNodeCard: View {
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
                 Text(String(localized: "Human approval required"))
-                    .font(.system(.caption2))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
             }
@@ -752,7 +753,7 @@ struct ActionNodeCard: View {
                     Text("\u{00B7}")
                         .foregroundColor(theme.tertiaryText)
                     Text(subtitle)
-                        .font(.system(.caption2, design: .monospaced))
+                        .font(theme.fontCodeCaption)
                         .foregroundColor(theme.secondaryText)
                         .lineLimit(1)
                 }

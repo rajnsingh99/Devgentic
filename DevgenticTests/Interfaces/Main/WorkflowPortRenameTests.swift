@@ -19,18 +19,16 @@ import SwiftUI
 @MainActor
 final class WorkflowPortRenameTests: XCTestCase {
 
-    private func conditionNode(rules: [ConditionRule], fallback: String = "False") -> WorkflowNode {
+    private func conditionNode(rules: [ConditionRule]) -> WorkflowNode {
         var config = ConditionNodeConfig()
         config.rules = rules
-        config.fallbackLabel = fallback
         return WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
     }
 
-    private func rename(_ node: WorkflowNode, rules: [ConditionRule], fallback: String = "False") -> WorkflowNode {
+    private func rename(_ node: WorkflowNode, rules: [ConditionRule]) -> WorkflowNode {
         var renamed = node
         var config = ConditionNodeConfig()
         config.rules = rules
-        config.fallbackLabel = fallback
         renamed.kind = .condition(config)
         return renamed
     }
@@ -85,7 +83,7 @@ final class WorkflowPortRenameTests: XCTestCase {
     func testRenameIntoAStillExistingLabelDoesNotRepoint() {
         let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
         let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
-        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "Fallback")
+        let condition = conditionNode(rules: [ruleA, ruleB])
         let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
 
         let state = WorkflowCanvasState(profileID: UUID())
@@ -98,7 +96,7 @@ final class WorkflowPortRenameTests: XCTestCase {
         // Rule B is renamed to "A" — the label "A" still exists (rule A keeps it).
         var renamedB = ruleB
         renamedB.label = "A"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, renamedB], fallback: "Fallback"))
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, renamedB]))
 
         XCTAssertEqual(state.edges.first?.sourcePortLabel, "A",
                        "The edge must stay on the port it was wired to, not be moved by a colliding rename")
@@ -135,7 +133,7 @@ final class WorkflowPortRenameTests: XCTestCase {
     func testShiftRenamePermutationRepointsBothEdges() {
         let ruleLow = ConditionRule(label: "Low", field: .upstreamOutput, op: .contains, value: "low")
         let ruleHigh = ConditionRule(label: "High", field: .upstreamOutput, op: .contains, value: "high")
-        let condition = conditionNode(rules: [ruleLow, ruleHigh], fallback: "")
+        let condition = conditionNode(rules: [ruleLow, ruleHigh])
         let nodeA = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "A")
         let nodeB = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "B")
 
@@ -149,7 +147,7 @@ final class WorkflowPortRenameTests: XCTestCase {
 
         var renamedLow = ruleLow; renamedLow.label = "High"
         var renamedHigh = ruleHigh; renamedHigh.label = "Critical"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [renamedLow, renamedHigh], fallback: ""))
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [renamedLow, renamedHigh]))
 
         let byTarget = Dictionary(uniqueKeysWithValues: state.edges.map { ($0.targetNodeID, $0.sourcePortLabel) })
         XCTAssertEqual(byTarget[nodeA.id], "High",
@@ -163,7 +161,7 @@ final class WorkflowPortRenameTests: XCTestCase {
     func testSwapRenameRepointsBothEdges() {
         let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
         let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
-        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "")
+        let condition = conditionNode(rules: [ruleA, ruleB])
         let nodeA = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "A")
         let nodeB = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "B")
 
@@ -177,76 +175,11 @@ final class WorkflowPortRenameTests: XCTestCase {
 
         var swappedA = ruleA; swappedA.label = "B"
         var swappedB = ruleB; swappedB.label = "A"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [swappedA, swappedB], fallback: ""))
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [swappedA, swappedB]))
 
         let byTarget = Dictionary(uniqueKeysWithValues: state.edges.map { ($0.targetNodeID, $0.sourcePortLabel) })
         XCTAssertEqual(byTarget[nodeA.id], "B")
         XCTAssertEqual(byTarget[nodeB.id], "A")
-    }
-
-    /// [WF-CS12] The Router inspector clears a legacy catch-all on EVERY Save. When the user also
-    /// renames the rule the catch-all names — decode guarantees it names a real rule — the old
-    /// fallback arm ran after the rules loop and clobbered that rule's rename entry with
-    /// `map["B"] = ""`, re-pointing its edges to a nonexistent empty port.
-    func testClearingLegacyCatchAllDoesNotClobberARuleRename() {
-        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
-        let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
-        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "B")
-        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
-
-        let state = WorkflowCanvasState(profileID: UUID())
-        state.load(from: WorkflowLayout(
-            nodes: [condition, downstream],
-            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
-            annotations: []
-        ))
-
-        // One Save: rule B renamed to "C", catch-all cleared (what the inspector always does now).
-        var renamedB = ruleB; renamedB.label = "C"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, renamedB], fallback: ""))
-
-        XCTAssertEqual(state.edges.first?.sourcePortLabel, "C",
-                       "the renamed rule's edge must follow the rename — '' points at no port and kills the branch")
-    }
-
-    /// [WF-CS12] The control: clearing the catch-all WITHOUT renaming anything must leave edges
-    /// alone — the port lives on under the rule's own label.
-    func testClearingLegacyCatchAllAloneLeavesEdgesUntouched() {
-        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
-        let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
-        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "B")
-        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
-
-        let state = WorkflowCanvasState(profileID: UUID())
-        state.load(from: WorkflowLayout(
-            nodes: [condition, downstream],
-            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
-            annotations: []
-        ))
-
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, ruleB], fallback: ""))
-
-        XCTAssertEqual(state.edges.first?.sourcePortLabel, "B")
-    }
-
-    /// A PHANTOM catch-all (names no rule — possible in memory pre-normalization) is its own port,
-    /// so renaming it is still a tracked rename. Pins the one legitimate case the old fallback arm
-    /// handled, so the CS12 fix cannot pass by simply never mapping the fallback.
-    func testPhantomCatchAllRenameStillRepoints() {
-        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
-        let condition = conditionNode(rules: [ruleA], fallback: "Legacy")
-        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
-
-        let state = WorkflowCanvasState(profileID: UUID())
-        state.load(from: WorkflowLayout(
-            nodes: [condition, downstream],
-            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "Legacy")],
-            annotations: []
-        ))
-
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA], fallback: "Default"))
-
-        XCTAssertEqual(state.edges.first?.sourcePortLabel, "Default")
     }
 
     // MARK: - WF-CS2: Gate renames combined with count changes
@@ -464,7 +397,7 @@ final class WorkflowPortRenameTests: XCTestCase {
     func testConditionSharedLabelKeeperRetainsItsEdge() {
         let keeper = ConditionRule(label: "Escalation", field: .upstreamOutput, op: .contains, value: "a")
         let renamed = ConditionRule(label: "Escalation", field: .upstreamOutput, op: .contains, value: "b")
-        let condition = conditionNode(rules: [keeper, renamed], fallback: "")
+        let condition = conditionNode(rules: [keeper, renamed])
         let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
 
         let state = WorkflowCanvasState(profileID: UUID())
@@ -475,7 +408,7 @@ final class WorkflowPortRenameTests: XCTestCase {
         ))
 
         var urgent = renamed; urgent.label = "Urgent"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [keeper, urgent], fallback: ""))
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [keeper, urgent]))
 
         XCTAssertEqual(state.edges.first?.sourcePortLabel, "Escalation",
                        "the keeper still owns this label — the edge must stay on the live port, not follow the twin")
@@ -486,7 +419,7 @@ final class WorkflowPortRenameTests: XCTestCase {
     func testConditionDivergentDuplicateRenamesAreRefused() {
         let r1 = ConditionRule(label: "Pending", field: .upstreamOutput, op: .contains, value: "a")
         let r2 = ConditionRule(label: "Pending", field: .upstreamOutput, op: .contains, value: "b")
-        let condition = conditionNode(rules: [r1, r2], fallback: "")
+        let condition = conditionNode(rules: [r1, r2])
         let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
 
         let state = WorkflowCanvasState(profileID: UUID())
@@ -498,7 +431,7 @@ final class WorkflowPortRenameTests: XCTestCase {
 
         var retry = r1; retry.label = "Retry"
         var abort = r2; abort.label = "Abort"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [retry, abort], fallback: ""))
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [retry, abort]))
 
         XCTAssertEqual(state.edges.first?.sourcePortLabel, "Pending")
     }
@@ -525,7 +458,7 @@ final class WorkflowPortRenameTests: XCTestCase {
     func testRuleNamedErrorKeepsFailureRoutingOnRename() {
         let ok = ConditionRule(label: "ok", field: .upstreamOutput, op: .isNotEmpty, value: "")
         let err = ConditionRule(label: "error", field: .upstreamOutput, op: .isEmpty, value: "")
-        let condition = conditionNode(rules: [ok, err], fallback: "")
+        let condition = conditionNode(rules: [ok, err])
         let recovery = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Recovery")
 
         let state = WorkflowCanvasState(profileID: UUID())
@@ -536,7 +469,7 @@ final class WorkflowPortRenameTests: XCTestCase {
         ))
 
         var bad = err; bad.label = "bad"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [ok, bad], fallback: ""))
+        state.replaceNode(id: condition.id, with: rename(condition, rules: [ok, bad]))
 
         XCTAssertEqual(state.edges.first?.sourcePortLabel, WorkflowEdge.errorPortLabel,
                        "the failure port outlives the rule that shared its name — moving the edge unwires failure recovery")
@@ -560,59 +493,11 @@ final class WorkflowPortRenameTests: XCTestCase {
         XCTAssertEqual(state.edges.first?.sourcePortLabel, "Hold")
     }
 
-    /// [Found on adversarial review] Pins the CS12 guard's rule-membership clause, which nothing
-    /// else discriminates: a programmatic edit that changes the fallback to some OTHER non-empty
-    /// value while renaming the rule the old fallback names must not clobber the rule's rename.
-    func testFallbackChangeToAnotherLabelNeverClobbersARuleRename() {
-        let ruleA = ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a")
-        let ruleB = ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
-        let condition = conditionNode(rules: [ruleA, ruleB], fallback: "B")
-        let downstream = WorkflowNode(kind: .code(CodeNodeConfig()), position: .zero, displayName: "Next")
+    // MARK: - Node timeout
 
-        let state = WorkflowCanvasState(profileID: UUID())
-        state.load(from: WorkflowLayout(
-            nodes: [condition, downstream],
-            edges: [WorkflowEdge(sourceNodeID: condition.id, targetNodeID: downstream.id, sourcePortLabel: "B")],
-            annotations: []
-        ))
-
-        var renamedB = ruleB; renamedB.label = "C"
-        state.replaceNode(id: condition.id, with: rename(condition, rules: [ruleA, renamedB], fallback: "X"))
-
-        XCTAssertEqual(state.edges.first?.sourcePortLabel, "C",
-                       "the old fallback names rule B — B's edges follow B's rename, never the fallback's new value")
-    }
-
-    // MARK: - Workflow Settings removal
-
-    /// ⚠️ New workflows are BOUNDED. They used to be created with `nodeTimeoutEnabled: false` — fine
-    /// while the Settings sheet let you turn it back on, but that sheet is gone (2026-08-13), so a
-    /// profile created unbounded could never be bounded through any UI.
-    func testNewWorkflowConfig_IsBoundedByDefault() {
-        // ⚠️ Tests the FACTORY the profile-creation path uses, not a hand-built config. An earlier
-        // version constructed `WorkflowConfig` directly, so a mutation reinstating
-        // `nodeTimeoutEnabled: false` at the creation site passed every test.
-        let config = WorkflowConfig.forNewProfile()
-        XCTAssertNotNil(config.effectiveNodeTimeout,
-                        "a new workflow must have a node timeout — there is no UI to add one")
-        XCTAssertEqual(config.effectiveNodeTimeout, 120)
-    }
-
-    /// ⚠️ A workflow that deliberately ran unbounded keeps doing so — the stored value is still
-    /// honoured, and the run logs that it is, since no UI reveals it any more.
-    func testStoredTimeoutSettings_AreStillHonoured() {
-        var off = WorkflowConfig(agentProfileIDs: [])
-        off.nodeTimeoutEnabled = false
-        XCTAssertNil(off.effectiveNodeTimeout, "an explicit OFF must survive the control's removal")
-
-        var custom = WorkflowConfig(agentProfileIDs: [])
-        custom.defaultNodeTimeout = 45
-        XCTAssertEqual(custom.effectiveNodeTimeout, 45, "a stored number must survive too")
-
-        // …and both round-trip, so an existing layout keeps them.
-        let data = try? JSONEncoder().encode(off)
-        let decoded = data.flatMap { try? JSONDecoder().decode(WorkflowConfig.self, from: $0) }
-        XCTAssertNil(decoded?.effectiveNodeTimeout)
+    /// Every node is bounded by default: there is no workflow-level way to switch the timeout off.
+    func testTheWorkflowNodeTimeoutIsBounded() {
+        XCTAssertEqual(WorkflowConfig.nodeTimeout, 120)
     }
 
     // MARK: - Sub-workflow nesting: cycles and depth (design-time)
@@ -777,7 +662,6 @@ final class WorkflowPortRenameTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "asap"),
             ConditionRule(label: "Routine", field: .upstreamOutput, op: .isNotEmpty, value: "")
         ]
-        config.fallbackLabel = "Routine"
         let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
 
         XCTAssertEqual(WorkflowCanvasState.outputPortLabels(for: node),
@@ -793,7 +677,6 @@ final class WorkflowPortRenameTests: XCTestCase {
             ConditionRule(label: "ok", field: .upstreamOutput, op: .isNotEmpty, value: ""),
             ConditionRule(label: "error", field: .upstreamOutput, op: .isEmpty, value: "")
         ]
-        config.fallbackLabel = "error"
         let node = WorkflowNode(kind: .condition(config), position: .zero, displayName: "Router")
         let ports = WorkflowCanvasState.outputPortLabels(for: node)
 

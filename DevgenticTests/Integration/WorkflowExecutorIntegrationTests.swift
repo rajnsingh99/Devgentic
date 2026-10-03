@@ -95,14 +95,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
     /// Creates a workflow stream (without consuming it) for cancellation tests.
     ///
-    /// - Parameter workflowProfileID: defaults to a fresh, unregistered UUID (existing behavior —
-    ///   `executeWorkflow` logs "no workflow profile resolved" and falls back to a hard-coded 120s
-    ///   node timeout). Pass one that IS registered in `scenario.profileMap` (e.g. with
-    ///   `WorkflowConfig(agentProfileIDs: [], nodeTimeoutEnabled: false)`) when a test needs the
-    ///   Action-node tool path to skip `runToolWithTimeout`'s sentinel race entirely (WF-CC4) —
-    ///   otherwise every node timeout, including "disabled," resolves to SOME finite value and every
-    ///   tool call races a timeout sentinel that can itself intercept a post-cancellation retry
-    ///   before it ever reaches the mocked tool, masking whatever the retry loop itself does.
+    /// - Parameter workflowProfileID: defaults to a fresh, unregistered UUID.
     private func makeStream(
         _ scenario: WorkflowTestScenario,
         userInput: String = "Test input",
@@ -595,15 +588,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(occurrences, 1, "Upstream output should be injected once, not duplicated per edge")
     }
 
-    /// A RETIRED per-node policy is decoded and ignored. `continueAll` used to make the downstream
-    /// run; failure routing is now the `error` port, so an unwired one stops the branch.
-    func testRetiredContinueAllPolicyIsIgnored_BranchStops() async throws {
+    /// A failure with no `error` edge stops its branch: the downstream never runs.
+    func testFailureWithNoErrorEdge_BranchStops() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Failing Bot")
         let botB = scenario.addBotNode(name: "Downstream Bot")
 
         scenario.connect(from: botA, to: botB)
-        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .continueAll), for: botA)
 
         mockProvider.scriptError(for: scenario.profileID(for: botA)!, error: NSError(domain: "test", code: 1))
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("must not run")])
@@ -611,11 +602,11 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let events = try await execute(scenario)
 
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botB),
-                       "the stored policy must be ignored — with no error edge the branch stops")
+        XCTAssertFalse(started.contains(botB), "with no error edge the branch stops")
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == botA })
     }
 
-    /// The replacement for it: wire the `error` port and the downstream runs, with the failure.
+    /// Wire the `error` port and the downstream runs, with the failure.
     func testErrorPortWired_DownstreamRunsWithFailure() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Failing Bot")
@@ -636,27 +627,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         }) else { return XCTFail("handler never invoked") }
         XCTAssertTrue(invocation.context.input.contains("[Upstream node \"Failing Bot\" failed:"),
                       "…and must receive the annotated failure, got: \(invocation.context.input.prefix(160))")
-    }
-
-
-    /// A retired `stopWorkflow` no longer halts anything. Its branch stops (no error edge), which
-    /// is the same shape any failure produces now.
-    func testRetiredStopWorkflowPolicyIsIgnored() async throws {
-        let scenario = WorkflowTestScenario()
-        let botA = scenario.addBotNode(name: "Failing Bot")
-        let botB = scenario.addBotNode(name: "Downstream Bot")
-
-        scenario.connect(from: botA, to: botB)
-        scenario.setNodeConfig(WorkflowNodeConfig(onFailure: .stopWorkflow), for: botA)
-
-        mockProvider.scriptError(for: scenario.profileID(for: botA)!, error: NSError(domain: "test", code: 1))
-        mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("should not run")])
-
-        let events = try await execute(scenario)
-
-        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botB), "B is downstream of a failure with no error edge")
-        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == botA })
     }
 
 
@@ -825,39 +795,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
         XCTAssertTrue(started.contains(botNotAlpha), "notEquals 'alpha' should match 'beta'")
         XCTAssertFalse(started.contains(botIsAlpha))
-    }
-
-    func testCondition_MultipleRules_FirstMatchWins() async throws {
-        let scenario = WorkflowTestScenario()
-        let botA = scenario.addBotNode(name: "Bot A")
-        let condition = scenario.addConditionNode(
-            name: "Priority Router",
-            rules: [
-                ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
-                ConditionRule(label: "Normal", field: .upstreamOutput, op: .isNotEmpty, value: "")
-            ],
-            fallbackLabel: "Empty"
-        )
-        let botUrgent = scenario.addBotNode(name: "Urgent Bot")
-        let botNormal = scenario.addBotNode(name: "Normal Bot")
-        let botEmpty = scenario.addBotNode(name: "Empty Bot")
-
-        scenario.connect(from: botA, to: condition)
-        scenario.connect(from: condition, to: botUrgent, portLabel: "Urgent")
-        scenario.connect(from: condition, to: botNormal, portLabel: "Normal")
-        scenario.connect(from: condition, to: botEmpty, portLabel: "Empty")
-
-        // Input matches BOTH "Urgent" (contains) and "Normal" (isNotEmpty)
-        // First match should win
-        mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("urgent task here")])
-        mockProvider.scriptStream(for: scenario.profileID(for: botUrgent)!, events: [.content("handled urgently")])
-        mockProvider.scriptStream(for: scenario.profileID(for: botNormal)!, events: [.content("handled normally")])
-
-        let events = try await execute(scenario)
-        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(started.contains(botUrgent), "First matching rule (Urgent) should win")
-        XCTAssertFalse(started.contains(botNormal), "Second rule should NOT fire when first matches")
-        XCTAssertFalse(started.contains(botEmpty))
     }
 
     // MARK: - Group 9: DAG Topology Edge Cases
@@ -1839,7 +1776,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.askOnAmbiguity = true
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
         scenario.connect(from: source, to: router)
@@ -1879,7 +1816,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             // the same non-locatable property the deleted `always` operator provided here.
             ConditionRule(label: "All", field: .upstreamOutput, op: .notContains, value: "xyzzy")
         ]
-        config.askOnAmbiguity = true
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
         scenario.connect(from: source, to: router)
@@ -1909,7 +1846,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent, urgently"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.askOnAmbiguity = true
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
         scenario.connect(from: source, to: router)
@@ -1954,7 +1891,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Street", field: .upstreamOutput, op: .contains, value: "strasse"),
             ConditionRule(label: "Here", field: .upstreamOutput, op: .contains, value: "hier")
         ]
-        config.askOnAmbiguity = true
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
         scenario.connect(from: source, to: router)
@@ -1990,7 +1927,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Exact", field: .upstreamOutput, op: .equals, value: "escalate now"),
             ConditionRule(label: "Partial", field: .upstreamOutput, op: .contains, value: "escalate")
         ]
-        config.askOnAmbiguity = true
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let a = scenario.addBotNode(name: "A"), b = scenario.addBotNode(name: "B")
         scenario.connect(from: source, to: router)
@@ -2051,29 +1988,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                       "a per-node retry must still fire")
     }
 
-    /// ⚠️ A workflow-level default from before 2026-08-13 is STILL HONOURED at runtime — dropping it
-    /// outright would silently stop retrying for anyone who had opted in, and a flaky provider would
-    /// start failing runs that used to succeed.
-    ///
-    /// ⚠️ COVERED BY INSPECTION, NOT END-TO-END. `executeWorkflow` resolves its `WorkflowConfig` from
-    /// the workflow's own stored profile rather than accepting one, so an integration test cannot
-    /// inject a legacy value. What is pinned here is the accessor's semantics; the two call sites
-    /// that consult it (`executeProfileNodeWithRetry` and the Action path) are verified by reading,
-    /// which is worth knowing before trusting this row.
-    func testLegacyWorkflowRetryDefault_AccessorSemantics() {
-        var config = WorkflowConfig(agentProfileIDs: [])
-        XCTAssertEqual(config.resolvedMaxRetries, 0,
-                       "a new workflow does not retry unless a node asks for it")
-
-        config.defaultMaxRetries = 2
-        XCTAssertEqual(config.resolvedMaxRetries, 2, "a stored legacy value survives")
-
-        // And it round-trips, so an existing layout keeps it.
-        let data = try? JSONEncoder().encode(config)
-        let decoded = data.flatMap { try? JSONDecoder().decode(WorkflowConfig.self, from: $0) }
-        XCTAssertEqual(decoded?.resolvedMaxRetries, 2)
-    }
-
     /// ⚠️ Retry does not apply to DETERMINISTIC structural kinds. Re-running a Router is pointless:
     /// same input, same rules, same no-match. A stored `maxNodeRetries` is inert on Router / Code /
     /// Gate / Trigger.
@@ -2091,7 +2005,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     /// `executeStructuralNode` never assigns `.failed`. With no failure there is no state a retry
     /// could even be attempted from, so the assertion held for a reason that had nothing to do
     /// with the retry guard — and `<=` also passes at 0 starts, i.e. if the node never ran at all.
-    /// A Router with `noMatchBehavior == .failNode` and no matching rule is the one structural
+    /// A Router with `decisionPolicy == .failNode` and no matching rule is the one structural
     /// node that reliably DOES fail, which is what makes the retry guard observable.
     func testStructuralNode_NeverRetries_EvenWithRetriesConfigured() async throws {
         let scenario = WorkflowTestScenario()
@@ -2102,7 +2016,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "URGENT"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.noMatchBehavior = .failNode   // stated explicitly — this is what makes it fail
+        config.decisionPolicy = .failNode   // stated explicitly — this is what makes it fail
         let router = scenario.addConditionNode(name: "Router", config: config)
 
         var cfg = WorkflowNodeConfig()
@@ -2424,7 +2338,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.askOnAmbiguity = true
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         var cfg = WorkflowNodeConfig()
         cfg.hardTimeout = 1.0                      // shorter than the answer delay below
@@ -2460,10 +2374,10 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                       "…and the human's choice must still route")
     }
 
-    // MARK: - Router: catch-all is a rule, no-match is a failure
+    // MARK: - Router: no-match is a failure under `.failNode`
 
-    /// ⚠️ THE CORE CHANGE. With no rule matching and no legacy fallback, the Router FAILS rather
-    /// than silently swallowing the input. The failure is visible in the run instead of the input
+    /// ⚠️ With no rule matching and the policy set to fail, the Router FAILS rather than silently
+    /// swallowing the input. The failure is visible in the run instead of the input
     /// vanishing down a catch-all nobody chose.
     ///
     /// ⚠️ Deliberately a NODE failure, not a run-level stop — that would be `stopWorkflow` under a
@@ -2476,7 +2390,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.fallbackLabel = ""                      // no legacy catch-all
+        config.decisionPolicy = .failNode
         let router = scenario.addConditionNode(name: "Router", config: config)
         let arm = scenario.addBotNode(name: "Urgent Arm")
         scenario.connect(from: source, to: router)
@@ -2503,7 +2417,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.fallbackLabel = ""
+        config.decisionPolicy = .failNode
         let router = scenario.addConditionNode(name: "Router", config: config)
         let arm = scenario.addBotNode(name: "Urgent Arm")
         let recovery = scenario.addBotNode(name: "Unmatched Handler")
@@ -2522,9 +2436,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(started.contains(arm))
     }
 
-    /// The catch-all's successor (2026-08-16): `noMatchBehavior = .route` sends unmatched input to
-    /// a chosen rule's branch. (The previous incarnation of this test used the `always` operator,
-    /// hard-deleted the same day for amplifying ambiguity arbitration.)
+    /// `decisionPolicy = .route` sends unmatched input to a chosen rule's branch.
     func testRouter_NoMatchRoutesToConfiguredDefault() async throws {
         let scenario = WorkflowTestScenario()
         let source = scenario.addBotNode(name: "Source")
@@ -2535,8 +2447,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             generalRule
         ]
         // ⚠️ Stored by the rule's STABLE ID, not its label — renames must not strand the default.
-        config.noMatchBehavior = .route(ruleID: generalRule.id)
-        config.fallbackLabel = ""
+        config.decisionPolicy = .route(ruleID: generalRule.id)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let urgent = scenario.addBotNode(name: "Urgent Arm")
         let general = scenario.addBotNode(name: "General Arm")
@@ -2551,77 +2462,35 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let events = try await execute(scenario)
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
 
-        XCTAssertTrue(started.contains(general), "`always` as the last rule is the catch-all")
+        XCTAssertTrue(started.contains(general), "unmatched input takes the configured route")
         XCTAssertFalse(started.contains(urgent))
         // ⚠️ NOT `nodeFailedEvents.isEmpty` — the untaken branch is cascade-skipped and a skip is
         // ALSO reported as `.workflowNodeFailed`. Assert about the Router itself.
         XCTAssertFalse(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
-                       "the Router matched a rule, so it must not fail")
+                       "the Router routed per its policy, so it must not fail")
     }
 
-    /// ⚠️ EXISTING WORKFLOWS MUST NOT CHANGE. A stored `fallbackLabel` is still honoured, because
-    /// converting it on load would silently move where unmatched input goes in every workflow saved
-    /// before the redesign.
-    func testRouter_LegacyFallbackStillHonoured() async throws {
-        let scenario = WorkflowTestScenario()
-        let source = scenario.addBotNode(name: "Source")
-        var config = ConditionNodeConfig()
-        config.rules = [
-            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
-            ConditionRule(label: "Other", field: .upstreamOutput, op: .contains, value: "zzz-never")
-        ]
-        config.fallbackLabel = "Other"                 // the pre-2026-08-13 shape
-        let router = scenario.addConditionNode(name: "Router", config: config)
-        let urgent = scenario.addBotNode(name: "Urgent Arm")
-        let other = scenario.addBotNode(name: "Other Arm")
-        scenario.connect(from: source, to: router)
-        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
-        scenario.connect(from: router, to: other, portLabel: "Other")
-
-        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("nothing matches this")])
-        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("urgent")])
-        mockProvider.scriptStream(for: scenario.profileID(for: other)!, events: [.content("other")])
-
-        let events = try await execute(scenario)
-        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-
-        XCTAssertTrue(started.contains(other), "a legacy fallback must keep working")
-        XCTAssertFalse(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
-                       "…and must NOT be turned into a failure by the redesign")
-    }
-
-    /// A brand-new config has no catch-all, and the decoder must not invent one.
-    func testNewConfig_HasNoFallback_AndDecoderDoesNotInventOne() throws {
-        XCTAssertEqual(ConditionNodeConfig().fallbackLabel, "", "new nodes have no catch-all")
+    /// A new Router asks when it cannot decide, failing if nobody answers — and an absent key
+    /// decodes to that same default.
+    func testNewConfig_DefaultsToAskWithFailFallback() throws {
+        XCTAssertEqual(ConditionNodeConfig().decisionPolicy, .ask(fallback: .failNode))
 
         var config = ConditionNodeConfig()
-        config.rules = [
-            ConditionRule(label: "A", field: .upstreamOutput, op: .contains, value: "a"),
-            ConditionRule(label: "B", field: .upstreamOutput, op: .contains, value: "b")
-        ]
-        config.fallbackLabel = ""
+        config.decisionPolicy = .endBranch
         let round = try JSONDecoder().decode(ConditionNodeConfig.self, from: try JSONEncoder().encode(config))
-        XCTAssertEqual(round.fallbackLabel, "",
-                       "the legacy repair must be guarded on non-empty or it reinstates the retired behaviour")
+        XCTAssertEqual(round.decisionPolicy, .endBranch, "a stored policy survives the round trip")
 
-        // A legacy blob whose fallback names a rule that no longer exists is still repaired to the
-        // last rule. ⚠️ Built by ENCODING a real config and editing one field, not by hand-writing
-        // JSON — a malformed literal decodes to the default rule set and the test silently asserts
-        // nothing (which is exactly what the first draft of this did).
-        var stale = config
-        stale.fallbackLabel = "Gone"
-        var json = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(stale)) as! [String: Any]
-        XCTAssertEqual((json["rules"] as? [Any])?.count, 2, "precondition: the blob really carries both rules")
-        json["fallbackLabel"] = "Gone"
-        let repaired = try JSONDecoder().decode(
-            ConditionNodeConfig.self, from: try JSONSerialization.data(withJSONObject: json))
-        XCTAssertEqual(repaired.fallbackLabel, "B", "a stale fallback repairs to the LAST rule")
+        var json = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(config)) as! [String: Any]
+        json.removeValue(forKey: "decisionPolicy")
+        let absent = try JSONDecoder().decode(ConditionNodeConfig.self, from: try JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(absent.decisionPolicy, .ask(fallback: .failNode), "an absent key decodes to the default")
     }
 
-    // MARK: - Condition: multi-match arbitration (opt-in HITL)
+    // MARK: - Condition: multi-match arbitration (Ask)
 
-    /// Builds Source → Router(Urgent|Billing) → two arms, where the input matches BOTH rules.
-    private func ambiguousRouterScenario(askOnAmbiguity: Bool) -> (WorkflowTestScenario, router: UUID, urgent: UUID, billing: UUID) {
+    /// Builds Source → Router(Urgent|Billing) → two arms, where the input matches BOTH rules. The
+    /// policy is Ask, failing the node when nobody answers.
+    private func ambiguousRouterScenario() -> (WorkflowTestScenario, router: UUID, urgent: UUID, billing: UUID) {
         let scenario = WorkflowTestScenario()
         let source = scenario.addBotNode(name: "Source")
         var config = ConditionNodeConfig()
@@ -2629,8 +2498,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.fallbackLabel = "Billing"
-        config.askOnAmbiguity = askOnAmbiguity
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let urgent = scenario.addBotNode(name: "Urgent Arm")
         let billing = scenario.addBotNode(name: "Billing Arm")
@@ -2643,19 +2511,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("urgent handled")])
         mockProvider.scriptStream(for: scenario.profileID(for: billing)!, events: [.content("billing handled")])
         return (scenario, router, urgent, billing)
-    }
-
-    /// Explicitly switched OFF, an ambiguous input never pauses anything.
-    /// ⚠️ This is the escape hatch for scheduled workflows, where no banner is ever rendered.
-    func testAmbiguity_ArbitrationOff_NeverAsks() async throws {
-        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: false)
-        let events = try await execute(scenario)
-
-        XCTAssertTrue(WorkflowStreamCollector.gateRequests(from: events).isEmpty,
-                      "arbitration is opt-in — nothing may suspend with it off")
-        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(started.contains(urgent))
-        XCTAssertFalse(started.contains(billing))
     }
 
     /// ⚠️ ON BY DEFAULT (user decision 2026-08-13) — a fresh Router asks rather than guessing.
@@ -2686,7 +2541,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     /// ⚠️ NO per-node timeout — `deadline` is nil, so the banner shows no countdown and the wait is
     /// bounded only by the container (Stop, or a scheduled run's deadline).
     func testAmbiguity_RequestCarriesNoDeadline() async throws {
-        let (scenario, _, _, _) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let (scenario, _, _, _) = ambiguousRouterScenario()
         let events = try await executeWithGate(scenario, choosing: "Urgent")
         for event in events {
             if case .requestGate(_, _, _, let deadline, _, _, _, _) = event {
@@ -2698,7 +2553,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     /// The request carries EXACTLY the matched labels — not every rule, and not the fallback.
     /// Offering a non-matching branch would let a human route on a rule the input does not satisfy.
     func testAmbiguity_RequestOffersOnlyTheMatchedRules() async throws {
-        let (scenario, _, _, _) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let (scenario, _, _, _) = ambiguousRouterScenario()
         let events = try await executeWithGate(scenario, choosing: "Urgent")
         let requests = WorkflowStreamCollector.gateRequests(from: events)
 
@@ -2712,7 +2567,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     /// The human overrides the tiebreak: picking the SECOND matched rule routes there, which is the
     /// entire point — first-match is an authoring artefact, not a decision.
     func testAmbiguity_HumanPicksSecondRule_RoutesThere() async throws {
-        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: true)
+        let (scenario, _, urgent, billing) = ambiguousRouterScenario()
         let events = try await executeWithGate(scenario, choosing: "Billing")
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
 
@@ -2720,28 +2575,30 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(started.contains(urgent), "…and the first-match branch does NOT")
     }
 
-    /// ⚠️ THE UNATTENDED PROPERTY. Unanswered — Stop, closed conversation, or the timeout — falls
-    /// back to FIRST MATCH, never to `fallbackLabel`. That makes a scheduled run behave exactly as
-    /// it would with arbitration switched off, which is what makes the feature safe to enable.
-    func testAmbiguity_Unanswered_FallsBackToFirstMatch() async throws {
-        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: true)
+    /// ⚠️ Unanswered takes the configured 'If nobody can answer' action — here, fail the node —
+    /// never a first-match tiebreak (rule order is not a priority).
+    func testAmbiguity_Unanswered_TakesTheConfiguredFallback() async throws {
+        let (scenario, router, urgent, billing) = ambiguousRouterScenario()
         let events = try await executeWithGate(scenario, choosing: nil)
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
 
-        XCTAssertTrue(started.contains(urgent), "first match, exactly as if arbitration were off")
-        XCTAssertFalse(started.contains(billing), "must NOT route to the catch-all")
+        XCTAssertFalse(started.contains(urgent), "no first-match tiebreak")
+        XCTAssertFalse(started.contains(billing))
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                      "the fallback is fail-the-node")
     }
 
     /// ⚠️ A stale or mis-indexed answer must not activate a port this run never matched. The
     /// suspension resolves from several surfaces (banner, QuickAccess, and a remote index lookup),
     /// so the executor validates the answer against the matched set rather than trusting it.
-    func testAmbiguity_AnswerNotAmongMatches_FallsBackToFirstMatch() async throws {
-        let (scenario, _, urgent, billing) = ambiguousRouterScenario(askOnAmbiguity: true)
+    func testAmbiguity_AnswerNotAmongMatches_TakesTheConfiguredFallback() async throws {
+        let (scenario, router, urgent, billing) = ambiguousRouterScenario()
         let events = try await executeWithGate(scenario, choosing: "SomeOtherRule")
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
 
-        XCTAssertTrue(started.contains(urgent), "an unrecognised answer is treated as unanswered")
+        XCTAssertFalse(started.contains(urgent), "an unrecognised answer is treated as unanswered")
         XCTAssertFalse(started.contains(billing))
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router })
     }
 
     /// Only AMBIGUITY asks. A single match is not a decision anyone needs to make.
@@ -2753,8 +2610,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.fallbackLabel = "Billing"
-        config.askOnAmbiguity = true
+        config.decisionPolicy = .ask(fallback: .failNode)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let billing = scenario.addBotNode(name: "Billing Arm")
         scenario.connect(from: source, to: router)
@@ -2770,64 +2626,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertTrue(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(billing))
     }
 
-    /// A stored `askOnAmbiguity` must survive a blob round-trip, and its absence must decode to OFF
-    /// so every layout written before this feature keeps its behaviour.
-    func testAskOnAmbiguity_CodableRoundTripAndLegacyDefault() throws {
-        var config = ConditionNodeConfig()
-        config.askOnAmbiguity = true
-        let data = try JSONEncoder().encode(config)
-        XCTAssertTrue(try JSONDecoder().decode(ConditionNodeConfig.self, from: data).askOnAmbiguity)
-
-        // ⚠️ An ABSENT key decodes to TRUE (changed 2026-08-13). It means "saved before this field
-        // existed", not "the user switched it off" — once they do, `false` is written explicitly.
-        let legacy = Data(#"{"rules":[],"fallbackLabel":"False","passthroughContent":true}"#.utf8)
-        XCTAssertTrue(try JSONDecoder().decode(ConditionNodeConfig.self, from: legacy).askOnAmbiguity,
-                      "an absent key means pre-feature, so it adopts the new default")
-
-        var off = ConditionNodeConfig()
-        off.askOnAmbiguity = false
-        XCTAssertFalse(try JSONDecoder().decode(ConditionNodeConfig.self, from: try JSONEncoder().encode(off)).askOnAmbiguity,
-                       "an EXPLICIT false is a real user choice and must survive")
-    }
-
-    // MARK: - Condition: collect-all-matches (routing unchanged)
-
-    /// ⚠️ THE INVARIANT of the collect-all change: routing is byte-identical. Two rules both match,
-    /// and the FIRST in rule order still wins — exactly what the old `break` produced. Ambiguity is
-    /// now merely *observable*; it changes nothing about where the input goes.
-    func testAmbiguousInput_StillRoutesToFirstMatchingRule() async throws {
-        let scenario = WorkflowTestScenario()
-        let source = scenario.addBotNode(name: "Source")
-        let router = scenario.addConditionNode(
-            name: "Router",
-            rules: [
-                ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
-                ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
-            ],
-            fallbackLabel: "Billing"
-        )
-        let urgentArm = scenario.addBotNode(name: "Urgent Arm")
-        let billingArm = scenario.addBotNode(name: "Billing Arm")
-
-        scenario.connect(from: source, to: router)
-        scenario.connect(from: router, to: urgentArm, portLabel: "Urgent")
-        scenario.connect(from: router, to: billingArm, portLabel: "Billing")
-
-        // Matches BOTH rules.
-        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT help with my invoice")])
-        mockProvider.scriptStream(for: scenario.profileID(for: urgentArm)!, events: [.content("urgent handled")])
-        mockProvider.scriptStream(for: scenario.profileID(for: billingArm)!, events: [.content("billing handled")])
-
-        // ⚠️ `executeWithGate(choosing: nil)`, not `execute()`. Arbitration is ON by default and has
-        // no timeout since 2026-08-13, so a plain `execute()` on an ambiguous Router parks FOREVER
-        // and hangs the suite instead of failing. Answering nil exercises the unattended path, which
-        // is what this test is about: first match still wins.
-        let events = try await executeWithGate(scenario, choosing: nil)
-        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-
-        XCTAssertTrue(started.contains(urgentArm), "first matching rule wins, as before")
-        XCTAssertFalse(started.contains(billingArm), "exactly ONE port activates — a Router never fans out")
-    }
+    // MARK: - Condition: collect-all-matches
 
     /// A second rule that matches must not be reached when an earlier one already did — and equally
     /// must not suppress it. This is the control for the loop no longer having a `break`.
@@ -2860,10 +2659,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(started.contains(urgentArm))
     }
 
-    /// ⚠️ The classifier trigger is `matchedLabels.isEmpty`, NOT `count != 1`. An AMBIGUOUS input
-    /// already has a route — invoking a model for it would spend time and GPU on inputs that route
-    /// fine today, and (since the classifier can only return a rule label) could not change the
-    /// answer anyway.
+    /// ⚠️ The classifier trigger is "no rule matched", NOT `count != 1`. An AMBIGUOUS input is
+    /// resolved by the decision policy — invoking a model for it would spend time and GPU, and
+    /// (since the classifier can only return a rule label) could not resolve the ambiguity anyway.
     ///
     /// Observable because the classifier is enabled with no MLX model: entering that branch throws
     /// and yields an "AI Classifier failed" thought. Its ABSENCE is the assertion.
@@ -2875,7 +2673,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.fallbackLabel = "Billing"
+        config.decisionPolicy = .failNode
         config.llmFallbackEnabled = true
         config.llmPrompt = "Classify the message."
         // ⚠️ A NIL model is blocked by pre-flight validation (`.error`), so the run would never
@@ -2894,13 +2692,14 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         mockProvider.scriptStream(for: scenario.profileID(for: urgentArm)!, events: [.content("handled")])
         mockProvider.scriptStream(for: scenario.profileID(for: billingArm)!, events: [.content("handled")])
 
-        // ⚠️ See above — an ambiguous Router parks indefinitely under `execute()`.
-        let events = try await executeWithGate(scenario, choosing: nil)
+        let events = try await execute(scenario)
         let thoughts = WorkflowStreamCollector.thoughtText(from: events)
 
         XCTAssertFalse(thoughts.contains("AI Classifier failed"),
                        "two rules matched — the classifier must not run. Thoughts: \(thoughts)")
-        XCTAssertTrue(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(urgentArm))
+        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router },
+                      "the ambiguity is resolved by the policy (fail), not by the classifier")
+        XCTAssertFalse(WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID).contains(urgentArm))
     }
 
     /// ⚠️ WF61: a Code node has a wireable `error` port, so a recovery branch can be attached
@@ -3314,12 +3113,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     func testCascadedConditions_TwoConditionNodesInChain() async throws {
         // Source → Router1 → Router2 → [Routed: BotA, NotRouted: BotB]
         //
-        // ⚠️ REWRITTEN 2026-08-13 when "Pass Through Content" was retired, and the old version is
-        // worth remembering as the argument FOR retiring it: it set `passthroughContent: false` so
-        // Router1 emitted the debug string `Condition (pattern): route → Pass`, then had Router2
-        // match the literal substring "route" inside it. A downstream rule keyed off a diagnostic
-        // line rather than data — which is the only thing the toggle's OFF state ever enabled.
-        // A Router now always passes content through, so Router2 keys off the actual payload.
+        // A Router always passes content through, so Router2 keys off the actual payload.
         let scenario = WorkflowTestScenario()
         let botSrc = scenario.addBotNode(name: "Source")
         let cond1 = scenario.addConditionNode(
@@ -3351,9 +3145,8 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(started.contains(botNotRouted))
     }
 
-    /// ⚠️ The content survives a Router unchanged — that is the whole point of retiring the toggle.
-    /// A stored `passthroughContent = false` from an older layout must NOT suppress it.
-    func testRouter_AlwaysPassesContentThrough_EvenWithRetiredToggleOff() async throws {
+    /// The content survives a Router unchanged — routing decides WHERE it goes, never WHAT it says.
+    func testRouter_AlwaysPassesContentThrough() async throws {
         let scenario = WorkflowTestScenario()
         let source = scenario.addBotNode(name: "Source")
         var config = ConditionNodeConfig()
@@ -3361,8 +3154,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Pass", field: .upstreamOutput, op: .isNotEmpty, value: ""),
             ConditionRule(label: "Empty", field: .upstreamOutput, op: .isEmpty, value: "")
         ]
-        config.fallbackLabel = "Empty"
-        config.passthroughContent = false          // retired — must be ignored
+        config.decisionPolicy = .failNode
         let router = scenario.addConditionNode(name: "Router", config: config)
         let sink = scenario.addBotNode(name: "Sink")
 
@@ -3377,7 +3169,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let sinkInput = mockProvider.workflowInvocations
             .first { $0.profileID == scenario.profileID(for: sink)! }?.context.input ?? ""
         XCTAssertTrue(sinkInput.contains("the real payload"), "content must flow — got: \(sinkInput)")
-        XCTAssertFalse(sinkInput.contains("route \u{2192}"), "the retired routing-label string must be gone")
     }
 
     func testCodeThenGateThenCondition_ComplexStructuralChain() async throws {
@@ -4499,11 +4290,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let scenario = WorkflowTestScenario()
         let entry = scenario.addBotNode(name: "Entry")
 
-        // A stored task from before the field was retired must have NO effect on the run.
-        var cfg = WorkflowNodeConfig()
-        cfg.taskDescription = "Summarise the input"
-        scenario.setNodeConfig(cfg, for: entry)
-
         mockProvider.scriptStream(for: scenario.profileID(for: entry)!, events: [.content("ok")])
         _ = try await execute(scenario, userInput: "List all the files in Acme")
 
@@ -4514,8 +4300,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertTrue(ctx.isFirstNode, "precondition: the node under test is the entry node")
 
         // The specific regressions, asserted by name so a re-fusion is caught explicitly.
-        XCTAssertFalse(ctx.input.contains("Summarise the input"),
-                       "a retired stored task must not be fused into the input — that is the two-channel model returning")
         XCTAssertFalse(ctx.input.contains("User Query:"), "the inline label must not come back")
         XCTAssertFalse(ctx.input.contains("---"), "the separator line must not come back")
     }
@@ -4707,8 +4491,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         for (id, profile) in inner.profileMap { scenario.profileMap[id] = profile }
 
         let subWorkflow = scenario.addSubWorkflowNode(name: "Nested Step", workflowProfileID: inner.workflowProfileID)
-        XCTAssertNil(scenario.layout.nodes.first(where: { $0.id == subWorkflow })?.nodeConfig?.taskDescription,
-                     "Precondition: the node under test carries no task description")
 
         // Direct validator assertion — this is the gate that threw `validationFailed`.
         let issues = WorkflowValidator.validate(layout: scenario.layout, profileMap: scenario.profileMap)
@@ -4825,7 +4607,6 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             position: .zero,
             displayName: "Poster Generator"
         )
-        node.nodeConfig = WorkflowNodeConfig(taskDescription: "Draw a poster")
         let layout = WorkflowLayout(nodes: [node], edges: [], annotations: [])
 
         let errors = WorkflowValidator.validate(layout: layout, profileMap: scenario.profileMap)
@@ -4912,17 +4693,14 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     // fix touched the loop, `scriptThrowingTool` had never been exercised by a single test in this
     // file, so the retry-then-fail flow itself had zero test coverage of any kind.
 
-    /// ⚠️ `nodeTimeoutEnabled: false` on the workflow profile is load-bearing, not incidental. With
-    /// ANY finite node timeout (including this test's own prior attempt at a very large one),
-    /// `runToolWithTimeout` always races `tool.run` against a `Task.sleep` sentinel — and once the
-    /// ambient Task is cancelled, that sentinel's `Task.sleep` throws `CancellationError` almost
-    /// instantly, regardless of how long the configured timeout was, which can win the race and
-    /// abort a retried attempt BEFORE it ever reaches the mocked tool. That masks this exact fix:
-    /// mutation-testing this test with the retry loop fully reverted to its pre-fix shape still
-    /// passed, because the timeout sentinel — not the loop's own retry/cancellation handling — was
-    /// what stopped the second invocation. Only with the node timeout genuinely OFF does
-    /// `runToolWithTimeout` take the direct `tool.run(args)` path with no race at all, making the
-    /// retry loop's OWN cancellation handling the only thing that can prevent a second invocation.
+    /// ⚠️ WEAKER THAN IT LOOKS. Every Action node is bounded (`WorkflowConfig.nodeTimeout` when it
+    /// sets no `hardTimeout`), so `runToolWithTimeout` always races `tool.run` against a `Task.sleep`
+    /// sentinel — and once the ambient Task is cancelled that sentinel throws `CancellationError`
+    /// almost instantly and can win the race, aborting a retried attempt BEFORE it reaches the mocked
+    /// tool. With the retry loop reverted to its pre-WF-CC4 shape this test can therefore still
+    /// pass: the sentinel, not the loop's own cancellation handling, may be what stops the second
+    /// invocation. (It used to run with the workflow's node timeout switched OFF to take the
+    /// no-race path; that setting was removed 2026-10-03.) Treat it as a regression smoke test.
     ///
     /// A multi-second `retryDelay` gives the test a wide, deterministic window: after the tool's
     /// first attempt fails and the loop decides to retry, it blocks on `Task.sleep`. Cancelling
@@ -4933,20 +4711,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let action = scenario.addActionNode(name: "Flaky Call", toolName: "flaky_tool")
         scenario.setNodeConfig(WorkflowNodeConfig(maxNodeRetries: 2, retryDelay: 5), for: action)
 
-        let workflowProfileID = UUID()
-        scenario.profileMap[workflowProfileID] = BackendProfileSnapshot(
-            id: workflowProfileID,
-            displayName: "Host Workflow",
-            details: .workflow(WorkflowConfig(agentProfileIDs: [], nodeTimeoutEnabled: false))
-        )
-
         let reached = expectation(description: "tool invoked once")
         reached.assertForOverFulfill = false
         mockProvider.scriptThrowingToolWithBarrier(name: "flaky_tool", error: URLError(.networkConnectionLost)) { count in
             if count == 1 { reached.fulfill() }
         }
 
-        let stream = makeStream(scenario, workflowProfileID: workflowProfileID)
+        let stream = makeStream(scenario)
         let task = Task { try await StreamCollector.collect(from: stream) }
 
         await fulfillment(of: [reached], timeout: 10)
@@ -4994,14 +4765,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == action })
     }
 
-    // MARK: - Group 31: Router no-match behaviour + unattended arbitration (2026-08-16)
-    //
-    // The `always` catch-all idiom was hard-deleted for amplifying ambiguity arbitration (any
-    // input matching a real rule also matched the catch-all, so EVERY ordinary routing decision
-    // asked "which branch?"). Its replacement is `noMatchBehavior`; unattended runs additionally
-    // skip arbitration entirely (`WorkflowRunAttendance`).
+    // MARK: - Group 31: Router no-match behaviour
 
-    /// `.endWorkflow`: unmatched input ends the BRANCH gracefully — downstream skips as
+    /// `.endBranch`: unmatched input ends the BRANCH gracefully — downstream skips as
     /// not-chosen (never failed), and the Router's passthrough becomes the final output because
     /// terminality is computed over LIVE edges.
     func testRouter_NoMatchEndWorkflow_EndsBranchGracefullyWithPassthroughAsFinalOutput() async throws {
@@ -5012,8 +4778,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ]
-        config.noMatchBehavior = .endWorkflow
-        config.fallbackLabel = ""
+        config.decisionPolicy = .endBranch
         let router = scenario.addConditionNode(name: "Router", config: config)
         let urgent = scenario.addBotNode(name: "Urgent Arm")
         scenario.connect(from: source, to: router)
@@ -5044,14 +4809,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let source = scenario.addBotNode(name: "Source")
         var config = ConditionNodeConfig()
         var fallbackRule = ConditionRule(label: "General", field: .upstreamOutput, op: .contains, value: "generalzz")
-        config.noMatchBehavior = .route(ruleID: fallbackRule.id)
+        config.decisionPolicy = .route(ruleID: fallbackRule.id)
         // Rename AFTER the route was configured — the id is what the engine resolves.
         fallbackRule.label = "Fallback"
         config.rules = [
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             fallbackRule
         ]
-        config.fallbackLabel = ""
         let router = scenario.addConditionNode(name: "Router", config: config)
         let arm = scenario.addBotNode(name: "Fallback Arm")
         scenario.connect(from: source, to: router)
@@ -5066,88 +4830,12 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).isEmpty)
     }
 
-    /// ⚠️ THE AMPLIFIER'S SYSTEMIC HALF: an UNATTENDED run never arbitrates — first match wins
-    /// immediately. A scheduled run parked here until the 600s deadline killed the WHOLE run, and
-    /// a ChatOps run (no deadline) parked forever.
-    func testRouter_Ambiguity_UnattendedRunSkipsArbitrationAndTakesFirstMatch() async throws {
-        let scenario = WorkflowTestScenario()
-        let source = scenario.addBotNode(name: "Source")
-        var config = ConditionNodeConfig()
-        config.rules = [
-            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
-            ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
-        ]
-        config.askOnAmbiguity = true                     // explicitly ON — and still must not ask
-        let router = scenario.addConditionNode(name: "Router", config: config)
-        let urgent = scenario.addBotNode(name: "Urgent Arm")
-        let billing = scenario.addBotNode(name: "Billing Arm")
-        scenario.connect(from: source, to: router)
-        scenario.connect(from: router, to: urgent, portLabel: "Urgent")
-        scenario.connect(from: router, to: billing, portLabel: "Billing")
-
-        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("URGENT invoice problem")])
-        mockProvider.scriptStream(for: scenario.profileID(for: urgent)!, events: [.content("handled")])
-        mockProvider.scriptStream(for: scenario.profileID(for: billing)!, events: [.content("handled")])
-
-        // The scheduler/ChatOps binding, reproduced: everything inside inherits unattended.
-        let events = try await WorkflowRunAttendance.$isAttended.withValue(false) {
-            try await execute(scenario)
-        }
-
-        XCTAssertTrue(WorkflowStreamCollector.gateRequests(from: events).isEmpty,
-                      "an unattended run must NEVER park on arbitration — nobody can answer")
-        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: urgent)! },
-                      "first match (rule order) must win, same as an unanswered arbitration")
-        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: billing)! })
-    }
-
-    /// The behaviour change of the hard delete, pinned: a legacy blob's "always" rule decodes to
-    /// `.other("always")` and NEVER matches — unmatched input follows `noMatchBehavior` (default:
-    /// fail onto the error port) instead of the old catch-all.
-    func testLegacyAlwaysRule_DecodesAsNeverMatching_AndNoMatchBehaviourApplies() async throws {
-        // ⚠️ Built by encoding a REAL rule and editing one field — a hand-written JSON literal
-        // misses required keys (ConditionRule's stable `id`) and asserts nothing (recorded trap).
-        let donor = ConditionRule(label: "Rest", field: .upstreamOutput, op: .isNotEmpty, value: "")
-        let json = String(data: try JSONEncoder().encode(donor), encoding: .utf8)!
-            .replacingOccurrences(of: "\"isNotEmpty\"", with: "\"always\"")
-        XCTAssertTrue(json.contains("\"always\""), "precondition: the blob really carries the retired op")
-        let rule = try JSONDecoder().decode(ConditionRule.self, from: Data(json.utf8))
-        XCTAssertEqual(rule.op, ConditionOp.other("always"),
-                       "a stored 'always' must decode to the inert other() form, not crash and not match")
-
-        let scenario = WorkflowTestScenario()
-        let source = scenario.addBotNode(name: "Source")
-        var config = ConditionNodeConfig()
-        config.rules = [
-            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
-            rule
-        ]
-        config.fallbackLabel = ""
-        let router = scenario.addConditionNode(name: "Router", config: config)
-        let rest = scenario.addBotNode(name: "Rest Arm")
-        let recovery = scenario.addBotNode(name: "Recovery")
-        scenario.connect(from: source, to: router)
-        scenario.connect(from: router, to: rest, portLabel: "Rest")
-        scenario.connect(from: router, to: recovery, portLabel: WorkflowEdge.errorPortLabel)
-
-        mockProvider.scriptStream(for: scenario.profileID(for: source)!, events: [.content("plain input")])
-        mockProvider.scriptStream(for: scenario.profileID(for: rest)!, events: [.content("old catch-all")])
-        mockProvider.scriptStream(for: scenario.profileID(for: recovery)!, events: [.content("recovered")])
-
-        let events = try await execute(scenario)
-        XCTAssertFalse(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: rest)! },
-                       "the retired always rule must be DEAD — routing through it would resurrect the amplifier")
-        XCTAssertTrue(mockProvider.invocations.contains { $0.profileID == scenario.profileID(for: recovery)! },
-                      "unmatched input follows noMatchBehavior (.failNode default) — the error branch runs")
-        XCTAssertTrue(WorkflowStreamCollector.nodeFailedEvents(from: events).contains { $0.nodeID == router })
-    }
-
     // MARK: - WF-TS4: the AI Classifier's FAILURE path
     //
     // ⚠️ The classifier's happy path is unreachable in tests without an MLX model, so its failure
     // path — the one users actually hit on a machine with no model, a deleted model, or a bad
-    // config — had NO coverage at all. These three pin what happens to the RUN when the classifier
-    // throws, under each of the three `noMatchBehavior` choices.
+    // config — had NO coverage at all. These pin what happens to the RUN when the classifier
+    // throws, under the decision-policy choices.
     //
     // ⚠️ HERMETIC CLASSIFIER FAILURE (the load-bearing fact — do not "fix" this config):
     // `evaluateConditionWithLLM`'s FIRST guard is `!config.llmPrompt.isEmpty`, and an empty prompt
@@ -5158,7 +4846,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     private func makeThrowingClassifierConfig(rules: [ConditionRule]) -> ConditionNodeConfig {
         var config = ConditionNodeConfig()
         config.rules = rules
-        config.fallbackLabel = ""
+        config.decisionPolicy = .failNode
         config.llmFallbackEnabled = true
         config.llmPrompt = ""                    // <- the throw
         config.llmModelName = "never-loaded"     // non-empty so pre-flight passes
@@ -5277,12 +4965,11 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                        "no rule matched and the classifier threw — no option branch may run")
     }
 
-    /// ⚠️ WF-CC10 — THIS TEST INVERTED on 2026-08-16 (user decision). It previously asserted that a
-    /// crashed classifier still honoured `When Nothing Matches` and routed to the default branch.
-    /// That was the defect: an MLX slot race silently became a routing decision and the run
-    /// reported SUCCESS with an arbitrary branch taken.
+    /// ⚠️ WF-CC10. A crashed classifier used to honour the configured default route: an MLX slot
+    /// race silently became a routing decision and the run reported SUCCESS with an arbitrary
+    /// branch taken.
     ///
-    /// `noMatchBehavior` answers "no rule described this input" — a verdict about CONTENT. A
+    /// `decisionPolicy` answers "no single rule described this input" — a verdict about CONTENT. A
     /// classifier that threw produced no verdict at all, so the setting is not applied. Only a
     /// classifier FAULT bypasses it; an explicit "none of these" and an unreadable reply are
     /// verdicts the model did produce and still follow the setting (see `WorkflowNoMatchDispositionTests`).
@@ -5295,7 +4982,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             generalRule
         ])
-        config.noMatchBehavior = .route(ruleID: generalRule.id)
+        config.decisionPolicy = .route(ruleID: generalRule.id)
         let router = scenario.addConditionNode(name: "Router", config: config)
         let generalArm = scenario.addBotNode(name: "General Arm")
         let recovery = scenario.addBotNode(name: "Recovery")
@@ -5322,9 +5009,8 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                       "the failure must still reach the event stream and the logs")
     }
 
-    /// ⚠️ WF-CC10 — THIS TEST INVERTED on 2026-08-16 (user decision). It previously asserted a
-    /// crashed classifier ended the branch gracefully under `.endWorkflow`, reporting the run as
-    /// COMPLETED. A classifier fault is now a node failure regardless of the setting.
+    /// ⚠️ WF-CC10. A crashed classifier used to end the branch gracefully under "end the branch",
+    /// reporting the run as COMPLETED. A classifier fault is now a node failure regardless of the setting.
     ///
     /// ⚠️ The one half that is KEPT VERBATIM is the load-bearing one: `try await execute(scenario)`
     /// must still NOT throw. That pins that the classifier's `do/catch` stays a CATCH — if the
@@ -5342,7 +5028,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
             ConditionRule(label: "Billing", field: .upstreamOutput, op: .contains, value: "invoice")
         ])
-        config.noMatchBehavior = .endWorkflow
+        config.decisionPolicy = .endBranch
         let router = scenario.addConditionNode(name: "Router", config: config)
         let urgentArm = scenario.addBotNode(name: "Urgent Arm")
         scenario.connect(from: source, to: router)
@@ -6046,15 +5732,12 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
     // MARK: - Group 34: the UNIFIED Router decision policy (2026-08-17 redesign)
     //
-    // ⚠️ One setting, both triggers. A node carrying a `decisionPolicy` resolves EMPTY and
-    // AMBIGUOUS through the same dropdown; a node without one keeps the legacy trio byte-identically
-    // (which is what the 173 tests above continue to prove — every one of them is a nil-policy node).
+    // ⚠️ One setting, both triggers: EMPTY and AMBIGUOUS resolve through the same dropdown.
 
     private func policyRouterConfig(_ policy: RouterDecisionPolicy,
                                     rules: [ConditionRule]) -> ConditionNodeConfig {
         var config = ConditionNodeConfig()
         config.rules = rules
-        config.fallbackLabel = ""
         config.decisionPolicy = policy
         return config
     }

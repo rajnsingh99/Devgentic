@@ -14,161 +14,25 @@ import XCTest
 /// unreadably — cannot be produced by any test in this repo.
 ///
 /// WF-CC10's claim is that those two are treated DIFFERENTLY. A test suite that can only ever
-/// produce one of the two terms cannot prove a difference between them. That is why
-/// `resolveNoMatch` was extracted pure: **the differential lives in this file or it does not
-/// exist.** The integration tests cover the crash path's end-to-end wiring; these cover the rule.
+/// produce one of the two terms cannot prove a difference between them. That is why `classify` and
+/// `resolveUndecided` are pure: **the differential lives in this file or it does not exist.** The
+/// integration tests cover the crash path's end-to-end wiring; these cover the rule.
 final class WorkflowNoMatchDispositionTests: XCTestCase {
 
-    private func rules() -> [ConditionRule] {
-        [
-            ConditionRule(label: "Urgent", field: .upstreamOutput, op: .contains, value: "urgent"),
-            ConditionRule(label: "General", field: .upstreamOutput, op: .contains, value: "zzz")
-        ]
+    // MARK: - Routable matches (WF-EX1)
+
+    /// ⚠️ An EMPTY label is absent, never a port: `edgeIsLive` resolves an edge's port as
+    /// `sourcePortLabel ?? ""`, so activating `""` would fire every UNLABELLED edge out of the
+    /// Router and send the run down the default branch as though a rule had matched.
+    func testABlankLabelIsNeverRoutable() {
+        XCTAssertEqual(WorkflowExecutor.routableMatches([""]), [])
+        XCTAssertEqual(WorkflowExecutor.routableMatches(["", "Urgent"]), ["Urgent"],
+                       "a blank match must not turn a single real match into an ambiguity")
     }
 
-    private func routeToGeneral(_ rules: [ConditionRule]) -> RouterNoMatchBehavior {
-        .route(ruleID: rules[1].id)
-    }
-
-    // MARK: - The finding itself
-
-    /// ⚠️ THE TEST WF-CC10 EXISTS FOR. Same setting, same rules — the ONLY difference is whether
-    /// the classifier produced a verdict. Before the fix both returned `.route(port: "General")`,
-    /// which is how an MLX slot race silently became a routing decision on a run that then
-    /// reported success.
-    func testACrashedClassifierAndAnInconclusiveOneResolveToDifferentDispositions() {
-        let r = rules()
-        let behavior = routeToGeneral(r)
-
-        let crashed = WorkflowExecutor.resolveNoMatch(
-            behavior: behavior, outcome: .failed(reason: "model slot held by another run"), rules: r)
-        let inconclusive = WorkflowExecutor.resolveNoMatch(
-            behavior: behavior, outcome: .noMatch, rules: r)
-
-        XCTAssertNotEqual(crashed, inconclusive,
-                          "a classifier that NEVER RAN and one that ran and found nothing must not resolve identically — that equality IS WF-CC10")
-
-        guard case .fail(let reason) = crashed else {
-            return XCTFail("a classifier fault must fail the node, got \(crashed)")
-        }
-        XCTAssertTrue(reason.contains("could not be consulted"), reason)
-        XCTAssertTrue(reason.contains("model slot held by another run"),
-                      "the underlying cause must survive into the reason: \(reason)")
-        XCTAssertEqual(inconclusive, .route(port: "General"),
-                       "an explicit 'none of these' IS the case `When Nothing Matches` was written for")
-    }
-
-    /// The model ran and said "none of these". That is a verdict about the RULES — the author's
-    /// setting applies exactly as designed.
-    func testAnExplicitNoneOfTheseStillFollowsTheAuthorsDefaultRoute() {
-        let r = rules()
-        XCTAssertEqual(
-            WorkflowExecutor.resolveNoMatch(behavior: routeToGeneral(r), outcome: .noMatch, rules: r),
-            .route(port: "General"))
-    }
-
-    /// ⚠️ THE DEBATABLE BOUNDARY, pinned deliberately. An unreadable reply means the model RAN and
-    /// could not decide — and "if it can't decide, When Nothing Matches applies" is what the Router
-    /// inspector promises. A small local model producing mush is precisely the audience that picks
-    /// `.route`. If this ever changes to `.fail`, this is the test that says so out loud.
-    func testAnUnreadableReplyStillFollowsTheAuthorsDefaultRoute() {
-        let r = rules()
-        XCTAssertEqual(
-            WorkflowExecutor.resolveNoMatch(
-                behavior: routeToGeneral(r), outcome: .unreadable(preview: "It is not QP3N"), rules: r),
-            .route(port: "General"))
-    }
-
-    // MARK: - Honest reasons
-
-    /// ⚠️ Pins the second wrongness in the old `detail` string: it INFERRED "the classifier ran"
-    /// from `config.llmFallbackEnabled`, so a Router whose classifier is switched OFF — and one
-    /// where a rule matched with a BLANK label, skipping the classifier entirely — both reported
-    /// "the AI Classifier did not return a label" about a classifier that was never consulted.
-    func testAClassifierThatNeverRanIsNotDescribedAsHavingAnswered() {
-        let r = rules()
-        let disposition = WorkflowExecutor.resolveNoMatch(behavior: .failNode, outcome: nil, rules: r)
-
-        guard case .fail(let reason) = disposition else {
-            return XCTFail("expected .fail, got \(disposition)")
-        }
-        XCTAssertEqual(reason, "no rule matched")
-        XCTAssertFalse(reason.localizedCaseInsensitiveContains("classifier"),
-                       "no classifier was consulted, so the reason must not mention one: \(reason)")
-    }
-
-    func testAnExplicitNoMatchReasonNamesTheClassifierAndTheRuleCount() {
-        let r = rules()
-        guard case .fail(let reason) = WorkflowExecutor.resolveNoMatch(
-            behavior: .failNode, outcome: .noMatch, rules: r) else {
-            return XCTFail("expected .fail")
-        }
-        XCTAssertTrue(reason.contains("none of the 2 categories fit"),
-                      "the reason must distinguish 'the model considered your rules and rejected them' from 'nothing ran': \(reason)")
-    }
-
-    func testAnUnreadableReasonQuotesWhatTheModelActuallySaid() {
-        let r = rules()
-        guard case .fail(let reason) = WorkflowExecutor.resolveNoMatch(
-            behavior: .failNode, outcome: .unreadable(preview: "It is not QP3N"), rules: r) else {
-            return XCTFail("expected .fail")
-        }
-        XCTAssertTrue(reason.contains("It is not QP3N"),
-                      "quoting the reply is what lets a user tell a too-small model from a rules problem: \(reason)")
-    }
-
-    // MARK: - The other arms are unaffected
-
-    func testEndWorkflowStillEndsTheBranchForAGenuineNoMatch() {
-        let r = rules()
-        XCTAssertEqual(
-            WorkflowExecutor.resolveNoMatch(behavior: .endWorkflow, outcome: .noMatch, rules: r),
-            .endBranch)
-    }
-
-    /// …but not after a fault: the fault check precedes the behaviour switch.
-    func testEndWorkflowDoesNotSwallowAClassifierFault() {
-        let r = rules()
-        guard case .fail = WorkflowExecutor.resolveNoMatch(
-            behavior: .endWorkflow, outcome: .failed(reason: "boom"), rules: r) else {
-            return XCTFail("`.endWorkflow` must not turn a classifier fault into a graceful ending — that reports SUCCESS on a run where nothing was classified")
-        }
-    }
-
-    /// A deleted default-route target still fails honestly — unchanged, and the in-file precedent
-    /// this whole finding's policy was argued from.
-    func testADeletedDefaultRouteTargetStillFailsHonestly() {
-        let r = rules()
-        guard case .fail(let reason) = WorkflowExecutor.resolveNoMatch(
-            behavior: .route(ruleID: UUID()), outcome: .noMatch, rules: r) else {
-            return XCTFail("expected .fail for a deleted route target")
-        }
-        XCTAssertTrue(reason.contains("no longer exists"), reason)
-    }
-
-    /// ⚠️ Proves the MAPPING only. That a real Stop actually produces `.cancelled` is NOT proven by
-    /// any test in this repo — the hermetic vehicle throws before reaching a cancellable await, and
-    /// nothing can make the classifier's `model.generate` throw `CancellationError`. Recorded as an
-    /// explicit coverage gap rather than implied.
-    func testACancelledClassifierIsNeverDescribedAsAClassifierVerdict() {
-        let r = rules()
-        guard case .fail(let reason) = WorkflowExecutor.resolveNoMatch(
-            behavior: .failNode, outcome: .cancelled, rules: r) else {
-            return XCTFail("expected .fail")
-        }
-        XCTAssertFalse(reason.localizedCaseInsensitiveContains("classifier"),
-                       "a Stop is not a classifier verdict: \(reason)")
-    }
-
-    // MARK: - Outcome adapter
-
-    func testOnlyALabelOutcomeExposesALabelToPortResolution() {
-        XCTAssertEqual(WorkflowExecutor.ClassifierOutcome.label("Urgent").label, "Urgent")
-        XCTAssertNil(WorkflowExecutor.ClassifierOutcome.noMatch.label)
-        XCTAssertNil(WorkflowExecutor.ClassifierOutcome.unreadable(preview: "x").label)
-        XCTAssertNil(WorkflowExecutor.ClassifierOutcome.failed(reason: "x").label)
-        XCTAssertNil(WorkflowExecutor.ClassifierOutcome.cancelled.label,
-                     "a cancelled classifier must never contribute a routing signal")
+    /// Two rules sharing a label share one port — one branch, not an ambiguity.
+    func testSharedLabelsCountOnceInRuleOrder() {
+        XCTAssertEqual(WorkflowExecutor.routableMatches(["Bug", "Bug", "Feature"]), ["Bug", "Feature"])
     }
 
     // MARK: - The UNIFIED policy (2026-08-17 redesign)
@@ -330,58 +194,7 @@ final class WorkflowNoMatchDispositionTests: XCTestCase {
         XCTAssertTrue(amb.contains("AI Classifier named 2 categories"), amb)
         XCTAssertTrue(amb.contains("Urgent, Billing"), amb)
     }
-    // MARK: - Migration seeding (inspector) + the prompt template
-
-    private func legacyConfig(ask: Bool, noMatch: RouterNoMatchBehavior,
-                              fallbackLabel: String = "") -> ConditionNodeConfig {
-        var c = ConditionNodeConfig()
-        c.rules = ruleSet()
-        c.askOnAmbiguity = ask
-        c.noMatchBehavior = noMatch
-        c.fallbackLabel = fallbackLabel
-        return c
-    }
-
-    /// ⚠️ The migration happens on an explicit SAVE, never at decode — so a stored workflow keeps
-    /// its exact behaviour until its author opens the node. This seeds what the merged control
-    /// shows them.
-    func testSeedingMapsTheLegacyPairOntoTheUnifiedPolicy() {
-        // ask ON + fail  → the default mass. Ask, falling back to fail.
-        XCTAssertEqual(ConditionNodeInspectorView.seedPolicy(from: legacyConfig(ask: true, noMatch: .failNode)),
-                       .ask(fallback: .failNode))
-        // ask OFF + fail → resolve silently, both triggers.
-        XCTAssertEqual(ConditionNodeInspectorView.seedPolicy(from: legacyConfig(ask: false, noMatch: .failNode)),
-                       .failNode)
-        // ask ON + end   → Ask, falling back to ending the branch.
-        XCTAssertEqual(ConditionNodeInspectorView.seedPolicy(from: legacyConfig(ask: true, noMatch: .endWorkflow)),
-                       .ask(fallback: .endBranch))
-        // ask OFF + route → that route, both triggers.
-        var routed = legacyConfig(ask: false, noMatch: .failNode)
-        let target = routed.rules[2].id
-        routed.noMatchBehavior = .route(ruleID: target)
-        XCTAssertEqual(ConditionNodeInspectorView.seedPolicy(from: routed), .route(ruleID: target))
-    }
-
-    /// ⚠️ A legacy catch-all OUTRANKS `noMatchBehavior` at runtime today, so it must seed the
-    /// route — otherwise the first Save would silently move where unmatched input goes, which is
-    /// exactly the failure the `fallbackLabel` retirement note warns about.
-    func testSeedingHonoursALegacyCatchAllOverNoMatchBehavior() {
-        // ⚠️ Read the id from the SAME config the seeder sees — `ruleSet()` mints fresh UUIDs on
-        // every call, so comparing against a second instance's id compares two different rules.
-        let config = legacyConfig(ask: false, noMatch: .failNode, fallbackLabel: "General")
-        let generalID = config.rules.first { $0.label == "General" }!.id
-
-        XCTAssertEqual(ConditionNodeInspectorView.seedPolicy(from: config), .route(ruleID: generalID),
-                       "the catch-all is where unmatched input goes TODAY — seeding fail would change it")
-    }
-
-    /// An already-migrated node is returned untouched — seeding is not idempotent-by-luck, it
-    /// short-circuits.
-    func testSeedingLeavesAnExistingPolicyAlone() {
-        var c = legacyConfig(ask: true, noMatch: .failNode)
-        c.decisionPolicy = .endBranch
-        XCTAssertEqual(ConditionNodeInspectorView.seedPolicy(from: c), .endBranch)
-    }
+    // MARK: - The prompt template
 
     /// ⚠️ The placeholder expands at RUN TIME, which is what makes rule edits non-clobbering and
     /// non-staling at once.

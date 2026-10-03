@@ -66,12 +66,9 @@ struct FileTagPopoverView: View {
                     .font(theme.fontHeadline)
                     .foregroundColor(theme.primaryText)
                 Spacer()
-                Button(action: dismissAction) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(theme.tertiaryText)
+                TactileIconButton(icon: "xmark", tooltip: "Close", size: .compact) {
+                    dismissAction()
                 }
-                .buttonStyle(PlainButtonStyle())
-                .accessibilityLabel("Close")
             }
 
             Text("Path: \(fileItem.url.path)")
@@ -80,8 +77,13 @@ struct FileTagPopoverView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             
-            HStack {
-                Button {
+            HStack(spacing: 8) {
+                TactileButton(
+                    title: fullPathCopied ? "Path Copied!" : "Copy Path",
+                    icon: fullPathCopied ? "checkmark.circle.fill" : "doc.on.doc",
+                    variant: fullPathCopied ? .primary : .secondary,
+                    size: .compact
+                ) {
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
                     pasteboard.setString(fileItem.url.path, forType: .string)
@@ -89,16 +91,14 @@ struct FileTagPopoverView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         fullPathCopied = false
                     }
-                } label: {
-                    HStack {
-                        Image(systemName: fullPathCopied ? "checkmark.circle.fill" : "doc.on.doc")
-                        Text(fullPathCopied ? "Path Copied!" : "Copy Path")
-                    }
-                    .foregroundColor(fullPathCopied ? theme.successColor : theme.accentColor)
                 }
-                .buttonStyle(.bordered)
                 
-                Button("Open in Finder") {
+                TactileButton(
+                    title: "Open in Finder",
+                    icon: "folder",
+                    variant: .subtle,
+                    size: .compact
+                ) {
                     NSWorkspace.shared.activateFileViewerSelecting([fileItem.url])
                     dismissAction()
                 }
@@ -137,7 +137,12 @@ struct FileTagPopoverView: View {
                     .font(theme.fontCaption)
                     .foregroundColor(theme.errorColor)
             } else {
-                Button("Show Content Preview") {
+                TactileButton(
+                    title: "Show Content Preview",
+                    icon: "eye",
+                    variant: .secondary,
+                    size: .compact
+                ) {
                     loadContentPreview()
                 }
             }

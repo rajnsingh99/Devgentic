@@ -384,7 +384,7 @@ final class QuickAccessSessionViewModel {
             let title = query.isEmpty ? (files.first?.name ?? String(localized: "Attachment")) : query
             let convID = ensureConversation(titleFrom: title, profileID: config.profile.id)
             // Bind the profile so restart-resume (G1), ChatOps, and the sidebar all resolve it.
-            persistence.updateBackendForConversation(id: convID, backendType: nil, backendEntityId: config.profile.id)
+            persistence.updateBackendForConversation(id: convID, backendEntityId: config.profile.id)
 
             // Factory does the same text/image attachment classification as the main send path.
             // Built through `panelTurn` so the persisted row and the row handed to the send path

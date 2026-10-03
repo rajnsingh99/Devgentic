@@ -214,7 +214,10 @@ struct BotConfigDetailView: View {
             SaveAdvisoryBanner(advisories: saveAdvisories) {
                 withAnimation { saveAdvisories = [] }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, ViewLayout.containerPadding)
+            .padding(.top, 8)
+            .frame(maxWidth: ViewLayout.maxContentWidth)
+            .frame(maxWidth: .infinity, alignment: .center)
 
             ScrollView {
                 VStack(spacing: 32) {

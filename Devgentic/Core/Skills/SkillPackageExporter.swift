@@ -8,11 +8,10 @@
 //
 //  ## Exports the FOLDER, never a rebuilt package
 //
-//  The tempting alternative — serialize a `SkillPackage` from `loadFullPackage` — silently loses
-//  most of a real skill. `loadResources` is lossy by design: five named subdirectories, one level
-//  deep, no hidden files, no symlinks, nothing over 10 MB, and every non-UTF-8 file skipped. A
-//  recipient would get a skill missing its images and binaries, with no error anywhere to say so.
-//  Copying the bytes is the only export that round-trips.
+//  The tempting alternative — serialize a `SkillPackage` rebuilt from the folder — silently loses
+//  most of a real skill: any rebuild picks named subdirectories, skips hidden files, symlinks and
+//  non-UTF-8 files. A recipient would get a skill missing its images and binaries, with no error
+//  anywhere to say so. Copying the bytes is the only export that round-trips.
 //
 //  ## `--keepParent`: defence in depth, NOT load-bearing
 //

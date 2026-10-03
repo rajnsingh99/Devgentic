@@ -345,7 +345,7 @@ struct CoreIntelligenceSettingsView: View {
                 .foregroundColor(theme.secondaryText)
         } else {
             Picker("", selection: $selectedModel) {
-                Text("Select a model…")
+                Text("Select a model")
                     .tag("")
 
                 ForEach(modelService.installedModels) { model in

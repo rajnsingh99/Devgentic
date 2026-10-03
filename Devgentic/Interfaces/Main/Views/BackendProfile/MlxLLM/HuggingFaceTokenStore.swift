@@ -209,9 +209,6 @@ final class HuggingFaceTokenStore {
         }
     }
 
-    /// Legacy spelling of `refreshFromKeychain`, kept so existing call sites keep compiling.
-    func invalidateCache() { refreshFromKeychain() }
-
     // MARK: - Validation
 
     /// Whether a string looks like a HuggingFace access token.

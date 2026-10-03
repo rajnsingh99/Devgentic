@@ -352,8 +352,9 @@ final class PlaceholderIndexGateTests: XCTestCase {
         XCTAssertTrue(ChatMessage.isSyntheticPlaceholder(ChatMessage.stoppedRunPlaceholder))
     }
 
-    func testLegacyPlaceholderIsSynthetic() {
-        XCTAssertTrue(ChatMessage.isSyntheticPlaceholder(ChatMessage.legacyStoppedRunPlaceholder))
+    /// The pre-refactor wording is no longer recognised — only the current placeholder is synthetic.
+    func testTheRetiredPlaceholderWordingIsNotSynthetic() {
+        XCTAssertFalse(ChatMessage.isSyntheticPlaceholder("*Operation stopped by user.*"))
     }
 
     func testWhitespacePaddingStillMatches() {

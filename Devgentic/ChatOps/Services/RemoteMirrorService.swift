@@ -55,6 +55,16 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
     /// Maps operationID → transport message_id (for editing HITL messages after resolution).
     private var hitlMessageIDs: [UUID: String] = [:]
 
+    /// A resolution that arrived while its prompt was still being POSTED, parked for the render
+    /// window to apply the moment it has a message id.
+    ///
+    /// ⚠️ This carries the REAL verdict. Before it, a prompt answered mid-post was rewritten by the
+    /// render window's interaction-center re-check as "✅ Already answered on another surface." —
+    /// wrong when it was answered from this very chat, and a ✅ even for a DENIAL. The re-check is
+    /// kept as the fallback for the one ordering where the prompt is gone from the centre but this
+    /// service's observer Task has not yet run (see the render window).
+    private var resolutionsDuringRender: [UUID: (statusText: String, kind: String)] = [:]
+
     /// One reminder per posted prompt, cancelled when the prompt resolves or the mirror tears down.
     private var reminderTasks: [UUID: Task<Void, Never>] = [:]
 
@@ -216,6 +226,7 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         remoteSessions.removeAll()
         mirroringConversations.removeAll()
         hitlMessageIDs.removeAll()
+        resolutionsDuringRender.removeAll()
         reminderTasks.values.forEach { $0.cancel() }
         reminderTasks.removeAll()
         mirroredOperations.removeAll()
@@ -492,24 +503,50 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                     // ⚠️ Re-checking AFTER the await rather than reserving before it: the
                     // observers key off this map, and a placeholder would make them act on a
                     // message id that does not exist yet.
-                    if activeStreamManager?.interactionCenter?.item(withID: pending.id) == nil {
+                    if let resolved = resolutionsDuringRender.removeValue(forKey: pending.id) {
+                        // The observer already delivered the real verdict while the post was in
+                        // flight. Apply it now; a notification does not fire twice.
+                        await editResolvedPrompt(session,
+                                                 messageID: msgID,
+                                                 to: resolved.statusText,
+                                                 operationID: pending.id,
+                                                 kind: resolved.kind)
+                        // Released like any resolved operation — a claim never shed suppresses
+                        // every later pass for this id and grows the dedup Set without bound.
+                        mirroredOperations.remove(pending.id)
+                        logger.info("[Mirror] Operation \(pending.id) was resolved while its \(resolved.kind) prompt was still being posted to \(session.source.rawValue); the posted message was rewritten with the actual outcome. CONSEQUENCE: none — the prompt shows what was decided and has no live buttons.")
+                    } else if activeStreamManager?.interactionCenter?.item(withID: pending.id) == nil {
                         logger.error("[Mirror] Operation \(pending.id) resolved while its prompt was being posted to \(session.source.rawValue). CONSEQUENCE: the prompt is rewritten as resolved immediately and its correlation id is NOT stored — without this it would have kept live buttons for a decision already made, and later replies to it would have been routed to a suspension that no longer exists.")
                         await editResolvedPrompt(session,
                                                  messageID: msgID,
                                                  to: "✅ Already answered on another surface.",
                                                  operationID: pending.id,
                                                  kind: "HITL")
+                        // ⚠️ Fallback path only: the prompt left the centre but this service's
+                        // observer Task has not run yet, so the precise verdict is not here. Release
+                        // the claim so that Task, when it runs, sees neither a posted id nor a
+                        // mid-post claim and does nothing — rather than parking a verdict nobody
+                        // will ever collect.
+                        mirroredOperations.remove(pending.id)
                     } else {
                         hitlMessageIDs[pending.id] = msgID
                         scheduleReminder(for: pending, session: session, provider: provider)
                     }
                 } else {
+                    if let resolved = resolutionsDuringRender.removeValue(forKey: pending.id) {
+                        logger.error("[Mirror] Operation \(pending.id) resolved while its \(resolved.kind) prompt was being posted to \(session.source.rawValue), but the transport returned no message id. CONSEQUENCE: the prompt CANNOT be rewritten — it keeps its buttons for a decision already made, and the outcome \"\(resolved.statusText)\" is discarded because there is no message to put it on.")
+                    }
                     logger.error("[Mirror] The transport posted the HITL prompt for operation \(pending.id) but returned no message id. CONSEQUENCE: the prompt cannot be edited when it resolves, so its buttons stay live and the remote user can tap a decision that has already been made.")
                 }
                 logger.info("[Mirror] Sent HITL prompt to \(session.source.rawValue) for operation \(pending.id).")
             } catch {
                 // Release the claim: the prompt was NOT posted, so the next pass must try again.
                 mirroredOperations.remove(pending.id)
+                // Nothing was posted, so a verdict parked for this prompt has nowhere to land — and
+                // must not be applied to a LATER, unrelated re-post of the same operation.
+                if let resolved = resolutionsDuringRender.removeValue(forKey: pending.id) {
+                    logger.error("[Mirror] Operation \(pending.id) resolved while its \(resolved.kind) prompt was in flight to \(session.source.rawValue), and that post then FAILED. CONSEQUENCE: the remote chat never saw this prompt, so nothing misleading is on screen — but the outcome \"\(resolved.statusText)\" is not reported remotely either; only the Mac records it.")
+                }
                 logger.error("[Mirror] Failed to send HITL prompt for operation \(pending.id) to \(session.source.rawValue): \(error.localizedDescription). CONSEQUENCE: the run stays parked with no prompt visible remotely; the claim is released so the next observation pass re-sends it, and only the Mac banner can answer it until then.")
             }
         }
@@ -734,6 +771,49 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         logger.warning("[Mirror] A resolved HITL prompt (op \(operationID?.uuidString.prefix(8) ?? "?"), remote message \(messageID)) cannot be rewritten: \(reason). CONSEQUENCE: its approve/deny buttons stay LIVE in the remote chat on a decision that has already been made — a tap does nothing and answers nobody. Before this line the case was indistinguishable from the ordinary 'not ours' bail and left no trace at all.")
     }
 
+    /// Where a resolution should go: onto a posted prompt, or parked for one still being posted.
+    private enum ResolutionTarget {
+        case posted(messageID: String, session: RemoteSessionInfo)
+        case midPost(session: RemoteSessionInfo)
+
+        var session: RemoteSessionInfo {
+            switch self {
+            case .posted(_, let session), .midPost(let session): return session
+            }
+        }
+    }
+
+    /// ⚠️ THE MID-POST CASE IS THE POINT. `rewritableTarget` alone answers "not ours" for a prompt
+    /// of ours that is still being posted, because its message id is recorded only when
+    /// `transport.render` RETURNS. `mirroredOperations` separates the two: it is claimed BEFORE the
+    /// render await, so an operation that is claimed but has no id is exactly one mid-post.
+    private func resolutionTarget(operationID: UUID, conversationID: UUID?) -> ResolutionTarget? {
+        if let posted = rewritableTarget(operationID: operationID, conversationID: conversationID) {
+            return .posted(messageID: posted.messageID, session: posted.session)
+        }
+        guard hitlMessageIDs[operationID] == nil,              // not a stranded posted prompt
+              mirroredOperations.contains(operationID),        // claimed → a post is in flight
+              let conversationID,
+              let session = remoteSessions[conversationID] else { return nil }
+        return .midPost(session: session)
+    }
+
+    /// The one place every observer hands its verdict to — an edit now, or a rendezvous with the
+    /// render window.
+    private func applyResolution(_ target: ResolutionTarget, operationID: UUID,
+                                 statusText: String, kind: String) async {
+        switch target {
+        case .posted(let messageID, let session):
+            await editResolvedPrompt(session, messageID: messageID, to: statusText,
+                                     operationID: operationID, kind: kind)
+            hitlMessageIDs.removeValue(forKey: operationID)
+            mirroredOperations.remove(operationID)   // [HITL/P5] bound the dedup Set
+        case .midPost(let session):
+            resolutionsDuringRender[operationID] = (statusText, kind)
+            logger.info("[Mirror] Operation \(operationID) resolved while its \(kind) prompt was still being posted to \(session.source.rawValue); the outcome is held for the post to apply. CONSEQUENCE: none if the post succeeds.")
+        }
+    }
+
     /// Reads the two facts every observer needs out of a resolution notification.
     private static func resolution(from notification: Notification) -> (outcome: String?, source: MessageSource?) {
         let outcome = notification.userInfo?[HITLResolvedKey.outcome] as? String
@@ -758,9 +838,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                 guard let self,
                       let operationID,
                       let approved,
-                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                      let target = self.resolutionTarget(operationID: operationID, conversationID: conversationID)
                 else { return }
-                let (messageID, session) = target
+                let session = target.session
 
                 // ⚠️ A CANCEL IS NOT A DENIAL. `drainOperation` resolves a torn-down permission with
                 // `approved: false`, so a stopped run or a deadline used to render as
@@ -774,10 +854,8 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                         + Self.attribution(for: resolution.source, in: session) + "."
                 }
 
-                await self.editResolvedPrompt(session, messageID: messageID, to: statusText,
-                                              operationID: operationID, kind: "tool approval")
-                self.hitlMessageIDs.removeValue(forKey: operationID)
-                self.mirroredOperations.remove(operationID)   // [HITL/P5] bound the dedup Set
+                await self.applyResolution(target, operationID: operationID,
+                                           statusText: statusText, kind: "tool approval")
             }
         }
 
@@ -793,9 +871,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             Task { @MainActor [weak self] in
                 guard let self,
                       let operationID,
-                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                      let target = self.resolutionTarget(operationID: operationID, conversationID: conversationID)
                 else { return }
-                let (messageID, session) = target
+                let session = target.session
 
                 let statusText: String
                 switch resolution.outcome {
@@ -808,10 +886,8 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                     statusText = "✅ Clarification answered"
                         + Self.attribution(for: resolution.source, in: session) + "."
                 }
-                await self.editResolvedPrompt(session, messageID: messageID, to: statusText,
-                                              operationID: operationID, kind: "clarification")
-                self.hitlMessageIDs.removeValue(forKey: operationID)
-                self.mirroredOperations.remove(operationID)   // [HITL/P5] bound the dedup Set
+                await self.applyResolution(target, operationID: operationID,
+                                           statusText: statusText, kind: "clarification")
             }
         }
 
@@ -827,9 +903,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             Task { @MainActor [weak self] in
                 guard let self,
                       let operationID,
-                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                      let target = self.resolutionTarget(operationID: operationID, conversationID: conversationID)
                 else { return }
-                let (messageID, session) = target
+                let session = target.session
 
                 let statusText: String
                 switch resolution.outcome {
@@ -842,10 +918,8 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                     statusText = "✅ Plan approved"
                         + Self.attribution(for: resolution.source, in: session) + "."
                 }
-                await self.editResolvedPrompt(session, messageID: messageID, to: statusText,
-                                              operationID: operationID, kind: "plan review")
-                self.hitlMessageIDs.removeValue(forKey: operationID)
-                self.mirroredOperations.remove(operationID)   // [HITL/P5] bound the dedup Set
+                await self.applyResolution(target, operationID: operationID,
+                                           statusText: statusText, kind: "plan review")
             }
         }
 
@@ -864,9 +938,9 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             Task { @MainActor [weak self] in
                 guard let self,
                       let operationID,
-                      let target = self.rewritableTarget(operationID: operationID, conversationID: conversationID)
+                      let target = self.resolutionTarget(operationID: operationID, conversationID: conversationID)
                 else { return }
-                let (messageID, session) = target
+                let session = target.session
 
                 // ⚠️ A cancelled gate is not a decision, so it does not get a ✅ or an attribution.
                 let statusText: String
@@ -881,10 +955,8 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                     statusText = "✅ Gate decided: \(outcome ?? "")"
                         + Self.attribution(for: source, in: session) + "."
                 }
-                await self.editResolvedPrompt(session, messageID: messageID, to: statusText,
-                                              operationID: operationID, kind: "gate")
-                self.hitlMessageIDs.removeValue(forKey: operationID)
-                self.mirroredOperations.remove(operationID)   // [HITL/P5] bound the dedup Set
+                await self.applyResolution(target, operationID: operationID,
+                                           statusText: statusText, kind: "gate")
             }
         }
     }

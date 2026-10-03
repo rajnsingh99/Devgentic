@@ -565,7 +565,8 @@ final class BlobWriteRefusalTests: XCTestCase {
         let sd = ChatMessageSD(
             id: UUID(), conversationId: UUID(), timestamp: Date(), senderType: "assistant",
             traceID: nil, contentData: Data("[]".utf8), agentResponseData: nil,
-            timelineEventsData: try JSONEncoder().encode(events)
+            timelineEventsData: try JSONEncoder().encode(
+                VersionedBlob(schemaVersion: ChatMessageSD.timelineBlobVersion, payload: events))
         )
         context.insert(sd)
         try context.save()
@@ -600,7 +601,8 @@ final class BlobWriteRefusalTests: XCTestCase {
         let sd = ChatMessageSD(
             id: UUID(), conversationId: UUID(), timestamp: Date(), senderType: "assistant",
             traceID: nil, contentData: Data("[]".utf8), agentResponseData: nil,
-            timelineEventsData: try JSONEncoder().encode(events)
+            timelineEventsData: try JSONEncoder().encode(
+                VersionedBlob(schemaVersion: ChatMessageSD.timelineBlobVersion, payload: events))
         )
         context.insert(sd)
         try context.save()

@@ -9,14 +9,14 @@
 //
 //  ⚠️ KC-56 — the (service, account) pair IS the credential's address. Rename either and every item
 //  written by an earlier build becomes unreachable: the user's keys still sit in their Keychain,
-//  and the app presents every store as "never configured". ChatOps already shipped exactly this
-//  (the 2faad1c bundle-id rename; `legacyKeychainServices` is the repair). So these tests pin the
+//  and the app presents every store as "never configured" — ChatOps shipped exactly this once (the
+//  2faad1c bundle-id rename). So these tests pin the
 //  LITERAL strings each store writes under, observed through its test seam — never the constant it
 //  reads from, because the constant is exactly what a rename changes.
 //
-//  If you are changing one of these deliberately: the old address must be migrated in the same
-//  commit (copy-then-delete, gated on a successful write — see `ProviderKeyStore` and ChatOps'
-//  `legacyKeychainServices`), and only then is the pin below updated.
+//  If you are changing one of these deliberately once the app has users: the old address must be
+//  migrated in the same commit (copy-then-delete, gated on a successful write), and only then is
+//  the pin below updated.
 //
 //  ⚠️ KC-62 — nothing this app stores may be iCloud-synchronizable, and no Keychain traffic may
 //  bypass the one primitive where that is enforced. Adding `kSecAttrSynchronizable: true` reads
@@ -144,9 +144,8 @@ final class KeychainServiceIdentityTests: XCTestCase {
     }
 
     /// ⚠️ ChatOps is the one store whose service DERIVES from the bundle identifier, so this pin
-    /// also fails on a bundle-id rename (register KC-41). That is intended: the outgoing identifier
-    /// must be added to `ChatOpsConfigManager.legacyKeychainServices` in the same commit, or every
-    /// paired bot token is orphaned exactly as 2faad1c orphaned them.
+    /// also fails on a bundle-id rename (register KC-41). That is intended: a rename orphans every
+    /// paired bot token exactly as 2faad1c did, unless it ships with a migration.
     func testChatOpsTokensLiveUnderTheAppBundleIdentifier() {
         let config = ChatOpsConfigManager.shared
         ChatOpsConfigManager.setKeychainForTesting(keychain)
@@ -171,8 +170,8 @@ final class KeychainServiceIdentityTests: XCTestCase {
                 "(app.devgentic.macos, chatOpsSlackBotToken)",
                 "(app.devgentic.macos, chatOpsSlackAppToken)",
             ],
-            "ChatOps credentials must stay at these addresses. A bundle-id rename needs the old id "
-                + "in legacyKeychainServices (KC-41); an account rename needs its own migration."
+            "ChatOps credentials must stay at these addresses. A bundle-id or account rename "
+                + "orphans every paired token unless it ships with a migration (KC-41)."
         )
     }
 }

@@ -22,14 +22,11 @@
 //  silently missing or defaulted. No error, no log, just a profile that loads fine having quietly
 //  lost its settings. That is the same silent-degradation class as G12/G13.
 //
-//  Two of fourteen blob columns already carry a discriminator — `configData` (`ProfileMigrator`
-//  v1–v6, an inline key) and `nodeResultsData` (`VersionedNodeResults`, an envelope). This file
-//  generalises both so the remaining twelve stop guessing.
+//  `configData` carries its own inline key (`ProfileBlobGate`); this file gives every other blob
+//  column a discriminator too, so none of them has to guess.
 //
-//  WHY NOW: nothing has shipped, so every blob on disk was written by a dev build. Stamping today
-//  means every blob a user ever sees is self-describing. Stamp after shipping and "version unknown,
-//  guess" becomes a permanent case — exactly the `?? 0` that `ProfileMigrator` must carry forever
-//  because profiles were versioned after data already existed.
+//  ⚠️ NO LEGACY SHAPES (2026-10-03 history reset, pre-release): every reader accepts only the
+//  stamped/enveloped shape. A blob from before versioning is a decode failure, not a fallback.
 //
 //  TWO MECHANISMS, CHOSEN BY ROOT SHAPE — not interchangeable:
 //
@@ -48,7 +45,7 @@
 //  trap. Swift's synthesized `init(from:)` calls `decode(_:forKey:)` for every non-optional stored
 //  property EVEN WHEN IT HAS A DEFAULT, so adding the property would make every already-persisted
 //  blob throw `keyNotFound` — the precise failure this whole effort exists to prevent. Stamping at
-//  the JSON level (what `ProfileMigrator` already does with `json["schemaVersion"]`) touches no
+//  the JSON level (what `ProfileBlobGate` does with `json["schemaVersion"]`) touches no
 //  type's Codable conformance.
 //
 
@@ -58,16 +55,12 @@ import Foundation
 
 enum BlobVersioning {
 
-    /// The key stamped into object-rooted blobs. Matches the name `ProfileMigrator` already uses on
+    /// The key stamped into object-rooted blobs. Matches the name `ProfileBlobGate` reads on
     /// `configData`, so the app has ONE spelling of this concept rather than two.
     static let versionKey = "schemaVersion"
 
-    /// Reads the version stamped into a blob, or nil when it carries none (a legacy blob written
-    /// before its column was versioned).
-    ///
-    /// nil is a real answer, not an error: it means "written before versioning", and the caller
-    /// decides what that implies. Deliberately tolerant of any root shape — an array simply has no
-    /// version, which is the truth.
+    /// Reads the version stamped into a blob, or nil when it carries none. Deliberately tolerant of
+    /// any root shape — an array simply has no version, which is the truth.
     static func version(of data: Data) -> Int? {
         struct Probe: Decodable { let schemaVersion: Int? }
         return (try? JSONDecoder().decode(Probe.self, from: data))?.schemaVersion
@@ -135,14 +128,7 @@ enum BlobVersioning {
 
 /// A versioned wrapper for blobs that cannot carry an inline key.
 ///
-/// Use for ARRAY-rooted payloads, and for dictionaries whose keys come from the user. Generalises
-/// the shape `WorkflowRunRecordSD.VersionedNodeResults` already uses.
-///
-/// ⚠️ Wrapping CHANGES the on-disk shape, unlike mechanism A. Every reader must therefore keep the
-/// legacy fallback — decode the envelope, and on failure decode the bare payload — for as long as
-/// unwrapped blobs can exist. `nodeResultsData` proves this is not theoretical: the envelope has
-/// been in the code for a while and the rows in the developer's real store are STILL bare arrays,
-/// because a row is only rewritten when its run is touched.
+/// Use for ARRAY-rooted payloads, and for dictionaries whose keys come from the user.
 struct VersionedBlob<Payload: Codable>: Codable {
     let schemaVersion: Int
     let payload: Payload
@@ -152,18 +138,12 @@ struct VersionedBlob<Payload: Codable>: Codable {
         self.payload = payload
     }
 
-    /// Decodes either the envelope or a bare legacy payload, reporting which it found.
-    ///
-    /// Returns nil only when the bytes are neither — a genuine decode failure the caller must treat
-    /// as unreadable rather than as "empty".
+    /// Decodes the envelope. Returns nil when the bytes are not one — a genuine decode failure the
+    /// caller must treat as unreadable rather than as "empty". A bare, unwrapped payload is NOT
+    /// accepted: that shape predates versioning and is no longer read (2026-10-03 reset).
     static func decode(from data: Data, decoder: JSONDecoder = JSONDecoder())
-        -> (payload: Payload, version: Int?)? {
-        if let wrapped = try? decoder.decode(VersionedBlob<Payload>.self, from: data) {
-            return (wrapped.payload, wrapped.schemaVersion)
-        }
-        if let bare = try? decoder.decode(Payload.self, from: data) {
-            return (bare, nil)  // nil = written before this column was versioned
-        }
-        return nil
+        -> (payload: Payload, version: Int)? {
+        guard let wrapped = try? decoder.decode(VersionedBlob<Payload>.self, from: data) else { return nil }
+        return (wrapped.payload, wrapped.schemaVersion)
     }
 }

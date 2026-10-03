@@ -337,6 +337,7 @@ struct IslandPillButton: View {
                     Image(systemName: icon)
                         .font(.system(.caption2, weight: .bold))
                         .imageScale(.small)
+                        .foregroundColor(iconColor)
                 }
                 Text(title)
                     .font(.system(.caption, weight: fontWeight))
@@ -360,7 +361,13 @@ struct IslandPillButton: View {
                         lineWidth: isFocused ? 1.5 : 0.5
                     )
             )
-            .shadow(color: theme.shadowColor.opacity(isHovered ? 0.3 : 0.15), radius: 6, y: 2)
+            .shadow(
+                color: style == .primary && buttonAccentStyle == .themeContrast
+                    ? Color.black.opacity(isHovered ? 0.3 : 0.15)
+                    : (style == .primary ? theme.accentColor.opacity(isHovered ? 0.25 : 0.0) : theme.shadowColor.opacity(isHovered ? 0.3 : 0.15)),
+                radius: 6,
+                y: 2
+            )
             .opacity(isEnabled ? 1.0 : 0.45)
             .scaleEffect(shouldScale ? 1.03 : 1.0)
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -403,13 +410,25 @@ struct IslandPillButton: View {
         }
     }
 
+    private var iconColor: Color {
+        switch style {
+        case .primary:
+            if buttonAccentStyle == .accent {
+                return theme.accentColor
+            }
+            return foregroundColor
+        default:
+            return foregroundColor
+        }
+    }
+
     private var foregroundColor: Color {
         switch style {
         case .primary:
             if buttonAccentStyle == .themeContrast {
                 return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
             }
-            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            return isHovered ? theme.primaryText : theme.primaryText.opacity(0.95)
         case .success:
             return .white
         case .secondary:
@@ -427,10 +446,9 @@ struct IslandPillButton: View {
                     ? [Color.white.opacity(isHovered ? 0.4 : 0.2), Color.white.opacity(0.1)]
                     : [Color.black.opacity(isHovered ? 0.3 : 0.15), Color.black.opacity(0.08)]
             }
-            if theme.isAccentLight {
-                return [theme.dividerColor.opacity(isHovered ? 0.8 : 0.4), theme.dividerColor.opacity(0.3)]
-            }
-            return [Color.white.opacity(isHovered ? 0.4 : 0.25), theme.accentColor.opacity(0.4)]
+            return isHovered
+                ? [theme.accentColor.opacity(0.55), theme.accentColor.opacity(0.25)]
+                : [theme.secondaryText.opacity(0.22), theme.secondaryText.opacity(0.12)]
         case .success:
             return [Color.white.opacity(isHovered ? 0.4 : 0.25), theme.successColor.opacity(0.4)]
         case .secondary:
@@ -454,7 +472,7 @@ struct IslandPillButton: View {
                     ? Color.white.opacity(isHovered ? 1.0 : 0.95)
                     : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
             }
-            return theme.accentColor.opacity(isHovered ? 1.0 : 0.9)
+            return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
         case .success:
             return theme.successColor.opacity(isHovered ? 1.0 : 0.9)
         case .secondary:
@@ -692,8 +710,8 @@ struct GlassActionButton: View {
             // Flat solid material primary: dark icon on dark mode white button, white icon on light mode dark button
             return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
         } else if isAccentPrimary {
-            // Dynamic accent solid primary: white icon
-            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            // Style 3 (Tactile Glass Surface): vibrant accent icon
+            return theme.accentColor
         } else if buttonAccentStyle == .themeContrast {
             // Material secondary/action: crisp monochrome pro styling
             return isHovered ? theme.primaryText : theme.secondaryText
@@ -707,7 +725,8 @@ struct GlassActionButton: View {
         if isMaterialPrimary {
             return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
         } else if isAccentPrimary {
-            return theme.isAccentLight ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
+            // Style 3: clean primary text
+            return isHovered ? theme.primaryText : theme.primaryText.opacity(0.95)
         } else {
             return isHovered ? theme.primaryText : theme.primaryText.opacity(0.92)
         }
@@ -720,8 +739,8 @@ struct GlassActionButton: View {
                 ? Color.white.opacity(isHovered ? 1.0 : 0.95)
                 : Color(red: 0.12, green: 0.12, blue: 0.14).opacity(isHovered ? 1.0 : 0.95)
         } else if isAccentPrimary {
-            // Solid accent styling for Dynamic Accent
-            return theme.accentColor.opacity(isHovered ? 1.0 : 0.92)
+            // Style 3: translucent glass surface
+            return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
         } else {
             // Sleek translucent glass surface
             return isHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay
@@ -734,9 +753,8 @@ struct GlassActionButton: View {
                 ? Color.white
                 : Color(red: 0.12, green: 0.12, blue: 0.14)
         } else if isAccentPrimary {
-            return theme.isAccentLight
-                ? theme.dividerColor.opacity(isHovered ? 0.80 : 0.40)
-                : Color.white.opacity(isHovered ? 0.40 : 0.20)
+            // Style 3: subtle 1px stroke glowing with accent tint on hover
+            return isHovered ? theme.accentColor.opacity(0.55) : theme.secondaryText.opacity(0.18)
         } else if buttonAccentStyle == .themeContrast {
             return isHovered ? theme.primaryText.opacity(0.40) : theme.dividerColor.opacity(0.25)
         } else {
@@ -750,7 +768,7 @@ struct GlassActionButton: View {
                 ? Color.black.opacity(isHovered ? 0.35 : 0.20)
                 : Color.black.opacity(isHovered ? 0.25 : 0.12)
         } else if isAccentPrimary {
-            return theme.accentColor.opacity(isHovered ? 0.30 : 0.15)
+            return isHovered ? theme.accentColor.opacity(0.25) : Color.black.opacity(0.08)
         } else if buttonAccentStyle == .themeContrast {
             return Color.black.opacity(isHovered ? 0.16 : 0.06)
         } else {

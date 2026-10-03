@@ -106,36 +106,4 @@ enum SynthesisOptIn {
         }
         return Decision(optedIn: true, family: family, reason: "opted-in")
     }
-
-    // MARK: - Migration
-
-    /// One-time seeding of the per-family toggles from the legacy single toggle,
-    /// so a previously-opted-in user keeps synthesis everywhere. Idempotent —
-    /// guarded by `ciSynthPerProviderMigratedKey`.
-    ///
-    /// Reads the legacy key EXPLICITLY (`object(forKey:) as? Bool`) rather than
-    /// `bool(forKey:)`, and seeds only on an explicit `true`. This is deliberate:
-    /// the settings UI declared `@AppStorage(...) = true` while the engine read
-    /// `UserDefaults.bool(forKey:)` (false when absent), so an install where the
-    /// switch was never touched DISPLAYED "on" but never actually synthesized.
-    /// Seeding from the engine's real behavior keeps every user's experience
-    /// unchanged across the upgrade; seeding from the UI's claim would silently
-    /// switch synthesis ON for everyone who never opted in.
-    ///
-    /// - Returns: true if seeding ran on this call (false if already migrated).
-    @discardableResult
-    static func migrateLegacyToggleIfNeeded(defaults: UserDefaults = .standard) -> Bool {
-        guard !defaults.bool(forKey: AppSettings.ciSynthPerProviderMigratedKey) else {
-            return false
-        }
-
-        let legacyOptedIn = (defaults.object(forKey: AppSettings.ciFeatureResponseSynthesisKey) as? Bool) == true
-        for family in ProviderFamily.allCases {
-            defaults.set(legacyOptedIn, forKey: family.defaultsKey)
-        }
-        defaults.set(true, forKey: AppSettings.ciSynthPerProviderMigratedKey)
-
-        logger.info("[SYNTH] Migrated legacy Response Synthesis toggle → per-family opt-in. legacy-explicit-true: \(legacyOptedIn) → MLX/Ollama/Remote all set to \(legacyOptedIn).")
-        return true
-    }
 }

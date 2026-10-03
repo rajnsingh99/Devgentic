@@ -130,7 +130,7 @@ final class WithdrawnCapabilityAndAdvisorySurfaceTests: XCTestCase {
         XCTAssertTrue(agent.supportsSystemInstructions)
         XCTAssertFalse(imageGen.supportsSystemInstructions,
                        "an image generator has no instructions field to be empty")
-        XCTAssertFalse(ProfileDetails.workflow(WorkflowConfig(agentProfileIDs: []))
+        XCTAssertFalse(ProfileDetails.workflow(WorkflowConfig())
                         .supportsSystemInstructions)
     }
 
@@ -139,7 +139,7 @@ final class WithdrawnCapabilityAndAdvisorySurfaceTests: XCTestCase {
             llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3"),
             instructions: "be brief"))
         XCTAssertEqual(agent.systemInstructions, "be brief")
-        XCTAssertNil(ProfileDetails.workflow(WorkflowConfig(agentProfileIDs: [])).systemInstructions)
+        XCTAssertNil(ProfileDetails.workflow(WorkflowConfig()).systemInstructions)
     }
 
     /// The advisory must remain non-blocking — G92, re-asserted on the new channel.

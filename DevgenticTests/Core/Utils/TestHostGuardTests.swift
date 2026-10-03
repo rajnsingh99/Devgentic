@@ -88,8 +88,6 @@ final class TestHostGuardTests: XCTestCase {
              "deletes the developer's real crash payloads"),
             ("Devgentic/Interfaces/Main/Views/Sidebar/Explorer/FileSystemMonitor.swift", "start",
              "opens an FSEventStream on the developer's real folder"),
-            ("Devgentic/Interfaces/Shared/ChatInput/ChatInputViewModel.swift", "checkMicPermissions",
-             "raises a modal microphone prompt from a process nobody is watching"),
         ]
 
         for entry in required {
@@ -97,6 +95,24 @@ final class TestHostGuardTests: XCTestCase {
             XCTAssertTrue(body.contains("TestHost.permits"),
                           "\(entry.symbol) is unguarded — in a test host it \(entry.why)")
         }
+    }
+
+    /// ⚠️ The composer used to ASK for the microphone from `init` — a guard row here once covered it.
+    /// The fix removed the prompt rather than guarding it: the composer is built at app scope, so the
+    /// request raised the macOS microphone dialog on every first launch, before any voice use. The
+    /// invariant is now "the init-path status sync never requests", with the request on the mic tap.
+    func testBuildingTheComposerNeverRequestsTheMicrophone() throws {
+        let file = "Devgentic/Interfaces/Shared/ChatInput/ChatInputViewModel.swift"
+        let sync = try functionBody(named: "syncMicPermissionStatus", in: file)
+        XCTAssertFalse(sync.contains("requestRecordPermission"),
+                       "the init-path sync prompts again — the mic dialog is back on first launch")
+        XCTAssertTrue(sync.contains("recordPermission"), "the reader returned a stub — it is not seeing the real body")
+
+        // The request must still exist somewhere a user acts, or voice input could never be granted.
+        // (A file scan, not `functionBody`: the file also declares a protocol `startStreaming(`.)
+        let source = stripComments(try readSource(file))
+        XCTAssertTrue(source.contains("requestRecordPermission"),
+                      "nothing requests the microphone any more — an undetermined status can never become granted")
     }
 
     /// ⚠️ NON-VACUITY. Every assertion above is a substring scan, so a wrong path or a renamed symbol

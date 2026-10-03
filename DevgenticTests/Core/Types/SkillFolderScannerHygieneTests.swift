@@ -240,12 +240,6 @@ final class SkillFolderScannerHygieneTests: XCTestCase {
 
         XCTAssertEqual(exfil.resourceCount, 0,
                        "a symlinked resource directory must contribute no counted resources")
-
-        let package = try SkillFolderScanner.loadFullPackage(for: exfil)
-        XCTAssertTrue(package.resources.isEmpty,
-                      "nothing behind a symlinked resource directory may be loaded")
-        XCTAssertFalse(package.resources.contains { $0.content.contains("PRIVATE-KEY-MATERIAL") },
-                       "file content from outside the skill folder must never reach a SkillPackage")
     }
 
     /// Same characterization caveat as above: this passes with or without the guard.
@@ -287,8 +281,5 @@ final class SkillFolderScannerHygieneTests: XCTestCase {
         }
 
         XCTAssertEqual(normal.resourceCount, 1, "a genuine resource directory must still be counted")
-        let package = try SkillFolderScanner.loadFullPackage(for: normal)
-        XCTAssertEqual(package.resources.count, 1, "a genuine resource directory must still load")
-        XCTAssertTrue(package.resources[0].content.contains("Checklist"))
     }
 }

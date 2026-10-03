@@ -4,13 +4,12 @@
 //  ProfileBlobDowngradeTests.swift
 //  devgenticTests
 //
-//  Covers G18: an older build reading a profile blob written by a newer one.
+//  Covers G18 — an older build reading a profile blob written by a newer one — and, since the
+//  2026-10-03 history reset, a blob older than the current version (`ProfileBlobGate`).
 //
-//  `ProfileMigrator` is forward-only — its steps are shaped `if storedVersion < N`. A blob stamped
-//  ABOVE the version this build knows matched no step, was passed through untouched, and was handed
-//  to a decoder that could not read it. The decode failure then presented as "this profile is
-//  corrupt", when the truth was "this profile is from the future" — two situations whose remedies
-//  are opposite. Corrupt invites the user to reconfigure, which overwrites the blob and makes the
+//  A blob stamped ABOVE the version this build knows was once handed to a decoder that could not
+//  read it, and the failure presented as "this profile is corrupt", when the truth was "this
+//  profile is from the future" — two situations whose remedies are opposite. Corrupt invites the user to reconfigure, which overwrites the blob and makes the
 //  loss permanent. From-the-future needs them to change nothing and update the app.
 //
 //  ⚠️ The schema layer cannot help here. With a single declared schema version, an older build's
@@ -40,54 +39,59 @@ final class ProfileBlobDowngradeTests: XCTestCase {
     // MARK: - The refusal
 
     func testABlobFromANewerBuildIsRefusedRatherThanDecoded() throws {
-        let future = try blob(version: ProfileMigrator.currentVersion + 1)
+        let future = try blob(version: ProfileBlobGate.currentVersion + 1)
 
-        guard case .tooNew(let storedVersion) = ProfileMigrator.migrateIfNeeded(future) else {
-            return XCTFail("A newer-versioned blob must be refused, not migrated")
+        guard case .tooNew(let storedVersion) = ProfileBlobGate.check(future) else {
+            return XCTFail("A newer-versioned blob must be refused, not decoded")
         }
-        XCTAssertEqual(storedVersion, ProfileMigrator.currentVersion + 1)
+        XCTAssertEqual(storedVersion, ProfileBlobGate.currentVersion + 1)
     }
 
     /// Being far ahead must behave the same as being one ahead — the old code's failure mode was
     /// that NO step matched, and that is equally true for +1 and +100.
     func testAnyFutureVersionIsRefused() throws {
         for ahead in [1, 2, 7, 100] {
-            let future = try blob(version: ProfileMigrator.currentVersion + ahead)
-            guard case .tooNew = ProfileMigrator.migrateIfNeeded(future) else {
+            let future = try blob(version: ProfileBlobGate.currentVersion + ahead)
+            guard case .tooNew = ProfileBlobGate.check(future) else {
                 return XCTFail("+\(ahead) must be refused")
             }
         }
     }
 
-    // MARK: - The forward path is untouched
+    // MARK: - Older blobs are refused too (2026-10-03 history reset)
 
-    /// The whole point of the migrator. Every version at or below current must still migrate — a
-    /// refusal here would break the ordinary upgrade path, which is the case that actually happens.
-    func testEveryKnownVersionStillMigrates() throws {
-        for version in 0...ProfileMigrator.currentVersion {
-            let data = try blob(version: version)
-            guard case .migrated = ProfileMigrator.migrateIfNeeded(data) else {
-                return XCTFail("v\(version) must migrate, not be refused")
+    /// Nothing upgrades a pre-reset blob any more, so it must be REFUSED — never handed to a decoder
+    /// that might partially succeed and quietly drop settings.
+    func testAnOlderVersionIsRefusedAsUnsupported() throws {
+        for version in 0..<ProfileBlobGate.currentVersion {
+            guard case .unsupported(let stored) = ProfileBlobGate.check(try blob(version: version)) else {
+                return XCTFail("v\(version) must be refused, not decoded")
             }
+            XCTAssertEqual(stored, version)
         }
     }
 
-    /// A blob with no version key at all is v0 legacy data, not future data.
-    func testAnUnstampedBlobIsTreatedAsLegacyNotFuture() throws {
+    /// A blob with no version key at all predates versioning — refused, not mistaken for current.
+    func testAnUnstampedBlobIsRefusedAsUnsupported() throws {
         let unstamped = try JSONSerialization.data(withJSONObject: [
             "profileType": "Bot",
             "llmConfig": ["apiProvider": "Ollama (Local)", "modelName": "llama3"],
         ])
+        guard case .unsupported(0) = ProfileBlobGate.check(unstamped) else {
+            return XCTFail("An unstamped blob must be refused as version 0")
+        }
+    }
 
-        guard case .migrated = ProfileMigrator.migrateIfNeeded(unstamped) else {
-            return XCTFail("An unstamped blob must migrate as v0")
+    func testTheCurrentVersionIsDecodable() throws {
+        guard case .decodable = ProfileBlobGate.check(try blob(version: ProfileBlobGate.currentVersion)) else {
+            return XCTFail("the current version must reach the decoder")
         }
     }
 
     /// Bytes that are not a JSON object carry no version to judge, so they must reach the decoder
     /// and produce a real decoding error — not be misreported as "from the future".
     func testGarbageIsNotMistakenForAFutureVersion() {
-        guard case .migrated = ProfileMigrator.migrateIfNeeded(Data("{ not json".utf8)) else {
+        guard case .decodable = ProfileBlobGate.check(Data("{ not json".utf8)) else {
             return XCTFail("Unparseable bytes must pass through to the decoder")
         }
     }
@@ -97,45 +101,20 @@ final class ProfileBlobDowngradeTests: XCTestCase {
     /// ⚠️ The reason the refusal is worth having: the bytes must survive it. A refusal that
     /// discarded the blob would be no better than the decode failure it replaced.
     func testRefusingDoesNotAlterTheStoredBytes() throws {
-        let future = try blob(version: ProfileMigrator.currentVersion + 1)
+        let future = try blob(version: ProfileBlobGate.currentVersion + 1)
         let before = future
 
-        _ = ProfileMigrator.migrateIfNeeded(future)
-        _ = ProfileMigrator.migrateIfNeeded(future)
+        _ = ProfileBlobGate.check(future)
+        _ = ProfileBlobGate.check(future)
 
         XCTAssertEqual(future, before)
-    }
-
-    /// ⚠️ This replaced an assertion on the literal `6`, which guarded the WRONG DIRECTION: it
-    /// failed on a safe, correctly-paired bump and passed on the dangerous one where the writer and
-    /// the refusal disagree. Pinning a number tests that nobody changed it, which is not the
-    /// property anyone cares about.
-    ///
-    /// What matters is that the migration CHAIN is complete: every version below current must climb
-    /// all the way to current. Add a `ProfileSchemaVersion` case without its `migrateToV<n>` step and
-    /// a blob stops short of the top, this fails, and the gap is named — which is the real
-    /// self-lockout risk, since the encoder would meanwhile be stamping the new number on every save.
-    func testEveryOlderVersionMigratesAllTheWayToCurrent() throws {
-        for version in 0..<ProfileMigrator.currentVersion {
-            let data = try blob(version: version)
-
-            guard case .migrated(let migrated) = ProfileMigrator.migrateIfNeeded(data) else {
-                return XCTFail("v\(version) must migrate")
-            }
-            let stamped = (try JSONSerialization.jsonObject(with: migrated) as? [String: Any])?["schemaVersion"] as? Int
-
-            XCTAssertEqual(
-                stamped, ProfileMigrator.currentVersion,
-                "v\(version) stopped at \(stamped.map(String.init) ?? "nil") — a migrateToV<n> step is missing"
-            )
-        }
     }
 
     /// The writer and the refusal must be the same number. They are now derived from one symbol, so
     /// this cannot fail — which is the point: it records WHY the derivation exists, so a future
     /// reader does not "simplify" `currentVersion` back into its own literal.
     func testTheStampedVersionAndTheRefusalCeilingAreTheSameNumber() {
-        XCTAssertEqual(ProfileMigrator.currentVersion, ProfileSchemaVersion.current.rawValue)
+        XCTAssertEqual(ProfileBlobGate.currentVersion, ProfileSchemaVersion.current.rawValue)
     }
 
     // MARK: - The reason must reach the UI, not die in the log
@@ -172,11 +151,23 @@ final class ProfileBlobDowngradeTests: XCTestCase {
     /// a test rather than a comment.
     @MainActor
     func testAFutureBlobIsReportedAsFromANewerBuildNotAsCorrupt() throws {
-        let future = ProfileMigrator.currentVersion + 1
+        let future = ProfileBlobGate.currentVersion + 1
         let model = try reloadedProfile(withBlob: try blob(version: future))
 
         XCTAssertTrue(model.hasUnreadableConfiguration)
         XCTAssertEqual(model.configurationUnreadableReason, .writtenByNewerBuild(storedVersion: future))
+    }
+
+    @MainActor
+    func testAPreResetBlobIsReportedUnreadableAndKeptIntact() throws {
+        let old = try blob(version: 0)
+        let model = try reloadedProfile(withBlob: old)
+
+        XCTAssertTrue(model.hasUnreadableConfiguration)
+        XCTAssertEqual(model.configurationUnreadableReason, .undecodable)
+        let readBack = model.details
+        model.details = readBack
+        XCTAssertEqual(model.configData, old, "an opportunistic save must not overwrite the refused bytes")
     }
 
     @MainActor
@@ -191,7 +182,7 @@ final class ProfileBlobDowngradeTests: XCTestCase {
     /// the signal is worthless.
     @MainActor
     func testAReadableProfileReportsNoReason() throws {
-        let model = try reloadedProfile(withBlob: try blob(version: ProfileMigrator.currentVersion))
+        let model = try reloadedProfile(withBlob: try blob(version: ProfileBlobGate.currentVersion))
 
         XCTAssertFalse(model.hasUnreadableConfiguration)
         XCTAssertNil(model.configurationUnreadableReason)
@@ -200,7 +191,7 @@ final class ProfileBlobDowngradeTests: XCTestCase {
     /// The refusal is only worth something if the bytes are still there for the newer build to read.
     @MainActor
     func testAnOpportunisticSaveCannotOverwriteAFutureBlob() throws {
-        let original = try blob(version: ProfileMigrator.currentVersion + 1)
+        let original = try blob(version: ProfileBlobGate.currentVersion + 1)
         let model = try reloadedProfile(withBlob: original)
 
         // Exactly what ToolLibraryContainerView / MLXContextWindowHealer do: read, then write back.

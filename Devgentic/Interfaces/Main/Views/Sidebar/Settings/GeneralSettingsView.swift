@@ -32,15 +32,47 @@ struct GeneralSettingsView: View {
     @State private var activeAlert: SettingsWhisperAlert?
     @State private var showWhisperAlert = false
     @State private var pendingModelId: String?
-    /// Tracks the last valid (downloaded) model so the picker can revert on cancel.
-    /// Initialized from @AppStorage on first appear (#14).
-    @State private var previousModelId: String?
 
     /// Human-readable footprint of the local trace database, loaded lazily on appear.
     @State private var diagnosticsStorageText: String = "—"
 
     /// Presents the read-only diagnostic-bundle viewer (maintainer tool).
     @State private var showBundleViewer = false
+
+    /// The picker's tag for "no usable model".
+    private static let noModelTag = ""
+
+    /// The picker shows the stored model only when it is ON DISK; otherwise "No model".
+    ///
+    /// ⚠️ The stored key defaults to "base.en" and outlives its files, so binding the picker to it
+    /// directly presented an undownloaded model as the active one. Picking an undownloaded model
+    /// asks to download it and leaves the stored choice untouched — the getter keeps showing the
+    /// current state, so there is nothing to revert on Cancel.
+    private var modelPickerSelection: Binding<String> {
+        Binding(
+            get: { downloadService.isModelDownloaded(selectedModel) ? selectedModel : Self.noModelTag },
+            set: { newModel in
+                guard newModel != Self.noModelTag else { return }
+                if downloadService.isModelDownloaded(newModel) {
+                    selectedModel = newModel
+                    NotificationCenter.default.post(
+                        name: GlobalConstants.speechModelChangedNotification,
+                        object: newModel
+                    )
+                } else {
+                    pendingModelId = newModel
+                    activeAlert = .download
+                    showWhisperAlert = true
+                }
+            }
+        )
+    }
+
+    /// The model the status chip describes: a running download, else the selection if usable.
+    private var statusChipModelId: String? {
+        if let downloading = downloadService.downloadingModelId { return downloading }
+        return downloadService.isModelDownloaded(selectedModel) ? selectedModel : nil
+    }
 
     // Available Whisper models (shared catalog)
     private var availableModels: [WhisperModelInfo] { WhisperModelCatalog.availableModels }
@@ -86,7 +118,10 @@ struct GeneralSettingsView: View {
                         theme: theme
                     ) {
                         HStack(spacing: 8) {
-                            Picker("", selection: $selectedModel) {
+                            Picker("", selection: modelPickerSelection) {
+                                if !downloadService.isModelDownloaded(selectedModel) {
+                                    Text("No model").tag(Self.noModelTag)
+                                }
                                 ForEach(availableModels) { model in
                                     HStack(spacing: 4) {
                                         Text("\(model.displayName)  \(model.size)")
@@ -103,20 +138,9 @@ struct GeneralSettingsView: View {
                             .labelsHidden()
                             .tint(theme.primaryText)
                             .fixedSize()
-                            .onAppear { if previousModelId == nil { previousModelId = selectedModel } }
                             .onChange(of: selectedModel) { _, newModel in
-                                if downloadService.isModelDownloaded(newModel) {
-                                    previousModelId = newModel
-                                    NotificationCenter.default.post(
-                                        name: GlobalConstants.speechModelChangedNotification,
-                                        object: newModel
-                                    )
-                                } else {
-                                    pendingModelId = newModel
-                                    selectedModel = previousModelId ?? "base.en"
-                                    activeAlert = .download
-                                    showWhisperAlert = true
-                                }
+                                // Also fires when a download finishes and the service stores
+                                // the new model, so the language follows that path too.
                                 if newModel.hasSuffix(".en") && selectedLanguage != "en" && !selectedLanguage.isEmpty {
                                     selectedLanguage = "en"
                                 }
@@ -126,17 +150,21 @@ struct GeneralSettingsView: View {
                             // Download state for the currently-selected model.
                             // Deletion routes through the existing alert; the
                             // download alert is handled via Picker onChange above.
-                            ModelDownloadStatusView(
-                                backend: .whisper,
-                                modelIdentifier: selectedModel,
-                                displayName: selectedModel,
-                                isInstalled: downloadService.isModelDownloaded(selectedModel),
-                                onDeleteRequested: {
-                                    pendingModelId = selectedModel
-                                    activeAlert = .delete
-                                    showWhisperAlert = true
-                                }
-                            )
+                            // The chip follows a running pull first — with "No model" showing,
+                            // it is the only place the download's progress appears here.
+                            if let chipModelId = statusChipModelId {
+                                ModelDownloadStatusView(
+                                    backend: .whisper,
+                                    modelIdentifier: chipModelId,
+                                    displayName: chipModelId,
+                                    isInstalled: downloadService.isModelDownloaded(chipModelId),
+                                    onDeleteRequested: {
+                                        pendingModelId = chipModelId
+                                        activeAlert = .delete
+                                        showWhisperAlert = true
+                                    }
+                                )
+                            }
                         }
                     }
 
@@ -259,11 +287,14 @@ struct GeneralSettingsView: View {
                         description: "Revisit the initial welcome slideshow, feature overview, and profile setup assistant.",
                         theme: theme
                     ) {
-                        Button("Launch Setup Assistant...") {
+                        TactileButton(
+                            title: "Launch Setup Assistant",
+                            icon: "sparkles",
+                            variant: .secondary,
+                            size: .compact
+                        ) {
                             isOnboardingComplete = false
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
                 }
 
@@ -288,10 +319,15 @@ struct GeneralSettingsView: View {
                         description: "Look for a newer version right away. Also available from the Devgentic menu.",
                         theme: theme
                     ) {
-                        Button("Check for Updates…") { softwareUpdater.checkForUpdates() }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(!softwareUpdater.canCheckForUpdates)
+                        TactileButton(
+                            title: "Check for Updates",
+                            icon: "arrow.triangle.2.circlepath",
+                            variant: .secondary,
+                            size: .compact,
+                            isDisabled: !softwareUpdater.canCheckForUpdates
+                        ) {
+                            softwareUpdater.checkForUpdates()
+                        }
                     }
                 }
 
@@ -426,7 +462,6 @@ struct GeneralSettingsView: View {
                 let fallback = await downloadService.deleteModel(modelId)
                 if let fallback {
                     selectedModel = fallback
-                    previousModelId = fallback
                     NotificationCenter.default.post(
                         name: GlobalConstants.speechModelChangedNotification,
                         object: fallback

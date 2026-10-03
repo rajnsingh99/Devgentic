@@ -89,7 +89,6 @@ final class SchedulerCoordinator {
             messages: [],
             timestamp: Date(),
             userDefinedTitle: title,
-            backendType: .none,
             backendEntityId: profileID.id
         )
         persistenceService.addConversation(from: newConversation)

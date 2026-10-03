@@ -87,7 +87,7 @@ final class UnpromptedTurnPersistenceTests: XCTestCase {
         store.addConversation(from: Conversation(
             id: conversationID, messages: [], timestamp: Date(),
             userDefinedTitle: "wake", isPinned: false,
-            backendType: nil, backendEntityId: nil
+            backendEntityId: nil
         ))
 
         let message = ChatMessage(conversationId: conversationID, sender: .agent,

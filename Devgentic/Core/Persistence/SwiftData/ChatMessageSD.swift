@@ -306,16 +306,11 @@ final class ChatMessageSD {
         return VersionedBlob(schemaVersion: timelineBlobVersion, payload: events)
     }
 
-    /// Reads the timeline from either shape.
-    ///
-    /// ⚠️ The bare-array fallback is load-bearing, not defensive. Every timeline row written before
-    /// 2026-08-05 is a bare array, and a row is only rewritten when its message is touched — so
-    /// unwrapped blobs persist indefinitely. Dropping this path would erase them.
+    /// Reads the timeline envelope. Throws on any other shape, so the caller's catch classifies it
+    /// as a real read failure rather than silently returning an empty timeline (which the writers
+    /// would then persist).
     static func decodeTimeline(from data: Data) throws -> [TimelineEvent] {
-        if let result = VersionedBlob<[TimelineEvent]>.decode(from: data) { return result.payload }
-        // Neither shape decoded — let the caller's catch classify it as a real read failure rather
-        // than silently returning an empty timeline (which the writers would then persist).
-        return try JSONDecoder().decode([TimelineEvent].self, from: data)
+        try JSONDecoder().decode(VersionedBlob<[TimelineEvent]>.self, from: data).payload
     }
 
     /// - Parameter version: stamped into the encoded blob (G19) so a future reader can ASK what shape

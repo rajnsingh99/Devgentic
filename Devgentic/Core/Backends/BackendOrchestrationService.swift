@@ -125,10 +125,15 @@ class BackendOrchestrationService {
         let aggregatedTraceUpdate: @Sendable (AgentTraceLog) -> Void = { log in
             onTraceUpdate?(log)
         }
-        
+        let requestedConfig = config
+
         return AsyncThrowingStream<AgentStreamEvent, Error> { continuation in
             // [CRITICAL FIX] Capture the task to allow cancellation propagation
             let task = Task {
+                // ⚠️ Resolved FIRST: the history shape (native turns or not), the generator, the
+                // trace's config snapshot and the request log all read the capability below, and
+                // must all see the one this run actually uses — see `LiveModelDetection`.
+                let config = BackendRequestConfig(profile: await LiveModelDetection.resolving(requestedConfig.profile))
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
                 // Resource Management: Unload local MLX models if they are not required for this request.
@@ -1923,7 +1928,7 @@ extension BackendProfileModel {
         // ⚠️ An UPPER BOUND. `AgentConnect` injects `load_skill` only once the manifests actually
         // resolve and come back non-empty; the profile can only see that skills are referenced.
         // A profile whose skill folder has gone missing is over-charged by 518 chars.
-        if config.skillConfig != nil || !(config.skillSelections ?? []).isEmpty {
+        if !(config.skillSelections ?? []).isEmpty {
             names.append("load_skill")
         }
 

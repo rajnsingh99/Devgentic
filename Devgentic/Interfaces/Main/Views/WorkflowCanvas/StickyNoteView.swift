@@ -71,6 +71,7 @@ struct StickyNoteView: View {
                             .onTapGesture {
                                 canvasState.updateStickyNoteColor(note.id, color: color)
                             }
+                            .pointingHandCursor()
                     }
                 }
                 // Small offset to not clash with the dog-ear fold on the right
@@ -108,9 +109,9 @@ struct StickyNoteView: View {
             // literal never reached the String Catalog and would have shipped untranslated.
             // Visible wording is byte-identical, and it stays ONE `Text(_: String)` call, so no
             // view identity changes.
-            Text(note.text.isEmpty ? String(localized: "Double-click to edit...") : note.text)
+            Text(note.text.isEmpty ? String(localized: "Double-click to edit") : note.text)
                 .font(.system(size: 13, weight: .regular, design: .rounded))
-                .foregroundColor(note.text.isEmpty ? theme.secondaryText.opacity(0.6) : theme.primaryText)
+                .foregroundColor(note.text.isEmpty ? theme.placeholderText : theme.primaryText)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

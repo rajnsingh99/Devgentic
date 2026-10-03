@@ -429,7 +429,7 @@ struct CreateScheduledTaskView: View {
                     Spacer(minLength: 16)
 
                     Picker("", selection: $linkedConversationID) {
-                        Text("Select a conversation…").tag(UUID?.none)
+                        Text("Select a conversation").tag(UUID?.none)
                         ForEach(conversations) { conv in
                             Text(conversationDisplayName(conv)).tag(Optional(conv.id))
                         }

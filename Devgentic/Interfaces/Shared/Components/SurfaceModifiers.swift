@@ -29,11 +29,21 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
     let shape: S
     let elevation: SurfaceElevation
     var strokeColor: Color? = nil
+    var strokeWidth: CGFloat? = nil
     var isFocused: Bool = false
     var solidFillOverride: Color? = nil
 
     @Environment(\.surfaceStyle) private var surfaceStyle
     @Environment(\.appTheme) private var theme
+
+    private var effectiveStrokeWidth: CGFloat {
+        if let strokeWidth {
+            return strokeWidth
+        }
+        // In dark mode, 1pt borders have high visual contrast against dark surfaces and can bleed or appear heavy.
+        // A crisp hairline (0.5pt on Retina, matching 1 physical pixel) provides a refined, non-bleeding edge.
+        return theme.isDark ? 0.5 : 1.0
+    }
 
     func body(content: Content) -> some View {
         switch surfaceStyle {
@@ -41,13 +51,13 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
             content
                 .glassEffect(.regular, in: shape)
                 .background(shape.fill(glassFill))
-                .overlay(shape.strokeBorder(glassStroke, lineWidth: 1))
+                .overlay(shape.strokeBorder(glassStroke, lineWidth: effectiveStrokeWidth))
                 .shadow(color: glassShadowColor, radius: glassShadowRadius, x: 0, y: glassShadowY)
 
         case .solid:
             content
                 .background(shape.fill(solidFill))
-                .overlay(shape.strokeBorder(solidStroke, lineWidth: 1))
+                .overlay(shape.strokeBorder(solidStroke, lineWidth: effectiveStrokeWidth))
                 .shadow(color: solidShadowColor, radius: solidShadowRadius, x: 0, y: solidShadowY)
         }
     }
@@ -73,7 +83,10 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         if isFocused {
             return AnyShapeStyle(
                 LinearGradient(
-                    colors: [theme.accentColor.opacity(0.65), theme.accentColor.opacity(0.20)],
+                    colors: [
+                        theme.accentColor.opacity(theme.isDark ? 0.45 : 0.65),
+                        theme.accentColor.opacity(theme.isDark ? 0.12 : 0.20)
+                    ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -94,9 +107,9 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
             return AnyShapeStyle(
                 LinearGradient(
                     colors: [
-                        theme.isDark ? Color.white.opacity(0.28) : theme.dividerColor.opacity(0.65),
+                        theme.isDark ? Color.white.opacity(0.16) : theme.dividerColor.opacity(0.65),
                         theme.dividerColor.opacity(0.40),
-                        theme.accentColor.opacity(0.22)
+                        theme.accentColor.opacity(theme.isDark ? 0.12 : 0.22)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
@@ -127,7 +140,7 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
 
     private var glassShadowColor: Color {
         if isFocused {
-            return theme.accentColor.opacity(0.22)
+            return theme.accentColor.opacity(theme.isDark ? 0.08 : 0.22)
         }
         switch elevation {
         case .elevated:
@@ -146,7 +159,7 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         case .canvas: return 0
         case .container: return 16
         case .card: return 6
-        case .elevated: return isFocused ? 22 : 18
+        case .elevated: return isFocused ? (theme.isDark ? 8 : 22) : 18
         case .popover: return 12
         }
     }
@@ -184,15 +197,15 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
 
     private var solidStroke: some ShapeStyle {
         if isFocused {
-            return AnyShapeStyle(theme.accentColor.opacity(0.70))
+            return AnyShapeStyle(theme.accentColor.opacity(theme.isDark ? 0.45 : 0.70))
         }
         if let strokeColor {
             return AnyShapeStyle(strokeColor)
         }
         switch elevation {
         case .elevated:
-            // Crisp, razor-sharp 1px border matching the solid sidebar
-            return AnyShapeStyle(theme.isDark ? Color.white.opacity(0.14) : theme.dividerColor.opacity(0.8))
+            // Crisp, razor-sharp border matching the solid sidebar
+            return AnyShapeStyle(theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.8))
         case .card, .container, .popover:
             return AnyShapeStyle(theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.6))
         default:
@@ -202,7 +215,7 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
 
     private var solidShadowColor: Color {
         if isFocused {
-            return theme.accentColor.opacity(0.15)
+            return theme.accentColor.opacity(theme.isDark ? 0.05 : 0.15)
         }
         switch elevation {
         case .elevated:
@@ -220,7 +233,7 @@ struct AppSurfaceModifier<S: InsettableShape>: ViewModifier {
         switch elevation {
         case .canvas, .container: return 0
         case .card: return 3
-        case .elevated: return isFocused ? 8 : 4
+        case .elevated: return isFocused ? (theme.isDark ? 4 : 8) : 4
         case .popover: return 6
         }
     }
@@ -243,6 +256,7 @@ extension View {
         in shape: S,
         elevation: SurfaceElevation = .card,
         strokeColor: Color? = nil,
+        strokeWidth: CGFloat? = nil,
         isFocused: Bool = false,
         solidFillOverride: Color? = nil
     ) -> some View {
@@ -251,6 +265,7 @@ extension View {
                 shape: shape,
                 elevation: elevation,
                 strokeColor: strokeColor,
+                strokeWidth: strokeWidth,
                 isFocused: isFocused,
                 solidFillOverride: solidFillOverride
             )

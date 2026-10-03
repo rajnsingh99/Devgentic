@@ -248,74 +248,20 @@ final class ProfileBlobHardeningTests: XCTestCase {
 
     // MARK: - Hand-written codecs must cover EVERY field of the type they flatten
 
-    /// ⚠️ `ProfileDetails.init(from:)` hand-decodes `WorkflowConfig`'s fields one at a time instead
-    /// of delegating to its synthesized `Codable`, so the field list is maintained by hand and
-    /// nothing checks it against the struct. `nodeTimeoutEnabled` was missing from `CodingKeys`,
-    /// `encode(to:)` AND `init(from:)` — so a user who turned the node timeout OFF had it silently
-    /// discarded on save, and `effectiveNodeTimeout` then read the nil back as "enabled" and timed
-    /// their nodes out at the 120 s default they had explicitly disabled.
-    func testWorkflowConfigNodeTimeoutDisabledSurvivesARoundTrip() throws {
-        var config = WorkflowConfig(agentProfileIDs: [UUID()])
-        config.nodeTimeoutEnabled = false          // the user switches the timeout OFF
-        config.defaultNodeTimeout = 45
-
-        let data = try JSONEncoder().encode(ProfileDetails.workflow(config))
-        let decoded = try JSONDecoder().decode(ProfileDetails.self, from: data)
-
-        guard case .workflow(let out) = decoded else {
-            return XCTFail("Expected .workflow, got \(decoded)")
-        }
-        XCTAssertEqual(out.nodeTimeoutEnabled, false,
-                       "The disabled flag was dropped by the hand-written codec.")
-        XCTAssertNil(out.effectiveNodeTimeout,
-                     "With the timeout disabled, nodes must have NO deadline — a surviving 120 s "
-                     + "default is the user-visible symptom of the dropped field.")
-        XCTAssertEqual(out.defaultNodeTimeout, 45, "The neighbouring field must be unaffected.")
-    }
-
-    /// The `true` and `nil` cases must stay distinguishable too — `nil` means "never set" and
-    /// `effectiveNodeTimeout` treats it as enabled, so collapsing the two would hide the bug again.
-    func testWorkflowConfigNodeTimeoutEnabledAndUnsetRoundTripDistinctly() throws {
-        for value in [true, nil] as [Bool?] {
-            var config = WorkflowConfig(agentProfileIDs: [])
-            config.nodeTimeoutEnabled = value
-
-            let data = try JSONEncoder().encode(ProfileDetails.workflow(config))
-            guard case .workflow(let out) = try JSONDecoder().decode(ProfileDetails.self, from: data) else {
-                return XCTFail("Expected .workflow")
-            }
-            XCTAssertEqual(out.nodeTimeoutEnabled, value, "nodeTimeoutEnabled=\(String(describing: value)) did not round-trip.")
-            XCTAssertNotNil(out.effectiveNodeTimeout, "Both nil and true mean the timeout applies.")
-        }
-    }
-
-    /// ⚠️ THE GENERAL GUARD, not a specific field. `WorkflowConfig`'s Codable is synthesized and
-    /// complete, but `ProfileDetails` never calls it — it decomposes the struct into its own flat
-    /// key space. So adding a field to `WorkflowConfig` compiles, passes every other test, and
-    /// silently does not persist. This fails the moment the two disagree, whatever the new field is.
-    func testEveryWorkflowConfigFieldSurvivesTheHandWrittenCodec() throws {
-        var config = WorkflowConfig(agentProfileIDs: [UUID(), UUID()])
-        config.defaultNodeTimeout   = 33
-        config.nodeTimeoutEnabled   = false
-        config.defaultFailurePolicy = .stopWorkflow
-        config.defaultMaxRetries    = 7
-        config.contextBudgetPerNode = 1234
-        config.totalContextBudget   = 5678
-        config.maxNestingDepth      = 9
-
-        let data = try JSONEncoder().encode(ProfileDetails.workflow(config))
-        guard case .workflow(let out) = try JSONDecoder().decode(ProfileDetails.self, from: data) else {
+    /// ⚠️ THE GENERAL GUARD for `.workflow`. `ProfileDetails` hand-writes each arm instead of
+    /// delegating to the payload's synthesized `Codable`, and its `.workflow` arm writes NO payload
+    /// fields because `WorkflowConfig` has none. A field added to `WorkflowConfig` would compile,
+    /// pass every other test, and silently not persist — `nodeTimeoutEnabled` was lost exactly that
+    /// way once. This fails the moment the struct gains a stored property.
+    func testWorkflowConfigHasNoStoredFieldsTheCodecWouldDrop() throws {
+        XCTAssertTrue(Mirror(reflecting: WorkflowConfig()).children.isEmpty,
+                      """
+                      WorkflowConfig gained a stored field. Add it to CodingKeys, encode(to:) AND                       init(from:) in ProfileDetails (BackendProfile.swift), then replace this test                       with a round-trip that sets every field.
+                      """)
+        let data = try JSONEncoder().encode(ProfileDetails.workflow(WorkflowConfig()))
+        guard case .workflow = try JSONDecoder().decode(ProfileDetails.self, from: data) else {
             return XCTFail("Expected .workflow")
         }
-
-        // Compare the WHOLE value. If someone adds a field to WorkflowConfig and forgets the three
-        // hand-maintained lists in ProfileDetails, this fails — which is the entire point.
-        XCTAssertEqual(out, config,
-                       """
-                       A WorkflowConfig field did not survive ProfileDetails' hand-written codec. \
-                       Add it to CodingKeys, encode(to:) AND init(from:) in BackendProfile.swift — \
-                       all three, or it silently will not persist.
-                       """)
     }
 
     /// ⚠️ `.agent` and `.code` carry the SAME `AgentConfig` but have SEPARATE encode/decode arms, so

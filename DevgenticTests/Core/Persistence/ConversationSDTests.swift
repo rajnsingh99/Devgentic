@@ -78,8 +78,6 @@ final class ConversationSDTests: XCTestCase {
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
             userDefinedTitle: "Full Conv",
             isPinned: true,
-            openAIThreadID: "thread_xyz",
-            backendType: BackendType.agent.rawValue,
             backendEntityId: profileId
         )
         context.insert(conv)
@@ -88,8 +86,6 @@ final class ConversationSDTests: XCTestCase {
         let fetched = try context.fetch(FetchDescriptor<ConversationSD>()).first!
         XCTAssertEqual(fetched.userDefinedTitle, "Full Conv")
         XCTAssertTrue(fetched.isPinned)
-        XCTAssertEqual(fetched.openAIThreadID, "thread_xyz")
-        XCTAssertEqual(fetched.backendType, BackendType.agent.rawValue)
         XCTAssertEqual(fetched.backendEntityId, profileId)
         XCTAssertEqual(fetched.timestamp.timeIntervalSince1970, 1_700_000_000, accuracy: 1)
     }
@@ -101,8 +97,6 @@ final class ConversationSDTests: XCTestCase {
 
         let fetched = try context.fetch(FetchDescriptor<ConversationSD>()).first!
         XCTAssertNil(fetched.userDefinedTitle)
-        XCTAssertNil(fetched.openAIThreadID)
-        XCTAssertNil(fetched.backendType)
         XCTAssertNil(fetched.backendEntityId)
     }
 
@@ -203,8 +197,6 @@ final class ConversationSDTests: XCTestCase {
             timestamp: Date(),
             userDefinedTitle: "Struct Test",
             isPinned: true,
-            openAIThreadID: "thread_123",
-            backendType: BackendType.agent.rawValue,
             backendEntityId: profileId
         )
         context.insert(conv)
@@ -214,8 +206,6 @@ final class ConversationSDTests: XCTestCase {
         XCTAssertEqual(result.id, conv.id)
         XCTAssertEqual(result.userDefinedTitle, "Struct Test")
         XCTAssertTrue(result.isPinned)
-        XCTAssertEqual(result.openAIThreadID, "thread_123")
-        XCTAssertEqual(result.backendType, .agent)
         XCTAssertEqual(result.backendEntityId, profileId)
     }
 
@@ -257,24 +247,6 @@ final class ConversationSDTests: XCTestCase {
 
         let result = conv.toStruct()
         XCTAssertTrue(result.messages.isEmpty)
-    }
-
-    func testToStructBackendTypeNilMapping() throws {
-        let conv = ConversationSD(id: UUID(), backendType: nil)
-        context.insert(conv)
-        try context.save()
-
-        let result = conv.toStruct()
-        XCTAssertNil(result.backendType)
-    }
-
-    func testToStructUnknownBackendTypeMapping() throws {
-        let conv = ConversationSD(id: UUID(), backendType: "unknown_type")
-        context.insert(conv)
-        try context.save()
-
-        let result = conv.toStruct()
-        XCTAssertNil(result.backendType, "Unknown backend type string should map to nil")
     }
 
     // MARK: - Fetch with Predicate

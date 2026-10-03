@@ -559,13 +559,17 @@ struct OpenAICompatibleModelPickerView: View {
 
                 Spacer(minLength: 0)
 
-                Button("Load Models") {
+                TactileButton(
+                    title: "Load Models",
+                    icon: "arrow.clockwise",
+                    variant: .secondary,
+                    size: .compact,
+                    isLoading: isLoading,
+                    isDisabled: baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ) {
                     fetchTask?.cancel()
                     fetchTask = Task { await fetchModels() }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .frame(maxWidth: 300)
         }

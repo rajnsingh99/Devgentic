@@ -246,16 +246,13 @@ struct MediaArtifactImageView: View {
     /// [CF-26] The reference `loadImage` actually reads from, which is not always the one the
     /// artifact carries.
     ///
-    /// The legacy `"image"` decode shim (`ChatMessage.swift`) maps EVERY url-only message to
-    /// `.remoteURL` — including the `file://` URLs older image-gen runs wrote to disk — and
-    /// `MediaReference.resolve()` refuses `.remoteURL` unconditionally. So readable pictures
-    /// still sitting on disk rendered a developer-facing "Convert to diskPath first" card next
-    /// to a Retry that re-ran the same refusal. A `file://` URL is a disk path however it got
-    /// labelled; read it as one.
+    /// `MediaReference.resolve()` refuses `.remoteURL` unconditionally, so a `file://` URL that
+    /// arrived labelled remote rendered a developer-facing "Convert to diskPath first" card next to
+    /// a Retry that re-ran the same refusal — for a picture sitting readable on disk. A `file://`
+    /// URL is a disk path however it got labelled; read it as one.
     ///
     /// The repair lives here rather than in `MediaReference` because that type is Core and
-    /// serves the whole pipeline (where "remote is never auto-fetched" is a deliberate rule);
-    /// this is the one renderer that has to cope with the legacy shape.
+    /// serves the whole pipeline, where "remote is never auto-fetched" is a deliberate rule.
     nonisolated static func resolvableReference(for reference: MediaReference) -> MediaReference {
         if case .remoteURL(let url) = reference, url.isFileURL {
             return .diskPath(url)

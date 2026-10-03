@@ -338,11 +338,9 @@ enum SkillIngest {
     ///
     /// ⚠️⚠️ WHY THIS IS A NAMED FUNCTION AND NOT A `Task.detached` AT EACH CALL SITE. This read walks
     /// every file of every skill and reads each as bytes; on an unmounted volume or a network share
-    /// even the first `fileExists` blocks for the mount timeout. That is the exact hazard
-    /// `SkillLibraryMigration`'s header refuses to take on inside the migration hook — and then the
-    /// launch sweep took it anyway. Wrapping it per call site made "off the main actor" a property
-    /// of one NAME: `SkillImportSheet` wrapped it, the launch sweep did not, and the launch — the one
-    /// where a beachball costs the most confidence — was the one that blocked.
+    /// even the first `fileExists` blocks for the mount timeout. Wrapping it per call site made "off
+    /// the main actor" a property of one call site rather than of one NAME: a caller that forgot to
+    /// wrap it blocked the main actor, and a launch-time caller did exactly that.
     ///
     /// ⚠️ `Task.detached`, NOT a `nonisolated async func`. Whether a nonisolated async function
     /// leaves its caller's actor is a LANGUAGE-MODE behaviour: it does under Swift 5, and under
@@ -542,12 +540,10 @@ enum SkillIngest {
 
 /// Splitting a SKILL.md into frontmatter and body.
 ///
-/// ⚠️ Its own type because THREE places used to implement this rule independently —
-/// `SkillFolderScanner.extractBody`, the old on-disk editor's `split`, and ingest. A split that
-/// disagreed with the scanner would store a body different from what the file shows.
-///
-/// The editor's copy went with the editor; the scanner's now DELEGATES here. This is the only
-/// implementation, and an earlier version of this comment claimed that before it was true.
+/// ⚠️ Its own type because THREE places used to implement this rule independently — the scanner's
+/// legacy package loader, the old on-disk editor's `split`, and ingest. A split that disagreed
+/// would store a body different from what the file shows. The other two are gone; this is the only
+/// implementation.
 enum SkillBodyExtraction {
 
     static func body(of raw: String) -> String {

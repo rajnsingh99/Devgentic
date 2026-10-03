@@ -272,10 +272,9 @@ final class ChatOpsConfigManager {
         }
     }
 
-    /// Drops the memoized credential values so the next read hits the Keychain. The legacy
-    /// migration in `init` writes through the same backend outside this cache, and a test that
-    /// swaps backends must call it too — a stale entry from the previous backend would otherwise
-    /// survive the swap.
+    /// Drops the memoized credential values so the next read hits the Keychain. A test that swaps
+    /// backends must call it — a stale entry from the previous backend would otherwise survive the
+    /// swap.
     func refreshCredentialCache() {
         credentialCache.removeAll()
     }
@@ -287,10 +286,9 @@ final class ChatOpsConfigManager {
     /// mutating observable state during a view update. The restore path runs in `init`, where it is
     /// safe, and it is the only place `connectionState` is derived.
     ///
-    /// ⚠️ TEST SEAM: `nonisolated static` with an injected `keychain`, exactly like
-    /// `migrateCredentialsFromLegacyServices(keychain:)` above. The manager is a singleton with a
-    /// `private init`, so the restore cannot be re-run from a test; making the derivation static is
-    /// what lets the `.failed → .unreadable` mapping be exercised at all.
+    /// ⚠️ TEST SEAM: `nonisolated static` with an injected `keychain`. The manager is a singleton
+    /// with a `private init`, so the restore cannot be re-run from a test; making the derivation
+    /// static is what lets the `.failed → .unreadable` mapping be exercised at all.
     nonisolated static func credentialState(
         _ account: String,
         keychain: KeychainAccessing,
@@ -546,24 +544,6 @@ final class ChatOpsConfigManager {
         case .telegram: securityTier = tier
         case .discord:  discordSecurityTier = tier
         case .slack:    slackSecurityTier = tier
-        }
-    }
-
-    /// Gives an ALREADY-PAIRED Discord or Slack the tier it has been running under.
-    ///
-    /// ⚠️⚠️ WITHOUT THIS THE FIX IS A SILENT DOWNGRADE. Splitting the tier means Discord and Slack
-    /// start reading their own keys, which do not exist yet — so an install that had been running at
-    /// Full Access would drop to Read Only on upgrade and its remote approvals would begin failing
-    /// with a message naming no cause. Seeded only for a provider that is ALREADY paired; one paired
-    /// after this runs gets `.readOnly`, which is the point of the split.
-    private func seedPerProviderTiers() {
-        let inherited = securityTier
-        for (provider, isPaired, key) in [
-            (RemoteChannel.Provider.discord, discordAuthorizedChannelID != nil, Self.discordSecurityTierKey),
-            (RemoteChannel.Provider.slack, slackAuthorizedChannelID != nil, Self.slackSecurityTierKey)
-        ] where isPaired && UserDefaults.standard.string(forKey: key) == nil {
-            setSecurityTier(inherited, for: provider)
-            logger.info("[CHATOPS] Seeded the \(provider.rawValue) security tier as '\(inherited.rawValue)', inherited from the single tier that used to govern all three platforms. CONSEQUENCE: an already-paired provider keeps the access it has been running under instead of silently dropping to Read Only; a provider paired from now on starts at Read Only.")
         }
     }
 
@@ -1030,114 +1010,7 @@ final class ChatOpsConfigManager {
         return summary
     }
 
-    // MARK: - Keychain Service Migration
-
-    /// Keychain `service` strings earlier builds stored ChatOps credentials under, newest first.
-    ///
-    /// ⚠️⚠️ WHY THIS LIST EXISTS AT ALL. `keychainService` is `Bundle.main.bundleIdentifier`, and
-    /// commit `2faad1c` changed that identifier from `com.dev.devgentic` to `app.devgentic.macos`
-    /// as part of public-release prep. A Keychain item is addressed by (service, account), so on the
-    /// first launch after that build EVERY ChatOps credential became unreachable at once: all four
-    /// reads returned nothing, `isConfigured` went false, all three bridges declined to start, and
-    /// the Settings UI offered "Start Pairing" as though the user had never paired. Nothing was
-    /// deleted — the items were still there, addressed by a name no code asked for any more — so the
-    /// three live third-party bot tokens would have sat in the user's Keychain forever.
-    ///
-    /// ⚠️ A RENAME IS NOT A ONE-OFF. Any future bundle-id change (a rebrand, a separate beta
-    /// identifier, an Xcode target split) reproduces this exactly. Prepend the outgoing identifier
-    /// here in the same commit that changes it, and this stays a migration rather than a data loss.
-    ///
-    /// ⚠️ Non-ChatOps state keys off the same identifier and has its OWN migration paths, which
-    /// already exist and are tested: `VectorStoreService.legacyBundleIdentifiers` adopts a
-    /// pre-rename vector-db, and `StoreRecovery` enumerates the legacy store locations for the
-    /// reset dialog. A future rename must update THIS list and BOTH of those in the same commit —
-    /// do not build a second adoption path here, and do not assume the others do not exist.
-    nonisolated private static let legacyKeychainServices = ["com.dev.devgentic"]
-
-    /// Every account this manager stores under `keychainService`.
-    ///
-    /// ⚠️ THE MIGRATION'S COVERAGE IS THIS LIST, so a credential added without adding it here is a
-    /// credential the next rename silently drops.
-    nonisolated private static let credentialAccounts = [
-        AppSettings.chatOpsBotTokenKey,
-        AppSettings.chatOpsDiscordBotTokenKey,
-        AppSettings.chatOpsSlackBotTokenKey,
-        AppSettings.chatOpsSlackAppTokenKey
-    ]
-
-    /// Moves credentials written under a previous bundle identifier onto the current one.
-    ///
-    /// Idempotent, and safe to run on every launch: an account already present under the current
-    /// service is never overwritten, and a legacy item is only removed once its value is readable
-    /// under the current service.
-    ///
-    /// ⚠️⚠️ `read` RATHER THAN `retrieve`, AND THE DIFFERENCE IS THE WHOLE SAFETY ARGUMENT.
-    /// `retrieve` collapses "the Keychain refused to answer" into `nil`, which here would read as
-    /// "nothing is stored under the current service" — and this function's response to that is to
-    /// copy a legacy value forward and then DELETE it. Run that against a locked or re-signed
-    /// Keychain (`errSecInteractionNotAllowed`) and the migration destroys the only copy. Every
-    /// branch below therefore acts on `.found` / `.notFound` and bails loudly on `.failed`.
-    @discardableResult
-    nonisolated static func migrateCredentialsFromLegacyServices(
-        keychain: KeychainAccessing,
-        logger: DGLogger = DGLogger(category: "ChatOpsConfig")
-    ) -> Int {
-        var migrated = 0
-
-        for account in credentialAccounts {
-            switch keychain.read(service: keychainService, account: account) {
-            case .found:
-                // Already current. Sweep any stale legacy copy so a rotated token cannot linger.
-                for legacy in legacyKeychainServices {
-                    guard case .found = keychain.read(service: legacy, account: account) else { continue }
-                    let status = keychain.delete(service: legacy, account: account)
-                    if status == errSecSuccess {
-                        logger.info("[CHATOPS] Removed the stale '\(account)' credential left under the previous Keychain service '\(legacy)'. CONSEQUENCE: the superseded copy no longer sits in the user's Keychain; the live credential under '\(keychainService)' is untouched.")
-                    } else {
-                        logger.error("[CHATOPS] Could not delete the stale '\(account)' credential under the previous Keychain service '\(legacy)' (OSStatus \(status)). CONSEQUENCE: a superseded third-party token stays in the user's Keychain indefinitely; ChatOps itself is unaffected because the current service already holds the live value.")
-                    }
-                }
-
-            case .failed(let status):
-                // ⚠️ NOT a migration trigger. See this function's header.
-                logger.error("[CHATOPS] Could not read '\(account)' under the current Keychain service '\(keychainService)' (OSStatus \(status)). CONSEQUENCE: the legacy-service migration is SKIPPED for this credential rather than guessed at — copying a legacy value forward on an unreadable Keychain and then deleting it would destroy the only copy. ChatOps may report itself unconfigured until the Keychain is readable again.")
-
-            case .notFound:
-                for legacy in legacyKeychainServices {
-                    guard case .found(let value) = keychain.read(service: legacy, account: account) else { continue }
-
-                    let saveStatus = keychain.save(value: value, service: keychainService, account: account)
-                    guard saveStatus == errSecSuccess else {
-                        logger.error("[CHATOPS] Failed to migrate '\(account)' from the previous Keychain service '\(legacy)' to '\(keychainService)' (OSStatus \(saveStatus)). CONSEQUENCE: the credential stays readable ONLY under the old service, so this ChatOps provider will present as unconfigured and the user is asked to pair again; the legacy item is deliberately NOT deleted, so retrying after the Keychain is writable still recovers it.")
-                        break
-                    }
-
-                    migrated += 1
-                    let deleteStatus = keychain.delete(service: legacy, account: account)
-                    if deleteStatus == errSecSuccess {
-                        logger.info("[CHATOPS] Migrated '\(account)' from the previous Keychain service '\(legacy)' to '\(keychainService)'. CONSEQUENCE: the credential survives the bundle-identifier change, so a paired provider keeps working across the upgrade instead of silently presenting as never configured.")
-                    } else {
-                        logger.error("[CHATOPS] Migrated '\(account)' to '\(keychainService)' but could not delete the old item under '\(legacy)' (OSStatus \(deleteStatus)). CONSEQUENCE: ChatOps works correctly — the migration itself succeeded — but a duplicate copy of a live third-party token remains in the user's Keychain.")
-                    }
-                    break
-                }
-            }
-        }
-
-        return migrated
-    }
-
     private init() {
-        // ⚠️ FIRST, BEFORE ANY CREDENTIAL IS READ. Every restore check below reads a token, and a
-        // token that has not yet been moved onto the current Keychain service reads as absent —
-        // which would leave all three providers "disconnected" on the one launch that matters.
-        Self.migrateCredentialsFromLegacyServices(keychain: keychain)
-        // The migration wrote through the backend directly, outside the read cache.
-        refreshCredentialCache()
-
-        // ⚠️ AFTER the credential migration, because it reads whether a provider is paired.
-        seedPerProviderTiers()
-
         // ⚠️⚠️ "IS PAIRED" AND "IS SWITCHED ON" ARE DIFFERENT QUESTIONS, AND CONFLATING THEM MADE THE
         // OFF SWITCH A ONE-WAY DOOR. These three conditions used to include `isEnabled`, so a user
         // who turned ChatOps off — which the toggle's own description invites, "Start the Telegram

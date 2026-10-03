@@ -137,15 +137,6 @@ final class WorkflowRunRollupTests: XCTestCase {
         XCTAssertEqual(d.rollupOutcome, .completed)
     }
 
-    /// Legacy records (pre-2026-08-15) encode a skip as `.failed` + the old prose. The legacy
-    /// branch must keep excusing them.
-    func testLegacyUpstreamSkipRecordsAreNotFailures() {
-        let d = record(.completed, nodes: [node(.completed),
-                                           node(.failed, detail: "Upstream dependency failed")])
-        XCTAssertFalse(d.hasGenuineFailure)
-        XCTAssertEqual(d.pillVerdict, .completed)
-    }
-
     /// A cancelled node is the user's own Stop, not a fault.
     func testCancelledNodesAreNotFailures() {
         let d = record(.cancelled, nodes: [node(.completed), node(.cancelled)])
@@ -157,7 +148,7 @@ final class WorkflowRunRollupTests: XCTestCase {
     func testStepCounterNamesTheGenuinelyFailedStep() {
         let d = record(.completed, nodes: [
             node(.completed),
-            node(.failed, detail: "Upstream dependency failed"),  // legacy not-run — must be skipped over
+            node(.skipped(.upstreamFailed)),                      // not run — must be skipped over
             node(.failed, detail: "boom"),                        // the real break: step 3
             node(.completed)
         ])

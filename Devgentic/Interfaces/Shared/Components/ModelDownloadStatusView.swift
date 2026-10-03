@@ -33,6 +33,16 @@ struct ModelDownloadStatusView: View {
     var profileID: UUID? = nil
     var showInstalledLabel: Bool = true
 
+    /// Non-nil when this model can never be run by Devgentic (a decision/classifier model, or a
+    /// speech/image/embedding model). The Download pill is replaced by a disabled "Not supported"
+    /// pill carrying this text as its tooltip.
+    ///
+    /// ⚠️ Consulted ONLY after the in-progress and installed states. A copy already on disk (or a
+    /// download already running) must stay deletable/cancellable — an unsupported verdict that
+    /// stranded a multi-GB installed model with no Delete menu would be a worse bug than the one
+    /// it prevents.
+    var unsupportedReason: String? = nil
+
     /// Called when the user confirms a fresh download. If `nil`, the view
     /// falls back to `DownloadCoordinator.start…IfNeeded` directly.
     var onDownloadRequested: (() -> Void)? = nil
@@ -68,6 +78,7 @@ struct ModelDownloadStatusView: View {
         isInstalled: Bool,
         profileID: UUID? = nil,
         showInstalledLabel: Bool = true,
+        unsupportedReason: String? = nil,
         onDownloadRequested: (() -> Void)? = nil,
         onDeleteRequested: (() -> Void)? = nil,
         onRevealRequested: (() -> Void)? = nil
@@ -78,6 +89,7 @@ struct ModelDownloadStatusView: View {
         self.isInstalled = isInstalled
         self.profileID = profileID
         self.showInstalledLabel = showInstalledLabel
+        self.unsupportedReason = unsupportedReason
         self.onDownloadRequested = onDownloadRequested
         self.onDeleteRequested = onDeleteRequested
         self.onRevealRequested = onRevealRequested
@@ -101,6 +113,8 @@ struct ModelDownloadStatusView: View {
                 downloadingView(record: active)
             } else if isInstalled {
                 installedView
+            } else if let reason = unsupportedReason {
+                unsupportedView(reason: reason)
             } else {
                 availableView
             }
@@ -145,6 +159,31 @@ struct ModelDownloadStatusView: View {
         .buttonStyle(.plain)
         .help("Download \(displayName)")
         .accessibilityLabel("Download \(displayName)")
+    }
+
+    /// Disabled stand-in for `availableView`. A real `Button` with `.disabled(true)` rather than
+    /// bare text, so VoiceOver announces it as a dimmed control and the tooltip still shows why.
+    private func unsupportedView(reason: String) -> some View {
+        Button {} label: {
+            HStack(spacing: 4) {
+                Image(systemName: "nosign")
+                    .font(.system(.caption, weight: .semibold))
+                Text("Not supported")
+                    .font(.system(.caption, weight: .medium))
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(theme.secondaryText.opacity(0.12))
+            .foregroundColor(theme.secondaryText)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(true)
+        .help(reason)
+        .accessibilityLabel("\(displayName) is not supported")
+        .accessibilityHint(reason)
     }
 
     private func downloadingView(record: DownloadRecord) -> some View {

@@ -99,6 +99,7 @@ struct OnboardingThemeView: View {
                                             .scaleEffect(viewModel.selectedAccentColor == item.accent ? 1.18 : 1.0)
                                     }
                                     .buttonStyle(.plain)
+                                    .pointingHandCursor()
                                 }
                             }
                             .padding(10)
@@ -217,6 +218,7 @@ struct OnboardingThemeView: View {
             )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     // MARK: - Surface Style Card
@@ -260,6 +262,7 @@ struct OnboardingThemeView: View {
             )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     // MARK: - Live Preview Card

@@ -192,7 +192,6 @@ final class ConversationManagementCoordinator {
             id: UUID(),
             messages: [],
             timestamp: Date(),
-            backendType: .none,
             backendEntityId: nil
         )
         persistenceService.addConversation(from: newConversation)
@@ -297,29 +296,8 @@ final class ConversationManagementCoordinator {
     /// Called at send time by `MessagingCoordinator` (through a VM forward)
     /// and from the scheduler path.
     func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
-        var legacyBackendType: BackendType = .none
-        if let id = profileID, let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == id }) {
-            switch profile.profileType {
-            case .agent:
-                legacyBackendType = .agent
-            case .bot:
-                if case .bot(let config) = profile.details, config.llmConfig.apiProvider == .ollama {
-                    legacyBackendType = .ollama
-                } else {
-                    legacyBackendType = .remote
-                }
-            case .workflow:
-                legacyBackendType = .none
-            case .imageGen:
-                legacyBackendType = .none
-            case .code:
-                legacyBackendType = .none
-            }
-        }
-
         persistenceService.updateBackendForConversation(
             id: conversationID,
-            backendType: legacyBackendType,
             backendEntityId: profileID
         )
         logger.debug("Persisted profile ID \(profileID?.uuidString ?? "nil") for conversation \(conversationID.uuidString).")

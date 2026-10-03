@@ -20,10 +20,6 @@ struct ActionNodeInspectorView: View {
     @Binding var node: WorkflowNode
     /// Workflow variable names (Code-node outputs) surfaced in the binding menu.
     var availableVariables: [String] = []
-    /// The workflow-level retry count this node INHERITS when it carries no count of its own
-    /// (register INS-8). Supplied by the canvas from the workflow profile's `resolvedMaxRetries`;
-    /// 0 for a workflow that never set one, which is the overwhelmingly common case.
-    var inheritedRetryDefault: Int = 0
     @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
@@ -44,11 +40,16 @@ struct ActionNodeInspectorView: View {
 
     // Live tool catalog (native + MCP).
     private var toolSources: [ToolSource] { UnifiedToolStore.shared.sources }
+    var showsHeader: Bool = true
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
+            if showsHeader {
+                header
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+            }
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 20) {
                     guideCard
@@ -62,15 +63,34 @@ struct ActionNodeInspectorView: View {
             }
         }
         .frame(
-            minWidth: 800,
-            idealWidth: 950,
+            minWidth: showsHeader ? 800 : nil,
+            idealWidth: showsHeader ? 950 : nil,
             maxWidth: .infinity,
-            minHeight: 620,
-            idealHeight: 750,
+            minHeight: showsHeader ? 620 : nil,
+            idealHeight: showsHeader ? 750 : nil,
             maxHeight: .infinity
         )
         .background(theme.primaryBackground)
-        .onAppear { loadFromNode() }
+        .onAppear {
+            loadFromNode()
+            if !showsHeader {
+                NodeInspectorPendingCommit.shared.register {
+                    persistConfigToNode()
+                }
+            }
+        }
+        .onDisappear {
+            if !showsHeader {
+                persistConfigToNode()
+                NodeInspectorPendingCommit.shared.clear()
+            }
+        }
+        .onChange(of: selectedTool) { persistIfEmbedded() }
+        .onChange(of: bindings) { persistIfEmbedded() }
+        .onChange(of: maxRetries) { persistIfEmbedded() }
+        .onChange(of: unattendedAutoApprove) { persistIfEmbedded() }
+        .onChange(of: retryDelay) { persistIfEmbedded() }
+        .onChange(of: hardTimeout) { persistIfEmbedded() }
         .sheet(isPresented: $showToolPicker) { toolPickerSheet }
     }
 
@@ -79,24 +99,29 @@ struct ActionNodeInspectorView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "bolt.horizontal.fill")
-                .font(.system(size: 14, weight: .semibold))
+                .font(theme.fontSubheadline.weight(.semibold))
                 .foregroundColor(.teal)
             Text("Action")
                 .font(theme.fontSubheadline.weight(.semibold))
                 .foregroundColor(theme.primaryText)
             Text("\u{00B7}")
                 .foregroundColor(theme.tertiaryText)
-            TextField("Node Name", text: $node.displayName)
-                .font(theme.fontCaption)
-                .textFieldStyle(.plain)
-                .foregroundColor(theme.secondaryText)
+            TextField(
+                "",
+                text: $node.displayName,
+                prompt: Text("Node Name").foregroundColor(theme.placeholderText)
+            )
+            .font(theme.fontSubheadline.weight(.semibold))
+            .textFieldStyle(.plain)
+            .foregroundColor(theme.primaryText)
             Spacer()
-            Button {
+            TactileIconButton(
+                icon: "questionmark.circle",
+                tooltip: showGuide ? "Hide guide" : "Show guide",
+                accessibilityLabel: showGuide ? "Hide guide" : "Show guide",
+                size: .compact
+            ) {
                 withAnimation(.easeInOut(duration: 0.2)) { showGuide.toggle() }
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(theme.fontBody)
-                    .foregroundColor(theme.secondaryText)
             }
             GlassActionButton(title: "Cancel", icon: "xmark", isAccent: false) { closeInspector() }
             GlassActionButton(title: "Save", icon: "checkmark", isAccent: true) { saveAndDismiss() }
@@ -116,7 +141,7 @@ struct ActionNodeInspectorView: View {
                     .font(theme.fontCaption.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                 Text("Pick a tool, then bind each argument to a value. Use placeholders to pull from the workflow:")
-                    .font(.system(size: 11))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
                 Group {
                     bindingHint("{{ input }}", "the upstream node's text output")
@@ -125,10 +150,13 @@ struct ActionNodeInspectorView: View {
                     bindingHint("{{ var.name }}", "a workflow variable")
                 }
                 Text("Anything else is treated as a literal value.")
-                    .font(.system(size: 10))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.tertiaryText)
                     .italic()
-                Divider().padding(.vertical, 2)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
+                    .padding(.vertical, 2)
                 Text("Things to know")
                     .font(theme.fontCaption.weight(.semibold))
                     .foregroundColor(theme.primaryText)
@@ -148,11 +176,12 @@ struct ActionNodeInspectorView: View {
     private func guideLine(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Text("•")
-                .font(.system(size: 11, weight: .bold))
+                .font(theme.fontCaption2.weight(.bold))
                 .foregroundColor(.teal)
             Text(text)
-                .font(.system(size: 11))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
+                .lineSpacing(2.0)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -160,10 +189,10 @@ struct ActionNodeInspectorView: View {
     private func bindingHint(_ token: String, _ desc: String) -> some View {
         HStack(spacing: 6) {
             Text(token)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .font(theme.fontCodeCaption.weight(.medium))
                 .foregroundColor(.teal)
             Text("—  \(desc)")
-                .font(.system(size: 11))
+                .font(theme.fontCaption2)
                 .foregroundColor(theme.secondaryText)
         }
     }
@@ -177,11 +206,12 @@ struct ActionNodeInspectorView: View {
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(tool.name)
-                                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                .font(theme.fontFootnote.weight(.semibold))
                                 .foregroundColor(theme.primaryText)
                             Text(tool.description)
-                                .font(.system(size: 11))
+                                .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
+                                .lineSpacing(2.5)
                                 .lineLimit(2)
                         }
                         Spacer()
@@ -190,10 +220,10 @@ struct ActionNodeInspectorView: View {
                 } else {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
                         Text("No tool selected")
-                            .font(.system(size: 11))
+                            .font(theme.fontCaption2)
                             .foregroundColor(theme.warningColor)
                         Spacer()
                         GlassActionButton(title: "Select Tool", icon: "wrench.and.screwdriver", isAccent: true) { showToolPicker = true }
@@ -213,7 +243,7 @@ struct ActionNodeInspectorView: View {
             VStack {
                 if argNames.isEmpty {
                     Text("This tool takes no arguments.")
-                        .font(.system(size: 11))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
@@ -241,11 +271,11 @@ struct ActionNodeInspectorView: View {
             // Header: name, type, required, + token-insertion menu.
             HStack(spacing: 6) {
                 Text(argName)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(theme.fontCode.weight(.medium))
                     .foregroundColor(theme.primaryText)
                 if let type = prop?.type {
                     Text(type)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(theme.fontCaption2.weight(.medium))
                         .foregroundColor(.teal)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -253,7 +283,7 @@ struct ActionNodeInspectorView: View {
                 }
                 if isRequired {
                     Text("required")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(theme.fontCaption2.weight(.medium))
                         .foregroundColor(theme.warningColor)
                 }
                 Spacer()
@@ -261,8 +291,9 @@ struct ActionNodeInspectorView: View {
             }
             if let desc = prop?.description, !desc.isEmpty {
                 Text(desc)
-                    .font(.system(size: 10))
-                    .foregroundColor(theme.tertiaryText)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -278,7 +309,7 @@ struct ActionNodeInspectorView: View {
 
             if unbalanced {
                 Label("Unbalanced \u{007B}\u{007B} \u{007D}\u{007D} — check the placeholder.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10))
+                    .font(theme.fontCaption2)
                     .foregroundColor(theme.warningColor)
             }
         }
@@ -287,11 +318,13 @@ struct ActionNodeInspectorView: View {
     /// Plain/template text field for non-boolean arguments.
     private func bindingField(argName: String, isRequired: Bool, unbalanced: Bool) -> some View {
         let isEmptyRequired = isRequired && (bindings[argName] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        let promptText = isRequired ? "Required — value or {{ input }}" : "Optional — leave blank to omit"
         return TextField(
-            isRequired ? "Required — value or {{ input }}" : "Optional — leave blank to omit",
-            text: Binding(get: { bindings[argName] ?? "" }, set: { bindings[argName] = $0 })
+            "",
+            text: Binding(get: { bindings[argName] ?? "" }, set: { bindings[argName] = $0 }),
+            prompt: Text(promptText).foregroundColor(theme.placeholderText)
         )
-        .font(.system(size: 12, design: .monospaced))
+        .font(theme.fontCode)
         .textFieldStyle(.plain)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -368,11 +401,12 @@ struct ActionNodeInspectorView: View {
             }
         } label: {
             Image(systemName: "curlybraces")
-                .font(.system(size: 11, weight: .medium))
+                .font(theme.fontCodeCaption.weight(.medium))
                 .foregroundColor(.teal)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .pointingHandCursor()
         .help("Insert a value from the workflow")
     }
 
@@ -415,13 +449,16 @@ struct ActionNodeInspectorView: View {
                     } else {
                         HStack(spacing: 8) {
                             Text("Default")
-                                .font(.system(size: 11)).foregroundColor(theme.tertiaryText)
+                                .font(theme.fontCaption2)
+                                .foregroundColor(theme.secondaryText)
                             GlassActionButton(title: "Set", icon: "clock", isAccent: true) { hardTimeout = 120 }
                         }
                     }
                 }
 
-                Divider().opacity(0.3)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
 
                 // Retries
                 execRow(
@@ -432,7 +469,9 @@ struct ActionNodeInspectorView: View {
                 }
 
                 if maxRetries > 0 {
-                    Divider().opacity(0.3)
+                    Rectangle()
+                        .fill(theme.dividerColor.opacity(0.3))
+                        .frame(height: 0.5)
                     execRow(
                         label: "Retry Delay",
                         explainer: "Seconds to wait between attempts."
@@ -441,7 +480,9 @@ struct ActionNodeInspectorView: View {
                     }
                 }
 
-                Divider().opacity(0.3)
+                Rectangle()
+                    .fill(theme.dividerColor.opacity(0.3))
+                    .frame(height: 0.5)
 
                 // [WF-SE6/SE11] The EXPLICIT unattended approval — see ProfileNodeInspectorView's
                 // twin row. Without it, an unattended run refuses this tool's confirmation fast
@@ -471,17 +512,18 @@ struct ActionNodeInspectorView: View {
         explainer: String,
         @ViewBuilder control: () -> Control
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(theme.secondaryText)
+                    .font(theme.fontFootnote.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
                 Text(explainer)
-                    .font(.system(size: 10))
-                    .foregroundColor(theme.tertiaryText)
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 12)
+            Spacer(minLength: 16)
             control()
         }
     }
@@ -495,23 +537,25 @@ struct ActionNodeInspectorView: View {
                     .font(theme.fontSubheadline.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                 Spacer()
-                Button("Done") { showToolPicker = false }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                TactileButton(title: "Done", variant: .secondary, size: .compact) {
+                    showToolPicker = false
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(height: 0.5)
             if toolSources.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "wrench.and.screwdriver")
                         .font(.system(size: 28))
                         .foregroundColor(theme.tertiaryText)
                     Text("No tools available")
-                        .font(theme.fontBody)
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.secondaryText)
                     Text("Connect an MCP server or check the Tool Library.")
-                        .font(.system(size: 11))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.tertiaryText)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -527,14 +571,14 @@ struct ActionNodeInspectorView: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack(spacing: 5) {
                                     Text(source.serverName.uppercased())
-                                        .font(.system(size: 10, weight: .bold))
+                                        .font(theme.fontCodeCaption.weight(.bold))
                                         .foregroundColor(theme.tertiaryText)
                                     if !source.isEnabled {
                                         Image(systemName: "pause.circle.fill")
-                                            .font(.system(size: 9))
+                                            .font(theme.fontCaption2)
                                             .foregroundColor(theme.secondaryText.opacity(0.6))
                                         Text("Disabled — enable in Tool Library")
-                                            .font(.system(size: 9))
+                                            .font(theme.fontCaption2)
                                             .foregroundColor(theme.tertiaryText)
                                     }
                                 }
@@ -562,10 +606,10 @@ struct ActionNodeInspectorView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(def.title ?? def.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(theme.fontFootnote.weight(.medium))
                         .foregroundColor(theme.primaryText)
                     Text(def.description)
-                        .font(.system(size: 10))
+                        .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
@@ -585,6 +629,7 @@ struct ActionNodeInspectorView: View {
             )
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     // MARK: - Logic
@@ -630,9 +675,7 @@ struct ActionNodeInspectorView: View {
     ///
     /// ⚠️ Returning `existing` — `nil` included — is the whole point: `WorkflowCanvasState.replaceNode`
     /// refuses a write that changes nothing, so an unedited Save must produce a byte-identical node.
-    /// Materialising `WorkflowNodeConfig()` defeats that guard AND changes run behaviour, because
-    /// `maxNodeRetries` is non-optional and the executor's `?? workflowConfig.resolvedMaxRetries`
-    /// fallback is reachable only while `nodeConfig` is nil.
+    /// Materialising `WorkflowNodeConfig()` defeats that guard.
     ///
     /// `nonisolated static` and pure so the "is this a real change?" decision is truth-tableable —
     /// a `private func` inside `saveAndDismiss` is unreachable from a test.
@@ -641,8 +684,7 @@ struct ActionNodeInspectorView: View {
         maxRetries: Int,
         retryDelay: TimeInterval,
         hardTimeout: TimeInterval?,
-        unattendedAutoApprove: Bool,
-        inheritedRetryDefault: Int = 0
+        unattendedAutoApprove: Bool
     ) -> WorkflowNodeConfig? {
         var updated = existing ?? WorkflowNodeConfig()
         updated.maxNodeRetries = maxRetries
@@ -650,27 +692,14 @@ struct ActionNodeInspectorView: View {
         updated.hardTimeout = hardTimeout
         // nil (not false) when off — the default costs no bytes in the blob. [WF-SE6/SE11]
         updated.unattendedAutoApprove = unattendedAutoApprove ? true : nil
-        // Nothing to write: the panel holds exactly what `nil` already means for THIS workflow.
-        //
-        // ⚠️ `inheritedRetryDefault`, not a bare `WorkflowNodeConfig()`. `loadFromNode` seeds the
-        // stepper with the inherited count, so on a legacy workflow (`resolvedMaxRetries > 0`) an
-        // UNEDITED panel holds that count — and comparing against the bare defaults would call that
-        // a change, write a config, dirty the canvas and burn an undo step for a Save that changed
-        // nothing. It would also convert an inherited value into a PINNED one silently, dropping the
-        // node out of the executor's "still honoured by N node(s)" notice.
-        if existing == nil,
-           updated == .materialised(inheritedRetryDefault: inheritedRetryDefault) { return nil }
+        // Nothing to write: the panel holds exactly what `nil` already means.
+        if existing == nil, updated == WorkflowNodeConfig() { return nil }
         return updated
     }
 
     private func loadFromNode() {
         // Execution config lives on the shared per-node config.
-        // [INS-8] `?? inheritedRetryDefault`, not `?? 0`. `maxNodeRetries` is a non-optional Int, so
-        // the executor's `node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries`
-        // falls back ONLY while `nodeConfig` is nil — i.e. the stepper showing 0 was claiming "no
-        // retries" for a node the engine would retry `resolvedMaxRetries` times. Seeding the
-        // inherited value also migrates it onto the node on the first Save instead of erasing it.
-        maxRetries = node.nodeConfig?.maxNodeRetries ?? inheritedRetryDefault
+        maxRetries = node.nodeConfig?.maxNodeRetries ?? 0
         unattendedAutoApprove = node.nodeConfig?.unattendedAutoApprove ?? false
         retryDelay = node.nodeConfig?.retryDelay ?? 0
         hardTimeout = node.nodeConfig?.hardTimeout
@@ -680,7 +709,7 @@ struct ActionNodeInspectorView: View {
         bindings = config.argumentBindings
     }
 
-    private func saveAndDismiss() {
+    private func persistConfigToNode() {
         // Drop empty bindings so unconfigured optional args are omitted at run time.
         let cleaned = bindings.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         node.kind = .action(ActionNodeConfig(tool: selectedTool, argumentBindings: cleaned))
@@ -690,18 +719,24 @@ struct ActionNodeInspectorView: View {
         // UNCHANGED — nil included — when the panel holds exactly the defaults nil already means.
         // The old form materialised `WorkflowNodeConfig()` before writing, which `replaceNode`'s
         // equality guard cannot absorb (nil != .some(defaults)), so a Save with no edits dirtied the
-        // canvas and burned an undo slot. Not cosmetic here: materialising the default PINS a legacy
-        // workflow's inherited retry budget to 0 and drops the node out of the executor's
-        // "still honoured by N node(s)" notice.
+        // canvas and burned an undo slot.
         node.nodeConfig = Self.executionConfigToPersist(
             existing: node.nodeConfig,
             maxRetries: maxRetries,
             retryDelay: retryDelay,
             hardTimeout: hardTimeout,
-            unattendedAutoApprove: unattendedAutoApprove,
-            inheritedRetryDefault: inheritedRetryDefault
+            unattendedAutoApprove: unattendedAutoApprove
         )
+    }
 
+    private func persistIfEmbedded() {
+        guard !showsHeader else { return }
+        persistConfigToNode()
+    }
+
+    private func saveAndDismiss() {
+        persistConfigToNode()
+        NodeInspectorPendingCommit.shared.clear()
         closeInspector()
     }
 }

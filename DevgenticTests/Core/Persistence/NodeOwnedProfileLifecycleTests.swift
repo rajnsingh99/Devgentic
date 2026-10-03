@@ -202,7 +202,7 @@ final class NodeOwnedProfileLifecycleTests: XCTestCase {
         let store = InMemoryStore()
         let workflow = BackendProfileSnapshot(
             id: workflowID, displayName: "W",
-            details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+            details: .workflow(WorkflowConfig()))
         let owned = ownedRow("Node", workflow: workflowID, node: UUID())
         store.profiles = [workflow, owned]
         store.failFetch = true
@@ -217,42 +217,19 @@ final class NodeOwnedProfileLifecycleTests: XCTestCase {
                       "and its node's row must still be reachable through that workflow")
     }
 
-    // MARK: - The retired agentProfileIDs list (Phase 4)
+    // MARK: - Workflows with no profile nodes
 
-    /// ⚠️ THE REGRESSION PHASE 4 EXISTS TO PREVENT. `WorkflowConfig.agentProfileIDs` is no longer
-    /// recomputed, so it is empty (or stale) forever. While a BLOCKING validator rule keyed on that
-    /// emptiness, `BackendProfileStore` validating `strict: isUpdate` meant every UPDATE of a
-    /// workflow threw — including a rename, which is the most ordinary edit there is.
+    /// A workflow whose canvas is entirely structural nodes (Routers, Code, Gates) references no
+    /// profiles at all, and must still save and rename.
     ///
-    /// Asserted through the real `ProfileValidator` rather than a double, because the rule and the
-    /// strictness live on opposite sides of the store boundary and only their COMBINATION broke.
-    func testAWorkflowWithNoAgentListIsStillValidUnderStrictValidation() {
-        let workflow = BackendProfileSnapshot(
-            displayName: "Renamed Workflow",
-            details: .workflow(WorkflowConfig(agentProfileIDs: []))
-        )
-
-        let errors = ProfileValidator.validate(workflow, strict: true)
-
-        XCTAssertTrue(errors.blocking.isEmpty,
-                      "an empty agentProfileIDs must not block an update — it would make every "
-                      + "workflow permanently unsaveable, renames included. Got: "
-                      + "\(errors.blocking.map(\.message))")
-    }
-
-    /// The service-level shape of the same scenario: a workflow whose canvas is entirely structural
-    /// nodes (Routers, Code, Gates) references no profiles at all, and must still save and rename.
-    ///
-    /// ⚠️ NOT a guard on the validator rule — verified by mutation: reinstating the rule leaves this
-    /// test GREEN, because `InMemoryStore` does not run `ProfileValidator` (the real store does).
-    /// `testAWorkflowWithNoAgentListIsStillValidUnderStrictValidation` above is the test that
-    /// actually catches that regression. This one covers the save/rename path itself.
+    /// ⚠️ NOT a guard on validation — `InMemoryStore` does not run `ProfileValidator` (the real
+    /// store does); `ProfileValidatorTests` covers that. This one covers the save/rename path.
     func testAStructuralOnlyWorkflowSavesAndRenames() throws {
         let store = InMemoryStore()
         let svc = service(store)
         var workflow = BackendProfileSnapshot(
             id: workflowID, displayName: "Structural Only",
-            details: .workflow(WorkflowConfig(agentProfileIDs: []))
+            details: .workflow(WorkflowConfig())
         )
         _ = try svc.saveProfile(workflow)
 
@@ -271,7 +248,7 @@ final class NodeOwnedProfileLifecycleTests: XCTestCase {
         let store = InMemoryStore()
         let workflow = BackendProfileSnapshot(
             id: workflowID, displayName: "My Workflow",
-            details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+            details: .workflow(WorkflowConfig()))
         let owned = ownedRow("Node Config", workflow: workflowID, node: UUID())
         let foreign = ownedRow("Other Workflow's", workflow: UUID(), node: UUID())
         let shared = sharedRow("Library")
@@ -291,7 +268,7 @@ final class NodeOwnedProfileLifecycleTests: XCTestCase {
         let store = InMemoryStore()
         let workflow = BackendProfileSnapshot(
             id: workflowID, displayName: "W",
-            details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+            details: .workflow(WorkflowConfig()))
         let owned = ownedRow("Node", workflow: workflowID, node: UUID())
         store.profiles = [workflow, owned]
 

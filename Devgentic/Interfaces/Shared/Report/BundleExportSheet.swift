@@ -128,15 +128,9 @@ struct BundleExportSheet: View {
                     .foregroundColor(theme.secondaryText)
             }
             Spacer()
-            Button(action: { dismiss() }) {
-                Image(systemName: "xmark")
-                    .font(.caption.bold())
-                    .foregroundColor(theme.secondaryText)
-                    .frame(width: 22, height: 22)
-                    .background(theme.secondaryBackground)
-                    .clipShape(Circle())
+            TactileIconButton(icon: "xmark", tooltip: "Close", size: .compact) {
+                dismiss()
             }
-            .buttonStyle(.plain)
         }
         .padding(16)
     }
@@ -230,12 +224,20 @@ struct BundleExportSheet: View {
                     .foregroundColor(theme.secondaryText)
             }
             Spacer()
-            Button("Cancel") { dismiss() }
-                .disabled(isExporting)
-            Button("Export Bundle") { runExport() }
-                .buttonStyle(.borderedProminent)
-                .disabled(isExporting || includes.toOptionSet().rawValue == 0)
-                .keyboardShortcut(.return, modifiers: .command)
+            TactileButton(title: "Cancel", variant: .subtle, size: .compact, isDisabled: isExporting) {
+                dismiss()
+            }
+            TactileButton(
+                title: "Export Bundle",
+                icon: "arrow.up.doc",
+                variant: .primary,
+                size: .compact,
+                isLoading: isExporting,
+                isDisabled: isExporting || includes.toOptionSet().rawValue == 0
+            ) {
+                runExport()
+            }
+            .keyboardShortcut(.return, modifiers: .command)
         }
     }
 
@@ -292,17 +294,18 @@ struct BundleExportSheet: View {
 
             VStack(spacing: 10) {
                 HStack(spacing: 12) {
-                    Button("Save Bundle…") { saveBundle(result.zipURL) }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.return, modifiers: .command)
-                    Button("Report on GitHub") { reportOnGitHub(result) }
+                    TactileButton(title: "Save Bundle…", icon: "arrow.down.doc", variant: .primary, size: .regular) {
+                        saveBundle(result.zipURL)
+                    }
+                    .keyboardShortcut(.return, modifiers: .command)
+
+                    TactileButton(title: "Report on GitHub", icon: "safari", variant: .secondary, size: .regular) {
+                        reportOnGitHub(result)
+                    }
                 }
-                Button("Reveal in Finder") {
+                TactileButton(title: "Reveal in Finder", icon: "folder", variant: .subtle, size: .compact) {
                     NSWorkspace.shared.activateFileViewerSelecting([result.zipURL])
                 }
-                .buttonStyle(.plain)
-                .font(.caption)
-                .foregroundColor(theme.secondaryText)
             }
             .padding(.top, 4)
         }
@@ -324,12 +327,13 @@ struct BundleExportSheet: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 20)
             HStack(spacing: 12) {
-                Button("Retry") {
+                TactileButton(title: "Cancel", variant: .subtle, size: .regular) {
+                    dismiss()
+                }
+                TactileButton(title: "Retry", icon: "arrow.clockwise", variant: .primary, size: .regular) {
                     errorMessage = nil
                     runExport()
                 }
-                Button("Cancel") { dismiss() }
-                    .buttonStyle(.borderedProminent)
             }
         }
         .padding(30)

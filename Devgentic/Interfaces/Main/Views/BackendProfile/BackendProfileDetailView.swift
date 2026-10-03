@@ -140,7 +140,7 @@ struct BackendProfileDetailView: View {
                 Text(
                     "\(unreadable?.displayName ?? "This profile") was saved by a newer version of "
                     + "Devgentic (configuration format \(storedVersion); this build reads up to "
-                    + "\(ProfileMigrator.currentVersion)). Its settings are intact and untouched — "
+                    + "\(ProfileBlobGate.currentVersion)). Its settings are intact and untouched — "
                     + "update Devgentic to use it again.\n\nDo not reconfigure it here: saving on this "
                     + "version would replace the newer settings permanently."
                 )
@@ -186,12 +186,19 @@ struct BackendProfileDetailView: View {
 
             Spacer(minLength: 8)
 
-            Button("Discard and Reconfigure") { showingDiscardAlert = true }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            TactileButton(
+                title: "Discard and Reconfigure",
+                icon: "arrow.triangle.2.circlepath",
+                variant: .destructive,
+                size: .compact
+            ) {
+                showingDiscardAlert = true
+            }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, ViewLayout.containerPadding)
+        .padding(.vertical, 12)
+        .frame(maxWidth: ViewLayout.maxContentWidth)
+        .frame(maxWidth: .infinity, alignment: .center)
         .background(theme.warningColor.opacity(0.10))
         .overlay(alignment: .bottom) {
             Rectangle().fill(theme.warningColor.opacity(0.35)).frame(height: 1)
@@ -221,12 +228,19 @@ struct BackendProfileDetailView: View {
 
             Spacer(minLength: 8)
 
-            Button("Try Again") { retryProviderKeyRead() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            TactileButton(
+                title: "Try Again",
+                icon: "arrow.clockwise",
+                variant: .secondary,
+                size: .compact
+            ) {
+                retryProviderKeyRead()
+            }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, ViewLayout.containerPadding)
+        .padding(.vertical, 12)
+        .frame(maxWidth: ViewLayout.maxContentWidth)
+        .frame(maxWidth: .infinity, alignment: .center)
         .background(theme.warningColor.opacity(0.10))
         .overlay(alignment: .bottom) {
             Rectangle().fill(theme.warningColor.opacity(0.35)).frame(height: 1)
@@ -292,73 +306,30 @@ struct ProfileRowView: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Left rail = STATE: accent when selected, focused, or hovered; absent otherwise
-            if isSelected || isHovering || isFocused {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(
-                        LinearGradient(
-                            colors: isSelected ? [theme.accentColor, theme.accentColor.opacity(0.45)] : [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: 3)
-                    .padding(.vertical, isSelected ? 2 : 5)
-                    .padding(.trailing, 4)
-                    .shadow(color: isSelected ? theme.accentColor.opacity(0.4) : .clear, radius: 4)
-                    .transition(.opacity.combined(with: .scale))
-            } else {
-                Spacer().frame(width: 7)
-            }
+        HStack(spacing: 12) {
+            ProfileTypeIcon(
+                type: profile.profileType,
+                size: 18,
+                color: color(for: profile.profileType),
+                isHovered: isHovering
+            )
+            .frame(width: 24)
 
-            HStack(spacing: 12) {
-                ProfileTypeIcon(
-                    type: profile.profileType,
-                    size: 18,
-                    color: color(for: profile.profileType),
-                    isHovered: isHovering
-                )
-                .frame(width: 24)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(profile.displayName)
-                        .font(theme.fontFootnote.weight(.medium))
-                        .foregroundColor(theme.primaryText)
-                    Text(profile.profileType.localizedTitle)
-                        .font(.system(.caption))
-                        .foregroundColor(theme.secondaryText)
-                }
-                
-                Spacer()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(profile.displayName)
+                    .font(theme.fontFootnote.weight(.medium))
+                    .foregroundColor(theme.primaryText)
+                Text(profile.profileType.localizedTitle)
+                    .font(.system(.caption))
+                    .foregroundColor(theme.secondaryText)
             }
+            
+            Spacer()
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            ZStack {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(theme.accentColor.opacity(0.08))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
-                        )
-                        .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
-                } else if isFocused {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(theme.surfaceOverlayStrong)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(theme.accentColor.opacity(0.35), lineWidth: 1)
-                        )
-                } else if isHovering {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(theme.surfaceOverlay)
-                }
-            }
-        )
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering || isFocused)
         .overlay(alignment: .trailing) {
             if isHovering {
                 HoverActionButton(
@@ -484,22 +455,27 @@ struct DuplicateProfileSheet: View {
 
             // Actions
             HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
+                TactileButton(
+                    title: "Cancel",
+                    variant: .secondary,
+                    size: .regular
+                ) {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
                 Spacer()
-                Button("Duplicate") {
-                    // ⚠️ Was a four-argument call to the memberwise init (register A31). Every
-                    // parameter there has a default, so omitting `fileContextStrategy` compiled
-                    // cleanly and silently produced a copy with `nil` — which resolves to
-                    // `.stateless` for an agent, so duplicating an agent set to `.directInjection`
-                    // gave you a copy that hands the model file PATHS instead of file CONTENT.
-                    // `duplicated(as:)` copies the whole value and re-stamps only identity, so a
-                    // property added later is carried instead of dropped.
+
+                TactileButton(
+                    title: "Duplicate",
+                    icon: "doc.on.doc",
+                    variant: .primary,
+                    size: .regular,
+                    isDisabled: trimmedName.isEmpty
+                ) {
                     onConfirm(sourceProfile.duplicated(as: trimmedName))
                     dismiss()
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(trimmedName.isEmpty)
                 .keyboardShortcut(.defaultAction)
             }
             .padding()

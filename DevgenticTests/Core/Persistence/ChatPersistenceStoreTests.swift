@@ -46,7 +46,6 @@ final class ChatPersistenceStoreTests: XCTestCase {
         id: UUID = UUID(),
         title: String? = nil,
         isPinned: Bool = false,
-        backendType: BackendType? = nil,
         backendEntityId: UUID? = nil,
         messages: [ChatMessage] = []
     ) -> Conversation {
@@ -56,7 +55,6 @@ final class ChatPersistenceStoreTests: XCTestCase {
             timestamp: Date(),
             userDefinedTitle: title,
             isPinned: isPinned,
-            backendType: backendType,
             backendEntityId: backendEntityId
         )
     }
@@ -156,12 +154,11 @@ final class ChatPersistenceStoreTests: XCTestCase {
     func testAddConversationWithBackendAssociation() {
         let convId = UUID()
         let profileId = UUID()
-        let conv = makeConversation(id: convId, backendType: .agent, backendEntityId: profileId)
+        let conv = makeConversation(id: convId, backendEntityId: profileId)
 
         store.addConversation(from: conv)
 
         let fetched = store.getConversation(withId: convId)
-        XCTAssertEqual(fetched?.backendType, BackendType.agent.rawValue)
         XCTAssertEqual(fetched?.backendEntityId, profileId)
     }
 
@@ -353,39 +350,20 @@ final class ChatPersistenceStoreTests: XCTestCase {
         let profileId = UUID()
         store.addConversation(from: makeConversation(id: convId))
 
-        store.updateBackendForConversation(id: convId, backendType: .agent, backendEntityId: profileId)
+        store.updateBackendForConversation(id: convId, backendEntityId: profileId)
 
         let fetched = store.getConversation(withId: convId)
-        XCTAssertEqual(fetched?.backendType, BackendType.agent.rawValue)
         XCTAssertEqual(fetched?.backendEntityId, profileId)
     }
 
     func testUpdateBackendClearsExisting() {
         let convId = UUID()
-        store.addConversation(from: makeConversation(id: convId, backendType: .agent, backendEntityId: UUID()))
+        store.addConversation(from: makeConversation(id: convId, backendEntityId: UUID()))
 
-        store.updateBackendForConversation(id: convId, backendType: nil, backendEntityId: nil)
+        store.updateBackendForConversation(id: convId, backendEntityId: nil)
 
         let fetched = store.getConversation(withId: convId)
-        XCTAssertNil(fetched?.backendType)
         XCTAssertNil(fetched?.backendEntityId)
-    }
-
-    // MARK: - Update OpenAI Thread ID
-
-    func testUpdateOpenAIThreadID() {
-        let convId = UUID()
-        store.addConversation(from: makeConversation(id: convId))
-
-        store.updateOpenAIThreadID(for: convId, with: "thread_abc123")
-
-        let fetched = store.getConversation(withId: convId)
-        XCTAssertEqual(fetched?.openAIThreadID, "thread_abc123")
-    }
-
-    func testUpdateOpenAIThreadIDForNonExistentConversation() {
-        // Should not crash
-        store.updateOpenAIThreadID(for: UUID(), with: "thread_xyz")
     }
 
     // MARK: - ConversationSD → Conversation Struct Mapping
@@ -395,7 +373,7 @@ final class ChatPersistenceStoreTests: XCTestCase {
         let profileId = UUID()
         let msg = makeUserMessage(conversationId: convId, text: "Mapped message")
         let conv = makeConversation(id: convId, title: "Mapped Conv",
-                                    isPinned: true, backendType: .agent,
+                                    isPinned: true,
                                     backendEntityId: profileId, messages: [msg])
 
         store.addConversation(from: conv)
@@ -406,7 +384,6 @@ final class ChatPersistenceStoreTests: XCTestCase {
         XCTAssertEqual(result.id, convId)
         XCTAssertEqual(result.userDefinedTitle, "Mapped Conv")
         XCTAssertTrue(result.isPinned)
-        XCTAssertEqual(result.backendType, .agent)
         XCTAssertEqual(result.backendEntityId, profileId)
         XCTAssertEqual(result.messages.count, 1)
         XCTAssertEqual(result.messages.first?.content.textContent, "Mapped message")

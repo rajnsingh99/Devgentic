@@ -82,7 +82,22 @@ struct OllamaModelStoreContainerView: View {
                     .help("Sort Models")
                     .accessibilityLabel("Sort models")
 
-                    if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty {
+                    if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty,
+                       let reason = viewModel.unsupportedPullReason {
+                        // Labelled, inert pill instead of the Pull icon — a dimmed icon alone
+                        // would read as "still loading".
+                        Text("Not supported")
+                            .font(.system(.caption, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(.secondary.opacity(0.15)))
+                            .help(reason)
+                            .accessibilityLabel("This model is not supported")
+                            .accessibilityHint(reason)
+                    } else if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty {
                         IslandIconButton(
                             symbol: "arrow.down.circle.fill",
                             style: .prominent,

@@ -43,18 +43,15 @@ struct APIKeyInputPopup: View {
     
     // MARK: - Subviews
 
-    // ADDED: A dedicated close button for the popup.
     private var closeButton: some View {
-        Button(action: {
+        TactileIconButton(
+            icon: "xmark.circle.fill",
+            tooltip: "Close",
+            size: .regular
+        ) {
             dismiss()
-        }) {
-            Image(systemName: "xmark.circle.fill")
-                .font(.title3)
-                .foregroundColor(.secondary.opacity(0.6))
         }
-        .buttonStyle(.plain)
         .padding()
-        .help("Close")
         .accessibilityLabel("Close")
     }
 
@@ -118,20 +115,19 @@ struct APIKeyInputPopup: View {
     }
     
     private var actionButton: some View {
-        Button(action: handleButtonAction) {
-            HStack {
-                Spacer()
-                if case .validating = inputViewModel.validationState {
-                    ProgressView().controlSize(.small).tint(.white)
-                } else {
-                    Text(buttonText)
-                }
-                Spacer()
-            }
+        TactileButton(
+            title: buttonText,
+            variant: .primary,
+            size: .regular,
+            isLoading: {
+                if case .validating = inputViewModel.validationState { return true }
+                return false
+            }(),
+            isDisabled: isButtonDisabled
+        ) {
+            handleButtonAction()
         }
-        .controlSize(.large)
-        .buttonStyle(.borderedProminent)
-        .disabled(isButtonDisabled)
+        .frame(maxWidth: .infinity)
     }
     
     private var helpSection: some View {

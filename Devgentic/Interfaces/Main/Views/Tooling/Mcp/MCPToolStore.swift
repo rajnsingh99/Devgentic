@@ -23,6 +23,21 @@ final class MCPToolStore {
     // MARK: - Singleton Instance
     static let shared = MCPToolStore()
 
+    /// ⚠️ TEST SEAM (register KC-37, the KC-52 shape). When set, receives exactly the messages the
+    /// config-blob integrity paths log — an `updateTool`/`deleteTool` whose `mcpConfigData` cannot
+    /// yield an env-key set, and an `addTool` whose definition cannot be encoded. Those paths used
+    /// to be silent, and silence is the whole defect: an orphaned secret nobody was told about.
+    /// One message for the sink and the logger alike; the seam cannot drift from the log.
+    nonisolated(unsafe) static var blobIntegrityLogSinkForTesting: (@Sendable (String) -> Void)?
+
+    private static func logBlobIntegrity(_ message: String) {
+        if let sink = blobIntegrityLogSinkForTesting {
+            sink(message)
+            return
+        }
+        logger.error(message)
+    }
+
     /// Array of tool sources that the UI can observe for changes.
     var sources: [ToolSource] = []
 
@@ -33,46 +48,13 @@ final class MCPToolStore {
         modelContainer?.mainContext
     }
 
-    /// Call this once from the App init to inject the container. Also runs the
-    /// one-time legacy-secrets migration (lifts inline `env` / `authentication`
-    /// blobs into Keychain so they're no longer in plaintext on disk) and
-    /// kicks off a proactive OAuth-token refresh for any near-expiry bundles.
-    /// - Parameter migrateLegacySecrets: whether the one-shot legacy-secrets migration may run this
-    ///   launch. Pass the launch-sweep decision — this migration REWRITES `mcpConfigData` blobs and
-    ///   moves values into the Keychain, so it belongs to the same destructive class as
-    ///   `pruneOldRecords` and the two `reconcileOrphans` sweeps and must be gated identically.
-    ///
-    ///   ⚠️ It used to run unconditionally from here, which is called synchronously in the App
-    ///   struct's initializer — i.e. BEFORE `evaluateLaunchSweep()`. So on the first launch after a
-    ///   schema change, the gate correctly deferred the other three sweeps while this one had already
-    ///   rewritten secrets against possibly-degraded rows. That defeated the gate for one of the five
-    ///   operations it was created to cover (SWIFTDATA_GAP_REGISTER.md G44).
-    ///
-    ///   Skipping only postpones it: the `mcp.secrets.migrated.v1` flag stays unset, so the next
-    ///   launch runs it normally.
-    func configureContainer(_ container: ModelContainer, migrateLegacySecrets: Bool) {
+    /// Call this once from the App init to inject the container. Also kicks off a proactive
+    /// OAuth-token refresh for any near-expiry bundles.
+    func configureContainer(_ container: ModelContainer) {
         self.modelContainer = container
-        if migrateLegacySecrets {
-            // ⚠️ REFUSED under XCTest. The test host is the real app on the real store, but its
-            // Keychain is an in-memory stand-in (`TestHostKeychain`, registers KC-54/55) — a
-            // "successful" secret write here proves nothing, and the blob rewrite that follows it
-            // would strip real secrets into a store that vanishes with the process. Same class as
-            // `BackendProfileStore.migrateAPIKeysToKeychain`; the flag stays unset, so the app's own
-            // next launch runs it normally.
-            if TestHost.permits("migrate legacy MCP secrets out of the config blobs into the Keychain", logger: logger) {
-                migrateLegacySecretsIfNeeded()
-            }
-        } else {
-            logger.notice(
-                "[STARTUP] MCP legacy-secrets migration DEFERRED — the launch sweep is not running "
-                + "this launch. CONSEQUENCE: any pre-Keychain inline secrets stay inline for now and "
-                + "are migrated on the next launch; MCP servers still connect normally meanwhile."
-            )
-        }
         fetchTools()
         refreshNearExpiryOAuthBundles()
     }
-
 
     /// Resolves the model context, LOGGING the user-visible consequence when it is missing.
     ///
@@ -118,12 +100,30 @@ final class MCPToolStore {
                 + "form is told the add failed."
         ) else { return nil }
 
+        // Encode the definition BEFORE any secret is written. ⚠️ Register KC-38: the `try?` that
+        // used to build this blob could null it after `persistSecrets` had already stored the env
+        // values — creating exactly the row `deleteTool` cannot clean up, a source whose env-key
+        // names never reached disk while their secrets sit in the Keychain. Failing the add is
+        // cheap here: nothing has been written yet, so there is nothing to clean up.
+        let configBlob: Data
+        do {
+            configBlob = BlobVersioning.stamped(
+                try JSONEncoder().encode(serverDefinition), version: MCPToolItem.configBlobVersion)
+        } catch {
+            Self.logBlobIntegrity(
+                "[PERSISTENCE] Failed to encode the ServerDefinition for new MCP source "
+                + "'\(serverName)' (id \(newID)): \(error). CONSEQUENCE: the server was NOT "
+                + "added — no row and no Keychain secrets were written, so there is nothing to "
+                + "clean up; re-entering the configuration is the whole recovery."
+            )
+            return nil
+        }
+
         let item = MCPToolItem(
             id: newID,
             serverName: serverName,
             // Stamped (G19) so a future reader can ask what shape this is instead of guessing.
-            mcpConfigData: (try? JSONEncoder().encode(serverDefinition))
-                .map { BlobVersioning.stamped($0, version: MCPToolItem.configBlobVersion) }
+            mcpConfigData: configBlob
         )
 
         for tool in newTools {
@@ -230,11 +230,38 @@ final class MCPToolStore {
 
             // Capture the previous env-key set so we can purge any keys the
             // user removed in this edit. Read before mutating mcpConfigData.
+            //
+            // ⚠️ Register KC-37: the `try?` that used to sit here turned an UNDECODABLE (or
+            // MISSING) blob into an empty key set, so the purge below silently skipped — any
+            // env-var secret the user had removed kept its Keychain entry with nothing left
+            // pointing at it, and nothing said why. An unknowable key set purges NOTHING (the
+            // key names live in the blob, and deleting on an uncertain read is the KC-1
+            // hazard), but the skip must be stated, not silent.
             let previousEnvKeys: Set<String> = {
-                guard let data = item.mcpConfigData,
-                      let prev = try? JSONDecoder().decode(ServerDefinition.self, from: data),
-                      let keys = prev.envKeys else { return [] }
-                return Set(keys)
+                guard let data = item.mcpConfigData else {
+                    Self.logBlobIntegrity(
+                        "[PERSISTENCE] Updating MCP source '\(serverName)' (id \(id)) whose "
+                        + "mcpConfigData is MISSING. CONSEQUENCE: the previous env-key set is "
+                        + "unknowable, so NO env-var secrets are purged in this edit — any key the "
+                        + "user removed keeps its Keychain entry. Purge leftovers by hand from "
+                        + "Keychain Access (search \"\(id.uuidString)\") if this source held credentials."
+                    )
+                    return []
+                }
+                do {
+                    let prev = try JSONDecoder().decode(ServerDefinition.self, from: data)
+                    return Set(prev.envKeys ?? [])
+                } catch {
+                    Self.logBlobIntegrity(
+                        "[PERSISTENCE] Updating MCP source '\(serverName)' (id \(id)) whose "
+                        + "mcpConfigData is UNDECODABLE (\(data.count) bytes) — \(error). "
+                        + "CONSEQUENCE: the previous env-key set is unknowable, so NO env-var "
+                        + "secrets are purged in this edit — any key the user removed keeps its "
+                        + "Keychain entry. Purge leftovers by hand from Keychain Access "
+                        + "(search \"\(id.uuidString)\") if this source held credentials."
+                    )
+                    return []
+                }
             }()
 
             item.serverName = serverName
@@ -304,12 +331,27 @@ final class MCPToolStore {
                 // being deleted. If the blob cannot be decoded we cannot know what to purge, and the
                 // secrets outlive the source with nothing left pointing at them (G22). Silent before;
                 // the row still gets deleted (the user asked for that), but the orphaning is stated.
+                //
+                // ⚠️ Register KC-38: the nil branch returned an empty key set in complete silence —
+                // a blob that was never persisted (the addTool defect, now fixed at the source)
+                // deleted its row while its env-var secrets stayed in the Keychain unnamed and
+                // unexplained. Same consequence as the undecodable case below, so it gets the same
+                // log: the row goes, the orphaning is stated, nothing is guessed at.
                 let envKeys: Set<String> = {
-                    guard let data = item.mcpConfigData else { return [] }
+                    guard let data = item.mcpConfigData else {
+                        Self.logBlobIntegrity(
+                            "[PERSISTENCE] Deleting MCP source '\(item.serverName)' (\(targetID)) whose "
+                            + "mcpConfigData is MISSING. CONSEQUENCE: its env-var secrets CANNOT be "
+                            + "identified and are left in the Keychain with nothing referencing them. "
+                            + "Purge them by hand from Keychain Access (search \"\(targetID.uuidString)\") "
+                            + "if this source held credentials."
+                        )
+                        return []
+                    }
                     do {
                         return Set(try JSONDecoder().decode(ServerDefinition.self, from: data).envKeys ?? [])
                     } catch {
-                        logger.error(
+                        Self.logBlobIntegrity(
                             "[PERSISTENCE] Deleting MCP source '\(item.serverName)' (\(targetID)) whose "
                             + "mcpConfigData is UNDECODABLE (\(data.count) bytes) — \(error). "
                             + "CONSEQUENCE: its env-var secrets CANNOT be identified and are left in the "
@@ -498,152 +540,6 @@ final class MCPToolStore {
                     logger.warning("Proactive OAuth refresh failed for \(serverName): \(error.localizedDescription)")
                 }
             }
-        }
-    }
-
-    // MARK: - Legacy migration
-
-    /// One-time pass: read any pre-Phase-1 `mcpConfigData` blobs (which carry
-    /// inline `env` / `authentication` payloads), lift the secret material
-    /// into Keychain, and re-encode the blob in the new shape. Idempotent —
-    /// keyed by a UserDefaults flag so it never runs twice.
-    /// ⚠️ TEST SEAM: `defaults` is injectable and this is not `private`, mirroring
-    /// `ProviderKeyStore.purgeLegacyPlaintextKeys(defaults:)`. The one-shot flag lives in
-    /// `UserDefaults`, so without this a test could neither run the migration (the flag is already
-    /// set on any machine that has launched the app) nor avoid writing to the developer's real
-    /// preferences domain to clear it. Production always uses `.standard`.
-    func migrateLegacySecretsIfNeeded(defaults: UserDefaults = .standard) {
-        guard let context = requireContext("migrateLegacySecretsIfNeeded", consequence: "the one-shot legacy-secrets migration did not run; inline secrets stay in plaintext on disk and it retries next launch.") else { return }
-
-        let migrationKey = "mcp.secrets.migrated.v1"
-        if defaults.bool(forKey: migrationKey) {
-            return
-        }
-
-        do {
-            let descriptor = FetchDescriptor<MCPToolItem>()
-            let items = try context.fetch(descriptor)
-            var migratedCount = 0
-            var migrationFailures = 0
-            for item in items {
-                guard let data = item.mcpConfigData,
-                      let legacy = try? JSONDecoder().decode(LegacyServerDefinition.self, from: data) else {
-                    continue
-                }
-
-                // Only proceed if the blob actually has legacy secrets — a
-                // ServerDefinition encoded post-migration won't decode the
-                // legacy keys (they'll just be nil), so this branch no-ops.
-                let hasLegacyEnv = !(legacy.env?.isEmpty ?? true)
-                let hasLegacyAuth = !(legacy.authentication?.isEmpty ?? true)
-                guard hasLegacyEnv || hasLegacyAuth else { continue }
-
-                // ⚠️⚠️ EVERY `store` RESULT IS LOAD-BEARING HERE — register KC-6. These returns used
-                // to be discarded, and execution fell through to the blob rewrite below, which
-                // replaces the legacy shape with one that carries only env KEY NAMES and no secret
-                // material. So a Keychain write that failed left the secret in NEITHER place: gone
-                // from the blob, never written to the Keychain, unrecoverable.
-                //
-                // And this is not a rare path. It runs unattended at launch over every source, and
-                // the launch most likely to fail is the FIRST ONE AFTER AN UPDATE — precisely when
-                // a re-signed binary makes macOS re-prompt for Keychain access and an unattended
-                // login-item launch has nobody there to answer it.
-                //
-                // The rule the encode failure below already follows: do not count it as migrated if
-                // it did not persist. This applies it to the Keychain half too.
-                var secretsPersisted = true
-
-                // Lift env values into Keychain.
-                var envKeys: [String] = []
-                if let env = legacy.env {
-                    for (k, v) in env where !v.isEmpty {
-                        if !MCPSecretStore.shared.store(v, for: .envValue(key: k), sourceID: item.id) {
-                            secretsPersisted = false
-                            logger.error(
-                                "[MCP-SECRETS] Legacy migration could not write env value '\(k)' for "
-                                + "MCP source '\(item.serverName)' (id \(item.id)) to the Keychain. "
-                                + "CONSEQUENCE: this source's blob is NOT rewritten, so the secret "
-                                + "stays readable in its legacy inline form and the migration is "
-                                + "retried on the next launch."
-                            )
-                        }
-                        envKeys.append(k)
-                    }
-                }
-
-                // Lift bearer-style token (the only legacy auth shape we ever
-                // wrote) into Keychain and set scheme to `.bearer`.
-                var auth: MCPAuthenticationScheme = .none
-                if let token = legacy.authentication?["token"], !token.isEmpty {
-                    if MCPSecretStore.shared.store(token, for: .bearerToken, sourceID: item.id) {
-                        auth = .bearer
-                    } else {
-                        secretsPersisted = false
-                        logger.error(
-                            "[MCP-SECRETS] Legacy migration could not write the bearer token for MCP "
-                            + "source '\(item.serverName)' (id \(item.id)) to the Keychain. "
-                            + "CONSEQUENCE: this source's blob is NOT rewritten, so the token stays "
-                            + "in its legacy inline form and the server keeps working; the migration "
-                            + "is retried on the next launch."
-                        )
-                    }
-                }
-
-                // ⚠️ Bail BEFORE the rewrite. The blob is the only remaining copy of any secret
-                // whose Keychain write failed, so leaving it byte-intact is what makes this
-                // recoverable. `migrationFailures` keeps the one-shot flag unset so it retries.
-                guard secretsPersisted else {
-                    migrationFailures += 1
-                    continue
-                }
-
-                let migrated = ServerDefinition(
-                    command: legacy.command,
-                    args: legacy.args,
-                    envKeys: envKeys.isEmpty ? nil : envKeys.sorted(),
-                    url: legacy.url,
-                    auth: auth
-                )
-                // ⚠️ Same rule as `updateTool`, and it matters more here: this runs unattended at
-                // launch over EVERY source. A `try?` would have nulled a working configuration while
-                // the secrets had already been moved to the Keychain, leaving the source unusable
-                // and unrecoverable. Don't count it as migrated if it did not persist, or the
-                // `mcp.secrets.migrated.v1` flag would be set for a source that still needs it.
-                do {
-                    item.mcpConfigData = BlobVersioning.stamped(
-                        try JSONEncoder().encode(migrated), version: MCPToolItem.configBlobVersion)
-                    migratedCount += 1
-                } catch {
-                    migrationFailures += 1
-                    logger.error(
-                        "[PERSISTENCE] Failed to encode migrated ServerDefinition for MCP source "
-                        + "'\(item.serverName)' (id \(item.id)): \(error). CONSEQUENCE: this source's "
-                        + "mcpConfigData is left at its legacy shape and still works; it is retried "
-                        + "on the next launch because the migration flag is not set below."
-                    )
-                }
-            }
-
-            if migratedCount > 0 {
-                try context.save()
-                logger.info("Migrated \(migratedCount) MCP source(s) to Keychain-backed secrets.")
-            }
-            // ⚠️ Only claim the migration is done if nothing was left behind. Setting the flag with
-            // failures outstanding would strand those sources at their legacy shape forever, with
-            // their secrets already moved to the Keychain and nothing left to retry the move.
-            if migrationFailures == 0 {
-                defaults.set(true, forKey: migrationKey)
-            } else {
-                logger.error(
-                    "[PERSISTENCE] Legacy-secrets migration INCOMPLETE — \(migratedCount) source(s) "
-                    + "migrated, \(migrationFailures) failed to encode. CONSEQUENCE: the migration "
-                    + "flag is NOT set, so the whole pass retries on the next launch; already-migrated "
-                    + "sources are idempotent and will simply be skipped."
-                )
-            }
-        } catch {
-            // Don't set the migrated flag — we'll retry on next launch.
-            logger.error("Legacy-secrets migration failed: \(error.localizedDescription)")
         }
     }
 

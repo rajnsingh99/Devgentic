@@ -47,8 +47,7 @@ struct PromptRowView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
-        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering)
-        .overlay(keyboardFocusRing)
+        .sidebarRowBackground(isSelected: isSelected, isHovering: isHovering || isKeyboardFocused)
         .opacity(isSelectionMode && !canDelete ? 0.55 : 1)
         .contentShape(Rectangle())
         .pointingHandCursor()
@@ -116,7 +115,7 @@ struct PromptRowView: View {
                     onEnterSelectionMode()
                     onToggleBatchSelect()
                 } label: {
-                    Label("Select Prompts…", systemImage: "checkmark.circle")
+                    Label("Select Prompts", systemImage: "checkmark.circle")
                 }
             }
 
@@ -183,58 +182,40 @@ struct PromptRowView: View {
 
     @ViewBuilder
     private var standardContentView: some View {
-        HStack(alignment: .top, spacing: 0) {
-            // Accent gradient line on left for selected state
-            if isSelected {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(
-                        LinearGradient(
-                            colors: [theme.accentColor, theme.accentColor.opacity(0.4)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: 3)
-                    .padding(.vertical, 4)
-                    .padding(.trailing, 6)
-                    .transition(.scale(scale: 0.5, anchor: .leading).combined(with: .opacity))
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 4) {
-                    if prompt.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(theme.fontCaption2)
-                            .foregroundColor(theme.accentColor.opacity(0.85))
-                            .rotationEffect(.degrees(45))
-                            .accessibilityHidden(true)
-                    }
-
-                    Text(prompt.title)
-                        .font(theme.fontFootnote.weight(.medium))
-                        .foregroundColor(theme.primaryText)
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    // Hover actions take the badge's slot — only one shows at a time.
-                    if isHovering {
-                        hoverActions
-                            .transition(.opacity)
-                    } else {
-                        categoryBadge
-                            .transition(.opacity)
-                    }
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                if prompt.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.accentColor.opacity(0.85))
+                        .rotationEffect(.degrees(45))
+                        .accessibilityHidden(true)
                 }
 
-                Text(prompt.text)
-                    .font(theme.fontCaption)
-                    .foregroundColor(theme.secondaryText)
+                Text(prompt.title)
+                    .font(theme.fontFootnote.weight(.medium))
+                    .foregroundColor(theme.primaryText)
                     .lineLimit(1)
-                    .truncationMode(.tail)
+
+                Spacer()
+
+                // Hover actions take the badge's slot — only one shows at a time.
+                if isHovering {
+                    hoverActions
+                        .transition(.opacity)
+                } else {
+                    categoryBadge
+                        .transition(.opacity)
+                }
             }
+
+            Text(prompt.text)
+                .font(theme.fontCaption)
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 4)
         .padding(.vertical, 2)
     }
 
@@ -277,15 +258,6 @@ struct PromptRowView: View {
                     action: onDelete
                 )
             }
-        }
-    }
-
-    @ViewBuilder
-    private var keyboardFocusRing: some View {
-        if isKeyboardFocused && !isSelected {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(theme.accentColor.opacity(0.5), lineWidth: 1)
-                .allowsHitTesting(false)
         }
     }
 

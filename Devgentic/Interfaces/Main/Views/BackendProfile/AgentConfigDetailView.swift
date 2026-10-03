@@ -310,35 +310,6 @@ struct AgentConfigDetailView: View {
         )
     }
 
-    private var skillConfigBinding: Binding<SkillFolderConfig?> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
-        return Binding<SkillFolderConfig?>(
-            get: {
-                if case .agent(let config) = buffer.draft.details { return config.skillConfig }
-                return nil
-            },
-            set: { newValue in
-                if case .agent(var config) = buffer.draft.details {
-                    config.skillConfig = newValue
-                    // ⚠️ DELIBERATELY DOES NOT TOUCH `skillSelections` (changed 2026-09-14).
-                    //
-                    // This editor used to keep the two in lockstep, because during the v8 dual-read
-                    // window it was a WRITER of links and `SkillResolution` preferred selections.
-                    // Under V6 it is not a writer any more: a profile links skills in the Skills
-                    // library, and this card no longer imports folders. A selection now addresses
-                    // an opaque `skill_…` that this editor has no way to produce, so anything it
-                    // wrote here would be an address it invented.
-                    //
-                    // ⚠️ Do NOT reinstate a derive-from-skillConfig step. That is what once deleted
-                    // every library-made link the moment a user touched this card — silent,
-                    // persisted on the next Save, and invisible until an agent stopped seeing a
-                    // skill. The legacy blob is read-only history now; leave it alone.
-                    buffer.draft.details = .agent(config)
-                }
-            }
-        )
-    }
-
     // MARK: - Body
     var body: some View {
         Group {
@@ -409,7 +380,10 @@ struct AgentConfigDetailView: View {
             SaveAdvisoryBanner(advisories: saveAdvisories) {
                 withAnimation { saveAdvisories = [] }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, ViewLayout.containerPadding)
+            .padding(.top, 8)
+            .frame(maxWidth: ViewLayout.maxContentWidth)
+            .frame(maxWidth: .infinity, alignment: .center)
 
             ScrollView {
                 VStack(spacing: 32) {
@@ -519,6 +493,7 @@ struct AgentConfigDetailView: View {
                     .foregroundColor(theme.secondaryText)
             }
             .buttonStyle(.plain)
+            .pointingHandCursor()
             .help("Agent configuration guide")
             .accessibilityLabel("Agent configuration guide")
         }
@@ -530,47 +505,15 @@ struct AgentConfigDetailView: View {
 
     private var inferenceEngineSection: some View {
         SettingsCard(title: "Inference Engine", icon: "cpu", theme: theme) {
-            VStack(alignment: .leading, spacing: 16) {
-                ProviderConfigSection(
-                    providerConfig: providerConfig,
-                    profileID: editBuffer.draft.id,
-                    profileType: .agent,
-                    onProviderChanged: { _, newProvider in
-                        providerConfig.wrappedValue.cognitiveCapability =
-                            ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: newProvider)
-                    }
-                )
-
-                Divider()
-
-                // Capability Status Badge (Agent-specific)
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Inference Capability")
-                            .font(theme.fontFootnote.weight(.semibold))
-                            .foregroundColor(theme.primaryText)
-                        Text("Detected architectural support for complex structured reasoning.")
-                            .font(theme.fontCaption2)
-                            .foregroundColor(theme.secondaryText)
-                            .lineSpacing(2.5)
-                    }
-
-                    Spacer(minLength: 16)
-
-                    HStack(spacing: 6) {
-                        let capability = providerConfig.wrappedValue.cognitiveCapability
-                        Image(systemName: capabilityIcon(for: capability))
-                        Text(capability.localizedTitle)
-                            .font(theme.fontCaption2.weight(.semibold))
-                    }
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 10)
-                    .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
-                    .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
+            ProviderConfigSection(
+                providerConfig: providerConfig,
+                profileID: editBuffer.draft.id,
+                profileType: .agent,
+                onProviderChanged: { _, newProvider in
+                    providerConfig.wrappedValue.cognitiveCapability =
+                        ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: newProvider)
                 }
-            }
+            )
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
         }
@@ -743,10 +686,8 @@ struct AgentConfigDetailView: View {
         }
     }
 
-    /// ⚠️ NO IMPORT HERE (V6). This card used to be the whole skills editor — add a folder,
-    /// rescan it, toggle each skill, remove them all — writing into the profile's own
-    /// `skillConfig` blob. That is gone: skills live in a global library, a profile stores a
-    /// REFERENCE, and linking happens where the library is. Five profiles using one skill was five
+    /// ⚠️ NO IMPORT HERE. Skills live in a global library, a profile stores a REFERENCE, and
+    /// linking happens where the library is. Five profiles using one skill was five
     /// copies that could disagree about what its description said.
     ///
     /// What is left is the honest summary plus the way through.
@@ -762,7 +703,7 @@ struct AgentConfigDetailView: View {
                                 .foregroundColor(theme.primaryText)
 
                             if !linkedSelections.isEmpty {
-                                let enabledCount = linkedSelections.filter { $0.isEnabled && !$0.isAwaitingRelink }.count
+                                let enabledCount = linkedSelections.filter(\.isEnabled).count
                                 let isContrast = buttonAccentStyle == .themeContrast
                                 Text("\(enabledCount) active")
                                     .font(theme.fontCodeCaption.weight(.medium))
@@ -785,23 +726,6 @@ struct AgentConfigDetailView: View {
                     GlassActionButton(title: "Manage Skills", icon: "arrow.up.forward.app", isAccent: false) {
                         router.navigate(to: .skillLibrary(profileID: editBuffer.draft.id))
                     }
-                }
-
-                // ⚠️ Named separately from "not found". A selection awaiting re-link points at a
-                // skill that probably still exists and the import sweep repairs it; telling the user
-                // to remove it would destroy a link that is about to fix itself.
-                if awaitingRelinkCount > 0 {
-                    HStack(spacing: 8) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.orange)
-                        Text("\(awaitingRelinkCount) skill\(awaitingRelinkCount == 1 ? "" : "s") carried over from before the skill library and will be re-linked automatically. Nothing to do.")
-                            .font(theme.fontCaption2)
-                            .foregroundStyle(theme.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(8)
-                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 }
 
                 if linkedSelections.isEmpty {
@@ -836,11 +760,7 @@ struct AgentConfigDetailView: View {
                                 selection: selection,
                                 theme: theme,
                                 onOpenDetail: {
-                                    if let skillID = selection.skillID {
-                                        router.navigate(to: .skillDetail(skillID: skillID))
-                                    } else {
-                                        router.navigate(to: .skillLibrary(profileID: editBuffer.draft.id))
-                                    }
+                                    router.navigate(to: .skillDetail(skillID: selection.skillID))
                                 }
                             )
                         }
@@ -857,10 +777,8 @@ struct AgentConfigDetailView: View {
         return config.skillSelections ?? []
     }
 
-    private var awaitingRelinkCount: Int { linkedSelections.filter(\.isAwaitingRelink).count }
-
     private var linkedSkillsSummary: String {
-        let enabled = linkedSelections.filter { $0.isEnabled && !$0.isAwaitingRelink }.count
+        let enabled = linkedSelections.filter(\.isEnabled).count
         guard !linkedSelections.isEmpty else {
             return "No skills linked. Skills are sets of instructions this agent loads on demand when a task matches one of them."
         }
@@ -1248,22 +1166,6 @@ struct AgentConfigDetailView: View {
             defaultProfile: .agent
         )
     }
-
-    private func capabilityIcon(for capability: ModelCognitiveCapability) -> String {
-        switch capability {
-        case .none: return "text.bubble"
-        case .singleAction: return "bolt.fill"
-        case .parallelActions: return "bolt.shield.fill"
-        }
-    }
-
-    private func capabilityColor(for capability: ModelCognitiveCapability) -> Color {
-        switch capability {
-        case .none: return theme.secondaryText
-        case .singleAction: return .orange
-        case .parallelActions: return .green
-        }
-    }
 }
 
 // MARK: - SkillSelectionRow
@@ -1318,11 +1220,7 @@ private struct SkillSelectionRow: View {
                         }
                     }
 
-                    if selection.isAwaitingRelink {
-                        Text("Awaiting re-link from migration")
-                            .font(theme.fontCaption2)
-                            .foregroundStyle(Color.orange)
-                    } else if let versionID = selection.pinnedVersionID {
+                    if let versionID = selection.pinnedVersionID {
                         Text("Pinned to version \(versionID)")
                             .font(theme.fontCaption2)
                             .foregroundStyle(theme.secondaryText)

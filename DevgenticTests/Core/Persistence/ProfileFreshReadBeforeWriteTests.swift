@@ -6,15 +6,12 @@
 //
 //  ⚠️⚠️ THE CLOBBER. `BackendProfileService.profiles` is an array of VALUE-TYPE snapshots taken when
 //  it last loaded. Several things write profile ROWS out of band and never refresh it:
-//  `BackendOrchestrationService` auto-healing a thinking flag, `MLXContextWindowHealer` backfilling a
-//  context window, and — since V6 — `SkillLibraryImportSweep`, which re-links every pre-V6 skill
-//  reference at launch by assigning `details` on the SwiftData row directly.
+//  `BackendOrchestrationService` auto-healing a thinking flag, and `MLXContextWindowHealer`
+//  backfilling a context window — both by assigning `details` on the SwiftData row directly.
 //
 //  A writer that starts from the stale array, changes one facet and calls `saveProfile` writes the
 //  WHOLE stale snapshot back, because `BackendProfileStore.saveProfile` does
-//  `existing.details = snapshot.details`. The sweep is the worst case of the class: it is the one
-//  pass that carries a pre-V6 user's skills into the library, so reverting it loses the migration
-//  rather than one setting — and the trigger is an ordinary skill-link toggle.
+//  `existing.details = snapshot.details` — and the trigger is an ordinary skill-link toggle.
 //
 //  `activateEditBuffer` already learned this for the editor path. `freshProfile(id:)` is that rule
 //  extracted and named, so the next whole-profile writer reaches for it instead of rediscovering it.
@@ -57,33 +54,30 @@ final class ProfileFreshReadBeforeWriteTests: XCTestCase {
         return config.skillSelections ?? []
     }
 
-    /// ⚠️ THE DEFECT, as the sweep actually produces it: the service loads, the sweep rewrites the
-    /// ROW underneath it, and the in-memory copy still holds the pre-sweep selections.
+    /// ⚠️ THE DEFECT: the service loads, an out-of-band writer rewrites the ROW underneath it, and
+    /// the in-memory copy still holds what was there before.
     ///
     /// **Mutation check:** have `freshProfile` return `profiles.first(where:)` instead of reading the
     /// store and this goes red.
     func testFreshProfileSeesAnOutOfBandRowWriteThatTheSnapshotArrayMissed() throws {
         let store = InMemoryStore()
-        let pending = SkillSelection(skillID: nil, legacyFolderPath: "/tmp/skills/code-review",
-                                     name: "code-review", isEnabled: true)
-        store.profiles = [agent(selections: [pending])]
+        store.profiles = [agent(selections: [])]
         let service = BackendProfileService(store: store)
         let id = try XCTUnwrap(service.profiles.first?.id)
 
-        XCTAssertTrue(selections(of: service.profiles.first).allSatisfy { $0.skillID == nil },
-                      "precondition: the loaded snapshot holds an unlinked selection")
+        XCTAssertTrue(selections(of: service.profiles.first).isEmpty,
+                      "precondition: the loaded snapshot links nothing")
 
-        // The sweep: the ROW is re-linked, the service is never told.
-        let relinked = SkillSelection(skillID: "skill_abc", legacyFolderPath: nil,
-                                      name: "code-review", isEnabled: true)
-        store.profiles = [agent(selections: [relinked])].map {
+        // The out-of-band write: the ROW gains a link, the service is never told.
+        let linked = SkillSelection(skillID: "skill_abc", name: "code-review", isEnabled: true)
+        store.profiles = [agent(selections: [linked])].map {
             BackendProfileSnapshot(id: id, displayName: $0.displayName, details: $0.details)
         }
 
-        XCTAssertEqual(selections(of: service.profiles.first).first?.skillID, nil,
-                       "the in-memory array is STALE — this is the state every whole-profile writer starts from")
+        XCTAssertTrue(selections(of: service.profiles.first).isEmpty,
+                      "the in-memory array is STALE — this is the state every whole-profile writer starts from")
         XCTAssertEqual(selections(of: service.freshProfile(id: id)).first?.skillID, "skill_abc",
-                       "freshProfile must see what the sweep actually wrote")
+                       "freshProfile must see what was actually written")
     }
 
     /// The control: with the store unreachable, the cached copy is still returned rather than nil.

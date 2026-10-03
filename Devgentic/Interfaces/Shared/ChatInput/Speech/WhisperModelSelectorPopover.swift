@@ -17,6 +17,9 @@ struct WhisperModelSelectorPopover: View {
     let onSelectUndownloadedModel: (String) -> Void
     let onDeleteModel: (String) -> Void
 
+    /// @Observable — reading its download state in `body` re-renders the rows as a pull advances.
+    private var downloadService: WhisperModelDownloadService { .shared }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             popoverHeader
@@ -33,9 +36,20 @@ struct WhisperModelSelectorPopover: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Speech Model")
                 .font(.system(size: 13, weight: .semibold))
-            Text("Select a model to enable voice input")
-                .font(.system(.caption))
-                .foregroundColor(.secondary)
+            if let downloadingId = downloadService.downloadingModelId {
+                Text("Downloading \(displayName(for: downloadingId))…")
+                    .font(.system(.caption))
+                    .foregroundColor(.accentColor)
+            } else if let error = downloadService.downloadError {
+                Text("Download failed: \(error)")
+                    .font(.system(.caption))
+                    .foregroundColor(.red)
+                    .lineLimit(2)
+            } else {
+                Text("Select a model to enable voice input")
+                    .font(.system(.caption))
+                    .foregroundColor(.secondary)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
@@ -46,10 +60,19 @@ struct WhisperModelSelectorPopover: View {
         ScrollView {
             VStack(spacing: 0) {
                 ForEach(WhisperModelCatalog.availableModels) { model in
+                    let isDownloaded = downloadedModelIds.contains(model.id)
+                    let isDownloading = downloadService.downloadingModelId == model.id
                     ModelRowView(
                         model: model,
-                        isSelected: model.id == currentModelName,
-                        isDownloaded: downloadedModelIds.contains(model.id),
+                        // ⚠️ Selected means USABLE. The stored choice outlives its files (deleted,
+                        // moved, or never downloaded), and a check on a model that is not on disk
+                        // told the user voice input was ready when it was not.
+                        isSelected: isDownloaded && model.id == currentModelName,
+                        isDownloaded: isDownloaded,
+                        downloadProgress: isDownloading ? downloadService.downloadProgress : nil,
+                        // One pull at a time (the service refuses a second), so while one runs the
+                        // other undownloaded rows are inert rather than inviting a tap that is dropped.
+                        isEnabled: isDownloaded || !downloadService.isDownloading,
                         onTap: {
                             if downloadedModelIds.contains(model.id) {
                                 onSelectModel(model.id)
@@ -69,6 +92,10 @@ struct WhisperModelSelectorPopover: View {
         }
         .frame(maxHeight: 350)
     }
+
+    private func displayName(for modelId: String) -> String {
+        WhisperModelCatalog.availableModels.first { $0.id == modelId }?.displayName ?? modelId
+    }
 }
 
 // MARK: - Model Row
@@ -77,6 +104,9 @@ private struct ModelRowView: View {
     let model: WhisperModelInfo
     let isSelected: Bool
     let isDownloaded: Bool
+    /// Non-nil while THIS model is downloading: 0…1 (0 until the first progress report).
+    let downloadProgress: Double?
+    let isEnabled: Bool
     let onTap: () -> Void
     let onDelete: () -> Void
     @State private var isHovering = false
@@ -88,9 +118,16 @@ private struct ModelRowView: View {
                     Text(model.displayName)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.primary)
-                    Text(model.size)
-                        .font(.system(.caption))
-                        .foregroundColor(.secondary)
+                    if let progress = downloadProgress {
+                        Text(progress > 0 ? "Downloading… \(Int(progress * 100))%" : "Starting download…")
+                            .font(.system(.caption))
+                            .foregroundColor(.accentColor)
+                            .monospacedDigit()
+                    } else {
+                        Text(model.size)
+                            .font(.system(.caption))
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 Spacer()
@@ -116,7 +153,9 @@ private struct ModelRowView: View {
                 // folded into the row's label instead, so state is spoken rather than
                 // announced as "checkmark.circle.fill".
                 Group {
-                    if isSelected {
+                    if let progress = downloadProgress {
+                        DownloadRing(progress: progress)
+                    } else if isSelected {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(.body))
                             .foregroundColor(.accentColor)
@@ -141,6 +180,8 @@ private struct ModelRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled || downloadProgress != nil)
+        .opacity(isEnabled || downloadProgress != nil ? 1 : 0.45)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.1)) {
                 isHovering = hovering
@@ -168,7 +209,9 @@ private struct ModelRowView: View {
     /// "whisper-small, 466 MB" and was never told which model was actually active.
     private var accessibilityLabel: String {
         let state: String
-        if isSelected {
+        if let progress = downloadProgress {
+            state = String(localized: "downloading, \(Int(progress * 100)) percent")
+        } else if isSelected {
             state = String(localized: "selected")
         } else if isDownloaded {
             state = String(localized: "downloaded")
@@ -176,5 +219,32 @@ private struct ModelRowView: View {
             state = String(localized: "not downloaded, activate to download")
         }
         return "\(model.displayName), \(model.size), \(state)"
+    }
+}
+
+// MARK: - Download Ring
+
+/// Determinate ring once progress arrives; a spinner before the first report (the handshake).
+private struct DownloadRing: View {
+    let progress: Double
+
+    var body: some View {
+        if progress > 0 {
+            ZStack {
+                Circle()
+                    .stroke(Color.accentColor.opacity(0.25), lineWidth: 2)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 0.25), value: progress)
+            }
+            .frame(width: 14, height: 14)
+        } else {
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.7)
+                .frame(width: 14, height: 14)
+        }
     }
 }

@@ -20,7 +20,7 @@
 //    - **`.id(profileID)`.** Resets view state on a profile switch, so search text and scroll
 //      position cannot leak across targets inside one destination.
 //
-//  ⚠️ Filtered to `.agent` only. `.code` reuses `AgentConfig` and persists `skillConfig`, but
+//  ⚠️ Filtered to `.agent` only. `.code` reuses `AgentConfig` and persists `skillSelections`, but
 //  `AgentConnect` deliberately does not load skills for it (the S0 hygiene pass made that
 //  disagreement explicit rather than silent). Offering Code profiles here would let a user link
 //  skills that provably never run.
@@ -48,14 +48,6 @@ struct SkillLibraryContainerView: View {
     @State private var shellToolOffer: String?
     /// The skill a delete has been requested for, held while the user confirms.
     @State private var pendingDeletion: SkillSD?
-    /// Folders the V6 import sweep could not read, re-read from the capture file.
-    ///
-    /// ⚠️ Read from the FILE rather than passed down from the sweep, and that is not laziness: after
-    /// a pass the capture holds exactly what failed, and it survives relaunches. A value handed from
-    /// a launch-time run would be gone the moment the user navigated away, which is precisely when
-    /// they would come looking for it.
-    @State private var failedImports: [SkillLibraryMigration.LegacySkillRef] = []
-    @State private var isRetryingImports = false
 
     /// A write that failed, shown to the user rather than only logged.
     ///
@@ -130,7 +122,7 @@ struct SkillLibraryContainerView: View {
                     title: "Skills",
                     icon: "puzzlepiece",
                     text: $searchText,
-                    placeholder: "Search skills…",
+                    placeholder: "Search skills",
                     isExpanded: $isSearchExpanded,
                     accessibilityIdentifier: "skills.library.search"
                 )
@@ -157,10 +149,6 @@ struct SkillLibraryContainerView: View {
                             libraryOverviewCard
                         }
 
-                        if !failedImports.isEmpty {
-                            failedImportsSection
-                        }
-
                         if let shellToolOffer {
                             shellOfferRow(shellToolOffer)
                         }
@@ -179,9 +167,6 @@ struct SkillLibraryContainerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.primaryBackground)
-        .onAppear {
-            failedImports = SkillLibraryMigration.peekPendingImports()
-        }
         // Resets @State across a profile switch within the same destination.
         .id(profileID ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!)
         .onChange(of: profileID) { _, new in
@@ -282,7 +267,7 @@ struct SkillLibraryContainerView: View {
 
     /// Contextual header when configuring skills for a specific agent profile.
     private var agentScopeCard: some View {
-        let enabledCount = selections.filter { $0.isEnabled && !$0.isAwaitingRelink }.count
+        let enabledCount = selections.filter(\.isEnabled).count
         let pinnedCount = selections.filter { $0.pinnedVersionID != nil }.count
         let draftCount = skills.filter(\.isDraft).count
 
@@ -417,10 +402,7 @@ struct SkillLibraryContainerView: View {
     @ViewBuilder
     private var unresolvedSection: some View {
         let known = Set(skills.map(\.id))
-        let dangling = selections.filter { selection in
-            guard let skillID = selection.skillID else { return false }
-            return !known.contains(skillID)
-        }
+        let dangling = selections.filter { !known.contains($0.skillID) }
 
         if canConfigureSkills, !dangling.isEmpty {
             SettingsCard(title: "Linked but Not Found", icon: "questionmark.circle", theme: theme) {
@@ -440,7 +422,7 @@ struct SkillLibraryContainerView: View {
                                 Text(selection.name)
                                     .font(theme.fontBody.weight(.medium))
                                     .foregroundStyle(theme.primaryText)
-                                Text(selection.skillID ?? selection.legacyFolderPath ?? "unknown address")
+                                Text(selection.skillID)
                                     .font(theme.fontCodeCaption)
                                     .foregroundStyle(theme.secondaryText)
                                     .lineLimit(1)
@@ -450,9 +432,7 @@ struct SkillLibraryContainerView: View {
                             Spacer(minLength: 0)
 
                             GlassActionButton(title: "Remove", icon: "trash", isAccent: false) {
-                                if let id = selection.skillID {
-                                    removeLink(skillID: id)
-                                }
+                                removeLink(skillID: selection.skillID)
                             }
                         }
                         .padding(10)
@@ -558,99 +538,6 @@ struct SkillLibraryContainerView: View {
         mutateSelections { SkillLinkEditing.pinning($0, skillID: skillID, toVersionID: versionID) }
     }
 
-    /// Folders the migration sweep could not import — almost always a volume that was not mounted.
-    @ViewBuilder
-    private var failedImportsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Color.orange)
-                Text("\(failedImports.count) skill\(failedImports.count == 1 ? "" : "s") could not be imported")
-                    .font(theme.fontBody.weight(.semibold))
-                    .foregroundStyle(theme.primaryText)
-                Spacer(minLength: 0)
-                if isRetryingImports {
-                    ProgressView().controlSize(.small)
-                } else {
-                    HStack(spacing: 8) {
-                        GlassActionButton(title: "Try again", icon: "arrow.clockwise", isAccent: false) {
-                            retryFailedImports()
-                        }
-                        GlassActionButton(title: "Forget", icon: "xmark", isAccent: false) {
-                            forgetFailedImports()
-                        }
-                    }
-                }
-            }
-            Text("These came from folders your skills used to live in. They are usually on a drive that was not mounted when Devgentic upgraded — reconnect it and try again.")
-                .font(theme.fontCaption)
-                .foregroundStyle(theme.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(spacing: 4) {
-                ForEach(failedImports, id: \.folderPath) { ref in
-                    HStack(spacing: 8) {
-                        Text(ref.name)
-                            .font(theme.fontCaption.weight(.medium))
-                            .foregroundStyle(theme.primaryText)
-                        Text(ref.folderPath)
-                            .font(theme.fontCodeCaption)
-                            .foregroundStyle(theme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(theme.secondaryBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                }
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.orange.opacity(0.3), lineWidth: 0.5)
-        )
-    }
-
-    /// Re-runs the sweep. Safe to press repeatedly: it reads the capture, imports what it can, and
-    /// writes back only what still failed.
-    private func retryFailedImports() {
-        guard let container = SkillStore.shared.currentContainer else {
-            DGLogger(category: "SkillLibrary").error("[SKILLS] Retry requested with no model container. CONSEQUENCE: nothing was imported and the pending list is unchanged; the next launch retries.")
-            return
-        }
-        isRetryingImports = true
-        // ⚠️ The spinner above is only reachable now that the sweep suspends. Before the ingest moved
-        // off the main actor this whole method completed inside one main-actor turn, so
-        // `isRetryingImports` went true and false without a frame ever being drawn between them —
-        // the ProgressView was unreachable code that looked wired.
-        Task { @MainActor in
-            let outcome = await SkillLibraryImportSweep.run(container: container)
-            failedImports = SkillLibraryMigration.peekPendingImports()
-            isRetryingImports = false
-            revision += 1
-            report(outcome)
-        }
-    }
-
-    private func report(_ outcome: SkillImportSweepOutcome) {
-
-        if outcome.imported.isEmpty && !outcome.failed.isEmpty {
-            DGLogger(category: "SkillLibrary").notice("[SKILLS] Retry imported nothing; \(outcome.failed.count) folder(s) still unreadable. CONSEQUENCE: the banner stays and the capture file is kept — the folders are still missing.")
-        }
-    }
-
-    private func forgetFailedImports() {
-        let count = failedImports.count
-        SkillLibraryMigration.setPendingImports([])
-        failedImports = []
-        DGLogger(category: "SkillLibrary").notice("[SKILLS] User dismissed \(count) unimportable pre-V6 skill folder(s). CONSEQUENCE: they will NOT be retried on any future launch — the record of where they lived is gone, and re-adding them is now a manual import.")
-    }
-
     // MARK: - Writes
 
     private func setLink(_ skill: SkillSD, enabled: Bool) {
@@ -706,13 +593,12 @@ struct SkillLibraryContainerView: View {
     /// Adds `run_command` because the USER asked, from the offer row.
     private func acceptShellToolOffer() {
         defer { shellToolOffer = nil }
-        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. The launch sweep re-links every pre-V6
-        // skill reference by writing `details` on the SwiftData row directly, and the service's
-        // array is a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
-        // `saveProfile` writes the whole pre-sweep `details` back — `BackendProfileStore.saveProfile`
-        // does `existing.details = snapshot.details` — so toggling one skill link would silently
-        // revert the entire migration for that profile. `activateEditBuffer` already learned this
-        // for three other out-of-band writers; `freshProfile` is that rule with a name.
+        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. Out-of-band writers (the MLX context
+        // healer, for one) write `details` on the SwiftData row directly, and the service's array is
+        // a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
+        // `saveProfile` writes the whole stale `details` back — `BackendProfileStore.saveProfile`
+        // does `existing.details = snapshot.details` — silently reverting their writes.
+        // `activateEditBuffer` already learned this; `freshProfile` is that rule with a name.
         guard let profileID,
               let index = profileService.profiles.firstIndex(where: { $0.id == profileID }),
               let current = profileService.freshProfile(id: profileID),
@@ -740,8 +626,7 @@ struct SkillLibraryContainerView: View {
         }
 
         // ⚠️ From the FRESH row, for the same reason as `mutateSelections`: starting from the stale
-        // snapshot would write the pre-sweep `details` back and revert the skill re-link as a side
-        // effect of granting a tool.
+        // snapshot would revert out-of-band writes as a side effect of granting a tool.
         var profile = current
         profile.details = .agent(config)
         profileService.profiles[index] = profile
@@ -785,13 +670,12 @@ struct SkillLibraryContainerView: View {
     /// ⚠️ The buffer sync writes only the `skillSelections` FACET, never the whole `details` — the
     /// user's other pending edits in that draft must survive.
     private func mutateSelections(_ transform: ([SkillSelection]) -> [SkillSelection]) {
-        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. The launch sweep re-links every pre-V6
-        // skill reference by writing `details` on the SwiftData row directly, and the service's
-        // array is a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
-        // `saveProfile` writes the whole pre-sweep `details` back — `BackendProfileStore.saveProfile`
-        // does `existing.details = snapshot.details` — so toggling one skill link would silently
-        // revert the entire migration for that profile. `activateEditBuffer` already learned this
-        // for three other out-of-band writers; `freshProfile` is that rule with a name.
+        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. Out-of-band writers (the MLX context
+        // healer, for one) write `details` on the SwiftData row directly, and the service's array is
+        // a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
+        // `saveProfile` writes the whole stale `details` back — `BackendProfileStore.saveProfile`
+        // does `existing.details = snapshot.details` — silently reverting their writes.
+        // `activateEditBuffer` already learned this; `freshProfile` is that rule with a name.
         guard let profileID,
               let index = profileService.profiles.firstIndex(where: { $0.id == profileID }),
               let current = profileService.freshProfile(id: profileID),
@@ -814,8 +698,8 @@ struct SkillLibraryContainerView: View {
             buffer.draft.details = .agent(draftConfig)
         }
 
-        // 2. Write the service array — from the FRESH row, so every field the sweep or a healer
-        //    wrote out of band survives this save instead of being reverted by it.
+        // 2. Write the service array — from the FRESH row, so every field a healer wrote out of
+        //    band survives this save instead of being reverted by it.
         var profile = current
         profile.details = .agent(config)
         profileService.profiles[index] = profile
@@ -1026,13 +910,13 @@ private struct SkillLibraryCardRow: View {
             onOpenDetail()
         }
         .contextMenu {
-            Button("Inspect & Edit…") { onOpenDetail() }
+            Button("Inspect & Edit") { onOpenDetail() }
             Button("Copy Skill ID") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(skill.id, forType: .string)
             }
             Divider()
-            Button("Delete Skill…", role: .destructive) { onDelete() }
+            Button("Delete Skill", role: .destructive) { onDelete() }
         }
     }
 

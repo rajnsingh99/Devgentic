@@ -63,45 +63,6 @@ final class SkillAllowedToolsWiringTests: XCTestCase {
         XCTAssertNil(manifest.allowedTools)
     }
 
-    // MARK: - It is re-read at load time, from disk
-
-    /// ⚠️ REWRITTEN. This asserted on `SkillPackage.declaredTools`, a field that was written on both
-    /// load paths and READ BY NOTHING — it existed for the V4/V5 design where a run-time manifest
-    /// carried no declaration. `SkillResolution` has carried `allowedTools` on the manifest itself
-    /// since V6, so the field was redundant and is gone.
-    ///
-    /// What remains worth pinning is the property underneath it: the declaration and the body come
-    /// from ONE read of the file, so a skill cannot advertise one tool set while its body assumes
-    /// another.
-    func testTheDeclarationAndTheBodyComeFromOneRead() throws {
-        let folder = try createSkill(name: "one-read", allowedToolsLine: "allowed-tools: [Bash]")
-        let scanned = try XCTUnwrap(try SkillFolderScanner.scan(rootFolder: tempDir).first)
-        XCTAssertEqual(scanned.allowedTools, ["Bash"])
-
-        // Rewrite the file so BOTH halves change, then re-scan: they must move together.
-        try "---\nname: one-read\ndescription: d\nallowed-tools: [Read]\n---\n\nNEW BODY"
-            .write(to: folder.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
-
-        let rescanned = try XCTUnwrap(try SkillFolderScanner.scan(rootFolder: tempDir).first)
-        let package = try SkillFolderScanner.loadFullPackage(for: rescanned)
-        XCTAssertEqual(rescanned.allowedTools, ["Read"])
-        XCTAssertTrue(package.body.contains("NEW BODY"),
-                      "the body and the declaration must not be able to come from different reads")
-    }
-
-    /// A frontmatter the user broke after import must not take the instructions down with it.
-    func testABrokenFrontmatterStillLoadsTheBody() throws {
-        let folder = try createSkill(name: "broken-later", allowedToolsLine: "allowed-tools: [Read]")
-        let scanned = try XCTUnwrap(try SkillFolderScanner.scan(rootFolder: tempDir).first)
-
-        try "no frontmatter at all\n\n# Still has instructions\nDo the thing."
-            .write(to: folder.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
-
-        let package = try SkillFolderScanner.loadFullPackage(for: scanned)
-        XCTAssertTrue(package.body.contains("Still has instructions"),
-                      "a metadata problem is not a reason to refuse the instructions")
-    }
-
     // MARK: - The shell OFFER (the one place a declaration influences anything, and it ends at a click)
 
     /// ⚠️ MOVED to `SkillCapabilityHints` when the profile's skills card was deleted (V6). It lived

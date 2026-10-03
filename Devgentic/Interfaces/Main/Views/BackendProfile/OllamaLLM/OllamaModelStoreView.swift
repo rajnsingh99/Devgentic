@@ -113,7 +113,8 @@ struct OllamaModelStoreContent: View {
                                 modelIdentifier: viewModel.searchText,
                                 displayName: viewModel.searchText,
                                 isInstalled: viewModel.displayedModels.contains { $0.name == viewModel.searchText },
-                                profileID: profileID
+                                profileID: profileID,
+                                unsupportedReason: viewModel.unsupportedPullReason
                             )
                         }
                     }
@@ -167,6 +168,8 @@ struct OllamaModelStoreContent: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
+                .frame(maxWidth: centeredLayout ? 1000 : .infinity)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
 
             if let message = viewModel.deleteErrorMessage ?? viewModel.downloadErrorMessage {
@@ -194,6 +197,8 @@ struct OllamaModelStoreContent: View {
                 .background(theme.errorColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
+                .frame(maxWidth: centeredLayout ? 1000 : .infinity)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .accessibilityElement(children: .combine)
             }
 
@@ -258,10 +263,14 @@ struct OllamaModelStoreContent: View {
                     .font(.callout)
             }
             
-            Button("Refresh Connection") {
+            TactileButton(
+                title: "Refresh Connection",
+                icon: "arrow.clockwise",
+                variant: .secondary,
+                size: .compact
+            ) {
                 viewModel.refresh(triggeredBy: .ollamaRefreshButton)
             }
-            .buttonStyle(.bordered)
             .padding(.top, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

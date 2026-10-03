@@ -81,6 +81,8 @@ struct SaveAdvisoryBanner: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(theme.warningColor.opacity(0.25), lineWidth: 0.5)
             )
+            .frame(maxWidth: ViewLayout.maxContentWidth)
+            .frame(maxWidth: .infinity, alignment: .center)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Saved with \(advisories.count) advisory note(s)")
             .transition(.opacity.combined(with: .move(edge: .top)))

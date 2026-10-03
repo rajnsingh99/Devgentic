@@ -30,9 +30,21 @@ final class ProviderKeyStorageTests: XCTestCase {
         super.tearDown()
     }
 
+    /// ⚠️ An OpenAI-COMPATIBLE profile, deliberately: since 2026-10-03 it is the one cloud provider
+    /// whose key is still stored per profile (`ProviderKeyStore`) — OpenAI, Anthropic, Google and
+    /// OpenRouter share one key per provider (`GlobalProviderKeys`, covered by
+    /// `SharedProviderKeyTests`). Every guard below protects the per-profile path.
     private func agentDetails(key: String?) -> ProfileDetails {
         .agent(AgentConfig(llmConfig: ProviderConfig(
-            apiProvider: .anthropic, modelName: "claude-opus-5", apiKey: key)))
+            apiProvider: .openAICompatible, modelName: "local-model", apiKey: key,
+            baseURL: "https://llm.example.test/v1")))
+    }
+
+    /// Whether the STORED BYTES carry the key — decoded directly, because `details` injects the
+    /// Keychain value and would report a key either way.
+    private func hasInlineKey(_ row: BackendProfile) -> Bool {
+        let decoded = try? JSONDecoder().decode(ProfileDetails.self, from: row.configData)
+        return !(decoded?.providerAPIKey ?? "").isEmpty
     }
 
     private func makeRow(key: String?) -> BackendProfile {
@@ -49,7 +61,7 @@ final class ProviderKeyStorageTests: XCTestCase {
 
         XCTAssertFalse(blob.contains(sentinel),
                        "the API key must never be encoded into configData")
-        XCTAssertFalse(row.hasInlineAPIKeyInStoredBlob)
+        XCTAssertFalse(hasInlineKey(row))
     }
 
     /// The key must still be USABLE — stripping it from the blob is only correct if reads reinject
@@ -93,39 +105,37 @@ final class ProviderKeyStorageTests: XCTestCase {
 
     func testProfilesWithoutAnLLMConfigAreUnaffected() {
         let row = BackendProfile(
-            displayName: "Flow", details: .workflow(WorkflowConfig(agentProfileIDs: [])))
+            displayName: "Flow", details: .workflow(WorkflowConfig()))
         createdProfileIDs.append(row.id)
 
         XCTAssertNil(row.details.providerAPIKey)
-        XCTAssertFalse(row.hasInlineAPIKeyInStoredBlob)
+        XCTAssertFalse(hasInlineKey(row))
     }
 
-    // MARK: Migration
+    // MARK: Inline key (left there by a Keychain write that failed)
 
-    /// ⚠️ The pre-migration shape: a blob written by an older build still carries its key inline.
-    /// It must keep working — the read path falls back to the blob when the Keychain is empty —
-    /// and `hasInlineAPIKeyInStoredBlob` must report it so the launch sweep can find it.
-    func testALegacyBlobWithAnInlineKeyStillResolvesAndIsDetected() throws {
+    /// A key the setter had to leave inline must keep working — the read path falls back to the
+    /// blob when the Keychain is empty.
+    func testAnInlineKeyStillResolves() throws {
         let row = makeRow(key: nil)
         // Write the legacy shape directly, bypassing the stripping setter.
         row.configData = try JSONEncoder().encode(agentDetails(key: sentinel))
         row.resetDecodeCacheForTesting()
 
-        XCTAssertTrue(row.hasInlineAPIKeyInStoredBlob,
-                      "the sweep must be able to identify an un-migrated row")
+        XCTAssertTrue(hasInlineKey(row), "precondition: the key is inline")
         XCTAssertEqual(row.details.providerAPIKey, sentinel,
-                       "a legacy profile must keep working before the sweep runs")
+                       "an inline key must keep working until a later save moves it")
     }
 
-    /// What the sweep does to such a row: assigning `details` back through the setter strips it.
-    func testRewritingALegacyRowStripsTheKeyFromTheBlob() throws {
+    /// The next save moves it: assigning `details` back through the setter strips it.
+    func testTheNextSaveMovesAnInlineKeyIntoTheKeychain() throws {
         let row = makeRow(key: nil)
         row.configData = try JSONEncoder().encode(agentDetails(key: sentinel))
         row.resetDecodeCacheForTesting()
 
-        row.details = row.details   // the sweep's operation
+        row.details = row.details
 
-        XCTAssertFalse(row.hasInlineAPIKeyInStoredBlob)
+        XCTAssertFalse(hasInlineKey(row))
         XCTAssertEqual(row.details.providerAPIKey, sentinel, "the key survives the move")
         XCTAssertEqual(ProviderKeyStore.load(for: row.id), sentinel)
     }
@@ -151,7 +161,7 @@ final class ProviderKeyStorageTests: XCTestCase {
         var readOutcome: KeychainReadOutcome?      // when set, overrides `stored`
         var deleteStatus: OSStatus = errSecSuccess
         /// Register B25: a Keychain that refuses WRITES — a login-item launch before first unlock
-        /// is the ordinary way this happens, and it is exactly when the migration sweep runs.
+        /// is the ordinary way this happens.
         var saveStatus: OSStatus = errSecSuccess
         private(set) var deleteCallCount = 0
 
@@ -190,8 +200,10 @@ final class ProviderKeyStorageTests: XCTestCase {
             let row = makeRow(key: sentinel)
             XCTAssertEqual(stub.stored[row.id.uuidString], sentinel, "precondition: key is stored")
 
-            // The Keychain goes unreadable, and the row is re-materialized (a fresh fetch).
+            // The Keychain goes unreadable, and the row is re-materialized on a fresh launch —
+            // the process key cache starts empty.
             stub.readOutcome = .failed(errSecAuthFailed)
+            ProviderKeyStore.discardCache()
             row.resetDecodeCacheForTesting()
             XCTAssertNil(row.details.providerAPIKey, "precondition: the read failure hides the key")
 
@@ -210,6 +222,7 @@ final class ProviderKeyStorageTests: XCTestCase {
     private func rowWithUnreadableKey(_ stub: StubKeychain) -> BackendProfile {
         let row = makeRow(key: sentinel)
         stub.readOutcome = .failed(errSecAuthFailed)
+        ProviderKeyStore.discardCache()   // a fresh launch: the process key cache starts empty
         row.resetDecodeCacheForTesting()
         XCTAssertNil(row.details.providerAPIKey, "precondition: the read failure hides the key")
         XCTAssertTrue(row.hasUnreadableProviderKey, "precondition: KC-22's flag reports it")
@@ -341,6 +354,7 @@ final class ProviderKeyStorageTests: XCTestCase {
             XCTAssertEqual(ProviderKeyStore.read(for: id), .notFound)
 
             stub.readOutcome = .failed(errSecAuthFailed)
+            ProviderKeyStore.discardCache()   // a fresh launch, so the Keychain is actually asked
             XCTAssertEqual(ProviderKeyStore.read(for: id), .failed(errSecAuthFailed))
 
             // ⚠️ And `load` still flattens both to nil — which is why callers that WRITE based on
@@ -349,53 +363,11 @@ final class ProviderKeyStorageTests: XCTestCase {
         }
     }
 
-    // MARK: - A53: legacy plaintext credentials in UserDefaults
+    // MARK: - A failed Keychain write keeps the key inline rather than losing it
 
-    /// A throwaway suite so the developer's real preferences are never touched.
-    private func makeDefaults(_ name: String = #function) -> UserDefaults {
-        let suite = "devgentic.tests.\(name)"
-        UserDefaults.standard.removePersistentDomain(forName: suite)
-        return UserDefaults(suiteName: suite)!
-    }
-
-    /// ⚠️ Deleting the write in `GeminiService` protects only future fetches. Every install that
-    /// ever validated a Gemini key already has the plaintext value on disk, unreachable from any
-    /// UI and surviving profile deletion — so the purge is the half that actually closes A53.
-    func testThePurgeRemovesTheLegacyGeminiKey() {
-        let defaults = makeDefaults()
-        defaults.set("AIzaSy-live-secret", forKey: "gemini_api_key")
-
-        ProviderKeyStore.purgeLegacyPlaintextKeys(defaults: defaults)
-
-        XCTAssertNil(defaults.string(forKey: "gemini_api_key"))
-    }
-
-    /// ⚠️ THE GUARD THAT MATTERS. `webSearchAPIKey` was a cleartext credential in UserDefaults
-    /// with a live reader; it now has a Keychain home (`WebSearchKeyStore`, register KC-2) and the
-    /// store's own migration removes the plaintext ONLY after the Keychain write succeeded. This
-    /// purge runs earlier in launch than that migration, so an unconditional delete here would
-    /// race it and disable web search. Same pin, new reason.
-    func testThePurgeLeavesCredentialsThatAreStillReadBack() {
-        let defaults = makeDefaults()
-        defaults.set("still-in-use", forKey: "webSearchAPIKey")
-
-        ProviderKeyStore.purgeLegacyPlaintextKeys(defaults: defaults)
-
-        XCTAssertEqual(defaults.string(forKey: "webSearchAPIKey"), "still-in-use")
-    }
-
-    // MARK: - B25: the launch sweep must count what happened, not what it attempted
-
-    /// ⚠️ THE B25 REGRESSION, at the seam the sweep's counter reads.
-    ///
-    /// `migrateAPIKeysToKeychain` did `model.details = model.details; migrated += 1`. The
-    /// assignment SUCCEEDS even when the Keychain write inside it failed — by design, since the
-    /// setter keeps the key inline rather than destroying it — so the counter incremented for rows
-    /// that had not moved, and the log then asserted the keys were "no longer readable from
-    /// DevgenticSD.store". That is a security property stated as achieved while the plaintext
-    /// credential was still sitting in the blob. The counter now re-reads
-    /// `hasInlineAPIKeyInStoredBlob` after the write, which is what this asserts stays true.
-    func testAFailedKeychainWriteLeavesTheRowStillInlineAfterTheSweepsOperation() throws {
+    /// The assignment SUCCEEDS even when the Keychain write inside it failed — by design, since the
+    /// setter keeps the key inline rather than destroying it.
+    func testAFailedKeychainWriteLeavesTheKeyInline() throws {
         let stub = StubKeychain()
         ProviderKeyStore.setStorageForTesting(stub)
         defer { ProviderKeyStore.setStorageForTesting(nil) }
@@ -403,21 +375,20 @@ final class ProviderKeyStorageTests: XCTestCase {
         let row = makeRow(key: nil)
         row.configData = try JSONEncoder().encode(agentDetails(key: sentinel))
         row.resetDecodeCacheForTesting()
-        XCTAssertTrue(row.hasInlineAPIKeyInStoredBlob, "precondition: an un-migrated legacy row")
+        XCTAssertTrue(hasInlineKey(row), "precondition: the key is inline")
 
         stub.saveStatus = errSecInteractionNotAllowed
-        row.details = row.details   // the sweep's operation, verbatim
+        row.details = row.details
 
-        XCTAssertTrue(row.hasInlineAPIKeyInStoredBlob,
+        XCTAssertTrue(hasInlineKey(row),
                       "the key must stay in the blob when the Keychain write failed — losing it "
-                      + "would be worse — and the sweep must therefore NOT count this as migrated")
+                      + "would be worse")
         XCTAssertEqual(row.details.providerAPIKey, sentinel, "the profile keeps working")
         XCTAssertNil(stub.stored[row.id.uuidString], "precondition: nothing reached the Keychain")
     }
 
-    /// The other half: a row that really did move must stop reporting inline, or the sweep would
-    /// log a failure every launch and retry forever.
-    func testASuccessfulWriteClearsTheInlineKeySoTheSweepCountsItOnce() throws {
+    /// The other half: a row that really did move no longer carries the key inline.
+    func testASuccessfulWriteClearsTheInlineKey() throws {
         let stub = StubKeychain()
         ProviderKeyStore.setStorageForTesting(stub)
         defer { ProviderKeyStore.setStorageForTesting(nil) }
@@ -428,19 +399,8 @@ final class ProviderKeyStorageTests: XCTestCase {
 
         row.details = row.details
 
-        XCTAssertFalse(row.hasInlineAPIKeyInStoredBlob)
+        XCTAssertFalse(hasInlineKey(row))
         XCTAssertEqual(stub.stored[row.id.uuidString], sentinel)
-    }
-
-    /// Runs on every launch, so it has to be safe to repeat and quiet when there is nothing to do.
-    func testThePurgeIsIdempotent() {
-        let defaults = makeDefaults()
-        defaults.set("AIzaSy-live-secret", forKey: "gemini_api_key")
-
-        ProviderKeyStore.purgeLegacyPlaintextKeys(defaults: defaults)
-        ProviderKeyStore.purgeLegacyPlaintextKeys(defaults: defaults)
-
-        XCTAssertNil(defaults.string(forKey: "gemini_api_key"))
     }
 }
 
@@ -470,7 +430,7 @@ final class ProfileDetailsKeyAccessorTests: XCTestCase {
 
     /// `.workflow` has no `llmConfig` — it composes other profiles, each with their own key.
     func testWorkflowHasNoKeyAndIsUnchangedBySetting() {
-        let workflow = ProfileDetails.workflow(WorkflowConfig(agentProfileIDs: []))
+        let workflow = ProfileDetails.workflow(WorkflowConfig())
         XCTAssertNil(workflow.providerAPIKey)
         XCTAssertEqual(workflow.settingProviderAPIKey("k"), workflow)
     }

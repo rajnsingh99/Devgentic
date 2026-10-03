@@ -63,7 +63,7 @@ final class ProfileDetailsAgentConfigTests: XCTestCase {
     func testTypesWithoutAnAgentConfigReturnNil() {
         let llm = ProviderConfig(apiProvider: .ollama, modelName: "llama3")
         XCTAssertNil(ProfileDetails.bot(BotConfig(llmConfig: llm)).agentConfig)
-        XCTAssertNil(ProfileDetails.workflow(WorkflowConfig(agentProfileIDs: [])).agentConfig)
+        XCTAssertNil(ProfileDetails.workflow(WorkflowConfig()).agentConfig)
         XCTAssertNil(ProfileDetails.imageGen(ImageGenConfig(llmConfig: llm)).agentConfig)
     }
 

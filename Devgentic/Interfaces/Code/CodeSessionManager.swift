@@ -108,7 +108,6 @@ final class CodeSessionManager {
     /// the current project's copy — see `CodeQuickSettingsStore`.
     private static let quickSettingsKey = CodeQuickSettingsStore.defaultsKey
     private static let recentPathsKey = "devgentic.codeRecentProjectPaths"
-    private static let legacyConfigKey = "devgentic.codeSessionConfig"
     private static let devgenticDirName = ".devgentic"
     private static let projectMemoryFileName = ".devgentic/context.md"
 
@@ -135,9 +134,6 @@ final class CodeSessionManager {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-
-        // Clean up legacy CodeSessionConfig from UserDefaults
-        defaults.removeObject(forKey: Self.legacyConfigKey)
 
         // Restore cached recent project paths
         loadRecentProjectPaths()
@@ -465,6 +461,12 @@ final class CodeSessionManager {
         // next send, so the gauge prices the model the user just picked.
         agentConfig.llmConfig.numCtxOverride = Self.contextTokens(quickSettings, for: agentConfig.llmConfig)
 
+        // The key goes to the provider's Keychain slot so another project's model on this
+        // provider — or this one, after a detour — finds it again. ⚠️ BEFORE the profile save: for a
+        // shared-key provider the slot is the shared key, and the profile keeps the shared key rather
+        // than one it carries — so the save must find the new key already there.
+        CodeProviderKeys.remember(apiKey, for: provider)
+
         profile.details = .code(agentConfig)
 
         do {
@@ -480,9 +482,6 @@ final class CodeSessionManager {
             self.baseURL = baseURL
             self.modelMetadata = cognitiveProfile.metadata
             logger.info("Model updated to \(modelName) (provider: \(provider.rawValue), capability: \(cognitiveProfile.capability.rawValue), dialect: \(cognitiveProfile.dialect.rawValue), thinking: \(thinkingEnabled))")
-            // The key goes to the provider's Keychain slot so another project's model on this
-            // provider — or this one, after a detour — finds it again.
-            CodeProviderKeys.remember(apiKey, for: provider)
             if let path = projectPath?.path {
                 captureProject(path, from: agentConfig, reason: "model picked")
             } else {

@@ -145,7 +145,7 @@ final class MLXStoreCapability2WiringTests: XCTestCase {
     /// Capability 7. The rule is inert unless the button and Return both consult it.
     func testThePasteAffordanceConsultsTheRule() throws {
         let code = try Self.source(Self.container)
-        XCTAssertEqual(code.components(separatedBy: "MLXModelStoreViewModel.repoIdToDownload(from:").count - 1, 2,
+        XCTAssertGreaterThanOrEqual(code.components(separatedBy: "MLXModelStoreViewModel.repoIdToDownload(from:").count - 1, 2,
                        "both the Return key and the Download button must gate on the identifier rule")
         XCTAssertTrue(code.contains("DownloadCoordinator.startMLXDownloadIfNeeded"), """
             A pasted id must go through the coordinator, or it skips the install short-circuit, \

@@ -243,19 +243,8 @@ final class WorkflowLayoutSD {
     /// refused write instead of permanent loss (WF-TS5, pinned by
     /// `BlobWriteRefusalTests.testNewerVersionBlobKeepsAFutureFieldTheDecoderCannotSee`).
     ///
-    /// **v2 (2026-08-17)** — `ConditionNodeConfig.decisionPolicy` added (the unified Router
-    /// decision setting). Additive and optional, and bumped anyway BECAUSE it is additive: an older
-    /// build drops the key on decode and omits it on re-encode, so without the bump a v1 build
-    /// could silently launder a Router's policy out of a layout on any ordinary save. With it, that
-    /// build reads and RUNS the layout normally and is refused the write — a read-only canvas on
-    /// downgrade, which is the trade this stamp exists to make.
-    ///
-    /// **v3 (2026-08-24)** — `WorkflowNodeConfig.unattendedAutoApprove` added (the explicit
-    /// per-node unattended tool approval, WF-SE6/SE11). Additive and optional; bumped for the
-    /// same reason as v2 — this key is a SECURITY setting, and a v2 build laundering it out of a
-    /// layout on an ordinary save would silently revert a scheduled workflow from "auto-approve
-    /// this node's tool" to "refuse it unattended" (or vice versa on a later upgrade re-read).
-    static let layoutBlobVersion = 3
+    /// **v1** — the baseline (history reset 2026-10-03, pre-release).
+    static let layoutBlobVersion = 1
 
     private static func encodeLayout(_ layout: WorkflowLayout) -> Data {
         do {

@@ -27,6 +27,7 @@
 //
 
 import Foundation
+import os
 
 enum ProviderKeyStore {
 
@@ -43,9 +44,31 @@ enum ProviderKeyStore {
     /// `setStorageForTesting`; production never reassigns it.
     nonisolated(unsafe) private static var storage: KeychainAccessing = SecureKeyStorage()
 
-    /// Swaps the Keychain backend. Test-only — pass nil to restore the real one.
+    /// How long a failed read is answered from the cache before a fresh fetch asks again.
+    static let failedReadRetryInterval: TimeInterval = 60
+
+    /// Process-wide answers, keyed by account (profile id). Same shape as `GlobalProviderKeys`.
+    ///
+    /// ⚠️ Why it exists: a `BackendProfile` instance caches its own decode, but SwiftData hands out
+    /// a NEW instance on every fetch — and the profile list refetches on most changes — so each
+    /// OpenAI-compatible profile was read from the Keychain again on every refetch. With the item
+    /// unreadable under a changed signature, each of those was a fresh access prompt.
+    private enum Entry {
+        case found(String)
+        case notFound
+        case failed(OSStatus, at: Date)
+    }
+    private static let cache = OSAllocatedUnfairLock<[String: Entry]>(initialState: [:])
+
+    /// Swaps the Keychain backend and empties the cache. Test-only — pass nil to restore the real one.
     static func setStorageForTesting(_ replacement: KeychainAccessing?) {
         storage = replacement ?? SecureKeyStorage()
+        discardCache()
+    }
+
+    /// Forgets every cached answer, so the next read of each profile asks the Keychain.
+    static func discardCache() {
+        cache.withLock { $0.removeAll() }
     }
 
     // MARK: - API
@@ -67,6 +90,8 @@ enum ProviderKeyStore {
         }
 
         let status = storage.save(value: trimmed, service: service, account: profileID.uuidString)
+        // On failure the item's state is unknown — drop the entry so the next read asks the Keychain.
+        cache.withLock { $0[profileID.uuidString] = status == errSecSuccess ? .found(trimmed) : nil }
         guard status == errSecSuccess else {
             // ⚠️ Registers KC-27 + KC-53. This log used to claim the key "stays where it already
             // was" — true only when the profile ALREADY had a key, and false (and understated)
@@ -95,15 +120,39 @@ enum ProviderKeyStore {
     /// ⚠️ Only for callers that merely need a value to send. Anything that WRITES based on the
     /// answer must use `read(for:)` — see register B2.
     static func load(for profileID: UUID) -> String? {
-        guard case .found(let key) = storage.read(service: service, account: profileID.uuidString) else {
-            return nil
-        }
+        guard case .found(let key) = read(for: profileID) else { return nil }
         return key
     }
 
     /// Reads the API key, distinguishing "none stored" from "the read failed".
-    static func read(for profileID: UUID) -> KeychainReadOutcome {
-        let outcome = storage.read(service: service, account: profileID.uuidString)
+    ///
+    /// - Parameter bypassingFailedRead: ask the Keychain even when a recent read failed. For
+    ///   callers with their own retry policy — a profile's KC-20 re-read and Try Again — so the
+    ///   cache never stretches how long a profile stays "unreadable". A found or not-found answer
+    ///   is still served from the cache: it cannot have changed without passing through `save` or
+    ///   `delete` here.
+    static func read(for profileID: UUID, bypassingFailedRead: Bool = false) -> KeychainReadOutcome {
+        let account = profileID.uuidString
+        switch cache.withLock({ $0[account] }) {
+        case .found(let key)?:
+            return .found(key)
+        case .notFound?:
+            return .notFound
+        case .failed(let status, let at)?
+            where !bypassingFailedRead && Date().timeIntervalSince(at) < failedReadRetryInterval:
+            return .failed(status)
+        case .failed?, nil:
+            break
+        }
+        // Outside the lock: a read can block for as long as an access prompt stays on screen.
+        let outcome = storage.read(service: service, account: account)
+        cache.withLock { cache in
+            switch outcome {
+            case .found(let key):       cache[account] = .found(key)
+            case .notFound:             cache[account] = .notFound
+            case .failed(let status):   cache[account] = .failed(status, at: Date())
+            }
+        }
         if case .failed(let status) = outcome {
             logger.error(
                 "[SECRETS] Could not read the Keychain API key for profile \(profileID) "
@@ -134,7 +183,9 @@ enum ProviderKeyStore {
     @discardableResult
     static func delete(for profileID: UUID, reason: DeletionReason = .profileDeleted) -> Bool {
         let status = storage.delete(service: service, account: profileID.uuidString)
-        guard status != errSecSuccess && status != errSecItemNotFound else { return true }
+        let gone = status == errSecSuccess || status == errSecItemNotFound
+        cache.withLock { $0[profileID.uuidString] = gone ? .notFound : nil }
+        guard !gone else { return true }
 
         switch reason {
         case .profileDeleted:
@@ -152,103 +203,6 @@ enum ProviderKeyStore {
             )
         }
         return false
-    }
-
-    // MARK: - Legacy plaintext cleanup (register A53)
-
-    /// `UserDefaults` keys that earlier builds wrote a raw provider credential into, and which
-    /// nothing reads.
-    ///
-    /// ⚠️ **Membership here requires that the key has NO reader.** `gemini_api_key` qualifies:
-    /// `GeminiService` wrote it on every successful model-list fetch and its `getApiKey` /
-    /// `clearApiKey` accessors had zero callers repo-wide, so removing it cannot break anything.
-    /// A key that is still read back must NOT be added — it needs migrating to the Keychain
-    /// first, then purging. `webSearchAPIKey` is the worked example: it now has a Keychain home
-    /// (`WebSearchKeyStore`, register KC-2) and `WebSearchKeyStore.migrateFromUserDefaults` owns its
-    /// removal, which happens ONLY after the Keychain write succeeded. It stays off this list because
-    /// this purge runs at container configuration and that migration at view-model load; an
-    /// unconditional delete here would race the migration and disable web search.
-    private static let legacyPlaintextDefaultsKeys = ["gemini_api_key"]
-
-    /// Removes credentials earlier builds left in `~/Library/Preferences/`.
-    ///
-    /// ⚠️ Deleting the WRITE is not enough. A profile whose key was validated by any prior build
-    /// already has the plaintext value on disk, where no UI can reach it — it survives deleting
-    /// the profile, rotating the key, and every later launch. Same lesson as the v7 blob repair
-    /// (registers A11/A12): a corrected write site does not fix data already written.
-    ///
-    /// Idempotent and self-limiting: it logs only when something was actually removed, so it is
-    /// safe to run on every launch and needs no migration flag of its own.
-    static func purgeLegacyPlaintextKeys(defaults: UserDefaults = .standard) {
-        for key in legacyPlaintextDefaultsKeys where defaults.object(forKey: key) != nil {
-            defaults.removeObject(forKey: key)
-            logger.notice(
-                "[SECRETS] Removed a legacy plaintext credential from UserDefaults ('\(key)'). "
-                + "CONSEQUENCE: the copy an earlier build left in ~/Library/Preferences/ is gone; "
-                + "the live key is unaffected — it lives in the Keychain, keyed on profile id."
-            )
-        }
-    }
-
-    // MARK: - Orphaned preference domains (register KC-0)
-
-    /// Bundle identifiers this app shipped under before the current one. A preferences domain is
-    /// addressed by bundle id, so the rename `com.dev.devgentic` → `app.devgentic.macos` orphaned
-    /// the old domain INTACT: every plaintext credential a pre-Keychain build wrote there is still
-    /// on disk, and no reader resolves to that domain any more — the purge above looks in
-    /// `UserDefaults.standard`, which is the NEW domain, and can never see that file.
-    ///
-    /// `VectorStoreService.legacyBundleIdentifiers` and `ChatOpsConfigManager.legacyKeychainServices`
-    /// name the same identifier for their own migrations; this is the UserDefaults side.
-    static let legacyPreferenceDomains = ["com.dev.devgentic"]
-
-    /// `UserDefaults` keys that ever carried a raw credential, in any build. In an ORPHANED domain
-    /// nothing reads them, so unlike `legacyPlaintextDefaultsKeys` there is no reader to protect —
-    /// and no migration either: the current domain holds its own copy of anything still in use,
-    /// and a value the user was told to rotate is not one to copy forward. Verified on disk
-    /// 2026-09-16: a live Telegram bot token, a Google API key and a DeepSeek key, all cleartext.
-    static let orphanedDomainCredentialKeys: Set<String> = [
-        "chatOpsBotToken", "webSearchAPIKey", "gemini_api_key", "deepseek_api_key",
-    ]
-
-    /// Whether a key in an orphaned domain is treated as a credential.
-    ///
-    /// The explicit list plus the `<provider>_api_key` family by NAME. `deepseek_api_key` was on
-    /// nobody's list — it proved the family has more members than anyone enumerated — so a key is
-    /// matched on how it is named, never on what its value looks like.
-    static func isOrphanedDomainCredentialKey(_ key: String) -> Bool {
-        orphanedDomainCredentialKeys.contains(key) || key.hasSuffix("_api_key")
-    }
-
-    /// Removes plaintext credentials from preference domains the app no longer resolves to.
-    ///
-    /// Works on the persistent domain directly. `UserDefaults(suiteName:)` layers the global domain
-    /// and this app's own on top of the named one, so enumerating THAT would delete keys the current
-    /// app still uses. Idempotent, and it logs only when something was actually removed.
-    /// - Returns: the number of keys removed.
-    @discardableResult
-    static func purgeOrphanedLegacyDomains(
-        domainNames: [String] = legacyPreferenceDomains,
-        defaults: UserDefaults = .standard
-    ) -> Int {
-        var removed = 0
-        for domain in domainNames {
-            guard var contents = defaults.persistentDomain(forName: domain) else { continue }
-            let credentialKeys = contents.keys.filter(isOrphanedDomainCredentialKey).sorted()
-            guard !credentialKeys.isEmpty else { continue }
-
-            for key in credentialKeys { contents.removeValue(forKey: key) }
-            defaults.setPersistentDomain(contents, forName: domain)
-            removed += credentialKeys.count
-            logger.notice(
-                "[SECRETS] Removed \(credentialKeys.count) plaintext credential(s) "
-                + "(\(credentialKeys.joined(separator: ", "))) from the orphaned preferences domain "
-                + "'\(domain)'. CONSEQUENCE: ~/Library/Preferences/\(domain).plist no longer carries "
-                + "them; nothing in the app read that domain, so no feature changes — but any of "
-                + "those values that is still live sat in cleartext until now and should be rotated."
-            )
-        }
-        return removed
     }
 }
 
@@ -289,6 +243,30 @@ extension ProfileDetails {
         case .imageGen(let c): return c.llmConfig.apiKey
         case .workflow:        return nil
         }
+    }
+
+    /// The provider whose API key this configuration uses, if the profile type has one.
+    var keyProvider: ApiProvider? {
+        switch self {
+        case .bot(let c):      return c.llmConfig.apiProvider
+        case .agent(let c):    return c.llmConfig.apiProvider
+        case .code(let c):     return c.llmConfig.apiProvider
+        case .imageGen(let c): return c.llmConfig.apiProvider
+        case .workflow:        return nil
+        }
+    }
+
+    /// True when this configuration's provider takes no API key (Ollama, MLX), so the profile has
+    /// nothing to read from or write to the Keychain. A workflow has no provider and is NOT keyless
+    /// in this sense — it simply has no key path at all (`keyProvider == nil`).
+    var isKeylessProvider: Bool {
+        keyProvider.map { !$0.usesAPIKey } ?? false
+    }
+
+    /// The `GlobalProviderKeys` account holding this configuration's key, or nil when the key is
+    /// stored per profile (or the type has none). See `GlobalProviderKeys.isShared`.
+    var sharedKeyAccount: String? {
+        keyProvider.flatMap(GlobalProviderKeys.account(for:))
     }
 
     /// Returns a copy with the provider API key replaced (or removed, when nil).

@@ -179,27 +179,27 @@ final class SkillLoadSeamTests: XCTestCase {
         XCTAssertTrue(result.contains("no longer in the library"))
     }
 
-    // MARK: - The legacy arm still works
+    // MARK: - Nothing loads from disk
 
-    /// ⚠️ A manifest with NO `versionID` came from a pre-library profile blob, where `folderPath`
-    /// really is a path. That arm must keep reading from disk — it is what a user sees before the
-    /// import sweep has run.
-    func testALegacyManifestStillLoadsFromDisk() async throws {
+    /// A manifest with NO `versionID` did not come from resolution, so there is nothing to load —
+    /// even with a readable SKILL.md sitting at its `folderPath`. The disk loader that once served
+    /// pre-library profiles is gone.
+    func testAnUnversionedManifestIsRefusedEvenWhenItsFolderIsReadable() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir.appendingPathComponent("legacy-skill"),
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("disk-skill"),
                                                 withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let folder = dir.appendingPathComponent("legacy-skill")
-        try "---\nname: legacy-skill\ndescription: d\n---\n\nDISK BODY"
+        let folder = dir.appendingPathComponent("disk-skill")
+        try "---\nname: disk-skill\ndescription: d\n---\n\nDISK BODY"
             .write(to: folder.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
 
-        let legacy = SkillManifest(id: UUID(), name: "legacy-skill", description: "d",
-                                   folderPath: folder.path, resourceCount: 0, hasScripts: false,
-                                   compatibility: nil, isEnabled: true)
-        XCTAssertNil(legacy.versionID, "the absence of a version id is what selects the disk arm")
+        let unversioned = SkillManifest(id: UUID(), name: "disk-skill", description: "d",
+                                        folderPath: folder.path, resourceCount: 0, hasScripts: false,
+                                        compatibility: nil, isEnabled: true)
 
-        let result = try await load("legacy-skill", from: [legacy])
-        XCTAssertTrue(result.contains("DISK BODY"), result)
+        let result = try await load("disk-skill", from: [unversioned])
+        XCTAssertFalse(result.contains("DISK BODY"), result)
+        XCTAssertTrue(result.contains("was not resolved from the skill library"), result)
     }
 
     // MARK: - Labels are structure; the body is content

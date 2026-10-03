@@ -190,6 +190,18 @@ final class BackendProfile {
             return
         }
         let outcome = Self.decodeDetails(from: configData)
+        // ⚠️ A shared-key provider has no per-profile item to read: its key is injected by the
+        // `details` getter from `GlobalProviderKeys`, which caches it for the process. Reading here
+        // as well is what made every fetch decrypt every profile's key again. A workflow has no key,
+        // and a keyless provider (Ollama, MLX) never sends one — reading for it was a lookup on
+        // every fetch and render that could only ever answer "not found".
+        guard outcome.details.keyProvider != nil,
+              outcome.details.sharedKeyAccount == nil,
+              !outcome.details.isKeylessProvider else {
+            _cachedDetails = outcome.details
+            _detailsUnreadableReason = outcome.reason
+            return
+        }
         // ⚠️ Inject the API key from the Keychain, where it now lives instead of in the blob.
         // Done HERE rather than in the getter so the Keychain is touched once per decode and the
         // result is cached — `details` is read on nearly every render.
@@ -205,9 +217,9 @@ final class BackendProfile {
 
         let keychainKey: String? = { if case .found(let k) = keyOutcome { return k } else { return nil } }()
 
-        // The `??` is the migration path: a blob written before the Keychain move still carries its
-        // key inline and must keep working until the launch sweep rewrites it. Keychain wins when
-        // both exist — it is the newer of the two by construction.
+        // The `??` is the write-failure path: when the Keychain write failed, the setter left the key
+        // inline rather than destroy it, and it must keep working until a later save moves it.
+        // Keychain wins when both exist — it is the newer of the two by construction.
         _cachedDetails = outcome.details.settingProviderAPIKey(
             keychainKey ?? outcome.details.providerAPIKey
         )
@@ -233,6 +245,10 @@ final class BackendProfile {
     /// that was never given a key, and the user's natural fix was to paste the key again.
     var hasUnreadableProviderKey: Bool {
         primeDecodeState()
+        if let account = _cachedDetails?.sharedKeyAccount {
+            if case .failed = GlobalProviderKeys.read(account: account) { return true }
+            return false
+        }
         return _providerKeyUnreadable
     }
 
@@ -241,6 +257,10 @@ final class BackendProfile {
     @discardableResult
     func retryProviderKeyRead() -> Bool {
         primeDecodeState()
+        if let account = _cachedDetails?.sharedKeyAccount {
+            if case .failed = GlobalProviderKeys.retry(account: account) { return false }
+            return true
+        }
         guard _providerKeyUnreadable else { return true }
         rereadProviderKey(force: true)
         return !_providerKeyUnreadable
@@ -259,7 +279,7 @@ final class BackendProfile {
             return
         }
         _providerKeyLastReadAttempt = Date()
-        switch ProviderKeyStore.read(for: id) {
+        switch ProviderKeyStore.read(for: id, bypassingFailedRead: true) {
         case .found(let key):
             _providerKeyUnreadable = false
             _cachedDetails = _cachedDetails?.settingProviderAPIKey(key)
@@ -275,18 +295,6 @@ final class BackendProfile {
     /// key without waiting out `providerKeyRetryInterval`.
     func expireProviderKeyRetryThrottleForTesting() {
         _providerKeyLastReadAttempt = nil
-    }
-
-    /// Whether the STORED BYTES still carry an inline API key — i.e. this row predates the move to
-    /// the Keychain.
-    ///
-    /// ⚠️ Decodes `configData` directly rather than reading `details`, because `details` injects
-    /// the Keychain value and would report `true` for an already-migrated row. This is the only
-    /// thing that distinguishes the two, so the migration sweep keys off it.
-    var hasInlineAPIKeyInStoredBlob: Bool {
-        let decoded = Self.decodeDetails(from: configData).details
-        guard let key = decoded.providerAPIKey else { return false }
-        return !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Explicitly discards an unreadable configuration and replaces it.
@@ -310,7 +318,7 @@ final class BackendProfile {
     var details: ProfileDetails {
         get {
             primeDecodeState()
-            return _cachedDetails ?? Self.decodeDetails(from: configData).details
+            return Self.injectingSharedKey(into: _cachedDetails ?? Self.decodeDetails(from: configData).details)
         }
         set {
             // ⚠️ Load-bearing, not defensive — see `primeDecodeState()`.
@@ -322,7 +330,9 @@ final class BackendProfile {
             // CodeSessionManager, MLXContextWindowHealer all call saveProfile without the user
             // editing anything) and writing it would destroy the original configuration
             // permanently. A genuine user edit produces a DIFFERENT value and is allowed through.
-            if _detailsDecodeFailed, newValue == _cachedDetails {
+            // Compared against what the GETTER handed out — it injects the shared key, so the raw
+            // cache would never equal a placeholder coming back and the refusal would not fire.
+            if _detailsDecodeFailed, newValue == _cachedDetails.map(Self.injectingSharedKey(into:)) {
                 logger.error(
                     "[PERSISTENCE] Refusing to overwrite unreadable profile blob — profile '\(displayName)' "
                     + "(id \(id)): the incoming value is the placeholder issued after the failed decode, so "
@@ -342,46 +352,80 @@ final class BackendProfile {
                 _detailsUnreadableReason = nil
             }
 
-            // ⚠️ Move the key to the Keychain BEFORE encoding, and only strip it from the blob
-            // once that write succeeded. Stripping first and failing second would destroy the
-            // user's credential; this way the worst case is the pre-existing behaviour (key stays
-            // in the blob) rather than a key that exists nowhere.
-            let keyForKeychain = newValue.providerAPIKey
+            let detailsToEncode: ProfileDetails
+            let detailsToCache: ProfileDetails
+            if let account = newValue.sharedKeyAccount {
+                // ⚠️ ONE KEY PER PROVIDER. The key is not this profile's to write or delete — every
+                // profile on the provider shares it, and it is set only in the model catalog or the
+                // Code model picker — so a save just strips it and never touches the Keychain. The
+                // B2 / KC-20 guards below therefore have nothing to protect on this path: no save,
+                // opportunistic or stale, can destroy or replace the shared key from here.
+                Self.noteDiscardedSharedKey(carriedBy: newValue, account: account,
+                                            profileName: displayName, profileID: id)
+                detailsToEncode = newValue.settingProviderAPIKey(nil)
+                // The getter injects the shared key, so the cache holds the stripped value.
+                detailsToCache = detailsToEncode
+            } else if newValue.isKeylessProvider, !Self.keepsOwnKey(_cachedDetails) {
+                // A keyless provider (Ollama, MLX) has nothing to store, so a save never touches the
+                // Keychain — it used to DELETE a per-profile item on every save that could never
+                // exist. Any key the value carries (a provider switch left it behind) is dropped.
+                // ⚠️ Gated on the PREVIOUS value too: a profile switching here FROM a provider that
+                // keeps its own key takes the branch below instead, which clears that old item under
+                // the B2 / KC-20 guards rather than orphaning it.
+                detailsToEncode = newValue.settingProviderAPIKey(nil)
+                detailsToCache = detailsToEncode
+            } else {
+                // ⚠️ Move the key to the Keychain BEFORE encoding, and only strip it from the blob
+                // once that write succeeded. Stripping first and failing second would destroy the
+                // user's credential; this way the worst case is the pre-existing behaviour (key stays
+                // in the blob) rather than a key that exists nowhere.
+                // A keyless provider reaches here only when LEAVING a provider that kept its own
+                // key — nil clears that old item.
+                let keyForKeychain = newValue.isKeylessProvider ? nil : newValue.providerAPIKey
 
-            // ⚠️ register B2 — THE GUARD THAT STOPS A READ FAILURE BECOMING A DELETE. When the
-            // Keychain could not be read, `details` came back with no key, so an unrelated save
-            // (a rename, a capability chip, the thinking auto-heal, the MLX context healer) called
-            // `save(nil)` → `delete` and destroyed a credential that was perfectly intact. A nil
-            // key is only user intent when we could actually SEE that there was nothing there.
-            //
-            // Deliberately asymmetric: a nil key with an unreadable Keychain leaves the item
-            // alone, while a nil key with a readable one still clears it. Refusing to clear in
-            // both cases would break the user's ability to remove a key at all.
-            // ⚠️ The STICKY flag, not `_providerKeyUnreadable` — a recovery since the failure does
-            // not make a draft snapshotted during it trustworthy (register KC-20).
-            let suppressKeychainClear = (keyForKeychain == nil && _providerKeyClearSuppressed)
-            if suppressKeychainClear {
-                logger.error(
-                    "[SECRETS] NOT clearing the Keychain API key for profile '\(displayName)' "
-                    + "(id \(id)): a Keychain read FAILED earlier in this session, so a missing key "
-                    + "cannot be trusted as the user clearing it — it may come from a form filled "
-                    + "while the key was hidden. CONSEQUENCE: the stored credential is preserved and "
-                    + "the rest of this save proceeds normally. If the user DID mean to remove the "
-                    + "key, that removal is not applied this session: relaunch and clear it again."
-                )
-            }
+                // ⚠️ register B2 — THE GUARD THAT STOPS A READ FAILURE BECOMING A DELETE. When the
+                // Keychain could not be read, `details` came back with no key, so an unrelated save
+                // (a rename, a capability chip, the thinking auto-heal, the MLX context healer) called
+                // `save(nil)` → `delete` and destroyed a credential that was perfectly intact. A nil
+                // key is only user intent when we could actually SEE that there was nothing there.
+                //
+                // Deliberately asymmetric: a nil key with an unreadable Keychain leaves the item
+                // alone, while a nil key with a readable one still clears it. Refusing to clear in
+                // both cases would break the user's ability to remove a key at all.
+                // ⚠️ The STICKY flag, not `_providerKeyUnreadable` — a recovery since the failure does
+                // not make a draft snapshotted during it trustworthy (register KC-20).
+                let suppressKeychainClear = (keyForKeychain == nil && _providerKeyClearSuppressed)
+                if suppressKeychainClear {
+                    logger.error(
+                        "[SECRETS] NOT clearing the Keychain API key for profile '\(displayName)' "
+                        + "(id \(id)): a Keychain read FAILED earlier in this session, so a missing key "
+                        + "cannot be trusted as the user clearing it — it may come from a form filled "
+                        + "while the key was hidden. CONSEQUENCE: the stored credential is preserved and "
+                        + "the rest of this save proceeds normally. If the user DID mean to remove the "
+                        + "key, that removal is not applied this session: relaunch and clear it again."
+                    )
+                }
 
-            // `true` in the suppressed case is correct rather than a fudge: it means "the blob may
-            // be written without the key", which is exactly right — the key is not in the blob, it
-            // is safe in the Keychain and we are deliberately not touching it.
-            let storedSecurely = suppressKeychainClear
-                ? true
-                : ProviderKeyStore.save(keyForKeychain, for: id)
-            let detailsToEncode = storedSecurely ? newValue.settingProviderAPIKey(nil) : newValue
-            // A key just WRITTEN is a key we know — the banner must not keep saying "unreadable"
-            // until the next throttled re-read. Display flag only; the sticky one stays (KC-20).
-            if keyForKeychain != nil && storedSecurely && !suppressKeychainClear {
-                _providerKeyUnreadable = false
+                // `true` in the suppressed case is correct rather than a fudge: it means "the blob may
+                // be written without the key", which is exactly right — the key is not in the blob, it
+                // is safe in the Keychain and we are deliberately not touching it.
+                let storedSecurely = suppressKeychainClear
+                    ? true
+                    : ProviderKeyStore.save(keyForKeychain, for: id)
+                detailsToEncode = storedSecurely ? newValue.settingProviderAPIKey(nil) : newValue
+                // A key just WRITTEN is a key we know — the banner must not keep saying "unreadable"
+                // until the next throttled re-read. Display flag only; the sticky one stays (KC-20).
+                if keyForKeychain != nil && storedSecurely && !suppressKeychainClear {
+                    _providerKeyUnreadable = false
+                }
+                // `_cachedDetails` keeps the key — it is the in-memory view, and every reader
+                // expects `details.llmConfig.apiKey` to be usable. Only `configData` is stripped.
+                // ⚠️ In the suppressed case the Keychain still holds the key, so memory must too —
+                // caching the key-less value would send every later request unauthenticated while the
+                // credential sat intact and readable (register KC-20). Nil if it is still unreadable.
+                detailsToCache = suppressKeychainClear
+                    ? newValue.settingProviderAPIKey(_cachedDetails?.providerAPIKey)
+                    : newValue
             }
 
             guard let encoded = Self.encodeDetails(detailsToEncode) else {
@@ -397,14 +441,7 @@ final class BackendProfile {
                 )
                 return
             }
-            // `_cachedDetails` keeps the key — it is the in-memory view, and every reader
-            // expects `details.llmConfig.apiKey` to be usable. Only `configData` is stripped.
-            // ⚠️ In the suppressed case the Keychain still holds the key, so memory must too —
-            // caching the key-less value would send every later request unauthenticated while the
-            // credential sat intact and readable (register KC-20). Nil if it is still unreadable.
-            _cachedDetails = suppressKeychainClear
-                ? newValue.settingProviderAPIKey(_cachedDetails?.providerAPIKey)
-                : newValue
+            _cachedDetails = detailsToCache
             configData = encoded
             // Keep denormalized columns in sync
             switch newValue {
@@ -452,13 +489,28 @@ final class BackendProfile {
         self.modelNameRaw = model
 
         // ⚠️ Same strip-on-write as the `details` setter — a freshly created profile must not
-        // put its key in the blob either. `_cachedDetails` keeps the key for in-memory readers.
-        let storedSecurely = ProviderKeyStore.save(details.providerAPIKey, for: id)
-        let detailsToEncode = storedSecurely ? details.settingProviderAPIKey(nil) : details
+        // put its key in the blob either. `_cachedDetails` keeps the key for in-memory readers,
+        // except on a shared-key provider, where the getter injects it.
+        let detailsToEncode: ProfileDetails
+        let detailsToCache: ProfileDetails
+        if let account = details.sharedKeyAccount {
+            Self.noteDiscardedSharedKey(carriedBy: details, account: account,
+                                        profileName: displayName, profileID: id)
+            detailsToEncode = details.settingProviderAPIKey(nil)
+            detailsToCache = detailsToEncode
+        } else if details.isKeylessProvider {
+            // Nothing to store for a keyless provider, and a fresh row has no old item to clear.
+            detailsToEncode = details.settingProviderAPIKey(nil)
+            detailsToCache = detailsToEncode
+        } else {
+            let storedSecurely = ProviderKeyStore.save(details.providerAPIKey, for: id)
+            detailsToEncode = storedSecurely ? details.settingProviderAPIKey(nil) : details
+            detailsToCache = details
+        }
 
         if let encoded = Self.encodeDetails(detailsToEncode) {
             self.configData = encoded
-            self._cachedDetails = details
+            self._cachedDetails = detailsToCache
         } else {
             // A fresh row has no prior bytes to protect, so refusal is not an option here — but the
             // stored value must never be mistakable for a valid empty config. `{}` would be: it is
@@ -474,6 +526,40 @@ final class BackendProfile {
                 + "instead of silently losing settings the user believes they saved."
             )
         }
+    }
+
+    // MARK: - Shared Provider Keys
+
+    /// Whether `details` belongs to a provider whose key lives in a PER-PROFILE Keychain item
+    /// (today: OpenAI-compatible) — the one case where leaving it must clear that item.
+    static func keepsOwnKey(_ details: ProfileDetails?) -> Bool {
+        guard let details, let provider = details.keyProvider else { return false }
+        return provider.usesAPIKey && details.sharedKeyAccount == nil
+    }
+
+    /// `details` with the shared provider key injected, when its provider has one. Not found or
+    /// unreadable → `details` as stored, which carries no key.
+    static func injectingSharedKey(into details: ProfileDetails) -> ProfileDetails {
+        guard let account = details.sharedKeyAccount,
+              case .found(let key) = GlobalProviderKeys.read(account: account) else { return details }
+        return details.settingProviderAPIKey(key)
+    }
+
+    /// Logs a key a shared-provider profile was saved carrying that is not the shared key — it is
+    /// about to be discarded. Never writes: shared keys are set only in the model catalog and the
+    /// Code model picker. Silent otherwise, including for the common case of carrying the shared
+    /// key itself (the getter injected it).
+    static func noteDiscardedSharedKey(carriedBy details: ProfileDetails, account: String,
+                                       profileName: String, profileID: UUID) {
+        guard let carried = details.providerAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !carried.isEmpty else { return }
+        if case .found(let shared) = GlobalProviderKeys.read(account: account), shared == carried { return }
+        logger.notice(
+            "[GLOBAL_KEYS] Profile '\(profileName)' (id \(profileID)) was saved carrying a '\(account)' key "
+            + "that is not the shared one. CONSEQUENCE: it is discarded — profiles never store their own "
+            + "key on this provider — and the profile uses the shared key, or none until one is entered "
+            + "in the model catalog."
+        )
     }
 
     // MARK: - Denormalization Helpers
@@ -538,8 +624,7 @@ final class BackendProfile {
             BotConfig(llmConfig: ProviderConfig(apiProvider: .ollama, modelName: ""))
         )
 
-        // Run migration pipeline before decoding.
-        switch ProfileMigrator.migrateIfNeeded(data) {
+        switch ProfileBlobGate.check(data) {
         case .tooNew(let storedVersion):
             // ⚠️ Written by a NEWER build (register G18). Distinguished from corruption ON PURPOSE:
             // the remedies are opposite. Corrupt data invites the user to reconfigure the profile,
@@ -551,7 +636,7 @@ final class BackendProfile {
             // that was perfectly well-formed.
             logger.error(
                 "[PERSISTENCE] ProfileDetails blob is schemaVersion \(storedVersion) but this build "
-                + "understands at most \(ProfileMigrator.currentVersion) (\(data.count) bytes) — it was "
+                + "understands at most \(ProfileBlobGate.currentVersion) (\(data.count) bytes) — it was "
                 + "written by a NEWER version of Devgentic. CONSEQUENCE: not decoded and NOT "
                 + "overwritten; a placeholder is shown and the profile is marked unreadable. The data "
                 + "is intact — update Devgentic to read it. ⚠️ Reconfiguring this profile on THIS "
@@ -559,12 +644,22 @@ final class BackendProfile {
             )
             return (placeholder, .writtenByNewerBuild(storedVersion: storedVersion))
 
-        case .migrated(let migrated):
+        case .unsupported(let storedVersion):
+            logger.error(
+                "[PERSISTENCE] ProfileDetails blob is schemaVersion \(storedVersion), older than this build's "
+                + "\(ProfileBlobGate.currentVersion) (\(data.count) bytes) — it predates the 2026-10-03 format "
+                + "reset, and older formats are no longer upgraded. CONSEQUENCE: not decoded and NOT "
+                + "overwritten; a placeholder is shown and the profile is marked unreadable. Delete and "
+                + "recreate the profile."
+            )
+            return (placeholder, .undecodable)
+
+        case .decodable:
             do {
-                return (try JSONDecoder().decode(ProfileDetails.self, from: migrated), nil)
+                return (try JSONDecoder().decode(ProfileDetails.self, from: data), nil)
             } catch {
                 logger.error(
-                    "[PERSISTENCE] Failed to decode ProfileDetails after migration (\(data.count) bytes): "
+                    "[PERSISTENCE] Failed to decode ProfileDetails (\(data.count) bytes): "
                     + "\(error). CONSEQUENCE: a placeholder bot config is returned for display, the stored "
                     + "bytes are NOT overwritten, and this profile is marked unreadable."
                 )

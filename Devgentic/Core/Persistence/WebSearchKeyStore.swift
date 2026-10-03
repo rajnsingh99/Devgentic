@@ -29,11 +29,6 @@ enum WebSearchKeyStore {
     /// One key per user, not per profile.
     static let account = "apiKey"
 
-    /// The `UserDefaults` key every build before this one wrote the raw key to. Owned HERE rather
-    /// than by `ProviderKeyStore.legacyPlaintextDefaultsKeys`, because this key has to be MIGRATED
-    /// before it is removed and that purge deletes unconditionally.
-    static let legacyDefaultsKey = "webSearchAPIKey"
-
     /// ⚠️ TEST SEAM, same shape as `ProviderKeyStore.storage`. Mutated only by
     /// `setStorageForTesting`; production never reassigns it.
     nonisolated(unsafe) private static var storage: KeychainAccessing = SecureKeyStorage()
@@ -104,58 +99,5 @@ enum WebSearchKeyStore {
             + "user believes it was removed."
         )
         return false
-    }
-
-    // MARK: - Migration from plaintext UserDefaults
-
-    enum MigrationOutcome: Equatable {
-        /// No plaintext copy existed.
-        case nothingToMigrate
-        /// The value is in the Keychain and the plaintext copy is gone.
-        case migrated
-        /// The Keychain write failed; the plaintext copy was deliberately left where it was.
-        case leftInPlace(OSStatus)
-    }
-
-    /// Moves a plaintext key left in `UserDefaults` into the Keychain, then removes the plaintext.
-    ///
-    /// ⚠️ STRIP ONLY IF THE WRITE SUCCEEDED — the same asymmetry as `BackendProfileSD.details`.
-    /// Removing the plaintext first and writing second would, on an unwritable Keychain, leave the
-    /// key in neither place: the one outcome worse than plaintext.
-    ///
-    /// The plaintext value WINS over a Keychain value when both exist. Post-fix builds never write
-    /// plaintext, so the two coexist only when an older build ran after this one and the user
-    /// entered a key there — in which case the plaintext is the more recent action.
-    /// `SettingsCoordinator` removes the plaintext copy on every successful save for the same
-    /// reason: a stale copy must not be re-migrated over a rotated key on the next launch.
-    ///
-    /// Idempotent; safe on every launch. `defaults` is injectable so tests never touch the
-    /// developer's real preferences domain.
-    @discardableResult
-    static func migrateFromUserDefaults(defaults: UserDefaults = .standard) -> MigrationOutcome {
-        guard let plaintext = defaults.string(forKey: legacyDefaultsKey) else { return .nothingToMigrate }
-        let trimmed = plaintext.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            defaults.removeObject(forKey: legacyDefaultsKey)
-            return .nothingToMigrate
-        }
-
-        let status = storage.save(value: trimmed, service: service, account: account)
-        guard status == errSecSuccess else {
-            logger.error(
-                "[SECRETS] Could not migrate the web-search API key into the Keychain (OSStatus "
-                + "\(status)). CONSEQUENCE: the plaintext copy in UserDefaults is LEFT IN PLACE — "
-                + "removing it now would leave the key nowhere — and it is retried on the next launch."
-            )
-            return .leftInPlace(status)
-        }
-
-        defaults.removeObject(forKey: legacyDefaultsKey)
-        logger.notice(
-            "[SECRETS] Migrated the web-search API key from plaintext UserDefaults into the Keychain "
-            + "and removed the plaintext copy. CONSEQUENCE: ~/Library/Preferences/ no longer holds a "
-            + "live web-search API key for this domain; web search keeps working from the Keychain."
-        )
-        return .migrated
     }
 }

@@ -28,22 +28,16 @@ struct AppSettings {
     static let ciFeatureSuggestionKey = "ciFeatureSuggestion"
     static let ciFeatureMorningBriefKey = "ciFeatureMorningBrief"
     static let ciFeatureUserPersonalKey = "ciFeatureUserPersonal"
-    /// Legacy single Response Synthesis toggle. RETAINED FOR MIGRATION ONLY — no
-    /// runtime code reads it any more; see the per-family keys below.
-    static let ciFeatureResponseSynthesisKey = "ciFeatureResponseSynthesis"
     static let ciFeatureHistoryCompactionKey = "ciFeatureHistoryCompaction"
     static let ciCustomPromptKey = "ciCustomPrompt"
 
-    // Response Synthesis opt-in, per provider family (replaces the single
-    // `ciFeatureResponseSynthesisKey` toggle). A run synthesizes only when the key
+    // Response Synthesis opt-in, per provider family. A run synthesizes only when the key
     // matching ITS provider family is on: an IC-sized cleanup pass measurably helps
     // small local models, but behind a large cloud model it compresses a better
     // answer than it produces. Default false — synthesis is never automatic.
     static let ciFeatureResponseSynthesisMLXKey = "ciFeatureResponseSynthesisMLX"
     static let ciFeatureResponseSynthesisOllamaKey = "ciFeatureResponseSynthesisOllama"
     static let ciFeatureResponseSynthesisRemoteKey = "ciFeatureResponseSynthesisRemote"
-    /// One-shot guard so the legacy → per-family seeding runs exactly once.
-    static let ciSynthPerProviderMigratedKey = "ciSynthPerProviderMigrated"
 
     // Morning Brief
     static let lastMorningBriefDateKey = "lastMorningBriefDate"

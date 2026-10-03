@@ -199,19 +199,18 @@ struct ThemeSettingsView: View {
 
                             Spacer()
 
-                            Button {
+                            TactileButton(
+                                title: "Reset to Default",
+                                icon: "arrow.counterclockwise",
+                                variant: .subtle,
+                                size: .compact,
+                                isDisabled: themeManager.chatFontFamily == .system && themeManager.chatFontSize == 14
+                            ) {
                                 withAnimation(.easeInOut(duration: 0.2)) {
                                     themeManager.applyChatFontFamily(.system)
                                     themeManager.applyChatFontSize(14)
                                 }
-                            } label: {
-                                Text("Reset to Default")
-                                    .font(.system(.caption, weight: .medium))
-                                    .foregroundColor(theme.secondaryText)
                             }
-                            .buttonStyle(.plain)
-                            .disabled(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 14)
-                            .opacity(themeManager.chatFontFamily == .system && themeManager.chatFontSize == 14 ? 0.4 : 1)
                         }
                     }
                 }

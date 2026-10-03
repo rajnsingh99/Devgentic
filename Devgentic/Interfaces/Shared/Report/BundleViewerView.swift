@@ -68,13 +68,13 @@ struct BundleViewerView: View {
             }
             Spacer()
             if loaded != nil {
-                Button("Open Another…") { openBundle() }
+                TactileButton(title: "Open Another…", icon: "folder", variant: .secondary, size: .compact) {
+                    openBundle()
+                }
             }
-            Button(action: { dismiss() }) {
-                Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(theme.secondaryText)
-                    .frame(width: 22, height: 22).background(theme.secondaryBackground).clipShape(Circle())
+            TactileIconButton(icon: "xmark", tooltip: "Close", size: .compact) {
+                dismiss()
             }
-            .buttonStyle(.plain)
         }
         .padding(16)
     }
@@ -94,7 +94,9 @@ struct BundleViewerView: View {
                 Text("Couldn't read bundle").font(.headline).foregroundStyle(theme.primaryText)
                 Text(err).font(.caption).foregroundStyle(theme.secondaryText)
                     .multilineTextAlignment(.center).padding(.horizontal, 24)
-                Button("Try Another…") { openBundle() }.buttonStyle(.borderedProminent)
+                TactileButton(title: "Try Another…", icon: "arrow.counterclockwise", variant: .primary, size: .regular) {
+                    openBundle()
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let loaded {
@@ -105,7 +107,9 @@ struct BundleViewerView: View {
                 Text("Open a diagnostic bundle exported from Devgentic to inspect its trace, spans, and events.")
                     .font(.callout).foregroundStyle(theme.secondaryText)
                     .multilineTextAlignment(.center).padding(.horizontal, 40)
-                Button("Open Bundle…") { openBundle() }.buttonStyle(.borderedProminent)
+                TactileButton(title: "Open Bundle…", icon: "folder", variant: .primary, size: .regular) {
+                    openBundle()
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

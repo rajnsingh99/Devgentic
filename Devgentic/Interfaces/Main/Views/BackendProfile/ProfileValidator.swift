@@ -156,21 +156,9 @@ struct ProfileValidator {
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))
 
             case .workflow:
-                // ⚠️ NO RULE. A blocking "Workflow must reference at least one agent profile."
-                // lived here, keyed on `WorkflowConfig.agentProfileIDs` being empty. That field is
-                // RETIRED (2026-08-29): nothing recomputes it any more, because a workflow's nodes
-                // now own their configuration and the layout is the only record of what a workflow
-                // contains.
-                //
-                // ⚠️ Keeping the rule while the field stopped being maintained would have made
-                // every workflow permanently unsaveable — `BackendProfileStore` validates with
-                // `strict: isUpdate`, so an empty list throws on every UPDATE including a rename.
-                // Register B36 recorded exactly that failure mode as the reason never to PRUNE the
-                // list; retiring the field makes the rule unsatisfiable rather than merely fragile.
-                //
-                // The condition it was reaching for — "this workflow has nothing to run" — belongs
-                // to `WorkflowValidator`, which reads the actual layout and already reports an
-                // empty canvas before a run.
+                // No profile-level rule: "this workflow has nothing to run" belongs to
+                // `WorkflowValidator`, which reads the actual layout and reports an empty canvas
+                // before a run.
                 break
 
             case .code(let config):

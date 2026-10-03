@@ -1209,11 +1209,10 @@ struct SubTask: Sendable, Codable, Identifiable, Equatable, Hashable {
         self.dependsOn = dependsOn
     }
 
-    // MARK: - Backward-Compatible Codable
+    // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
         case id, description, toolHints, status, result, dependsOn
-        case toolHint // Legacy key — decode only, never encoded
     }
 
     init(from decoder: Decoder) throws {
@@ -1224,14 +1223,8 @@ struct SubTask: Sendable, Codable, Identifiable, Equatable, Hashable {
         self.result = try? container.decode(String.self, forKey: .result)
         self.dependsOn = try? container.decode([String].self, forKey: .dependsOn)
 
-        // New format first, fallback to legacy single-string key
-        if let hints = try? container.decode([String].self, forKey: .toolHints) {
-            self.toolHints = hints.isEmpty ? nil : hints
-        } else if let legacyHint = try? container.decode(String.self, forKey: .toolHint) {
-            self.toolHints = legacyHint.isEmpty ? nil : [legacyHint]
-        } else {
-            self.toolHints = nil
-        }
+        let hints = try? container.decode([String].self, forKey: .toolHints)
+        self.toolHints = (hints?.isEmpty ?? true) ? nil : hints
     }
 
     func encode(to encoder: Encoder) throws {
