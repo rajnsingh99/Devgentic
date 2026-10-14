@@ -1,27 +1,568 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-release="pending">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Devgentic — AI agents that run on your Mac</title>
-<meta name="description" content="A native macOS app for building and running AI agents — locally with MLX and Ollama, or in the cloud with your own API keys.">
-<link rel="canonical" href="https://rajnsingh99.github.io/devgentic/">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Devgentic — Local-first AI agents for your Mac</title>
+  <meta name="description" content="A native macOS app for building and running AI agents — locally with MLX and Ollama where you want it, in the cloud where you need it. Free and open source (AGPL-3.0). No telemetry, no account.">
+  <link rel="canonical" href="https://rajnsingh99.github.io/devgentic/">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="assets/favicon.png">
+  <link rel="apple-touch-icon" href="assets/favicon-180.png">
+  <meta name="theme-color" content="#06070a">
 
-<!-- Link previews. Keep these accurate: they are what Slack, Discord, Reddit and X render. -->
-<meta property="og:type" content="website">
-<meta property="og:title" content="Devgentic — AI agents that run on your Mac">
-<meta property="og:description" content="A native macOS app for building and running AI agents — locally with MLX and Ollama, or in the cloud with your own API keys.">
-<meta property="og:url" content="https://rajnsingh99.github.io/devgentic/">
-<meta property="og:image" content="https://rajnsingh99.github.io/devgentic/assets/og.png">
-<meta name="twitter:card" content="summary_large_image">
+  <!-- Link previews for Slack, Discord, Reddit, and X/Twitter -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Devgentic — Local-first AI agents for your Mac">
+  <meta property="og:description" content="Build and run AI agents natively on macOS — locally with MLX and Ollama, or in the cloud with your own keys. Open source, no telemetry.">
+  <meta property="og:url" content="https://rajnsingh99.github.io/devgentic/">
+  <meta property="og:image" content="https://rajnsingh99.github.io/devgentic/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Devgentic — Local-first AI agents for your Mac">
+  <meta name="twitter:description" content="Build and run AI agents natively on macOS — locally with MLX and Ollama, or in the cloud. Open source, no telemetry.">
+  <meta name="twitter:image" content="https://rajnsingh99.github.io/devgentic/assets/og.png">
+
+  <link rel="stylesheet" href="css/styles.css?v=5">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Person",
+    "name": "Raj Singh",
+    "url": "https://rajnsingh99.github.io/devgentic/",
+    "sameAs": ["https://www.linkedin.com/in/rajnsingh99", "https://github.com/rajnsingh99"]
+  }
+  </script>
 </head>
 <body>
-  <!-- Scaffold only. Real content goes here — and it must live in the HTML,
-       not be injected from site.config.js, or the meta previews above are
-       the only thing a crawler ever sees. -->
-  <h1>Devgentic</h1>
-  <p>AI agents that run on your Mac.</p>
-  <p><a href="https://github.com/rajnsingh99/devgentic/releases/latest/download/Devgentic.dmg">Download for macOS</a></p>
-  <p><a href="https://github.com/rajnsingh99/devgentic">Source on GitHub</a></p>
+
+  <a href="#main" class="skip-link">Skip to content</a>
+
+  <!-- Pre-release notice: always visible until a release is published -->
+  <div class="prerelease-banner pending-only" role="note">
+    <strong>Pre-release.</strong>
+    Devgentic runs shell commands and edits files with your user's privileges.
+    <a href="https://github.com/rajnsingh99/devgentic#before-you-use-this" target="_blank" rel="noopener">Read this before you use it</a>.
+  </div>
+
+  <header class="site-header">
+    <nav class="nav-shell" aria-label="Primary">
+      <a href="#" class="brand">
+        <img src="assets/app-icon.png" alt="" width="28" height="28">
+        <span>Devgentic</span>
+        <span class="badge release-only" data-bind="version"></span>
+      </a>
+
+      <ul class="nav-links">
+        <li><a href="#features" class="nav-link">Features</a></li>
+        <li><a href="#backends" class="nav-link">Local &amp; cloud</a></li>
+        <li><a href="#safety" class="nav-link">Safety</a></li>
+        <li><a href="#requirements" class="nav-link">Requirements</a></li>
+        <li><a href="#faq" class="nav-link">FAQ</a></li>
+      </ul>
+
+      <div class="nav-actions">
+        <a href="https://github.com/rajnsingh99/devgentic" class="btn-ghost" target="_blank" rel="noopener" data-bind="repo">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>
+          <span>GitHub</span>
+        </a>
+        <a href="https://github.com/rajnsingh99/devgentic/releases/latest/download/Devgentic.dmg" class="btn-primary-sm release-only" data-bind="download"><span>Download</span></a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-pill">
+        <span class="dot"></span>
+        <span class="pending-only">Pre-release · open source</span>
+        <span class="release-only">Open source · AGPL-3.0</span>
+      </div>
+
+      <h1 class="hero-title">
+        Local-first AI agents <br>
+        <span class="gradient-text">for your Mac</span>
+      </h1>
+
+      <p class="hero-subtitle">
+        A native macOS app for building and running AI agents — locally with MLX and Ollama where you want it,
+        in the cloud where you need it. No account, no telemetry.
+      </p>
+
+      <!-- Orb: the app's floating voice orb. Click to cycle its four states. -->
+      <div class="orb-stage" id="orbStage">
+        <div class="orb-ambient-glow" id="orbAmbientGlow"></div>
+        <div class="orb-ripple ripple-1"></div>
+        <div class="orb-ripple ripple-2"></div>
+        <div class="voice-orb" id="voiceOrb" role="button" aria-label="Orb, the floating voice assistant. Activate to cycle through its states." tabindex="0">
+          <div class="orb-specular"></div>
+          <div class="orb-waveform">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 2a1 1 0 0 1 1 1v18a1 1 0 1 1-2 0V3a1 1 0 0 1 1-1zm-4 3a1 1 0 0 1 1 1v12a1 1 0 1 1-2 0V6a1 1 0 0 1 1-1zm8 0a1 1 0 0 1 1 1v12a1 1 0 1 1-2 0V6a1 1 0 0 1 1-1zm-8 4a1 1 0 0 1 1 1v4a1 1 0 1 1-2 0v-4a1 1 0 0 1 1-1zm12 0a1 1 0 0 1 1 1v4a1 1 0 1 1-2 0v-4a1 1 0 0 1 1-1zm-16 1a1 1 0 0 1 1 1v2a1 1 0 1 1-2 0v-2a1 1 0 0 1 1-1zm20 0a1 1 0 0 1 1 1v2a1 1 0 1 1-2 0v-2a1 1 0 0 1 1-1z"/>
+            </svg>
+          </div>
+        </div>
+        <button class="orb-status-pill" id="orbStatusPill" title="Cycle the orb's states">
+          <span class="dot" id="orbStatusDot"></span>
+          <span class="status-name" id="orbStatusText">STANDBY</span>
+          <span class="status-separator">·</span>
+          <span class="status-action">CLICK TO CYCLE</span>
+        </button>
+      </div>
+
+      <div class="hero-cta-group">
+        <!-- Before the first release -->
+        <div class="cta-row pending-only">
+          <a href="https://github.com/rajnsingh99/devgentic" class="download-main-action cta-solo" target="_blank" rel="noopener" data-bind="repo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>
+            <span>View on GitHub</span>
+          </a>
+          <a href="https://github.com/rajnsingh99/devgentic#build" class="btn-ghost btn-lg" target="_blank" rel="noopener">Build from source</a>
+        </div>
+
+        <!-- After a release is published -->
+        <div class="cta-row release-only">
+          <a href="https://github.com/rajnsingh99/devgentic/releases/latest/download/Devgentic.dmg" class="download-main-action cta-solo" data-bind="download">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <span>Download for macOS</span>
+          </a>
+        </div>
+
+        <div class="hero-meta-row">
+          <span>macOS 26.1+</span>
+          <span>·</span>
+          <span>Apple Silicon</span>
+          <span>·</span>
+          <span>Free &amp; open source</span>
+        </div>
+
+        <div class="brew-pill pending-only">
+          <span>$</span>
+          <code>git clone https://github.com/rajnsingh99/devgentic.git</code>
+          <button class="copy-btn" data-copy="git clone https://github.com/rajnsingh99/devgentic.git" title="Copy command">Copy</button>
+        </div>
+
+        <div class="sha-row release-only" id="shaRow" hidden>
+          <span>SHA-256</span> <code id="shaValue"></code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Trust bar -->
+  <section class="trust-bar">
+    <div class="container">
+      <div class="trust-grid">
+        <div class="trust-item">
+          <div class="trust-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+          </div>
+          <div class="trust-text">
+            <h4>No telemetry, no account</h4>
+            <p>The app has no backend of its own and sends no analytics.</p>
+          </div>
+        </div>
+        <div class="trust-item">
+          <div class="trust-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+          </div>
+          <div class="trust-text">
+            <h4>Local or cloud, your choice</h4>
+            <p>MLX and Ollama stay on your Mac. Cloud profiles use your own keys.</p>
+          </div>
+        </div>
+        <div class="trust-item">
+          <div class="trust-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          </div>
+          <div class="trust-text">
+            <h4>You approve the risky calls</h4>
+            <p>Tool calls are gated by human-in-the-loop approval, by risk tier.</p>
+          </div>
+        </div>
+        <div class="trust-item">
+          <div class="trust-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          </div>
+          <div class="trust-text">
+            <h4>AGPL-3.0 open source</h4>
+            <p>Read it, build it, change it. The full source is on GitHub.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="showcase-section" id="features">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">What it does</span>
+        <h2 class="section-title">One app, five kinds of work</h2>
+        <p class="section-desc">You create backend profiles. Each binds a model to a set of capabilities, and the app gives it somewhere to run.</p>
+      </div>
+
+      <div class="showcase-tabs" role="tablist">
+        <button class="tab-btn active" data-tab="profiles" role="tab">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+          <span>Profiles</span>
+        </button>
+        <button class="tab-btn" data-tab="tools" role="tab">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+          <span>Tools &amp; approvals</span>
+        </button>
+        <button class="tab-btn" data-tab="orb" role="tab">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle></svg>
+          <span>Orb &amp; QuickAccess</span>
+        </button>
+        <button class="tab-btn" data-tab="reach" role="tab">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          <span>Scheduler &amp; chat bridges</span>
+        </button>
+      </div>
+
+      <div class="window-frame">
+        <div class="window-titlebar">
+          <div class="traffic-lights">
+            <span class="traffic-dot traffic-red"></span>
+            <span class="traffic-dot traffic-yellow"></span>
+            <span class="traffic-dot traffic-green"></span>
+          </div>
+          <span class="window-title">Devgentic</span>
+          <span class="illustration-label">Illustration</span>
+        </div>
+
+        <div class="window-body">
+          <div class="tab-panel active" id="panel-profiles">
+            <div class="panel-content">
+              <span class="panel-tagline">Five profile types</span>
+              <h3>Pick the shape of the work</h3>
+              <p>Every profile binds a model to instructions and capabilities. Choose the one that fits the job.</p>
+              <ul class="feature-checklist">
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span><strong>Bot</strong> — plain chat with a model, instructions and optional knowledge sources.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span><strong>Agent</strong> — a tool-using loop with optional planning and self-reflection.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span><strong>Workflow</strong> — a node graph with routers, approval gates, triggers and actions.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span><strong>Image Generator</strong> and <strong>Code</strong> — text-to-image, and a project-scoped agent for reading and editing a codebase.</span></li>
+              </ul>
+            </div>
+            <div class="panel-visual">
+              <div class="mono-block">
+                <div class="mono-accent-indigo">Profiles</div>
+                <div>Bot&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;chat · knowledge</div>
+                <div>Agent&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;tools · planning</div>
+                <div>Workflow&nbsp;&nbsp;&nbsp;node graph</div>
+                <div>Image&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;text → image</div>
+                <div>Code&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;per-project</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="panel-tools">
+            <div class="panel-content">
+              <span class="panel-tagline">Real tools, with a human in the loop</span>
+              <h3>70 native macOS tools</h3>
+              <p>Agents can work with files, the shell, git, code search and editing, Calendar, Reminders, Contacts, Safari, UI automation and the network — plus anything a connected MCP server exposes.</p>
+              <ul class="feature-checklist">
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Every tool call can be gated by an approval keyed to its risk tier.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Connect MCP servers to extend what an agent can do.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Autonomous mode exists — turn it on deliberately.</span></li>
+              </ul>
+            </div>
+            <div class="panel-visual">
+              <div class="mono-block">
+                <div class="mono-accent-amber">Approval requested</div>
+                <div>Tool: shell</div>
+                <div>Command: git status</div>
+                <div class="mono-dim">Read the request before approving.</div>
+                <div class="mono-buttons"><span>Deny</span><span class="mono-primary">Approve</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="panel-orb">
+            <div class="panel-content">
+              <span class="panel-tagline">Beyond the main window</span>
+              <h3>Orb and QuickAccess</h3>
+              <p>Orb is a floating voice orb with wake-word or push-to-talk activation that speaks its answers back. QuickAccess is a global-hotkey panel you can summon from any app.</p>
+              <ul class="feature-checklist">
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Opt-in: Orb stays off until you turn it on.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Wake word or push-to-talk, and spoken replies.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>QuickAccess opens from a global hotkey, in whatever app you are using.</span></li>
+              </ul>
+            </div>
+            <div class="panel-visual">
+              <div class="jarvis-mockup">
+                <div class="mockup-orb">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 1v22m-6-18v14m12-14v14m-18-8v2m24-2v2"></path></svg>
+                </div>
+                <div class="mockup-transcript">Standby · Listening · Thinking · Speaking</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="panel-reach">
+            <div class="panel-content">
+              <span class="panel-tagline">Unattended and remote</span>
+              <h3>Scheduler and chat bridges</h3>
+              <p>Run profiles on a cron schedule without opening the app, and reach them from Slack, Discord or Telegram.</p>
+              <ul class="feature-checklist">
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>A cron scheduler for unattended runs.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Remote bridges for Slack, Discord and Telegram, with approvals handled in chat.</span></li>
+                <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Bridges are yours to configure: the app has no hosted service in the middle.</span></li>
+              </ul>
+            </div>
+            <div class="panel-visual">
+              <div class="mono-block">
+                <div class="mono-accent-indigo">Schedule</div>
+                <div>0 9 * * 1-5&nbsp;&nbsp;daily summary</div>
+                <div class="mono-dim">Slack · Discord · Telegram</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Local vs cloud -->
+  <section class="matrix-section" id="backends">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Seven backends</span>
+        <h2 class="section-title">You choose where inference runs</h2>
+        <p class="section-desc">MLX and Ollama run on your Mac. OpenAI, Anthropic, Google, OpenRouter and any OpenAI-compatible endpoint run remotely. MLX models are browsed and downloaded in-app from the Hugging Face Hub.</p>
+      </div>
+
+      <div class="matrix-table-wrap">
+        <table class="matrix-table">
+          <thead>
+            <tr>
+              <th>&nbsp;</th>
+              <th>Local profile (MLX, Ollama)</th>
+              <th>Cloud profile</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Where requests go</strong></td>
+              <td class="highlight">Nowhere — inference stays on this Mac</td>
+              <td>To the provider you configured</td>
+            </tr>
+            <tr>
+              <td><strong>Offline</strong></td>
+              <td class="highlight">Yes, once the model is downloaded</td>
+              <td>Needs an internet connection</td>
+            </tr>
+            <tr>
+              <td><strong>Cost</strong></td>
+              <td class="highlight">No per-token fees; uses your hardware</td>
+              <td>Billed by the provider, with your own key</td>
+            </tr>
+            <tr>
+              <td><strong>Telemetry from Devgentic</strong></td>
+              <td class="highlight">None</td>
+              <td class="highlight">None</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="matrix-note">A cloud profile sends its requests to the provider you configured — that is what a cloud profile is. See the <a href="https://github.com/rajnsingh99/devgentic/blob/main/PRIVACY.md" target="_blank" rel="noopener">privacy statement</a> for exactly what leaves your Mac and when.</p>
+    </div>
+  </section>
+
+  <!-- Safety -->
+  <section class="specs-section" id="safety">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Before you use it</span>
+        <h2 class="section-title">Built to be approved, not blindly trusted</h2>
+        <p class="section-desc">Devgentic is pre-release software that drives shell commands, edits files and automates the UI on your machine, with your user's privileges.</p>
+      </div>
+
+      <div class="specs-grid">
+        <div class="spec-card">
+          <h4>Not sandboxed</h4>
+          <p>The app is deliberately outside the App Sandbox so tools can do real work. It is signed with the hardened runtime.</p>
+        </div>
+        <div class="spec-card">
+          <h4>Approval system</h4>
+          <p>Tool calls can require your approval by risk tier. Read what a tool is asking to do before approving it.</p>
+        </div>
+        <div class="spec-card">
+          <h4>Autonomous mode</h4>
+          <p>Be deliberate about turning it on. It lets an agent act without asking each time.</p>
+        </div>
+        <div class="spec-card">
+          <h4>Security policy</h4>
+          <p><a href="https://github.com/rajnsingh99/devgentic/blob/main/SECURITY.md" target="_blank" rel="noopener">SECURITY.md</a> spells out what counts as a vulnerability in a tool built on this trust model, and where to report one.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Requirements -->
+  <section class="specs-section" id="requirements">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Requirements</span>
+        <h2 class="section-title">What you need</h2>
+      </div>
+
+      <div class="specs-grid">
+        <div class="spec-card">
+          <h4>macOS</h4>
+          <p>macOS 26.1 or later.</p>
+        </div>
+        <div class="spec-card">
+          <h4>Processor</h4>
+          <p>Apple Silicon (arm64). There is no Intel build.</p>
+        </div>
+        <div class="spec-card">
+          <h4>Memory &amp; disk</h4>
+          <p>Local models need roughly their own size in memory and disk, so it depends on what you download. Cloud profiles need none.</p>
+        </div>
+        <div class="spec-card">
+          <h4>Dependencies</h4>
+          <p>None to install. The project uses Swift Package Manager only.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="faq-section" id="faq">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">FAQ</span>
+        <h2 class="section-title">Common questions</h2>
+      </div>
+
+      <div class="faq-list">
+        <div class="faq-item">
+          <button class="faq-question"><span>Is Devgentic free and open source?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">Yes. It is licensed under the GNU Affero General Public License v3 (AGPL-3.0), and the full source is public on GitHub. A <a href="https://github.com/rajnsingh99/devgentic/blob/main/COMMERCIAL-LICENSE.md" target="_blank" rel="noopener">commercial licence</a> is described in the repository for anyone who needs different terms.</div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question"><span>Does it send my data anywhere?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">Devgentic has no backend of its own and sends no analytics or telemetry. A local MLX or Ollama profile keeps inference on your Mac. A cloud profile sends its requests to the provider you configured. Downloading a model, or checking for updates if you turn that on, contacts the host that serves it. <a href="https://github.com/rajnsingh99/devgentic/blob/main/PRIVACY.md" target="_blank" rel="noopener">PRIVACY.md</a> is the full statement.</div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question"><span>Can I use it offline?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">With a local profile, yes — once the model is downloaded. Cloud profiles need a connection to their provider.</div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question"><span>What is the difference between MLX and Ollama?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">Both run models locally. MLX is Apple's machine-learning framework for Apple Silicon, and Devgentic browses and downloads MLX models from the Hugging Face Hub inside the app. Ollama is a separate model runner Devgentic can use as another local backend. A profile uses whichever you pick.</div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question"><span>How do I install it?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">
+            <span class="pending-only">There is no published release yet. Until then you can <a href="https://github.com/rajnsingh99/devgentic#build" target="_blank" rel="noopener">build it from source</a> with Xcode. When a release is published, it will be a signed, notarized DMG on the Releases page.</span>
+            <span class="release-only">Download the DMG from the Releases page, open it, and drag Devgentic to your Applications folder. The app is signed and notarized, so macOS opens it normally.</span>
+          </div>
+        </div>
+
+        <div class="faq-item release-only">
+          <button class="faq-question"><span>How do I verify my download?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">Run <code>shasum -a 256 ~/Downloads/Devgentic.dmg</code> in Terminal and compare the result with the SHA-256 shown on this page and on the release.</div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question"><span>How do updates work?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">The app uses Sparkle. It asks before checking automatically, and you can check manually from the app menu or Settings → About. Update signatures are verified before anything installs.</div>
+        </div>
+
+        <div class="faq-item">
+          <button class="faq-question"><span>How do I report a bug or ask for a feature?</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+          <div class="faq-answer">Use Settings → About → Report a Bug or Request a Feature in the app, or <a href="https://github.com/rajnsingh99/devgentic/issues/new/choose" target="_blank" rel="noopener" data-bind="issues">open an issue on GitHub</a>. Please never paste API keys.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- About the author -->
+  <section class="author-section" id="author">
+    <div class="container">
+      <div class="author-card">
+        <div class="author-copy">
+          <span class="section-tag">Built by</span>
+          <h2 class="author-name">Raj Singh</h2>
+          <p class="author-headline">Software engineer · GenAI &amp; agentic systems · heading toward Forward Deployed Engineering</p>
+          <p class="author-bio">
+            I'm a software engineer in Pune with eight years of experience building enterprise Java and cloud systems
+            for banking and payments, and I'm a Google Cloud Professional Cloud Developer. I now focus on GenAI and
+            agentic systems. Devgentic is how I'm learning them end to end: a native Mac agent app, built in the open,
+            where every design decision is there to be read and questioned.
+          </p>
+          <ul class="author-chips" aria-label="Skills">
+            <li>Java &amp; Spring Boot</li>
+            <li>Microservices</li>
+            <li>Google Cloud (certified)</li>
+            <li>Kubernetes</li>
+            <li>LangChain &amp; LangGraph</li>
+            <li>Swift &amp; SwiftUI</li>
+          </ul>
+          <div class="author-links">
+            <a href="https://www.linkedin.com/in/rajnsingh99" class="btn-primary-sm" target="_blank" rel="noopener me" data-bind="linkedin">
+              <span>Connect on LinkedIn</span>
+            </a>
+            <a href="https://github.com/rajnsingh99" class="btn-ghost" target="_blank" rel="noopener me" data-bind="author">
+              <span>GitHub</span>
+            </a>
+            <a href="https://github.com/sponsors/rajnsingh99" class="btn-ghost" target="_blank" rel="noopener" data-bind="sponsor">
+              <span>♥ Sponsor</span>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <img src="assets/app-icon.png" alt="" width="28" height="28">
+          <span>Devgentic</span>
+        </div>
+
+        <ul class="footer-links">
+          <li><a href="https://github.com/rajnsingh99/devgentic" target="_blank" rel="noopener" data-bind="repo">GitHub</a></li>
+          <li><a href="https://github.com/rajnsingh99/devgentic/releases" target="_blank" rel="noopener" data-bind="releases">Releases</a></li>
+          <li><a href="https://github.com/rajnsingh99/devgentic/blob/main/PRIVACY.md" target="_blank" rel="noopener">Privacy</a></li>
+          <li><a href="https://github.com/rajnsingh99/devgentic/blob/main/LICENSE" target="_blank" rel="noopener">Licence</a></li>
+          <li><a href="https://github.com/rajnsingh99/devgentic/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></li>
+          <li><a href="https://github.com/rajnsingh99/devgentic/issues/new/choose" target="_blank" rel="noopener" data-bind="issues">Report a bug</a></li>
+          <li><a href="https://github.com/sponsors/rajnsingh99" target="_blank" rel="noopener" data-bind="sponsor">Sponsor</a></li>
+          <li><a href="https://www.linkedin.com/in/rajnsingh99" target="_blank" rel="noopener me" data-bind="linkedin">LinkedIn</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-copy">
+        <div>Released under the GNU Affero General Public License v3 (AGPL-3.0).</div>
+        <div>Created by <a href="https://github.com/rajnsingh99" target="_blank" rel="noopener" data-bind="author">Raj Singh</a>.</div>
+      </div>
+    </div>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

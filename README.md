@@ -46,3 +46,19 @@ git add . && git commit -m "…" && git push origin gh-pages
    as a pre-release — GitHub excludes pre-releases from `latest`.
 2. **Keep real content in the HTML.** Anything rendered client-side from JS is invisible to link
    unfurlers, so a page shared to Slack, Discord, Reddit or X would preview as blank.
+
+## Publishing a release on the site
+
+The page is pre-release by default: it shows "View on GitHub" and "Build from source" and hides every
+download element. After `scripts/release.sh` has produced the notarized DMG and the GitHub Release exists
+with `Devgentic.dmg` attached, edit **only** `site.config.js`:
+
+```js
+release: { published: true, version: "0.9.0", sha256: "<printed by release.sh>" }
+```
+
+That switches on the Download buttons, the version badge, the checksum line and the "verify your
+download" FAQ, and hides the pre-release banner. Keep `appcast.xml` (written by `generate_appcast`) at the
+root of this branch — Sparkle fetches it from here.
+
+Do not put sizes, benchmarks or checksums in the page until they come from a real build.
