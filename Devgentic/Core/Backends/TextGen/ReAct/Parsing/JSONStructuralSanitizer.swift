@@ -99,7 +99,7 @@ enum JSONStructuralSanitizer {
     /// the dialect parsers have always been trailing-comma + literals, and widening them here
     /// would be a behaviour change smuggled in under a bug fix.
     static func repairingStructure(_ json: String, quotingUnquotedKeys: Bool = false) -> String {
-        let repaired = rewritingOutsideStrings(json) { span in
+        let repaired = rewritingOutsideStrings(keepingInvalidEscapesLiteral(escapingRawControlCharacters(json))) { span in
             guard !span.isEmpty else { return span }
             var s = span
             if quotingUnquotedKeys { s = replacingMatches(in: s, unquotedKey, with: " \"$1\":") }
@@ -114,6 +114,129 @@ enum JSONStructuralSanitizer {
             logger.debug("🔧 [JSONSanitizer] Repaired structural defects (\(json.count) → \(repaired.count) chars); string values untouched.")
         }
         return repaired
+    }
+
+    /// Escapes RAW control characters (a literal newline, tab, carriage return…) inside string values.
+    ///
+    /// ⚠️ CR-19 (2026-10-10): a model writing a multi-line `final_answer` in a ReAct `Action Input`
+    /// puts real line breaks inside the string — invalid JSON, so the call decoded to `[:]` and failed
+    /// as "missing answer". Like `keepingInvalidEscapesLiteral`, this never changes a byte the model
+    /// meant: a valid document has no raw control characters inside strings, so it is returned
+    /// unchanged; an invalid one did not decode at all before.
+    static func escapingRawControlCharacters(_ json: String) -> String {
+        var out = ""
+        out.reserveCapacity(json.count + 8)
+        var inString = false
+        var escaped = false
+        var repairs = 0
+        for scalar in json.unicodeScalars {
+            if inString {
+                if escaped { escaped = false; out.unicodeScalars.append(scalar); continue }
+                if scalar == "\\" { escaped = true; out.unicodeScalars.append(scalar); continue }
+                if scalar == "\"" { inString = false; out.unicodeScalars.append(scalar); continue }
+                if scalar.value < 0x20 {
+                    repairs += 1
+                    switch scalar {
+                    case "\n": out += "\\n"
+                    case "\r": out += "\\r"
+                    case "\t": out += "\\t"
+                    default: out += String(format: "\\u%04x", scalar.value)
+                    }
+                    continue
+                }
+                out.unicodeScalars.append(scalar)
+            } else {
+                if scalar == "\"" { inString = true }
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        if repairs > 0 {
+            logger.info("🔧 [JSONSanitizer] Escaped \(repairs) raw control character(s) inside string values (e.g. a literal newline in a multi-line answer). CONSEQUENCE: the payload can decode, with every character the model wrote.")
+        }
+        return out
+    }
+
+    /// A JSON OBJECT decoded strictly, else after the structural repairs above; nil only when even the
+    /// repaired text is not an object. One definition, so every parser repairs the same way.
+    static func decodeObject(_ json: String) -> [String: JSONValue]? {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let data = trimmed.data(using: .utf8), let strict = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
+            return strict
+        }
+        let repaired = repairingStructure(trimmed)
+        guard let data = repaired.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode([String: JSONValue].self, from: data)
+    }
+
+    /// Doubles the backslash of every escape JSON does not define, so `\'` decodes as the two
+    /// characters the model wrote instead of failing the whole call.
+    ///
+    /// The one repair here that reaches INTO string values, and it is safe for the same reason
+    /// the walker is: it never changes a byte the model meant. A valid document has no invalid
+    /// escapes, so it is returned unchanged; an invalid one did not decode at all before. Keeping
+    /// the backslash, rather than dropping it, is deliberate: `\'` is an apostrophe in prose
+    /// but a real backslash in `'\''` (shell) or `print('don\'t')` (Python source), and a call
+    /// that writes a file must not lose one silently. Prose pays with a visible backslash.
+    ///
+    /// On the 2026-10-06 device run Qwen2.5-3B answered T3 correctly as
+    /// `{"answer": "…Devgentic\'s local models.\n\nCodename: BLUEFIN-42"}`; the `\'` failed the
+    /// decode, the two retries repeated it, and the run ended on a wrong answer.
+    ///
+    /// `\u` counts as valid only with four hex digits after it: `"C:\users"` is a Windows path,
+    /// not a broken escape.
+    static func keepingInvalidEscapesLiteral(_ json: String) -> String {
+        let chars = Array(json)
+        var out = ""
+        out.reserveCapacity(chars.count + 8)
+        var inString = false
+        var repairs = 0
+        var index = 0
+        while index < chars.count {
+            let char = chars[index]
+            guard inString else {
+                if char == "\"" { inString = true }
+                out.append(char)
+                index += 1
+                continue
+            }
+            if char == "\"" {
+                inString = false
+                out.append(char)
+                index += 1
+                continue
+            }
+            guard char == "\\" else {
+                out.append(char)
+                index += 1
+                continue
+            }
+            let next = index + 1 < chars.count ? chars[index + 1] : nil
+            if let next, isValidEscape(next, hexAfter: chars[min(index + 2, chars.count)...]) {
+                out.append(char)
+                out.append(next)
+                index += 2
+            } else {
+                out += "\\\\"
+                repairs += 1
+                index += 1
+            }
+        }
+        if repairs > 0 {
+            logger.info("🔧 [JSONSanitizer] Kept \(repairs) invalid escape(s) as literal backslashes (e.g. \\' from Python-style quoting). CONSEQUENCE: the payload can decode; each value keeps every character the model wrote, backslash included.")
+        }
+        return out
+    }
+
+    private static func isValidEscape(_ char: Character, hexAfter rest: ArraySlice<Character>) -> Bool {
+        switch char {
+        case "\"", "\\", "/", "b", "f", "n", "r", "t":
+            return true
+        case "u":
+            return rest.prefix(4).count == 4 && rest.prefix(4).allSatisfy(\.isHexDigit)
+        default:
+            return false
+        }
     }
 
     // MARK: - Patterns

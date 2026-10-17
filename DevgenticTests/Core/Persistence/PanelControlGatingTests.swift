@@ -10,7 +10,9 @@
 //
 
 import XCTest
+#if MLX_IMAGE_GEN   // on-device image generation is compiled out; see MLXImageGenService.swift
 import Flux2Core   // `Flux2Model` lives in the SPM package, not the app module
+#endif
 @testable import devgentic
 
 // MARK: - B33: the OpenAI panel must gate on the same predicate the provider does
@@ -82,6 +84,8 @@ final class OpenAIPanelGatingSourceTests: XCTestCase {
 
 // MARK: - B34: the Flux2 picker follows ModelSelectionPolicy like every other picker
 
+#if MLX_IMAGE_GEN
+
 final class Flux2ModelSelectionTests: XCTestCase {
 
     private var inferenceModels: [String] {
@@ -149,3 +153,4 @@ final class Flux2ModelSelectionTests: XCTestCase {
                       "the fill candidate must itself be selectable in the picker")
     }
 }
+#endif // MLX_IMAGE_GEN

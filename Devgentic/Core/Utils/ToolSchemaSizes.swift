@@ -52,7 +52,7 @@ enum ToolSchemaSizes {
         // with it.
         //
         // Field-observed 2026-09-20: a Code session priced 19 tools at 3,168 chars with 9 of them
-        // costing ZERO — including `git_tool` (seven actions), `edit_code_batch` (a nested array
+        // costing ZERO — including `git` (seven actions), `edit_code_batch` (a nested array
         // schema) and `diff_files`. That is the one profile type whose tool payload is entirely
         // fixed and knowable ahead of time, and it was the only one being mis-priced.
         //
@@ -72,7 +72,7 @@ enum ToolSchemaSizes {
         }
 
         // Control-plane tools next. `AgentConnect` appends `final_answer`, `ask_user`,
-        // `get_conversation_history`, `load_skill` and `update_project_context` per run, outside
+        // `get_conversation_history`, `load_skill` and the Code memory tools per run, outside
         // the catalogue, because each needs run-scoped data to construct. Their SCHEMAS are
         // constants, so they are priceable here — and they were not priced at all until
         // 2026-09-20, which cost a pointer-history Code run 2,102 unaccounted chars.

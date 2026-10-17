@@ -139,7 +139,8 @@ struct Llama3JsonParser: CognitiveParserProtocol {
             )
         }
 
-        logger.warning("Llama3JsonParser: Failed to decode tool call JSON: \(trimmed.prefix(200))")
+        logger.warning("Llama3JsonParser: Failed to decode tool call JSON: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("Llama3JsonParser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 

@@ -84,7 +84,8 @@ struct DynamicToolTagParser: CognitiveParserProtocol {
 
             // Parse the body as JSON arguments
             guard let arguments = parseArguments(body) else {
-                logger.warning("DynamicToolTagParser: Failed to parse JSON for tag '<\(tagName)>': \(body.prefix(200))")
+                logger.warning("DynamicToolTagParser: Failed to parse JSON for tag '<\(tagName)>': \(body.count) chars (snippet at debug: model output is content, CR-57)")
+                logger.debug("DynamicToolTagParser: snippet: \(body.prefix(200))")
                 continue
             }
 

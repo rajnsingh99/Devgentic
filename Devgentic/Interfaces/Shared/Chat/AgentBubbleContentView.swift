@@ -143,6 +143,16 @@ struct AgentBubbleContentView: View, Equatable {
             // 4. CONTENT
             contentView
 
+            // 4b. FILES THIS TURN EDITED — Code turns only, once the run is done.
+            if TurnFileChanges.showsCard(for: message) {
+                TurnFileChangesCard(message: message)
+            }
+
+            // 4c. PROJECT MEMORY THIS TURN CHANGED — renders nothing unless it saved or removed one.
+            if TurnMemoryChanges.showsCard(for: message) {
+                TurnMemoryChangesCard(message: message)
+            }
+
             // 5. TERMINAL OUTCOME INDICATOR
             // Surfaces a subtle chip when the run ended in a non-success state
             // (circuit-breaker abort, iteration exhaustion). Keeps

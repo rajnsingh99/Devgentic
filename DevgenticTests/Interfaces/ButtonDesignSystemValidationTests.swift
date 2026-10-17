@@ -5,7 +5,7 @@
 //  DevgenticTests
 //
 //  Regression test suite validating adherence to the button design system
-//  specification in `button_ui.md`. Enforces zero bare bordered buttons
+//  specification. Enforces zero bare bordered buttons
 //  across UI modules and verifies surface style synchronization.
 //
 
@@ -99,7 +99,7 @@ final class ButtonDesignSystemValidationTests: XCTestCase {
 
         XCTAssertTrue(
             violatingSites.isEmpty,
-            "Bare .bordered / .borderedProminent buttons violate button_ui.md specification. Found in:\n" + violatingSites.joined(separator: "\n")
+            "Bare .bordered / .borderedProminent buttons violate the button design system specification. Found in:\n" + violatingSites.joined(separator: "\n")
         )
     }
 

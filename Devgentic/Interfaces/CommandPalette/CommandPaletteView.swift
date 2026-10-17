@@ -354,20 +354,22 @@ struct CommandPaletteView: View {
                 NotificationCenter.default.post(name: .clearDownloadHistory, object: nil)
             }
         )
-        items.append(
-            CommandPaletteItem(
-                title: "New Backend Profile...",
-                subtitle: "Create a new AI agent, bot, or image generation profile",
-                icon: "plus.circle",
-                category: .action,
-                shortcutBadge: ["⌘", "N"],
-                keywords: ["profile", "agent", "backend", "new", "create", "bot", "imagegen"]
-            ) {
-                selectedTabRawValue = SidebarTab.backendProfiles.rawValue
-                isSidebarVisible = true
-                NotificationCenter.default.post(name: .newProfile, object: nil)
-            }
-        )
+        if SidebarTab.backendProfiles.isVisible(in: viewModel.interfaceMode) {
+            items.append(
+                CommandPaletteItem(
+                    title: "New Backend Profile...",
+                    subtitle: "Create a new AI agent, bot, or image generation profile",
+                    icon: "plus.circle",
+                    category: .action,
+                    shortcutBadge: ["⌘", "N"],
+                    keywords: ["profile", "agent", "backend", "new", "create", "bot", "imagegen"]
+                ) {
+                    selectedTabRawValue = SidebarTab.backendProfiles.rawValue
+                    isSidebarVisible = true
+                    NotificationCenter.default.post(name: .newProfile, object: nil)
+                }
+            )
+        }
 
         // MARK: - Navigation Tabs
         items.append(
@@ -410,37 +412,41 @@ struct CommandPaletteView: View {
                 isSidebarVisible = true
             }
         )
-        items.append(
-            CommandPaletteItem(
-                title: "Go to Scheduler",
-                subtitle: "Automated recurring tasks",
-                icon: "clock.badge",
-                category: .navigation,
-                shortcutBadge: ["⌘", "⌥", "4"],
-                keywords: ["scheduler", "tasks", "cron", "recurring"]
-            ) {
-                selectedTabRawValue = SidebarTab.scheduler.rawValue
-                isSidebarVisible = true
-            }
-        )
-        items.append(
-            CommandPaletteItem(
-                title: "Go to Backend Profiles",
-                subtitle: "Manage AI agents, models and providers",
-                icon: "cpu",
-                category: .navigation,
-                shortcutBadge: ["⇧", "⌘", "P"],
-                keywords: ["profiles", "backends", "models", "agents", "llm"]
-            ) {
-                if let first = profileService.sharedProfiles.first {
-                    router.navigateToProfile(first.id, activatingBufferOn: profileService)
-                } else {
-                    selectedTabRawValue = SidebarTab.backendProfiles.rawValue
+        if SidebarTab.scheduler.isVisible(in: viewModel.interfaceMode) {
+            items.append(
+                CommandPaletteItem(
+                    title: "Go to Scheduler",
+                    subtitle: "Automated recurring tasks",
+                    icon: "clock.badge",
+                    category: .navigation,
+                    shortcutBadge: ["⌘", "⌥", "4"],
+                    keywords: ["scheduler", "tasks", "cron", "recurring"]
+                ) {
+                    selectedTabRawValue = SidebarTab.scheduler.rawValue
                     isSidebarVisible = true
-                    router.returnToChat()
                 }
-            }
-        )
+            )
+        }
+        if SidebarTab.backendProfiles.isVisible(in: viewModel.interfaceMode) {
+            items.append(
+                CommandPaletteItem(
+                    title: "Go to Backend Profiles",
+                    subtitle: "Manage AI agents, models and providers",
+                    icon: "cpu",
+                    category: .navigation,
+                    shortcutBadge: ["⇧", "⌘", "P"],
+                    keywords: ["profiles", "backends", "models", "agents", "llm"]
+                ) {
+                    if let first = profileService.sharedProfiles.first {
+                        router.navigateToProfile(first.id, activatingBufferOn: profileService)
+                    } else {
+                        selectedTabRawValue = SidebarTab.backendProfiles.rawValue
+                        isSidebarVisible = true
+                        router.returnToChat()
+                    }
+                }
+            )
+        }
         items.append(
             CommandPaletteItem(
                 title: "Go to Tool Library & MCP",
@@ -567,6 +573,17 @@ struct CommandPaletteView: View {
         )
         items.append(
             CommandPaletteItem(
+                title: "Settings: MLX Model Store",
+                subtitle: "Browse Apple Silicon models",
+                icon: "shippingbox",
+                category: .navigation,
+                keywords: ["settings", "mlx", "model", "store", "huggingface", "apple silicon"]
+            ) {
+                router.navigateToSettings(.mlxModelStore)
+            }
+        )
+        items.append(
+            CommandPaletteItem(
                 title: "Settings: About & Licenses",
                 subtitle: "Devgentic version, build info, and third-party notices",
                 icon: "info.circle",
@@ -584,7 +601,7 @@ struct CommandPaletteView: View {
                 category: .navigation,
                 keywords: ["mlx", "huggingface", "apple silicon", "store"]
             ) {
-                router.navigate(to: .mlxModelStore(profileID: UUID(), filterForTools: false))
+                router.navigateToSettings(.mlxModelStore)
             }
         )
         items.append(

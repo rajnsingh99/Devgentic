@@ -159,7 +159,7 @@ enum OrbRunNarration {
         }
     }
 
-    /// `fs_smart_search` spoken verbatim is unintelligible. Underscores become spaces; nothing
+    /// `spotlight_search` spoken verbatim is unintelligible. Underscores become spaces; nothing
     /// else is guessed at.
     static func spokenToolName(_ name: String) -> String {
         name.replacingOccurrences(of: "_", with: " ")

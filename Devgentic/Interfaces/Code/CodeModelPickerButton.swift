@@ -20,6 +20,7 @@ struct CodeModelPickerButton: View {
 
     @Environment(CodeSessionManager.self) private var codeSessionManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     @State private var isHovering = false
 
@@ -65,6 +66,7 @@ struct CodeModelPickerButton: View {
             CodeModelSelectorPopover()
                 .frame(width: 356, height: 460)
                 .environment(\.appTheme, theme)
+                .environment(\.surfaceStyle, surfaceStyle)
                 .tint(theme.accentColor)
                 .preferredColorScheme(theme.colorScheme)
         }
@@ -140,6 +142,7 @@ private struct CodeModelSelectorPopover: View {
 
     @Environment(CodeSessionManager.self) private var codeSessionManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
     @FocusState private var isSearchFocused: Bool
 
     /// Popover dimensions: aligned with ProfileSelectorPopover (356x460).
@@ -198,15 +201,12 @@ private struct CodeModelSelectorPopover: View {
         }
         .padding(.vertical, 8)
         .frame(width: popoverWidth, height: popoverHeight)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.secondaryBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(theme.isDark ? Color.white.opacity(0.09) : theme.dividerColor.opacity(0.50), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background {
+            if surfaceStyle == .solid {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(theme.secondaryBackground)
+            }
+        }
         .onAppear {
             DispatchQueue.main.async { isSearchFocused = true }
         }
@@ -235,11 +235,11 @@ private struct CodeModelSelectorPopover: View {
             .padding(2.5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.60))
+                    .fill(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(theme.isDark ? Color.white.opacity(0.06) : theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+                    .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.35), lineWidth: 0.5)
             )
         }
         .padding(.horizontal, 8)
@@ -315,7 +315,7 @@ private struct CodeModelSelectorPopover: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
+                .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -376,11 +376,11 @@ private struct CodeModelSelectorPopover: View {
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
+                        .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35), lineWidth: 1)
+                        .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.35), lineWidth: 1)
                 )
                 .onAppear { apiKeyInput = codeSessionManager.apiKey ?? "" }
                 .onChange(of: apiKeyInput) { _, _ in
@@ -402,11 +402,11 @@ private struct CodeModelSelectorPopover: View {
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
+                        .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35), lineWidth: 1)
+                        .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.35), lineWidth: 1)
                 )
                 .onAppear { cloudModelNameInput = codeSessionManager.modelName }
                 .onChange(of: cloudModelNameInput) { _, _ in
@@ -437,11 +437,11 @@ private struct CodeModelSelectorPopover: View {
     private func suggestionChip(_ suggestion: String) -> some View {
         let isSelected = cloudModelNameInput == suggestion
         let bg = isSelected
-            ? (theme.isDark ? Color.white.opacity(0.12) : theme.primaryBackground)
-            : (theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.60))
+            ? (theme.isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.10))
+            : (theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
         let border = isSelected
-            ? (theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.40))
-            : (theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.25))
+            ? (theme.isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.12))
+            : (theme.isDark ? Color.white.opacity(0.06) : theme.dividerColor.opacity(0.25))
 
         return Button(action: {
             cloudModelNameInput = suggestion
@@ -710,17 +710,17 @@ private struct CodeSegmentTabButton: View {
 
     private var badgeBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.16) : theme.tertiaryBackground
+            return theme.isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08)
         } else {
-            return theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground.opacity(0.50)
+            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
         }
     }
 
     private var tabBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.12) : theme.primaryBackground
+            return theme.isDark ? Color.white.opacity(0.12) : Color.white.opacity(0.70)
         } else if isHovering {
-            return theme.isDark ? Color.white.opacity(0.06) : theme.primaryBackground.opacity(0.50)
+            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
         } else {
             return Color.clear
         }
@@ -728,7 +728,7 @@ private struct CodeSegmentTabButton: View {
 
     private var tabBorder: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.40)
+            return theme.isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
         } else {
             return Color.clear
         }
@@ -785,9 +785,9 @@ private struct CodeModelRow: View {
 
     private var rowBackground: Color {
         if isHovering {
-            return theme.isDark ? Color.white.opacity(0.08) : theme.tertiaryBackground.opacity(0.70)
+            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)
         } else if isSelected {
-            return theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.40)
+            return theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03)
         } else {
             return Color.clear
         }
@@ -827,7 +827,7 @@ private struct CodeModelRow: View {
                         .padding(.vertical, 2)
                         .background(
                             Capsule()
-                                .fill(theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground)
+                                .fill(theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.04))
                         )
                 }
 

@@ -55,9 +55,16 @@ final class OrbDefaultsIsolationTests: XCTestCase {
         // `.standard` to verify this very test made its own cleanup overwrite the author's real
         // setting with an empty string. A test that only behaves when the thing it tests is
         // working is not a safe test.
-        let previousRaw = OrbConfigManager.shared.wakeWordRaw
+        //
+        // ⚠️ And restore ABSENCE as absence. Restoring through `wakeWordRaw` wrote "" when nothing
+        // was set (its getter reads unset as ""), which leaves exactly the stored key that
+        // `testAnUnsetWakeWordMeansTheDefault` asserts is not there.
+        let store = TestHost.defaults
+        let previous = store.object(forKey: key)
         OrbConfigManager.shared.wakeWordRaw = "zephyrprobe"
-        defer { OrbConfigManager.shared.wakeWordRaw = previousRaw }
+        defer {
+            if let previous { store.set(previous, forKey: key) } else { store.removeObject(forKey: key) }
+        }
 
         XCTAssertEqual(OrbConfigManager.shared.wakeWord, "zephyrprobe",
                        "the write must still round-trip — an isolated store is not a disabled one")
@@ -66,6 +73,28 @@ final class OrbDefaultsIsolationTests: XCTestCase {
             "the write reached UserDefaults.standard, which under a test host is the developer's "
             + "real Orb configuration. Their wake word has just been overwritten by a test."
         )
+    }
+
+    /// Two test hosts at once must not share a settings domain — see `TestHost.testHostSuite`.
+    func testEachTestHostProcessHasItsOwnDefaultsDomain() {
+        XCTAssertTrue(TestHost.defaultsSuiteName.hasSuffix(".\(ProcessInfo.processInfo.processIdentifier)"))
+        let key = "testhost.isolation.probe.\(UUID().uuidString)"
+        TestHost.defaults.set("mine", forKey: key)
+        defer { TestHost.defaults.removeObject(forKey: key) }
+        XCTAssertEqual(UserDefaults(suiteName: TestHost.defaultsSuiteName)?.string(forKey: key), "mine",
+                       "TestHost.defaults is not the per-process domain its name claims")
+        XCTAssertNil(UserDefaults(suiteName: TestHost.defaultsSuitePrefix)?.string(forKey: key),
+                     "a write reached the old machine-wide domain other test hosts read")
+    }
+
+    func testOnlyExitedHostsDomainsAreSwept() {
+        let live: pid_t = 100, dead: pid_t = 200
+        let prefix = TestHost.defaultsSuitePrefix
+        let files = ["\(prefix).plist", "\(prefix).\(live).plist", "\(prefix).\(dead).plist",
+                     "app.devgentic.macos.plist", "\(prefix).notapid.plist", "\(prefix).\(dead).lockfile"]
+        XCTAssertEqual(TestHost.staleSuiteNames(amongPreferenceFiles: files) { $0 == live },
+                       [prefix, "\(prefix).\(dead)"],
+                       "a live host's domain, the app's own and unrelated files must never be swept")
     }
 
     func testAnUnsetWakeWordMeansTheDefault() {

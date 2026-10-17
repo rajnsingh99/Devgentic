@@ -277,23 +277,23 @@ final class HybridRetrievalRankingTests: XCTestCase {
             chunks, against: query,
             queryText: "whats the code inside advancedCard",
             limit: 3, maximumDistance: 0.7,
-            excludedSourceMessageIDs: history
+            exclusion: RetrievalExclusion(messageIDs: history)
         )
         XCTAssertTrue(
             hits.contains { $0.bestChunkText.contains("SettingsCard") },
             "excluded history parents must not occupy limit slots — the corpus doc fills the window"
         )
-        XCTAssertFalse(hits.contains { history.contains($0.parent.sourceMessageID) },
+        XCTAssertFalse(hits.contains { history.contains($0.sourceMessageID) },
                        "no excluded parent may be returned")
 
         // Same guarantee on the dense-only path (fusion router off).
         let denseHits = VectorStoreService.rankConversationChunks(
             chunks, against: query,
             limit: 3, maximumDistance: 0.7,
-            excludedSourceMessageIDs: history
+            exclusion: RetrievalExclusion(messageIDs: history)
         )
         XCTAssertTrue(denseHits.contains { $0.bestChunkText.contains("SettingsCard") })
-        XCTAssertFalse(denseHits.contains { history.contains($0.parent.sourceMessageID) })
+        XCTAssertFalse(denseHits.contains { history.contains($0.sourceMessageID) })
     }
 
     func testGate_PastThresholdChunkWithoutIdentifierHit_StaysExcluded() throws {

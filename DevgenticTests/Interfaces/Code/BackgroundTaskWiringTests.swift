@@ -136,7 +136,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
             .call(arguments: JSONDecoder().decode(CommandOutputTool.Arguments.self,
                                                   from: Data(#"{"task_id":"bg_1"}"#.utf8)))
         XCTAssertGreaterThanOrEqual(read.filter { $0 == "x" }.count, 12_000,
-                                    "command_output cut the log itself — a tool-side cap is back")
+                                    "get_task_output cut the log itself — a tool-side cap is back")
     }
 
     // MARK: - The three tools read the same registry
@@ -149,7 +149,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
         let read = try await CommandOutputTool(conversationID: conversation)
             .call(arguments: JSONDecoder().decode(CommandOutputTool.Arguments.self,
                                                   from: Data(#"{"task_id":"bg_1"}"#.utf8)))
-        XCTAssertTrue(read.contains("one"), "command_output is not reading the same registry: \(read)")
+        XCTAssertTrue(read.contains("one"), "get_task_output is not reading the same registry: \(read)")
         XCTAssertTrue(read.contains("two"))
     }
 
@@ -161,7 +161,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
         // task_id must still enumerate the conversation's tasks, or that capability died with it.
         let status = try await CommandOutputTool(conversationID: conversation)
             .call(arguments: JSONDecoder().decode(CommandOutputTool.Arguments.self, from: Data("{}".utf8)))
-        XCTAssertTrue(status.contains("bg_1"), "command_output's list form cannot see the task: \(status)")
+        XCTAssertTrue(status.contains("bg_1"), "get_task_output's list form cannot see the task: \(status)")
         XCTAssertTrue(status.contains("running"))
 
         let stopped = try await CommandStopTool(conversationID: conversation)
@@ -172,7 +172,7 @@ final class BackgroundTaskWiringTests: XCTestCase {
         // requested" — a correctness fix to the wording, failing a test that was pinning prose.
         // The reply's job is to name the right task and not be an error; whether the stop LANDED
         // is the registry's answer, on the line below.
-        XCTAssertFalse(stopped.hasPrefix("Error:"), "command_stop refused: \(stopped)")
+        XCTAssertFalse(stopped.hasPrefix("Error:"), "stop_background_task refused: \(stopped)")
         XCTAssertTrue(stopped.contains("bg_1"), "the reply does not name the task it acted on: \(stopped)")
         XCTAssertEqual(BackgroundProcessRegistry.shared.snapshot(conversationID: conversation, taskID: "bg_1")?.status,
                        .stopped)

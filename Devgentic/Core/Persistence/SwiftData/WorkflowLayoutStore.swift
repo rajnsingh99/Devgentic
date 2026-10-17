@@ -305,7 +305,7 @@ final class WorkflowLayoutStore {
             let priorLayout = existing.layout
             existing.layout = layout    // setter refreshes blob + denormalized counts + updatedAt
             do {
-                try context.save()
+                try SharedContextSave.save(context, "workflow layout: save \(profileID)")
                 writeGeneration &+= 1
                 return .saved
             } catch {
@@ -336,7 +336,7 @@ final class WorkflowLayoutStore {
             let scratch = ModelContext(container)
             scratch.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: layout))
             do {
-                try scratch.save()
+                try SharedContextSave.save(scratch, "workflow layout: first save \(profileID)", scope: .throwaway)
                 writeGeneration &+= 1
                 return .saved
             } catch {
@@ -401,70 +401,101 @@ final class WorkflowLayoutStore {
         var descriptor = FetchDescriptor<WorkflowLayoutSD>(predicate: predicate)
         descriptor.fetchLimit = 1
 
+        // ⚠️ READINESS CR-62 (2026-10-12). Both failure paths below used to call
+        // `context.rollback()` on the SHARED mainContext. That never undid the failed save
+        // (SwiftData cannot, `SharedContextCommitTests`), and it DISCARDED every other subsystem's
+        // pending changes (an unsaved chat auto-title, a skill edit), which this file forbids in
+        // `save(_:for:)`. Now each path touches only its own work: an existing row is put back
+        // field by field, exactly as `save(_:for:)` does, and a missing row is inserted on a
+        // throwaway context, as the first save does.
+        //
+        // ⚠️ The existing row stays on mainContext, NOT a throwaway context: measured, a throwaway
+        // context's committed update refreshes mainContext's instance's stored fields but NOT its
+        // `@Transient` decoded-layout cache, so the canvas would keep showing the pre-repair state
+        // (`PersistenceBatch6Tests` probe).
+        let existing: WorkflowLayoutSD?
         do {
-            if let existing = try context.fetch(descriptor).first {
-                existing.replaceUnreadableLayout(layout, reason: reason)
-            } else {
-                context.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: layout))
-            }
-            try context.save()
-            logger.warning(
-                "[PERSISTENCE] Unreadable canvas REPAIRED — profile \(profileID), reason: \(reason). "
-                + "CONSEQUENCE: the previous undecodable bytes are overwritten and unrecoverable; "
-                + "saves for this profile work normally again."
-            )
-            writeGeneration &+= 1
-            return .saved
+            existing = try context.fetch(descriptor).first
         } catch {
-            // ⚠️ ROLL BACK THIS ROW, matching `save(_:for:)`'s [WF-PE3] discipline. Every store
-            // shares `container.mainContext`, so a mutation left pending after a failed save rides
-            // out on the NEXT unrelated `context.save()` from any subsystem — committing a repair
-            // the user was told had failed, at a moment nothing bumps `writeGeneration`, so every
-            // canvas caching this layout keeps validating against the pre-repair copy.
-            context.rollback()
             logger.error(
-                "[PERSISTENCE] Failed to repair layout for \(profileID): "
-                + "\(error.localizedDescription). CONSEQUENCE: the canvas remains unreadable and "
-                + "every save stays refused; the pending repair was rolled back so it cannot be "
-                + "committed later by an unrelated save."
+                "[PERSISTENCE] Failed to fetch the layout row for \(profileID) before repairing it: "
+                + "\(error.localizedDescription). CONSEQUENCE: nothing was written or mutated; the "
+                + "canvas stays unreadable and every save stays refused."
             )
             return .failed(error.localizedDescription)
         }
+
+        if let existing {
+            let prior = existing.storedState
+            existing.replaceUnreadableLayout(layout, reason: reason)
+            do {
+                try SharedContextSave.save(context, "workflow layout: repair \(profileID)")
+            } catch {
+                existing.restore(prior)
+                logger.error(
+                    "[PERSISTENCE] Failed to repair layout for \(profileID): "
+                    + "\(error.localizedDescription). CONSEQUENCE: the canvas remains unreadable and "
+                    + "every save stays refused. Only THIS row was put back to its stored bytes; other "
+                    + "subsystems' pending changes on the shared context are untouched."
+                )
+                return .failed(error.localizedDescription)
+            }
+        } else {
+            guard let container = modelContainer else { return .notConfigured }
+            let scratch = ModelContext(container)
+            scratch.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: layout))
+            do {
+                try SharedContextSave.save(scratch, "workflow layout: repair-insert \(profileID)", scope: .throwaway)
+            } catch {
+                logger.error(
+                    "[PERSISTENCE] Failed to write the repaired layout for \(profileID) (no row existed): "
+                    + "\(error.localizedDescription). CONSEQUENCE: the canvas is not on disk. The insert "
+                    + "was staged on a throwaway context, so nothing is left pending on the shared one."
+                )
+                return .failed(error.localizedDescription)
+            }
+        }
+        logger.warning(
+            "[PERSISTENCE] Unreadable canvas REPAIRED — profile \(profileID), reason: \(reason). "
+            + "CONSEQUENCE: the previous undecodable bytes are overwritten and unrecoverable; "
+            + "saves for this profile work normally again."
+        )
+        writeGeneration &+= 1
+        return .saved
     }
 
     /// Deletes the layout row for a workflow profile (if any). Called from the
     /// cascade hook in `BackendProfileService.deleteProfile` so a deleted
     /// workflow profile doesn't leave an orphan layout behind.
     func delete(for profileID: UUID) {
-        guard let context = mainContext else {
-            logger.error("delete(for:) called before container was configured — drop.")
+        // CR-62: the delete is staged on a THROWAWAY context. A failed save then leaves no pending
+        // delete on the shared mainContext to ride out on another subsystem's next save, and needs
+        // no `rollback()`, which discarded everyone else's pending changes. Measured: a throwaway
+        // context's committed delete is visible to mainContext's next fetch, even for a row
+        // mainContext had already loaded (`PersistenceBatch6Tests` probe).
+        guard let container = modelContainer else {
+            logger.error("[PERSISTENCE] delete(for:) called before the container was configured — profile \(profileID). CONSEQUENCE: the layout row (if any) is left in place as an orphan.")
             return
         }
+        let scratch = ModelContext(container)
 
         let predicate = #Predicate<WorkflowLayoutSD> { $0.workflowProfileID == profileID }
         var descriptor = FetchDescriptor<WorkflowLayoutSD>(predicate: predicate)
         descriptor.fetchLimit = 1
 
         do {
-            if let existing = try context.fetch(descriptor).first {
-                context.delete(existing)
-                try context.save()
+            if let existing = try scratch.fetch(descriptor).first {
+                scratch.delete(existing)
+                try SharedContextSave.save(scratch, "workflow layout: delete \(profileID)", scope: .throwaway)
                 // A deleted child is a CHANGE to what a parent's nesting validation sees.
                 writeGeneration &+= 1
                 logger.info("Deleted layout for profile \(profileID).")
             }
         } catch {
-            // ⚠️ ROLL BACK, same reason as `repairUnreadableLayout` and `save(_:for:)`. A pending
-            // `context.delete` left on the SHARED mainContext is committed by the next unrelated
-            // save from any subsystem — the layout disappears after this method reported failure,
-            // and at a moment when nothing bumps `writeGeneration`, so every parent canvas caching
-            // this child keeps validating against a layout that no longer exists.
-            context.rollback()
             logger.error(
                 "[PERSISTENCE] Failed to delete layout for \(profileID): \(error.localizedDescription). "
-                + "CONSEQUENCE: the row is left in place and the pending delete was rolled back, so it "
-                + "cannot be committed later by an unrelated save. Any parent workflow caching this "
-                + "layout keeps a valid copy."
+                + "CONSEQUENCE: the row is left in place as an orphan of the deleted profile. The delete "
+                + "was staged on a throwaway context, so nothing is left pending to commit it later."
             )
         }
     }

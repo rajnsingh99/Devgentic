@@ -33,6 +33,7 @@ struct PromptDetailContainerView: View {
     @State private var showingConflictAlert: Bool = false
     @State private var incomingExternalPrompt: DevPrompt? = nil
     @State private var isInitialLoad: Bool = true
+    @State private var isMenuHovered: Bool = false
 
     @Environment(MainViewRouter.self) private var router
     @Environment(ToastManager.self) private var toastManager
@@ -514,19 +515,6 @@ struct PromptDetailContainerView: View {
 
     private var actionButtons: some View {
         HStack(spacing: 6) {
-            if editVM.isDirty {
-                Text("Unsaved")
-                    .font(.system(.caption, weight: .medium))
-                    .foregroundColor(theme.warningColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule().fill(theme.warningColor.opacity(0.12))
-                    )
-                    .transition(.opacity)
-                    .accessibilityLabel("Unsaved changes")
-            }
-
             IslandPillButton(
                 title: "Save",
                 style: .primary,
@@ -581,17 +569,22 @@ struct PromptDetailContainerView: View {
                 .disabled(prompt == nil || !(prompt?.isUserDefined ?? true))
                 .help((prompt?.isUserDefined ?? true) ? "Delete prompt" : "Built-in prompts can't be deleted")
             } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(.callout, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .foregroundColor(theme.secondaryText)
-                    .background(
-                        Circle().fill(theme.surfaceOverlay)
-                    )
-                    .contentShape(Circle())
+                VStack(spacing: 2.5) {
+                    Circle().frame(width: 3.0, height: 3.0)
+                    Circle().frame(width: 3.0, height: 3.0)
+                    Circle().frame(width: 3.0, height: 3.0)
+                }
+                .foregroundColor(isMenuHovered ? theme.primaryText : theme.secondaryText)
+                .frame(width: 28, height: 28)
+                .background(
+                    Circle().fill(isMenuHovered ? theme.surfaceOverlayStrong : theme.surfaceOverlay)
+                )
+                .contentShape(Circle())
             }
             .menuIndicator(.hidden)
             .buttonStyle(.plain)
+            .pointingHandCursor()
+            .onHover { isMenuHovered = $0 }
             .help("More actions")
             .accessibilityLabel("More actions")
         }

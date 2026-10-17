@@ -203,6 +203,37 @@ final class WorkflowLayoutSD {
         applyLayout(newValue)
     }
 
+    /// The persisted fields as they stand, captured before a destructive write so a FAILED save can
+    /// put this one row back (CR-62).
+    struct StoredState {
+        let layoutData: Data
+        let nodeCount: Int
+        let edgeCount: Int
+        let annotationCount: Int
+        let updatedAt: Date
+    }
+
+    var storedState: StoredState {
+        StoredState(layoutData: layoutData, nodeCount: nodeCount, edgeCount: edgeCount,
+                    annotationCount: annotationCount, updatedAt: updatedAt)
+    }
+
+    /// Puts back what `storedState` captured, after the save that followed a write failed.
+    ///
+    /// ⚠️ The transient caches are CLEARED, not set: the next read re-primes them from the restored
+    /// bytes, so an unreadable canvas is reported unreadable again (and saves refused again) rather
+    /// than wearing the failed repair's decoded layout.
+    func restore(_ state: StoredState) {
+        layoutData = state.layoutData
+        nodeCount = state.nodeCount
+        edgeCount = state.edgeCount
+        annotationCount = state.annotationCount
+        updatedAt = state.updatedAt
+        _cachedLayout = nil
+        _layoutDecodeFailed = false
+        _layoutFromNewerVersion = false
+    }
+
     /// The actual write. Never call this directly from a save path — go through `layout` so the
     /// refusal applies.
     private func applyLayout(_ newValue: WorkflowLayout) {

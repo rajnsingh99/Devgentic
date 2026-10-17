@@ -133,7 +133,7 @@ struct TraceConfigSnapshot: Codable, Sendable {
 
     // --- Code-mode-specific (nil otherwise) ---
     let codeProjectPath: String?        // sanitized via TelemetrySanitizer
-    let codeMemoryLength: Int?          // chars of .devgentic/context.md
+    let codeMemoryLength: Int?          // chars of the per-run project knowledge (AGENTS.md + memory listing)
     let codeMemoryHash: String?
 
     // --- Request-time context ---
@@ -159,7 +159,7 @@ struct TraceConfigSnapshot: Codable, Sendable {
     ///   - config: the request config (profile + llmConfig)
     ///   - history: incoming conversation history (for turn count only)
     ///   - files: attached files (for summary only)
-    ///   - codeMemory: Code mode's `.devgentic/context.md` content if active
+    ///   - codeMemory: Code mode's per-run project knowledge (AGENTS.md + memory listing) if active
     static func capture(
         traceID: String,
         config: BackendRequestConfig,

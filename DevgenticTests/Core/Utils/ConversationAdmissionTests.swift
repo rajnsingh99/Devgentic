@@ -109,6 +109,56 @@ final class ConversationAdmissionTests: XCTestCase {
         task.cancel()
     }
 
+    // MARK: - CR-4: what Stop needs to know
+
+    /// `isWaiting` is what marks a run QUEUED for Stop's target choice; it must be true exactly while
+    /// the run is parked here.
+    func testIsWaitingIsTrueExactlyWhileTheRunIsParked() async {
+        let first = UUID(), second = UUID()
+        start(first)
+        start(second)
+        XCTAssertFalse(admission.isWaiting(second), "not waiting before it asks")
+
+        var secondStarted = false
+        let task = Task { @MainActor in
+            await admission.awaitTurn(conversationID: conversation, messageID: second)
+            secondStarted = true
+        }
+        defer { task.cancel() }
+        let parked = await waitUntil { self.admission.isWaiting(second) }
+        XCTAssertTrue(parked)
+        XCTAssertFalse(admission.isWaiting(first), "the RUNNING run is not queued")
+
+        finish(first)
+        let admitted = await waitUntil { secondStarted }
+        XCTAssertTrue(admitted)
+        XCTAssertFalse(admission.isWaiting(second), "an admitted run is no longer queued")
+    }
+
+    /// ⚠️ Cancelling a queued run must RESUME it — `withCheckedContinuation` ignores cancellation, so
+    /// a cancelled waiter used to sit until the run in front finished. `ActiveStreamManager.cancelStream`
+    /// now calls `forget`; this pins that `forget` releases a cancelled waiter at once.
+    func testForgettingACancelledWaiterResumesItImmediately() async {
+        let first = UUID(), second = UUID()
+        start(first)
+        start(second)
+        var resumedWhileFirstStillLive = false
+        let task = Task { @MainActor in
+            await admission.awaitTurn(conversationID: conversation, messageID: second)
+            resumedWhileFirstStillLive = self.live[self.conversation]?.contains(first) == true
+        }
+        let parked = await waitUntil { self.admission.isWaiting(second) }
+        XCTAssertTrue(parked)
+
+        task.cancel()
+        await Task.yield()
+        XCTAssertTrue(admission.isWaiting(second), "the control: cancellation alone does NOT resume it")
+
+        admission.forget(messageID: second, inConversation: conversation)
+        let resumed = await waitUntil { resumedWhileFirstStillLive }
+        XCTAssertTrue(resumed, "the cancelled waiter must exit now, not when the first run finishes")
+    }
+
     /// A ChatOps message that has waited longest must not be overtaken.
     func testWaitersAreAdmittedInArrivalOrder() async {
         let first = UUID(), second = UUID(), third = UUID()
@@ -391,7 +441,8 @@ final class ConversationAdmissionTests: XCTestCase {
         // way. Mutation deleting this line left every gate test green, because the gate is not
         // what owns it.
         guard let queuedAt = code.range(of: ".thinking(.queued)"),
-              let clearedAt = code.range(of: "waited { agentMessage.agentState = .thinking(.reasoning) }")
+              let clearedAt = code.range(of: #"if waited \{\s*agentMessage\.agentState = \.thinking\(\.reasoning\)"#,
+                                         options: .regularExpression)
         else {
             return XCTFail("the queued label is set but never cleared — an admitted run keeps "
                            + "showing 'Waiting its turn' until its first executor event")

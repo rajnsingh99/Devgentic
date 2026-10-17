@@ -48,8 +48,17 @@ enum ImageGenProviderFactory {
             )
 
         case .mlx:
+            #if MLX_IMAGE_GEN
             logger.info("Creating MLX image provider for model: \(config.modelName)")
             return MLXImageGenService(modelName: config.modelName)
+            #else
+            logger.error(
+                "[IMAGEGEN] A profile asked for MLX image generation (model '\(config.modelName)'), "
+                + "which this build does not include. CONSEQUENCE: no image is generated; the "
+                + "user is told to switch the profile's provider."
+            )
+            throw ImageGenError.providerError(underlying: MLXImageGenAvailability.unavailableMessage)
+            #endif
 
         case .ollama:
             let baseURL = config.baseURL ?? ProviderDefaults.ollamaBaseURL.absoluteString
@@ -63,10 +72,10 @@ enum ImageGenProviderFactory {
             throw ImageGenError.providerError(underlying: "Anthropic does not currently support image generation.")
 
         case .openRouter:
-            throw ImageGenError.providerError(underlying: "OpenRouter profiles support text generation only. Use an OpenAI, Gemini, or MLX profile for image generation.")
+            throw ImageGenError.providerError(underlying: "OpenRouter profiles support text generation only. Use an OpenAI, Gemini, or Ollama profile for image generation.")
 
         case .openAICompatible:
-            throw ImageGenError.providerError(underlying: "Custom OpenAI-compatible profiles support text generation only. Use an OpenAI, Gemini, or MLX profile for image generation.")
+            throw ImageGenError.providerError(underlying: "Custom OpenAI-compatible profiles support text generation only. Use an OpenAI, Gemini, or Ollama profile for image generation.")
         }
     }
 }

@@ -95,7 +95,8 @@ struct GenericToolsXMLParser: CognitiveParserProtocol {
                     continue
                 }
 
-                logger.warning("GenericToolsXMLParser: Found \(openTag) block but JSON decode failed for body: \(body.prefix(200))")
+                logger.warning("GenericToolsXMLParser: Found \(openTag) block but JSON decode failed for body: \(body.count) chars (snippet at debug: model output is content, CR-57)")
+                logger.debug("GenericToolsXMLParser: snippet: \(body.prefix(200))")
             }
 
             // If we found matches with this tag pattern, stop — don't try the next pattern

@@ -23,6 +23,7 @@ struct BackendPickerButton: View {
 
     @Binding var showingPopup: Bool
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     @State private var isHovering = false
 
@@ -62,6 +63,7 @@ struct BackendPickerButton: View {
             )
             .frame(width: 356, height: 460)
             .environment(\.appTheme, theme)
+            .environment(\.surfaceStyle, surfaceStyle)
             .tint(theme.accentColor)
             .preferredColorScheme(theme.colorScheme)
         }

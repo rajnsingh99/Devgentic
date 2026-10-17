@@ -213,7 +213,8 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
             }
         }
 
-        logger.warning("QwenHermesJsonParser: Failed to decode tool call JSON: \(trimmed.prefix(200))")
+        logger.warning("QwenHermesJsonParser: Failed to decode tool call JSON: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("QwenHermesJsonParser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 
@@ -269,7 +270,7 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
     ///
     /// Both extraction paths are routed through `ReasoningQualityFilter`.
     /// Qwen2.5/3 and Hermes-2/3-Pro at Q4 routinely fill the `content` slot
-    /// with stock phrases like "Executing tool fs_smart_search..." that look
+    /// with stock phrases like "Executing tool spotlight_search..." that look
     /// like reasoning but carry no signal beyond the tool name.
     private func extractReasoning(from text: String, extractedCount: Int) -> String {
         guard extractedCount > 0 else {

@@ -189,7 +189,7 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         let separatorLen = Self.lineSeparator.count
         // G10: mirror compileForPrompt's dedup so the estimate matches the actual
         // rendered size. Without this, repeated tool calls (e.g. qwen-coder looping on
-        // codebase_map) inflate the estimate to full-render size for every duplicate
+        // project_tree) inflate the estimate to full-render size for every duplicate
         // and trigger false memory-pressure alerts while actual compile output stays small.
         var seenObsKeys: Set<String> = []
         var alertMessages: [String] = []
@@ -249,6 +249,23 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         return Double(estimatedSize) / Double(config.totalBudgetChars)
     }
 
+    /// Chars of the newest `fullFidelityWindow − 1` step entries — the ones that, with the entry being
+    /// recorded, form the full-fidelity window `compileForPrompt` never evicts (CR-12).
+    private func unevictableRecentChars() -> Int {
+        let keepPrior = max(0, config.fullFidelityWindow - 1)
+        guard keepPrior > 0 else { return 0 }
+        var total = 0
+        var counted = 0
+        for entry in entries.reversed() where counted < keepPrior {
+            switch entry {
+            case .observation(let rec): total += rec.result.count + rec.params.count; counted += 1
+            case .reasoning(let rec): total += rec.text.count; counted += 1
+            case .systemAlert: continue
+            }
+        }
+        return total
+    }
+
     // MARK: - Protocol Conformance
 
     mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, params: String, result: String, artifacts: [MediaArtifact]) {
@@ -256,7 +273,15 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
 
         // Same cut as the native path: the MIDDLE goes, with a note naming what was removed and how
         // to get it — a head-only cut dropped a build's final error.
-        let cappedResult = ToolResultBudget.fit(result, limit: config.perEntryCap,
+        // ⚠️⚠️ NOT `perEntryCap` alone (readiness CR-12). That equals the WHOLE budget, while eviction
+        // only ever removes OLD lines — the newest `fullFidelityWindow` entries are never evicted. So
+        // three large results in a row each kept the whole budget and the scratchpad shipped at ~3×.
+        // The room that is free is the budget minus the recent entries eviction cannot touch.
+        let limit = min(config.perEntryCap,
+                        ToolResultBudget.limit(payloadBudgetChars: config.totalBudgetChars,
+                                               protectedChars: unevictableRecentChars(),
+                                               resultsInBatch: 1))
+        let cappedResult = ToolResultBudget.fit(result, limit: limit,
                                                 strategy: cutPolicy.strategy(forTool: toolName))
 
         // Params get an independent, smaller cap. Large params (e.g. write_file

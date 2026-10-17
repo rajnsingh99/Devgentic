@@ -46,7 +46,6 @@ final class ParseFailureCorrectiveTests: XCTestCase {
                                missingArgs: ["path"], unexpectedArgs: []),
             .dialectDrift(expected: "Native JSON", detected: "Mistral XML"),
             .toolNameInProse(toolName: "read_file", snippet: "read_file path: \"/tmp\""),
-            .gatedTool(attempted: "update_project_context", unlockHint: "Read 2 more source files"),
         ]
     }
 
@@ -64,14 +63,13 @@ final class ParseFailureCorrectiveTests: XCTestCase {
         case .argSchemaMismatch:    return "argSchemaMismatch"
         case .dialectDrift:         return "dialectDrift"
         case .toolNameInProse:      return "toolNameInProse"
-        case .gatedTool:            return "gatedTool"
         }
     }
 
     func testTheReasonSampleCoversEveryCase() {
         XCTAssertEqual(Set(allReasons.map(kindLabel)).count, allReasons.count,
                        "each sample must be a distinct case")
-        XCTAssertEqual(allReasons.count, 10,
+        XCTAssertEqual(allReasons.count, 9,
                        "a case was added or removed — add it to allReasons, then re-read every "
                        + "assertion below to decide whether the new arm should state a shape")
     }
@@ -141,7 +139,6 @@ final class ParseFailureCorrectiveTests: XCTestCase {
             .unknownToolName(attempted: "reed_file", suggestions: ["read_file"]),
             .argSchemaMismatch(attempted: "reed_file", resolvedTo: "read_file",
                                missingArgs: ["path"], unexpectedArgs: []),
-            .gatedTool(attempted: "update_project_context", unlockHint: "Read 2 more"),
         ]
 
         for reason in shapeFree {

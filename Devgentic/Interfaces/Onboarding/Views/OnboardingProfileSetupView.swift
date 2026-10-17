@@ -13,6 +13,12 @@ struct OnboardingProfileSetupView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(\.appTheme) private var theme
 
+    /// An empty field is not shouted at before the user has typed anything; duplicates and
+    /// over-long names are shown as soon as they occur.
+    private var showsNameProblem: Bool {
+        viewModel.profileNameProblem != nil && !viewModel.profileDisplayName.isEmpty
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Scrollable Content
@@ -21,7 +27,7 @@ struct OnboardingProfileSetupView: View {
                     // Header
                     VStack(spacing: 8) {
                         HStack(spacing: 6) {
-                            Text("STEP 1 OF 3")
+                            Text(OnboardingViewModel.Step.profileSetup.progressLabel ?? "")
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
                                 .foregroundStyle(Color.accentColor)
                                 .tracking(1.0)
@@ -46,11 +52,18 @@ struct OnboardingProfileSetupView: View {
 
                         // 1. Profile Name
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Profile Name")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(theme.primaryText)
+                            HStack(spacing: 4) {
+                                Text("Profile Name")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(theme.primaryText)
+                                Text("Required")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(theme.secondaryText)
+                            }
 
-                            TextField("e.g. Local Assistant, Coding Bot", text: $viewModel.profileDisplayName)
+                            TextField("e.g. Research Assistant, Mac Helper", text: $viewModel.profileDisplayName)
+                                .onSubmit { viewModel.proceedFromProfileSetup() }
+                                .accessibilityLabel("Profile name, required")
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 13))
                                 .padding(11)
@@ -58,8 +71,19 @@ struct OnboardingProfileSetupView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 11))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 11)
-                                        .stroke(theme.dividerColor, lineWidth: 1)
+                                        .stroke(showsNameProblem ? theme.warningColor : theme.dividerColor, lineWidth: 1)
                                 )
+
+                            if showsNameProblem, let problem = viewModel.profileNameProblem {
+                                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(theme.warningColor)
+                                    .transition(.opacity)
+                            } else if let loadError = viewModel.profileNamesLoadError {
+                                Label("Couldn't check your existing profile names (\(loadError)).", systemImage: "exclamationmark.circle")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(theme.secondaryText)
+                            }
                         }
 
                         // 2. Intelligence Type (Bot vs Agent)
@@ -82,7 +106,7 @@ struct OnboardingProfileSetupView: View {
                                 profileTypeCard(
                                     type: .agent,
                                     title: "Autonomous Agent",
-                                    description: "ReAct loop with 72 native macOS tools (Filesystem, Shell, Safari).",
+                                    description: "Uses tools on your Mac — files, shell, calendar, notes — and asks before each one.",
                                     icon: "bolt.shield.fill",
                                     accent: Color.green
                                 )
@@ -125,8 +149,6 @@ struct OnboardingProfileSetupView: View {
                             }
                         }
 
-                        // 4. Starter Model Status Banner
-                        modelStatusBanner
                     }
                     .frame(maxWidth: 620)
                 }
@@ -142,9 +164,8 @@ struct OnboardingProfileSetupView: View {
 
                 Spacer()
 
-                OnboardingPrimaryButton(
-                    viewModel.isModelInstalled ? "Continue to Customization" : "Download Model & Continue"
-                ) {
+                // Return is handled by the name field's `onSubmit`; a default action here would fire twice.
+                OnboardingPrimaryButton("Choose a Model", isEnabled: viewModel.profileNameProblem == nil, isDefaultAction: false) {
                     viewModel.proceedFromProfileSetup()
                 }
             }
@@ -153,20 +174,21 @@ struct OnboardingProfileSetupView: View {
             .padding(.top, 10)
             .padding(.bottom, 22)
         }
+        .onAppear { viewModel.refreshExistingProfileNames() }
     }
 
     // MARK: - Profile Type Card
     @ViewBuilder
     private func profileTypeCard(
         type: ProfileType,
-        title: String,
-        description: String,
+        title: LocalizedStringKey,
+        description: LocalizedStringKey,
         icon: String,
         accent: Color
     ) -> some View {
         let isSelected = viewModel.selectedProfileType == type
 
-        Button(action: { viewModel.selectedProfileType = type }) {
+        Button(action: { viewModel.selectProfileType(type) }) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     ZStack {
@@ -215,23 +237,22 @@ struct OnboardingProfileSetupView: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     // MARK: - Engine Option Card
     @ViewBuilder
     private func engineOptionCard(
         provider: ApiProvider,
-        title: String,
-        subtitle: String,
-        description: String,
+        title: LocalizedStringKey,
+        subtitle: LocalizedStringKey,
+        description: LocalizedStringKey,
         icon: String
     ) -> some View {
         let isSelected = viewModel.selectedBackend == provider
 
-        Button(action: {
-            viewModel.selectedBackend = provider
-            viewModel.checkInstalledModelStatus()
-        }) {
+        Button(action: { viewModel.selectBackend(provider) }) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Image(systemName: icon)
@@ -268,69 +289,7 @@ struct OnboardingProfileSetupView: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
-    }
-
-    // MARK: - Starter Model Status Banner
-    private var modelStatusBanner: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(viewModel.isModelInstalled ? Color.green.opacity(0.15) : Color.indigo.opacity(0.15))
-                    .frame(width: 42, height: 42)
-                Image(systemName: viewModel.isModelInstalled ? "checkmark.seal.fill" : "arrow.down.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundColor(viewModel.isModelInstalled ? .green : .indigo)
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text(viewModel.selectedBackend == .mlx ? "Llama 3.2 3B Instruct" : "llama3.2:3b")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(theme.primaryText)
-
-                    Text("Recommended Starter")
-                        .font(.system(size: 10, weight: .medium))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.15))
-                        .foregroundColor(Color.accentColor)
-                        .clipShape(Capsule())
-                }
-
-                Text(viewModel.isModelInstalled ? "Model weights already verified in local cache." : "Lightweight (~1.9 GB), fast local inference on Apple Silicon.")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.secondaryText)
-            }
-
-            Spacer()
-
-            if viewModel.isCheckingModelStatus {
-                ProgressView()
-                    .controlSize(.small)
-            } else if viewModel.isModelInstalled {
-                Text("Installed")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.green)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.12))
-                    .clipShape(Capsule())
-            } else {
-                Text("Needs Download")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.orange)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Color.orange.opacity(0.12))
-                    .clipShape(Capsule())
-            }
-        }
-        .padding(12)
-        .background(theme.secondaryBackground.opacity(0.55))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(theme.dividerColor.opacity(0.8), lineWidth: 1)
-        )
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

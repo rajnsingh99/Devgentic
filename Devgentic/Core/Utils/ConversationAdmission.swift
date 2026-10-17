@@ -55,6 +55,10 @@ final class ConversationAdmission {
         self.isBusy = isBusy
     }
 
+    /// Whether this run is parked here waiting for its turn — what makes it a QUEUED run, which Stop
+    /// must not prefer over the run actually working (readiness CR-4).
+    func isWaiting(_ messageID: UUID) -> Bool { waiters[messageID] != nil }
+
     /// How many runs are waiting in a conversation. Diagnostics and tests.
     func waitingCount(inConversation conversationID: UUID) -> Int {
         queue[conversationID]?.count ?? 0

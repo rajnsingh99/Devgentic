@@ -495,18 +495,23 @@ final class CodeProjectWiringTests: XCTestCase {
         XCTAssertTrue(code.contains("forConversationProject: persistenceService.getConversation(withId: conversationID)?.projectPath"))
     }
 
-    /// #3: the switch decides unloading with the model-aware rule.
-    func testTheSwitchUsesTheModelAwareUnloadRule() throws {
+    /// #3 (superseded by decision D10): a Code session switch unloads nothing — residency changes
+    /// when a run takes the local lock. See `LocalResidencyWiringTests`.
+    func testTheSwitchNoLongerUnloadsModels() throws {
         let code = try source("Devgentic/Interfaces/Main/ConversationSwitchCoordinator.swift")
-        XCTAssertTrue(code.contains("Self.shouldUnloadModels(codeModelBefore: codeModelBefore"))
-        XCTAssertTrue(code.contains("let codeModelBefore = Self.codeModelKey(vm)"))
+        XCTAssertFalse(code.contains("shouldUnloadModels"))
+        XCTAssertFalse(code.contains("MLXService.shared.unloadModel"))
     }
 
     /// #5: the combined roots publish is queued BEFORE the Explorer's own.
     func testOpeningAProjectPublishesRootsOnce() throws {
         let code = try source("Devgentic/Interfaces/Main/ConversationManagementCoordinator.swift")
-        let combined = try XCTUnwrap(code.range(of: "Task { await MCPRootsProvider.setWorkspace(url) }"))
-        let explorer = try XCTUnwrap(code.range(of: "vm.explorerViewModel.selectedRootURL = url"))
+        // Within `openCodeProject` only — the Explorer is now moved by `syncExplorerToInterfaceMode`,
+        // which other functions (Home) also call earlier in the file.
+        let start = try XCTUnwrap(code.range(of: "func openCodeProject(_ url: URL) {"))
+        let body = code[start.upperBound...]
+        let combined = try XCTUnwrap(body.range(of: "Task { await MCPRootsProvider.setWorkspace(url) }"))
+        let explorer = try XCTUnwrap(body.range(of: "vm.syncExplorerToInterfaceMode()"))
         XCTAssertLessThan(combined.lowerBound, explorer.lowerBound,
                           "the Explorer's publish is queued first, so a switch notifies servers twice")
     }

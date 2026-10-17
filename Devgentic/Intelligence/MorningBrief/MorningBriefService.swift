@@ -229,12 +229,15 @@ final class MorningBriefService {
 
         do {
             logger.notice("[Morning Brief] Calling IntelligenceCoreService for insights...")
-            let result = try await IntelligenceCoreService.shared.generate(
-                messages: messages,
-                maxTokens: 500,
-                temperature: 0.3,
-                caller: .morningBrief
-            )
+            // A background feature: it waits for the local model like a run, at the lowest priority (D7).
+            let result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "Morning Brief") {
+                try await IntelligenceCoreService.shared.generate(
+                    messages: messages,
+                    maxTokens: 500,
+                    temperature: 0.3,
+                    caller: .morningBrief
+                )
+            }
 
             logger.notice("[Morning Brief] IC unloading after insight generation...")
             await IntelligenceCoreService.shared.releaseHold(caller: .morningBrief)

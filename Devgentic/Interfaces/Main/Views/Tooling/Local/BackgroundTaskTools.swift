@@ -7,11 +7,11 @@
 //  The two tools that make a background task worth starting: read what it wrote, end it early.
 //
 //  ⚠️ There were THREE. `command_status` was withdrawn on 2026-09-23 because it was a strict SUBSET
-//  of `command_output` — every one of that tool's return paths begins with the same `describe(task)`
+//  of `get_task_output` — every one of that tool's return paths begins with the same `describe(task)`
 //  line `command_status` returned, and nothing else. Keeping both cost a tool slot (schemas were
 //  ~40% of a local model's 8K window on the device run) and actively caused harm: the model polled
 //  `command_status` twenty times and each call returned a status line with no output in it. The
-//  same twenty calls to `command_output` would at least have carried the build's own text.
+//  same twenty calls to `get_task_output` would at least have carried the build's own text.
 //
 //  Without them the background flag was a dead end — the process ran, its output went to
 //  /dev/null, and the only thing the model got back was a pid it could do nothing with. Starting
@@ -125,7 +125,7 @@ struct CommandOutputTool: DevgenticTool {
 struct CommandStopTool: DevgenticTool {
     let name = "stop_background_task"
     let category = "System & Shell"
-    // ⚠️ Names no starter, for the reason `command_output` gives.
+    // ⚠️ Names no starter, for the reason `get_task_output` gives.
     let description = "Ends a background command that is still running. Its output up to that point is kept and can still be read with get_task_output."
 
     let conversationID: UUID?

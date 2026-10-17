@@ -42,7 +42,8 @@ enum CronField: Equatable {
     case step(base: CronFieldBase, stepValue: Int)
 
     enum CronFieldBase: Equatable {
-        case any
+        /// `*` — the whole field, counted from the field's own minimum (`minimum`).
+        case any(minimum: Int)
         case range(ClosedRange<Int>)
     }
 
@@ -65,8 +66,13 @@ enum CronField: Equatable {
             return r.contains(value)
         case .step(let base, let stepValue):
             switch base {
-            case .any:
-                return value % stepValue == 0
+            case .any(let minimum):
+                // ⚠️ READINESS CR-31 (2026-10-12). This was `value % stepValue == 0`, i.e. counted
+                // from 0 for EVERY field. Vixie cron counts from the field's minimum, which is 1
+                // for day-of-month and month: "quarterly" `0 0 1 */3 *` fired Mar/Jun/Sep/Dec
+                // instead of Jan/Apr/Jul/Oct, and `*/2` day-of-month fired on even days instead
+                // of 1, 3, 5…. Minute, hour and day-of-week start at 0, so they are unchanged.
+                return value >= minimum && (value - minimum) % stepValue == 0
             case .range(let r):
                 guard r.contains(value) else { return false }
                 return (value - r.lowerBound) % stepValue == 0
@@ -85,7 +91,7 @@ enum CronField: Equatable {
             }
             let base = String(parts[0])
             if base == "*" {
-                return .step(base: .any, stepValue: stepValue)
+                return .step(base: .any(minimum: min), stepValue: stepValue)
             } else if base.contains("-") {
                 let rangeParts = base.split(separator: "-")
                 guard rangeParts.count == 2,

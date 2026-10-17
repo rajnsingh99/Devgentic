@@ -49,7 +49,7 @@ struct GrepFilesTool: DevgenticTool {
             self.pattern = p
 
             var foundPath: String? = nil
-            for key in ["path", "directory", "dir", "folder"] {
+            for key in ToolPathKeys.grepFiles {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
                     foundPath = val
@@ -92,7 +92,7 @@ struct GrepFilesTool: DevgenticTool {
         // That is the failure worth naming: not an error, an authoritative-sounding FALSE
         // NEGATIVE. An agent asked to find every call site is told there are none, and has no
         // signal that its pattern was reinterpreted. Same shape as the unindexed-scope miss
-        // `fs_smart_search` grew a filesystem fallback to avoid. `find_definition`'s grep
+        // `spotlight_search` grew a filesystem fallback to avoid. `find_definition`'s grep
         // fallback already passes `-E`; this puts the two in agreement.
         var grepArgs = ["-rnE", "--include=*"]
         if let ext = arguments.file_extension {
@@ -236,7 +236,7 @@ struct PreviewFileTool: DevgenticTool {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: DynamicKey.self)
             var foundPath: String? = nil
-            for key in ["path", "file", "filePath"] {
+            for key in ToolPathKeys.previewFile {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
                     foundPath = val

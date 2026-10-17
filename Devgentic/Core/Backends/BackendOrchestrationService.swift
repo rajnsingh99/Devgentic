@@ -23,9 +23,15 @@ class BackendOrchestrationService {
     private let fileProcessorService: FileProcessorService
     private let agentConnect: AgentConnect
 
-    // RAG Services
-    private let embeddingService = EmbeddingService.shared
-    private let vectorStoreService = VectorStoreService.shared
+    // ⚠️ RAG-25: NO stored `EmbeddingService.shared` / `VectorStoreService.shared` here. Both were
+    // stored properties that nothing read, and initialising them is the CoreML MiniLM load and the
+    // ObjectBox open (schema gate, quarantine scan, `Store(...)`) — run on MAIN, because this object
+    // is built in `ActiveStreamManager.init` at launch. They are warmed off-main in `init` instead.
+
+    #if DEBUG
+    /// Test hook: called with `Thread.isMainThread` when the RAG warm-up runs (RAG-25).
+    nonisolated(unsafe) static var ragWarmUpThreadObserver: (@Sendable (_ onMainThread: Bool) -> Void)?
+    #endif
 
     // MARK: - Initialization
     init(
@@ -34,6 +40,18 @@ class BackendOrchestrationService {
         self.fileProcessorService = fileProcessorService
         self.ollamaService = OllamaService.shared
         self.agentConnect = AgentConnect()
+
+        // RAG-25: first touch OFF the main thread, so neither load sits in launch. A main-thread
+        // reader that arrives mid-load waits only for the remainder (static `let` init is once-only).
+        Task.detached(priority: .utility) {
+            let started = ContinuousClock.now
+            _ = EmbeddingService.shared
+            _ = VectorStoreService.shared
+            logger.info("[RAG] Embedding model and vector store warmed off the main thread in \(ContinuousClock.now - started).")
+            #if DEBUG
+            BackendOrchestrationService.ragWarmUpThreadObserver?(Thread.isMainThread)
+            #endif
+        }
 
         logger.info("BackendOrchestrationService initialized with AgentConnect.")
     }
@@ -114,6 +132,8 @@ class BackendOrchestrationService {
         conversationID: UUID,
         userQuery: String,
         currentUserMessageID: UUID? = nil,
+        retrievalQuery: String,
+        regenerating: RegenerationBoundary?,
         history: [ChatMessage],
         files: [FileSystemItem],
         context: TraceContext,
@@ -136,10 +156,11 @@ class BackendOrchestrationService {
                 let config = BackendRequestConfig(profile: await LiveModelDetection.resolving(requestedConfig.profile))
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
-                // Resource Management: Unload local MLX models if they are not required for this request.
-                if !self.isMLXProfile(config.profile) {
-                    await MLXService.shared.unloadModel()
-                }
+                // ⚠️ No residency change here (local inference coordinator, gap G2). This used to unload
+                // MLX for EVERY non-MLX request — including a cloud send from another conversation,
+                // which landed between a running MLX agent's iterations (no generation in flight, so the
+                // unload guard let it through) and cost that agent its model and its prompt cache. Which
+                // local models stay loaded is decided when a run takes the local lock.
                 
                 // 1. Sanitize History
                 // Filter out error messages to prevents confusing the model with previous system failures.
@@ -148,15 +169,6 @@ class BackendOrchestrationService {
                     return true
                 }
                 
-                // Retrieval dedup must exclude the CURRENT user message too — its
-                // fire-and-forget indexing (MessagingCoordinator) can land before
-                // Section 3 runs, and the duplicate-removal below strips it from
-                // `conversationHistory`, so a history-derived dedup set can't see it.
-                // Without this the query literally retrieves itself (observed: the
-                // "executionDefaultsCard" question consumed a doc slot as its own echo).
-                // Captured from the ORIGINAL history, before any trimming.
-                let retrievalExcludedIDs = Set(history.map { $0.id })
-
                 // Prevent duplicate current query in history (User UX vs LLM Context).
                 // The rule itself lives in `strippingCurrentQuery` so it can be tested against
                 // the real implementation instead of a copy; this call site owns the logging.
@@ -196,46 +208,39 @@ class BackendOrchestrationService {
                 // knowledge assembly below are the request's real pre-flight cost.
                 let preRequestAssemblyStart = Date()
                 var attachmentContext: String? = nil
+                // Resolved ONCE: delivery (below) and conversation-memory indexing (3b) must agree.
+                let attachmentDelivery = AttachmentDeliveryMode.resolve(for: config.profile)
                 if !files.isEmpty {
                     logger.info("Processing \(files.count) attached files with strategy: \(fileContextStrategy.rawValue). (Trace: \(context.traceID))")
 
-                    switch fileContextStrategy {
-                    case .contextualRAG, .directInjection:
-                        // .contextualRAG is deprecated and never returned by resolve() —
-                        // the arm stays only for switch exhaustiveness until Phase 4
-                        // deletes the case, and maps to directInjection behavior.
-                        // Write-capable profiles need the path, not just the name.
-                        let disclosePaths = config.profile.profileType == .agent
-                            || config.profile.profileType == .code
-                        let (fileContext, docFailures) = await self.assembleTextFileContent(
-                            for: files, includeAbsolutePaths: disclosePaths
-                        )
-                        if disclosePaths {
+                    // ⚠️ The mode comes from `AttachmentDeliveryMode.resolve` — the SAME call the
+                    // transcript (`MessageAttachmentBuilder`) and the gauge make, so all three agree
+                    // on manifest-vs-injection and on the wrapper width. Do not re-derive it here.
+                    switch attachmentDelivery {
+                    case .pathManifest:
+                        // The manifest is a promise that `read_file` exists — `resolve` only
+                        // returns this when it does.
+                        let paths = files.map { $0.url.path }.joined(separator: "\n")
+                        attachmentContext = "The user has attached the following files. Use the read_file tool to access them when needed:\n\(paths)"
+                        logger.info("[ATTACH] Stateless: handed \(files.count) path(s) to the agent to read on demand.")
+
+                    case .inject(let includeAbsolutePaths):
+                        if fileContextStrategy == .stateless {
+                            // The paths would point at a tool the profile cannot call, so the
+                            // content is injected rather than silently dropping the attachment.
+                            logger.warning("[ATTACH] Profile '\(config.profile.displayName)' uses the stateless file strategy but has NO read_file tool enabled — the path manifest would reference a tool it cannot call. Falling back to direct injection so the \(files.count) attachment(s) still reach the model; enable read_file to get on-demand reads.")
+                        } else if includeAbsolutePaths {
+                            // Write-capable profiles need the path, not just the name.
                             logger.info("[ATTACH] Direct injection for \(config.profile.profileType.rawValue) discloses absolute paths so the model can write back to the right file.")
                         }
+                        let (fileContext, docFailures) = await self.assembleTextFileContent(
+                            for: files, includeAbsolutePaths: includeAbsolutePaths
+                        )
                         if !fileContext.isEmpty {
                             attachmentContext = fileContext
                         }
                         // D3: report (traced + structured notice), keep answering.
                         await self.reportFileFailures(docFailures, span: context, continuation: continuation)
-
-                    case .stateless:
-                        // The manifest is a promise that `read_file` exists. If the profile
-                        // has it switched off, the paths point at nothing and the attachment
-                        // vanishes without a trace — so fall back to injecting the content
-                        // rather than silently dropping what the user attached.
-                        let paths = files.map { $0.url.path }.joined(separator: "\n")
-                        if config.profile.enabledToolNames.contains("read_file") {
-                            attachmentContext = "The user has attached the following files. Use the read_file tool to access them when needed:\n\(paths)"
-                            logger.info("[ATTACH] Stateless: handed \(files.count) path(s) to the agent to read on demand.")
-                        } else {
-                            logger.warning("[ATTACH] Profile '\(config.profile.displayName)' uses the stateless file strategy but has NO read_file tool enabled — the path manifest would reference a tool it cannot call. Falling back to direct injection so the \(files.count) attachment(s) still reach the model; enable read_file to get on-demand reads.")
-                            let (fileContext, docFailures) = await self.assembleTextFileContent(
-                                for: files, includeAbsolutePaths: true
-                            )
-                            if !fileContext.isEmpty { attachmentContext = fileContext }
-                            await self.reportFileFailures(docFailures, span: context, continuation: continuation)
-                        }
                     }
                 }
 
@@ -316,7 +321,12 @@ class BackendOrchestrationService {
                     }
                 }
 
-                if profileUsesConversationRAG && !conversationHistory.isEmpty && knowledgeStoreIsAvailable {
+                // RAG-34: nothing to search for in a query with no letter or digit (empty, emoji-only).
+                let queryIsRetrievable = QueryRewritingService.isRetrievable(retrievalQuery)
+                if profileUsesConversationRAG && !conversationHistory.isEmpty && knowledgeStoreIsAvailable && !queryIsRetrievable {
+                    logger.info("[RAG] Retrieval skipped — the query has no letters or digits (\(retrievalQuery.count) chars). CONSEQUENCE: no conversation memory this turn; an empty or emoji-only query has nothing to embed or match, so retrieval would only inject noise. (conv: \(conversationID) trace: \(context.traceID))")
+                }
+                if profileUsesConversationRAG && !conversationHistory.isEmpty && knowledgeStoreIsAvailable && queryIsRetrievable {
 
                     // The store is up — self-heal any advisory left from an earlier state.
                     await MainActor.run {
@@ -344,30 +354,54 @@ class BackendOrchestrationService {
                         ? true
                         : UserDefaults.standard.bool(forKey: AppSettings.ciFeatureRAGRewritingKey)
                     let queryForRAG: String
+                    // `retrievalQuery`, not `userQuery`: the model-facing query can carry a
+                    // decoration (Orb's spoken-style hint, a wake prompt) that would swamp the
+                    // embedder's 128-token window and light up BM25 on the hint's own words.
                     if isICEnabled && hasICModel && isRAGRewritingEnabled {
-                        queryForRAG = await QueryRewritingService.shared.rewriteQuery(userQuery, history: conversationHistory)
+                        queryForRAG = await QueryRewritingService.shared.rewriteQuery(retrievalQuery, history: conversationHistory)
                     } else {
-                        queryForRAG = userQuery
+                        queryForRAG = retrievalQuery
                     }
 
-                    ragContextString = await self.retrieveRAGContext(for: queryForRAG, lexicalQuery: userQuery, contextWindowTokens: contextWindowTokens, conversationID: conversationID, excludedMessageIDs: retrievalExcludedIDs)
+                    ragContextString = await Self.conversationMemoryContext(
+                        query: queryForRAG,
+                        lexicalQuery: retrievalQuery,
+                        profile: config.profile,
+                        conversationID: conversationID,
+                        originalHistory: history,
+                        shippedHistory: conversationHistory,
+                        currentTurnFiles: files,
+                        regenerating: regenerating,
+                        contextWindowTokens: contextWindowTokens,
+                        traceID: context.traceID
+                    )
                 }
 
                 // 3b. Conversation-memory indexing of current-turn attachments — AFTER
                 // retrieval, so a file can never re-surface in the same turn it was
                 // injected; later turns can recall it, including the >50K tail the
                 // injection budget cut off. Fire-and-forget: dispatch shouldn't wait on
-                // chunking/embedding. Stateless attachments are paths-only by design and
-                // are never indexed (the model never received their content).
+                // chunking/embedding. A path manifest is never indexed (the model received
+                // paths, not content); EVERY injecting path is — including the stateless
+                // fallback and the deprecated contextualRAG strategy (RAG-18).
                 if !files.isEmpty,
                    profileUsesConversationRAG,
-                   fileContextStrategy == .directInjection {
+                   attachmentDelivery.deliversContent {
                     let filesToIndex = files
+                    // Indexed under the message that CARRIED them, dated to its turn — a fresh
+                    // UUID left the vectors untraceable to any turn and outside a Redo's cutoff.
+                    let carrier = currentUserMessageID.flatMap { id in history.first { $0.id == id } }
+                    if carrier == nil {
+                        logger.warning("[RAG] Indexing \(filesToIndex.count) attachment(s) without their carrying message — id \(currentUserMessageID.map { String($0.uuidString.prefix(8)) } ?? "nil") is not in history. CONSEQUENCE: the file vectors get a synthetic message id and are dated to now, so a later Redo of this turn treats them as belonging to a later turn. (conv: \(conversationID) trace: \(context.traceID))")
+                    }
+                    let carrierID = carrier?.id ?? UUID()
+                    let carrierTimestamp = carrier?.timestamp ?? Date()
                     Task.detached(priority: .background) {
                         await RAGIndexingService.shared.indexAttachedFiles(
                             files: filesToIndex,
                             conversationID: conversationID,
-                            messageID: UUID()
+                            messageID: carrierID,
+                            messageTimestamp: carrierTimestamp
                         )
                     }
                 }
@@ -471,7 +505,7 @@ class BackendOrchestrationService {
                     let imageTokens: Int = {
                         guard config.profile.supportsVisionInput else { return 0 }
                         let current = PromptFitCheck.estimatedImageTokens(
-                            forImageURLs: files.map(\.url).filter { fileProcessorService.isImageFile(mimeType: fileProcessorService.getFileMimeType(for: $0), url: $0) },
+                            forImageURLs: files.map(\.url).filter { AttachmentClassifier.classify($0) == .image },
                             provider: primaryConfig?.apiProvider
                         )
                         // Prior-turn images are charged ONLY where they actually ship.
@@ -514,7 +548,8 @@ class BackendOrchestrationService {
                         // `<attached_images>` lines a vision profile actually ships were
                         // measured as zero — the gauge under-read the payload on exactly the
                         // conversations whose images already crowd the window.
-                        includeImageNames: config.profile.supportsVisionInput
+                        includeImageNames: config.profile.supportsVisionInput,
+                        carriesProse: config.profile.carriesHistoryProse
                     )
                     // Tool schemas ride EVERY request and scale with how many tools the user
                     // enabled; the flat layer overhead charged an agent the same as a bot.
@@ -821,10 +856,7 @@ class BackendOrchestrationService {
 
                             // 3. Resolve intent
                             // Extract attached image data from files if any are images
-                            let imageFiles = files.filter { file in
-                                let mimeType = self.fileProcessorService.getFileMimeType(for: file.url)
-                                return self.fileProcessorService.isImageFile(mimeType: mimeType, url: file.url)
-                            }
+                            let imageFiles = files.filter { AttachmentClassifier.classify($0) == .image }
                             // #24: read the image bytes OFF the main actor — same sync-`Data(contentsOf:)`
                             // hitch as `buildImagePayload`, here on the image-gen intent path.
                             // Normalize each source image to JPEG: the image-to-image providers
@@ -1012,40 +1044,115 @@ class BackendOrchestrationService {
         }
     }
 
-    private func isMLXProfile(_ profile: BackendProfileModel) -> Bool {
-        switch profile.details {
-        case .bot(let config): return config.llmConfig.apiProvider == .mlx
-        case .agent(let config): return config.llmConfig.apiProvider == .mlx
-        case .imageGen(let config): return config.llmConfig.apiProvider == .mlx
-        case .code(let config): return config.llmConfig.apiProvider == .mlx
-        case .workflow: return false
+    // MARK: - Conversation Memory (Section 3)
+
+    /// What conversation-memory retrieval must not return for this turn.
+    ///
+    /// ⚠️ Excludes what the request CARRIES IN FULL — not everything it fetched. The old rule
+    /// excluded every message of the ≤300-row history fetch while the prompt carries ~10 turns,
+    /// further cut to 60% of the window: turns 11..300 were neither in the prompt nor
+    /// retrievable, so conversation memory could only ever recall attached files (RAG-1).
+    ///
+    /// Carried in full = the native turns the executors build from `shippedHistory`, asked of
+    /// the same builder with the same strategy, budget and tool flag the fit check uses. The
+    /// episodic XML is NOT a full carrier — it clips each question to 80 chars and each answer
+    /// to 200 — so a profile without native turns (MLX) excludes only the current message, and
+    /// retrieval may restore a recent answer the model otherwise sees only as a clip.
+    ///
+    /// Also excluded: every row the request removed from history on purpose (the current query
+    /// — whose fire-and-forget indexing can beat retrieval, so the query retrieved its own echo —
+    /// and error rows), this turn's attachments by path (RAG-15), and on Redo/Resume the reply
+    /// being regenerated plus everything indexed at or after it (RAG-4).
+    static func retrievalExclusion(
+        profile: BackendProfileModel,
+        originalHistory: [ChatMessage],
+        shippedHistory: [ChatMessage],
+        currentTurnFiles: [FileSystemItem],
+        regenerating: RegenerationBoundary?,
+        contextWindowTokens: Int
+    ) -> RetrievalExclusion {
+        let carriedInFull: Set<UUID> = profile.carriesHistoryProse
+            ? NativeHistoryConverter.buildCarryingProvenance(
+                strategy: profile.resolvedHistoryStrategy ?? .recentHistory,
+                from: shippedHistory,
+                charBudget: PromptFitCheck.historyCharBudget(forContextWindow: contextWindowTokens),
+                // `false`, as the fit check sizes the same turns: with history images the
+                // request's trim can keep one fewer pair, so at most one carried turn is excluded
+                // here that the request dropped — retrievable again from the next turn on.
+                includeImages: false,
+                toolsAvailable: profile.profileType != .bot
+            ).messageIDsCarriedInFull
+            : []
+        let removedFromHistory = Set(originalHistory.map(\.id)).subtracting(shippedHistory.map(\.id))
+
+        var exclusion = RetrievalExclusion(
+            messageIDs: carriedInFull.union(removedFromHistory),
+            sourceIdentifiers: Set(currentTurnFiles.map(\.url.path))
+        )
+        if let regenerating {
+            exclusion.messageIDs.insert(regenerating.messageID)
+            exclusion.indexedAtOrAfter = regenerating.timestamp
         }
+        return exclusion
     }
-    
+
+    /// Section 3's retrieval: the exclusion for this turn, then the scoped search. Static and
+    /// internal so tests drive the SAME composition the send path runs, against the test host's
+    /// redirected store.
+    static func conversationMemoryContext(
+        query: String,
+        lexicalQuery: String,
+        profile: BackendProfileModel,
+        conversationID: UUID,
+        originalHistory: [ChatMessage],
+        shippedHistory: [ChatMessage],
+        currentTurnFiles: [FileSystemItem],
+        regenerating: RegenerationBoundary?,
+        contextWindowTokens: Int,
+        traceID: String
+    ) async -> String? {
+        let exclusion = retrievalExclusion(
+            profile: profile,
+            originalHistory: originalHistory,
+            shippedHistory: shippedHistory,
+            currentTurnFiles: currentTurnFiles,
+            regenerating: regenerating,
+            contextWindowTokens: contextWindowTokens
+        )
+        logger.debug("[RAG] Exclusion for conv \(conversationID.uuidString.prefix(8)): \(exclusion.messageIDs.count) message(s) carried in full or removed, \(exclusion.sourceIdentifiers.count) current-turn file(s), redo cutoff: \(exclusion.indexedAtOrAfter != nil). (trace: \(traceID))")
+        return await retrieveRAGContext(for: query, lexicalQuery: lexicalQuery,
+                                        contextWindowTokens: contextWindowTokens,
+                                        conversationID: conversationID, exclusion: exclusion)
+    }
+
     /// - Parameters:
     ///   - userQuery: The (possibly rewritten) query used for the EMBEDDING search.
     ///   - lexicalQuery: The user's RAW typed query, used for exact-match token
     ///     boosting — the raw text is the ground truth for symbol names, and it
     ///     can't be corrupted by a hallucinated rewrite.
-    ///   - excludedMessageIDs: Message IDs whose indexed parents must not be
-    ///     re-injected — everything already visible in history PLUS the current
-    ///     user message (whose fire-and-forget indexing can beat retrieval, making
-    ///     the query retrieve its own echo).
-    private func retrieveRAGContext(for userQuery: String, lexicalQuery: String, contextWindowTokens: Int, conversationID: UUID, excludedMessageIDs: Set<UUID>) async -> String? {
-        logger.info("RAG: Attempting to retrieve context for conversation: \(conversationID.uuidString)")
+    ///   - exclusion: Parents that must not be re-injected (`retrievalExclusion`).
+    ///
+    /// ⚠️ `nonisolated` — the whole point (CR-29). This type is `@MainActor`, and the scoped scan
+    /// below is SYNCHRONOUS: fetch every chunk, dense + BM25 + RRF. Isolated, it ran on the main
+    /// thread for every bot/agent send — 147 ms with a 300-page PDF, 1.6 s with one large file
+    /// (-O build). Nonisolated async runs on the cooperative pool and inherits the caller's
+    /// cancellation; `VectorStoreService` is Sendable and its results are copied values.
+    nonisolated private static func retrieveRAGContext(for userQuery: String, lexicalQuery: String, contextWindowTokens: Int, conversationID: UUID, exclusion: RetrievalExclusion) async -> String? {
+        let conv = conversationID.uuidString.prefix(8)
+        logger.info("[RAG] Retrieving conversation memory (conv \(conv)).")
 
-        guard let queryEmbedding = await embeddingService.generateEmbedding(for: userQuery) else {
-            logger.warning("RAG: Could not generate embedding for query.")
+        guard let queryEmbedding = await EmbeddingService.shared.generateEmbedding(for: userQuery) else {
+            logger.warning("[RAG] The query could not be embedded (conv \(conv)). CONSEQUENCE: no conversation memory this turn; the request goes out without it.")
             return nil
         }
 
         // Retrieve relevant documents — history/self exclusion happens INSIDE the
         // ranker so excluded parents can't occupy limit slots (post-filtering here
         // starved turns to 0 injected docs while injectable chunks sat at rank 4).
-        let hits = vectorStoreService.findNearest(to: queryEmbedding, queryText: lexicalQuery, limit: 3, conversationID: conversationID, excludedParentMessageIDs: excludedMessageIDs)
+        let hits = VectorStoreService.shared.findNearest(to: queryEmbedding, queryText: lexicalQuery, limit: 3, conversationID: conversationID, exclusion: exclusion)
 
         guard !hits.isEmpty else {
-            logger.info("RAG: Vector store returned 0 documents.")
+            logger.info("[RAG] Nothing in conversation memory passed the relevance threshold (conv \(conv)) — none injected.")
             return nil
         }
 
@@ -1053,16 +1160,16 @@ class BackendOrchestrationService {
         // collection — anything caught here indicates an exclusion leak upstream,
         // so the log doubles as a tripwire.
         let filteredHits = hits.filter { hit in
-            !excludedMessageIDs.contains(hit.parent.sourceMessageID)
+            !exclusion.excludes(hit)
         }
 
         let removedCount = hits.count - filteredHits.count
         if removedCount > 0 {
-            logger.warning("RAG: Dedup tripwire removed \(removedCount)/\(hits.count) documents the ranker should have excluded.")
+            logger.warning("[RAG] Dedup tripwire removed \(removedCount)/\(hits.count) document(s) the ranker should have excluded (conv \(conv)). CONSEQUENCE: none for this turn (they are dropped here), but the ranker's exclusion has a leak — fewer than the limit may be injected.")
         }
 
         guard !filteredHits.isEmpty else {
-            logger.info("RAG: No relevant context found (all \(hits.count) documents were duplicates of history).")
+            logger.info("[RAG] All \(hits.count) retrieved document(s) were already in the prompt (conv \(conv)) — none injected.")
             return nil
         }
 
@@ -1074,15 +1181,15 @@ class BackendOrchestrationService {
         // turns) + its match distance — without this, a wrong answer can't be
         // triaged to "retrieved the wrong doc" vs "model missed it".
         let hitsSummary = filteredHits.map { hit -> String in
-            let identifier = hit.parent.sourceIdentifier
+            let identifier = hit.sourceIdentifier
             let name = identifier.contains("/")
                 ? (identifier as NSString).lastPathComponent
-                : "msg:\(hit.parent.sourceMessageID.uuidString.prefix(8))"
+                : "msg:\(hit.sourceMessageID.uuidString.prefix(8))"
             return "\(name) d=\(String(format: "%.3f", hit.distance))"
         }.joined(separator: ", ")
-        logger.info("RAG: Injecting \(filteredHits.count) document(s) [\(hitsSummary)] (budget: \(budgets.total) chars for \(contextWindowTokens)-token window).")
+        logger.info("[RAG] Injecting \(filteredHits.count) document(s) [\(hitsSummary)] (conv \(conv); budget \(budgets.total) chars for a \(contextWindowTokens)-token window).")
         return RAGRetrievalBudget.assemble(
-            filteredHits.map { (text: $0.parent.fullTextContent, anchor: $0.bestChunkText) },
+            filteredHits.map { (text: $0.fullTextContent, anchor: $0.bestChunkText) },
             perParent: budgets.perParent,
             total: budgets.total
         )
@@ -1106,9 +1213,9 @@ class BackendOrchestrationService {
         // cheap UTType lookups. Capture only Sendable values for the off-actor read below.
         var items: [(url: URL, mime: String, name: String)] = []
         for file in files {
-            let mime = fileProcessorService.getFileMimeType(for: file.url)
-            guard fileProcessorService.isImageFile(mimeType: mime, url: file.url) else { continue }
-            items.append((file.url, mime, file.name))
+            // ⚠️ Shared with the transcript (`MessageAttachmentBuilder`) — see AttachmentClassifier.
+            guard AttachmentClassifier.classify(file) == .image else { continue }
+            items.append((file.url, fileProcessorService.getFileMimeType(for: file.url), file.name))
         }
         guard !items.isEmpty else { return (nil, []) }
 
@@ -1172,36 +1279,57 @@ class BackendOrchestrationService {
     ///   `FilePathResolver` anchors to HOME, silently creating a stray file instead of
     ///   editing the user's. Bots stay name-only; they have no tools to act on a path and
     ///   the extra characters would just cost context.
-    private func assembleTextFileContent(for files: [FileSystemItem], includeAbsolutePaths: Bool = false) async -> (content: String, failures: [FileRetrievalError]) {
-        var assembledContent = ""
+    /// Internal (not private) so `AttachmentDeliveryAgreementTests` can hold it against the
+    /// transcript's record of the same files — the agreement this whole path exists for.
+    func assembleTextFileContent(for files: [FileSystemItem], includeAbsolutePaths: Bool = false) async -> (content: String, failures: [FileRetrievalError]) {
+        var readable: [DirectInjectionPlan.File] = []
         var failures: [FileRetrievalError] = []
 
         for file in files {
-            let mime = fileProcessorService.getFileMimeType(for: file.url)
-            if fileProcessorService.isImageFile(mimeType: mime, url: file.url) { continue }
-
-            guard assembledContent.count < directInjectionTotalBudget else {
-                failures.append(.tooLarge(path: file.url.path))
+            // Images ride `buildImagePayload`. Same classifier as the transcript, so a file is
+            // never recorded as one kind and delivered as another (ATT-1).
+            switch AttachmentClassifier.classify(file) {
+            case .image:
                 continue
+            case .folder:
+                // ATT-3: injection sends CONTENTS and a folder has none. Reported as `.isFolder`
+                // rather than attempting a read, whose failure surfaced as "Couldn't read —
+                // Try re-attaching": advice that can never work. Intake refuses folders for
+                // injecting profiles; this catches one attached under a different profile.
+                failures.append(.isFolder(path: file.url.path))
+                continue
+            case .document, .text, .video, .binary:
+                break
             }
 
-            let remainingBudget = min(
-                directInjectionBudgetPerFile,
-                directInjectionTotalBudget - assembledContent.count
-            )
-
             do {
-                let content = try await fileProcessorService.readFileContentOrThrow(for: file.url, maxSize: remainingBudget)
-                let label = includeAbsolutePaths ? "\(file.name) (\(file.url.path))" : file.name
-                assembledContent += "\n\n--- Start of file: \(label) ---\n\(content)\n--- End of file: \(file.name) ---"
-                // ATT-1 visibility: this is the authoritative "the model saw it"
-                // record — pair it against MessageAttachmentBuilder's persistence
-                // logs to trace any transcript/model-input divergence.
-                logger.debug("Direct-injected '\(file.name)' (\(content.count) chars) into the model context.")
+                // Read up to the transcript's cap, NOT the injection budget: the plan below cuts
+                // an over-budget file to what fits. Reading at the budget made the reader THROW
+                // for it, so the model received nothing while the transcript stored it whole.
+                let content = try await fileProcessorService.readFileContentOrThrow(for: file.url, maxSize: DirectInjectionBudget.readCap)
+                readable.append(.init(name: file.name, path: file.url.path, content: content))
             } catch let retrievalError as FileRetrievalError {
                 failures.append(retrievalError)
             } catch {
                 failures.append(.readFailed(path: file.url.path, underlying: error.localizedDescription))
+            }
+        }
+
+        // ⚠️ The ONE injection rule — `MessageAttachmentBuilder` runs the same plan to record
+        // each file's delivery on the transcript, and the gauge prices it.
+        let (assembledContent, deliveries) = DirectInjectionPlan.assemble(readable, includeAbsolutePaths: includeAbsolutePaths)
+        for (file, delivery) in zip(readable, deliveries) {
+            switch delivery {
+            case .full:
+                // ATT-1 visibility: the authoritative "the model saw it" record — pair it
+                // against MessageAttachmentBuilder's persistence logs.
+                logger.debug("Direct-injected '\(file.name)' (\(file.content.count) chars) into the model context.")
+            case .truncated(let sent, let total):
+                logger.notice("[ATTACH] '\(file.name)' CUT to its first \(sent) of \(total) chars to fit the injection budget. CONSEQUENCE: the model sees a truncation marker and only that part; the transcript chip says so.")
+            case .omitted:
+                failures.append(.tooLarge(path: file.path))
+            case .pathOnly:
+                break
             }
         }
 
@@ -1252,25 +1380,34 @@ class BackendOrchestrationService {
     /// Extracts text from knowledge source files for the system `<knowledge_base>`
     /// layer. Returns the assembled content plus a typed list of sources that
     /// couldn't be read — previously silent skips, now reported like attachments.
-    private func assembleKnowledgeSourceContent(sources: [KnowledgeSource]) async -> (content: String, failures: [FileRetrievalError]) {
-        var assembled = ""
+    /// Knowledge sources, injected through the SAME `DirectInjectionPlan` as attachments: an
+    /// over-budget source is CUT with a marker instead of being dropped whole (user decision
+    /// 2026-10-05). The profile editor warns per source, from the same plan, before any send.
+    /// Internal (not private) for the agreement test.
+    func assembleKnowledgeSourceContent(sources: [KnowledgeSource]) async -> (content: String, failures: [FileRetrievalError]) {
+        var readable: [DirectInjectionPlan.File] = []
         var failures: [FileRetrievalError] = []
         for source in sources {
-            guard assembled.count < directInjectionTotalBudget else {
-                failures.append(.tooLarge(path: source.location))
-                continue
-            }
-            let remainingBudget = min(
-                directInjectionBudgetPerFile,
-                directInjectionTotalBudget - assembled.count
-            )
             do {
-                let content = try await fileProcessorService.readFileContentOrThrow(for: source.url, maxSize: remainingBudget)
-                assembled += "\n\n--- Knowledge: \(source.fileName) ---\n\(content)"
+                // Read to the cap, not the budget — the plan cuts. Reading at the budget made the
+                // reader THROW for an over-budget source, so none of it reached the model.
+                let content = try await fileProcessorService.readFileContentOrThrow(for: source.url, maxSize: DirectInjectionBudget.readCap)
+                readable.append(.init(name: source.fileName, path: source.location, content: content))
             } catch let retrievalError as FileRetrievalError {
                 failures.append(retrievalError)
             } catch {
                 failures.append(.readFailed(path: source.location, underlying: error.localizedDescription))
+            }
+        }
+        let (assembled, deliveries) = DirectInjectionPlan.assemble(readable, layout: .knowledge)
+        for (file, delivery) in zip(readable, deliveries) {
+            switch delivery {
+            case .truncated(let sent, let total):
+                logger.notice("[KNOWLEDGE] '\(file.name)' CUT to its first \(sent) of \(total) chars to fit the injection budget. CONSEQUENCE: the model sees a truncation marker and only that part; the profile editor warns about this source.")
+            case .omitted:
+                failures.append(.tooLarge(path: file.path))
+            case .full, .pathOnly:
+                break
             }
         }
         return (assembled, failures)
@@ -1318,23 +1455,41 @@ enum RAGRetrievalBudget {
         perParent perParentBudget: Int = perParent,
         total totalBudget: Int = total
     ) -> String {
+        // ⚠️ The budget covers EVERYTHING emitted (RAG-37): the separators between documents and
+        // every marker `window` adds. It used to count only the excerpts, so the output ran
+        // ~100–200 chars over per windowed document — material at the 1,200-char floor a small
+        // local window gets.
+        let separator = "\n\n"
         var assembled: [String] = []
         var used = 0
-        for doc in docs {
-            guard used < totalBudget else { break }
-            let budget = min(perParentBudget, totalBudget - used)
-            let windowed = window(for: doc.text, anchor: doc.anchor, budget: budget)
+        for (index, doc) in docs.enumerated() {
+            let overhead = assembled.isEmpty ? 0 : separator.count
+            let remaining = totalBudget - used - overhead
+            guard remaining >= minUsefulExcerpt else {
+                let dropped = docs.count - index
+                logger.info("[RAG] Retrieved-context budget (\(totalBudget) chars) spent after \(assembled.count) of \(docs.count) document(s) — \(dropped) lower-ranked document(s) NOT injected. CONSEQUENCE: the model does not see them this turn; they remain retrievable on later turns.")
+                break
+            }
+            let windowed = window(for: doc.text, anchor: doc.anchor, budget: min(perParentBudget, remaining))
             assembled.append(windowed)
-            used += windowed.count
+            used += overhead + windowed.count
         }
-        return assembled.joined(separator: "\n\n")
+        return assembled.joined(separator: separator)
     }
+
+    /// Smallest excerpt worth injecting: below this, the remaining budget would deliver a sliver
+    /// of a document — markers and a few words — rather than anything the model can use.
+    static let minUsefulExcerpt = 120
 
     /// A `budget`-sized excerpt of `text` centered on `anchor` (the matched chunk).
     /// Keeps the document's identity line (`[File: …]`) when the head is cut, and
     /// marks trimmed edges so the model knows the text is partial.
+    ///
+    /// ⚠️ The result is AT MOST `budget` characters, markers and identity line included (RAG-37):
+    /// their size is reserved before the excerpt is cut, not added after it.
     static func window(for text: String, anchor: String?, budget: Int) -> String {
         guard text.count > budget else { return text }
+        let tailMarker = "\n… [truncated]"
 
         // Code chunks carry a "[lang Context]:\n" retrieval prefix that is not part
         // of the stored document text — strip it or the anchor never matches and
@@ -1357,16 +1512,24 @@ enum RAGRetrievalBudget {
         }
 
         guard let matched = anchorRange else {
-            return String(text.prefix(budget)) + "\n… [truncated]"
+            return String(text.prefix(max(0, budget - tailMarker.count))) + tailMarker
         }
+
+        // Reserve the decorations first. The omitted-count marker is sized for the LARGEST count
+        // this text could produce, so the reservation is an upper bound.
+        let firstLine = text.prefix(while: { $0 != "\n" })
+        let header = firstLine.hasPrefix("[File:") ? String(firstLine) + "\n" : ""
+        let omittedMarkerMax = "… [\(text.count) earlier chars omitted]\n".count
+        let reserved = header.count + omittedMarkerMax + tailMarker.count
+        let inner = reserved < budget / 2 ? budget - reserved : budget / 2
 
         let matchStart = text.distance(from: text.startIndex, to: matched.lowerBound)
         let matchLength = text.distance(from: matched.lowerBound, to: matched.upperBound)
         let center = matchStart + matchLength / 2
 
-        var start = max(0, center - budget / 2)
-        let end = min(text.count, start + budget)
-        start = max(0, end - budget)
+        var start = max(0, center - inner / 2)
+        let end = min(text.count, start + inner)
+        start = max(0, end - inner)
 
         let winStart = text.index(text.startIndex, offsetBy: start)
         let winEnd = text.index(text.startIndex, offsetBy: end)
@@ -1375,14 +1538,13 @@ enum RAGRetrievalBudget {
         if start > 0 {
             // Preserve the "[File: name]" identity line so the model knows the
             // excerpt's source even when the head is trimmed away.
-            let firstLine = text.prefix(while: { $0 != "\n" })
-            let header = firstLine.hasPrefix("[File:") ? String(firstLine) + "\n" : ""
             excerpt = header + "… [\(start) earlier chars omitted]\n" + excerpt
         }
         if end < text.count {
-            excerpt += "\n… [truncated]"
+            excerpt += tailMarker
         }
-        return excerpt
+        // Only an identity line longer than half the budget could break the bound — clip, never overshoot.
+        return excerpt.count <= budget ? excerpt : String(excerpt.prefix(budget))
     }
 }
 
@@ -1396,6 +1558,10 @@ enum DirectInjectionBudget {
     static let perFile = 50_000
     /// Maximum total characters injected across all files (~50K tokens).
     static let total = 200_000
+    /// Most characters READ from one attachment. Past it the file isn't read at all (the
+    /// reader throws `.tooLarge`); under it, `DirectInjectionPlan` cuts to the budget. Shared
+    /// with the transcript, whose reader uses the same cap.
+    static let readCap = 500_000
 }
 
 // MARK: - Stateless Knowledge Manifest
@@ -1521,23 +1687,17 @@ enum PromptFitCheck {
             ).count
         }
 
-        var assembled = 0
+        // The backend's own plan over stat'd sizes, with the knowledge wrapper — so an over-budget
+        // source is priced as the slice that ships (it is CUT, 2026-10-05), not as nothing.
+        // A source that cannot be stat'd (missing) is skipped, as the reader fails on it.
+        var sizes: [Int] = []
+        var wrappers: [Int] = []
         for source in sources {
-            // `assembled` only grows, so once the total budget is gone every remaining source
-            // is a `.tooLarge` failure — the assembler keeps looping to record them, this stops.
-            guard assembled < DirectInjectionBudget.total else { break }
-            let remainingBudget = min(
-                DirectInjectionBudget.perFile,
-                DirectInjectionBudget.total - assembled
-            )
-            guard let bytes = (try? source.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
-                  bytes <= remainingBudget else { continue }
-            // The assembler's own wrapper literal, so its width is derived rather than guessed.
-            // The wrapper lands on top of `remainingBudget`, exactly as it does there, which is
-            // why the running total can end a hair above `total`.
-            assembled += "\n\n--- Knowledge: \(source.fileName) ---\n".count + bytes
+            guard let bytes = (try? source.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else { continue }
+            sizes.append(bytes)
+            wrappers.append(DirectInjectionPlan.wrapperWidth(name: source.fileName, path: source.location, layout: .knowledge))
         }
-        return assembled
+        return attachmentInjectionChars(forFileSizes: sizes, wrapperWidths: wrappers)
     }
 
     /// Characters the tool schemas contribute to the prompt.
@@ -1611,21 +1771,36 @@ enum PromptFitCheck {
     ///   the profiles whose images already push them closest to the window. That is an
     ///   UNDER-count, i.e. the direction that fails to raise a banner. Defaulted to `false`
     ///   only so call sites not yet updated keep their current arithmetic.
+    /// - Parameter carriesProse: `BackendProfileModel.carriesHistoryProse` — whether native turns
+    ///   ship. When they do, the request leaves out the `<outcome>` clips of answers those turns
+    ///   carry in full, so the gauge asks the converter the same question to size the same XML.
+    ///   Defaulted to false (outcomes kept) so un-updated call sites over-read, never under-read.
     static func estimatedEpisodicChars(
         in history: [ChatMessage],
         strategy: HistoryStrategy?,
         contextWindow: Int,
         toolsAvailable: Bool = true,
-        includeImageNames: Bool = false
+        includeImageNames: Bool = false,
+        carriesProse: Bool = false
     ) -> Int {
         guard !history.isEmpty else { return 0 }
-        let budget = ActionEffect.diffBudget(forHistoryCharBudget: historyCharBudget(forContextWindow: contextWindow))
+        let charBudget = historyCharBudget(forContextWindow: contextWindow)
+        let budget = ActionEffect.diffBudget(forHistoryCharBudget: charBudget)
+        // `includeImages: false`, as `estimatedHistoryProseChars` sizes the same turns. With history
+        // images the request's budget trim can keep one fewer turn; then the gauge omits an outcome
+        // the request keeps and under-reads by at most one 200-char clip.
+        let carried = carriesProse
+            ? NativeHistoryConverter.buildCarryingProvenance(
+                strategy: strategy ?? .recentHistory, from: history, charBudget: charBudget,
+                includeImages: false, toolsAvailable: toolsAvailable).fullAnswerMessageIDs
+            : []
         return EpisodicHistoryFormatter.build(
             strategy: strategy ?? .recentHistory,
             from: history,
             includeImageNames: includeImageNames,
             effectBudget: budget,
-            toolsAvailable: toolsAvailable
+            toolsAvailable: toolsAvailable,
+            answersCarriedNatively: carried
         ).count
     }
     /// The chars↔tokens ratio for FIT CHECKING and every char-denominated BUDGET, in both
@@ -1669,7 +1844,7 @@ enum PromptFitCheck {
     /// Token cost of the images in a set of composer attachments.
     ///
     /// Images were invisible to this gauge until now — `estimatedAttachmentChars`
-    /// filters them out by extension, so attaching a 6 MB screenshot to an 8K-window
+    /// leaves them out (they are not text), so attaching a 6 MB screenshot to an 8K-window
     /// local model produced no warning whatsoever. Dimensions are read from each
     /// file's header (cheap, no decode); an unreadable header falls back to the flat
     /// per-image estimate rather than dropping the image from the tally.
@@ -1727,31 +1902,41 @@ enum PromptFitCheck {
         tokens >= 1_000 ? "\(Int((Double(tokens) / 1_000).rounded()))K" : "\(tokens)"
     }
 
-    /// Chars the attachments contribute once the reader has had its way with them.
+    /// Chars the attachments contribute once the injection plan has had its way with them.
     ///
-    /// Two behaviours the old clamp got wrong, both now exact:
+    /// Runs `DirectInjectionPlan.allocate` — the backend's own rule — over stat'd sizes, so the
+    /// gauge cannot drift from what ships:
+    ///  • a file within the remaining budget is charged in full, plus its wrapper;
+    ///  • a file over it is charged the slice that fits plus the truncation marker — it is CUT,
+    ///    not dropped (user decision 2026-10-04; it used to be refused whole);
+    ///  • a file left with less than `minimumSlice` of room contributes nothing.
     ///
-    /// 1. **A file over the per-file budget contributes ZERO, not the budget.**
-    ///    `readFileContentOrThrow` THROWS `.tooLarge` when `content.count > maxSize` — it
-    ///    does not truncate — and `assembleTextFileContent` records the failure and moves on.
-    ///    Clamping to 50,000 charged the full budget for a file the model never sees.
-    /// 2. **Each included file carries wrapper text.** `--- Start of file: <label> ---` …
-    ///    `--- End of file: <name> ---`, where the label gains the absolute path on
-    ///    write-capable profiles. Small per file, real across many.
-    ///
-    /// Sizes are STAT'd bytes while the reader's limit is decoded CHARS. For UTF-8 text
-    /// chars ≤ bytes, so a file under the budget in bytes is certainly under it in chars;
-    /// above the budget it is dropped in the common single-byte case. That is the direction
-    /// this errs, and it errs toward the truth far more often than the old clamp did.
-    static func attachmentInjectionChars(forFileSizes sizes: [Int], wrapperCharsPerFile: Int) -> Int {
+    /// Sizes are stat'd BYTES while the plan counts decoded CHARS; for UTF-8 text chars ≤ bytes,
+    /// so this errs toward over-charging multi-byte text, never under.
+    static func attachmentInjectionChars(forFileSizes allSizes: [Int], wrapperWidths allWrappers: [Int]) -> Int {
+        // A file past the READ cap is never read (the reader throws `.tooLarge`), so it never
+        // reaches the plan — drop it before allocating, exactly as the assembler never sees it.
+        let kept = zip(allSizes, allWrappers).filter { $0.0 <= DirectInjectionBudget.readCap }
+        let sizes = kept.map(\.0)
+        let wrapperWidths = kept.map(\.1)
+        let deliveries = DirectInjectionPlan.allocate(lengths: sizes, wrapperWidths: wrapperWidths)
         var total = 0
-        for size in sizes {
-            guard total < DirectInjectionBudget.total else { break }
-            let bytes = max(size, 0)
-            guard bytes <= DirectInjectionBudget.perFile else { continue }  // dropped, not clipped
-            total += bytes + wrapperCharsPerFile
+        for ((size, wrapper), delivery) in zip(zip(sizes, wrapperWidths), deliveries) {
+            switch delivery {
+            case .full:
+                total += wrapper + max(size, 0)
+            case .truncated(let sent, let fileTotal):
+                total += wrapper + sent + DirectInjectionPlan.truncationMarker(sent: sent, total: fileTotal).count
+            case .omitted, .pathOnly:
+                continue
+            }
         }
-        return min(total, DirectInjectionBudget.total)
+        return total
+    }
+
+    /// Convenience for callers pricing a uniform wrapper.
+    static func attachmentInjectionChars(forFileSizes sizes: [Int], wrapperCharsPerFile: Int) -> Int {
+        attachmentInjectionChars(forFileSizes: sizes, wrapperWidths: Array(repeating: wrapperCharsPerFile, count: sizes.count))
     }
 
     /// Chars the attachments contribute for THIS profile, honouring its file strategy.
@@ -1768,27 +1953,30 @@ enum PromptFitCheck {
     ) -> Int {
         guard !files.isEmpty else { return 0 }
 
-        let injectable = PreSendFitHint.estimatableSizes(of: files)
-        let disclosesPaths = profile.profileType == .agent || profile.profileType == .code
-
-        if profile.resolvedFileContextStrategy == .stateless,
-           profile.enabledToolNames.contains("read_file") {
+        // ⚠️ The SAME mode resolution the orchestrator and the transcript use. This used to be
+        // re-derived here and missed that the stateless-without-`read_file` fallback injects
+        // WITH paths, under-pricing every wrapper on those profiles.
+        switch AttachmentDeliveryMode.resolve(for: profile) {
+        case .pathManifest:
             // Mirrors the manifest the orchestrator builds: one preamble line plus one
             // absolute path per file. Measured, not guessed.
             let preamble = "The user has attached the following files. Use the read_file tool to access them when needed:\n"
             return preamble.count + files.map { $0.url.path }.joined(separator: "\n").count
-        }
 
-        // `--- Start of file: <name> (<path>) ---\n` + `\n--- End of file: <name> ---` plus
-        // the leading blank line. Path only on write-capable profiles, matching
-        // `assembleTextFileContent(includeAbsolutePaths:)`.
-        let wrapper = files.reduce(0) { running, file in
-            let label = disclosesPaths ? "\(file.name) (\(file.url.path))" : file.name
-            return running + 55 + label.count + file.name.count
+        case .inject(let includeAbsolutePaths):
+            // Per file, paired: the size (`PreSendFitHint.estimatableSizes` — images are priced
+            // in tokens elsewhere, binary documents not at all) and the exact wrapper
+            // `DirectInjectionPlan.assemble` will emit.
+            var sizes: [Int] = []
+            var wrappers: [Int] = []
+            for file in files {
+                guard let size = PreSendFitHint.estimatableSizes(of: [file]).first else { continue }
+                let label = DirectInjectionPlan.wrapperLabel(name: file.name, path: file.url.path, includeAbsolutePaths: includeAbsolutePaths)
+                sizes.append(size)
+                wrappers.append(DirectInjectionPlan.wrapperWidth(name: file.name, label: label))
+            }
+            return attachmentInjectionChars(forFileSizes: sizes, wrapperWidths: wrappers)
         }
-        let averageWrapper = files.isEmpty ? 0 : wrapper / files.count
-
-        return attachmentInjectionChars(forFileSizes: injectable, wrapperCharsPerFile: averageWrapper)
     }
 }
 
@@ -1885,7 +2073,7 @@ extension BackendProfileModel {
     /// the flat `layerOverheadChars` charged them identically.
     ///
     /// ⚠️⚠️ Includes the CONTROL-PLANE tools since 2026-09-20. `AgentConnect` appends
-    /// `final_answer`, `ask_user` and — conditionally — `update_project_context`, `load_skill`
+    /// `final_answer`, `ask_user` and — conditionally — the Code memory tools, `load_skill`
     /// and `get_conversation_history` at request time. This returned only `config.tools`, so
     /// those were never submitted for pricing at all, on top of costing 0 in the snapshot.
     ///
@@ -1920,10 +2108,8 @@ extension BackendProfileModel {
         // the ReAct loop, and `ask_user` is always appended by `resolveExecutableTools`.
         var names = ["final_answer", "ask_user"]
 
-        // Code profiles get the project-memory tool, gated at runtime behind a successful read.
-        // Charged unconditionally: the gate decides WHEN it becomes callable, not whether its
-        // schema rides the request.
-        if case .code = details { names.append("update_project_context") }
+        // Code profiles get the project-memory tools on every run.
+        if case .code = details { names.append(contentsOf: ["remember", "forget", "recall"]) }
 
         // ⚠️ An UPPER BOUND. `AgentConnect` injects `load_skill` only once the manifests actually
         // resolve and come back non-empty; the profile can only see that skills are referenced.

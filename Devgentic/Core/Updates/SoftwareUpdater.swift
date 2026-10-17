@@ -66,6 +66,12 @@ final class SoftwareUpdater: ObservableObject {
         }
     }
 
+    /// When Sparkle last checked the feed (manual or scheduled), or nil if it never has — or
+    /// under XCTest, where the updater does not exist.
+    var lastUpdateCheckDate: Date? {
+        controller?.updater.lastUpdateCheckDate
+    }
+
     /// The user-initiated check behind the "Check for Updates…" menu item. Unlike a background
     /// check, this one shows its result either way — including "you're up to date" and any error
     /// reaching the feed.

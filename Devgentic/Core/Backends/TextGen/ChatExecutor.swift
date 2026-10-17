@@ -107,7 +107,7 @@ actor ChatExecutor: Executor {
                     logger.info("--- 🤖 CHAT EXECUTOR START 🤖 ---")
                     logger.info("Model: \(model.modelName)")
                     if let instructions = input.instructions {
-                        logger.info("Instructions: \(instructions.prefix(100))...")
+                        logger.info("Instructions: \(instructions.count) chars") // CR-57: instructions are content
                     }
 
                     onTraceUpdate(AgentTraceLog(
@@ -219,7 +219,17 @@ actor ChatExecutor: Executor {
                             try Task.checkCancellation()
                             var emittedThisAttempt = false
                             do {
-                                for try await chunk in model.streamWithUsage(messages: messages, tools: nil, onUsage: { usageBox.value = $0 }) {
+                                // The conversation names the MLX prompt cache (`MLXPromptCache`), so a
+                                // Bot conversation's next message reuses the prompt this one shares
+                                // with it (layout B keeps that prefix stable). Set around THIS call
+                                // only, and never for a workflow node: one-shot calls that share a
+                                // run's conversation would only evict each other. Read when the
+                                // stream starts; non-MLX providers ignore it.
+                                let promptCacheKey = Self.promptCacheKey(for: input)
+                                let stream = MLXPromptCacheScope.$key.withValue(promptCacheKey) {
+                                    model.streamWithUsage(messages: messages, tools: nil, onUsage: { usageBox.value = $0 })
+                                }
+                                for try await chunk in stream {
                                     try Task.checkCancellation()
                                     emittedThisAttempt = true
                                     fullResponse += chunk
@@ -264,7 +274,8 @@ actor ChatExecutor: Executor {
                         logger.notice("--- 🚫 CHAT EXECUTOR TORN DOWN (cancelled mid-stream) 🚫 — \(fullResponse.count) chars of partial output DISCARDED; the consumer is gone (Stop, node timeout, or per-node skip). CONSEQUENCE: nothing below reaches the run — its outcome was decided by whoever cancelled this task, and the events yielded from here land in a dead stream.")
                     } else {
                         logger.info("--- 🏁 CHAT EXECUTOR COMPLETE 🏁 ---")
-                        logger.info("Final Response: \(fullResponse)")
+                        logger.info("Final Response: \(fullResponse.count) chars") // CR-57: the reply is content; full text at debug only
+                        logger.debug("Final Response: \(fullResponse)")
                         logger.info("-----------------------------------")
                     }
                     let callMs = Int(Date().timeIntervalSince(callStart) * 1000)
@@ -415,6 +426,11 @@ actor ChatExecutor: Executor {
     /// Bot uses `.bot` layer config: task, instructions, environment, RAG, episodic history.
     /// The user's current query is passed as `userMessagePrefix` so it appears as the
     /// final user message — maintaining natural conversational flow.
+    /// The MLX prompt-cache key a Bot call runs under: its conversation, or nil for a workflow node.
+    nonisolated static func promptCacheKey(for input: AgentInput) -> String? {
+        input.workflowContext == nil ? input.conversationID.uuidString : nil
+    }
+
     nonisolated private func buildMessages(input: AgentInput) -> [[String: String]] {
         // Workflow-aware branch
         if let wfCtx = input.workflowContext {
@@ -472,7 +488,8 @@ actor ChatExecutor: Executor {
             shellType: "Zsh (Non-Interactive Mode)",
             userName: NSUserName(),
             homeDirectory: NSHomeDirectory(),
-            currentDate: Date().formatted(date: .numeric, time: .shortened)
+            currentDate: EnvironmentFacts.clock().date,
+            currentTime: EnvironmentFacts.clock().time
         )
 
         return SemanticContext(

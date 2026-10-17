@@ -217,7 +217,7 @@ final class ToolSchemaSizingTests: XCTestCase {
         let code = profile(.code(agentConfig(strategy: .pointer)))
         let names = Set(code.schemaBearingToolNames)
 
-        for expected in ["final_answer", "ask_user", "update_project_context", "get_conversation_history"] {
+        for expected in ["final_answer", "ask_user", "remember", "forget", "recall", "get_conversation_history"] {
             XCTAssertTrue(names.contains(expected),
                           "a Code profile with pointer history carries '\(expected)', but the gauge "
                           + "is not charged for it")
@@ -246,11 +246,12 @@ final class ToolSchemaSizingTests: XCTestCase {
 
     // MARK: - Each condition is real
 
-    func testUpdateProjectContextIsCodeOnly() {
-        XCTAssertFalse(profile(.agent(agentConfig())).schemaBearingToolNames.contains("update_project_context"),
-                       "an Agent profile never gets the project-memory tool; charging for it "
-                       + "over-reads on every agent run")
-        XCTAssertTrue(profile(.code(agentConfig())).schemaBearingToolNames.contains("update_project_context"))
+    func testTheMemoryToolsAreCodeOnly() {
+        for tool in ["remember", "forget", "recall"] {
+            XCTAssertFalse(profile(.agent(agentConfig())).schemaBearingToolNames.contains(tool),
+                           "an Agent profile never gets '\(tool)'; charging for it over-reads on every agent run")
+            XCTAssertTrue(profile(.code(agentConfig())).schemaBearingToolNames.contains(tool))
+        }
     }
 
     func testConversationHistoryToolFollowsThePointerMarker() {

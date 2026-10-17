@@ -69,7 +69,7 @@ struct ExplorerSidebarView: View {
 
                         TactileIconButton(
                             icon: "folder",
-                            tooltip: "Change Folder",
+                            tooltip: viewModel.scope == .code ? "Change Project Folder" : "Change Folder",
                             variant: .subtle,
                             size: 24
                         ) {
@@ -78,7 +78,7 @@ struct ExplorerSidebarView: View {
                     }
                 } else {
                     SidebarHeaderActionButton(
-                        title: "Open Folder",
+                        title: viewModel.scope == .code ? "Select Project" : "Open Folder",
                         systemImage: "folder.badge.plus",
                         action: {
                             viewModel.selectRootDirectory()
@@ -136,16 +136,31 @@ struct ExplorerSidebarView: View {
 
             } else {
                 // MARK: - Empty State
-                SidebarEmptyStateView(
-                    title: "No Project Open",
-                    subtitle: "Open a folder to start working with your codebase context.",
-                    buttonTitle: "Open Folder",
-                    buttonIcon: "folder.badge.plus",
-                    systemImage: "folder.badge.plus",
-                    onAction: {
-                        viewModel.selectRootDirectory()
-                    }
-                )
+                // Code Home has no project yet; the button runs the Code project picker
+                // (`selectRootDirectory` routes there in Code scope).
+                if viewModel.scope == .code {
+                    SidebarEmptyStateView(
+                        title: "Select Project folder",
+                        subtitle: "Choose the folder this Code session works in.",
+                        buttonTitle: "Select Project Folder",
+                        buttonIcon: "folder.badge.plus",
+                        systemImage: "folder.badge.questionmark",
+                        onAction: {
+                            viewModel.selectRootDirectory()
+                        }
+                    )
+                } else {
+                    SidebarEmptyStateView(
+                        title: "No Folder Open",
+                        subtitle: "Open a folder to start working with your codebase context.",
+                        buttonTitle: "Open Folder",
+                        buttonIcon: "folder.badge.plus",
+                        systemImage: "folder.badge.plus",
+                        onAction: {
+                            viewModel.selectRootDirectory()
+                        }
+                    )
+                }
             }
         }
         // Modern sidebar background (Translucent)

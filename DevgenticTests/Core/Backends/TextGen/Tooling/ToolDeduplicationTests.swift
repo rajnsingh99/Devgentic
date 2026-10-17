@@ -95,8 +95,8 @@ final class ToolDeduplicationTests: XCTestCase {
     // MARK: - T3i: Path Normalization — Non-Path Args Not Affected
 
     func testDedup_NonPathArgs_NotAffected() {
-        let call1 = makePendingToolCall(name: "fs_smart_search", arguments: ["search_term": .string("Acme")])
-        let call2 = makePendingToolCall(name: "fs_smart_search", arguments: ["search_term": .string("Acme/")])
+        let call1 = makePendingToolCall(name: "spotlight_search", arguments: ["search_term": .string("Acme")])
+        let call2 = makePendingToolCall(name: "spotlight_search", arguments: ["search_term": .string("Acme/")])
         let result = deduplicateToolCalls([call1, call2])
         XCTAssertEqual(result.count, 2, "Non-path string args should NOT be normalized (Acme != Acme/)")
     }

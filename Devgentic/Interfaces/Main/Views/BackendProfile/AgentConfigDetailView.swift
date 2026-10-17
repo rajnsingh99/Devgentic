@@ -834,14 +834,9 @@ struct AgentConfigDetailView: View {
                     }
 
                     if !knowledgeSourcesBinding.wrappedValue.isEmpty {
-                        VStack(spacing: 8) {
-                            ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                                KnowledgeSourceRow(source: source, theme: theme) {
-                                    knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
-                                }
-                            }
-                        }
-                        .padding(.leading, 12)
+                        // Rows + per-source "will be cut" warnings, from the backend's own plan.
+                        KnowledgeSourceList(sources: knowledgeSourcesBinding, profile: editBuffer.draft, theme: theme)
+                            .padding(.leading, 12)
                     } else {
                         Text("No reference documents added.")
                             .font(theme.fontCaption2)

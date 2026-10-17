@@ -61,7 +61,14 @@ struct StreamingCircuitBreaker {
     /// and long loops (e.g. 200-char complete tool call blocks).
     let windowSizes: [Int]
 
+    /// How many times one tool call (same name, same arguments) may appear in a single turn before
+    /// the breaker trips. Default: 3, so one accidental duplicate passes and the third copy stops it.
+    let repeatedCallLimit: Int
+
     // MARK: - State
+
+    /// Copies of each call seen this turn, keyed by its exact serialized form.
+    private var callCounts: [String: Int] = [:]
 
     /// All text generated so far in this streaming session.
     private(set) var accumulatedText: String = ""
@@ -80,14 +87,17 @@ struct StreamingCircuitBreaker {
     ///   - repetitionThreshold: Consecutive repetitions before tripping. Default: 3.
     ///   - checkInterval: Characters between checks. Default: 100.
     ///   - windowSizes: Block sizes to scan. Default: [40, 80, 150, 300].
+    ///   - repeatedCallLimit: Copies of one tool call that trip the breaker. Default: 3.
     init(
         repetitionThreshold: Int = 3,
         checkInterval: Int = 100,
-        windowSizes: [Int] = [40, 80, 150, 300]
+        windowSizes: [Int] = [40, 80, 150, 300],
+        repeatedCallLimit: Int = 3
     ) {
         self.repetitionThreshold = repetitionThreshold
         self.checkInterval = checkInterval
         self.windowSizes = windowSizes
+        self.repeatedCallLimit = repeatedCallLimit
         self.nextCheckAt = checkInterval
     }
 
@@ -125,6 +135,41 @@ struct StreamingCircuitBreaker {
         }
 
         return .healthy
+    }
+
+    // MARK: - Repeated Tool Calls
+
+    /// Feeds one tool call the model wrote this turn. Returns `.tripped` when the same call has now
+    /// appeared `repeatedCallLimit` times; the caller must then NOT forward that copy and must stop
+    /// generating.
+    ///
+    /// ⚠️ WHY `feed(_:)` NEVER SAW THESE LOOPS. Calls the framework already decoded arrive as
+    /// `.toolCall` events, not text, so they bypassed the text check entirely. And a text check could
+    /// not have caught them anyway: it compares the last 40-300 characters with the block before,
+    /// which only matches when the loop's length is a multiple of the window. The device loops were
+    /// ~190 and ~350 characters per call. Qwen2.5-3B wrote the same `read_file` 46 times and the same
+    /// edit 17 times, each running to the 2,048-token limit (~50s of decode, 2026-10-06).
+    ///
+    /// Counted per turn, not only back to back, so an alternating A, B, A, B, A loop is caught too.
+    /// The executor already collapses duplicate calls before running them, so the copies withheld
+    /// here would never have run: stopping loses nothing but the wasted generation.
+    ///
+    /// - Parameters:
+    ///   - signature: the call's exact serialized form (name + arguments, keys sorted), or the raw
+    ///     text of a call the framework rejected.
+    ///   - name: the tool name, for the diagnostic only.
+    mutating func feedToolCall(_ signature: String, name: String) -> Status {
+        guard !hasTripped else {
+            return .tripped(reason: "Circuit breaker already tripped")
+        }
+        let count = (callCounts[signature] ?? 0) + 1
+        callCounts[signature] = count
+        guard count >= repeatedCallLimit else { return .healthy }
+
+        hasTripped = true
+        let reason = "the model wrote the same call to '\(name)' \(count) times in one turn"
+        logger.warning("🔴 Circuit breaker TRIPPED: \(reason)")
+        return .tripped(reason: reason)
     }
 
     // MARK: - Repetition Detection

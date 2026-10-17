@@ -179,7 +179,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             return lenient
         }
 
-        logger.error("❌ [JSONParser] All parsing strategies exhausted. JSON was: \(sanitized.prefix(500))")
+        logger.error("❌ [JSONParser] All parsing strategies exhausted. JSON was: \(sanitized.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("❌ [JSONParser] All parsing strategies exhausted. JSON was: snippet: \(sanitized.prefix(500))")
 
         // All schemas rejected the JSON despite it being structurally well-formed
         // (extractOutermostJSON succeeded). This is the iter-5-shape failure: valid
@@ -513,7 +514,9 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
             if let toolName = toolName {
                 var arguments: [String: JSONValue]? = nil
-                if let argsStart = json.range(of: "\"arguments\""),
+                // [CR-50] `parameters` is the Cohere (Command-R / R7B) spelling of the same field;
+                // reading `arguments` only ran every such call with no arguments at all.
+                if let argsStart = json.range(of: "\"arguments\"") ?? json.range(of: "\"parameters\""),
                    let extracted = extractOutermostJSON(from: String(json[argsStart.lowerBound...])) {
                     if let argsData = extracted.data(using: .utf8),
                        let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: argsData) {
@@ -691,13 +694,13 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
         switch toolName {
         case "list_directory", "read_file", "create_folder", "delete_file",
-             "read_file_metadata", "fs_read_metadata",
-             "watch_folder", "fs_watch_folder":
+             "read_file_metadata",
+             "watch_folder":
             if let path = extractPathFromContent(trimmed) {
                 return ["path": JSONValue.string(path)]
             }
 
-        case "spotlight_search", "fs_smart_search":
+        case "spotlight_search":
             return ["search_term": JSONValue.string(trimmed)]
 
         case "run_applescript":

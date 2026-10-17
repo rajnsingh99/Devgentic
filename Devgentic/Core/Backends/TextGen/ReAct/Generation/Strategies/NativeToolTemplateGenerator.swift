@@ -54,9 +54,9 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
 
     var expectedDialect: ModelDialect? { dialect }
 
-    /// Short reinforcement hint appended to the user-message prompt trigger each iteration.
-    /// Kept brief and attention-proximate; the chat template provides the authoritative
-    /// format spec via the `<tools>` scaffolding.
+    /// The dialect's call format, completing "To call a tool, respond with …" in the prompt
+    /// trigger each iteration. Kept brief and attention-proximate; the chat template provides
+    /// the authoritative format spec via the `<tools>` scaffolding.
     let triggerSuffix: String
 
     /// Short identifier for log lines — keeps grepping straightforward across dialects.
@@ -106,10 +106,13 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
     }
 
     func promptTrigger(for iteration: Int) -> String {
-        let base = iteration == 1
-            ? "Analyze the task and working memory, then decide your next action."
-            : "New observations have been recorded in working memory. Decide your next action."
-        return base + " " + triggerSuffix
+        let base = IterationTrigger.base(for: iteration)
+        // The format hint is conditional, and plain text is named as the way to answer. This used
+        // to read "Respond with one or more <tool_call> blocks" every turn: a plain reply has been
+        // accepted as the final answer since the answer-vs-call verdict, but small models kept
+        // exploring instead of answering, even when the user said not to use tools (2026-10-05 runs).
+        return base + " To call a tool, respond with " + triggerSuffix
+            + " To answer the user instead, reply in plain text with no tool call."
     }
 
     // MARK: - Generation
@@ -163,7 +166,7 @@ struct NativeToolTemplateGenerator: CognitiveGenerator {
             expectedDialect: dialect,
             modelId: model.modelName,
             iteration: iteration,
-            knownToolNames: Set(context.availableTools.map(\.name)),
+            knownToolNames: Set(context.availableTools.map(\.name)).union(context.runToolNames),
             registeredTools: context.availableTools
         )
         return pipeline.parse(raw: responseText)
@@ -183,7 +186,7 @@ extension NativeToolTemplateGenerator {
     static func qwenHermes() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .qwenHermesToolCall,
-            triggerSuffix: "Respond with one or more <tool_call> blocks containing JSON with `name` then `arguments`.",
+            triggerSuffix: "one or more <tool_call> blocks containing JSON with `name` then `arguments`.",
             logTag: "QwenHermes"
         )
     }
@@ -193,7 +196,7 @@ extension NativeToolTemplateGenerator {
     static func llama3Json() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .llama3JsonSingle,
-            triggerSuffix: "Respond with a SINGLE JSON object: {\"name\": <tool>, \"parameters\": {...}}. Only one tool call per response.",
+            triggerSuffix: "a SINGLE JSON object: {\"name\": <tool>, \"parameters\": {...}}. Only one tool call per response.",
             logTag: "Llama3"
         )
     }
@@ -203,7 +206,7 @@ extension NativeToolTemplateGenerator {
     static func mistralV3() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .mistralV3Array,
-            triggerSuffix: "Respond with [TOOL_CALLS] followed by a JSON array of tool call objects.",
+            triggerSuffix: "[TOOL_CALLS] followed by a JSON array of tool call objects.",
             logTag: "MistralV3"
         )
     }
@@ -213,7 +216,7 @@ extension NativeToolTemplateGenerator {
     static func mistralV11() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .mistralV11Flat,
-            triggerSuffix: "Respond with [TOOL_CALLS]<tool_name>[ARGS]<json_arguments> for each tool call.",
+            triggerSuffix: "[TOOL_CALLS]<tool_name>[ARGS]<json_arguments> for each tool call.",
             logTag: "MistralV11"
         )
     }
@@ -223,7 +226,7 @@ extension NativeToolTemplateGenerator {
     static func phiFunctools() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .phiFunctoolsBracket,
-            triggerSuffix: "Respond with functools[{\"name\":\"<tool>\",\"arguments\":{...}}] containing one or more tool calls.",
+            triggerSuffix: "functools[{\"name\":\"<tool>\",\"arguments\":{...}}] containing one or more tool calls.",
             logTag: "PhiFunctools"
         )
     }
@@ -233,7 +236,7 @@ extension NativeToolTemplateGenerator {
     static func deepseekV3() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .deepseekV3JsonFence,
-            triggerSuffix: "Respond using DeepSeek's native <｜tool▁call▁begin｜>function<｜tool▁sep｜>name ```json {...} ``` <｜tool▁call▁end｜> format.",
+            triggerSuffix: "DeepSeek's native <｜tool▁call▁begin｜>function<｜tool▁sep｜>name ```json {...} ``` <｜tool▁call▁end｜> format.",
             logTag: "DeepSeekV3"
         )
     }
@@ -243,7 +246,7 @@ extension NativeToolTemplateGenerator {
     static func pythonic() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .pythonicBracketList,
-            triggerSuffix: "Respond with a Python list of function calls: [func_name(arg1=\"val\", arg2=42), ...]. Use Python literal syntax (True/False/None, not true/false/null).",
+            triggerSuffix: "a Python list of function calls: [func_name(arg1=\"val\", arg2=42), ...]. Use Python literal syntax (True/False/None, not true/false/null).",
             logTag: "Pythonic"
         )
     }
@@ -252,7 +255,7 @@ extension NativeToolTemplateGenerator {
     static func graniteLegacy() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .graniteLegacyArray,
-            triggerSuffix: "Respond with <tool_call>[{\"name\":\"...\",\"arguments\":{...}}]</tool_call> containing a JSON array of tool calls.",
+            triggerSuffix: "<tool_call>[{\"name\":\"...\",\"arguments\":{...}}]</tool_call> containing a JSON array of tool calls.",
             logTag: "GraniteLegacy"
         )
     }
@@ -262,7 +265,7 @@ extension NativeToolTemplateGenerator {
     static func granite4() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .granite4ToolCall,
-            triggerSuffix: "Respond with one or more <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> blocks.",
+            triggerSuffix: "one or more <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call> blocks.",
             logTag: "Granite4"
         )
     }
@@ -271,7 +274,7 @@ extension NativeToolTemplateGenerator {
     static func commandR() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .commandRAction,
-            triggerSuffix: "Respond with Action: ```json\\n[{\"tool_name\":\"...\",\"parameters\":{...}}]\\n``` containing the tool call list.",
+            triggerSuffix: "Action: ```json\\n[{\"tool_name\":\"...\",\"parameters\":{...}}]\\n``` containing the tool call list.",
             logTag: "CommandR"
         )
     }
@@ -280,7 +283,7 @@ extension NativeToolTemplateGenerator {
     static func commandR7B() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .commandR7BAction,
-            triggerSuffix: "Respond with <|START_ACTION|>[{\"tool_call_id\":\"0\",\"tool_name\":\"...\",\"parameters\":{...}}]<|END_ACTION|>.",
+            triggerSuffix: "<|START_ACTION|>[{\"tool_call_id\":\"0\",\"tool_name\":\"...\",\"parameters\":{...}}]<|END_ACTION|>.",
             logTag: "CommandR7B"
         )
     }
@@ -289,7 +292,7 @@ extension NativeToolTemplateGenerator {
     static func qwen3Coder() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .qwen3CoderDeepXml,
-            triggerSuffix: "Respond with <tool_call><function=<tool_name>><parameter=<key>>value</parameter></function></tool_call>.",
+            triggerSuffix: "<tool_call><function=<tool_name>><parameter=<key>>value</parameter></function></tool_call>.",
             logTag: "Qwen3Coder"
         )
     }
@@ -298,7 +301,7 @@ extension NativeToolTemplateGenerator {
     static func deepseekV31() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .deepseekV31Flat,
-            triggerSuffix: "Respond with DeepSeek V3.1 native format: <｜tool▁call▁begin｜>name<｜tool▁sep｜>{args}<｜tool▁call▁end｜>.",
+            triggerSuffix: "DeepSeek V3.1 native format: <｜tool▁call▁begin｜>name<｜tool▁sep｜>{args}<｜tool▁call▁end｜>.",
             logTag: "DeepSeekV31"
         )
     }
@@ -307,7 +310,7 @@ extension NativeToolTemplateGenerator {
     static func deepseekV32() -> NativeToolTemplateGenerator {
         .init(
             expectedDialect: .deepseekV32Dsml,
-            triggerSuffix: "Respond with DeepSeek V3.2 DSML format: <｜DSML｜function_calls><｜DSML｜invoke name=\"X\"><｜DSML｜parameter name=\"Y\" string=\"true\">value</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>.",
+            triggerSuffix: "DeepSeek V3.2 DSML format: <｜DSML｜function_calls><｜DSML｜invoke name=\"X\"><｜DSML｜parameter name=\"Y\" string=\"true\">value</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>.",
             logTag: "DeepSeekV32"
         )
     }

@@ -26,6 +26,7 @@ struct ProfileSelectorPopover: View {
     var onManageProfiles: (() -> Void)? = nil
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.surfaceStyle) private var surfaceStyle
 
     @State private var profiles: [BackendProfileModel] = []
     @State private var searchText: String = ""
@@ -77,23 +78,47 @@ struct ProfileSelectorPopover: View {
                 .padding(.bottom, 6)
 
             Rectangle()
-                .fill(theme.isDark ? Color.white.opacity(0.07) : theme.dividerColor.opacity(0.35))
+                .fill(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.35))
                 .frame(height: 1)
                 .padding(.horizontal, 8)
 
             profileList
+
+            if let onManageProfiles {
+                Rectangle()
+                    .fill(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.35))
+                    .frame(height: 1)
+                    .padding(.horizontal, 8)
+
+                Button {
+                    isPresented = false
+                    onManageProfiles()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 11))
+                            .foregroundColor(theme.secondaryText)
+                        Text("Manage Profiles…")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .popoverRowHighlight()
+            }
         }
         .padding(.vertical, 8)
         .frame(width: popoverWidth, height: popoverHeight)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.secondaryBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(theme.isDark ? Color.white.opacity(0.09) : theme.dividerColor.opacity(0.50), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background {
+            if surfaceStyle == .solid {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(theme.secondaryBackground)
+            }
+        }
         .onAppear {
             profiles = (try? BackendProfileStore.shared.fetchSharedProfiles()) ?? []
             // Default to "All" so the active selection is visible immediately in the list
@@ -128,11 +153,11 @@ struct ProfileSelectorPopover: View {
             .padding(2.5)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.60))
+                    .fill(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(theme.isDark ? Color.white.opacity(0.06) : theme.dividerColor.opacity(0.35), lineWidth: 0.5)
+                    .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : theme.dividerColor.opacity(0.35), lineWidth: 0.5)
             )
         }
         .padding(.horizontal, 8)
@@ -200,7 +225,7 @@ struct ProfileSelectorPopover: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(theme.isDark ? Color.white.opacity(0.05) : theme.textBackground)
+                .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -270,9 +295,9 @@ private struct ProfileRow: View {
 
     private var rowBackground: Color {
         if isHovering {
-            return theme.isDark ? Color.white.opacity(0.08) : theme.tertiaryBackground.opacity(0.70)
+            return theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)
         } else if isSelected {
-            return theme.isDark ? Color.white.opacity(0.04) : theme.tertiaryBackground.opacity(0.40)
+            return theme.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03)
         } else {
             return Color.clear
         }
@@ -312,7 +337,7 @@ private struct ProfileRow: View {
                     .padding(.vertical, 2)
                     .background(
                         Capsule()
-                            .fill(theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground)
+                            .fill(theme.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.04))
                     )
 
                 // Right-aligned Checkmark (matching Antigravity ✓)
@@ -367,17 +392,17 @@ private struct SegmentTabButton: View {
 
     private var badgeBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.16) : theme.tertiaryBackground
+            return theme.isDark ? Color.white.opacity(0.16) : Color.black.opacity(0.08)
         } else {
-            return theme.isDark ? Color.white.opacity(0.06) : theme.tertiaryBackground.opacity(0.50)
+            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
         }
     }
 
     private var tabBackground: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.12) : theme.primaryBackground
+            return theme.isDark ? Color.white.opacity(0.12) : Color.white.opacity(0.70)
         } else if isHovering {
-            return theme.isDark ? Color.white.opacity(0.06) : theme.primaryBackground.opacity(0.50)
+            return theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
         } else {
             return Color.clear
         }
@@ -385,7 +410,7 @@ private struct SegmentTabButton: View {
 
     private var tabBorder: Color {
         if isSelected {
-            return theme.isDark ? Color.white.opacity(0.10) : theme.dividerColor.opacity(0.40)
+            return theme.isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
         } else {
             return Color.clear
         }

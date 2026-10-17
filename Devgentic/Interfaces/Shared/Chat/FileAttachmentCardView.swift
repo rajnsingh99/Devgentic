@@ -24,6 +24,9 @@ private enum FileTypeColor {
 /// A stylish, premium glass card for displaying user-attached files in user prompts.
 struct FileAttachmentCardView: View {
     let fileName: String
+    /// `AttachmentDelivery.note` — set when the model received less than the whole file.
+    /// Replaces the type description, in the warning colour, so a cut is visible at a glance.
+    var deliveryNote: String? = nil
     let action: () -> Void
 
     @State private var isHovering = false
@@ -90,10 +93,18 @@ struct FileAttachmentCardView: View {
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
-                    Text(fileTypeInfo.description)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(theme.secondaryText.opacity(0.85))
-                        .lineLimit(1)
+                    if let deliveryNote {
+                        Text(deliveryNote)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(theme.warningColor)
+                            .lineLimit(1)
+                            .help(deliveryNote)
+                    } else {
+                        Text(fileTypeInfo.description)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(theme.secondaryText.opacity(0.85))
+                            .lineLimit(1)
+                    }
                 }
 
                 // Language Badge
@@ -120,7 +131,7 @@ struct FileAttachmentCardView: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(fileTypeInfo.description): \(fileName)")
+        .accessibilityLabel("\(fileTypeInfo.description): \(fileName)" + (deliveryNote.map { ". \($0)" } ?? ""))
         .accessibilityHint("Double-tap to open file")
         .accessibilityAddTraits(.isButton)
         .onHover { hovering in

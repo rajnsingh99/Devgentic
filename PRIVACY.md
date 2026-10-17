@@ -3,6 +3,8 @@
 Devgentic is **local-first**. It has no backend and sends no analytics or telemetry
 anywhere on its own. Your conversations, files, and configuration stay on your Mac.
 
+This policy ships inside the app: open it any time from **Help → Privacy Policy**.
+
 ## On-device diagnostics
 
 To make problems reproducible and fixable, Devgentic records **sanitized diagnostic
@@ -48,8 +50,9 @@ included only if you explicitly add one, and may contain whatever was on screen.
 
 ## Update checks
 
-Devgentic uses [Sparkle](https://sparkle-project.org) to check for new versions. On the
-second launch it **asks** whether to check automatically; nothing is requested before you
+Devgentic uses [Sparkle](https://sparkle-project.org) to check for new versions. The setup
+assistant **asks** whether to check automatically, with no answer pre-selected (if setup was
+never completed, Sparkle asks on the second launch instead); nothing is requested before you
 answer. If you agree, it fetches `https://rajnsingh99.github.io/devgentic/appcast.xml` about
 once a day. That request is a plain download of a public file from GitHub Pages: it carries
 the standard HTTP headers (including your IP address and a user agent naming the app
@@ -57,6 +60,19 @@ version) and **no system profile** — Sparkle's optional hardware/OS report is 
 You can change your answer at any time, or check by hand with **Devgentic → Check for
 Updates…**. Updates are verified against a signing key built into the app before they are
 installed.
+
+## What leaves your Mac — only when you choose it
+
+Devgentic contacts other services only as a direct result of something you set up or ask for:
+
+- **Model downloads** from Hugging Face (MLX models) or the Ollama library (through your local
+  Ollama), when you download a model.
+- **Cloud AI providers and remote MCP servers**, if you add one: your messages and any tool
+  results in them go to that provider, under its own privacy policy.
+- **Your agent's online actions**, such as web requests or commands that reach the network. Each
+  tool asks for your approval first unless you have set it to run without asking.
+- **ChatOps bridges** (Slack, Discord, Telegram), if you connect one.
+- **Update checks**, if you allow them (see above).
 
 ## What is *not* collected
 

@@ -70,6 +70,20 @@ struct GlobalConstants {
     /// ⚠️ Same account/repo-name dependency as `homepageURL`: a rename breaks both.
     static let sourceCodeURL = "https://github.com/rajnsingh99/devgentic"
 
+    /// The GitHub Sponsors page behind "Support Development" — a tip jar, not a paywall.
+    ///
+    /// ⚠️ EVERY SURFACE HIDES ITSELF WHILE THIS IS EMPTY: the app menu item and the About row. To
+    /// move to another page (e.g. Ko-fi) change only this string — and `.github/FUNDING.yml`.
+    /// ⚠️ WORDING IS "Support", NEVER "Donate" (this is not a charity), and NEVER a nag: no launch
+    /// popup, no modal, no badge. ⚠️ AN APP STORE EDITION MUST STRIP EVERY USE OF THIS — Apple
+    /// rejects external tipping links and requires an in-app purchase tip jar instead.
+    static let supportURL = "https://github.com/sponsors/rajnsingh99"
+
+    /// `supportURL` as a URL, or nil while it is unset — the one gate all support UI reads.
+    static var supportLink: URL? {
+        supportURL.isEmpty ? nil : URL(string: supportURL)
+    }
+
     // --- Notification Name ---
     static let showQuickAccessPanelNotification = Notification.Name("devgentic.showQuickAccessPanel")
     /// [QA revival P2e] Navigate the main window to a conversation (userInfo["conversationID"]

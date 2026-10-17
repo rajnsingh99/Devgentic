@@ -94,7 +94,7 @@ class PromptStore: PromptStoreProtocol {
             }
             if normalizedCount > 0 {
                 logger.info("Normalized \(normalizedCount) prompt categories to canonical casing.")
-                try? context.save()
+                try? SharedContextSave.save(context, "prompts: normalize categories")
             }
 
             let prompts = models.map { $0.toDevPrompt() }
@@ -175,7 +175,7 @@ class PromptStore: PromptStoreProtocol {
     private func saveContext() -> Result<Void, PromptStoreError> {
         guard let context = mainContext else { return .failure(.containerUnavailable) }
         do {
-            try context.save()
+            try SharedContextSave.save(context, "prompts")
             return .success(())
         } catch {
             logger.error("Failed to save SwiftData context: \(error.localizedDescription)")

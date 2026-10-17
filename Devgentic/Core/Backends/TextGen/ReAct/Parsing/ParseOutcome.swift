@@ -116,14 +116,6 @@ enum ParseFailureReason: Sendable, Equatable, Codable {
     /// corrective alert can be targeted: "you wrote `codebase_map` in prose, use
     /// this JSON shape instead".
     case toolNameInProse(toolName: String, snippet: String)
-
-    /// Model called a tool that IS registered for this agent but is currently
-    /// hidden from the schema by a runtime gate (e.g. `update_project_context`
-    /// before the reading-gate unlocks). Distinct from `.unknownToolName` because
-    /// the call isn't a hallucination — the model is calling a real tool that
-    /// will become available later. `unlockHint` is the human-readable reason
-    /// the tool is locked, shown to both the user (chip) and the model (alert).
-    case gatedTool(attempted: String, unlockHint: String)
 }
 
 // MARK: - UI + Model Alert Surfacing
@@ -151,8 +143,6 @@ extension ParseFailureReason {
             return "Wrong format (\(detected))"
         case .toolNameInProse(let toolName, _):
             return "`\(toolName)` in prose, not structured"
-        case .gatedTool(let attempted, _):
-            return "Tool locked: \(attempted)"
         }
     }
 
@@ -183,8 +173,6 @@ extension ParseFailureReason {
             return "Expected '\(expected)' format but detected '\(detected)'."
         case .toolNameInProse(let toolName, let snippet):
             return "The model wrote the tool name '\(toolName)' in plain prose instead of emitting a structured tool call. Snippet: \(snippet.prefix(120))"
-        case .gatedTool(let attempted, let unlockHint):
-            return "'\(attempted)' is registered but not yet available. \(unlockHint)"
         }
     }
 
@@ -278,9 +266,6 @@ extension ParseFailureReason {
             let shape = dialect.map { " Re-emit `\(toolName)` as a structured tool call in this model's format: \($0.formatReminder)." }
                 ?? " Emit it as a structured tool call using this provider's native tool-calling API, not as text."
             return "You wrote `\(toolName)` in plain prose (`\(snippet.prefix(80))`).\(shape) Do not describe the tool call in prose — emit it directly."
-
-        case .gatedTool(let attempted, let unlockHint):
-            return "Tool `\(attempted)` is not available yet — \(unlockHint). Continue exploring with the tools that ARE available: \(availableToolNames.joined(separator: ", ")). Call `final_answer` if you're finished."
         }
     }
 }

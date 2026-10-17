@@ -931,9 +931,13 @@ struct WorkflowDedicatedView: View {
                 // Both glyphs are decoration — one is a category hint, the other says
                 // "this is a menu", which VoiceOver already announces. Unhidden they were
                 // read aloud as "clock.arrow.circlepath, Live, chevron.down".
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 11))
-                    .accessibilityHidden(true)
+                if isLive {
+                    DevgenticActivityIndicator(style: .gyroscope, size: 11, tint: theme.accentColor)
+                } else {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 11))
+                        .accessibilityHidden(true)
+                }
                 // XUI-3: state word from the SELECTION's liveness (`isLive`, the run on screen),
                 // not from nil-ness — the live run is addressed via a non-nil
                 // `selectedHistoricalRunID`, so the nil test said "History" while the live run

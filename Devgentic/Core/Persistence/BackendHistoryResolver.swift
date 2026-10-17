@@ -49,15 +49,23 @@ enum BackendHistoryResolver {
     ///
     /// - Parameter inMemory: the caller's live messages (the UI window, or streaming rows not
     ///   yet persisted). Merged OVER the stored set, never replaced by it.
+    /// - Parameter omittingImageBytes: true only for callers that size rather than send (the
+    ///   gauge) — the request ships history images and must keep their bytes.
     /// - Returns: the merged history and whether the store cap was hit, so callers can report
     ///   that older turns fell out of direct context and now rely on retrieval.
+    ///
+    /// ⚠️ The stored half is decoded OFF the main actor (`fetchContextHistory`, RAG-6/7) — up to
+    /// 300 messages' timelines, measured at 60–125 ms in long Code conversations.
     static func resolve(
         conversationID: UUID,
         inMemory: [ChatMessage],
-        persistence: ChatPersistenceProtocol
+        persistence: ChatPersistenceProtocol,
+        omittingImageBytes: Bool = false
     ) async -> (history: [ChatMessage], storedCount: Int, capHit: Bool) {
         let scoped = inMemory.filter { $0.conversationId == conversationID }
-        let stored = await persistence.fetchMessages(for: conversationID, offset: 0, limit: messageLimit)
+        let stored = await persistence.fetchContextHistory(
+            for: conversationID, limit: messageLimit, omittingImageBytes: omittingImageBytes
+        )
         return (merge(stored: stored, inMemory: scoped), stored.count, stored.count >= messageLimit)
     }
 }

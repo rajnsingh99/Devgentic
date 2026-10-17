@@ -93,8 +93,10 @@ enum MLXContextWindowHealer {
     ///
     /// Creating the metadata uses `.medium`, which is exactly what every tier consumer already
     /// substitutes for nil (`AgentConnect`: `modelMetadata?.tier ?? .medium`), so nothing that
-    /// depends on tier changes behaviour — only the window is healed. Re-picking the model
-    /// derives the real tier, quantization and family.
+    /// depends on tier changes behaviour — only the window is healed. Re-picking the model from
+    /// the catalog derives the real tier, quantization and family (`CatalogModelSelection`).
+    /// ⚠️ Until 2026-10-09 it did NOT: the catalog wrote no metadata, so this `.medium`
+    /// placeholder outlived every re-pick and save — a 3B model stored as "Medium" tier.
     private static func healedConfig(_ config: ProviderConfig, window: Int) -> ProviderConfig? {
         guard config.apiProvider == .mlx else { return nil }
         var healed = config

@@ -641,7 +641,7 @@ struct OrbSettingsView: View {
                 title: config.recognizer.isAppleSpeech ? "Speech model (not in use)" : "Speech model",
                 description: config.recognizer.isAppleSpeech
                     ? "Orb is running on Apple Speech, which does not use this model. It is still what the composer's dictation uses."
-                    : "Shared with dictation in the composer. Change it in the Developer card above.",
+                    : "Shared with dictation in the composer. Change it in Settings → General → Speech Recognition.",
                 value: speechModelText,
                 isWarning: !isModelLoaded && !config.recognizer.isAppleSpeech
             )
@@ -773,8 +773,39 @@ struct OrbSettingsView: View {
                     config.isEnabled = newValue
                 }
                 AppDelegate.shared?.applyOrbHotkeyConfig()
+                if newValue { requestMicrophoneOnEnable() }
             }
         )
+    }
+
+    private static let logger = DGLogger(category: "OrbSettings")
+
+    /// Switching Orb on asks for the microphone NOW, while the user is thinking about voice, so the
+    /// permission is settled before the orb first listens. macOS shows its prompt only while the
+    /// answer is undetermined; once allowed or denied this returns at once with no prompt, and the
+    /// Status card's Microphone row shows the result either way.
+    /// ⚠️ Orb is switched on even if access is denied. Refusing the switch would hide why; the
+    /// Microphone row says Denied and Privacy Settings is beside it.
+    private func requestMicrophoneOnEnable() {
+        let before = AVAudioApplication.shared.recordPermission
+        Task { @MainActor in
+            let granted = await AVAudioApplication.requestRecordPermission()
+            micPermission = AVAudioApplication.shared.recordPermission
+            if granted {
+                Self.logger.info("[ORB] Orb enabled — microphone access granted (was \(Self.permissionName(before))).")
+            } else {
+                Self.logger.warning("[ORB] Orb enabled but microphone access is NOT granted (was \(Self.permissionName(before))\(before == .denied ? "; macOS does not ask again once denied" : "")). CONSEQUENCE: the orb opens but hears nothing until access is allowed in System Settings → Privacy & Security → Microphone; the Status card shows Denied.")
+            }
+        }
+    }
+
+    private static func permissionName(_ permission: AVAudioApplication.recordPermission) -> String {
+        switch permission {
+        case .granted:      return "allowed"
+        case .denied:       return "denied"
+        case .undetermined: return "not yet asked"
+        @unknown default:   return "unknown"
+        }
     }
 
     private var activationBinding: Binding<OrbActivationMode> {

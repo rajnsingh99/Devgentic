@@ -13,17 +13,13 @@ struct OnboardingThemeView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let availableAccentColors: [(accent: AppAccentColor, color: Color, name: String)] = [
-        (.blue, Color(hex: "#0A84FF"), "Electric Azure"),
-        (.green, Color(hex: "#10B981"), "Emerald Mint"),
-        (.spotify, Color(hex: "#1DB954"), "Spotify Green"),
-        (.purple, Color(hex: "#8B5CF6"), "Royal Violet"),
-        (.modernSpotify, Color(hex: "#06B6D4"), "Cosmic Cyan"),
-        (.orange, Color(hex: "#F59E0B"), "Warm Amber"),
-        (.pink, Color(hex: "#EC4899"), "Rose Quartz"),
-        (.white, Color(hex: "#FFFFFF"), "Pure White")
-    ]
+    /// The palette follows the selected theme: its last slot is Pure White on dark themes and Onyx
+    /// Black on light ones (see `OnboardingViewModel.accentPalette`).
+    private var accentPalette: [AppAccentColor] {
+        OnboardingViewModel.accentPalette(isDarkTheme: theme.isDark)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,7 +29,7 @@ struct OnboardingThemeView: View {
                     // Header
                     VStack(spacing: 8) {
                         HStack(spacing: 6) {
-                            Text("STEP 3 OF 3")
+                            Text(OnboardingViewModel.Step.themeCustomization.progressLabel ?? "")
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
                                 .foregroundStyle(Color.accentColor)
                                 .tracking(1.0)
@@ -77,29 +73,14 @@ struct OnboardingThemeView: View {
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundColor(theme.primaryText)
                                 Spacer()
-                                Text(availableAccentColors.first { $0.accent == viewModel.selectedAccentColor }?.name ?? "")
+                                Text(viewModel.selectedAccentColor.displayName)
                                     .font(.system(size: 12, weight: .semibold))
                                     .foregroundColor(viewModel.selectedAccentColor.color ?? Color.accentColor)
                             }
 
                             HStack(spacing: 14) {
-                                ForEach(availableAccentColors, id: \.accent) { item in
-                                    Button(action: {
-                                        viewModel.selectedAccentColor = item.accent
-                                        themeManager.applyAccentColor(item.accent)
-                                    }) {
-                                        Circle()
-                                            .fill(item.color)
-                                            .frame(width: 28, height: 28)
-                                            .overlay(
-                                                Circle()
-                                                    .stroke(Color.white, lineWidth: viewModel.selectedAccentColor == item.accent ? 2.5 : 0)
-                                            )
-                                            .shadow(color: item.color.opacity(viewModel.selectedAccentColor == item.accent ? 0.65 : 0), radius: 6)
-                                            .scaleEffect(viewModel.selectedAccentColor == item.accent ? 1.18 : 1.0)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .pointingHandCursor()
+                                ForEach(accentPalette, id: \.self) { accent in
+                                    accentSwatch(accent)
                                 }
                             }
                             .padding(10)
@@ -146,11 +127,7 @@ struct OnboardingThemeView: View {
             // Pinned Bottom Navigation Actions
             HStack {
                 OnboardingSecondaryButton("Back", icon: "chevron.left") {
-                    if viewModel.isModelInstalled {
-                        viewModel.goToStep(.profileSetup)
-                    } else {
-                        viewModel.goToStep(.modelDownload)
-                    }
+                    viewModel.goToStep(.privacy)
                 }
 
                 Spacer()
@@ -168,15 +145,10 @@ struct OnboardingThemeView: View {
 
     // MARK: - Theme Card
     @ViewBuilder
-    private func themeCard(id: String, title: String, subtitle: String, icon: String, previewColor: Color) -> some View {
+    private func themeCard(id: String, title: LocalizedStringKey, subtitle: LocalizedStringKey, icon: String, previewColor: Color) -> some View {
         let isSelected = viewModel.selectedThemeID == id
 
-        Button(action: {
-            viewModel.selectedThemeID = id
-            if let matching = themeManager.availableThemes.first(where: { $0.id == id }) {
-                themeManager.applyTheme(matching)
-            }
-        }) {
+        Button(action: { viewModel.selectTheme(id, themeManager: themeManager) }) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     ZStack {
@@ -219,11 +191,41 @@ struct OnboardingThemeView: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    // MARK: - Accent Swatch
+    /// The ring is drawn in the theme's text colour with a gap, so it shows on every swatch —
+    /// the old white ring was invisible around Pure White. A hairline outlines every swatch so the
+    /// white and black ones don't disappear into the background.
+    @ViewBuilder
+    private func accentSwatch(_ accent: AppAccentColor) -> some View {
+        let isSelected = viewModel.selectedAccentColor == accent
+        let fill = accent.color ?? Color.accentColor
+
+        Button(action: {
+            viewModel.selectedAccentColor = accent
+            themeManager.applyAccentColor(accent)
+        }) {
+            Circle()
+                .fill(fill)
+                .frame(width: 26, height: 26)
+                .overlay(Circle().stroke(theme.dividerColor, lineWidth: 1))
+                .padding(3)
+                .overlay(Circle().stroke(theme.primaryText, lineWidth: isSelected ? 2 : 0))
+                .scaleEffect(isSelected && !reduceMotion ? 1.1 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .help(accent.displayName)
+        .accessibilityLabel(accent.displayName)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     // MARK: - Surface Style Card
     @ViewBuilder
-    private func surfaceCard(style: SurfaceStyle, title: String, subtitle: String, icon: String) -> some View {
+    private func surfaceCard(style: SurfaceStyle, title: LocalizedStringKey, subtitle: LocalizedStringKey, icon: String) -> some View {
         let isSelected = viewModel.selectedSurfaceStyle == style
 
         Button(action: {
@@ -263,6 +265,8 @@ struct OnboardingThemeView: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     // MARK: - Live Preview Card

@@ -110,45 +110,57 @@ struct SemanticChunker {
     // MARK: - Semantic Text Chunking
     
     /// Splits standard markdown text by paragraph boundaries, grouping them until the limit.
+    ///
+    /// ⚠️ INVARIANT: no chunk exceeds `maxChunkSize`. The embedder reads ~128 tokens (~500 chars),
+    /// so anything past the cap is invisible to semantic search.
+    ///
+    /// The old packer appended an oversized paragraph WHOLE whenever a chunk was already open —
+    /// `splitLargeText` only ran for the very first paragraph. Uploads arrive as one `.paragraph`
+    /// with PDF pages joined by "\n\n", so every page after the first became one 2–4K-char chunk
+    /// whose text past ~500 chars no embedding ever saw (RAG-3). It also re-seeded the 50-char
+    /// overlap without re-checking the cap.
+    ///
+    /// Oversized paragraphs now split at LINE breaks first (a PDF page keeps its line structure),
+    /// and only a single over-long line falls back to word-snapped windows.
     private func chunkText(_ text: String) -> [String] {
-        // Split by markdown paragraph boundaries (double newline)
-        let paragraphs = text.components(separatedBy: "\n\n")
-        var chunks: [String] = []
-        var currentChunk = ""
-        
-        for paragraph in paragraphs {
-            let cleanedParagraph = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
-            if cleanedParagraph.isEmpty { continue }
-            
-            let separator = currentChunk.isEmpty ? "" : "\n\n"
-            
-            // If adding this paragraph keeps us under the limit, append it
-            if currentChunk.count + separator.count + cleanedParagraph.count <= maxChunkSize {
-                currentChunk += separator + cleanedParagraph
-            } else {
-                // The current chunk is full. Save it.
-                if !currentChunk.isEmpty {
-                    chunks.append(currentChunk)
-                    
-                    // Start a new chunk using overlap from the previous chunk
-                    let overlapText = getOverlapText(from: currentChunk, overlapSize: overlap)
-                    currentChunk = overlapText + (overlapText.isEmpty ? "" : "\n\n") + cleanedParagraph
-                } else {
-                    // Edge case: A single paragraph is larger than maxChunkSize
-                    let splitParagraphs = splitLargeText(cleanedParagraph, maxSize: maxChunkSize, overlap: overlap)
-                    if let last = splitParagraphs.last {
-                        chunks.append(contentsOf: splitParagraphs.dropLast())
-                        currentChunk = last // Keep the last segment as the start of the next iteration
-                    }
-                }
+        pack(text.components(separatedBy: "\n\n"), joiner: "\n\n") { paragraph in
+            pack(paragraph.components(separatedBy: "\n"), joiner: "\n") { line in
+                splitLargeText(line, maxSize: maxChunkSize, overlap: overlap)
             }
         }
-        
-        // Don't forget the final chunk
-        if !currentChunk.isEmpty {
-            chunks.append(currentChunk)
+    }
+
+    /// Greedily packs `pieces` into chunks of at most `maxChunkSize`, joined by `joiner`, carrying
+    /// a word-snapped overlap into the next chunk when it fits. A piece larger than a chunk is
+    /// handed to `splitOversized`, which must return pieces of at most `maxChunkSize`.
+    private func pack(_ pieces: [String], joiner: String, splitOversized: (String) -> [String]) -> [String] {
+        var chunks: [String] = []
+        var current = ""
+        for raw in pieces {
+            let piece = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if piece.isEmpty { continue }
+
+            if piece.count > maxChunkSize {
+                if !current.isEmpty { chunks.append(current) }
+                let parts = splitOversized(piece)
+                chunks.append(contentsOf: parts.dropLast())
+                current = parts.last ?? ""
+                continue
+            }
+            if current.isEmpty {
+                current = piece
+            } else if current.count + joiner.count + piece.count <= maxChunkSize {
+                current += joiner + piece
+            } else {
+                chunks.append(current)
+                // The overlap SHRINKS to the room left beside `piece` rather than pushing the chunk
+                // past the cap (or being dropped): context survives and so does the invariant.
+                let room = min(overlap, maxChunkSize - joiner.count - piece.count)
+                let overlapText = room > 0 ? getOverlapText(from: current, overlapSize: room) : ""
+                current = overlapText.isEmpty ? piece : overlapText + joiner + piece
+            }
         }
-        
+        if !current.isEmpty { chunks.append(current) }
         return chunks
     }
     
@@ -178,37 +190,35 @@ struct SemanticChunker {
         return overlapCandidate
     }
     
-    /// Emergency fallback to split a single massive paragraph that exceeds maxChunkSize.
+    /// Splits one over-long run of text (no paragraph or line break left to use) into windows of at
+    /// most `maxSize`, snapped back to a space when that keeps at least half a window.
+    ///
+    /// ⚠️ Linear. The old loop measured `distance(from: currentIndex, to: endIndex)` on every window —
+    /// O(remaining) each time, quadratic overall (a 500K-char run cost ~10⁸ steps, RAG-35) — and this
+    /// path is now hot: every oversized line of every upload goes through it.
     private func splitLargeText(_ text: String, maxSize: Int, overlap: Int) -> [String] {
         var chunks: [String] = []
         var currentIndex = text.startIndex
-        
         while currentIndex < text.endIndex {
-            let remaining = text.distance(from: currentIndex, to: text.endIndex)
-            if remaining <= maxSize {
-                chunks.append(String(text[currentIndex..<text.endIndex]))
+            // `limitedBy` caps the walk at maxSize characters — never a scan of the remainder.
+            guard let windowEnd = text.index(currentIndex, offsetBy: maxSize, limitedBy: text.endIndex),
+                  windowEnd < text.endIndex else {
+                chunks.append(String(text[currentIndex...]))
                 break
             }
-            
-            let endIndex = text.index(currentIndex, offsetBy: maxSize, limitedBy: text.endIndex) ?? text.endIndex
-            var snapIndex = endIndex
-            
+            var snapIndex = windowEnd
             // Try to snap to the last space to avoid cutting words in half
-            let substring = text[currentIndex..<endIndex]
-            if let lastSpace = substring.lastIndex(of: " ") {
-                // Ensure we don't shrink the chunk too much (keep it at least 50% of maxSize)
-                if text.distance(from: currentIndex, to: lastSpace) > maxSize / 2 {
-                    snapIndex = lastSpace
-                }
+            if let lastSpace = text[currentIndex..<windowEnd].lastIndex(of: " "),
+               text.distance(from: currentIndex, to: lastSpace) > maxSize / 2 {
+                snapIndex = lastSpace
             }
-            
             chunks.append(String(text[currentIndex..<snapIndex]))
-            
-            // Advance index, taking overlap into account
+
+            // Advance, taking overlap into account. When the overlap would not move forward (a small
+            // window), advance past the window instead — the old `break` here DROPPED the rest of the
+            // text without a trace.
             let advanceBy = text.distance(from: currentIndex, to: snapIndex) - overlap
-            if advanceBy <= 0 { break } // Failsafe
-            
-            currentIndex = text.index(currentIndex, offsetBy: advanceBy, limitedBy: text.endIndex) ?? text.endIndex
+            currentIndex = advanceBy > 0 ? text.index(currentIndex, offsetBy: advanceBy) : snapIndex
         }
         return chunks
     }

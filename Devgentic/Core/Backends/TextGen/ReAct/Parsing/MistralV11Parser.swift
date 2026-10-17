@@ -118,7 +118,8 @@ struct MistralV11Parser: CognitiveParserProtocol {
             return decoded
         }
 
-        logger.warning("MistralV11Parser: Failed to decode [ARGS] JSON: \(trimmed.prefix(200))")
+        logger.warning("MistralV11Parser: Failed to decode [ARGS] JSON: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("MistralV11Parser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 

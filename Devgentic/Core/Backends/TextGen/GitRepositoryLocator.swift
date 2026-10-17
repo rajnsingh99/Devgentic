@@ -16,7 +16,7 @@ private let logger = DGLogger(category: "GitRepositoryLocator")
 ///
 /// ⚠️⚠️ WHY THIS EXISTS. `WorkspaceBoundary` validates the path a tool was HANDED. That is
 /// sufficient for every other preset tool, because `read_file("<root>/x")` reads exactly
-/// `<root>/x`. It is not sufficient for `git_tool`, because `git -C <dir>` does not operate on
+/// `<root>/x`. It is not sufficient for `git`, because `git -C <dir>` does not operate on
 /// `<dir>` — it walks UP from `<dir>` until it finds a `.git`, and operates on whatever it finds.
 ///
 /// Field-observed 2026-09-20: a Code session rooted at `…/cp-dsa/java` ran `git_tool(status)`
@@ -35,7 +35,7 @@ struct GitRepositoryLocator: Sendable {
 
     /// Returns the absolute repository toplevel for `directory`, or nil when it is not inside a
     /// repository (or git is unavailable — which fails in the permissive direction on purpose:
-    /// `git_tool` will then report "not a git repository" itself, which is the honest message).
+    /// `git` will then report "not a git repository" itself, which is the honest message).
     let toplevel: @Sendable (_ directory: String) -> String?
 
     /// Asks the real git.
@@ -52,12 +52,10 @@ struct GitRepositoryLocator: Sendable {
             // read the index or render a diff, so no repo-nominated program should fire here — but
             // this runs against a repository the user has not vouched for yet, which is the one
             // place not to rely on "should".
-            var environment = ProcessInfo.processInfo.environment
-            environment["TERM"] = "dumb"
             let run = try ProcessRunner.run(
                 executable: "/usr/bin/git",
                 arguments: ["-C", start] + GitCommandBuilder.hardening + ["rev-parse", "--show-toplevel"],
-                environment: environment
+                environment: GitCommandBuilder.environment()
             )
             guard run.succeeded else { return nil }
             let path = run.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)

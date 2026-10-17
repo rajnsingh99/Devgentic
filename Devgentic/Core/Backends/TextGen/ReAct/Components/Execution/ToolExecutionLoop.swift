@@ -39,6 +39,9 @@ func executeToolCalls(
     unattendedAutoApprove: Bool = false,
     /// Code mode's project folder. Nil for every other profile — those stay unconfined.
     workspaceRoot: String? = nil,
+    /// Calls of this same step that failed validation while these passed (CR-52). Each becomes a
+    /// "Not run" observation, so the model learns the call did not happen and why.
+    rejectedCalls: [RejectedSiblingCall] = [],
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
 
@@ -82,13 +85,22 @@ func executeToolCalls(
     }
 
     // --- Deduplicate ---
-    let uniqueToolCalls = deduplicateToolCalls(toolCalls)
+    let plan = planToolCalls(toolCalls)
+    let uniqueToolCalls = plan.run
     logger.info("Deduped \(toolCalls.count) → \(uniqueToolCalls.count) unique tools.")
 
     // --- Partition: Interactive vs Autonomous ---
     // Interactive tools require human input (ask_user or HITL confirmation).
     // They must run sequentially to avoid UI deadlock (only one banner can show at a time).
-    let toolLookup = Dictionary(uniqueKeysWithValues: availableTools.map { ($0.name, $0) })
+    // ⚠️ `uniquingKeysWith`, NEVER `uniqueKeysWithValues`. Names are de-duplicated (and the
+    // injected ones reserved) in `AgentConnect.resolveExecutableTools`, but a tool appended after
+    // that — as `final_answer`, the memory tools and `get_conversation_history` once were — used to
+    // TRAP here on the first tool batch (readiness CR-2). A duplicate is a wiring defect to log, not
+    // a reason to take the app down; the first registration wins, matching the resolver.
+    let toolLookup = Dictionary(availableTools.map { ($0.name, $0) }, uniquingKeysWith: { first, duplicate in
+        logger.error("[TOOLRESOLVE] ⚠️ Two tools named '\(first.name)' reached the execution loop. CONSEQUENCE: calls go to the first registration; the duplicate is unreachable — and a provider that rejects duplicate tool names will have refused this request already. A tool was added after `resolveExecutableTools` de-duplicated the list.")
+        return first
+    })
 
     var autonomousTools: [PendingToolCall] = []
     var interactiveTools: [PendingToolCall] = []
@@ -108,32 +120,47 @@ func executeToolCalls(
         logger.info("Partitioned tools: \(autonomousTools.count) autonomous (parallel), \(interactiveTools.count) interactive (sequential).")
     }
 
-    var observations: [ToolObservation] = []
+    // A superseded write did not run; the model is told so (CR-43).
+    var observations: [ToolObservation] = plan.superseded.map {
+        supersededObservation(for: $0.call, by: $0.by, currentIteration: currentIteration)
+    }
+    // A rejected sibling did not run either; the model is told so, with the reason (CR-52).
+    observations += rejectedCalls.map { rejectedObservation(for: $0, currentIteration: currentIteration) }
 
     // --- Phase 1: Run Autonomous Tools in Parallel ---
+    // One task per LANE: calls that change a common file run in order inside their lane (CR-45).
     if !autonomousTools.isEmpty {
-        try await withThrowingTaskGroup(of: ToolObservation.self) { group in
-            for tool in autonomousTools {
+        let lanes = executionLanes(for: autonomousTools, workspaceRoot: workspaceRoot)
+        if lanes.count < autonomousTools.count {
+            logger.info("[TOOLS] \(autonomousTools.count) autonomous call(s) in \(lanes.count) lane(s): calls that change the same file run one after another, in the order the model gave. CONSEQUENCE: no edit is overwritten by a concurrent one.")
+        }
+        try await withThrowingTaskGroup(of: [ToolObservation].self) { group in
+            for lane in lanes {
                 group.addTask {
-                    try await executeSingleTool(
-                        tool: tool,
-                        availableTools: availableTools,
-                        conversationID: conversationID,
-                        currentIteration: currentIteration,
-                        iterationSpan: iterationSpan,
-                        toolMediator: toolMediator,
-                        interactionMemory: interactionMemory,
-                        continuation: continuation,
-                        approvalNodeID: approvalNodeID,
-                        unattendedAutoApprove: unattendedAutoApprove,
-                workspaceRoot: workspaceRoot,
-                        onTraceUpdate: onTraceUpdate
-                    )
+                    var laneObservations: [ToolObservation] = []
+                    for tool in lane {
+                        try Task.checkCancellation()
+                        laneObservations.append(try await executeSingleTool(
+                            tool: tool,
+                            availableTools: availableTools,
+                            conversationID: conversationID,
+                            currentIteration: currentIteration,
+                            iterationSpan: iterationSpan,
+                            toolMediator: toolMediator,
+                            interactionMemory: interactionMemory,
+                            continuation: continuation,
+                            approvalNodeID: approvalNodeID,
+                            unattendedAutoApprove: unattendedAutoApprove,
+                            workspaceRoot: workspaceRoot,
+                            onTraceUpdate: onTraceUpdate
+                        ))
+                    }
+                    return laneObservations
                 }
             }
 
-            for try await observation in group {
-                observations.append(observation)
+            for try await laneObservations in group {
+                observations.append(contentsOf: laneObservations)
             }
         }
     }
@@ -361,7 +388,7 @@ private func executeSingleTool(
         // respond"), which is exactly what happened.
         if !WorkflowRunAttendance.canReachAHuman {
             let skipText = "System: No one is available to answer (this run is unattended). Proceed with reasonable assumptions, or stop and report what you need."
-            logger.error("[HITL] ask_user REFUSED — nobody can answer this run (scheduled), question: \(String(question.prefix(120))). CONSEQUENCE: the agent is told immediately that no answer is coming and continues on assumptions, instead of parking indefinitely until the run deadline cancels everything.")
+            logger.error("[HITL] ask_user REFUSED — nobody can answer this run (scheduled), question of \(question.count) chars. CONSEQUENCE: the agent is told immediately that no answer is coming and continues on assumptions, instead of parking indefinitely until the run deadline cancels everything.")
             // ⚠️ Found on adversarial audit: this arm returned the ToolObservation WITHOUT ever
             // closing the `.toolCall` row opened above — the timeline showed the step as
             // perpetually running (or, once a run-end settle pass closes dangling rows, as an
@@ -436,6 +463,8 @@ private func executeSingleTool(
     // [HITL/A3] Default to the agent's arguments; replaced by user edits if the confirmation was edited.
     var effectiveArguments = arguments
     var effectiveParams = paramsString
+    /// Set when the user changed the arguments in the banner: the observation must say so (CR-44).
+    var userEditedParams: String?
 
     // Dispatch (handles HITL)
     let dispatchOutcome = toolMediator.prepareDispatch(
@@ -555,8 +584,31 @@ private func executeSingleTool(
 
             if approved, let edited = await ExecutionSuspensionService.shared.consumeEditedArguments(for: operationID) {
                 // [HITL/A3] The user corrected the arguments in the banner — run with those.
-                effectiveArguments = edited
-                effectiveParams = serializeToolParams(edited)
+                //
+                // ⚠️ READINESS CR-44 (2026-10-12). The edit used to replace the arguments AFTER the
+                // workspace boundary had run on the model's originals, so an edited path was never
+                // re-anchored to the project (a relative path went to $HOME) and a write the user
+                // pointed outside the project ran. Edited arguments now get the same boundary: a
+                // write outside is still refused; a read outside runs, because the user just
+                // approved exactly that path in the banner.
+                let editedBoundary = WorkspaceBoundaryDecision.evaluate(
+                    toolName: toolName, arguments: edited, workspaceRoot: workspaceRoot)
+                if case .refuse(let reason) = editedBoundary.outcome {
+                    let editedParams = serializeToolParams(edited)
+                    logger.error("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' REFUSED after the user edited its arguments. \(reason) CONSEQUENCE: the tool did not run and nothing was written; the model is told the edited call was refused.")
+                    let refusal = "The user edited this call's arguments to \(editedParams), and that was refused: \(reason)"
+                    continuation.yield(.toolFailed(ToolOutput(toolName: toolName, params: editedParams, output: refusal, isSuccess: false, rowParams: paramsString), category: .permissionRejected))
+                    return ToolObservation(
+                        stepId: currentIteration, toolCallId: toolCallId, toolName: toolName,
+                        result: refusal, summary: refusal, isSuccess: false, params: editedParams,
+                        output: refusal, artifacts: [], failureCategory: .permissionRejected)
+                }
+                effectiveArguments = editedBoundary.arguments
+                effectiveParams = serializeToolParams(editedBoundary.arguments)
+                if effectiveParams != paramsString {
+                    userEditedParams = effectiveParams
+                    logger.info("[HITL] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' runs with the user's edited arguments: \(paramsString) → \(effectiveParams). CONSEQUENCE: the observation tells the model its arguments were changed, so it doesn't reason from the ones it sent.")
+                }
             }
             if !approved {
                 // [Loop Safety] Remember the denial so an identical re-ask is auto-denied.
@@ -617,7 +669,8 @@ private func executeSingleTool(
     let postWriteContent = await postWriteSnapshot(toolName: toolName, arguments: effectiveArguments, isSuccess: result.isSuccess)
 
     // Emit structured success/failure — category drives negativeConstraints policy and UI affordance.
-    let output = ToolOutput(toolName: toolName, params: effectiveParams, output: result.llmObservation, isSuccess: result.isSuccess, preWriteContent: preWriteContent, postWriteContent: postWriteContent)
+    // `rowParams`: the timeline row was created from the model's params; a banner edit changed them (CR-41).
+    let output = ToolOutput(toolName: toolName, params: effectiveParams, output: result.llmObservation, isSuccess: result.isSuccess, preWriteContent: preWriteContent, postWriteContent: postWriteContent, rowParams: effectiveParams == paramsString ? nil : paramsString)
     if let category = result.failureCategory {
         continuation.yield(.toolFailed(output, category: category))
     } else {
@@ -640,19 +693,24 @@ private func executeSingleTool(
         metadata: [
             "tool_name": toolName,
             "is_success": "\(result.isSuccess)",
-            "tool_params": paramsString,
+            "tool_params": effectiveParams,
             "tool_output": result.llmObservation
         ]
     ))
+
+    // CR-44: the model's own turn still carries the arguments IT sent; the result says what ran.
+    let observedResult = userEditedParams.map {
+        "[The user edited this call's arguments before it ran. It ran with: \($0)]\n\(result.llmObservation)"
+    } ?? result.llmObservation
 
     return ToolObservation(
         stepId: currentIteration,
         toolCallId: toolCallId,
         toolName: toolName,
-        result: result.llmObservation,
+        result: observedResult,
         summary: result.isSuccess ? "Tool '\(toolName)' executed successfully." : "Tool '\(toolName)' failed: \(result.llmObservation)",
         isSuccess: result.isSuccess,
-        params: paramsString,
+        params: effectiveParams,
         output: result.llmObservation,
         artifacts: result.artifacts,
         failureCategory: result.failureCategory
@@ -773,7 +831,27 @@ private func postWriteSnapshot(toolName: String, arguments: [String: JSONValue],
     }.value
 }
 
+/// What one step's tool calls become: the calls that run, and the earlier writes a later call in the
+/// same step replaced (each paired with the call that replaced it).
+struct ToolCallPlan {
+    let run: [PendingToolCall]
+    let superseded: [(call: PendingToolCall, by: PendingToolCall)]
+}
+
 func deduplicateToolCalls(_ toolCalls: [PendingToolCall]) -> [PendingToolCall] {
+    planToolCalls(toolCalls).run
+}
+
+/// Exact duplicates collapse to one; of several writes to the SAME target in one step, only the
+/// last runs (most recent intent).
+///
+/// ⚠️ READINESS CR-43 (2026-10-12). The semantic phase keyed every write by `path ?? source ??
+/// destination`, so two `copy_file`s of ONE source to two different destinations collided and the
+/// first was dropped — with no event and no observation, so the model believed both copies were
+/// made. The target is now every path ROLE of the tool (`writeTarget`): a copy or move is its source
+/// AND its destination. And a replaced call is returned in `superseded`, so the loop gives it an
+/// observation saying it did not run.
+func planToolCalls(_ toolCalls: [PendingToolCall]) -> ToolCallPlan {
     // Phase 1: Exact dedup — remove calls with identical name + serialized params.
     var exactUnique: [PendingToolCall] = []
     var seen = Set<String>()
@@ -785,51 +863,138 @@ func deduplicateToolCalls(_ toolCalls: [PendingToolCall]) -> [PendingToolCall] {
         }
     }
 
-    // Phase 2: Semantic dedup — for destructive/write operations targeting the same
-    // file path, keep only the LAST call (most recent intent). This prevents the
-    // model from flooding the HITL queue with near-identical write_file calls that
-    // differ only in whitespace (e.g., "\nHello" vs "\nHello\n" vs "Hello\n").
-    let destructiveTools: Set<String> = ["write_file", "delete_file", "move_file", "copy_file"]
-    var pathLastIndex: [String: Int] = [:]  // "tool|path" → last index in exactUnique
-
+    // Phase 2: Semantic dedup — of several writes to the same target, keep only the LAST. This
+    // stops a model flooding the HITL queue with near-identical write_file calls that differ only
+    // in whitespace (e.g., "\nHello" vs "\nHello\n" vs "Hello\n").
+    var lastIndexByTarget: [String: Int] = [:]
     for (index, tool) in exactUnique.enumerated() {
-        guard destructiveTools.contains(tool.name) else { continue }
-        let normalized = normalizePathArguments(tool.arguments)
-        guard let pathValue = normalized["path"] ?? normalized["source"] ?? normalized["destination"],
-              case .string(let path) = pathValue else { continue }
-        let key = "\(tool.name)|\(path)"
-        pathLastIndex[key] = index
+        if let target = writeTarget(of: tool) { lastIndexByTarget[target] = index }
     }
 
-    // If no destructive duplicates found, skip Phase 2
-    guard !pathLastIndex.isEmpty else { return exactUnique }
-
-    // Build set of indices to drop (earlier calls to same tool+path)
-    var indicesToKeep = Set(exactUnique.indices)
-    var seenPaths: [String: [Int]] = [:]
-
+    var run: [PendingToolCall] = []
+    var superseded: [(call: PendingToolCall, by: PendingToolCall)] = []
     for (index, tool) in exactUnique.enumerated() {
-        guard destructiveTools.contains(tool.name) else { continue }
-        let normalized = normalizePathArguments(tool.arguments)
-        guard let pathValue = normalized["path"] ?? normalized["source"] ?? normalized["destination"],
-              case .string(let path) = pathValue else { continue }
-        let key = "\(tool.name)|\(path)"
-        seenPaths[key, default: []].append(index)
-    }
-
-    for (_, indices) in seenPaths where indices.count > 1 {
-        // Keep only the last one, drop earlier calls
-        for i in indices.dropLast() {
-            indicesToKeep.remove(i)
+        if let target = writeTarget(of: tool), let last = lastIndexByTarget[target], last != index {
+            superseded.append((tool, exactUnique[last]))
+        } else {
+            run.append(tool)
         }
     }
 
-    if indicesToKeep.count < exactUnique.count {
-        let dropped = exactUnique.count - indicesToKeep.count
-        logger.info("🔀 Semantic dedup: collapsed \(dropped) earlier write(s) to same path, keeping last intent.")
+    if !superseded.isEmpty {
+        logger.info("🔀 Semantic dedup: \(superseded.count) earlier write(s) superseded by a later call to the same target in this step, keeping last intent: \(superseded.map { "\($0.call.name) \($0.call.id.prefix(12)) → \($0.by.id.prefix(12))" }.joined(separator: ", ")). CONSEQUENCE: each superseded call is reported to the model as not run.")
     }
+    return ToolCallPlan(run: run, superseded: superseded)
+}
 
-    return exactUnique.enumerated().compactMap { indicesToKeep.contains($0.offset) ? $0.element : nil }
+/// The target a write-like call acts on, as one key: the tool name plus the value of EACH of its
+/// path roles, in role order. Nil for tools that are not deduplicated by target, or when no role
+/// is present. Role lists are the decoders' own (`ToolPathKeys`).
+func writeTarget(of tool: PendingToolCall) -> String? {
+    let roles: [[String]]
+    switch tool.name {
+    case "write_file":  roles = [ToolPathKeys.writeFile]
+    case "delete_file": roles = [ToolPathKeys.deleteFile]
+    case "move_file":   roles = [ToolPathKeys.moveFileSource, ToolPathKeys.moveFileDestination]
+    case "copy_file":   roles = [ToolPathKeys.copyFileSource, ToolPathKeys.copyFileDestination]
+    default:            return nil
+    }
+    let normalized = normalizePathArguments(tool.arguments)
+    let values: [String?] = roles.map { keys in
+        for key in keys { if case .string(let value)? = normalized[key] { return value } }
+        return nil
+    }
+    guard values.contains(where: { $0 != nil }) else { return nil }
+    return ([tool.name] + values.map { $0 ?? "∅" }).joined(separator: "|")
+}
+
+/// The observation for a call a later call in the same step replaced (CR-43). Not a tool failure:
+/// it is reported `.cancelled`, which outcome accounting treats as a choice rather than evidence.
+func supersededObservation(for call: PendingToolCall, by later: PendingToolCall, currentIteration: Int) -> ToolObservation {
+    let note = "Not run: a later \(later.name) call in this same step (id \(later.id)) targets the same file(s), and only the last of them runs. Repeat this call in a later step if both were intended."
+    return ToolObservation(
+        stepId: currentIteration,
+        toolCallId: call.id,
+        toolName: call.name,
+        result: note,
+        summary: note,
+        isSuccess: false,
+        params: serializeToolParams(call.arguments),
+        output: note,
+        artifacts: [],
+        failureCategory: .cancelled
+    )
+}
+
+/// The observation for a call the parser rejected while its siblings ran (CR-52).
+func rejectedObservation(for rejected: RejectedSiblingCall, currentIteration: Int) -> ToolObservation {
+    let note = rejected.modelNote
+    return ToolObservation(
+        stepId: currentIteration,
+        toolCallId: rejected.call.id,
+        toolName: rejected.call.name,
+        result: note,
+        summary: note,
+        isSuccess: false,
+        params: serializeToolParams(rejected.call.arguments),
+        output: note,
+        artifacts: [],
+        failureCategory: {
+            if case .unknownToolName = rejected.reason { return .notFound }
+            return .invalidArgs
+        }()
+    )
+}
+
+// MARK: - Same-file ordering (CR-45)
+
+/// Tools that change a file's contents or existence. Two of these on one file must not run at once.
+let fileMutatingToolNames: Set<String> = [
+    "write_file", "overwrite_file", "create_new_file", "create_file",
+    "edit_code_single", "edit_code_batch", "edit_code",
+    "delete_file", "move_file", "copy_file",
+]
+
+/// Groups autonomous calls into lanes that may run in parallel. Calls that mutate a common file share
+/// a lane and run in the model's order; every other call is a lane of its own.
+///
+/// ⚠️ READINESS CR-45 (2026-10-12). Every autonomous call got its own task. Two `edit_code_single`
+/// calls on one file each read it, replaced their string and wrote it back, so the last write won
+/// and BOTH reported success — the first edit silently lost. Paths are compared after the same
+/// project re-anchoring the call will get (`WorkspaceBoundaryDecision`), so `a.swift` and
+/// `/proj/a.swift` are one file.
+func executionLanes(for calls: [PendingToolCall], workspaceRoot: String?) -> [[PendingToolCall]] {
+    var lanes: [[PendingToolCall]] = []
+    var laneByPath: [String: Int] = [:]
+    for call in calls {
+        guard fileMutatingToolNames.contains(call.name) else {
+            lanes.append([call])
+            continue
+        }
+        let anchored = WorkspaceBoundaryDecision.evaluate(toolName: call.name, arguments: call.arguments, workspaceRoot: workspaceRoot).arguments
+        let normalized = normalizePathArguments(anchored)
+        let paths = ToolPathKeys.pathArguments(forTool: call.name).sorted().compactMap { key -> String? in
+            if case .string(let value)? = normalized[key] { return value }
+            return nil
+        }
+        // A call touching files from several lanes joins the first; later lanes' paths are folded in.
+        let existing = Set(paths.compactMap { laneByPath[$0] }).sorted()
+        let lane: Int
+        if let first = existing.first {
+            lane = first
+            for other in existing.dropFirst() {
+                lanes[first].append(contentsOf: lanes[other])
+                lanes[other] = []
+                for (path, index) in laneByPath where index == other { laneByPath[path] = first }
+            }
+            lanes[lane].append(call)
+        } else {
+            lanes.append([call])
+            lane = lanes.count - 1
+        }
+        for path in paths { laneByPath[path] = lane }
+    }
+    return lanes.filter { !$0.isEmpty }
 }
 
 func serializeToolParams(_ params: [String: JSONValue]) -> String {

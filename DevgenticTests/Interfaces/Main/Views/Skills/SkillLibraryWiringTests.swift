@@ -53,6 +53,29 @@ final class SkillLibraryWiringTests: XCTestCase {
         XCTAssertEqual(SidebarTab(rawValue: SidebarTab.skills.rawValue), .skills)
     }
 
+    /// In Code interface mode, Profiles and Scheduler tabs must be hidden.
+    /// In Chat and Workflow interface modes, all sidebar tabs must remain visible.
+    func testSidebarTabVisibilityPerInterfaceMode() {
+        // In Code mode, Profiles and Scheduler must be hidden
+        XCTAssertFalse(SidebarTab.backendProfiles.isVisible(in: .code))
+        XCTAssertFalse(SidebarTab.scheduler.isVisible(in: .code))
+        XCTAssertTrue(SidebarTab.conversations.isVisible(in: .code))
+        XCTAssertTrue(SidebarTab.explorer.isVisible(in: .code))
+        XCTAssertTrue(SidebarTab.promptLibrary.isVisible(in: .code))
+        XCTAssertTrue(SidebarTab.tools.isVisible(in: .code))
+        XCTAssertTrue(SidebarTab.skills.isVisible(in: .code))
+        XCTAssertTrue(SidebarTab.settings.isVisible(in: .code))
+
+        // In Chat and Workflow modes, all tabs must be visible
+        for mode in [MainApplicationViewModel.InterfaceMode.chat, .workflow] {
+            XCTAssertTrue(SidebarTab.backendProfiles.isVisible(in: mode))
+            XCTAssertTrue(SidebarTab.scheduler.isVisible(in: mode))
+            XCTAssertTrue(SidebarTab.conversations.isVisible(in: mode))
+            XCTAssertTrue(SidebarTab.explorer.isVisible(in: mode))
+            XCTAssertTrue(SidebarTab.skills.isVisible(in: mode))
+        }
+    }
+
     // MARK: - Route
 
     /// The optional profile is the whole dual-mode contract: reachable with no profile chosen
@@ -93,6 +116,34 @@ final class SkillLibraryWiringTests: XCTestCase {
         let after = source[range.upperBound...].prefix(200)
         XCTAssertTrue(after.contains("requestSidebarVisible"),
                       "the skills-surface branch must post .requestSidebarVisible, as .toolLibrary does — and it must cover the DETAIL too, or arriving there with the pane hidden leaves no way back to the library")
+    }
+
+    /// Verifies that when the skills sidebar is empty, it prompts the user to import skills.
+    func testSkillNavigationPaneEmptyStatePresentsImportSkill() throws {
+        let source = try Self.read("Devgentic/Interfaces/Main/Views/Skills/SkillNavigationPane.swift")
+        guard let emptyStateRange = source.range(of: "private var emptyState: some View {") else {
+            return XCTFail("emptyState not found in SkillNavigationPane.swift")
+        }
+        let block = source[emptyStateRange.lowerBound...].prefix(400)
+        XCTAssertTrue(block.contains("buttonTitle: \"Import Skill\""), "Empty state button must offer Import Skill rather than New Skill")
+        XCTAssertTrue(block.contains("showingImport = true"), "Empty state action must trigger import sheet")
+    }
+
+    /// Verifies that SkillDetailView wires a preview toggle and renders via WorkflowMarkdownView.
+    func testSkillDetailViewWiredWithMarkdownPreview() throws {
+        let source = try Self.read("Devgentic/Interfaces/Main/Views/Skills/SkillDetailView.swift")
+        XCTAssertTrue(source.contains("isPreviewMode"), "SkillDetailView must track preview state")
+        XCTAssertTrue(source.contains("isPreviewEnabled"), "SkillDetailView must guard preview mode based on content")
+        XCTAssertTrue(source.contains("WorkflowMarkdownView(text: draft.body)"), "SkillDetailView must use WorkflowMarkdownView for rendering")
+        XCTAssertTrue(source.contains("skills.instructions.preview"), "SkillDetailView must include preview button identifier")
+    }
+
+    /// Verifies that ActivityBarView filters its visible tabs and reacts to interface mode changes.
+    func testActivityBarFiltersTabsForCodeMode() throws {
+        let source = try Self.read("Devgentic/Interfaces/Main/Views/Sidebar/ActivityBar.swift")
+        XCTAssertTrue(source.contains("visibleTopTabs"), "ActivityBarView must filter tabs for current interface mode")
+        XCTAssertTrue(source.contains("isVisible(in:"), "ActivityBarView must use isVisible(in:) to filter visible tabs")
+        XCTAssertTrue(source.contains("ensureValidSelectedTab"), "ActivityBarView must revalidate selected tab when mode changes")
     }
 
     // MARK: - Helper

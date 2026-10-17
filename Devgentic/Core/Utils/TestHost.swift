@@ -87,8 +87,15 @@ enum TestHost {
 
     /// Wiped once per process, so each run starts from a genuinely empty domain — otherwise a
     /// value written by one test would be "already configured" for the next run's defaults tests.
+    ///
+    /// ⚠️ ONE DOMAIN PER PROCESS (`…defaults.<pid>`). A preferences domain is machine-wide, and
+    /// the name used to be fixed — so two test hosts running at once (an overlapping background
+    /// run, or the developer's own Xcode run) shared it: one host's write landed mid-test in the
+    /// other, and its launch wipe erased the other's settings. `OrbDefaultsIsolationTests
+    /// .testAnUnsetWakeWordMeansTheDefault` failed that way, order-dependently, 2026-10-04.
     private static let testHostSuite: UserDefaults = {
-        let name = "devgentic.testhost.defaults"
+        let name = defaultsSuiteName
+        removeStaleSuites()
         guard let suite = UserDefaults(suiteName: name) else {
             // ⚠️ Falling back to `.standard` would silently restore the exact leak this exists to
             // close, so say so — a mysteriously-failing settings test is the symptom.
@@ -98,4 +105,36 @@ enum TestHost {
         suite.removePersistentDomain(forName: name)
         return suite
     }()
+
+    static let defaultsSuitePrefix = "devgentic.testhost.defaults"
+
+    /// This process's isolated domain.
+    static var defaultsSuiteName: String {
+        "\(defaultsSuitePrefix).\(ProcessInfo.processInfo.processIdentifier)"
+    }
+
+    /// Domains to delete from `~/Library/Preferences`: those of test hosts that have exited
+    /// (every run leaves one behind), and the old shared, unsuffixed one. Pure, for tests.
+    static func staleSuiteNames(amongPreferenceFiles fileNames: [String], isAlive: (pid_t) -> Bool) -> [String] {
+        fileNames.compactMap { file -> String? in
+            guard file.hasSuffix(".plist") else { return nil }
+            let domain = String(file.dropLast(".plist".count))
+            if domain == defaultsSuitePrefix { return domain }
+            guard domain.hasPrefix(defaultsSuitePrefix + "."),
+                  let pid = pid_t(domain.dropFirst(defaultsSuitePrefix.count + 1)) else { return nil }
+            return isAlive(pid) ? nil : domain
+        }
+    }
+
+    private static func removeStaleSuites() {
+        guard let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else { return }
+        let preferences = library.appendingPathComponent("Preferences", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: preferences.path)) ?? []
+        // `kill(pid, 0)` probes without signalling; EPERM still means the process exists.
+        let stale = staleSuiteNames(amongPreferenceFiles: files) { kill($0, 0) == 0 || errno == EPERM }
+        for domain in stale {
+            UserDefaults.standard.removePersistentDomain(forName: domain)
+            try? FileManager.default.removeItem(at: preferences.appendingPathComponent(domain + ".plist"))
+        }
+    }
 }

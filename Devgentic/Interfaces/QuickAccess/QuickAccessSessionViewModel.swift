@@ -133,13 +133,15 @@ final class QuickAccessSessionViewModel {
         query: String,
         conversationID: UUID,
         files: [FileSystemItem],
-        fileProcessorService: FileProcessorService
+        fileProcessorService: FileProcessorService,
+        deliveryMode: AttachmentDeliveryMode? = nil
     ) async -> ChatMessage {
         let userMessage = await MessagingCoordinator.makeUserMessage(
             conversationID: conversationID,
             query: query,
             files: files,
-            fileProcessorService: fileProcessorService
+            fileProcessorService: fileProcessorService,
+            deliveryMode: deliveryMode
         )
         userMessage.messageSource = .quickAccess   // [Q2] attribute panel traffic
         return userMessage
@@ -394,7 +396,8 @@ final class QuickAccessSessionViewModel {
                 query: query,
                 conversationID: convID,
                 files: files,
-                fileProcessorService: mainVM.messagingCoordinator.fileProcessor
+                fileProcessorService: mainVM.messagingCoordinator.fileProcessor,
+                deliveryMode: AttachmentDeliveryMode.resolve(for: config.profile)
             )
             await persistence.addMessage(userMessage, toConversation: convID)
             chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
@@ -601,7 +604,7 @@ final class QuickAccessSessionViewModel {
             }
         } else {
             submitHITLDirect("Gate cancelled", operationID: pending.id,
-                             detail: "no option chosen — the workflow resumes down its default path") {
+                             detail: "no option chosen — the Gate is dismissed and none of its branches run") {
                 await ExecutionSuspensionService.shared.resumeGate(for: pending.id, chosenOption: nil, resolvedBy: .quickAccess)
             }
         }

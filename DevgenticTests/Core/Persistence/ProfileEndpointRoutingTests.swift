@@ -15,6 +15,11 @@
 //  text-gen provider factory, and an endpoint string that failed to parse and silently degraded to
 //  "not configured". Each is asserted separately below because each was a separate omission.
 //
+//  B22's guard (`ConfiguredEndpoint`) and its tests were deleted on 2026-10-09 with the per-provider
+//  model pickers, its only callers. The model catalog that replaced them fetches from a typed
+//  endpoint only for Ollama and OpenAI-compatible servers, and both loaders refuse one that fails
+//  `ProviderDefaults.isUsableEndpoint` (asserted below); its cloud lists are built in — no fetch.
+//
 
 import XCTest
 @testable import devgentic
@@ -120,61 +125,5 @@ final class ResolvedBaseURLTests: XCTestCase {
         XCTAssertEqual(ProviderDefaults.resolvedBaseURL(configured: "http://localhost:1234/v1",
                                                         fallback: ProviderDefaults.openAIBaseURL).absoluteString,
                        "http://localhost:1234/v1")
-    }
-}
-
-// MARK: - B22: "unparseable" must not read as "not configured"
-
-final class ConfiguredEndpointTests: XCTestCase {
-
-    func testUnsetResolvesToTheVendorDefault() {
-        XCTAssertEqual(ConfiguredEndpoint.resolve(nil), .vendorDefault)
-        XCTAssertEqual(ConfiguredEndpoint.resolve(""), .vendorDefault)
-        XCTAssertEqual(ConfiguredEndpoint.resolve("  \n "), .vendorDefault)
-    }
-
-    func testAUsableEndpointResolvesToCustom() {
-        let endpoint = ConfiguredEndpoint.resolve("https://gw.corp.example.com/v1/")
-        XCTAssertEqual(endpoint, .custom(URL(string: "https://gw.corp.example.com/v1/")!))
-        XCTAssertEqual(endpoint.serviceURL?.host, "gw.corp.example.com")
-        XCTAssertTrue(endpoint.isUsable)
-    }
-
-    /// ⚠️ THE FINDING. `configuredBaseURL` returned `URL?` and mapped both "empty" and
-    /// "unparseable" to nil — and nil means "use the vendor default". So a half-typed or typo'd
-    /// gateway address routed the fetch, carrying the user's gateway-scoped API key, to the vendor.
-    func testAnUnparseableEndpointIsNotSilentlyTreatedAsUnset() {
-        let endpoint = ConfiguredEndpoint.resolve("https://my gateway")
-        XCTAssertNotEqual(endpoint, .vendorDefault,
-                          "an endpoint the user typed must never degrade to 'use the vendor'")
-        XCTAssertFalse(endpoint.isUsable)
-    }
-
-    /// The load-bearing consequence: nothing usable to send to, and specifically NOT the default.
-    func testAnUnusableEndpointYieldsNoServiceURL() {
-        for junk in ["my gateway", "gw.corp.example.com", "://nope"] {
-            let endpoint = ConfiguredEndpoint.resolve(junk)
-            XCTAssertFalse(endpoint.isUsable, "'\(junk)' must be flagged unusable")
-            XCTAssertNil(endpoint.serviceURL,
-                         "'\(junk)' must not produce a URL, and must not be answered with the default")
-        }
-    }
-
-    /// The endpoint has to be observable for `.onChange` to fire on an edit — the whole reason the
-    /// old `URL?`-inside-a-closure shape could not retrigger a fetch.
-    func testTwoDifferentEndpointsCompareUnequal() {
-        XCTAssertNotEqual(ConfiguredEndpoint.resolve("https://a.example.com/"),
-                          ConfiguredEndpoint.resolve("https://b.example.com/"))
-        XCTAssertNotEqual(ConfiguredEndpoint.resolve("https://a.example.com/"), .vendorDefault)
-        XCTAssertEqual(ConfiguredEndpoint.resolve("https://a.example.com/"),
-                       ConfiguredEndpoint.resolve("  https://a.example.com/  "),
-                       "whitespace alone must not look like a change and retrigger a fetch")
-    }
-
-    func testDescriptionNamesTheHostAFetchWouldUse() {
-        XCTAssertEqual(ConfiguredEndpoint.vendorDefault.description, "the default endpoint")
-        XCTAssertEqual(ConfiguredEndpoint.resolve("https://gw.example.com/v1/").description,
-                       "https://gw.example.com/v1/")
-        XCTAssertTrue(ConfiguredEndpoint.resolve("my gateway").description.contains("unusable"))
     }
 }

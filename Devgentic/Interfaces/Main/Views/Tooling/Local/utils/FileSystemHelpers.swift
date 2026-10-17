@@ -41,7 +41,7 @@ struct ExtendedAttributeHelper {
 }
 
 // `SpotlightSearcher` was removed on 2026-08-01: an @MainActor NSMetadataQuery wrapper with a
-// continuation-based `search(queryStr:scope:)`, referenced by nothing. `fs_smart_search` uses
+// continuation-based `search(queryStr:scope:)`, referenced by nothing. `spotlight_search` uses
 // `HybridSearchService`, which supersedes it — two-phase name-then-content querying, permission
 // scoping, and a filesystem fallback for unindexed locations, none of which this had. Kept out
 // rather than left as a second, worse search path for someone to find and wire up.

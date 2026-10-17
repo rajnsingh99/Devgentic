@@ -96,7 +96,7 @@ struct MarkdownStructuredGenerator: CognitiveGenerator {
             expectedDialect: Self.dialect,
             modelId: model.modelName,
             iteration: iteration,
-            knownToolNames: Set(context.availableTools.map(\.name)),
+            knownToolNames: Set(context.availableTools.map(\.name)).union(context.runToolNames),
             registeredTools: context.availableTools
         )
         return pipeline.parse(raw: responseText)

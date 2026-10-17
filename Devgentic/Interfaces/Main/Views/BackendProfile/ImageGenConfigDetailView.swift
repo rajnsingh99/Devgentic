@@ -12,7 +12,9 @@
 //
 
 import SwiftUI
+#if MLX_IMAGE_GEN   // see MLXImageGenService.swift for why on-device image generation is compiled out
 import Flux2Core
+#endif
 
 private let logger = DGLogger(category: "ImageGenConfigDetail")
 
@@ -163,9 +165,11 @@ struct ImageGenConfigDetailView: View {
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
             // When switching to MLX, immediately correct any invalid model name
+            #if MLX_IMAGE_GEN
             if providerConfig.wrappedValue.apiProvider == .mlx {
                 snapToValidFlux2Model()
             }
+            #endif
             // Reload advanced config with provider-appropriate defaults
             loadAdvancedConfig()
         }
@@ -302,28 +306,52 @@ struct ImageGenConfigDetailView: View {
                     providerConfig: providerConfig,
                     profileID: editBuffer.draft.id,
                     profileType: .imageGen,
-                    customMLXContent: AnyView(
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(alignment: .center) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Model Selection")
-                                        .font(theme.fontBody.weight(.medium))
-                                    Text("Flux2 models run fully on-device via Apple Silicon.")
-                                        .font(theme.fontCaption)
-                                        .foregroundColor(theme.secondaryText)
-                                }
-                                Spacer(minLength: 16)
-                                Flux2ModelPickerView(selectedModel: providerConfig.modelName)
-                                    .frame(maxWidth: 260, alignment: .trailing)
-                            }
-                        }
-                        .onAppear { snapToValidFlux2Model() }
-                    )
+                    customMLXContent: mlxModelContent
                 )
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
         }
+    }
+
+    /// The MLX arm of the provider section. In a build without on-device image generation it
+    /// explains why the profile can't run instead of offering the text-model picker, which
+    /// would let the user pick an LLM that cannot draw.
+    private var mlxModelContent: AnyView {
+        #if MLX_IMAGE_GEN
+        AnyView(
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Model Selection")
+                            .font(theme.fontBody.weight(.medium))
+                        Text("Flux2 models run fully on-device via Apple Silicon.")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    Spacer(minLength: 16)
+                    Flux2ModelPickerView(selectedModel: providerConfig.modelName)
+                        .frame(maxWidth: 260, alignment: .trailing)
+                }
+            }
+            .onAppear { snapToValidFlux2Model() }
+        )
+        #else
+        AnyView(
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundColor(theme.warningColor)
+                    .font(theme.fontCaption)
+                    .accessibilityHidden(true)
+                Text(MLXImageGenAvailability.unavailableMessage)
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.secondaryText)
+            }
+            .padding(8)
+            .background(theme.warningColor.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        )
+        #endif
     }
 
     private var advancedConfigSection: some View {
@@ -504,6 +532,7 @@ struct ImageGenConfigDetailView: View {
         }
     }
 
+    #if MLX_IMAGE_GEN
     /// Resolves the Flux2 model selection through `ModelSelectionPolicy` — register B34.
     ///
     /// ⚠️ This was `if !inferenceRawValues.contains(modelName) { modelName = klein4B }`, duplicated
@@ -556,6 +585,7 @@ struct ImageGenConfigDetailView: View {
             break
         }
     }
+    #endif
 
     /// Decodes the stored advanced config into local state and records the baseline.
     ///
@@ -668,6 +698,8 @@ struct ImageGenConfigDetailView: View {
 
 // MARK: - Flux2 Model Picker
 
+#if MLX_IMAGE_GEN
+
 /// A picker restricted to inference-capable Flux2 model variants.
 /// Only shows `dev`, `klein-4b`, and `klein-9b` — base/training models are excluded.
 private struct Flux2ModelPickerView: View {
@@ -708,3 +740,4 @@ private struct Flux2ModelPickerView: View {
         }
     }
 }
+#endif // MLX_IMAGE_GEN

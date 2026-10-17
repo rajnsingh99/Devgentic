@@ -39,6 +39,8 @@ struct MainApplicationView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
     @Environment(\.surfaceStyle) private var surfaceStyle
+    @Environment(GitChangesStore.self) private var gitChangesStore
+    @Environment(CodeSessionManager.self) private var codeSessionManager
 
     @FocusState private var isInputFocused: Bool
     
@@ -75,7 +77,16 @@ struct MainApplicationView: View {
         if chatHistoryViewModel.isBackgroundTasksPanelPresented {
             return chatHistoryViewModel.backgroundTasksPresentation == .split
         }
+        if isGitChangesPanelMounted {
+            return chatHistoryViewModel.gitChangesPresentation == .split
+        }
         return false
+    }
+
+    /// The Git Changes panel is Code-only; its flag lives on the shared view model.
+    private var isGitChangesPanelMounted: Bool {
+        GitChangesWiring.shouldMountPanel(interfaceMode: viewModel.interfaceMode,
+                                          isPresented: chatHistoryViewModel.isGitChangesPanelPresented)
     }
 
     /// Trailing inset the chat area yields to the Code Viewer or Background Tasks in split mode.
@@ -154,6 +165,18 @@ struct MainApplicationView: View {
         }
     }
 
+    /// Hoisted for the same reason as `backgroundTasksPanel`.
+    @ViewBuilder
+    private var gitChangesPanel: some View {
+        if isGitChangesPanelMounted {
+            GitChangesPanelView()
+                .environment(chatHistoryViewModel)
+                .environment(gitChangesStore)
+                .padding(.leading, chatHistoryViewModel.gitChangesPresentation == .overlay ? 0 : totalSidebarWidth)
+                .zIndex(2)
+        }
+    }
+
     private var isChatInterfaceActive: Bool {
         router.isShowingChat && viewModel.interfaceMode == .chat
     }
@@ -178,21 +201,48 @@ struct MainApplicationView: View {
     ///
     /// Dynamically tracks split-mode insets so they stay inside the chat column
     /// without overlapping side panels or each other.
+    ///
+    /// ⚠️ Mounts EXACTLY what `FloatingPillStack.visible` returns — no gate of its own here. A
+    /// shared inline gate is how Build 102.7 dropped the Background Tasks and Code Viewer pills
+    /// from Code mode; per-mode membership lives in that function and its tests.
+    private var visiblePills: [FloatingPill] {
+        FloatingPillStack.visible(
+            interfaceMode: viewModel.interfaceMode,
+            isShowingChat: router.isShowingChat,
+            showsQuickAccess: shouldShowQuickAccessButton,
+            showsGitChanges: GitChangesFloatingButton.shouldShow(
+                // The flag, NOT `snapshot != nil`: reading the snapshot would make this whole body
+                // re-evaluate on every refresh that changes a count.
+                hasLoadedRepository: gitChangesStore.hasLoadedRepository,
+                anyPanelOpen: chatHistoryViewModel.isGitChangesPanelPresented
+                    || chatHistoryViewModel.isCodeViewerPanelPresented
+                    || chatHistoryViewModel.isBackgroundTasksPanelPresented),
+            isCodeViewerMinimized: chatHistoryViewModel.isCodeViewerMinimized,
+            isBackgroundTasksPanelPresented: chatHistoryViewModel.isBackgroundTasksPanelPresented,
+            isGitChangesPanelPresented: isGitChangesPanelMounted
+        )
+    }
+
     @ViewBuilder
     private var floatingPills: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            if shouldShowQuickAccessButton {
-                QuickAccessFloatingButton()
-                    .environment(viewModel)
-            }
-            if isChatInterfaceActive {
-                BackgroundTasksFloatingButton(conversationID: chatHistoryViewModel.viewerOwningConversationID)
-                    .environment(chatHistoryViewModel)
-            }
-            if isChatInterfaceActive && chatHistoryViewModel.isCodeViewerMinimized && !chatHistoryViewModel.isBackgroundTasksPanelPresented {
-                CodeViewerFloatingButton()
-                    .environment(chatHistoryViewModel)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            ForEach(visiblePills, id: \.self) { pill in
+                switch pill {
+                case .quickAccess:
+                    QuickAccessFloatingButton()
+                        .environment(viewModel)
+                case .gitChanges:
+                    GitChangesFloatingButton()
+                        .environment(chatHistoryViewModel)
+                        .environment(gitChangesStore)
+                case .backgroundTasks:
+                    BackgroundTasksFloatingButton(conversationID: chatHistoryViewModel.viewerOwningConversationID)
+                        .environment(chatHistoryViewModel)
+                case .codeViewer:
+                    CodeViewerFloatingButton()
+                        .environment(chatHistoryViewModel)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -302,6 +352,9 @@ struct MainApplicationView: View {
             // two flags exclude each other in `ChatHistoryViewModel` rather than here — a rule
             // enforced at the mount site would be a rule this `if` could silently disagree with.
             backgroundTasksPanel
+
+            // Third occupant of the same slot — Code mode only. See `gitChangesPanel`.
+            gitChangesPanel
 
             // Floating pills — reopen-code-viewer and background-tasks. See `floatingPills`.
             floatingPills
@@ -589,6 +642,11 @@ struct MainApplicationView: View {
         .onChange(of: viewModel.interfaceMode) { _, _ in
             showModePicker = true
         }
+        // Git Changes: project sync, refresh triggers, close-on-mode-change.
+        .modifier(GitChangesWiringModifier(store: gitChangesStore,
+                                           chatHistoryViewModel: chatHistoryViewModel,
+                                           interfaceMode: viewModel.interfaceMode,
+                                           projectPath: codeSessionManager.projectPath))
         .onChange(of: viewModel.selectedConversationID) { _, _ in
             showModePicker = true
         }
@@ -658,6 +716,7 @@ struct MainApplicationView: View {
     // MARK: - Navigation & Mode Helpers
 
     private func selectSidebarTab(_ tab: SidebarTab) {
+        guard tab.isVisible(in: viewModel.interfaceMode) else { return }
         if !router.isShowingChat {
             router.returnToChat()
         }

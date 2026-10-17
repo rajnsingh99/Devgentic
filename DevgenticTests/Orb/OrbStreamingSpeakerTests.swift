@@ -115,8 +115,8 @@ final class OrbSegmentationTests: XCTestCase {
         // ⚠️ Regression guard. SpeechService's private cleaner treats `_…_` as emphasis and
         // collapses any identifier with two or more underscores — in a developer tool that is
         // precisely the text most worth pronouncing correctly.
-        XCTAssertEqual(OrbStreamingSpeaker.cleanForSpeech("call fs_smart_search first"),
-                       "call fs_smart_search first")
+        XCTAssertEqual(OrbStreamingSpeaker.cleanForSpeech("call spotlight_search first"),
+                       "call spotlight_search first")
         XCTAssertEqual(OrbStreamingSpeaker.cleanForSpeech("__init__ runs first"), "__init__ runs first")
     }
 

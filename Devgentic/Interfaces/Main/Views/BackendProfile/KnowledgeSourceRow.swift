@@ -28,6 +28,9 @@ import SwiftUI
 struct KnowledgeSourceRow: View {
     let source: KnowledgeSource
     let theme: any Theme
+    /// Set when the profile will send only part of this source (or none of it) — see
+    /// `KnowledgeSourceList`, which computes it from the backend's own plan.
+    var warning: DeliveryWarning? = nil
     let onRemove: () -> Void
 
     /// `doc.text.fill` for a healthy document, a warning triangle for a missing one.
@@ -72,6 +75,20 @@ struct KnowledgeSourceRow: View {
                         .font(theme.fontCaption2)
                         .foregroundColor(theme.errorColor)
                 }
+
+                if let warning {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(warning.problem, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundColor(theme.warningColor)
+                        Text(warning.reason)
+                            .foregroundColor(theme.secondaryText)
+                        Label(warning.suggestion, systemImage: "lightbulb")
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    .font(theme.fontCaption2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+                }
             }
 
             Spacer()
@@ -87,13 +104,56 @@ struct KnowledgeSourceRow: View {
         .background(theme.secondaryBackground.opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(
-            source.exists ? theme.dividerColor : theme.errorColor.opacity(0.3), lineWidth: 1
+            !source.exists ? theme.errorColor.opacity(0.3)
+                : warning != nil ? theme.warningColor.opacity(0.4) : theme.dividerColor,
+            lineWidth: 1
         ))
         // Announce the state in words. Without this the missing-file case reaches VoiceOver as a
         // filename and a stray "File not found" label with nothing tying them together.
         .accessibilityElement(children: .contain)
         .accessibilityLabel(source.exists
-            ? Text("Reference document \(source.fileName)")
+            ? Text("Reference document \(source.fileName)\(warning.map { ". \($0.problem)" } ?? "")")
             : Text("Reference document \(source.fileName), file not found"))
+    }
+}
+
+/// The knowledge-source rows of an agent or bot editor, each warned when the profile will send
+/// only part of it. ⚠️ Warnings come from `DeliveryWarnings.outcomes` — the backend's own read
+/// and plan, in the backend's order — so a row says exactly what the next send will do.
+/// Recomputed when the sources or the profile's file strategy / tools / type change.
+struct KnowledgeSourceList: View {
+    @Binding var sources: [KnowledgeSource]
+    let profile: BackendProfileModel
+    let theme: any Theme
+
+    @State private var warnings: [String: DeliveryWarning] = [:]
+
+    /// Knowledge is injected unless the strategy is stateless — which then ALWAYS sends a path
+    /// manifest (with or without read_file), unlike attachments.
+    private var injects: Bool { profile.resolvedFileContextStrategy != .stateless }
+
+    private var recomputeKey: String {
+        "\(sources.map(\.location).joined(separator: "|"))#\(injects)#\(profile.profileType.rawValue)"
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(sources) { source in
+                KnowledgeSourceRow(source: source, theme: theme, warning: warnings[source.location]) {
+                    sources.removeAll { $0.id == source.id }
+                }
+            }
+        }
+        .task(id: recomputeKey) {
+            guard injects else { warnings = [:]; return }
+            let candidates = sources.filter(\.exists).map {
+                DeliveryWarnings.Candidate(name: $0.fileName, path: $0.location, url: $0.url)
+            }
+            let outcomes = await DeliveryWarnings.outcomes(for: candidates, lane: .knowledge, reader: FileProcessorService())
+            guard !Task.isCancelled else { return }
+            let list = DeliveryWarnings.warnings(for: outcomes, lane: .knowledge,
+                                                 remedy: .forProfileType(profile.profileType))
+            warnings = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
     }
 }

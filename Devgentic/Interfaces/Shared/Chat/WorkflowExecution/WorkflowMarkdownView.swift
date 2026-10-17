@@ -34,7 +34,9 @@ struct WorkflowMarkdownView: View {
         self.presetBlocks = nil
     }
 
-    private init(blocks: [ContentBlock]) {
+    /// Renders blocks parsed elsewhere. Also used by `BundledDocumentView`, which parses a long
+    /// document once and renders it block by block inside a `LazyVStack`.
+    init(blocks: [ContentBlock]) {
         self.text = ""
         self.presetBlocks = blocks
     }

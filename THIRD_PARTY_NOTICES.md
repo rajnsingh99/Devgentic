@@ -3,12 +3,12 @@
 Devgentic bundles the open-source software listed below. Each package's licence text is reproduced
 verbatim, as its licence requires; where a package ships a `NOTICE` file it follows its licence.
 
-Generated 2026-09-09 from `Package.resolved` (40 pins; 14 direct package references in the
+Generated 2026-09-09 from `Package.resolved` (39 pins, in the
 project) and the resolved package checkouts. **Regenerate this file whenever dependencies change** —
 it is a compliance artefact for the shipped binary, not documentation.
 
 **Hand-maintained, NOT produced by the generator — carry them across when regenerating:** the
-*Bundled models* section, the *highlight.js* sub-entry under Highlightr, and the *tree-sitter
+*Bundled models* section, the *Bundled data* section, the *highlight.js* sub-entry under Highlightr, and the *tree-sitter
 grammars* sub-entry under CodeEditLanguages. Each covers something the app ships that is not a
 Swift package pin.
 
@@ -26,7 +26,6 @@ proprietary binary distributed free of charge under its own terms.
 | CodeEditTextView | 0.12.1 | MIT | <https://github.com/CodeEditApp/CodeEditTextView.git> |
 | CoreXLSX | 0.14.2 | Apache-2.0 | <https://github.com/CoreOffice/CoreXLSX> |
 | eventsource | 1.2.0 | MIT | <https://github.com/mattt/eventsource.git> |
-| flux-2-swift-mlx | 2.2.0 | MIT | <https://github.com/VincentGourbin/flux-2-swift-mlx.git> |
 | GRDB.swift | 7.10.0 | MIT | <https://github.com/groue/GRDB.swift.git> |
 | Highlightr | 2.3.0 | MIT | <https://github.com/raspu/Highlightr.git> |
 | HotKey | rev a3cf605d | MIT | <https://github.com/soffes/HotKey.git> |
@@ -111,6 +110,40 @@ SOFTWARE
 ```
 
 ---
+
+## Bundled data — hand-maintained, not from `Package.resolved`
+
+| Component | What ships | Licence | Source |
+|---|---|---|---|
+| LiteLLM model price list | `Resources/ModelPrices.json` — per-token prices of Anthropic, OpenAI and Gemini chat models, filtered from `model_prices_and_context_window.json` by `scripts/update-model-prices.py`; used by `ModelPriceList` to price cloud calls | MIT | <https://github.com/BerriAI/litellm> (the exact commit is recorded in the file's `_source` block) |
+
+### LiteLLM model price list — MIT
+
+The file is outside LiteLLM's `enterprise/` directory, so the repository's MIT licence applies to it.
+
+```text
+MIT License
+
+Copyright (c) 2023 Berri AI
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## CodeEditLanguages — ⚠️ no licence file shipped
 
@@ -466,34 +499,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-```
-
-## flux-2-swift-mlx — MIT
-
-Source: <https://github.com/VincentGourbin/flux-2-swift-mlx.git> · version 2.2.0 · file `LICENSE`
-
-```text
-MIT License
-
-Copyright (c) 2025 Vincent Gourbin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ## GRDB.swift — MIT

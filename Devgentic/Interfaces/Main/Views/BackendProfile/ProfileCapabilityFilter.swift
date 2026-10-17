@@ -43,11 +43,21 @@ struct ProfileCapabilityFilter {
     }
 
     /// Default provider for a NEW image-gen profile. Historically `.openAI`; falls
-    /// back to `.mlx` while remote models are hidden, so a fresh profile doesn't open
+    /// back to a local provider while remote models are hidden, so a fresh profile doesn't open
     /// on a provider the toggle just removed from every picker (the picker would show
-    /// it via `keepingCurrent`, defeating the feature on first sight).
+    /// it via `keepingCurrent`, defeating the feature on first sight). The local fallback is
+    /// `.mlx` only in a build that includes on-device image generation, `.ollama` otherwise.
     static var defaultImageGenProvider: ApiProvider {
-        AppSettings.showRemoteModels ? .openAI : .mlx
+        if AppSettings.showRemoteModels { return .openAI }
+        return MLXImageGenAvailability.isCompiledIn ? .mlx : .ollama
+    }
+
+    /// Providers that can generate images in THIS build. Anthropic has no image generation API;
+    /// MLX is listed only when on-device generation is compiled in (`MLXImageGenAvailability`).
+    static var imageGenProviders: [ApiProvider] {
+        MLXImageGenAvailability.isCompiledIn
+            ? [.openAI, .google, .mlx, .ollama]
+            : [.openAI, .google, .ollama]
     }
 
     // MARK: - Provider Filtering
@@ -61,21 +71,14 @@ struct ProfileCapabilityFilter {
     ) -> [ApiProvider] {
         switch profileType {
         case .imageGen:
-            // Anthropic has no image generation API
-            return filteringRemoteModels([.openAI, .google, .mlx, .ollama], keepingCurrent: current)
+            // A saved profile still on MLX in a build without on-device generation keeps MLX
+            // visible so its picker isn't blank; the editor explains why it can't run and the
+            // factory refuses it with the same message. New selections can't choose it.
+            var providers = imageGenProviders
+            if current == .mlx, !providers.contains(.mlx) { providers.append(.mlx) }
+            return filteringRemoteModels(providers, keepingCurrent: current)
         case .bot, .agent, .workflow, .code:
             return filteringRemoteModels(ApiProvider.allCases.map { $0 }, keepingCurrent: current)
-        }
-    }
-
-    // MARK: - Model Filtering
-
-    /// Whether model pickers should filter for tool-capable models.
-    /// Only Agent profiles require tool support from their models.
-    static func filterForTools(for profileType: ProfileType) -> Bool {
-        switch profileType {
-        case .agent:    return true
-        case .bot, .imageGen, .workflow, .code: return false
         }
     }
 

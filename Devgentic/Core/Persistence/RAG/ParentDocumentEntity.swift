@@ -39,6 +39,9 @@ final class ParentDocumentEntity {
     /// replace-on-reindex (delete prior copies before re-adding) so re-attached
     /// files and re-finalized messages don't accumulate duplicate vectors.
     /// Empty for rows written before this field existed.
+    ///
+    /// INDEXED (RAG-9): replace-on-reindex selects prior copies by this key.
+    // objectbox: index
     var sourceIdentifier: String = ""
 
     /// The default initializer required by ObjectBox.

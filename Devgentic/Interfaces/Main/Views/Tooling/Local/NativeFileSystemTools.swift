@@ -35,10 +35,7 @@ struct ListDirectoryTool: DevgenticTool {
             
             // ROBUST PARSING: Synonyms & Casing
             var foundPath: String? = nil
-            let keys = [
-                "path", "directory", "folder", "dir",
-                "directoryPath", "folderPath", "targetPath" // CamelCase handling
-            ]
+            let keys = ToolPathKeys.listDirectory
             
             for key in keys {
                 if let codingKey = DynamicKey(stringValue: key),
@@ -138,10 +135,7 @@ struct ReadFileTool: DevgenticTool {
             
             // ROBUST PARSING
             var foundPath: String? = nil
-            let keys = [
-                "path", "file", "filename", "filePath",
-                "source", "target", "file_path"
-            ]
+            let keys = ToolPathKeys.readFile
             
             for key in keys {
                 if let codingKey = DynamicKey(stringValue: key),
@@ -331,7 +325,7 @@ struct WriteFileTool: DevgenticTool {
             
             // Parse Path
             var foundPath: String? = nil
-            let pathKeys = ["path", "file", "filename", "destination", "filepath", "target", "filePath"]
+            let pathKeys = ToolPathKeys.writeFile
             for key in pathKeys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
@@ -453,7 +447,7 @@ struct DeleteFileTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
             
             var foundPath: String? = nil
-            let keys = ["path", "file", "filename", "item", "filePath", "target"]
+            let keys = ToolPathKeys.deleteFile
             for key in keys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
@@ -529,10 +523,7 @@ struct MoveFileTool: DevgenticTool {
             
             // Alias Check: Source
             var foundSource: String? = nil
-            let srcKeys = [
-                "source", "src", "from", "current_path", "source_path",
-                "original", "sourcePath", "filePath" // CamelCase
-            ]
+            let srcKeys = ToolPathKeys.moveFileSource
             for key in srcKeys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
@@ -547,10 +538,7 @@ struct MoveFileTool: DevgenticTool {
             
             // Alias Check: Destination
             var foundDest: String? = nil
-            let destKeys = [
-                "destination", "dest", "to", "target", "new_path", "target_path",
-                "destinationPath", "newPath", "targetPath" // CamelCase
-            ]
+            let destKeys = ToolPathKeys.moveFileDestination
             for key in destKeys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
@@ -620,7 +608,7 @@ struct CopyFileTool: DevgenticTool {
             
             // Alias Check: Source
             var foundSource: String? = nil
-            let srcKeys = ["source", "src", "from", "current_path", "original", "sourcePath"]
+            let srcKeys = ToolPathKeys.copyFileSource
             for key in srcKeys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
@@ -635,7 +623,7 @@ struct CopyFileTool: DevgenticTool {
             
             // Alias Check: Destination
             var foundDest: String? = nil
-            let destKeys = ["destination", "dest", "to", "target", "copy_path", "destinationPath"]
+            let destKeys = ToolPathKeys.copyFileDestination
             for key in destKeys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {
@@ -704,10 +692,7 @@ struct CreateFolderTool: DevgenticTool {
             
             // Alias Check
             var foundPath: String? = nil
-            let keys = [
-                "path", "folder", "directory", "dir", "name", "target",
-                "folderPath", "directoryPath" // CamelCase
-            ]
+            let keys = ToolPathKeys.createFolder
             for key in keys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: codingKey) {

@@ -367,7 +367,7 @@ final class ReActExecutorIntegrationTests: XCTestCase {
     /// the synthesizer's own gate is not what regressed here.
     ///
     /// ⚠️ The scripted tool name must NOT be a real permission-gated tool name.
-    /// The incident's literal `fs_read_metadata` is mapped by
+    /// The incident's tool (`fs_read_metadata` then, `read_file_metadata` now) is mapped by
     /// `ToolExecutionMediator.getRequiredPermissions` to
     /// [.desktop, .documents, .downloads], so a mock run with that name routes
     /// through `PermissionManager.shared.ensurePermissions` — real TCC-gated
@@ -419,7 +419,7 @@ final class ReActExecutorIntegrationTests: XCTestCase {
     /// from synthesis routing must leave the outcome honest, or every partially
     /// failed run would silently record green.
     ///
-    /// Same naming constraint as the test above: `fs_read_metadata` itself is
+    /// Same naming constraint as the test above: the real metadata tool is
     /// permission-gated and would drag real TCC checks into this mock run. (The
     /// same incident name with a failing tool and no opt-in must still amber the
     /// run — that is what `fs_read_metadata_probe` pins here.)

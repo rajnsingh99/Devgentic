@@ -33,10 +33,12 @@ extension ChildChunkEntity: ObjectBox.EntityInspectable {
         try entityBuilder.addProperty(name: "embedding", type: PropertyType.floatVector, flags: [.indexed], id: 3, uid: 1047382956103847936, indexId: 2, indexUid: 243373707592068352)
             .hnswParams(dimensions: 384, neighborsPerNode: 48, indexingSearchCount: 200, flags: nil, distanceType: HnswDistanceType.cosine, reparationBacklinkProbability: nil, vectorCacheHintSizeKB: 524288)
         try entityBuilder.addProperty(name: "chunkIndex", type: PropertyType.long, id: 4, uid: 2538194607326951424)
-        try entityBuilder.addProperty(name: "conversationID", type: PropertyType.string, id: 6, uid: 2322328137919046912)
+        try entityBuilder.addProperty(name: "conversationID", type: PropertyType.string, flags: [.indexHash, .indexed], id: 6, uid: 2322328137919046912, indexId: 3, indexUid: 2780367951072500992)
+        try entityBuilder.addProperty(name: "bm25Terms", type: PropertyType.string, id: 7, uid: 2814076638961787904)
+        try entityBuilder.addProperty(name: "bm25Length", type: PropertyType.long, id: 8, uid: 7334421554644074240)
         try entityBuilder.addToOneRelation(name: "parentDocument", targetEntityInfo: ToOne<ParentDocumentEntity>.Target.entityInfo, flags: [.indexed, .indexPartialSkipZero], id: 5, uid: 3692851740519263232, indexId: 1, indexUid: 4817293650284719104)
 
-        try entityBuilder.lastProperty(id: 6, uid: 2322328137919046912)
+        try entityBuilder.lastProperty(id: 8, uid: 7334421554644074240)
     }
 }
 
@@ -71,6 +73,18 @@ extension ChildChunkEntity {
     ///
     ///     box.query { ChildChunkEntity.conversationID.startsWith("X") }
     internal static var conversationID: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChildChunkEntity.bm25Terms.startsWith("X") }
+    internal static var bm25Terms: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 7, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChildChunkEntity.bm25Length > 1234 }
+    internal static var bm25Length: Property<ChildChunkEntity, Int, Void> { return Property<ChildChunkEntity, Int, Void>(propertyId: 8, isPrimaryKey: false) }
     internal static var parentDocument: Property<ChildChunkEntity, EntityId<ToOne<ParentDocumentEntity>.Target>, ToOne<ParentDocumentEntity>.Target> { return Property(propertyId: 5) }
 
 
@@ -120,6 +134,22 @@ extension ObjectBox.Property where E == ChildChunkEntity {
 
     internal static var conversationID: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
 
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .bm25Terms.startsWith("X") }
+
+    internal static var bm25Terms: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 7, isPrimaryKey: false) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .bm25Length > 1234 }
+
+    internal static var bm25Length: Property<ChildChunkEntity, Int, Void> { return Property<ChildChunkEntity, Int, Void>(propertyId: 8, isPrimaryKey: false) }
+
     internal static var parentDocument: Property<ChildChunkEntity, ToOne<ParentDocumentEntity>.Target.EntityBindingType.IdType, ToOne<ParentDocumentEntity>.Target> { return Property<ChildChunkEntity, ToOne<ParentDocumentEntity>.Target.EntityBindingType.IdType, ToOne<ParentDocumentEntity>.Target>(propertyId: 5) }
 
 }
@@ -147,13 +177,16 @@ internal final class ChildChunkEntityBinding: ObjectBox.EntityBinding, Sendable 
         let propertyOffset_chunkText = propertyCollector.prepare(string: entity.chunkText)
         let propertyOffset_embedding = propertyCollector.prepare(values: entity.embedding)
         let propertyOffset_conversationID = propertyCollector.prepare(string: entity.conversationID)
+        let propertyOffset_bm25Terms = propertyCollector.prepare(string: entity.bm25Terms)
 
         propertyCollector.collect(id, at: 2 + 2 * 1)
         propertyCollector.collect(entity.chunkIndex, at: 2 + 2 * 4)
+        propertyCollector.collect(entity.bm25Length, at: 2 + 2 * 8)
         try propertyCollector.collect(entity.parentDocument, at: 2 + 2 * 5, store: store)
         propertyCollector.collect(dataOffset: propertyOffset_chunkText, at: 2 + 2 * 2)
         propertyCollector.collect(dataOffset: propertyOffset_embedding, at: 2 + 2 * 3)
         propertyCollector.collect(dataOffset: propertyOffset_conversationID, at: 2 + 2 * 6)
+        propertyCollector.collect(dataOffset: propertyOffset_bm25Terms, at: 2 + 2 * 7)
     }
 
     internal func postPut(fromEntity entity: EntityType, id: ObjectBox.Id, store: ObjectBox.Store) throws {
@@ -177,6 +210,8 @@ internal final class ChildChunkEntityBinding: ObjectBox.EntityBinding, Sendable 
         entity.embedding = entityReader.read(at: 2 + 2 * 3)
         entity.chunkIndex = entityReader.read(at: 2 + 2 * 4)
         entity.conversationID = entityReader.read(at: 2 + 2 * 6)
+        entity.bm25Terms = entityReader.read(at: 2 + 2 * 7)
+        entity.bm25Length = entityReader.read(at: 2 + 2 * 8)
 
         entity.parentDocument = entityReader.read(at: 2 + 2 * 5, store: store)
         return entity
@@ -208,7 +243,7 @@ extension ParentDocumentEntity: ObjectBox.EntityInspectable {
         try entityBuilder.addProperty(name: "conversationID", type: PropertyType.string, id: 3, uid: 5649271038461280256)
         try entityBuilder.addProperty(name: "fullTextContent", type: PropertyType.string, id: 4, uid: 6102843719584372736)
         try entityBuilder.addProperty(name: "timestamp", type: PropertyType.date, id: 5, uid: 7531926084731928576)
-        try entityBuilder.addProperty(name: "sourceIdentifier", type: PropertyType.string, id: 6, uid: 7936131631944347392)
+        try entityBuilder.addProperty(name: "sourceIdentifier", type: PropertyType.string, flags: [.indexHash, .indexed], id: 6, uid: 7936131631944347392, indexId: 4, indexUid: 4259552375670964992)
 
         try entityBuilder.lastProperty(id: 6, uid: 7936131631944347392)
     }
@@ -369,7 +404,7 @@ fileprivate func cModel() throws -> OpaquePointer {
     try ChildChunkEntity.buildEntity(modelBuilder: modelBuilder)
     try ParentDocumentEntity.buildEntity(modelBuilder: modelBuilder)
     modelBuilder.lastEntity(id: 3, uid: 1682473059827456000)
-    modelBuilder.lastIndex(id: 2, uid: 243373707592068352)
+    modelBuilder.lastIndex(id: 4, uid: 4259552375670964992)
     return modelBuilder.finish()
 }
 

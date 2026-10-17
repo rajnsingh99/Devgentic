@@ -68,7 +68,19 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
     // MARK: - Extraction
 
     private func extractToolCalls(from text: String) -> [PendingToolCall] {
-        guard let startRange = text.range(of: Self.actionBegin) else { return [] }
+        // ⚠️ READINESS CR-50 (2026-10-12). The pipeline hands parsers SANITIZED text, and the
+        // sanitizer strips `<|START_ACTION|>` / `<|END_ACTION|>` with every other special token.
+        // So in production this parser never saw its own marker: every Command-R7B call fell to
+        // the heuristic, which read `"arguments"` only (never this dialect's `"parameters"`) and
+        // the first object only. Each call ran with NO arguments. Without the marker, the action
+        // array is recognised by its own shape instead (`markerlessActionArray`).
+        guard let startRange = text.range(of: Self.actionBegin) else {
+            let calls = markerlessActionArray(in: text).compactMap { toPendingCall($0) }
+            if !calls.isEmpty {
+                logger.info("CommandR7BActionParser: <|START_ACTION|> absent (the sanitizer strips it); recovered \(calls.count) call(s) from the action array's own shape.")
+            }
+            return calls
+        }
         let afterStart = startRange.upperBound
 
         // Delimit by <|END_ACTION|> if present; otherwise take the rest of the text.
@@ -83,6 +95,29 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
 
         guard let decoded = decodeArray(arraySlice) else { return [] }
         return decoded.compactMap { toPendingCall($0) }
+    }
+
+    /// The first JSON array in `text` that decodes as action objects AND names a tool with
+    /// `tool_name`, this dialect's own key (CR-50).
+    ///
+    /// ⚠️ `tool_name`, not the `name` alias: without the marker, `name` alone would turn an
+    /// ordinary JSON answer (`[{"name": "Ada"}]`) into a call to a tool called "Ada". Arrays that
+    /// do not qualify are stepped over, so a bracket in the prose before it (`[1]`, `[INFO]`)
+    /// does not hide the action array.
+    private func markerlessActionArray(in text: String) -> [ToolCallObject] {
+        var cursor = text.startIndex
+        while cursor < text.endIndex, let open = text[cursor...].firstIndex(of: "[") {
+            guard let range = BalancedJSONScanner.balancedRange(in: text, from: open, opener: "[") else {
+                cursor = text.index(after: open)
+                continue
+            }
+            if let objects = decodeArray(String(text[range]), quietly: true),
+               objects.contains(where: { $0.tool_name?.isEmpty == false }) {
+                return objects
+            }
+            cursor = text.index(after: open)
+        }
+        return []
     }
 
     private func extractBalancedArray(_ text: String) -> String? {
@@ -101,7 +136,7 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
         )
     }
 
-    private func decodeArray(_ arraySlice: String) -> [ToolCallObject]? {
+    private func decodeArray(_ arraySlice: String, quietly: Bool = false) -> [ToolCallObject]? {
         let trimmed = arraySlice.trimmingCharacters(in: .whitespacesAndNewlines)
         if let data = trimmed.data(using: .utf8),
            let decoded = try? JSONDecoder().decode([ToolCallObject].self, from: data) {
@@ -114,7 +149,9 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
             logger.info("CommandR7BActionParser: Decoded array after sanitization.")
             return decoded
         }
-        logger.warning("CommandR7BActionParser: Failed to decode array: \(trimmed.prefix(200))")
+        if !quietly {
+            logger.warning("CommandR7BActionParser: Failed to decode array (\(trimmed.count) chars). CONSEQUENCE: no call is taken from this START_ACTION body; the cascade's fallbacks get the reply.")
+        }
         return nil
     }
 

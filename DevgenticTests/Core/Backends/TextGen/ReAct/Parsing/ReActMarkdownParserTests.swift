@@ -60,12 +60,12 @@ final class ReActMarkdownParserTests: XCTestCase {
     func testReasoningKeyword_InsteadOfThought() {
         let input = """
         Reasoning: Let me search for the file first.
-        Action: fs_smart_search
+        Action: spotlight_search
         Action Input: {"search_term": "config"}
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 1)
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
         XCTAssertTrue(result.reasoning.contains("search for the file"))
     }
 

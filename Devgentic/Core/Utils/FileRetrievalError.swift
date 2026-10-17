@@ -17,6 +17,12 @@ enum FileRetrievalError: Error, Sendable {
     case accessDenied(path: String)
     case tooLarge(path: String)
     case readFailed(path: String, underlying: String)
+    /// The bytes aren't UTF-8 text (a `.class`, `.o`, archive…). Distinct from `readFailed`
+    /// because the remedy differs: re-attaching a binary can never succeed.
+    case notText(path: String)
+    /// A folder reached a lane that sends file CONTENTS (direct injection). Distinct from
+    /// `readFailed` for the same reason as `notText`: re-attaching it can never succeed (ATT-3).
+    case isFolder(path: String)
     case extractionFailed(path: String, underlying: String)
     case passwordProtected(path: String)
     case corrupted(path: String)
@@ -27,7 +33,8 @@ enum FileRetrievalError: Error, Sendable {
     var path: String {
         switch self {
         case .notFound(let p), .accessDenied(let p), .tooLarge(let p),
-             .passwordProtected(let p), .corrupted(let p), .emptyDocument(let p):
+             .passwordProtected(let p), .corrupted(let p), .emptyDocument(let p), .notText(let p),
+             .isFolder(let p):
             return p
         case .readFailed(let p, _), .extractionFailed(let p, _), .imageResolutionFailed(let p, _):
             return p
@@ -40,7 +47,9 @@ enum FileRetrievalError: Error, Sendable {
         case .notFound:             return .fileNotFound
         case .accessDenied:         return .fileAccessDenied
         case .tooLarge:             return .fileTooLarge
-        case .readFailed:           return .fileReadFailed
+        case .readFailed,
+             .notText,
+             .isFolder:             return .fileReadFailed
         case .extractionFailed,
              .emptyDocument:        return .documentExtractionFailed
         case .passwordProtected:    return .documentPasswordProtected
@@ -57,6 +66,8 @@ enum FileRetrievalError: Error, Sendable {
         case .accessDenied:         return "No permission to read '\(name)'."
         case .tooLarge:             return "'\(name)' is too large to include."
         case .readFailed:           return "Couldn't read '\(name)'."
+        case .notText:              return "'\(name)' is a binary file, not text."
+        case .isFolder:             return "'\(name)' is a folder, so it wasn't sent."
         case .extractionFailed:     return "Couldn't extract text from '\(name)'."
         case .passwordProtected:    return "'\(name)' is password-protected."
         case .corrupted:            return "'\(name)' appears corrupted."
@@ -72,6 +83,8 @@ enum FileRetrievalError: Error, Sendable {
         case .accessDenied:         return "Grant access in System Settings › Privacy & Security, or re-attach the file."
         case .tooLarge:             return "Try a smaller file, or extract the relevant portion."
         case .readFailed:           return "Try re-attaching the file."
+        case .notText:              return "Attach its source or a text export instead."
+        case .isFolder:             return "This profile sends file contents. Attach the files inside it, or use an agent with read_file enabled."
         case .extractionFailed,
              .corrupted:            return "The document couldn't be parsed — it may be damaged."
         case .passwordProtected:    return "Remove the password/encryption, then re-attach."

@@ -356,10 +356,15 @@ final class OrbConfigManager {
 
     // MARK: Enable
 
+    /// ⚠️ OPT-IN — DEFAULT OFF (owner, 2026-10-09). Orb is experimental and needs the microphone,
+    /// so it stays off until the user switches it on in Settings. That switch is also where the
+    /// macOS microphone prompt is asked (`OrbSettingsView.requestMicrophoneOnEnable`), with the user
+    /// thinking about voice. With the old default of ON, nobody ever pressed the switch, and the
+    /// first prompt arrived mid-gesture at the first listen.
     var isEnabled: Bool {
         get {
             access(keyPath: \.isEnabled)
-            return defaults.object(forKey: AppSettings.orbEnabledKey) as? Bool ?? true
+            return defaults.object(forKey: AppSettings.orbEnabledKey) as? Bool ?? false
         }
         set {
             assertMainThread()

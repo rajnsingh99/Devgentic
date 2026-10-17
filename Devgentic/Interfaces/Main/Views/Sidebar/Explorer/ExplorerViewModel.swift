@@ -37,6 +37,13 @@ final class ExplorerViewModel {
                 rootItems = []
                 expandedItemIDs = []
                 errorMessage = nil
+                // ⚠️ The `@` index belongs to the folder — drop it with the folder. It used to be
+                // only REPLACED when a new folder finished indexing, so a root going to none (Chat
+                // with no folder, Code Home) kept offering the previous folder's files: Code's
+                // `java` project showed up in Chat's `@` picker. Also stop a pending file-change
+                // refresh for the old folder, which would append its files back.
+                allSuggestableFiles = []
+                fileSystemDebounceTask?.cancel()
 
                 // Publish as an MCP root. Roots are not a Code-mode feature — the folder open
                 // here is "the folder this app is working in" for chat and workflow too, and
@@ -53,7 +60,10 @@ final class ExplorerViewModel {
                 let hasSecurityScope = newURL.startAccessingSecurityScopedResource()
                 if hasSecurityScope {
                     logger.info("Successfully started accessing security-scoped resource (didSet for selectedRootURL) for: \(newURL.path)")
-                    saveBookmark(for: newURL)
+                    // ⚠️ Only CHAT's folder is the remembered one. Code shows its project here
+                    // too, and saving that overwrote Chat's folder — switching back to Chat then
+                    // showed the Code project.
+                    if scope == .chat { saveBookmark(for: newURL) }
                 } else {
                     logger.info("Selected URL is not security-scoped or does not require scoped access: \(newURL.path)")
                 }
@@ -72,7 +82,10 @@ final class ExplorerViewModel {
                     self.rootItems = []
                     self.isLoading = false
                     self.expandedItemIDs = []
-                    clearLastOpenedFolderBookmark()
+                    if scope == .chat {
+                        chatRootURL = nil
+                        clearLastOpenedFolderBookmark()
+                    }
                 }
             } else {
                 // Stop monitoring when the folder is closed.
@@ -81,8 +94,9 @@ final class ExplorerViewModel {
                 self.errorMessage = nil
                 self.isLoading = false
                 self.expandedItemIDs = []
-                clearLastOpenedFolderBookmark()
-                logger.info("selectedRootURL is now nil. Cleared items, errors, and bookmark.")
+                // Code Home shows NO folder; that must not forget Chat's.
+                if scope == .chat { clearLastOpenedFolderBookmark() }
+                logger.info("selectedRootURL is now nil (\(self.scope == .chat ? "chat — bookmark cleared" : "code — chat's folder kept")).")
             }
         }
     }
@@ -118,7 +132,62 @@ final class ExplorerViewModel {
     @ObservationIgnored private let logger = DGLogger(category: "ExplorerViewModel")
     @ObservationIgnored private static let lastOpenedFolderBookmarkKey = "explorerLastOpenedFolderBookmark"
 
-    init() {
+    // MARK: - Whose folder is showing
+    //
+    // The Explorer is shared by Chat and Code, but each owns a different folder:
+    //  • Chat — the folder the user opened here; remembered across launches (the bookmark).
+    //  • Code — the Code session's project (`CodeSessionManager.projectPath`), or none on Home.
+    // Both used to write ONE root, so Code's project leaked into Chat and Chat's folder into a
+    // Code session. `MainApplicationViewModel.syncExplorerToInterfaceMode` picks the owner.
+
+    enum Scope: Equatable { case chat, code }
+
+    /// Which mode's folder `selectedRootURL` currently shows.
+    private(set) var scope: Scope = .chat
+
+    /// Chat's folder, kept while Code borrows the Explorer.
+    @ObservationIgnored private(set) var chatRootURL: URL?
+
+    /// Set by the app to `chooseCodeFolder`, which binds the folder to the Code session. In Code
+    /// scope the Explorer's folder buttons hand their pick to this instead of showing an
+    /// Explorer-only folder, which would leave Code running in a different project.
+    @ObservationIgnored var chooseCodeProject: ((URL) -> Void)?
+
+    /// Show Chat's own folder (or none — the "Open Folder" state).
+    func showChatFolder() {
+        scope = .chat
+        if selectedRootURL?.standardizedFileURL != chatRootURL?.standardizedFileURL {
+            selectedRootURL = chatRootURL
+        }
+        logger.info("[EXPLORER] Showing Chat's folder: \(self.chatRootURL.map { "'\($0.lastPathComponent)'" } ?? "none — Open Folder").")
+    }
+
+    /// Chat's folder is now `url` — remembered (bookmark) and shown.
+    func openChatFolder(_ url: URL) {
+        scope = .chat
+        chatRootURL = url
+        selectedRootURL = url
+    }
+
+    /// Show the Code session's project, or nil for Code Home ("Select Project folder").
+    func showCodeProject(_ url: URL?) {
+        scope = .code
+        if selectedRootURL?.standardizedFileURL != url?.standardizedFileURL {
+            selectedRootURL = url
+        } else if let url {
+            // Same folder: didSet won't fire, so refresh explicitly (the tree may be stale).
+            loadDirectoryContents(for: url)
+        }
+        logger.info("[EXPLORER] Showing the Code project: \(url.map { "'\($0.lastPathComponent)'" } ?? "none — Select Project folder").")
+    }
+
+    /// Where Chat's folder bookmark lives. Injectable so tests use a throwaway suite: with
+    /// `.standard` they read — and could clear — the developer's real Chat folder, and any
+    /// assertion about "Chat has no folder" depended on the machine running it.
+    @ObservationIgnored private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         logger.info("ExplorerViewModel initializing.")
         loadLastOpenedFolder()
     }
@@ -256,7 +325,7 @@ final class ExplorerViewModel {
     private func saveBookmark(for url: URL) {
         do {
             let bookmarkData = try url.bookmarkData(options: .withSecurityScope)
-            UserDefaults.standard.set(bookmarkData, forKey: Self.lastOpenedFolderBookmarkKey)
+            defaults.set(bookmarkData, forKey: Self.lastOpenedFolderBookmarkKey)
             logger.info("Saved security-scoped bookmark for URL: \(url.path)")
         } catch {
             logger.error("Failed to save bookmark for URL \(url.path): \(error.localizedDescription)")
@@ -265,7 +334,7 @@ final class ExplorerViewModel {
     }
 
     private func loadLastOpenedFolder() {
-        guard let bookmarkData = UserDefaults.standard.data(forKey: Self.lastOpenedFolderBookmarkKey) else {
+        guard let bookmarkData = defaults.data(forKey: Self.lastOpenedFolderBookmarkKey) else {
             logger.info("No saved folder bookmark found.")
             return
         }
@@ -276,6 +345,7 @@ final class ExplorerViewModel {
                 logger.warning("Resolved bookmark is stale for URL: \(resolvedURL.path). Will attempt to re-access and re-save via selectedRootURL.didSet.")
             }
             logger.info("Successfully resolved bookmark to URL: \(resolvedURL.path)")
+            self.chatRootURL = resolvedURL
             self.selectedRootURL = resolvedURL
         } catch {
             logger.error("Failed to resolve bookmark data or access persisted URL: \(error.localizedDescription)")
@@ -284,7 +354,7 @@ final class ExplorerViewModel {
     }
 
     private func clearLastOpenedFolderBookmark() {
-        UserDefaults.standard.removeObject(forKey: Self.lastOpenedFolderBookmarkKey)
+        defaults.removeObject(forKey: Self.lastOpenedFolderBookmarkKey)
         logger.info("Cleared last opened folder bookmark from UserDefaults.")
     }
 
@@ -308,6 +378,20 @@ final class ExplorerViewModel {
 
     // MARK: - Directory Operations
     func selectRootDirectory() {
+        // In Code the folder IS the session's project — pick it through the Code flow.
+        if scope == .code, let chooseCodeProject {
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.prompt = String(localized: "Select Project Folder")
+            panel.message = String(localized: "Choose a folder for your Code session.")
+            if panel.runModal() == .OK, let url = panel.url {
+                logger.info("[EXPLORER] Code project chosen from the Explorer: \(url.path)")
+                chooseCodeProject(url)
+            }
+            return
+        }
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = false
         openPanel.canChooseDirectories = true
@@ -316,7 +400,7 @@ final class ExplorerViewModel {
         if openPanel.runModal() == .OK {
             if let url = openPanel.url {
                 logger.info("Root directory selected via panel: \(url.path)")
-                selectedRootURL = url
+                openChatFolder(url)
             }
         }
     }
@@ -889,14 +973,14 @@ final class ExplorerViewModel {
     }
     
     // MARK: - Deep Search (Indexing)
-    private func indexAllFiles(from url: URL) async {
+    /// Internal (not private) so the stale-result guard can be tested deterministically.
+    func indexAllFiles(from url: URL) async {
         await MainActor.run { self.isIndexing = true }
         
         let indexLogger = self.logger
         let allFiles = await Task.detached(priority: .userInitiated) { () -> [FileSystemItem] in
             var collectedFiles: [FileSystemItem] = []
             let resourceKeys: [URLResourceKey] = [.nameKey, .isDirectoryKey, .isHiddenKey]
-            let excludedDirectoryNames: Set<String> = [".git", ".build", "node_modules", "Pods", ".DS_Store"]
 
             guard let enumerator = FileManager.default.enumerator(
                 at: url,
@@ -916,7 +1000,7 @@ final class ExplorerViewModel {
                 
                 // If the item is a directory and its name is in the exclusion list, skip its descendants.
                 if resourceValues.isDirectory == true {
-                    if excludedDirectoryNames.contains(resourceValues.name ?? "") {
+                    if SuggestableFileFilter.excludedDirectoryNames.contains(resourceValues.name ?? "") {
                         enumerator.skipDescendants()
                     }
                     // Always continue for all directories, as we only want to index files.
@@ -926,11 +1010,8 @@ final class ExplorerViewModel {
                 // The .skipsHiddenFiles option handles this, but a check remains for safety.
                 if resourceValues.isHidden == true { continue }
 
-                // **NEW**: Exclude video files
-                if let type = UTType(filenameExtension: fileURL.pathExtension),
-                   type.conforms(to: .movie) || type.conforms(to: .video) {
-                    continue
-                }
+                // Build artifacts, archives, media — see SuggestableFileFilter.
+                guard SuggestableFileFilter.admits(fileURL: fileURL) else { continue }
 
                 let name = resourceValues.name ?? fileURL.lastPathComponent
                 collectedFiles.append(FileSystemItem(id: fileURL, name: name, url: fileURL, isDirectory: false))
@@ -939,8 +1020,14 @@ final class ExplorerViewModel {
         }.value
 
         await MainActor.run {
-            self.allSuggestableFiles = allFiles
             self.isIndexing = false
+            // The root may have changed while this scan ran (a mode switch mid-index). A late
+            // result for the OLD folder must not overwrite the new folder's (empty) index.
+            guard self.selectedRootURL?.standardizedFileURL == url.standardizedFileURL else {
+                self.logger.info("[EXPLORER] Index for '\(url.lastPathComponent)' finished after the root changed to \(self.selectedRootURL.map { "'\($0.lastPathComponent)'" } ?? "none") — discarded. CONSEQUENCE: the @ picker offers only the folder now open.")
+                return
+            }
+            self.allSuggestableFiles = allFiles
             self.logger.info("Indexing complete. Found \(allFiles.count) suggestable files.")
         }
     }
@@ -959,11 +1046,25 @@ final class ExplorerViewModel {
             folderURL = url.deletingLastPathComponent()
         }
 
-        // Scan only the specific subfolder
-        let subfolderFiles = await fetchAllFiles(under: folderURL)
+        // Scan only the specific subfolder — unless it lies inside build output. The
+        // enumerator starts AT this folder, so it never sees the excluded ancestor and
+        // would re-admit e.g. a freshly compiled `out/…/January2026.class`.
+        let subfolderFiles: [FileSystemItem]
+        if let root = selectedRootURL, SuggestableFileFilter.isInsideExcludedDirectory(folderURL, root: root) {
+            subfolderFiles = []
+            logger.debug("Incremental refresh: '\(folderURL.lastPathComponent)' is inside an excluded build/dependency folder — no files added to the @ suggestion index (the Explorer tree still refreshes).")
+        } else {
+            subfolderFiles = await fetchAllFiles(under: folderURL)
+        }
         let freshChildren = try? await fetchItems(at: folderURL)
         
         await MainActor.run {
+            // Same race as `indexAllFiles`: only a folder still under the open root may write.
+            guard let root = self.selectedRootURL,
+                  folderURL.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path) else {
+                self.logger.info("[EXPLORER] Refresh of '\(folderURL.lastPathComponent)' finished outside the open folder — discarded.")
+                return
+            }
             // Remove old entries for this subfolder path
             let subfolderPath = folderURL.path
             self.allSuggestableFiles.removeAll { item in
@@ -1003,7 +1104,6 @@ final class ExplorerViewModel {
         await Task.detached(priority: .userInitiated) { () -> [FileSystemItem] in
             var collectedFiles: [FileSystemItem] = []
             let resourceKeys: [URLResourceKey] = [.nameKey, .isDirectoryKey, .isHiddenKey]
-            let excludedDirectoryNames: Set<String> = [".git", ".build", "node_modules", "Pods", ".DS_Store"]
 
             guard let enumerator = FileManager.default.enumerator(
                 at: url,
@@ -1017,17 +1117,14 @@ final class ExplorerViewModel {
             for case let fileURL as URL in enumerator {
                 guard let resourceValues = try? fileURL.resourceValues(forKeys: Set(resourceKeys)) else { continue }
                 if resourceValues.isDirectory == true {
-                    if excludedDirectoryNames.contains(resourceValues.name ?? "") {
+                    if SuggestableFileFilter.excludedDirectoryNames.contains(resourceValues.name ?? "") {
                         enumerator.skipDescendants()
                     }
                     continue
                 }
                 
-                // **NEW**: Exclude video files
-                if let type = UTType(filenameExtension: fileURL.pathExtension),
-                   type.conforms(to: .movie) || type.conforms(to: .video) {
-                    continue
-                }
+                // Build artifacts, archives, media — see SuggestableFileFilter.
+                guard SuggestableFileFilter.admits(fileURL: fileURL) else { continue }
 
                 let name = resourceValues.name ?? fileURL.lastPathComponent
                 collectedFiles.append(FileSystemItem(id: fileURL, name: name, url: fileURL, isDirectory: false))

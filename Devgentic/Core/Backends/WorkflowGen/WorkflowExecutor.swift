@@ -608,7 +608,9 @@ actor WorkflowExecutor: Executor {
                                         status: .skipped(reason: .byUser),
                                         output: passThrough, artifacts: passedArtifacts,
                                         metadata: .simple(start: Date(), end: Date(), output: passThrough),
-                                        structuredOutput: passedStructured
+                                        structuredOutput: passedStructured,
+                                        // A skipped node reads nothing; it forwards what its upstreams read.
+                                        readDocumentIDs: Self.documentsAlreadyRead(upstream: upstream)
                                     )
                                     state.recordResult(from: skipResult)
                                     let classified = ClassifiedAgentError.synthetic(
@@ -739,6 +741,7 @@ actor WorkflowExecutor: Executor {
                                 injectedProfileMap: injectedProfileMap
                             )
                             state.recordResult(from: structResult.envelope)
+                            state.recordNestedFailures(structResult.nestedFailures, for: structResult.envelope.nodeID)
                             if let ports = structResult.activePorts {
                                 state.setActiveOutputPorts(ports, for: node.id)
                             }
@@ -771,7 +774,7 @@ actor WorkflowExecutor: Executor {
                                 let shape = lanes
                                     .map { "\($0.slot ?? "unconstrained") ← [\($0.members.map(\.displayName).joined(separator: ", "))]" }
                                     .joined(separator: " THEN ")
-                                logger.notice("[WF_EXEC] profile \(profileID) conv \(conversationID) level \(levelIndex + 1)/\(levels.count): \(structuralNodes.count) structural node(s) demand \(lanes.count) DIFFERENT/uncertain local MLX slots, so they are dispatched in \(lanes.count) sequential lane(s) — \(shape). CONSEQUENCE: this level's wall clock is now the SUM of the lanes instead of the slowest node — the same tradeoff WF-CC2 already made for profile nodes, extended here because a Router's AI Classifier fallback and a nested sub-workflow can independently reach the same single-slot MLXService container.")
+                                logger.notice("[WF_EXEC] profile \(profileID) conv \(conversationID) level \(levelIndex + 1)/\(levels.count): \(structuralNodes.count) structural node(s) include \(lanes.count) MLX-reaching or uncertain node(s), so they are dispatched in \(lanes.count) sequential lane(s) — \(shape). CONSEQUENCE: this level's wall clock is now the SUM of the lanes instead of the slowest node — the same tradeoff WF-CC2 already made for profile nodes, extended here because a Router's AI Classifier fallback and a nested sub-workflow can independently reach the same single-slot MLXService container.")
                             }
 
                             for (laneIndex, lane) in lanes.enumerated() {
@@ -831,6 +834,7 @@ actor WorkflowExecutor: Executor {
                                     for await structResult in group {
                                         let sid = structResult.envelope.nodeID
                                         state.recordResult(from: structResult.envelope)
+                                        state.recordNestedFailures(structResult.nestedFailures, for: structResult.envelope.nodeID)
                                         if let ports = structResult.activePorts {
                                             state.setActiveOutputPorts(ports, for: sid)
                                         }
@@ -874,24 +878,19 @@ actor WorkflowExecutor: Executor {
                         } else {
                             // --- WF-CC2: MLX-aware dispatch ---
                             // Same-level profile nodes are split into lanes that run one after
-                            // another; every lane is still fully parallel inside itself. Nodes are
-                            // separated ONLY when this level demands two or more DIFFERENT MLX
-                            // models: `MLXService` keeps exactly ONE model container resident, and
-                            // `loadModel` calls `performUnload()` (MLXService.swift:246) before
-                            // loading a different directory while EARLY-RETURNING for the one
-                            // already resident (:215-219). Two siblings on different models
-                            // therefore evict each other on every generation call — i.e. every
-                            // ReAct iteration — and `container(expecting:)` gives up after two
-                            // attempts and throws `modelIdentityMismatch`. Two siblings on the
-                            // SAME model share one container and cost nothing, so they are
-                            // deliberately left parallel. See `profileDispatchLanes`.
+                            // another; every lane is still fully parallel inside itself. Every MLX
+                            // node gets its own lane (decision D6): siblings on DIFFERENT models
+                            // would evict each other on every generation call — `container(expecting:)`
+                            // gives up after two attempts and throws `modelIdentityMismatch` — and
+                            // siblings on the SAME model would decode concurrently with no
+                            // throughput gain and one KV cache each. See `profileDispatchLanes`.
                             let lanes = Self.profileDispatchLanes(profileNodes)
 
                             if lanes.count > 1 {
                                 let shape = lanes
                                     .map { "\($0.slot ?? "unconstrained") ← [\($0.members.map(\.node.displayName).joined(separator: ", "))]" }
                                     .joined(separator: " THEN ")
-                                logger.notice("[WF_EXEC] profile \(profileID) conv \(conversationID) level \(levelIndex + 1)/\(levels.count): \(profileNodes.count) profile node(s) demand \(lanes.count) DIFFERENT local MLX models, so they are dispatched in \(lanes.count) sequential lane(s) — \(shape). CONSEQUENCE: this level's wall clock is now the SUM of the lanes instead of the slowest node. Only ONE MLX model container is resident at a time, so running them together would unload and re-read multi-GB weights on every generation call and can fail a node outright with a model-identity mismatch.")
+                                logger.notice("[WF_EXEC] profile \(profileID) conv \(conversationID) level \(levelIndex + 1)/\(levels.count): \(profileNodes.count) profile node(s) include \(lanes.count) local MLX node(s), so they are dispatched in \(lanes.count) sequential lane(s), same-model lanes adjacent — \(shape). CONSEQUENCE: this level's wall clock is now the SUM of the lanes instead of the slowest node. MLX generates one request at a time (decision D6): different models would unload and re-read multi-GB weights on every generation call, and one model would decode the nodes concurrently at a fraction of the speed each, with a KV cache apiece.")
                             }
 
                             for (laneIndex, lane) in lanes.enumerated() {
@@ -1185,7 +1184,14 @@ actor WorkflowExecutor: Executor {
                         // documented and tested (`testTerminalVerdictIsTheFinalEvent`) to be the
                         // FINAL event on the stream — consumers stop reading once they see it. This
                         // signal only needs to land before then, not to own the last slot itself.
-                        continuation.yield(.workflowRunFinished(hadGenuineFailure: !failedNodes.isEmpty))
+                        // [CR-46] A sub-workflow node that COMPLETED but whose own run absorbed a
+                        // failure counts too. Before, only this run's failed nodes did, so a child's
+                        // handled failure left the parent's record saying clean.
+                        let nestedFailures = state.nestedFailureSummaries()
+                        if !nestedFailures.isEmpty {
+                            logger.warning("[WF_EXEC] Run completed, but \(nestedFailures.count) failure(s) were absorbed inside sub-workflow node(s): \(nestedFailures.joined(separator: " | ")). CONSEQUENCE: the run is recorded as completed with warnings, not clean.")
+                        }
+                        continuation.yield(.workflowRunFinished(hadGenuineFailure: !failedNodes.isEmpty || !nestedFailures.isEmpty))
                         continuation.yield(.executionFinished(outcome: .completed, reason: nil))
                     }
                     continuation.finish()
@@ -1423,12 +1429,27 @@ actor WorkflowExecutor: Executor {
         // can read attached files. Report-and-skip (policy b): a doc that can't be
         // read is traced + surfaced as a per-node warning, and the node CONTINUES
         // with whatever extracted (this is enrichment, not a hard dependency).
+        //
+        // [CR-49] Only documents no upstream node has read yet are inlined (see
+        // `documentsAlreadyRead`). The rest stay in the manifest with their path.
+        let consumedUpstreams = upstreamResults.filter {
+            if case .completed = $0.status { return true }
+            if case .skipped(reason: .byUser) = $0.status { return true }
+            return false
+        }
+        let documentsReadUpstream = Self.documentsAlreadyRead(upstream: consumedUpstreams)
+        let documentsToInline = upstreamArtifacts.filter { $0.kind == .document && !documentsReadUpstream.contains($0.id) }
+        let documentsNotInlined = upstreamArtifacts.filter { $0.kind == .document && documentsReadUpstream.contains($0.id) }
+        if !documentsNotInlined.isEmpty {
+            logger.info("[WF_CONTEXT] Node '\(displayName)' [node \(nodeID.uuidString.prefix(8))] receives \(documentsNotInlined.count) document(s) an upstream node already read: [\(documentsNotInlined.map { $0.label ?? "untitled" }.joined(separator: ", "))]. CONSEQUENCE: their text is NOT inlined again here; they stay in this node's file manifest with their path, and this node works from its upstream's output. Wire the producing node straight to this one if it must read the full text itself.")
+        }
+        let readDocumentIDs = documentsReadUpstream.union(documentsToInline.map(\.id))
         let upstreamArtifactText: String
-        if upstreamArtifacts.isEmpty {
+        if documentsToInline.isEmpty {
             upstreamArtifactText = ""
         } else {
             let (extracted, docFailures) = await WorkflowInputAssembler.extractDocumentText(
-                from: upstreamArtifacts,
+                from: documentsToInline,
                 fileProcessor: FileProcessorService()
             )
             upstreamArtifactText = extracted
@@ -1885,7 +1906,8 @@ actor WorkflowExecutor: Executor {
                 toolsInvoked: nodeArtifacts.map(\.toolName),
                 tokenEstimate: nodeOutput.count / 4
             ),
-            structuredOutput: structured
+            structuredOutput: structured,
+            readDocumentIDs: readDocumentIDs
         )
 
         // P1-16: persist per-node execution metrics. `NodeResultEnvelope.metadata`
@@ -1976,12 +1998,10 @@ actor WorkflowExecutor: Executor {
     /// HTTP to a separate server that keeps several models resident and queues server-side; it has
     /// no in-process slot to contend for.
     ///
-    /// ⚠️ Keyed on the MODEL, not merely on the provider. `MLXService.loadModel(from:)`
-    /// EARLY-RETURNS without unloading when the requested directory is already resident
-    /// (MLXService.swift:215-219) and coalesces concurrent loads of the same directory (:210-212),
-    /// so N nodes on ONE model share a single container and evict nothing. `performUnload()`
-    /// (:246) runs only on a genuine model SWITCH. Serializing same-model siblings would cost
-    /// parallelism for no benefit whatsoever.
+    /// ⚠️ Keyed on the MODEL, not merely on the provider: the key orders the lanes so that every
+    /// node on one model runs back to back and the model is loaded once for all of them. (It used to
+    /// decide whether same-model siblings could share a lane; since decision D6 they never do —
+    /// see `profileDispatchLanes`.)
     ///
     /// ⚠️ The NAME is a safe key even though `MLXService` compares DIRECTORIES: the name is
     /// resolved by `MLXModelService.installedModel(named:)`, which is deterministic, so equal
@@ -2001,9 +2021,19 @@ actor WorkflowExecutor: Executor {
     /// Splits one level's profile nodes into lanes dispatched one AFTER another. Every lane is
     /// still fully parallel inside itself.
     ///
-    /// ⚠️ Returns ONE lane containing everything unless the level demands TWO OR MORE DISTINCT MLX
-    /// models. A level with no MLX node, or with one MLX node beside any number of cloud/Ollama
-    /// nodes, is byte-for-byte today's behaviour — nothing can evict anything.
+    /// ⚠️⚠️ ONE MLX NODE PER LANE — decision D6 (owner, 2026-10-07, local inference coordinator
+    /// plan). This used to keep same-model siblings together in one parallel lane, on the argument
+    /// that they share one container and evict nothing. That is true of the WEIGHTS, but each
+    /// concurrent generation still allocates its own KV cache, mlx-swift-lm has no batched
+    /// generation (two decodes on one GPU each run at about half speed, so nothing is gained), and
+    /// concurrent decode on one container has never been verified on device. Sub-agents on MLX are
+    /// withdrawn for the same reason; a same-level pair of MLX nodes is the same mechanism.
+    ///
+    /// ⚠️ Same-model lanes are ADJACENT (first-seen model order, then node order within a model),
+    /// so the model is loaded once and serves them back to back.
+    ///
+    /// ⚠️ Returns ONE lane containing everything when the level has at most one MLX node: a level
+    /// with no MLX node, or one MLX node beside any number of cloud/Ollama nodes, is unchanged.
     ///
     /// ⚠️ When it does split, the unconstrained (cloud / Ollama / unconfigured) nodes ride along
     /// with the FIRST MLX lane rather than forming a lane of their own: they never touch the MLX
@@ -2032,13 +2062,14 @@ actor WorkflowExecutor: Executor {
             bySlot[slot, default: []].append(entry)
         }
 
-        guard slotOrder.count > 1 else {
+        let mlxLanes = slotOrder.flatMap { slot in bySlot[slot]!.map { (slot: Optional(slot), members: [$0]) } }
+        guard mlxLanes.count > 1 else {
             return nodes.isEmpty ? [] : [(slotOrder.first, nodes)]
         }
 
-        return slotOrder.enumerated().map { index, slot in
-            (slot, index == 0 ? unconstrained + bySlot[slot]! : bySlot[slot]!)
-        }
+        var lanes = mlxLanes
+        lanes[0].members = unconstrained + lanes[0].members
+        return lanes
     }
 
     // MARK: - WF-CC5: MLX-aware structural-node dispatch
@@ -2099,13 +2130,16 @@ actor WorkflowExecutor: Executor {
             bySlot[slot, default: []].append(node)
         }
 
-        guard slotOrder.count > 1 else {
+        // D6: one MLX-reaching node per lane, same-model lanes adjacent — see `profileDispatchLanes`.
+        // Sub-workflow slots are unique per node already, so this changes only same-model Routers.
+        let mlxLanes = slotOrder.flatMap { slot in bySlot[slot]!.map { (slot: Optional(slot), members: [$0]) } }
+        guard mlxLanes.count > 1 else {
             return nodes.isEmpty ? [] : [(slotOrder.first, nodes)]
         }
 
-        return slotOrder.enumerated().map { index, slot in
-            (slot, index == 0 ? unconstrained + bySlot[slot]! : bySlot[slot]!)
-        }
+        var lanes = mlxLanes
+        lanes[0].members = unconstrained + lanes[0].members
+        return lanes
     }
 
     // MARK: - Profile Node Retry Wrapper
@@ -2447,6 +2481,23 @@ actor WorkflowExecutor: Executor {
     /// How long a timed-out structural node's work gets, once cancelled, to stop on its own.
     static let structuralStopGrace: TimeInterval = 5
 
+    /// The `[WF_TIMEOUT]` line for a structural node that hit its bound.
+    ///
+    /// ⚠️ Wall-clock is reported beside compute, and the part spent before the bound's clock started is
+    /// split out. Wall ≈ limit + grace (+ any human wait) is the bound working; a large `beforeStart`,
+    /// or wall far past that with no human wait, is the PROCESS not scheduling the work. Without both
+    /// numbers a stall reads exactly like a bound that held (2026-10-10, P5: 8.55 s and 23.6 s runs
+    /// whose compute was a correct 0.5 s).
+    ///
+    /// ⚠️ Wall starts when the bound BEGINS RUNNING, not when its caller asked for it: a stall that
+    /// keeps the bound from being scheduled at all is invisible here. If the caller saw far more time
+    /// than this line reports, that gap was spent before the bound ran.
+    static func timeoutReport(nodeName: String, limit: TimeInterval, compute: TimeInterval,
+                              wall: TimeInterval, beforeStart: TimeInterval, abandoned: Bool) -> String {
+        let s = { (value: TimeInterval) in String(format: "%.1f", value) }
+        return "[WF_TIMEOUT] Node '\(nodeName)' exceeded its \(s(limit))s compute budget (\(s(compute))s compute, time awaiting a human excluded; \(s(wall))s wall-clock from entering the bound, \(s(beforeStart))s of it before its clock started). CONSEQUENCE: the node fails onto its error port; its work \(abandoned ? "did not stop within \(Int(structuralStopGrace))s of being cancelled and is abandoned" : "was stopped")."
+    }
+
     /// Runs `work`, failing it if compute time exceeds `limit`. `nil` limit ⇒ unbounded.
     /// See `computeTimeoutSentinel` for why the clock is not wall-clock.
     static func withComputeTimeout<T: Sendable>(
@@ -2455,6 +2506,7 @@ actor WorkflowExecutor: Executor {
         nodeName: String,
         work: @escaping @Sendable () async throws -> T
     ) async throws -> T {
+        let called = ContinuousClock.now
         // Nesting: fitted inside any enclosing limit. A node with NO limit of its own (a sub-workflow
         // without `hardTimeout`) still gets the fitted outer one — it used to run unbounded until
         // the scheduled run cut everything off, so its error port never fired.
@@ -2472,6 +2524,7 @@ actor WorkflowExecutor: Executor {
         // held the node, its level and Stop until the work finished, and then reported a timeout
         // with the sentinel's compute as "elapsed" (probe P5: a 1 s limit exited at 3.06 s saying
         // 1.00 s). The work is now cancelled at the bound and given a grace to stop.
+        let raceCalled = ContinuousClock.now
         let outcome = try await DeadlineRace.run(limit: limit, stopGrace: structuralStopGrace, parkScope: scope) {
             // ⚠️ No frame for the nodes INSIDE: a structural node's limit is fitted to the limits
             // around it, but does not shorten its children. With a frame, a sub-workflow's child
@@ -2482,7 +2535,10 @@ actor WorkflowExecutor: Executor {
         case .finished(let result):
             return try result.get()
         case .timedOut(let elapsed, let afterStop):
-            logger.error("[WF_TIMEOUT] Node '\(nodeName)' exceeded its \(Int(limit))s compute budget (\(Int(elapsed))s compute; time awaiting a human excluded). CONSEQUENCE: the node fails onto its error port; its work \(afterStop == nil ? "did not stop within \(Int(structuralStopGrace))s of being cancelled and is abandoned" : "was stopped").")
+            logger.error(timeoutReport(nodeName: nodeName, limit: limit, compute: elapsed,
+                                       wall: DeadlineRace.seconds(ContinuousClock.now - called),
+                                       beforeStart: DeadlineRace.seconds(raceCalled - called),
+                                       abandoned: afterStop == nil))
             throw AgentExecutionError(reason: .executionTimeout(elapsed: elapsed, limit: limit))
         }
     }
@@ -2498,6 +2554,32 @@ actor WorkflowExecutor: Executor {
     /// several hops earlier — even across intermediate Code/Gate/Agent nodes that
     /// didn't themselves emit media. De-dup by id keeps diamonds (A→B,C→D) from
     /// double-listing the same artifact and bounds growth to the run's distinct set.
+    /// The documents a consumer must NOT inline again, because every upstream that delivers them
+    /// has already read them (CR-49).
+    ///
+    /// ⚠️ READINESS CR-49 (2026-10-12). Artifacts are forwarded through every node (so media
+    /// survives multi-hop pipelines), and every profile node re-extracted every forwarded document
+    /// with no size cap and inlined it in full. A 300-page PDF through four agents in a chain was
+    /// extracted four times and paid for four times, though each agent after the first works from
+    /// its upstream's output. That is the rule the run's attachments already follow (entry node
+    /// only). The text is still never truncated (WF-OB3); it is inlined at the FIRST reader on each
+    /// path, and later nodes keep the manifest entry and its path.
+    ///
+    /// ⚠️ "Every upstream", not "any": when one upstream read a document and another forwards it
+    /// unread (say the producer is wired straight to this node as well), a path exists on which
+    /// nobody read it, so it is inlined. That is also the escape hatch for an author whose later
+    /// node needs the full text: wire the producer to it directly.
+    nonisolated static func documentsAlreadyRead(upstream: [NodeResultEnvelope]) -> Set<UUID> {
+        var readOnEveryCarrier: [UUID: Bool] = [:]
+        for envelope in upstream {
+            for artifact in envelope.artifacts where artifact.kind == .document {
+                let read = envelope.readDocumentIDs.contains(artifact.id)
+                readOnEveryCarrier[artifact.id] = (readOnEveryCarrier[artifact.id] ?? true) && read
+            }
+        }
+        return Set(readOnEveryCarrier.filter(\.value).keys)
+    }
+
     private nonisolated static func forwardedArtifacts(
         own: [MediaArtifact],
         upstream: [MediaArtifact]
@@ -2556,6 +2638,16 @@ actor WorkflowExecutor: Executor {
         let envelope: NodeResultEnvelope
         let activePorts: Set<String>?
         let variableUpdates: [String: String]
+        /// Failures INSIDE a sub-workflow that its own run absorbed (an error port handled them, or
+        /// a parallel branch still answered). Empty for every other node kind.
+        ///
+        /// ⚠️ READINESS CR-46 (2026-10-12). The child reports such a run as `.completed` plus a
+        /// separate `workflowRunFinished(hadGenuineFailure: true)`, and the parent suppressed that
+        /// signal with the rest of the child's orchestration events. The sub-workflow node went
+        /// green, and the parent's own verdict counted only ITS failed nodes, so the run record
+        /// said clean. Carried here so the node completes with warnings and the parent's verdict
+        /// counts it.
+        var nestedFailures: [String] = []
     }
 
     // MARK: - Structural Node Execution
@@ -2873,7 +2965,9 @@ actor WorkflowExecutor: Executor {
             if terminalEmitGate.claim() {
                 emitStructuralTerminalEvent(
                     node: node, envelope: bounded.envelope,
-                    variableUpdates: bounded.variableUpdates, continuation: continuation
+                    variableUpdates: bounded.variableUpdates,
+                    hasWarnings: !bounded.nestedFailures.isEmpty,
+                    continuation: continuation
                 )
             }
             return bounded
@@ -2961,6 +3055,7 @@ actor WorkflowExecutor: Executor {
         node: WorkflowNode,
         envelope: NodeResultEnvelope,
         variableUpdates: [String: String],
+        hasWarnings: Bool = false,
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
     ) {
         switch envelope.status {
@@ -2968,7 +3063,7 @@ actor WorkflowExecutor: Executor {
             // Full output (see executeNode) — the display renders & persists it in
             // full; previews clip downstream.
             let summary = envelope.output
-            continuation.yield(.workflowNodeCompleted(nodeID: node.id, profileName: node.displayName, summary: summary))
+            continuation.yield(.workflowNodeCompleted(nodeID: node.id, profileName: node.displayName, summary: summary, hasWarnings: hasWarnings))
         case .failed(let reason):
             continuation.yield(.workflowNodeFailed(nodeID: node.id, profileName: node.displayName, error: reason.localizedDescription, suggestion: reason.remediation))
         case .canceled:
@@ -3051,6 +3146,8 @@ actor WorkflowExecutor: Executor {
         var status: NodeExecutionStatus = .completed
         // Artifacts the node itself produces (only Action nodes, via their tool).
         var producedArtifacts: [MediaArtifact] = []
+        // Failures a sub-workflow's own run absorbed (CR-46); empty for every other kind.
+        var nestedFailures: [String] = []
 
         // Per-structural-node span so condition/code/gate/action nodes appear in the
         // trace tree (mirrors the profile-node span) and Action-node tool results below
@@ -3221,6 +3318,11 @@ actor WorkflowExecutor: Executor {
             var childOutcome: ExecutionOutcome? = nil
             var childFailureReason: String? = nil
             var suppressedOrchestrationEvents = 0
+            // [CR-46] The child's own verdict on whether something inside it genuinely failed, and
+            // WHICH inner nodes did (last status wins, so a node that failed and then passed on
+            // retry is not reported). Both come from events that are still suppressed below.
+            var childHadGenuineFailure = false
+            var childNodeFailures: [UUID: String] = [:]
 
             // Inner node id → display name, harvested from the child's own (suppressed)
             // `workflowNodeStarted` events. Used only to title a forwarded HITL banner.
@@ -3343,8 +3445,25 @@ actor WorkflowExecutor: Executor {
                     // verdict (`workflowRunFinished`) overwrite the parent's. Counted, not silent —
                     // see the log line below. (`.workflowNodeStarted` is the arm above: suppressed
                     // too, but its name is harvested for HITL banner titling.)
-                    case .workflowNodeCompleted, .workflowNodeFailed, .workflowNodeSkipped,
-                         .workflowNodeCancelled, .workflowProgress, .workflowRunFinished,
+                    // [CR-46] Still suppressed, but READ first: the child's verdict and the inner
+                    // nodes that failed are what tell the parent a "completed" child absorbed a
+                    // failure. Dropping them unread is what made the sub-workflow node green and the
+                    // parent's run record clean.
+                    case .workflowRunFinished(let hadGenuineFailure):
+                        childHadGenuineFailure = hadGenuineFailure
+                        suppressedOrchestrationEvents += 1
+
+                    case .workflowNodeFailed(let innerID, let innerName, let error, _):
+                        childNodeFailures[innerID] = "\(innerName): \(error)"
+                        suppressedOrchestrationEvents += 1
+
+                    case .workflowNodeCompleted(let innerID, _, _, _),
+                         .workflowNodeSkipped(let innerID, _, _, _),
+                         .workflowNodeCancelled(let innerID, _):
+                        childNodeFailures[innerID] = nil
+                        suppressedOrchestrationEvents += 1
+
+                    case .workflowProgress,
                          // [CF-30] Suppressed with its siblings: it names an inner node of the
                          // CHILD, and the parent's own row is `.running` for the whole child run,
                          // so a Stop during a nested back-off is already covered by
@@ -3403,8 +3522,9 @@ actor WorkflowExecutor: Executor {
                 status = .failed(.executionTimeout(elapsed: 0, limit: 0))
             case .completedWithWarnings:
                 logger.notice("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] completed with warnings (\(childFailureReason ?? "degraded run")) — continuing with its output.")
+                nestedFailures = Self.absorbedChildFailures(hadGenuineFailure: childHadGenuineFailure, failedInnerNodes: childNodeFailures, subWorkflowName: displayName)
             case .completed:
-                break
+                nestedFailures = Self.absorbedChildFailures(hadGenuineFailure: childHadGenuineFailure, failedInnerNodes: childNodeFailures, subWorkflowName: displayName)
             case nil where Task.isCancelled:
                 // [WF-CC1] OBSERVED, not inferred — same reasoning as the Gate arm above. The
                 // `catch is CancellationError` arm a few lines up this function is believed
@@ -3427,6 +3547,14 @@ actor WorkflowExecutor: Executor {
                 ))
             }
 
+            if !nestedFailures.isEmpty {
+                logger.warning("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] COMPLETED, but its own run absorbed \(nestedFailures.count) failure(s): \(nestedFailures.joined(separator: " | ")). CONSEQUENCE: the node completes WITH WARNINGS and the parent run is recorded as completed with warnings, not clean; its output still flows downstream.")
+                continuation.yield(.warning(
+                    category: .midRunError,
+                    message: "[\(displayName)] Completed, but inside it: \(nestedFailures.joined(separator: "; "))",
+                    sourceNodeID: nodeID))
+            }
+
             logger.info("[WF_EXEC] sub-workflow '\(displayName)' [node \(nodeID.uuidString.prefix(8))] finished: \(childOutput.count) chars, \(producedArtifacts.count) artifact(s) forwarded, \(suppressedOrchestrationEvents) child orchestration event(s) not re-emitted (deliberate — they belong to the child's own progress tally).")
 
         case .condition(let config):
@@ -3439,9 +3567,15 @@ actor WorkflowExecutor: Executor {
             // priority. Several matches is an AMBIGUOUS input, resolved by `decisionPolicy` below.
             var matchedLabels: [String] = []
             for rule in config.rules {
+                // [CR-48] Two views of the field. `fieldValue` is what `contains`/`notContains`
+                // SEARCH, attachments included. `wholeValue` is what `equals`/`notEquals`/
+                // `isEmpty`/`isNotEmpty` COMPARE: the message alone, trimmed (`routerWholeValue`).
                 let fieldValue: String
+                let wholeValue: String
                 switch rule.field {
-                case .upstreamOutput: fieldValue = upstreamText
+                case .upstreamOutput:
+                    fieldValue = upstreamText
+                    wholeValue = Self.routerWholeValue(structuralInput)
                 // EIO-5: trimmed, matching `setVariable`'s normalized keys and validation.
                 case .variable:
                     let varKey = (rule.variableName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3454,6 +3588,7 @@ actor WorkflowExecutor: Executor {
                         logger.warning("[WF_ROUTE] Router '\(displayName)' [node \(nodeID.uuidString.prefix(8))] rule '\(rule.label)' reads variable '\(varKey)', which is NOT SET at this point in the run — variables set so far: [\(state.variables.keys.sorted().joined(separator: ", "))]. It is compared as an EMPTY STRING. CONSEQUENCE: `isEmpty`/`notContains`/`notEquals` match unconditionally and `equals`/`contains` never match, so this rule's verdict is decided by the variable's ABSENCE. A Code node on this SAME execution level does not count — its write lands only after the level finishes; wire it upstream instead.")
                     }
                     fieldValue = state.variables[varKey] ?? ""
+                    wholeValue = Self.routerWholeValue(fieldValue)
                 case .other(let raw):
                     // A field this build cannot evaluate (newer-version blob, WF-PE3). The rule is
                     // INERT — never a match — and says so; guessing a field would route traffic on
@@ -3478,16 +3613,16 @@ actor WorkflowExecutor: Executor {
                     matches = !values.contains { fieldValue.localizedCaseInsensitiveContains($0) }
                 case .equals:
                     // ANY value equals → true
-                    matches = values.contains { fieldValue == $0 }
+                    matches = values.contains { wholeValue == $0 }
                 case .notEquals:
                     // ALL values must differ → true
-                    matches = !values.contains { fieldValue == $0 }
+                    matches = !values.contains { wholeValue == $0 }
                 case .other(let raw):
                     // Same contract as an unknown field: inert, loud, never a guess (WF-PE3).
                     logger.error("[WF_ROUTE] Router rule '\(rule.label)' uses operator '\(raw)', which this build cannot evaluate (saved by a newer version). CONSEQUENCE: the rule never matches on this build.")
                     matches = false
-                case .isEmpty:     matches = fieldValue.isEmpty
-                case .isNotEmpty:  matches = !fieldValue.isEmpty
+                case .isEmpty:     matches = wholeValue.isEmpty
+                case .isNotEmpty:  matches = !wholeValue.isEmpty
                 }
 
                 logger.debug("Router '\(displayName)' rule: field=\(String(describing: rule.field)) op=\(String(describing: rule.op)) value='\(rule.value)' → \(matches ? "MATCH" : "no match") (label: '\(rule.label)')")
@@ -3841,6 +3976,9 @@ actor WorkflowExecutor: Executor {
             logger.info("Gate node '\(displayName)' suspending for choice (operationID: \(operationID), options: [\(config.options.joined(separator: " | "))], timeout: \(gateTimeout.map { "\($0)s" } ?? "indefinite — container-bounded"))")
 
             let chosenOption: String?
+            // [CR-47] Set by the timer child BEFORE it resolves the gate, so a nil answer can be told
+            // apart: the timer's nil is an expiry, any other nil is the user dismissing the banner.
+            let expiry = TerminalEmitGate()
             if let timeout = gateTimeout {
                 // User-configured timeout: race the suspension against a sleep timer. ⚠️ It does NOT
                 // auto-reject — the `else` arm below fails the node and leaves `activePorts` unset, so
@@ -3855,6 +3993,7 @@ actor WorkflowExecutor: Executor {
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(timeout))
+                            _ = expiry.claim()
                             await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: nil, resolvedBy: nil, outcome: "expired")   // gate deadline — nobody answered
                             return nil
                         }
@@ -3903,14 +4042,21 @@ actor WorkflowExecutor: Executor {
                 status = .canceled
                 logger.info("Gate node '\(displayName)' cancelled — no branch taken, not reported as a failure.")
             } else {
-                // No choice, and NOT a cancellation — a configured per-gate timeout elapsed. The
-                // gate fails; no branch is taken.
-                // HITL Waiting Contract, decision B: the one timer on a human. Reported as EXPIRED —
-                // not `.modelError` ("check your model"), not "cancelled" — and onto the error port.
-                let limit = gateTimeout ?? 0
-                output = "Gate expired — nobody answered within \(ToolExecutionMediator.describe(limit))."
-                status = .failed(.gateExpired(limit: limit))
-                logger.info("[WF_EXEC] Gate node '\(displayName)' EXPIRED after \(Int(limit))s with no answer. CONSEQUENCE: no option branch runs; the node fails onto its error port.")
+                // No choice, and NOT a cancellation: either the configured timeout elapsed, or the
+                // user dismissed the banner without choosing.
+                // `claim()` is false only when the timer child already claimed it, i.e. expired.
+                let settled = Self.unansweredGateSettlement(
+                    expired: !expiry.claim(), limit: gateTimeout)
+                output = settled.output
+                status = settled.status
+                if case .failed = settled.status {
+                    // HITL Waiting Contract, decision B: the one timer on a human. Reported as
+                    // EXPIRED — not `.modelError` ("check your model"), not "cancelled" — and onto
+                    // the error port.
+                    logger.info("[WF_EXEC] Gate node '\(displayName)' EXPIRED after \(Int(gateTimeout ?? 0))s with no answer. CONSEQUENCE: no option branch runs; the node fails onto its error port.")
+                } else {
+                    logger.notice("[WF_EXEC] Gate node '\(displayName)' [node \(nodeID.uuidString.prefix(8))] DISMISSED — resolved with no option and no expiry (Escape, a QuickAccess cancel, or a stale ChatOps button). CONSEQUENCE: the node is recorded as cancelled; no option branch runs and its error port does NOT fire, since nothing failed.")
+                }
             }
 
             // Gate HITL is now a first-class `.gate` interaction, traced uniformly by ActiveStreamManager
@@ -4374,10 +4520,29 @@ actor WorkflowExecutor: Executor {
             // Auto-detect structured output (mirrors the profile-node path): a Code
             // node emitting JSON, or a Gate passing JSON through, exposes it as
             // `structuredOutput` for downstream `{{ input.json.path }}` access.
-            structuredOutput: JSONValue.parseStructured(output)
+            structuredOutput: JSONValue.parseStructured(output),
+            // Structural nodes read no documents; they pass on what their upstreams read (CR-49).
+            readDocumentIDs: Self.documentsAlreadyRead(upstream: upstreamResults)
         )
 
-        return StructuralNodeResult(envelope: envelope, activePorts: activePorts, variableUpdates: variableUpdates)
+        return StructuralNodeResult(envelope: envelope, activePorts: activePorts, variableUpdates: variableUpdates, nestedFailures: nestedFailures)
+    }
+
+    /// The failures a COMPLETED child run absorbed, as one line per inner node (CR-46).
+    ///
+    /// Keyed off the child's own verdict, never off the harvested node failures alone: a child
+    /// whose failed node was retried, skipped or cancelled afterwards already cleared that entry,
+    /// and a child that reported no genuine failure is clean whatever events preceded it. When the
+    /// verdict says failed but no inner node is named (the failure was itself nested one level
+    /// deeper, whose events this child suppressed), one generic line still says so.
+    nonisolated static func absorbedChildFailures(
+        hadGenuineFailure: Bool,
+        failedInnerNodes: [UUID: String],
+        subWorkflowName: String
+    ) -> [String] {
+        guard hadGenuineFailure else { return [] }
+        let named = failedInnerNodes.values.sorted()
+        return named.isEmpty ? ["a node nested inside '\(subWorkflowName)' failed"] : named
     }
 
     // MARK: - Classifier Outcome (WF-CC10)
@@ -4546,6 +4711,37 @@ actor WorkflowExecutor: Executor {
     ///
     /// `Mutex` rather than an actor: every claimant is synchronous, and an `await` here would add a
     /// suspension point to the cancelled return path — which is precisely where the race lives.
+    /// The value a Router's whole-value operators (`equals`, `notEquals`, `isEmpty`, `isNotEmpty`)
+    /// compare: the field trimmed of surrounding whitespace and newlines.
+    ///
+    /// ⚠️ READINESS CR-48 (2026-10-12). The rule's values were trimmed and the input was not, so a
+    /// model answering `"positive\n"` (most do end with a newline) never `equals` "positive", and a
+    /// whitespace-only answer was not `isEmpty`. At an ENTRY Router the run's attachments were also
+    /// folded into the compared text, so `equals` could never match there at all. The attachments
+    /// still reach `contains`/`notContains`, which search; a whole-value comparison is about the
+    /// message. Case is NOT folded: `equals` stays case-sensitive, as it always was.
+    nonisolated static func routerWholeValue(_ field: String) -> String {
+        field.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// How a Gate that ended with no option settles (CR-47).
+    ///
+    /// ⚠️ READINESS CR-47 (2026-10-12). Every nil answer was treated as an expiry, so a gate with
+    /// NO timeout that the user dismissed (Escape in QuickAccess, a QuickAccess cancel, a ChatOps
+    /// button that outlived its options) failed as `.gateExpired(limit: 0)`, "nobody answered
+    /// within 0 seconds", and fired its error port: a recovery branch ran for a choice the user
+    /// declined to make. Only the timer's own nil is an expiry now. A dismissal is the user's
+    /// decision not to continue down any option, so the node is cancelled: no branch, no error port.
+    nonisolated static func unansweredGateSettlement(
+        expired: Bool, limit: TimeInterval?
+    ) -> (status: NodeExecutionStatus, output: String) {
+        if expired, let limit {
+            return (.failed(.gateExpired(limit: limit)),
+                    "Gate expired — nobody answered within \(ToolExecutionMediator.describe(limit)).")
+        }
+        return (.canceled, "Gate dismissed — no option was chosen, so no branch ran.")
+    }
+
     final class TerminalEmitGate: @unchecked Sendable {
         private let claimed = Mutex(false)
 
@@ -4877,11 +5073,10 @@ actor WorkflowExecutor: Executor {
 
         logger.debug("AI Classifier '\(displayName)' raw response: \"\(response)\"")
 
-        // Immediately reclaim GPU RAM — classifier is a one-shot task,
-        // no need to keep the model loaded until the idle timer fires.
-        // The next workflow node will load whatever model it needs.
-        await MLXService.shared.unloadModel()
-        logger.debug("AI Classifier '\(displayName)': unloaded MLX model after classification")
+        // ⚠️ The classifier's model is NOT unloaded here (local inference coordinator, U3). It used to
+        // be, unconditionally — so a next node on the SAME model reloaded it from disk. The next node
+        // loads whatever it needs (a different model swaps in `MLXService.loadModel`), and the run's
+        // end leaves the model to the idle timer.
 
         // ⚠️ `parse(_:)`, NOT `parseResponse(_:)` (register EIO-1). The old adapter collapsed
         // `.ambiguous` to nil, so a reply naming two labels fell through to `.unreadable` — the

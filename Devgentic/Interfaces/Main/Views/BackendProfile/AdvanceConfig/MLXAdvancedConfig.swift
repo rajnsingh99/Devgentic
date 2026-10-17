@@ -71,11 +71,18 @@ struct MLXAdvancedConfig: Codable, Equatable {
     /// Lower quantization (fewer bits) and smaller models are more prone to degenerate
     /// repetition loops. This method applies stronger penalties and larger context windows
     /// for those cases, while keeping penalties light for high-precision large models.
-    static func recommended(for metadata: ModelMetadata) -> MLXAdvancedConfig {
-        let (penalty, contextSize) = optimalRepetitionSettings(
-            tier: metadata.tier,
-            quantization: metadata.quantization
-        )
+    ///
+    /// `profile` picks the ladder, as for Ollama (`OllamaConfigDefaultProfile.forProfileType`).
+    /// The agent ladder is deliberately light: a tool loop has to repeat identifiers verbatim, and
+    /// a strong penalty corrupts them. On the 2026-10-06 device run Qwen2.5-3B-4bit at 1.30 over
+    /// 30 tokens wrote `DevgeticTestbed` three times, each right after the real path had appeared
+    /// in the last 30 tokens, and one of them sent a read outside the project. The loops the strong
+    /// ladder was there to break are caught on that path anyway: identical tool calls by the
+    /// repeated-call guard, text loops by `StreamingCircuitBreaker`.
+    static func recommended(for metadata: ModelMetadata, profile: OllamaConfigDefaultProfile) -> MLXAdvancedConfig {
+        let (penalty, contextSize) = profile == .agent
+            ? agentRepetitionSettings(tier: metadata.tier)
+            : optimalRepetitionSettings(tier: metadata.tier, quantization: metadata.quantization)
         return MLXAdvancedConfig(
             temperature: 0.1,
             topP: 0.9,
@@ -110,6 +117,17 @@ struct MLXAdvancedConfig: Codable, Equatable {
             return isLowQuant ? (1.15, 25) : (1.10, 20)
         case .ultra:
             return (1.10, 20)
+        }
+    }
+
+    /// The agent ladder: enough to discourage a stutter, too little to flip a confident token. The
+    /// window stays at the chat ladder's 20–30 so the prompt cache's minimum suffix is unchanged.
+    private static func agentRepetitionSettings(tier: ModelTier) -> (penalty: Double, contextSize: Int) {
+        switch tier {
+        case .tiny, .small:
+            return (1.05, 30)
+        case .medium, .large, .ultra:
+            return (1.05, 20)
         }
     }
 
@@ -184,6 +202,9 @@ struct MLXSettingsView: View {
     /// `KnownModelContextWindows` (the same catalog AgentConnect uses at
     /// runtime). Nil when no model is selected yet.
     let modelName: String?
+
+    /// Which ladder "Reset to Defaults" restores: the agent one unless hosted in a Bot config.
+    var defaultProfile: OllamaConfigDefaultProfile = .agent
 
     @Environment(\.appTheme) private var theme
 
@@ -443,7 +464,7 @@ struct MLXSettingsView: View {
                         // available (e.g. tier-tuned repPenalty for Q4); fall back
                         // to the generic default otherwise.
                         if let metadata = modelMetadata {
-                            config = .recommended(for: metadata)
+                            config = .recommended(for: metadata, profile: defaultProfile)
                         } else {
                             config = .default()
                         }

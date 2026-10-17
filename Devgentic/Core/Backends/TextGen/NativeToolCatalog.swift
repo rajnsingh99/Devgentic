@@ -66,11 +66,33 @@ enum NativeToolVisibility: Sendable, Equatable {
     case hidden(reason: String)
 }
 
+/// What a tool needs before it can work, and where the user provides it.
+///
+/// Declared on the catalogue entry so a future tool that needs configuration (an API key, an
+/// account, a path) opts in with one line and gets the Tool Library's "Setup" option, the
+/// enable-block and the workflow warning for free.
+struct ToolSetup: Sendable {
+    /// Why the tool cannot work yet, or nil when it is ready. Evaluated live.
+    let blocker: @Sendable () -> String?
+    /// The Settings pane where the user finishes setup.
+    let settings: SettingsCategory
+}
+
 /// One tool's identity, availability, and how to build it for each consumer.
 struct NativeToolEntry: Sendable {
     let name: String
     let category: String
     let visibility: NativeToolVisibility
+
+    /// A PRECONDITION, not a policy: returns why this tool cannot work yet (no API key, no
+    /// provider chosen), or nil when it is ready. Evaluated live, so it follows the user's
+    /// settings. Nil for the vast majority of tools, which need nothing.
+    ///
+    /// ⚠️ This says "it would only return an error", never "it is risky": the Tool Library
+    /// refuses to ENABLE a blocked tool and agent resolution does not offer it, because
+    /// advertising a tool that can only fail wastes a slot and invites retry loops. It is
+    /// unrelated to `HITLRiskTier` / `ToolCapability`, which label and never gate.
+    let setup: ToolSetup?
 
     private let buildAgentTool: @Sendable (UUID?, Bool, TimeInterval?, String?) -> AgentTool
     private let buildExecutable: @Sendable () -> any ExecutableTool
@@ -82,6 +104,7 @@ struct NativeToolEntry: Sendable {
     /// honest — it is the tool's own answer, not a string repeated in the catalogue.
     static func make<T: DevgenticTool>(
         _ visibility: NativeToolVisibility,
+        setup: ToolSetup? = nil,
         _ build: @escaping @Sendable (UUID?) -> T
     ) -> NativeToolEntry {
         let probe = build(nil)
@@ -89,6 +112,7 @@ struct NativeToolEntry: Sendable {
             name: probe.name,
             category: probe.category,
             visibility: visibility,
+            setup: setup,
             buildAgentTool: { conversationID, requiresConfirmation, timeout, timeoutMessage in
                 AgentToolFactory.wrap(
                     build(conversationID),
@@ -163,6 +187,7 @@ enum NativeToolCatalog {
         .make(.library) { _ in ReadUIElementTreeTool() },
         .make(.library) { _ in CheckNetworkStatusTool() },
         .make(.library) { _ in HTTPRequestTool() },
+        .make(.library, setup: ToolSetup(blocker: { WebSearchConfig().setupBlocker }, settings: .webSearch)) { _ in WebSearchTool() },
         .make(.library) { _ in DNSLookupTool() },
         .make(.library) { _ in ManageAudioTool() },
         .make(.library) { _ in MediaControlTool() },
@@ -190,8 +215,9 @@ enum NativeToolCatalog {
         // `startBackground` and `effectiveTimeout`, which both tools below call.
         // Only its catalogue entry is withdrawn, so no profile can select it any more.
         //
-        // ⚠️ NO RENAME MAP. One was built and then deliberately removed: nothing seeds a default
-        // tool list, so a profile created after this withdrawal CANNOT contain the old name, and
+        // ⚠️ NO RENAME MAP. One was built and then deliberately removed: the only seeded tool lists
+        // (`CodeToolPreset`, `OnboardingToolPreset`) are built from this catalogue by name, so a
+        // profile created after this withdrawal CANNOT contain the old name, and
         // with no released users the only holders were local development profiles. A standing
         // "withdrawn names resolve to something else" mechanism is a first-party cousin of the
         // guess-by-name fallback `resolveExecutableTools` deleted on purpose — keeping one invites
@@ -250,6 +276,14 @@ enum NativeToolCatalog {
     }()
 
     static func entry(named name: String) -> NativeToolEntry? { byName[name] }
+
+    /// Why the named built-in cannot work yet, or nil when it is ready (or needs nothing).
+    static func setupBlocker(for name: String) -> String? { byName[name]?.setup?.blocker() }
+
+    /// The Settings pane that finishes the named tool's setup, or nil if it needs none. Unlike
+    /// `setupBlocker(for:)` this is non-nil even once the tool IS configured, so the Library can
+    /// keep offering "Setup" for changing the configuration.
+    static func setupSettings(for name: String) -> SettingsCategory? { byName[name]?.setup?.settings }
 
     /// The tools `LocalToolManager` registers, and therefore what the Tool Library and the
     /// workflow Action-node picker show.
@@ -327,8 +361,45 @@ extension NativeToolCatalog {
         .describe(AskUserTool(richFields: true)),
         .describe(ConversationHistoryTool(chatHistory: [], correlation: "")),
         .describe(LoadSkillTool(manifests: [])),
-        .describe(UpdateProjectContextTool(projectPath: "")),
+        .describe(RememberTool(projectPath: "", conversationID: nil)),
+        .describe(ForgetTool(projectPath: "")),
+        .describe(RecallTool(projectPath: "")),
     ]
 
     static var injectedToolNames: Set<String> { Set(injectedTools.map(\.name)) }
+
+    /// Every native tool name the catalogue can register.
+    static var allToolNames: Set<String> { Set(byName.keys) }
+
+    // MARK: - Retired names (diagnostics only)
+
+    /// Tools renamed in Build 102.6 (2026-09-25, commit 3d80ff6), old → new.
+    ///
+    /// ⚠️ DIAGNOSTICS ONLY — this is NOT an alias table. Nothing resolves an old name to the new
+    /// tool at run time (`ToolNameResolver` does not read this): there are no users to keep working,
+    /// and a silent alias would hide exactly the stale reference the user needs to fix. It exists so
+    /// that instructions written against the old vocabulary — Agent 3's "use fs_smart_search first"
+    /// was the case that found this — get a precise "renamed to X" advisory instead of a vague
+    /// "unknown tool". Every pair was verified against that commit's diff.
+    static let renamedTools: [String: String] = [
+        "fs_smart_search":    "spotlight_search",
+        "fs_read_metadata":   "read_file_metadata",
+        "fs_organize_batch":  "batch_move_files",
+        "fs_watch_folder":    "watch_folder",
+        "media_control":      "control_media",
+        "command_output":     "get_task_output",
+        "command_stop":       "stop_background_task",
+        "codebase_map":       "project_tree",
+        "git_tool":           "git",
+        "finder_tags":        "manage_finder_tags",
+        "disk_usage":         "get_disk_usage",
+        "display_management": "manage_displays",
+        "login_items":        "manage_login_items",
+        "external_devices":   "list_external_devices",
+        "apple_notes":        "manage_apple_notes",
+        "read_screen_state":  "extract_screen_text",
+    ]
+
+    /// Tools deleted with no direct successor. Diagnostics only, as above.
+    static let removedTools: Set<String> = ["execute_shell"]
 }

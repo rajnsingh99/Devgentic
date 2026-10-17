@@ -239,7 +239,7 @@ final class WorkflowRunHistoryStore {
                 // Update path — rewrite the row's contents from the (possibly
                 // off-main-encoded) blobs.
                 existing.apply(record, blobs: resolvedBlobs)
-                try context.save()
+                try SharedContextSave.save(context, "run history: update run \(record.id)")
                 logger.info("Updated run \(record.id) for conversation \(conversationID) — status=\(record.status.rawValue).")
                 return
             }
@@ -287,7 +287,7 @@ final class WorkflowRunHistoryStore {
                 }
             }
 
-            try context.save()
+            try SharedContextSave.save(context, "run history: insert run \(record.id)")
             logger.info("Persisted run \(record.id) for conversation \(conversationID) (\(allForConversation.count - max(0, overflow)) total after cap, status=\(record.status.rawValue)).")
         } catch {
             logger.error("Failed to upsert run \(record.id) for \(conversationID): \(error.localizedDescription)")
@@ -341,7 +341,7 @@ final class WorkflowRunHistoryStore {
                 // Recording a real value would need a heartbeat persisted DURING the run;
                 // there is no such field today.
             }
-            try context.save()
+            try SharedContextSave.save(context, "run history: reconcile orphans")
             logger.info("Reconciled \(orphans.count) orphaned .running run record(s) to .cancelled (Interrupted); duration left unset — the wall-clock time since the run started would include app downtime, not execution time.")
         } catch {
             logger.error("Failed to reconcile orphaned runs: \(error.localizedDescription)")
@@ -366,7 +366,7 @@ final class WorkflowRunHistoryStore {
             for r in records {
                 context.delete(r)
             }
-            try context.save()
+            try SharedContextSave.save(context, "run history: clear \(conversationID)")
             logger.info("Cleared \(records.count) run record(s) for conversation \(conversationID).")
         } catch {
             logger.error("Failed to clear run history for \(conversationID): \(error.localizedDescription)")

@@ -24,6 +24,9 @@ final class AnthropicModelGenerationTests: XCTestCase {
     func testCurrentFlagshipsClassifyAsAdaptive() {
         let adaptive = [
             "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5",
+            // ⚠️ Haiku 5.5 is a 5.5 that STILL takes `disabled` (at effort high or below). The 5.5
+            // split is by family, not version — see `classify`.
+            "claude-haiku-5-5",
         ]
         for model in adaptive {
             XCTAssertEqual(AnthropicModelGeneration.classify(modelName: model), .adaptive,
@@ -41,9 +44,14 @@ final class AnthropicModelGenerationTests: XCTestCase {
     /// tier member for which `disabled` IS legal — nothing caught it. Hence a separate case, and
     /// hence the body tests below run against a Fable id specifically.
     func testAlwaysOnFlagshipsRejectDisabledThinking() {
-        for model in ["claude-fable-5", "claude-mythos-5", "claude-mythos-preview"] {
+        for model in ["claude-fable-5", "claude-mythos-5", "claude-mythos-preview",
+                      // ⚠️ CR-1: Opus 5.5 400s on `disabled` at every effort level. It was in
+                      // `.adaptive`, so every new Opus 5.5 profile failed every request.
+                      "claude-opus-5-5", "anthropic.claude-opus-5-5", "claude-opus-6"] {
             let gen = AnthropicModelGeneration.classify(modelName: model)
             XCTAssertEqual(gen, .adaptiveAlwaysOn, "\(model)")
+            XCTAssertEqual(gen.thinkingOffShape, .notOffered, "\(model)")
+            XCTAssertFalse(gen.canTurnThinkingOff, "\(model) — the panel must hide the toggle")
             XCTAssertFalse(gen.acceptsDisabledThinking,
                            "\(model) returns 400 for thinking:{type:disabled} — the key must be omitted")
             // Everything else must still match the adaptive contract, or the split has drifted.
@@ -53,6 +61,32 @@ final class AnthropicModelGenerationTests: XCTestCase {
             XCTAssertEqual(gen.supportedEffortLevels,
                            AnthropicModelGeneration.adaptive.supportedEffortLevels,
                            "\(model) has the same effort ladder as the rest of the 5 tier")
+        }
+    }
+
+    /// ⚠️ CR-1: Sonnet 5.5 rejects `disabled` with a 400; thinking-off is `{type: "between_tools"}`.
+    /// The toggle stays — the user CAN turn thinking off — but the shape differs.
+    func testSonnet55TurnsThinkingOffWithBetweenTools() {
+        for model in ["claude-sonnet-5-5", "anthropic.claude-sonnet-5-5", "claude-sonnet-6"] {
+            let gen = AnthropicModelGeneration.classify(modelName: model)
+            XCTAssertEqual(gen, .adaptiveBetweenTools, "\(model)")
+            XCTAssertEqual(gen.thinkingOffShape, .betweenTools, "\(model)")
+            XCTAssertFalse(gen.acceptsDisabledThinking, "\(model) returns 400 for thinking:{type:disabled}")
+            XCTAssertTrue(gen.canTurnThinkingOff, "\(model) — the toggle must stay")
+            XCTAssertTrue(gen.usesAdaptiveThinking, "\(model)")
+            XCTAssertFalse(gen.acceptsSamplingParams, "\(model)")
+            XCTAssertEqual(gen.supportedEffortLevels, AnthropicModelGeneration.adaptive.supportedEffortLevels)
+        }
+    }
+
+    /// Opus 5.5 and Haiku 5.5 default to `medium`; every other current model to `high`. The panel's
+    /// "Default (…)" label and the dropped-effort log both read this.
+    func testDefaultEffortIsMediumOnlyWhereTheAPISaysSo() {
+        for model in ["claude-opus-5-5", "claude-haiku-5-5", "anthropic.claude-opus-5-5"] {
+            XCTAssertEqual(AnthropicModelGeneration.defaultEffort(for: model), "medium", model)
+        }
+        for model in ["claude-opus-5", "claude-sonnet-5-5", "claude-fable-5", "claude-opus-4-8", ""] {
+            XCTAssertEqual(AnthropicModelGeneration.defaultEffort(for: model), "high", model)
         }
     }
 
@@ -114,10 +148,12 @@ final class AnthropicModelGenerationTests: XCTestCase {
     }
 
     /// An id this table has never seen is newer than the table, not older — see the type's
-    /// header note. Guessing "old" would 400 every request to a just-released model.
+    /// header note. Guessing "old" would 400 every request to a just-released model. And of the
+    /// adaptive shapes, only always-on cannot 400 anywhere: it never sends `disabled` or
+    /// `between_tools`.
     func testUnknownIdsDefaultToTheNewestContract() {
-        for model in ["claude-opus-6", "claude-something-new", "", "gpt-4"] {
-            XCTAssertEqual(AnthropicModelGeneration.classify(modelName: model), .adaptive, "\(model)")
+        for model in ["claude-something-new", "", "gpt-4"] {
+            XCTAssertEqual(AnthropicModelGeneration.classify(modelName: model), .adaptiveAlwaysOn, "\(model)")
         }
     }
 }
@@ -230,6 +266,53 @@ final class AnthropicRequestBodyTests: XCTestCase {
         XCTAssertEqual(thinking["type"] as? String, "adaptive")
         XCTAssertNil(body["temperature"], "sampling params are removed on this generation")
         XCTAssertNil(body["top_p"])
+    }
+
+    // MARK: - CR-1: the 5.5 thinking-off shapes
+
+    /// ⚠️ THE CR-1 REGRESSION GUARD, through the shipped builders. A new profile ships
+    /// `extendedThinking: false`, so this is the body every fresh Opus 5.5 profile sends.
+    func testOpus55NeverReceivesDisabledThinking() throws {
+        for thinking in [false, true] {
+            let agentBody = body(for: provider(model: "claude-opus-5-5", thinking: thinking, effort: "low"))
+            let streamBody = provider(model: "claude-opus-5-5", thinking: thinking, effort: "low")
+                .debugStreamingRequestBody(messages: [["role": "user", "content": "hi"]])
+            for (path, b) in [("agent", agentBody), ("stream", streamBody)] {
+                let thinkingField = try XCTUnwrap(b["thinking"] as? [String: Any], "\(path) thinking=\(thinking)")
+                XCTAssertEqual(thinkingField["type"] as? String, "adaptive",
+                               "\(path) thinking=\(thinking): Opus 5.5 400s on disabled at every effort")
+                // Effort is the only control left, so it must survive the toggle being off.
+                XCTAssertEqual((b["output_config"] as? [String: Any])?["effort"] as? String, "low",
+                               "\(path) thinking=\(thinking)")
+            }
+        }
+    }
+
+    /// ⚠️ Sonnet 5.5's off is `between_tools`, sent BARE: `display` beside it is a 400 (and the agent
+    /// path asks for a summary), and effort `xhigh`/`max` is a 400 with it (so no effort at all).
+    func testSonnet55ThinkingOffIsBareBetweenToolsOnEveryBuilder() throws {
+        let agentBody = body(for: provider(model: "claude-sonnet-5-5", thinking: false, effort: "xhigh"))
+        let streamBody = provider(model: "claude-sonnet-5-5", thinking: false, effort: "xhigh")
+            .debugStreamingRequestBody(messages: [["role": "user", "content": "hi"]])
+        for (path, b) in [("agent", agentBody), ("stream", streamBody)] {
+            let thinkingField = try XCTUnwrap(b["thinking"] as? [String: Any], path)
+            XCTAssertEqual(thinkingField as NSDictionary, ["type": "between_tools"] as NSDictionary,
+                           "\(path): between_tools takes no other field")
+            XCTAssertNil(b["output_config"], "\(path): xhigh/max are rejected with between_tools — send no effort")
+        }
+    }
+
+    func testSonnet55WithThinkingOnIsAdaptiveWithEffort() throws {
+        let b = body(for: provider(model: "claude-sonnet-5-5", thinking: true, effort: "xhigh"))
+        XCTAssertEqual((b["thinking"] as? [String: Any])?["type"] as? String, "adaptive")
+        XCTAssertEqual((b["output_config"] as? [String: Any])?["effort"] as? String, "xhigh")
+    }
+
+    /// The control for the split: Haiku 5.5 is a 5.5 that still takes `disabled`.
+    func testHaiku55StillSendsDisabledWithNoEffort() throws {
+        let b = body(for: provider(model: "claude-haiku-5-5", thinking: false, effort: "max"))
+        XCTAssertEqual((b["thinking"] as? [String: Any])?["type"] as? String, "disabled")
+        XCTAssertNil(b["output_config"], "disabled is accepted only at effort high or below — send none")
     }
 
     func testEffortIsSentWhenSupportedAndDroppedWhenNot() throws {

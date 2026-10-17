@@ -33,6 +33,12 @@ actor QueryRewritingService {
             logger.debug("[RAG Rewrite] Skipped — no conversation history to contextualize against.")
             return currentQuery // Nothing to contextualize against
         }
+        // RAG-20: a long query is self-contained by construction — and the rewrite's 100-token
+        // output cap would CUT it, which the topic guard only sometimes catches.
+        guard currentQuery.count <= Self.maxRewritableQueryChars else {
+            logger.info("[RAG Rewrite] Skipped — query is \(currentQuery.count) chars (> \(Self.maxRewritableQueryChars)). CONSEQUENCE: retrieval uses the query as typed; a long query carries its own context, and rewriting it would truncate it to the 100-token output cap.")
+            return currentQuery
+        }
 
         totalRewriteCount += 1
         let rewriteNum = totalRewriteCount
@@ -41,7 +47,7 @@ actor QueryRewritingService {
         // unified OS log.
         logger.notice("[RAG Rewrite #\(rewriteNum)] BEGIN — Query: \(currentQuery.count) chars, History: \(history.count) messages")
 
-        let recentHistory = formatRecentHistory(history)
+        let recentHistory = Self.formatRecentHistory(history)
 
         let systemPrompt = """
         You are an expert search query rewriting assistant. Your singular task is to rewrite a user's follow-up query into a fully self-contained, descriptive search query using the provided conversation history.
@@ -72,16 +78,27 @@ actor QueryRewritingService {
         let rewriteStart = CFAbsoluteTimeGetCurrent()
 
         do {
-            let rewritten = try await IntelligenceCoreService.shared.generate(
-                messages: messages,
-                maxTokens: 100,
-                temperature: 0.1,
-                caller: .ragRewriting
-            )
+            // RAG-20: BOUNDED. The rewrite sits in front of the first token of every send with
+            // history, and a cold Intelligence Core load alone can take seconds. Past the deadline
+            // the original query is used; the abandoned call drains in the background (and leaves
+            // the IC model warm for the next send). The hold is released by the call itself,
+            // whichever way it ends, so an abandoned call cannot leak it.
+            let wrapped = UnsafeSendable(messages)
+            let rewritten = try await Self.withDeadline(Self.rewriteDeadline) {
+                defer { Task { await IntelligenceCoreService.shared.releaseHold(caller: .ragRewriting) } }
+                // The local lock: never waited for here (see `claimForInTurnIntelligence`).
+                return try await LocalInferenceCoordinator.inTurnIntelligence(
+                    feature: "RAG query rewrite", on: await Self.coordinator()
+                ) {
+                    try await IntelligenceCoreService.shared.generate(
+                        messages: wrapped.value,
+                        maxTokens: 100,
+                        temperature: 0.1,
+                        caller: .ragRewriting
+                    )
+                }
+            }
             let cleaned = rewritten.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Clean up cache to prevent memory footprint issues
-            await IntelligenceCoreService.shared.releaseHold(caller: .ragRewriting)
 
             let rewriteDuration = CFAbsoluteTimeGetCurrent() - rewriteStart
 
@@ -112,16 +129,84 @@ actor QueryRewritingService {
             }
             return cleaned
 
+        } catch let busy as LocalInferenceCoordinator.LocalSlotBusy {
+            fallbackCount += 1
+            logger.notice("[RAG Rewrite #\(rewriteNum)] SKIPPED — the local model is busy (\(busy.holder)). CONSEQUENCE: retrieval uses the original query (pronouns unresolved) instead of waiting behind another run. Fallbacks: \(self.fallbackCount)/\(self.totalRewriteCount)")
+            return currentQuery
+        } catch is RewriteDeadlineExceeded {
+            fallbackCount += 1
+            logger.warning("[RAG Rewrite #\(rewriteNum)] TIMED OUT after \(Self.rewriteDeadline). CONSEQUENCE: retrieval uses the original query (pronouns unresolved); the abandoned rewrite is cancelled and drains in the background. Fallbacks: \(self.fallbackCount)/\(self.totalRewriteCount)")
+            return currentQuery
         } catch {
             let rewriteDuration = CFAbsoluteTimeGetCurrent() - rewriteStart
             fallbackCount += 1
-            logger.error("[RAG Rewrite #\(rewriteNum)] FAILED — \(error.localizedDescription) (\(String(format: "%.2f", rewriteDuration))s). Fallbacks: \(self.fallbackCount)/\(self.totalRewriteCount)")
-
-            // Ensure we attempt to unload even if an error occurred during generation or tokenization
-            await IntelligenceCoreService.shared.releaseHold(caller: .ragRewriting)
-
+            logger.error("[RAG Rewrite #\(rewriteNum)] FAILED — \(error.localizedDescription) (\(String(format: "%.2f", rewriteDuration))s). CONSEQUENCE: retrieval uses the original query. Fallbacks: \(self.fallbackCount)/\(self.totalRewriteCount)")
             return currentQuery
         }
+    }
+
+    // MARK: - Bounds (RAG-20)
+
+    /// Longest query worth rewriting. Rewriting resolves "it"/"that" in a short follow-up.
+    static let maxRewritableQueryChars = 600
+    /// Wall-clock budget for the whole rewrite, model load included.
+    static let rewriteDeadline: Duration = .seconds(4)
+
+    /// The coordinator in-turn rewrites claim the local lock from. Tests point it at their own.
+    nonisolated(unsafe) static var coordinatorOverride: LocalInferenceCoordinator?
+    @MainActor static func coordinator() -> LocalInferenceCoordinator { coordinatorOverride ?? .shared }
+    /// Per-message cap on the history shown to the rewriter: head + tail of each message.
+    static let historyHeadChars = 300
+    static let historyTailChars = 200
+
+    struct RewriteDeadlineExceeded: Error {}
+
+    /// Runs `operation`, returning its result — or throwing `RewriteDeadlineExceeded` after
+    /// `deadline` WITHOUT waiting for it. A task group could not do this: it awaits every child
+    /// before returning, so a model load that ignores cancellation would hold the caller anyway.
+    /// Two unstructured tasks race through one continuation instead; the loser is cancelled.
+    static func withDeadline<T: Sendable>(
+        _ deadline: Duration,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let once = ResumeOnce<T>()
+        return try await withCheckedThrowingContinuation { continuation in
+            let work = Task {
+                do { once.resume(continuation, with: .success(try await operation())) }
+                catch { once.resume(continuation, with: .failure(error)) }
+            }
+            Task {
+                try? await Task.sleep(for: deadline)
+                if once.resume(continuation, with: .failure(RewriteDeadlineExceeded())) { work.cancel() }
+            }
+        }
+    }
+
+    /// The last `maxMessages` turns, each reduced to head + tail with reasoning stripped.
+    ///
+    /// ⚠️ Was every message WHOLE (RAG-20): one long reply or pasted document became the
+    /// rewriter's prompt — prefill time in front of the first token — and `<think>` blocks went in
+    /// with it. A follow-up's referent is in a turn's opening or closing lines.
+    static func formatRecentHistory(_ history: [ChatMessage], maxMessages: Int = 4) -> String {
+        var formatted = ""
+        for msg in history.suffix(maxMessages) {
+            let role = msg.sender == .user ? "User" : "Agent"
+            let raw = msg.content.textContent.map { OutputSanitizer.stripThinkBlocksAndTokens($0) } ?? "[Non-text content]"
+            let content: String
+            if raw.count > historyHeadChars + historyTailChars {
+                content = String(raw.prefix(historyHeadChars)) + " … " + String(raw.suffix(historyTailChars))
+            } else {
+                content = raw
+            }
+            formatted += "\(role): \(content)\n"
+        }
+        return formatted
+    }
+
+    /// RAG-34: a query with no letter or digit (empty, punctuation, emoji-only) has nothing to
+    /// embed meaningfully or to match lexically — retrieval on it returns noise, so it is skipped.
+    static func isRetrievable(_ query: String) -> Bool {
+        query.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 
     /// True when every content word of the original query survives (as a whole
@@ -146,15 +231,21 @@ actor QueryRewritingService {
         let rewriteTokens = Set(tokens(rewrite))
         return contentTokens.allSatisfy { rewriteTokens.contains($0) }
     }
+}
 
-    private func formatRecentHistory(_ history: [ChatMessage], maxMessages: Int = 4) -> String {
-        let relevant = Array(history.suffix(maxMessages))
-        var formatted = ""
-        for msg in relevant {
-            let role = msg.sender == .user ? "User" : "Agent"
-            let content = msg.content.textContent ?? "[Non-text content]"
-            formatted += "\(role): \(content)\n"
-        }
-        return formatted
+/// One-shot resume for a continuation raced between two tasks — resuming twice traps.
+private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    /// - Returns: true if this call resumed the continuation.
+    @discardableResult
+    func resume(_ continuation: CheckedContinuation<T, Error>, with result: Result<T, Error>) -> Bool {
+        lock.lock()
+        let first = !done
+        done = true
+        lock.unlock()
+        if first { continuation.resume(with: result) }
+        return first
     }
 }

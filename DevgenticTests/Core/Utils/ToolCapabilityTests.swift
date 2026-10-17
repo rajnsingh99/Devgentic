@@ -126,7 +126,7 @@ final class ToolCapabilityTests: XCTestCase {
         XCTAssertEqual(HITLRiskTier.classify(toolName: "delete_file"), .destructive)
         XCTAssertFalse(ToolCapability.executesArbitraryCode("delete_file"))
         XCTAssertEqual(HITLRiskTier.classify(toolName: "batch_move_files"), .destructive)
-        XCTAssertEqual(HITLRiskTier.classify(toolName: "fs_organize_batch"), .destructive)
+        XCTAssertEqual(HITLRiskTier.classify(toolName: "batch_move_files"), .destructive)
     }
 
     func testOrdinaryToolsAreUnaffected() {

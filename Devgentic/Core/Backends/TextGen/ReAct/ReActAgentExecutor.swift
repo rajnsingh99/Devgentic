@@ -95,16 +95,33 @@ actor ReActAgentExecutor: Executor {
                     var executionSummary = ExecutionSummary(originalGoal: input.userInput)
                     let executionTrace = input.traceContext
 
-                    // Parse-loop blindness guard: when the parser rejects model output
-                    // (`.suspectedFormatFailure`), we inject a corrective alert and retry.
-                    // If the model emits the *byte-identical* output multiple times in a row,
-                    // the corrective alert isn't landing — the model is stuck. Tracking the
-                    // last failed `step.reasoning` lets us abort early with a typed reason
-                    // instead of burning the entire iteration budget on the same stuck output.
+                    // Parse-loop guard: when the parser rejects model output
+                    // (`.suspectedFormatFailure`), we inject a corrective alert and retry — but
+                    // only so many times in a row. Two triggers, ONE exit (`formatCorrectionsExhausted`):
+                    //
+                    //  • `maxConsecutiveFormatFailures` consecutive failures, whatever the output.
+                    //    The profile's "On Parse Failure" setting (`maxParseFailures`, default 3,
+                    //    same count LLMRetryStrategy uses for thrown parse errors). Before this
+                    //    bound, a model that rephrased a correct answer every time was corrected
+                    //    without limit — and Code runs can have no iteration cap (2026-10-04:
+                    //    deepseek-r1 looped 6× for 4.5 min on correct analyses until the user
+                    //    pressed Stop, losing all of it). Any step that parses resets it, so slips
+                    //    spread across a long run never add up.
+                    //  • the byte-IDENTICAL reply 4 times in a row (`maxIdenticalFormatFailures`
+                    //    repeats past the first) — only matters when the setting is 4 or more. The
+                    //    model is copying itself; the corrective alert is not landing.
+                    //
+                    // Either way the loop ends like running out of iterations — the profile's
+                    // "On Budget Exhausted" policy decides (best-effort response by default), so
+                    // tool results already gathered, and edits already made, are still reported.
                     var lastFailedReasoning: String? = nil
                     var consecutiveIdenticalFormatFailures = 0
-                    let maxIdenticalFormatFailures = 2  // 2 retries on the same output, then bail
-                    
+                    let maxIdenticalFormatFailures = 2
+                    var consecutiveFormatFailures = 0
+                    let maxConsecutiveFormatFailures = max(1, input.resiliencePolicy.cognitive.maxParseFailures)
+                    // Set when the guard above ends the loop; the reason shown to the user.
+                    var formatCorrectionsExhausted: String? = nil
+
                     var memoryStrategy = input.workingMemory
                     var previousScratchpadLength = 0
                     // Components are built from SEPARATE policy tiers — the legacy
@@ -172,35 +189,16 @@ actor ReActAgentExecutor: Executor {
                     var didInjectFullBudgetAlert = false
                     let nativeKeepRecentExchanges = 3
 
-                    // --- G6: Reading-Tool Gate ---
-                    // `update_project_context` is hidden from the tool schema until the agent
-                    // has successfully invoked grounding tools. Prevents weak local models
-                    // from speculatively writing project memory before they've explored.
-                    // `codebase_map` counts because on the Code interface it returns a rich
-                    // structural survey that substantively grounds the model — excluding it
-                    // was causing exploration-heavy queries ("Analyse the project") to burn
-                    // extra iterations bouncing off the gate.
-                    var readingToolSuccessCount = 0
-                    let readingToolNames: Set<String> = [
-                        "read_file", "find_definition", "code_search", "file_overview", "project_tree", "codebase_map"
-                    ]
-                    // Narrowed to what THIS run actually registered. The filter below was
-                    // already a no-op for a non-Code profile, but the unlock branch was not:
-                    // an ordinary Agent run has no `update_project_context`, yet the first
-                    // successful read still fired the gate and injected the Code interface's
-                    // "use update_project_context to persist findings into .devgentic/
-                    // context.md" instructions. Field-observed 2026-07-25: the agent obeyed
-                    // them, found no such tool, reached for `write_file` instead, and wrote
-                    // a project-context document to ~/.devgentic/context.md rather than
-                    // editing the file the user had asked about.
-                    let gatedToolNames: Set<String> = Set(["update_project_context"])
-                        .intersection(input.tools.map(\.name))
-                    // Small-tier models (≤14B — e.g. qwen2.5-coder:14b) thrash against a
-                    // threshold of 2 because they tend to start with one structural tool and
-                    // immediately want to persist. Lower the bar for them; medium/large
-                    // models keep the stricter default.
-                    let readingGateThreshold: Int = (input.modelTier == .small) ? 1 : 2
-                    var readingGateLoggedUnlock = false
+                    // The run's full loadout — what an attempted call is recognised against.
+                    let runToolNames: Set<String> = Set(input.tools.map(\.name))
+                    // ⚠️ CAPTURED ONCE PER RUN, not per iteration. The day renders in the system
+                    // message's environment layer and the time of day in the per-message part of the
+                    // user message (layout B). Rebuilt each iteration, a minute ticking over mid-run
+                    // changed those bytes, and every token after them had to be read again: about 4k
+                    // tokens on Qwen2.5-3B, where T4 spanned 14:35-14:37 (2026-10-06). A run's clock
+                    // going a few minutes stale is harmless; re-reading the prompt is not (see
+                    // MLXPromptCache).
+                    let runClock = EnvironmentFacts.clock()
 
                     // #21: Read the user personal profile ONCE, before the loop, and inject it on
                     // EVERY iteration via `context` below. On the native path it's folded into the
@@ -267,7 +265,7 @@ actor ReActAgentExecutor: Executor {
                             ))
                         }
                         
-                        await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                        await GlobalRateLimiter.shared.waitForCapacity(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         // The limiter swallows sleep interruption internally (its wait is
                         // non-throwing); surface a Stop pressed during a long cloud debt
                         // wait here instead of firing another generation.
@@ -305,22 +303,15 @@ actor ReActAgentExecutor: Executor {
                             shellType: "Zsh (Non-Interactive Mode)",
                             userName: NSUserName(),
                             homeDirectory: NSHomeDirectory(),
-                            currentDate: Date().formatted(date: .numeric, time: .shortened),
+                            currentDate: runClock.date,
+                            currentTime: runClock.time,
                             workspaceRoot: input.workspaceRoot
                         )
 
                         // `userProfile` is read ONCE before the loop (#21) and injected into
                         // `context` below on every iteration.
 
-                        // G6: Filter gated tools from the schema until prerequisites are met.
-                        // When the list doesn't contain a gated tool (e.g. non-Code profile),
-                        // this is a zero-cost no-op.
-                        let availableToolsThisIteration: [AgentTool] = {
-                            if readingToolSuccessCount >= readingGateThreshold {
-                                return input.tools
-                            }
-                            return input.tools.filter { !gatedToolNames.contains($0.name) }
-                        }()
+                        let availableToolsThisIteration: [AgentTool] = input.tools
 
                         var context = SemanticContext(
                             instructions: input.instructions,
@@ -344,9 +335,13 @@ actor ReActAgentExecutor: Executor {
                             toolGuidanceContext: input.toolGuidanceContext,
                             userImagePayload: input.userPayload
                         )
+                        context.projectKnowledge = input.projectKnowledge
                         // Prompt-builder telemetry (Run-Report Phase 3): CONTEXT-injection
                         // events attribute to this iteration's span.
                         context.traceContext = iterationSpan
+                        // The full loadout, so a prompt-dialect parse recognises a broken call to
+                        // any tool this run offers (`AttemptedToolCallGrammar`).
+                        context.runToolNames = runToolNames
 
                         // G12: Seed native conversation turns on iter 1. System prompt and
                         // history are built via PromptBuilder (no working_memory), normalized
@@ -388,6 +383,15 @@ actor ReActAgentExecutor: Executor {
                             // kickoff stays byte-identical (KV-cache prefix unchanged).
                             let kickoffText: String = {
                                 var parts: [String] = []
+                                // Layout B: the per-message part (episodic history, current time,
+                                // retrieved context) leads this turn — `compileMessages` leaves it
+                                // out of the system message so that message is the same for the
+                                // whole conversation. A workflow node keeps it in its prefix user
+                                // message instead (see `NativeStructuredGenerator.compileMessages`).
+                                if input.workflowContext == nil,
+                                   let turn = PromptBuilder.turnContext(context: context, layerConfig: context.promptLayerConfig, wrapping: .xml) {
+                                    parts.append(turn)
+                                }
                                 if hasSeededContext {
                                     parts.append(PromptWrapping.xml.section("prior_context", content: seededContext))
                                 }
@@ -483,10 +487,7 @@ actor ReActAgentExecutor: Executor {
                                 }
                             }
 
-                            // 2. Restore the reading-gate counter so gated tools stay unlocked.
-                            readingToolSuccessCount = recon.readingToolSuccessCount
-
-                            // 3. Re-run the parked tool via the EXISTING (dialect-agnostic) path — re-raises
+                            // 2. Re-run the parked tool via the EXISTING (dialect-agnostic) path — re-raises
                             //    the HITL banner (requestConfirmation/requestClarification → enqueueHITL →
                             //    suspend) and returns the observation once the user responds.
                             if let parked = recon.parkedTool {
@@ -515,13 +516,12 @@ actor ReActAgentExecutor: Executor {
                                     }
                                 }
                                 for obs in parkedObs {
-                                    if obs.isSuccess && readingToolNames.contains(obs.toolName) { readingToolSuccessCount += 1 }
                                     executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess, failureCategory: obs.failureCategory)
                                     memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
                                 }
                             }
 
-                            // 4. Jump to the parked iteration; the loop's `currentIteration += 1` makes the
+                            // 3. Jump to the parked iteration; the loop's `currentIteration += 1` makes the
                             //    next generated step iteration N+1. Iter-1 native seeding won't re-run.
                             currentIteration = recon.resumeIteration
                             iterationFinishedNormally = true; continue cognitiveLoop
@@ -674,6 +674,7 @@ actor ReActAgentExecutor: Executor {
                                         nativeMessages: liveConversationTurns,
                                         availableTools: availableToolsThisIteration,
                                         iteration: currentIteration,
+                                        runToolNames: runToolNames,
                                         onTextDelta: draft.onTextDelta
                                     )
                                 } catch {
@@ -687,11 +688,18 @@ actor ReActAgentExecutor: Executor {
                                 if isFinalAnswer { draft.flush() } else { draft.withdraw() }
                             } else {
                                 // Legacy path (MLX, dialect generators): rebuilds messages from context each iter.
-                                step = try await input.generatorStrategy.generateCognitiveStep(
-                                    model: spyModel,
-                                    context: context,
-                                    iteration: currentIteration
-                                )
+                                //
+                                // The scope names the conversation for `MLXPromptCache`, so this run's
+                                // MLX iterations reuse the prompt they share. Set around THIS call only:
+                                // planning, reflection and synthesis calls elsewhere in the run carry no
+                                // key and can never evict the agent's cache. Non-MLX providers ignore it.
+                                step = try await MLXPromptCacheScope.$key.withValue(input.conversationID.uuidString) {
+                                    try await input.generatorStrategy.generateCognitiveStep(
+                                        model: spyModel,
+                                        context: context,
+                                        iteration: currentIteration
+                                    )
+                                }
                             }
                             let genDuration = Date().timeIntervalSince(genStart)
 
@@ -797,7 +805,7 @@ actor ReActAgentExecutor: Executor {
                                     liveConversationTurns.append(adapter.systemAlertTurn(message: systemAlert))
                                 }
                                 continuation.yield(.warning(category: .parseFailure, message: "Invalid JSON output. Retrying (\(attemptCount)/\(maxAttempts))..."))
-                                await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                                await GlobalRateLimiter.shared.waitForCapacity(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                                 iterationFinishedNormally = true; continue cognitiveLoop
 
                             case .modelReload(let message):
@@ -1006,42 +1014,83 @@ actor ReActAgentExecutor: Executor {
                             reachedAnswer = true
                             iterationFinishedNormally = true; break cognitiveLoop
                         case .suspectedFormatFailure(let originalReason, _):
-                            // Identical-output detection. If the model emits byte-identical
-                            // reasoning multiple iterations in a row, the corrective alert
-                            // isn't landing — abort with `.repetitiveActionLoop` instead of
-                            // burning the full iteration budget on the same stuck output.
-                            // This catches the real-world case where Llama-3 keeps emitting
+                            // Byte-identical repeats — one trigger of the parse-loop guard. This
+                            // catches the real-world case where Llama-3 keeps emitting
                             // `{"name":"X","parameters":{...}}` 12+ times despite the alert.
                             let currentReasoning = step.reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
                             if !currentReasoning.isEmpty, currentReasoning == lastFailedReasoning {
                                 consecutiveIdenticalFormatFailures += 1
-                                if consecutiveIdenticalFormatFailures > maxIdenticalFormatFailures {
-                                    let abortReason = "Model emitted the same malformed output \(consecutiveIdenticalFormatFailures + 1) times in a row — corrective alerts aren't landing. Likely a parser/dialect mismatch."
-                                    logger.error("🛑 Identical-output parse loop detected at iteration \(currentIteration). Aborting.")
-                                    let classified = ClassifiedAgentError.synthetic(
-                                        category: .parseExhausted,
-                                        origin: "ReActAgentExecutor.identicalOutputLoop",
-                                        message: abortReason,
-                                        context: [
-                                            "iteration": "\(currentIteration)",
-                                            "repeat_count": "\(consecutiveIdenticalFormatFailures + 1)",
-                                            "raw_snippet": String(currentReasoning.prefix(120))
-                                        ]
-                                    )
-                                    await TraceRecorder.shared.emitAgentError(
-                                        span: input.traceContext,
-                                        error: classified,
-                                        iteration: currentIteration
-                                    )
-                                    continuation.yield(.error(.init(abortReason)))
-                                    flushTokenUsage()
-                                    continuation.yield(.executionFinished(outcome: .failed, reason: abortReason))
-                                    continuation.finish()
-                                    return
-                                }
                             } else {
                                 lastFailedReasoning = currentReasoning.isEmpty ? nil : currentReasoning
                                 consecutiveIdenticalFormatFailures = 0
+                            }
+                            consecutiveFormatFailures += 1
+
+                            // Parse-loop guard (see `maxConsecutiveFormatFailures`): stop correcting
+                            // and leave the loop like an exhausted budget.
+                            let stuckOnIdenticalOutput = consecutiveIdenticalFormatFailures > maxIdenticalFormatFailures
+                            if stuckOnIdenticalOutput || consecutiveFormatFailures >= maxConsecutiveFormatFailures {
+                                // The latest reply becomes the answer ONLY when it is text the parser
+                                // found no call in — never when the model demonstrably tried to call
+                                // something (a tool-channel name/arg failure, a gated tool, a
+                                // wrong-schema object, or text declaring a call). A broken call, or
+                                // "I will now update the context", shown as the answer is worse than
+                                // the best-effort summary. A backstop: the parse pipelines already
+                                // turn such text into an answer before it gets here
+                                // (`AttemptedToolCallGrammar`), so this rarely fires.
+                                let isTextShapeFailure: Bool = {
+                                    switch originalReason {
+                                    case .malformedJSON, .noStructuredOutput: return true
+                                    default: return false
+                                    }
+                                }()
+                                let attemptedCall = AttemptedToolCallGrammar.attemptedCallName(
+                                    in: currentReasoning, callableNames: runToolNames)
+                                let keepsLastReply = isTextShapeFailure && !currentReasoning.isEmpty && attemptedCall == nil
+
+                                let last = attemptedCall.map { "attempted call '\($0)'" } ?? originalReason.uiChipLabel
+                                let exhaustion = AgentFailureReason.formatCorrectionsExhaustedMessage(
+                                    count: stuckOnIdenticalOutput ? consecutiveIdenticalFormatFailures + 1 : consecutiveFormatFailures,
+                                    last: last,
+                                    identicalReplies: stuckOnIdenticalOutput)
+                                formatCorrectionsExhausted = exhaustion
+                                if keepsLastReply {
+                                    executionSummary.finalAgentThought = currentReasoning
+                                }
+                                let shown = keepsLastReply
+                                    ? "with the latest reply (\(currentReasoning.count) chars, no attempted call) as the answer"
+                                    : "without showing the latest reply — it is an attempted call or empty"
+                                logger.error("[FORMAT] Iteration \(currentIteration): \(exhaustion) CONSEQUENCE: no more corrective retries; the run ends under the '\(input.errorRecovery.onIterationExhaustion.rawValue)' exhaustion policy, \(shown). conv \(input.conversationID)")
+
+                                var errorContext = [
+                                    "iteration": "\(currentIteration)",
+                                    "consecutive_failures": "\(consecutiveFormatFailures)",
+                                    "last_reason": originalReason.uiChipLabel
+                                ]
+                                if stuckOnIdenticalOutput {
+                                    errorContext["repeat_count"] = "\(consecutiveIdenticalFormatFailures + 1)"
+                                    errorContext["raw_snippet"] = String(currentReasoning.prefix(120))
+                                }
+                                let classified = ClassifiedAgentError.synthetic(
+                                    category: .parseExhausted,
+                                    origin: stuckOnIdenticalOutput
+                                        ? "ReActAgentExecutor.identicalOutputLoop"
+                                        : "ReActAgentExecutor.consecutiveFormatFailures",
+                                    message: exhaustion,
+                                    context: errorContext
+                                )
+                                await TraceRecorder.shared.emitAgentError(
+                                    span: input.traceContext,
+                                    error: classified,
+                                    iteration: currentIteration
+                                )
+                                continuation.yield(.warning(
+                                    category: .formatCorrection,
+                                    message: keepsLastReply
+                                        ? "Format corrections didn't take after \(consecutiveFormatFailures) tries — showing the model's last reply as the answer."
+                                        : "Format corrections didn't take after \(consecutiveFormatFailures) tries — stopping."
+                                ))
+                                iterationFinishedNormally = true; break cognitiveLoop
                             }
 
                             // Typed parse failure — build a reason-specific corrective alert
@@ -1050,23 +1099,7 @@ actor ReActAgentExecutor: Executor {
                             // generic "describe tool calls in prose" message is preserved
                             // as the fallback inside `ParseFailureReason.modelCorrectiveAlert`
                             // when the failure shape is `.proseDescribedIntent`.
-                            //
-                            // If the model called a tool name that belongs to the gated set
-                            // (see G6 reading-gate), promote `.unknownToolName → .gatedTool`
-                            // so the UI chip and model alert both explain "locked, read N
-                            // more files" instead of an alarming "Unknown tool" hallucination
-                            // claim. The tool exists — it's just not available yet.
-                            let reason: ParseFailureReason = {
-                                if case .unknownToolName(let attempted, _) = originalReason,
-                                   gatedToolNames.contains(attempted),
-                                   readingToolSuccessCount < readingGateThreshold {
-                                    let remaining = max(0, readingGateThreshold - readingToolSuccessCount)
-                                    let noun = remaining == 1 ? "file" : "files"
-                                    let hint = "Read \(remaining) more source \(noun) (e.g. `read_file`, `file_overview`, `project_tree`) to unlock it"
-                                    return .gatedTool(attempted: attempted, unlockHint: hint)
-                                }
-                                return originalReason
-                            }()
+                            let reason = originalReason
 
                             let toolNames = availableToolsThisIteration.map(\.name)
                             let modelAlert = reason.modelCorrectiveAlert(
@@ -1078,18 +1111,9 @@ actor ReActAgentExecutor: Executor {
                                 liveConversationTurns.append(adapter.systemAlertTurn(message: modelAlert))
                             }
 
-                            // Gated tools get a quieter chip — it's a policy lock, not a
-                            // format correction. Other failure shapes retain the existing
-                            // "Format correction (…)" prefix so regressions are obvious.
-                            let warningMessage: String
-                            if case .gatedTool = reason {
-                                warningMessage = reason.uiChipLabel
-                            } else {
-                                warningMessage = "Format correction (\(reason.uiChipLabel)): retrying iteration \(currentIteration)."
-                            }
                             continuation.yield(.warning(
                                 category: .formatCorrection,
-                                message: warningMessage
+                                message: "Format correction (\(reason.uiChipLabel)): retrying iteration \(currentIteration)."
                             ))
                             logger.warning("🔄 Suspected format failure [\(reason.uiChipLabel)]. Injecting typed corrective alert and retrying iteration \(currentIteration).")
                             iterationFinishedNormally = true; continue cognitiveLoop
@@ -1099,15 +1123,13 @@ actor ReActAgentExecutor: Executor {
                             // *did* land for) don't trip the abort prematurely.
                             lastFailedReasoning = nil
                             consecutiveIdenticalFormatFailures = 0
+                            consecutiveFormatFailures = 0
                             break
                         }
 
                         if step.toolCalls.isEmpty { iterationFinishedNormally = true; break cognitiveLoop }
 
                         // 3. ACTING & OBSERVING PHASE (Shared Parallel Execution)
-                        // Pass the same filtered list used in the schema so that a gated tool
-                        // (e.g. update_project_context) dispatched via hallucination fails with
-                        // "tool not found" rather than silently executing.
                         let observations = try await executeToolCalls(
                             toolCalls: step.toolCalls,
                             availableTools: availableToolsThisIteration,
@@ -1120,30 +1142,9 @@ actor ReActAgentExecutor: Executor {
                             approvalNodeID: input.workflowContext?.nodeID,
                             unattendedAutoApprove: input.workflowContext?.unattendedAutoApprove ?? false,
                             workspaceRoot: input.workspaceRoot,
+                            rejectedCalls: step.rejectedCalls,
                             onTraceUpdate: onTraceUpdate
                         )
-
-                        // --- G6: Advance Reading-Tool Gate Counter ---
-                        // Count successful reading-tool invocations so `update_project_context`
-                        // becomes available once the agent has actually read some source.
-                        for obs in observations where obs.isSuccess && readingToolNames.contains(obs.toolName) {
-                            readingToolSuccessCount += 1
-                        }
-                        if !readingGateLoggedUnlock, !gatedToolNames.isEmpty,
-                           readingToolSuccessCount >= readingGateThreshold {
-                            readingGateLoggedUnlock = true
-                            logger.info("🔓 Reading gate unlocked (\(readingToolSuccessCount)/\(readingGateThreshold) successful reading tools) — gated tools now available: \(gatedToolNames.sorted().joined(separator: ", "))")
-
-                            // Tell the model the tool is now available and how to use it.
-                            // Previously this guidance lived in the system prompt (causing
-                            // the model to attempt the call while the gate was still closed).
-                            memoryStrategy.recordSystemAlert(msg: CodeSystemPrompt.updateProjectContextUnlockAlert)
-                            if let adapter = nativeGenerator?.toolTurnAdapter {
-                                liveConversationTurns.append(adapter.systemAlertTurn(
-                                    message: CodeSystemPrompt.updateProjectContextUnlockAlert
-                                ))
-                            }
-                        }
 
                         // --- Terminal Signal Fast-Exit (final_answer) ---
                         // ToolExecutionLoop intercepts final_answer and returns a terminal
@@ -1220,9 +1221,21 @@ actor ReActAgentExecutor: Executor {
                                 observations: observations,
                                 toolCalls: step.toolCalls
                             )
-                            let protectedChars = liveConversationTurns
+                            let prefixChars = liveConversationTurns
                                 .prefix(nativePrefixCount)
                                 .reduce(0) { $0 + approximateTurnChars($1) }
+                            // ⚠️⚠️ PLUS THE RECENT EXCHANGES COMPACTION WILL KEEP (readiness CR-12). The
+                            // limit counted only the prefix, so each new result was handed ALL the room
+                            // while the previous `keep − 1` exchanges were unremovable too: three large
+                            // `read_file`s on a small model came to ~3× the budget, compaction logged
+                            // "CANNOT compact. Sending over budget", and the request overflowed (cloud
+                            // 400; Ollama silently dropped the head — the instructions). The room that is
+                            // genuinely free is the budget minus EVERYTHING compaction cannot drop.
+                            let keptRecentChars = unremovableRecentExchangeChars(
+                                liveConversationTurns, adapter: nativeGen.toolTurnAdapter,
+                                protectedPrefixCount: nativePrefixCount,
+                                keepRecentExchanges: nativeKeepRecentExchanges)
+                            let protectedChars = prefixChars + keptRecentChars
                             let perResultLimit = ToolResultBudget.limit(
                                 payloadBudgetChars: input.nativeContextBudgetChars,
                                 protectedChars: protectedChars,
@@ -1235,7 +1248,7 @@ actor ReActAgentExecutor: Executor {
                                     ContextCutLog.post(
                                         cut: .init(toolName: obs.toolName, originalChars: obs.result.count, keptChars: fitted.count),
                                         conversationID: input.conversationID, traceID: input.traceContext.traceID)
-                                    logger.info("[TOOLRESULT] '\(obs.toolName)' result cut from \(obs.result.count) to \(fitted.count) chars (limit \(perResultLimit) = payload budget \(input.nativeContextBudgetChars), protected prefix \(protectedChars), \(orderedObservations.count) result(s) this step). CONSEQUENCE: the model sees its start and end with a note naming what was omitted and how to fetch it.")
+                                    logger.info("[TOOLRESULT] '\(obs.toolName)' result cut from \(obs.result.count) to \(fitted.count) chars (limit \(perResultLimit) = payload budget \(input.nativeContextBudgetChars) − protected prefix \(prefixChars) − kept recent exchanges \(keptRecentChars), shared by \(orderedObservations.count) result(s) this step). CONSEQUENCE: the model sees its start and end with a note naming what was omitted and how to fetch it.")
                                 }
                                 return obs.withResult(fitted)
                             }
@@ -1523,13 +1536,21 @@ actor ReActAgentExecutor: Executor {
 
                     // --- Post-Loop Handoff ---
                     let iterationExhausted = currentIteration >= self.maxIterations && !reachedAnswer
+                    // The other budget: the parse-loop guard ended the loop. Same policy as
+                    // running out of iterations — both mean a retry budget is spent and the model
+                    // never answered. (The guard cannot fire on the last allowed step, where the
+                    // evaluator returns `.maxIterationsReached` first, so the two never coincide.)
+                    let formatExhausted: String? = iterationExhausted ? nil : formatCorrectionsExhausted
+                    let budgetExhaustedReason: String? = iterationExhausted
+                        ? "Reached maximum allowed steps (\(maxIterations)) without completion."
+                        : formatExhausted
 
-                    if iterationExhausted {
+                    if let exhaustionReason = budgetExhaustedReason {
                         // Consult ErrorRecovery.onIterationExhaustion policy
                         switch input.errorRecovery.onIterationExhaustion {
                         case .failHard:
                             // Fail immediately without synthesis
-                            let failureMsg = "Reached maximum allowed steps (\(maxIterations)) without completion."
+                            let failureMsg = exhaustionReason
                             executionSummary.markComplete(failureReason: failureMsg)
                             if !input.suppressEpisodeManagement {
                                 sessionState.closeActiveEpisode(outcome: .failed, message: failureMsg)
@@ -1543,20 +1564,24 @@ actor ReActAgentExecutor: Executor {
                             // phase-level fatal semantics. If we see these in dashboards and
                             // want finer detail, add a dedicated `executorIterationExhausted`
                             // case to AgentErrorCategory.
-                            let classified = ClassifiedAgentError.synthetic(
-                                category: .cbIdleLimit,
-                                origin: "ReActAgentExecutor.iterationExhaustion.failHard",
-                                message: failureMsg,
-                                context: [
-                                    "max_iterations": "\(maxIterations)",
-                                    "final_iteration": "\(currentIteration)"
-                                ]
-                            )
-                            await TraceRecorder.shared.emitAgentError(
-                                span: input.traceContext,
-                                error: classified,
-                                iteration: currentIteration
-                            )
+                            // Iterations only: the parse-loop guard already emitted its own
+                            // `.parseExhausted` error when it stopped.
+                            if iterationExhausted {
+                                let classified = ClassifiedAgentError.synthetic(
+                                    category: .cbIdleLimit,
+                                    origin: "ReActAgentExecutor.iterationExhaustion.failHard",
+                                    message: failureMsg,
+                                    context: [
+                                        "max_iterations": "\(maxIterations)",
+                                        "final_iteration": "\(currentIteration)"
+                                    ]
+                                )
+                                await TraceRecorder.shared.emitAgentError(
+                                    span: input.traceContext,
+                                    error: classified,
+                                    iteration: currentIteration
+                                )
+                            }
                             continuation.yield(.error(.init(failureMsg)))
                             flushTokenUsage()
                             continuation.yield(.executionFinished(outcome: .failed, reason: failureMsg))
@@ -1565,7 +1590,7 @@ actor ReActAgentExecutor: Executor {
 
                         case .synthesizeBestEffort:
                             // Default: synthesize best response from accumulated work
-                            executionSummary.markComplete(failureReason: "Reached maximum allowed steps (\(maxIterations)) without completion.")
+                            executionSummary.markComplete(failureReason: exhaustionReason)
                         }
                     } else {
                         executionSummary.markComplete()
@@ -1623,7 +1648,7 @@ actor ReActAgentExecutor: Executor {
                     // false-positive on every conversational ask. Exhaustion keeps its
                     // best-effort upgrade.
                     let terminalOutcome: ExecutionOutcome = {
-                        if iterationExhausted {
+                        if budgetExhaustedReason != nil {
                             let hasBestEffort = !response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             return hasBestEffort ? .completedWithWarnings : .failed
                         }
@@ -1634,6 +1659,7 @@ actor ReActAgentExecutor: Executor {
                         if iterationExhausted {
                             return "Reached maximum iterations (\(maxIterations)) without explicit completion"
                         }
+                        if let formatExhausted { return formatExhausted }
                         guard !effectiveFailures.isEmpty else { return nil }
                         let names = Set(effectiveFailures.map(\.toolName)).sorted().joined(separator: ", ")
                         let evidenceCount = executionSummary.evidenceResults.count
@@ -1684,7 +1710,8 @@ actor ReActAgentExecutor: Executor {
 
                     logger.info("--- 🏁 REACT EXECUTION COMPLETE 🏁 ---")
                     logger.info("Model: \(model.modelName)")
-                    logger.info("Final Synthesized Response: \(response)")
+                    logger.info("Final Synthesized Response: \(response.count) chars") // CR-57: the reply is content; full text at debug only
+                    logger.debug("Final Synthesized Response: \(response)")
                     logger.info("--------------------------------------")
 
                     // Emit accumulated token usage before finishing
@@ -1864,6 +1891,29 @@ private func imagePayloadChars(_ value: Any) -> Int {
 /// intact. Dropping from the front necessarily breaks the KV-cache prefix from the cut
 /// point — the intended trade when the alternative is overflowing the context window.
 /// `internal` (not `fileprivate`) so the compaction logic is directly unit-testable.
+/// Chars of the turns after the protected prefix that `compactNativeConversation` can NEVER drop once
+/// the next exchange is appended — what a new tool result must leave room for (CR-12).
+///
+/// Mirrors that function's rule exactly: it keeps the newest `keepRecentExchanges` exchanges, and the
+/// exchange about to be added is the newest of them, so the newest `keep − 1` EXISTING exchanges are
+/// unremovable; and while there are not more exchanges than the keep-floor, nothing after the prefix
+/// can be dropped at all (leading alert turns included). If the two ever disagree, the limit promises
+/// room compaction will not make — keep them together.
+func unremovableRecentExchangeChars(
+    _ turns: [[String: Any]],
+    adapter: any ToolTurnAdapter,
+    protectedPrefixCount: Int,
+    keepRecentExchanges: Int
+) -> Int {
+    let prefix = min(max(0, protectedPrefixCount), turns.count)
+    let keepPrior = max(1, keepRecentExchanges) - 1
+    let starts = (prefix..<turns.count).filter { adapter.classifyTurn(turns[$0]) == .toolCallAssistant }
+    // After the append there will be `starts.count + 1` exchanges; compaction drops none unless that
+    // exceeds the keep-floor.
+    let from = starts.count + 1 <= max(1, keepRecentExchanges) ? prefix : starts[starts.count - keepPrior]
+    return turns[from...].reduce(0) { $0 + approximateTurnChars($1) }
+}
+
 func compactNativeConversation(
     _ turns: inout [[String: Any]],
     adapter: any ToolTurnAdapter,

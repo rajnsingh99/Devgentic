@@ -25,8 +25,10 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case theme = "Theme"
     case coreIntelligence = "Core Intelligence"
     case quickAccess = "Quick Access"
+    case webSearch = "Web Search"
     case chatOps = "ChatOps"
     case orb = "Orb"
+    case mlxModelStore = "MLX Model Store"
     case downloads = "Downloads"
     case about = "About"
 
@@ -42,8 +44,10 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .theme:            return "Theme"
         case .coreIntelligence: return "Core Intelligence"
         case .quickAccess:      return "Quick Access"
+        case .webSearch:        return "Web Search"
         case .chatOps:          return "Chat Ops"
         case .orb:              return "Orb (Experimental)"
+        case .mlxModelStore:    return "MLX Model Store"
         case .downloads:        return "Downloads"
         case .about:            return "About"
         }
@@ -60,10 +64,14 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "cpu.fill"
         case .quickAccess:
             return "bolt.circle"
+        case .webSearch:
+            return "globe"
         case .chatOps:
             return "paperplane.fill"
         case .orb:
             return "atom"
+        case .mlxModelStore:
+            return "shippingbox"
         case .downloads:
             return "arrow.down.circle"
         case .about:
@@ -78,8 +86,10 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .theme: return String(localized: "Appearance and Typography")
         case .coreIntelligence: return String(localized: "On-device intelligence")
         case .quickAccess: return String(localized: "Global shortcut and panel")
+        case .webSearch: return String(localized: "Search provider for agents")
         case .chatOps: return String(localized: "Remote Telegram control")
         case .orb: return String(localized: "Voice assistant and listening")
+        case .mlxModelStore: return String(localized: "Browse Apple Silicon models")
         case .downloads: return String(localized: "Model and asset downloads")
         case .about: return String(localized: "Version and licenses")
         }
@@ -97,22 +107,18 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             CoreIntelligenceSettingsView()
         case .quickAccess:
             QuickAccessSettingsView()
+        case .webSearch:
+            WebSearchSettingsView()
         case .chatOps:
             ChatOpsSettingsView()
         case .orb:
             OrbSettingsView()
+        case .mlxModelStore:
+            MLXModelStoreContainerView(filterForTools: false, profileID: nil)
         case .downloads:
             DownloadManagerContainerView(isEmbeddedInSettings: true)
         case .about:
-            VStack(spacing: 16) {
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 48)) // Fixed size: intentional (icon)
-                    .foregroundStyle(.blue)
-                Text("Devgentic")
-                    .font(.largeTitle.weight(.bold))
-                Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")")
-                    .foregroundColor(.secondary)
-            }
+            AboutSettingsView()
         }
     }
 }

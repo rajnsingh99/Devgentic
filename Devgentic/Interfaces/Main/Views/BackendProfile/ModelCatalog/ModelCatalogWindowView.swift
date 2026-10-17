@@ -11,6 +11,8 @@
 
 import SwiftUI
 
+private let logger = DGLogger(category: "ModelCatalog")
+
 struct ModelCatalogWindowView: View {
 
     @Binding var providerConfig: ProviderConfig
@@ -139,28 +141,39 @@ struct ModelCatalogWindowView: View {
         applyModel(model, key: key, endpointOverride: endpoint)
     }
 
+    /// ⚠️ Order matters, and was wrong. The provider-change callback used to run LAST, after the
+    /// model's values were written, so its profile-type default (an agent on MLX or Ollama gets
+    /// `.singleAction`) overwrote the capability just measured for the picked model. And a provider
+    /// change reset nothing: the old provider's tuned generation settings and model measurements
+    /// rode along. Now: reset for the new provider, apply the profile-type defaults, then the
+    /// picked model's own values — the most specific answer is written last and wins.
     private func applyModel(_ model: CatalogModelItem, key: String?, endpointOverride: String? = nil) {
         let oldProvider = providerConfig.apiProvider
 
-        providerConfig.apiProvider = model.provider
-        providerConfig.modelName = model.id
-        providerConfig.cognitiveCapability = model.cognitiveCapability
-        providerConfig.modelDialect = model.modelDialect
-        providerConfig.supportedModalities = model.supportedModalities
-        providerConfig.thinkingEnabled = model.isReasoning
-
-        if let customEndpoint = endpointOverride ?? AppProviderKeyStore.loadEndpoint(forAccount: model.vendorKey) {
-            providerConfig.baseURL = customEndpoint
-        } else if let base = model.baseURL {
-            providerConfig.baseURL = base
+        if oldProvider != model.provider {
+            providerConfig.switchProvider(to: model.provider)
+            onProviderChanged?(oldProvider, model.provider)
         }
+        providerConfig = CatalogModelSelection.applying(
+            model, to: providerConfig,
+            savedEndpoint: endpointOverride ?? AppProviderKeyStore.loadEndpoint(forAccount: model.vendorKey))
+
+        if model.provider.isLocal && model.detectedProfile == nil {
+            logger.warning(
+                "[PROFILE] Picked local model '\(model.id)' (\(model.provider.rawValue)) for profile "
+                + "\(profileID.uuidString.prefix(8)) with no analyzer result on its catalog entry. "
+                + "CONSEQUENCE: the profile stores the catalog's capability and no tier, template or stop "
+                + "sequences; runs still re-detect at start, but anything reading the stored copy sees defaults."
+            )
+        }
+        logger.info(
+            "[PROFILE] Picked '\(model.id)' (\(model.provider.rawValue)) from the catalog for profile "
+            + "\(profileID.uuidString.prefix(8)) — \(CatalogModelSelection.describe(providerConfig)). "
+            + "It is stored on the next save."
+        )
 
         if let key, !key.isEmpty {
             providerConfig.apiKey = key
-        }
-
-        if oldProvider != model.provider {
-            onProviderChanged?(oldProvider, model.provider)
         }
 
         dismiss()

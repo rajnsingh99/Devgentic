@@ -37,19 +37,11 @@ struct TimelineReconstruction {
     let parkedTool: PendingToolCall?
     /// `true` when the parked tool is `ask_user` (re-raise a clarification) vs a permission confirmation.
     let parkedToolIsClarification: Bool
-    /// Re-derived count of successful reading-tool calls so the G6 reading-gate doesn't re-lock on resume.
-    let readingToolSuccessCount: Int
     /// The iteration the run had reached (the parked iteration). The loop resumes generating at +1.
     let resumeIteration: Int
 }
 
 enum TimelineTurnReconstructor {
-
-    /// Tools that count toward the G6 reading-gate. Mirrors `ReActAgentExecutor.readingToolNames`
-    /// so the gate counter re-derived here matches what a fresh run would compute.
-    static let readingToolNames: Set<String> = [
-        "read_file", "find_definition", "code_search", "file_overview", "project_tree", "codebase_map"
-    ]
 
     /// Rebuilds the in-flight state from a persisted timeline.
     /// - Parameters:
@@ -67,7 +59,6 @@ enum TimelineTurnReconstructor {
         var stepOrder: [Int] = []            // first-seen order of step ids
         var pendingReasoning: String?         // most recent reasoning not yet attached to a step
         var dangling: ToolExecutionData?      // the still-executing (parked) tool, if any
-        var readingSuccess = 0
         var maxStep = 0
 
         for event in timelineEvents {
@@ -92,9 +83,6 @@ enum TimelineTurnReconstructor {
                         stepReasoning[step] = r
                     }
                     pendingReasoning = nil
-                    if data.isSuccess == true, readingToolNames.contains(data.name) {
-                        readingSuccess += 1
-                    }
                 }
 
             default:
@@ -147,7 +135,6 @@ enum TimelineTurnReconstructor {
             completedSteps: steps,
             parkedTool: parked,
             parkedToolIsClarification: parkedIsClarification,
-            readingToolSuccessCount: readingSuccess,
             resumeIteration: max(1, maxStep)
         )
     }

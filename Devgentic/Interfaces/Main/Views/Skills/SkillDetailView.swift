@@ -66,6 +66,12 @@ struct SkillDetailView: View {
     @State private var copiedIdentifier = false
     @State private var copiedBody = false
     @State private var isIdentifierHovered = false
+    @State private var isPreviewMode = false
+
+    /// Whether instructions can be previewed as markdown (non-empty content).
+    private var isPreviewEnabled: Bool {
+        !draft.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     /// Name is dirty if the trimmed, resolved label differs from what was loaded or committed.
     private var isNameDirty: Bool {
@@ -118,6 +124,9 @@ struct SkillDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.primaryBackground)
         .onAppear(perform: load)
+        .onChange(of: skill.id) { _, _ in
+            isPreviewMode = false
+        }
         // ⚠️ Escape and click-outside run no button action, so without this a rename typed and then
         // dismissed that way is lost. `commitDisplayName` is a no-op when nothing changed.
         .onDisappear(perform: commitDisplayName)
@@ -410,10 +419,42 @@ struct SkillDetailView: View {
                             .foregroundStyle(theme.secondaryText.opacity(0.8))
                     }
                     Spacer()
-                    HStack(spacing: 12) {
+                    HStack(spacing: 8) {
                         Text("\(draft.body.count) chars · ~\(max(1, draft.body.count / 4)) tokens")
                             .font(theme.fontCodeCaption)
                             .foregroundStyle(theme.secondaryText.opacity(0.8))
+
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                isPreviewMode.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: isPreviewMode ? "pencil" : "eye")
+                                    .font(theme.fontCaption2)
+                                Text(isPreviewMode ? "Edit" : "Preview")
+                                    .font(theme.fontCaption2.weight(.medium))
+                            }
+                            .foregroundStyle(
+                                isPreviewEnabled
+                                    ? (isPreviewMode ? theme.accentColor : theme.primaryText)
+                                    : theme.secondaryText.opacity(0.4)
+                            )
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(isPreviewMode ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(isPreviewMode ? theme.accentColor.opacity(0.3) : Color.clear, lineWidth: 0.5)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!isPreviewEnabled)
+                        .help(isPreviewMode ? "Switch to edit mode" : "Preview rendered markdown")
+                        .accessibilityIdentifier("skills.instructions.preview")
 
                         Button {
                             NSPasteboard.general.clearContents()
@@ -439,35 +480,47 @@ struct SkillDetailView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Copy instructions to clipboard")
+                        .accessibilityIdentifier("skills.instructions.copy")
                     }
                 }
 
                 ZStack(alignment: .topLeading) {
-                    if draft.body.isEmpty {
-                        Text("# Instructions\n\nProvide step-by-step guidance for the agent when this skill is active.")
-                            .font(theme.fontCode)
-                            .foregroundStyle(theme.placeholderText.opacity(0.7))
-                            .lineSpacing(2.5)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 14)
-                            .allowsHitTesting(false)
-                    }
+                    if isPreviewMode {
+                        WorkflowMarkdownView(text: draft.body)
+                            .frame(maxWidth: .infinity, minHeight: 340, alignment: .topLeading)
+                            .padding(14)
+                    } else {
+                        if draft.body.isEmpty {
+                            Text("# Instructions\n\nProvide step-by-step guidance for the agent when this skill is active.")
+                                .font(theme.fontCode)
+                                .foregroundStyle(theme.placeholderText.opacity(0.7))
+                                .lineSpacing(2.5)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 14)
+                                .allowsHitTesting(false)
+                        }
 
-                    TextEditor(text: $draft.body)
-                        .font(theme.fontCode)
-                        .foregroundStyle(theme.primaryText)
-                        .frame(minHeight: 340)
-                        .scrollContentBackground(.hidden)
-                        .padding(10)
+                        TextEditor(text: $draft.body)
+                            .font(theme.fontCode)
+                            .foregroundStyle(theme.primaryText)
+                            .frame(minHeight: 340)
+                            .scrollContentBackground(.hidden)
+                            .padding(10)
+                    }
                 }
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(theme.textBackground)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(theme.dividerColor.opacity(0.4), lineWidth: 0.5)
-                            )
-                    )
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(theme.textBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(theme.dividerColor.opacity(0.4), lineWidth: 0.5)
+                        )
+                )
+                .onChange(of: draft.body) { _, newBody in
+                    if newBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isPreviewMode {
+                        isPreviewMode = false
+                    }
+                }
 
                 if draft.isDirty {
                     Rectangle()

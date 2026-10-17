@@ -39,14 +39,14 @@ final class HeuristicCognitiveParserTests: XCTestCase {
           "content": "Searching for files.",
           "tool_calls": [
             {"name": "list_directory", "arguments": {"path": "/Desktop"}},
-            {"name": "fs_smart_search", "arguments": {"search_term": "Acme"}}
+            {"name": "spotlight_search", "arguments": {"search_term": "Acme"}}
           ]
         }
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 2)
         XCTAssertEqual(result.toolCalls[0].name, "list_directory")
-        XCTAssertEqual(result.toolCalls[1].name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls[1].name, "spotlight_search")
     }
 
     func testWellFormed_EmptyToolCalls() {
@@ -63,7 +63,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         {
           "content": "Searching.",
           "tool_calls": [
-            {"name": "fs_smart_search", "arguments": {"search_term": "test", "scope": null}}
+            {"name": "spotlight_search", "arguments": {"search_term": "test", "scope": null}}
           ]
         }
         """
@@ -137,7 +137,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
     // MARK: - Lenient Array Extraction (New: Strategy A)
 
     func testLenient_MissingCommaBetweenArrayElements() {
-        // Real failure from production: missing comma after "fs_smart_search"
+        // Real failure from production: missing comma after "spotlight_search"
         let input = """
         {
           "content": "The user wants to list all files.",
@@ -147,7 +147,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
               "arguments": { "path": "/Users/alice" }
             },
             {
-              "name": "fs_smart_search"
+              "name": "spotlight_search"
               "search_term": "Acme",
               "scope": null
             }
@@ -161,7 +161,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
 
         // Should also recover the second tool via flattened argument extraction
         if result.toolCalls.count >= 2 {
-            XCTAssertEqual(result.toolCalls[1].name, "fs_smart_search")
+            XCTAssertEqual(result.toolCalls[1].name, "spotlight_search")
             XCTAssertEqual(result.toolCalls[1].arguments["search_term"], .string("Acme"))
         }
     }
@@ -175,7 +175,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
           "content": "Searching for files.",
           "tool_calls": [
             {
-              "name": "fs_smart_search"
+              "name": "spotlight_search"
               "search_term": "readme",
               "scope": null
             }
@@ -184,7 +184,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertGreaterThanOrEqual(result.toolCalls.count, 1)
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
         XCTAssertEqual(result.toolCalls.first?.arguments["search_term"], .string("readme"))
     }
 
@@ -196,7 +196,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
           "tool_calls": [
             {"name": "list_directory", "arguments": {"path": "/tmp"}},
             {"name": "read_file" "path": "/tmp/test.txt"},
-            {"name": "fs_read_metadata", "arguments": {"path": "/tmp"}}
+            {"name": "read_file_metadata", "arguments": {"path": "/tmp"}}
           ]
         }
         """
@@ -268,7 +268,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
     func testContentRescue_SearchTermInContent() {
         // Same pattern: structural defect forces lenient extraction path
         let input = """
-        { "content": "Acme", "tool_name": "fs_smart_search", "arguments": {}, "broken": undefined }
+        { "content": "Acme", "tool_name": "spotlight_search", "arguments": {}, "broken": undefined }
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 1)
@@ -339,11 +339,11 @@ final class HeuristicCognitiveParserTests: XCTestCase {
     func testSingleQuotedKeys_MixedWithDouble() {
         // Hybrid: some keys single-quoted, some double-quoted
         let input = """
-        {"content": 'Searching.', 'tool_calls': [{"name": 'fs_smart_search', "arguments": {'search_term': "readme"}}]}
+        {"content": 'Searching.', 'tool_calls': [{"name": 'spotlight_search', "arguments": {'search_term': "readme"}}]}
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 1)
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
     }
 
     // MARK: - S2: Unquoted JSON Keys
@@ -467,7 +467,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
               "arguments": { "path": "/Users/alice" }
             },
             {
-              "name": "fs_smart_search"
+              "name": "spotlight_search"
               "arguments": {}
             ]
           ]
@@ -517,14 +517,14 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         {
           "content": {
             "tool_calls": [
-              {"name": "fs_smart_search", "arguments": {"search_term": "Acme"}}
+              {"name": "spotlight_search", "arguments": {"search_term": "Acme"}}
             ]
           }
         }
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 1)
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
         XCTAssertEqual(result.reasoning, "")
     }
 
@@ -604,7 +604,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
           "content":<p>Based on the metadata retrieval results, it seems that there are multiple folders.</p>,
           "tool_calls": [
             {
-              "name": "fs_smart_search",
+              "name": "spotlight_search",
               "arguments": {
                 "search_term": "*Acme*"
               }
@@ -614,7 +614,7 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 1, "Valid tool_calls should be recovered even when content field is malformed HTML")
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
         XCTAssertEqual(result.toolCalls.first?.arguments["search_term"], .string("*Acme*"))
     }
 

@@ -132,12 +132,14 @@ struct PythonicListParser: CognitiveParserProtocol {
     private func parseSingleCall(_ text: String) -> PendingToolCall? {
         // Find `name` + opening `(`.
         guard let openParen = text.firstIndex(of: "(") else {
-            logger.warning("PythonicListParser: Segment has no '(': \(text.prefix(100))")
+            logger.warning("PythonicListParser: Segment has no '(': \(text.count) chars (snippet at debug: model output is content, CR-57)")
+            logger.debug("PythonicListParser: snippet: \(text.prefix(100))")
             return nil
         }
         let name = String(text[..<openParen]).trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidIdentifier(name) else {
-            logger.warning("PythonicListParser: Invalid identifier '\(name.prefix(50))'.")
+            logger.warning("PythonicListParser: Invalid identifier (\(name.count) chars; text at debug, CR-57).")
+            logger.debug("PythonicListParser: invalid identifier: \(name.prefix(50))")
             return nil
         }
 
@@ -245,6 +247,9 @@ struct PythonicListParser: CognitiveParserProtocol {
                     idx = hexEnd
                     continue
                 default:
+                    // ⚠️ CR-22: Python KEEPS the backslash of an escape it does not define, so
+                    // `'\d+\.\d+'` is the regex the model wrote. Dropping it sent `d+.d+`.
+                    result.append("\\")
                     result.append(escape)
                 }
                 idx = raw.index(after: next)

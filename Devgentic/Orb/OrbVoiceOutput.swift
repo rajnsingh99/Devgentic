@@ -26,6 +26,11 @@ import AVFoundation
 final class OrbVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
 
     private var synthesizer: AVSpeechSynthesizer?
+
+    /// When this output last let go of a synthesizer that had been speaking. The session controller
+    /// reads it to wait longer before opening a BLUETOOTH microphone right after speech: the headset
+    /// has to switch from its playback mode to its microphone mode first (device test 2026-10-10).
+    private(set) var lastAudioReleasedAt: Date?
     private var completion: (() -> Void)?
     /// [Phase 4b] Used INSTEAD of `synthesizer` while the panel-scoped duplex engine is up and
     /// cancelling echo. ⚠️ Both short phrases and the answer narration must go through it: leave
@@ -113,6 +118,7 @@ final class OrbVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
     /// Drops the synthesizer so its audio unit is deallocated. Called before opening
     /// the microphone so the two never hold CoreAudio at the same time.
     func releaseAudio() {
+        if synthesizer != nil { lastAudioReleasedAt = Date() }
         synthesizer?.delegate = nil
         synthesizer = nil
         // ⚠️ Releases the duplex SYNTHESIZER only. The engine itself is panel-scoped and shared

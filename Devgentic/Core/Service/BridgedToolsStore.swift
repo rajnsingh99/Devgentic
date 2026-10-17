@@ -32,6 +32,12 @@
 //  order in swift-jinja's dict conversion or its tojson), or the app rendering the tools section
 //  itself as a string — both recorded as options, neither taken yet.
 //
+//  ✅ WORKAROUND IN PLACE (2026-10-06): the app runs with `SWIFT_DETERMINISTIC_HASHING=1`, which
+//  makes every dictionary iterate identically and the rendered `<tools>` bytes stable (20 of 20
+//  renders identical, vs 20 of 20 distinct without it). See `DeterministicHashing.swift`. The
+//  root cause is in swift-jinja's `tojson` (`Value.encode`, `.object`), still unfixed upstream
+//  as of 2.3.1.
+//
 //  The store is kept because it still provides: (1) `canonicalKey`, the content-identity primitive
 //  any future fix needs; (2) one bridge instead of one per iteration; (3) the single seam where a
 //  self-rendered tools string would be cached if that option is taken. Its tests pin what it DOES

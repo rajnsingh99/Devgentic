@@ -13,7 +13,7 @@ struct OnboardingWelcomeSlideView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(\.appTheme) private var theme
 
-    @State private var isAutoAdvancing: Bool = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var orbPulsing: Bool = false
 
     var body: some View {
@@ -66,7 +66,7 @@ struct OnboardingWelcomeSlideView: View {
 
                 // Left Arrow
                 HStack {
-                    CarouselArrowButton(icon: "chevron.left") {
+                    CarouselArrowButton(icon: "chevron.left", label: "Previous feature") {
                         previousSlide()
                     }
                     .padding(.leading, 16)
@@ -74,7 +74,7 @@ struct OnboardingWelcomeSlideView: View {
                     Spacer()
 
                     // Right Arrow
-                    CarouselArrowButton(icon: "chevron.right") {
+                    CarouselArrowButton(icon: "chevron.right", label: "Next feature") {
                         nextSlide()
                     }
                     .padding(.trailing, 16)
@@ -95,6 +95,10 @@ struct OnboardingWelcomeSlideView: View {
                                         viewModel.currentSlideIndex = slide.id
                                     }
                                 }
+                                .accessibilityElement()
+                                .accessibilityLabel(slide.title)
+                                .accessibilityAddTraits(slide.id == viewModel.currentSlideIndex ? [.isButton, .isSelected] : .isButton)
+                                .accessibilityAction { viewModel.currentSlideIndex = slide.id }
                         }
                     }
                     .padding(.bottom, 16)
@@ -127,8 +131,13 @@ struct OnboardingWelcomeSlideView: View {
             .padding(.bottom, 22)
         }
         .onAppear {
-            orbPulsing = true
+            orbPulsing = !reduceMotion
         }
+        // ← / → page the feature carousel.
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.leftArrow) { previousSlide(); return .handled }
+        .onKeyPress(.rightArrow) { nextSlide(); return .handled }
     }
 
     // MARK: - Slide Content Layout
@@ -170,14 +179,15 @@ struct OnboardingWelcomeSlideView: View {
                             .foregroundColor(.white)
                     }
                 } else if slide.id == 1 {
-                    // QuickOverlay Spotlight Graphic
+                    // Quick Access Panel Graphic
                     VStack(spacing: 10) {
                         HStack(spacing: 5) {
                             Circle().fill(Color.red).frame(width: 7, height: 7)
                             Circle().fill(Color.yellow).frame(width: 7, height: 7)
                             Circle().fill(Color.green).frame(width: 7, height: 7)
                             Spacer()
-                            Text("⌘ Space")
+                            // The user's real shortcut, not a guess — "⌘ Space" here was Spotlight's.
+                            Text(verbatim: QuickAccessConfigManager.shared.shortcutDescription)
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                                 .foregroundColor(Color.orange)
                         }
@@ -188,7 +198,7 @@ struct OnboardingWelcomeSlideView: View {
                             .fill(Color.white.opacity(0.12))
                             .frame(height: 28)
                             .overlay(
-                                Text("Ask QuickOverlay...")
+                                Text("Ask Quick Access...")
                                     .font(.system(size: 11))
                                     .foregroundColor(.white.opacity(0.7)),
                                 alignment: .leading
@@ -196,7 +206,7 @@ struct OnboardingWelcomeSlideView: View {
                             .padding(.horizontal, 10)
 
                         HStack {
-                            Text("Screen Capture OCR")
+                            Text("Screen Capture")
                                 .font(.system(size: 9))
                                 .foregroundColor(.white.opacity(0.6))
                             Spacer()
@@ -356,6 +366,7 @@ struct OnboardingWelcomeSlideView: View {
 // MARK: - Carousel Arrow Button with Hover Feedback
 private struct CarouselArrowButton: View {
     let icon: String
+    let label: LocalizedStringKey
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
@@ -374,6 +385,7 @@ private struct CarouselArrowButton: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .accessibilityLabel(label)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering

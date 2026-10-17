@@ -54,9 +54,7 @@ struct JsonStructuredGenerator: CognitiveGenerator {
     }
 
     func promptTrigger(for iteration: Int) -> String {
-        let base = iteration == 1
-            ? "Analyze the task and working memory, then decide your next action."
-            : "New observations have been recorded in working memory. Decide your next action."
+        let base = IterationTrigger.base(for: iteration)
 
         return base + """
 
@@ -95,7 +93,7 @@ struct JsonStructuredGenerator: CognitiveGenerator {
             expectedDialect: dialect,
             modelId: model.modelName,
             iteration: iteration,
-            knownToolNames: Set(context.availableTools.map(\.name)),
+            knownToolNames: Set(context.availableTools.map(\.name)).union(context.runToolNames),
             registeredTools: context.availableTools
         )
         return pipeline.parse(raw: responseText)

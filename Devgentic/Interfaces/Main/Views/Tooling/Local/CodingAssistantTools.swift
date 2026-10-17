@@ -214,6 +214,80 @@ enum SearchMatchCounter {
     }
 }
 
+// MARK: - Search Exit Status
+
+/// What a grep/ripgrep run reported, read from its EXIT STATUS rather than from whether it
+/// printed anything.
+///
+/// Both programs follow one convention: 0 = matches, 1 = searched and found none, 2 = an error.
+/// An empty stdout covers both 1 and a pattern the program refused to compile, and every search
+/// tool here read it as the first. On device (2026-10-05) ripgrep rejected
+/// `\nfunction clamp\(.*?\)` — "the literal "\n" is not allowed in a regex", exit 2 — the tool
+/// answered "No matches found", and the agent concluded `clamp` did not exist. It was in
+/// `src/math_utils.py`. A false absence is worse than an error: the agent believes the
+/// codebase, not the tool.
+///
+/// Exit 2 does NOT mean nothing was searched. Both programs also exit 2 when SOME paths could
+/// not be read ("Permission denied") while still printing every match from the rest, so stdout
+/// is kept whenever there is any. Only an EMPTY stdout with a status other than 0/1 is an error,
+/// and its message stays neutral about the cause — the same exit 2 means "bad pattern" or
+/// "nothing found in the readable paths", and telling them apart would mean matching the
+/// program's English.
+enum SearchRunReport: Equatable {
+    /// Lines to show. `incompleteNote` is set when the program also reported an error, so the
+    /// result may be missing matches.
+    case output(String, incompleteNote: String?)
+    /// The program searched and found nothing.
+    case noMatches
+    /// The program reported an error and printed no results. `message` is model-facing.
+    case failed(message: String)
+
+    /// Lines of the program's stderr quoted back to the model. A pattern error is one to four
+    /// lines; a permission flood over a home directory is thousands.
+    static let maxQuotedErrorLines = 6
+
+    static func interpret(_ run: ProcessRunner.Result, program: String, tool: String, pattern: String? = nil) -> SearchRunReport {
+        let hasOutput = !run.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        if run.exitCode == 0 || run.exitCode == 1 {
+            return hasOutput ? .output(run.standardOutput, incompleteNote: nil) : .noMatches
+        }
+
+        let reason = quotedError(run.standardError, program: program)
+        guard hasOutput else {
+            logger.warning("[CODESEARCH] \(tool): \(program) exited \(run.exitCode) with no results. CONSEQUENCE: reported to the model as an error, not as 'No matches' — an empty result from a failed search is not evidence the pattern is absent.")
+            return .failed(message: "Error: \(program) reported an error (exit \(run.exitCode)) and returned no results, so this is NOT a \"no matches\" result. \(reason)\nFix the pattern or narrow the path, then search again." + (pattern.flatMap(globHint) ?? ""))
+        }
+        logger.warning("[CODESEARCH] \(tool): \(program) exited \(run.exitCode) but printed results. CONSEQUENCE: the results are shown with a note that the search was incomplete.")
+        return .output(run.standardOutput, incompleteNote: "[Search incomplete: \(program) reported an error (exit \(run.exitCode)), so matches may be missing. \(reason)]")
+    }
+
+    /// A pattern that starts with `*` cannot be a regular expression — `*` needs something to
+    /// repeat, which is exactly the error ripgrep gives — so it is a filename glob. On 2026-10-06
+    /// Qwen2.5-3B sent `code_search_files("*.py")` 11 times in one run; the error said "fix the
+    /// pattern" without saying what the pattern was mistaken for.
+    static func globHint(for pattern: String) -> String? {
+        let trimmed = pattern.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("*") else { return nil }
+        let glob = trimmed.hasPrefix("**/") ? trimmed : "**/" + trimmed
+        return "\n'\(trimmed)' is a filename glob, not a regular expression: these search tools match file CONTENTS. To find files by name, use glob_files with pattern \"\(glob)\"."
+    }
+
+    /// The program's own words, capped. Blank lines are dropped but leading spaces are kept —
+    /// ripgrep points at the offending character with a caret aligned under the pattern.
+    private static func quotedError(_ standardError: String, program: String) -> String {
+        let lines = standardError
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard !lines.isEmpty else { return "\(program) gave no reason." }
+        var quoted = lines.prefix(maxQuotedErrorLines).map { String($0.prefix(300)) }
+        if lines.count > maxQuotedErrorLines {
+            quoted.append("(+\(lines.count - maxQuotedErrorLines) more line\(lines.count - maxQuotedErrorLines == 1 ? "" : "s"))")
+        }
+        return "\(program) said:\n" + quoted.joined(separator: "\n")
+    }
+}
+
 // MARK: - Edit Code Tool (continued)
 
 struct EditCodeTool: DevgenticTool {
@@ -243,7 +317,7 @@ struct EditCodeTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
 
             var fp: String? = nil
-            for key in ["file_path", "filePath", "path", "file"] {
+            for key in ToolPathKeys.codingFile {
                 if let ck = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: ck) {
                     fp = val
@@ -464,15 +538,24 @@ struct CodeSearchTool: DevgenticTool {
         // grep / ripgrep write one "Permission denied" line per unreadable directory to
         // STDERR, and this site attached stderr to a pipe it never read — over a home
         // directory that passes 64 KB easily and the search hangs forever.
-        let rawOutput: String
+        let run: ProcessRunner.Result
         do {
-            rawOutput = try ProcessRunner.run(process).standardOutput
+            run = try ProcessRunner.run(process)
         } catch {
             return "Error running search: \(error.localizedDescription)"
         }
 
-        if rawOutput.isEmpty {
+        // Read the exit status, not just stdout — see `SearchRunReport`.
+        let rawOutput: String
+        let incompleteNote: String?
+        switch SearchRunReport.interpret(run, program: rgPath == nil ? "grep" : "ripgrep", tool: name, pattern: arguments.pattern) {
+        case .failed(let message):
+            return message
+        case .noMatches:
             return "No matches found for '\(arguments.pattern)'."
+        case .output(let output, let note):
+            rawOutput = output
+            incompleteNote = note
         }
 
         // `max_results` bounds the number of PRINTED lines. With context on, one match can print
@@ -524,7 +607,8 @@ struct CodeSearchTool: DevgenticTool {
         }
 
         let noun = filesOnly ? "file" : "match"
-        return "\(result)\n(\(reportedCount) \(Self.pluralise(noun, count: reportedCount)))"
+        let summary = "\(result)\n(\(reportedCount) \(Self.pluralise(noun, count: reportedCount)))"
+        return incompleteNote.map { "\(summary)\n\($0)" } ?? summary
     }
 
     /// "1 match" / "2 matches" / "1 file" / "2 files".
@@ -756,6 +840,8 @@ struct FindDefinitionTool: DevgenticTool {
         }
 
         var allResults: [String] = []
+        var failures: [String] = []
+        var incompleteNotes: [String] = []
 
         for (pattern, glob) in patterns {
             let rgPath = SearchBinary.ripgrepPath
@@ -787,19 +873,40 @@ struct FindDefinitionTool: DevgenticTool {
                 process.arguments = args
             }
 
+            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe only
+            // after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
+            let run: ProcessRunner.Result
             do {
-                // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
-                // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-                let data = Data(try ProcessRunner.run(process).standardOutput.utf8)
-                if let output = String(data: data, encoding: .utf8), !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    allResults.append(output.trimmingCharacters(in: .whitespacesAndNewlines))
-                }
+                run = try ProcessRunner.run(process)
             } catch {
+                // This used to `continue` silently, so a search that never ran was reported as
+                // "No definition found".
+                failures.append("Error running search: \(error.localizedDescription)")
                 continue
+            }
+
+            // The symbol is placed inside a regex, so one containing `(`, `[`, `?` or `*` is
+            // rejected by the search program — exit 2, empty stdout. Read the exit status, not
+            // just stdout; see `SearchRunReport`.
+            switch SearchRunReport.interpret(run, program: rgPath == nil ? "grep" : "ripgrep", tool: name) {
+            case .failed(let message):
+                failures.append(message)
+            case .noMatches:
+                break
+            case .output(let output, let note):
+                allResults.append(output.trimmingCharacters(in: .whitespacesAndNewlines))
+                if let note { incompleteNotes.append(note) }
             }
         }
 
         if allResults.isEmpty {
+            if let failure = failures.first {
+                // Only when the symbol itself carries regex syntax — the same exit 2 also means
+                // "unreadable paths", where this advice would be wrong.
+                let regexSyntax = Set("()[]{}?*+.|^$\\")
+                guard symbol.contains(where: regexSyntax.contains) else { return failure }
+                return failure + "\nfind_definition places `symbol` inside a regular expression — pass a bare identifier, without ( ) [ ] { } ? * + . | ^ $ or \\."
+            }
             return "No definition found for '\(symbol)'\(arguments.language != nil ? " in \(arguments.language!) files" : "")."
         }
 
@@ -810,7 +917,10 @@ struct FindDefinitionTool: DevgenticTool {
             result = String(result.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars]"
         }
 
-        return "Definitions for '\(symbol)':\n\(result)"
+        // A pattern that failed while another found definitions still leaves a gap — say so.
+        let notes = incompleteNotes + failures
+        let suffix = notes.isEmpty ? "" : "\n" + notes.joined(separator: "\n")
+        return "Definitions for '\(symbol)':\n\(result)\(suffix)"
     }
 }
 
@@ -1224,7 +1334,7 @@ struct CreateFileTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
 
             var fp: String? = nil
-            for key in ["file_path", "filePath", "path", "file"] {
+            for key in ToolPathKeys.codingFile {
                 if let ck = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: ck) {
                     fp = val
@@ -1297,7 +1407,7 @@ struct FileOverviewTool: DevgenticTool {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: DynamicKey.self)
             var fp: String? = nil
-            for key in ["file_path", "filePath", "path", "file"] {
+            for key in ToolPathKeys.codingFile {
                 if let ck = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: ck) {
                     fp = val

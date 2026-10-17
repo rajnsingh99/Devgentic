@@ -85,7 +85,8 @@ struct DeepSeekV3Parser: CognitiveParserProtocol {
             if let call = parseBlock(block) {
                 results.append(call)
             } else {
-                logger.warning("DeepSeekV3Parser: Block failed to yield call: \(block.prefix(150))")
+                logger.warning("DeepSeekV3Parser: Block failed to yield call: \(block.count) chars (snippet at debug: model output is content, CR-57)")
+                logger.debug("DeepSeekV3Parser: snippet: \(block.prefix(150))")
             }
 
             searchStart = endRange?.upperBound ?? blockEnd
@@ -178,7 +179,8 @@ struct DeepSeekV3Parser: CognitiveParserProtocol {
             logger.info("DeepSeekV3Parser: Decoded args after sanitization.")
             return decoded
         }
-        logger.warning("DeepSeekV3Parser: Failed to decode args JSON: \(trimmed.prefix(200))")
+        logger.warning("DeepSeekV3Parser: Failed to decode args JSON: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("DeepSeekV3Parser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 

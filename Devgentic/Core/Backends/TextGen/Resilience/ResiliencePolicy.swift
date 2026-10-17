@@ -376,6 +376,15 @@ enum ProviderErrorClassifier {
            case .httpError(let status, let body) = providerError {
             return classify(statusCode: status, rawBody: body)
         }
+        // ⚠️ A refusal is the same answer every time for the same request — retrying spends the
+        // budget and the user's money to be refused again (CR-16).
+        if let providerError = error as? LLMProviderError, case .refused = providerError {
+            return .fatal(reason: providerError.localizedDescription, category: .providerBadRequest)
+        }
+        // A stream cut off upstream (CR-26) is a transport failure: the same request normally completes.
+        if let providerError = error as? LLMProviderError, case .streamEndedEarly = providerError {
+            return .transient(detail: "the response stream ended before the model finished")
+        }
         if let urlError = error as? URLError {
             switch urlError.code {
             case .timedOut:

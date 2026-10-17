@@ -208,11 +208,11 @@ enum WorkflowValidator {
 
         // --- WF-CC2: same-level MLX model contention ---
         //
-        // `MLXService` keeps exactly ONE model container resident. `loadModel` calls
-        // `performUnload()` before loading a different directory (MLXService.swift:246) and
-        // EARLY-RETURNS for the one already resident (:215-219), so two same-level nodes on
-        // DIFFERENT MLX models evict each other on every generation call while two on the SAME
-        // model share one container for free. Only DISTINCT models are flagged.
+        // `MLXService` keeps exactly ONE model container resident and, since decision D6
+        // (2026-10-07), the engine runs every same-level MLX node in its own lane — different
+        // models would evict each other on every generation call, and one model would decode the
+        // nodes concurrently with no throughput gain. So ANY two same-level MLX nodes are flagged,
+        // same model or not; the rule describes what the runtime partition will do.
         //
         // ⚠️ WARNING, never an error, and this is not a judgement call. The graph is legal and it
         // runs. Per the standing directive a backend label may describe but must never gate.
@@ -256,15 +256,15 @@ enum WorkflowValidator {
 
         let mlxPools: [(demands: [MLXDemand], body: (String, String) -> String)] = [
             (mlxProfileDemands, { model, others in
-                "Runs the local MLX model '\(model)' on the same step as \(others). Only one MLX model stays in memory, so the engine runs these one after another instead of in parallel — this step takes as long as both nodes combined. Point them at the same model, or wire one into the other so they run on different steps, to get the parallelism back."
+                "Runs the local MLX model '\(model)' on the same step as \(others). Only one MLX model stays in memory and it generates one request at a time, so the engine runs these one after another instead of in parallel — this step takes as long as the nodes combined."
             })
         ]
         for pool in mlxPools {
             for (_, sameLevel) in Dictionary(grouping: pool.demands, by: { $0.level })
-            where Set(sameLevel.map(\.slot)).count > 1 {
+            where sameLevel.count > 1 {
                 for demand in sameLevel {
                     let others = sameLevel
-                        .filter { $0.nodeID != demand.nodeID && $0.slot != demand.slot }
+                        .filter { $0.nodeID != demand.nodeID }
                         // Sorted so the message text is deterministic — `Dictionary(grouping:)` is
                         // not, and a test that greps the message would otherwise flake.
                         .sorted { ($0.displayName, $0.model) < ($1.displayName, $1.model) }
@@ -358,7 +358,7 @@ enum WorkflowValidator {
                 guard !others.isEmpty else { continue }
                 let message = descriptor.isSubWorkflow
                     ? "Only one MLX model stays in memory, and this nested sub-workflow can independently reach it on the same step as \(others). Devgentic can't see which model(s) a sub-workflow uses at design time, so it always runs same-step sub-workflows — and same-step AI Classifiers — one after another instead of in parallel, to stay safe. This step now takes as long as all of them combined."
-                    : "Its AI Classifier runs the local MLX model '\(descriptor.model ?? "")' on the same step as \(others). Only one MLX model stays in memory, so the engine now runs these one after another instead of in parallel — this step takes as long as all of them combined."
+                    : "Its AI Classifier runs the local MLX model '\(descriptor.model ?? "")' on the same step as \(others). Only one MLX model stays in memory and it generates one request at a time, so the engine now runs these one after another instead of in parallel — this step takes as long as all of them combined."
                 issues.append(WorkflowValidationIssue(
                     nodeID: node.id,
                     nodeName: node.displayName,
@@ -1082,6 +1082,19 @@ enum WorkflowValidator {
                 nodeName: node.displayName,
                 severity: .error,
                 message: "Tool '\(tool.name)' is missing required argument(s): \(missing.sorted().joined(separator: ", "))."
+            ))
+        }
+
+        // A built-in that cannot work until the user configures it (e.g. `web_search` with no
+        // provider/key). An Action node embeds its own tool and never passes through a profile's
+        // tool list, so the Tool Library's block on enabling does not reach it. Warning, not
+        // error, like the offline-server case below: the user may finish setup before running.
+        if tool.sourceId == nativeToolSourceID, let blocker = NativeToolCatalog.setupBlocker(for: tool.name) {
+            issues.append(WorkflowValidationIssue(
+                nodeID: node.id,
+                nodeName: node.displayName,
+                severity: .warning,
+                message: "Tool '\(tool.name)' needs setup — the action will fail at run time until it is configured. \(blocker)"
             ))
         }
 

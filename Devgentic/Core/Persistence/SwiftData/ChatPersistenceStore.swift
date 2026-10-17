@@ -23,6 +23,21 @@ protocol ChatPersistenceProtocol: Sendable {
     func addMessages(_ messages: [ChatMessage], toConversation conversationId: UUID) async
     func getConversation(withId id: UUID) -> ConversationSD?
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage]
+    /// The newest `limit` messages, newest-first, for MODEL CONTEXT (the request and the context
+    /// gauge) — decoded OFF the main actor. See the store's implementation (RAG-6/7).
+    ///
+    /// ⚠️ A protocol REQUIREMENT, not only an extension default: `BackendHistoryResolver` holds the
+    /// protocol type, so an extension-only method would be statically dispatched and the store's
+    /// off-main override silently bypassed.
+    ///
+    /// - Parameter omittingImageBytes: every attached image keeps its name, extension and size but
+    ///   not its bytes. For callers that only COUNT images (the gauge); never for the request,
+    ///   which ships them.
+    func fetchContextHistory(for conversationId: UUID, limit: Int, omittingImageBytes: Bool) async -> [ChatMessage]
+    /// Rename / first-message title — SAVED by the store (RAG-39). Requirements, not extension
+    /// methods, for the same static-dispatch reason as `fetchContextHistory`.
+    func setTitle(_ title: String?, for conversationId: UUID)
+    func setTitleIfUntitled(_ title: String, for conversationId: UUID)
     func deleteConversation(with id: UUID)
     func updateBackendForConversation(id: UUID, backendEntityId: UUID?)
     func updateProfileType(for conversationId: UUID, profileTypeRaw: String)
@@ -73,6 +88,12 @@ protocol ChatPersistenceProtocol: Sendable {
 
 extension ChatPersistenceProtocol {
     func fetchMessage(withId id: UUID) async -> ChatMessage? { nil }
+    func setTitle(_ title: String?, for conversationId: UUID) {}
+    func setTitleIfUntitled(_ title: String, for conversationId: UUID) {}
+    /// Test doubles keep their `fetchMessages` behaviour; only the SwiftData store reads off-main.
+    func fetchContextHistory(for conversationId: UUID, limit: Int, omittingImageBytes: Bool) async -> [ChatMessage] {
+        await fetchMessages(for: conversationId, offset: 0, limit: limit)
+    }
     func fetchUserMessagesWithAttachedTextFiles(for conversationId: UUID) async -> [ChatMessage] { [] }
     func fetchSearchDocuments(for conversationId: UUID, limit: Int) async -> [SearchDocument] { [] }
     func fetchMessagesForExport(for conversationId: UUID, limit: Int) async -> (messages: [ChatMessage], isTruncated: Bool) {
@@ -119,6 +140,10 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
     /// Pruned wholesale alongside the timeline skip-cache below.
     private var imageUpsertCounts: [UUID: Int] = [:]
 
+    /// How stale `ConversationSD.timestamp` may get from updates alone before an upsert moves it
+    /// (RAG-28). Sidebar order and its Today/Yesterday grouping are accurate to this.
+    static let activityTimestampResolution: TimeInterval = 60
+
     // MARK: - Initialization
     private init() {}
 
@@ -145,7 +170,7 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
 
         context.insert(sd)
-        if saveContext() {
+        if saveContext("add conversation \(conversation.id.uuidString.prefix(8))") {
             logger.info(
                 "[PERSISTENCE] Added conversation \(conversation.id.uuidString) with "
                 + "\(conversation.messages.count) message(s)."
@@ -159,6 +184,35 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
     }
 
+    enum ConversationListingError: Error { case containerUnavailable }
+
+    /// Every conversation id in the store.
+    ///
+    /// ⚠️ THROWS rather than answering empty: its caller (the launch orphan sweep) deletes the
+    /// conversation memory of every id NOT in this set, so a failed fetch read as "there are no
+    /// conversations" would erase all of it.
+    func liveConversationIDs() throws -> Set<UUID> {
+        guard let context = mainContext else { throw ConversationListingError.containerUnavailable }
+        var descriptor = FetchDescriptor<ConversationSD>()
+        descriptor.propertiesToFetch = [\.id]
+        return Set(try context.fetch(descriptor).map(\.id))
+    }
+
+    /// Whether a conversation has at least one message (CR-68).
+    ///
+    /// ⚠️ READINESS CR-68 (2026-10-12). Emptiness was `sd.messages.isEmpty`, which faults the WHOLE
+    /// `messages` relationship to answer a yes/no question: for every one of the 200 rows a search
+    /// scans, the `limit * 6` rows of the recents menu, and every ChatOps listing. This is one
+    /// count on the indexed `ChatMessageSD.conversationId` column (`#Index([\.conversationId,
+    /// \.timestamp])`). It THROWS rather than answering "empty", because "empty" makes a
+    /// conversation reusable by `/new`.
+    static func hasMessages(conversationID: UUID, in context: ModelContext) throws -> Bool {
+        let id = conversationID
+        var descriptor = FetchDescriptor<ChatMessageSD>(predicate: #Predicate { $0.conversationId == id })
+        descriptor.fetchLimit = 1
+        return try context.fetchCount(descriptor) > 0
+    }
+
     func getConversation(withId id: UUID) -> ConversationSD? {
         guard let context = mainContext else { return nil }
 
@@ -167,7 +221,15 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         )
         descriptor.fetchLimit = 1
 
-        return try? context.fetch(descriptor).first
+        // ⚠️ Not `try?` (RAG-39): a THROWN fetch and a missing row both came back nil, and every caller
+        // reads nil as "deleted" — the send path aborts with "CRITICAL: Could not find conversation".
+        // The answer is still nil (callers cannot proceed without the row), but the log says which.
+        do {
+            return try context.fetch(descriptor).first
+        } catch {
+            logger.error("[PERSISTENCE] Looking up conversation \(id.uuidString.prefix(8)) FAILED: \(error.localizedDescription). CONSEQUENCE: the caller sees 'no such conversation' although it may exist — a send, rename or settings change on it is abandoned this time.")
+            return nil
+        }
     }
 
     /// Single-message fetch by id — the Code Viewer's fallback when a snippet's source
@@ -252,7 +314,17 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         // derived title everywhere else. Pre-existing (this expression moved here verbatim from
         // QuickAccess); recorded rather than changed, because changing it changes what the menu
         // shows and that is a product call.
-        return rows.lazy.filter { !$0.messages.isEmpty }.prefix(limit).map { (id: $0.id, title: $0.displayTitle) }
+        // [CR-68] Emptiness from the indexed `conversationId` count, not by faulting `messages`.
+        // A failed count falls back to the relationship for that row, so the menu degrades to
+        // slower, never to wrong.
+        return rows.lazy.filter { row in
+            do {
+                return try Self.hasMessages(conversationID: row.id, in: context)
+            } catch {
+                logger.error("[HISTORY] Recents: message count for conversation \(row.id.uuidString.prefix(8)) FAILED: \(error.localizedDescription). CONSEQUENCE: that row's emptiness is read from its messages relationship instead (slower, same answer).")
+                return !row.messages.isEmpty
+            }
+        }.prefix(limit).map { (id: $0.id, title: $0.displayTitle) }
     }
 
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] {
@@ -275,6 +347,64 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             return []
         }
     }
+
+    /// Model-context history, decoded on a background `ModelContext` (RAG-6/7).
+    ///
+    /// ⚠️ Was `fetchMessages(limit: 300)` on the main actor, called by the request path once per
+    /// send AND by the context gauge on every turn change. Measured (2026-10-11, `-O`,
+    /// `SendPathHistoryBenchmarkTests`): 60 ms for a Code conversation at 15 tools a turn, 125 ms at
+    /// 40 — ~90% of it timeline JSON decode, which neither caller can skip (the request and the
+    /// gauge both read tool executions for episodic history). The decode is unchanged; only WHERE
+    /// it runs moved.
+    ///
+    /// Reads COMMITTED rows only. That is sufficient because every chat write here saves before it
+    /// returns, and both callers merge their in-memory rows over this result
+    /// (`BackendHistoryResolver.merge`), which already covers the user message racing its own save.
+    func fetchContextHistory(for conversationId: UUID, limit: Int, omittingImageBytes: Bool) async -> [ChatMessage] {
+        guard let container = modelContainer else {
+            logger.error("[HISTORY] Context history for \(conversationId.uuidString.prefix(8)) requested before the container was configured — returning 0 messages. CONSEQUENCE: the request carries no prior turns and the context gauge reads empty.")
+            return []
+        }
+        let started = ContinuousClock.now
+        do {
+            let messages = try await Self.readOffMain(container) { context in
+                var descriptor = FetchDescriptor<ChatMessageSD>(
+                    predicate: #Predicate { $0.conversationId == conversationId },
+                    sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+                )
+                descriptor.fetchLimit = limit
+                return try context.fetch(descriptor).map { $0.toChatMessage(omittingImageBytes: omittingImageBytes) }
+            }
+            let elapsed = ContinuousClock.now - started
+            logger.debug("[HISTORY] Context history for \(conversationId.uuidString.prefix(8)): \(messages.count) message(s) decoded off the main actor in \(elapsed)\(omittingImageBytes ? " (image bytes omitted)" : "").")
+            return messages
+        } catch {
+            logger.error("[HISTORY] Context history fetch for \(conversationId.uuidString.prefix(8)) FAILED: \(error.localizedDescription). CONSEQUENCE: the request carries only the in-memory turns (no stored history) and the context gauge under-reads.")
+            return []
+        }
+    }
+
+    /// Runs `body` on a fresh `ModelContext` off the main actor and returns its Sendable result.
+    ///
+    /// A new context per call: a `ModelContext` is confined to the task that made it, and the
+    /// fetched `@Model` rows never leave `body` — only value/Sendable projections do.
+    nonisolated private static func readOffMain<T: Sendable>(
+        _ container: ModelContainer,
+        _ body: @escaping @Sendable (ModelContext) throws -> T
+    ) async throws -> T {
+        try await Task.detached(priority: .userInitiated) {
+            #if DEBUG
+            ChatPersistenceStore.offMainReadObserver?(Thread.isMainThread)
+            #endif
+            return try body(ModelContext(container))
+        }.value
+    }
+
+    #if DEBUG
+    /// Test hook: called with `Thread.isMainThread` for every background read, so a test can prove
+    /// the context-history and task-history reads stay off the main thread (RAG-6/7/26).
+    nonisolated(unsafe) static var offMainReadObserver: (@Sendable (_ onMainThread: Bool) -> Void)?
+    #endif
 
     /// [mm-4] See the protocol doc. Same predicate/sort/limit as `fetchMessages`; the ONLY
     /// difference in what comes back is that every attached image's `binaryData` is empty.
@@ -397,8 +527,41 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             imageUpsertCounts.removeAll(keepingCapacity: true)
         }
 
-        let conversation = getConversation(withId: conversationId)
+        // ⚠️⚠️ NO CONVERSATION, NO WRITE (readiness CR-61, 2026-10-10). Deleting a conversation
+        // mid-stream cancels its run, and the run's cancellation path still finalizes — calling here.
+        // With the conversation gone this used to INSERT the turn with `conversation == nil`: an
+        // orphan row nothing will ever cascade-delete, holding content the user just deleted, while
+        // the log said "Upserted 1 message(s)". Every send path creates the conversation row BEFORE
+        // its first message (ConversationManagementCoordinator, SchedulerCoordinator, QuickAccess,
+        // Orb), so a missing row here means it was deleted, never "not yet created".
+        //
+        // ⚠️ A fetch that THROWS refuses too — it cannot prove the conversation exists, and a
+        // refused write is logged and recoverable from the screen, an orphan is neither.
+        let conversation: ConversationSD
+        do {
+            var lookup = FetchDescriptor<ConversationSD>(predicate: #Predicate { $0.id == conversationId })
+            lookup.fetchLimit = 1
+            guard let found = try context.fetch(lookup).first else {
+                logger.notice(
+                    "[PERSISTENCE] \(messages.count) message(s) for conversation "
+                    + "\(conversationId.uuidString.prefix(8)) NOT written — the conversation no longer exists "
+                    + "(deleted while its run was finishing). CONSEQUENCE: nothing is stored or indexed for it, "
+                    + "which is what deleting it asked for."
+                )
+                return
+            }
+            conversation = found
+        } catch {
+            logger.error(
+                "[PERSISTENCE] Could not look up conversation \(conversationId.uuidString.prefix(8)) "
+                + "(\(error.localizedDescription)); \(messages.count) message(s) NOT written. CONSEQUENCE: "
+                + "they stay visible this session and are missing after relaunch — writing them without "
+                + "a conversation would leave orphan rows that are never cleaned up."
+            )
+            return
+        }
 
+        var insertedAny = false
         for message in messages {
             // Upsert: check if message already exists
             let messageId = message.id
@@ -407,7 +570,16 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             )
             descriptor.fetchLimit = 1
 
-            let existing = try? context.fetch(descriptor).first
+            // ⚠️ Not `try?` (RAG-39): a THROWN lookup read as "not stored yet" and took the INSERT
+            // branch, writing a second row for a message that may already exist. Skip it instead —
+            // the next flush or finalize re-upserts the same message.
+            let existing: ChatMessageSD?
+            do {
+                existing = try context.fetch(descriptor).first
+            } catch {
+                logger.error("[PERSISTENCE] Looking up message \(messageId.uuidString.prefix(8)) before upsert FAILED: \(error.localizedDescription). CONSEQUENCE: this message is NOT written in this save (inserting blind could duplicate it); the next upsert of it — a later flush or the finalize — retries.")
+                continue
+            }
 
             // [IMG-PERSIST] Decisive branch/count/bytes trace for image-bearing rows. An
             // image blob is the schema's only `@Attribute(.externalStorage)` attribute, so it
@@ -534,11 +706,19 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
                 // flush has already INSERTed the row — so finalize always lands on this
                 // UPDATE branch. Without this line the badge and conversation totals were
                 // visible live but gone on every reload (INSERT was the only writer).
-                if case .write(let data) = ChatMessageSD.encodeAuxiliaryBlob(
-                    message.tokenUsage, column: "tokenUsageData", messageID: messageId,
-                    version: ChatMessageSD.tokenUsageBlobVersion
-                ) {
-                    existing.tokenUsageData = data
+                //
+                // [CR-63] `canPersistTokenUsage` is the READ side, as for `agentResponse` above: a
+                // blob that failed to decode yielded nil, and this line persisted that nil, erasing
+                // the stored usage and cost on the first re-persist after the failed load.
+                if message.canPersistTokenUsage {
+                    if case .write(let data) = ChatMessageSD.encodeAuxiliaryBlob(
+                        message.tokenUsage, column: "tokenUsageData", messageID: messageId,
+                        version: ChatMessageSD.tokenUsageBlobVersion
+                    ) {
+                        existing.tokenUsageData = data
+                    }
+                } else {
+                    logger.error("[PERSISTENCE] Message \(messageId.uuidString.prefix(8)): tokenUsageData was unreadable on load and nothing has replaced it — the stored bytes are LEFT IN PLACE. CONSEQUENCE: usage/cost for this message stays missing on this build but is not erased.")
                 }
 
                 // [G1] Resume lifecycle + run-identity stamp. `ChatMessageSD.from` writes these on
@@ -590,18 +770,25 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
                 let sd = ChatMessageSD.from(message)
                 sd.conversation = conversation
                 context.insert(sd)
-                conversation?.messages.append(sd)
+                conversation.messages.append(sd)
                 // [P4] `ChatMessageSD.from` just encoded this revision's timeline.
                 lastEncodedTimelineRevision[messageId] = message.timelineRevision
+                insertedAny = true
             }
         }
 
-        // Update conversation timestamp
-        conversation?.timestamp = Date()
+        // Last activity. ⚠️ NOT on every write (RAG-28): a streaming flush re-upserts the same row
+        // every ≤2 s, and each timestamp write invalidated the sidebar's `@Query` (sorted on it) and
+        // re-ran its O(conversations) partition for the whole run. A NEW row still re-sorts at
+        // once; an update moves it at most once per `activityTimestampResolution`.
+        let now = Date()
+        if insertedAny || now.timeIntervalSince(conversation.timestamp) >= Self.activityTimestampResolution {
+            conversation.timestamp = now
+        }
         // ⚠️ .info, not .debug: DGLogger never routes .debug to the ring buffer, so the only
         // positive confirmation that the app's MAIN WRITE PATH ran was absent from every exported
         // bug bundle.
-        if saveContext() {
+        if saveContext("upsert \(messages.count) message(s) → conv \(conversationId.uuidString.prefix(8))") {
             logger.info(
                 "[PERSISTENCE] Upserted \(messages.count) message(s) for conversation "
                 + "\(conversationId.uuidString)."
@@ -610,7 +797,8 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             logger.error(
                 "[PERSISTENCE] \(messages.count) message(s) for conversation "
                 + "\(conversationId.uuidString) were NOT persisted. CONSEQUENCE: the turn is on screen "
-                + "but not on disk — it disappears on relaunch."
+                + "but not on disk; it stays pending and goes out with the next successful save — if "
+                + "saving keeps failing, it disappears on relaunch."
             )
         }
 
@@ -622,7 +810,9 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         // content, hence the sender filter). Re-adds (resume/replay/restore) are
         // idempotent: replace-on-reindex keys off the message id. Fire-and-forget —
         // persistence never waits on chunking/embedding.
-        let userMessages = messages.filter { $0.sender == .user }
+        // Snapshots, taken here on the main actor: the indexer runs detached and must not read the
+        // live `ChatMessage` the view model keeps mutating (RAG-16).
+        let userMessages = messages.filter { $0.sender == .user }.map { IndexableMessage($0) }
         if !userMessages.isEmpty {
             Task.detached(priority: .background) {
                 for message in userMessages {
@@ -655,17 +845,23 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         // ⚠️ A destructive cascade must never be reported before it commits. This claimed 42 messages
         // deleted on a save that could have thrown — and the conversation reappearing on relaunch
         // then looks like a resurrection bug rather than a failed delete.
-        if saveContext() {
+        if saveContext("delete conversation \(id.uuidString.prefix(8))") {
             logger.notice(
                 "[PERSISTENCE] Conversation \(id.uuidString.prefix(8)) deleted — cascaded "
                 + "\(messageCount) message(s), \(attachmentCount) attachment(s), \(runCount) workflow run(s)."
             )
+            // [CR-65] Its generated images go too, and ONLY now the delete has committed: a delete
+            // that failed to save brings the conversation back on the next launch, images included.
+            Task.detached(priority: .utility) {
+                await MediaStore.shared.evict(conversationID: id)
+            }
         } else {
             logger.error(
                 "[PERSISTENCE] Delete of conversation \(id.uuidString.prefix(8)) was NOT persisted "
                 + "(\(messageCount) message(s), \(attachmentCount) attachment(s), \(runCount) workflow "
-                + "run(s) still on disk). CONSEQUENCE: it disappears from the sidebar now and RETURNS "
-                + "on the next launch."
+                + "run(s) still on disk). CONSEQUENCE: it disappears from the sidebar now; the delete "
+                + "stays pending and goes out with the next successful save — if saving keeps failing, "
+                + "it RETURNS on the next launch."
             )
         }
     }
@@ -675,8 +871,10 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             logger.warning("Attempted to update backend for non-existent conversation: \(id.uuidString)")
             return
         }
+        // Called on EVERY send (RAG-39): an unchanged value needs no save.
+        guard conversation.backendEntityId != backendEntityId else { return }
         conversation.backendEntityId = backendEntityId
-        if saveContext() {
+        if saveContext("profile of conv \(id.uuidString.prefix(8))") {
             logger.info("[PERSISTENCE] Updated conversation \(id.uuidString) profile: \(backendEntityId?.uuidString ?? "none").")
         } else {
             logger.error(
@@ -691,8 +889,10 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             logger.warning("Attempted to update profileType for non-existent conversation: \(conversationId.uuidString)")
             return
         }
+        // Called on EVERY Code send (RAG-39): an unchanged value needs no save.
+        guard conversation.profileTypeRaw != profileTypeRaw else { return }
         conversation.profileTypeRaw = profileTypeRaw
-        if saveContext() {
+        if saveContext("profile type of conv \(conversationId.uuidString.prefix(8))") {
             logger.info("[PERSISTENCE] Updated conversation \(conversationId.uuidString) profileType: \(profileTypeRaw).")
         } else {
             logger.error(
@@ -702,31 +902,37 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
     }
 
-    /// ⚠️ The store is `@MainActor`, and a long conversation has thousands of rows, so this never
-    /// decodes a whole message: it reads only the timeline blob, and decodes THAT only when its
-    /// bytes contain the task case's key. The key is the synthesized `Codable` case name of
-    /// `KnownTimelineEvent.backgroundTask`, pinned by `BackgroundTaskHistoryStoreTests`.
+    /// ⚠️ A long conversation has thousands of rows, so this never decodes a whole message: it
+    /// reads only the timeline blob, and decodes THAT only when its bytes contain the task case's
+    /// key. The key is the synthesized `Codable` case name of `KnownTimelineEvent.backgroundTask`,
+    /// pinned by `BackgroundTaskHistoryStoreTests`.
+    ///
+    /// ⚠️ OFF the main actor (RAG-26). It runs on every conversation open, pill visible or not,
+    /// and it is unbounded — measured 18–28 ms per 300 messages on the main actor, growing with the
+    /// conversation. Same background reader as `fetchContextHistory`.
     func fetchBackgroundTaskRows(for conversationId: UUID) async -> [BackgroundTaskData] {
-        guard let context = mainContext else { return [] }
-        var descriptor = FetchDescriptor<ChatMessageSD>(
-            predicate: #Predicate { $0.conversationId == conversationId },
-            sortBy: [SortDescriptor(\.timestamp, order: .forward)]
-        )
-        descriptor.propertiesToFetch = [\.timelineEventsData]
-        let marker = Data("\"backgroundTask\"".utf8)
+        guard let container = modelContainer else { return [] }
         do {
-            var rows: [BackgroundTaskData] = []
-            for entity in try context.fetch(descriptor) {
-                guard let blob = entity.timelineEventsData, blob.range(of: marker) != nil else { continue }
-                do {
-                    for event in try ChatMessageSD.decodeTimeline(from: blob) {
-                        if case .backgroundTask(let data) = event { rows.append(data) }
+            return try await Self.readOffMain(container) { context in
+                var descriptor = FetchDescriptor<ChatMessageSD>(
+                    predicate: #Predicate { $0.conversationId == conversationId },
+                    sortBy: [SortDescriptor(\.timestamp, order: .forward)]
+                )
+                descriptor.propertiesToFetch = [\.timelineEventsData]
+                let marker = Data("\"backgroundTask\"".utf8)
+                var rows: [BackgroundTaskData] = []
+                for entity in try context.fetch(descriptor) {
+                    guard let blob = entity.timelineEventsData, blob.range(of: marker) != nil else { continue }
+                    do {
+                        for event in try ChatMessageSD.decodeTimeline(from: blob) {
+                            if case .backgroundTask(let data) = event { rows.append(data) }
+                        }
+                    } catch {
+                        logger.error("[BGTASK] Task history: message \(entity.id.uuidString.prefix(8)) has an undecodable timeline (\(error.localizedDescription)). CONSEQUENCE: its task cards are missing from the task list's history; the message itself renders with its own decode-failure placeholder.")
                     }
-                } catch {
-                    logger.error("[BGTASK] Task history: message \(entity.id.uuidString.prefix(8)) has an undecodable timeline (\(error.localizedDescription)). CONSEQUENCE: its task cards are missing from the task list's history; the message itself renders with its own decode-failure placeholder.")
                 }
+                return rows
             }
-            return rows
         } catch {
             logger.error("[BGTASK] Task history fetch failed for conversation \(conversationId.uuidString.prefix(8)): \(error.localizedDescription). CONSEQUENCE: the task list shows only tasks from this launch.")
             return []
@@ -740,7 +946,7 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
         guard conversation.projectPath != projectPath else { return }
         conversation.projectPath = projectPath
-        if saveContext() {
+        if saveContext("project folder of conv \(conversationId.uuidString.prefix(8))") {
             logger.info("[PERSISTENCE] Conversation \(conversationId.uuidString) runs in project '\(URL(fileURLWithPath: projectPath).lastPathComponent)'.")
         } else {
             logger.error(
@@ -750,13 +956,45 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         }
     }
 
+    /// The user's rename (nil or blank clears it).
+    ///
+    /// ⚠️ Was a direct `conversationSD.userDefinedTitle = …` in the coordinator with NO save (RAG-39):
+    /// the title reached disk only through autosave or some other store's next save, and sat
+    /// pending on the shared context in between — where any store's failed save leaves it stuck.
+    func setTitle(_ title: String?, for conversationId: UUID) {
+        guard let conversation = getConversation(withId: conversationId) else {
+            logger.warning("[PERSISTENCE] Rename of non-existent conversation \(conversationId.uuidString.prefix(8)). CONSEQUENCE: nothing to rename.")
+            return
+        }
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newTitle = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        guard conversation.userDefinedTitle != newTitle else { return }
+        conversation.userDefinedTitle = newTitle
+        if !saveContext("title of conv \(conversationId.uuidString.prefix(8))") {
+            logger.error("[PERSISTENCE] Rename of conversation \(conversationId.uuidString.prefix(8)) was NOT persisted. CONSEQUENCE: the sidebar shows the new title; it reverts on relaunch unless a later save succeeds.")
+        }
+    }
+
+    /// The first-message auto-title: sets `title` only when the conversation has none. Saved here,
+    /// for the same reason as `setTitle` — it used to be left pending across the send's awaits.
+    func setTitleIfUntitled(_ title: String, for conversationId: UUID) {
+        guard let conversation = getConversation(withId: conversationId),
+              conversation.userDefinedTitle?.isEmpty ?? true else { return }
+        conversation.userDefinedTitle = title
+        if saveContext("auto-title of conv \(conversationId.uuidString.prefix(8))") {
+            logger.info("[PERSISTENCE] Auto-titled conversation \(conversationId.uuidString.prefix(8)).")
+        } else {
+            logger.error("[PERSISTENCE] Auto-title of conversation \(conversationId.uuidString.prefix(8)) was NOT persisted. CONSEQUENCE: it shows this session; after relaunch the conversation reads 'New Conversation' unless a later save succeeds.")
+        }
+    }
+
     func togglePinStatus(for conversationId: UUID) {
         guard let conversation = getConversation(withId: conversationId) else {
             logger.warning("Attempted to toggle pin for non-existent conversation: \(conversationId.uuidString)")
             return
         }
         conversation.isPinned.toggle()
-        if saveContext() {
+        if saveContext("pin of conv \(conversationId.uuidString.prefix(8))") {
             logger.info("[PERSISTENCE] Pin for conversation \(conversationId.uuidString) → \(conversation.isPinned).")
         } else {
             logger.error(
@@ -824,7 +1062,7 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
     /// one of those lines asserted something that never happened, so a support log positively
     /// confirmed writes that were gone after relaunch — pointing any investigation at the load path
     /// instead of the save. Callers must now decide what to say based on what happened.
-    private func saveContext() -> Bool {
+    private func saveContext(_ label: @autoclosure () -> String) -> Bool {
         guard let context = mainContext else {
             logger.error(
                 "[PERSISTENCE] saveContext called before the ModelContainer was configured. "
@@ -834,7 +1072,7 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
             return false
         }
         do {
-            try context.save()
+            try SharedContextSave.save(context, "chat: \(label())")
             return true
         } catch {
             logger.error(

@@ -43,6 +43,11 @@
             value = "1"
             isEnabled = "YES">
          </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "SWIFT_DETERMINISTIC_HASHING"
+            value = "0"
+            isEnabled = "YES">
+         </EnvironmentVariable>
       </EnvironmentVariables>
       <Testables>
          <TestableReference
@@ -77,6 +82,13 @@
             ReferencedContainer = "container:Devgentic.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "SWIFT_DETERMINISTIC_HASHING"
+            value = "1"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

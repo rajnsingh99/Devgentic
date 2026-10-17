@@ -40,6 +40,8 @@ struct NodeOutput: Sendable {
     let profileName: String
     let profileType: ProfileType
     let sourceProfileID: UUID
+    /// See `NodeResultEnvelope.readDocumentIDs` (CR-49).
+    var readDocumentIDs: Set<UUID> = []
 }
 
 // MARK: - Workflow State
@@ -65,6 +67,10 @@ struct WorkflowState: Sendable {
 
     /// Chronological execution log for traceability.
     private(set) var executionLog: [WorkflowLogEntry] = []
+
+    /// Failures that a sub-workflow node's own run absorbed, keyed by that node (CR-46). The node
+    /// itself is `.completed`, so `failedNodeSummaries()` never sees these.
+    private(set) var nestedFailures: [UUID: [String]] = [:]
 
     // MARK: - Record
 
@@ -93,7 +99,8 @@ struct WorkflowState: Sendable {
             status: envelope.status,
             profileName: envelope.profileName,
             profileType: envelope.profileType,
-            sourceProfileID: envelope.sourceProfileID
+            sourceProfileID: envelope.sourceProfileID,
+            readDocumentIDs: envelope.readDocumentIDs
         )
         executionLog.append(WorkflowLogEntry(
             timestamp: Date(),
@@ -265,7 +272,8 @@ struct WorkflowState: Sendable {
                 output: output.text,
                 artifacts: output.artifacts,
                 metadata: output.metadata,
-                structuredOutput: output.structuredOutput
+                structuredOutput: output.structuredOutput,
+                readDocumentIDs: output.readDocumentIDs
             )
         }
         // De-duplicate by upstream node. When a node has multiple edges from the same
@@ -478,6 +486,20 @@ struct WorkflowState: Sendable {
     /// questions. A workflow whose every terminal was skipped by ordinary routing has failed nothing;
     /// one whose mid-graph node crashed has, even though the crash is not itself a terminal — and
     /// reporting the terminals alone described the symptom while hiding the cause.
+    /// Records (or, when empty, clears) the failures a sub-workflow node's run absorbed. A retried
+    /// node's later result replaces its earlier one.
+    mutating func recordNestedFailures(_ failures: [String], for nodeID: UUID) {
+        nestedFailures[nodeID] = failures.isEmpty ? nil : failures
+    }
+
+    /// One line per absorbed failure, prefixed with the sub-workflow node it happened inside.
+    func nestedFailureSummaries() -> [String] {
+        nestedFailures.flatMap { nodeID, failures -> [String] in
+            let owner = nodeOutputs[nodeID]?.profileName ?? "sub-workflow"
+            return failures.map { "\(owner) › \($0)" }
+        }.sorted()
+    }
+
     func failedNodeSummaries() -> [String] {
         nodeOutputs.values.compactMap { output in
             guard case .failed(let reason) = output.status else { return nil }

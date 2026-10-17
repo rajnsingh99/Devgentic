@@ -178,6 +178,14 @@ struct CatalogModelItem: Identifiable, Hashable, Sendable {
     let baseURL: String?
     let tags: [String]
     let fitAssessment: ModelFitAssessment?
+    /// Everything the local analyzer measured for this model — capability, dialect, metadata
+    /// (tier, quantization, family, window), modalities, chat-template source and stop sequences.
+    /// Set for installed local models (MLX, Ollama); nil for cloud entries, which are not measured.
+    ///
+    /// ⚠️ Picking a model must write ALL of it (`CatalogModelSelection`). The flat fields above
+    /// carried only capability, dialect and modalities, so a pick left the PREVIOUS model's
+    /// metadata, template and stop sequences in the profile — a 3B model stored as "Medium" tier.
+    let detectedProfile: CognitiveProfile?
 
     init(
         id: String,
@@ -196,7 +204,8 @@ struct CatalogModelItem: Identifiable, Hashable, Sendable {
         descriptionText: String = "",
         baseURL: String? = nil,
         tags: [String] = [],
-        fitAssessment: ModelFitAssessment? = nil
+        fitAssessment: ModelFitAssessment? = nil,
+        detectedProfile: CognitiveProfile? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -215,6 +224,7 @@ struct CatalogModelItem: Identifiable, Hashable, Sendable {
         self.baseURL = baseURL
         self.tags = tags
         self.fitAssessment = fitAssessment
+        self.detectedProfile = detectedProfile
     }
 
     var hasVision: Bool {

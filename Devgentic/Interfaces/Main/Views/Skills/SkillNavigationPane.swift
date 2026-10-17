@@ -312,10 +312,10 @@ struct SkillNavigationPane: View {
         SidebarEmptyStateView(
             title: "No Skills",
             subtitle: "Create a custom skill or import from a package to empower your agents.",
-            buttonTitle: "New Skill",
-            buttonIcon: "plus",
+            buttonTitle: "Import Skill",
+            buttonIcon: "arrow.down.doc",
             systemImage: "puzzlepiece",
-            onAction: { showingCreate = true }
+            onAction: { showingImport = true }
         )
     }
 

@@ -58,33 +58,21 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
             fullPrompt = prompt
         }
 
-        let dimensions = options.aspectRatio.dimensions()
-
+        let shape = Self.requestShape(model: modelName, aspectRatio: options.aspectRatio, quality: options.quality)
         var body: [String: Any] = [
             "model": modelName,
             "prompt": fullPrompt,
             "n": 1,
-            "response_format": "b64_json"
+            "size": shape.size
         ]
-
-        // DALL-E 3 uses "size" parameter as WxH string
-        // gpt-image-1 uses separate "width" and "height" or "size"
-        if modelName.lowercased().contains("dall-e-3") {
-            body["size"] = sizeStringForDALLE3(aspectRatio: options.aspectRatio)
-            body["quality"] = options.quality.rawValue
-        } else {
-            // gpt-image-1 or similar
-            body["size"] = "\(dimensions.width)x\(dimensions.height)"
-            if options.quality == .hd {
-                body["quality"] = "hd"
-            }
-        }
+        if let quality = shape.quality { body["quality"] = quality }
+        if shape.sendsResponseFormat { body["response_format"] = "b64_json" }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         progressHandler?(0, 1)
 
-        logger.info("OpenAI T2I request: model=\(modelName), size=\(dimensions.width)x\(dimensions.height)")
+        logger.info("OpenAI T2I request: model=\(modelName), size=\(shape.size)")
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -145,12 +133,13 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
         // path) so this fixed label is truthful — a raw HEIC/TIFF here would 400.
         bodyData.append(multipartFileField(name: "image", fileName: "input.jpg", mimeType: "image/jpeg", data: inputImage, boundary: boundary))
 
-        // Size
-        let dimensions = options.aspectRatio.dimensions()
-        bodyData.append(multipartField(name: "size", value: "\(dimensions.width)x\(dimensions.height)", boundary: boundary))
-
-        // Response format
-        bodyData.append(multipartField(name: "response_format", value: "b64_json", boundary: boundary))
+        // Size, and only the fields this model accepts (CR-24).
+        let shape = Self.requestShape(model: modelName, aspectRatio: options.aspectRatio, quality: options.quality)
+        bodyData.append(multipartField(name: "size", value: shape.size, boundary: boundary))
+        if let quality = shape.quality { bodyData.append(multipartField(name: "quality", value: quality, boundary: boundary)) }
+        if shape.sendsResponseFormat {
+            bodyData.append(multipartField(name: "response_format", value: "b64_json", boundary: boundary))
+        }
 
         // Close boundary
         bodyData.append("--\(boundary)--\r\n".data(using: .utf8)!)
@@ -212,20 +201,30 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
 
     // MARK: - Helpers
 
-    private func sizeStringForDALLE3(aspectRatio: ImageAspectRatio) -> String {
-        // DALL-E 3 only supports specific sizes
-        switch aspectRatio {
-        case .square:
-            return "1024x1024"
-        case .landscape, .wide:
-            return "1792x1024"
-        case .portrait:
-            return "1024x1792"
-        case .photo:
-            return "1024x1024" // Closest supported
-        case .photoPort:
-            return "1024x1792" // Closest supported
+    /// What one request may carry for `model`: a size it accepts, a quality value it accepts (or none),
+    /// and whether `response_format` may be sent.
+    ///
+    /// ⚠️⚠️ READINESS CR-24 (2026-10-10). Every non-DALL-E-3 model was sent `size` built from the raw
+    /// aspect ratio (`1024x576`, `1024x438`, `1024x768`…), which gpt-image accepts only as
+    /// 1024x1024 / 1536x1024 / 1024x1536 / auto and dall-e-2 only as square — so any non-square ratio
+    /// 400d, on generate AND edit. It was also sent `response_format` (gpt-image always returns base64
+    /// and rejects the field) and `quality: "hd"` (gpt-image takes low/medium/high/auto). Sizes snap to
+    /// the nearest allowed ORIENTATION; an unrecognised model is treated as gpt-image, the newest family.
+    static func requestShape(model: String, aspectRatio: ImageAspectRatio, quality: ImageQuality)
+        -> (size: String, quality: String?, sendsResponseFormat: Bool) {
+        let name = model.lowercased()
+        let dims = aspectRatio.dimensions()
+        let orientation = dims.width == dims.height ? 0 : (dims.width > dims.height ? 1 : -1)
+        if name.contains("dall-e-3") {
+            let size = orientation == 0 ? "1024x1024" : (orientation > 0 ? "1792x1024" : "1024x1792")
+            return (size, quality.rawValue, true)
         }
+        if name.contains("dall-e-2") {
+            // Square sizes only; no quality parameter.
+            return ("1024x1024", nil, true)
+        }
+        let size = orientation == 0 ? "1024x1024" : (orientation > 0 ? "1536x1024" : "1024x1536")
+        return (size, quality == .hd ? "high" : nil, false)
     }
 
     private func parseOpenAIError(from data: Data) -> String? {

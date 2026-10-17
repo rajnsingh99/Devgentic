@@ -62,13 +62,13 @@ final class MistralXMLParserTests: XCTestCase {
         let input = """
         <tool_call>
         <content>I will search for files.</content>
-        <tool_name>fs_smart_search</tool_name>
+        <tool_name>spotlight_search</tool_name>
         <arguments>{"search_term": "readme"}</arguments>
         </tool_call>
         """
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 1)
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
         XCTAssertEqual(result.toolCalls.first?.arguments["search_term"], .string("readme"))
         XCTAssertTrue(result.reasoning.contains("search for files"))
     }
@@ -88,7 +88,7 @@ final class MistralXMLParserTests: XCTestCase {
         let input = """
         [TOOL_CALLS] [
             {"name": "list_directory", "arguments": {"path": "/tmp"}},
-            {"name": "fs_smart_search", "arguments": {"search_term": "config"}}
+            {"name": "spotlight_search", "arguments": {"search_term": "config"}}
         ]
         """
         let result = parser.parse(rawResponse: input)

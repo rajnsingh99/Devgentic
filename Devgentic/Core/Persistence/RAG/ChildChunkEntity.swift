@@ -43,9 +43,25 @@ final class ChildChunkEntity {
     /// Denormalised conversation ID (mirrors ParentDocumentEntity.conversationID as a String).
     /// The scoped retrieval scan filters on this key, so an EMPTY value makes a chunk
     /// invisible to every conversation. Required at construction (convenience init) and
-    /// re-stamped from the parent in `VectorStoreService.addSemanticDocument` (the parent
+    /// re-stamped from the parent in `VectorStoreService.replaceSemanticDocument` (the parent
     /// is the authority) — the "" default exists only for ObjectBox's parameterless `init()`.
+    ///
+    /// INDEXED (RAG-9): every retrieval, delete and replace selects by this key. Unindexed, each
+    /// of those scanned every chunk of every conversation.
+    // objectbox: index
     var conversationID: String = ""
+
+    /// This chunk's BM25 tokens (`VectorStoreService.bm25Tokens`), space-delimited WITH a leading
+    /// and trailing space, so a whole-token match is a byte search for `" term "`.
+    ///
+    /// Stored once, at construction (RAG-40): retrieval used to re-tokenise EVERY chunk of the
+    /// conversation on EVERY send (~58 µs/chunk: 786 ms at 13.6k chunks), when BM25 only ever
+    /// needs the query terms' counts. "" for a row written before the field — ranked by
+    /// tokenising `chunkText` on the fly, so it is slower but never wrong.
+    var bm25Terms: String = ""
+
+    /// Token count of `bm25Terms` — BM25's document length.
+    var bm25Length: Int = 0
 
     /// Relation back to the complete parent document.
     var parentDocument: ToOne<ParentDocumentEntity> = nil
@@ -62,5 +78,8 @@ final class ChildChunkEntity {
         self.embedding = embedding
         self.chunkIndex = chunkIndex
         self.conversationID = conversationID
+        let document = VectorStoreService.bm25Document(for: chunkText)
+        self.bm25Terms = document.terms
+        self.bm25Length = document.length
     }
 }

@@ -377,6 +377,12 @@ struct LLMRetryStrategy: LLMRetryHandling {
     /// what actually recovers it (a device log showed the identical prompt yielding a clean tool
     /// call on one run and immediate EOS on the next, 7 tokens apart).
     ///
+    /// ⚠️ That evidence predates byte-stable prompts: in August the `<tools>` block re-rendered in a
+    /// new key order every call, so "the identical prompt" was not identical in bytes. Since
+    /// 2026-10-06 it is, and a discarded MLX tool call reproduced 3 of 3 times. That case is now
+    /// reported as a parse failure (`FrameworkToolCallEnvelope.discardedMarker`) and never reaches
+    /// this budget; what still does is a true zero-token EOS or a stream with no completion event.
+    ///
     /// Same shape and same reasoning as `modelSlotAction` below, whose own comment already draws
     /// the distinction: not a parse failure "since the model produced nothing to parse".
     private mutating func emptyResponseAction(generator: String) -> RetryAction {
@@ -388,16 +394,19 @@ struct LLMRetryStrategy: LLMRetryHandling {
 
         if attempt >= cap {
             logger.error("[GEN_EMPTY] \(generator) returned NO output \(attempt) time(s) in a row — giving up. CONSEQUENCE: the run stops. This is NOT charged to the parse budget and telemetry does not record .parseExhausted, because the model produced nothing to parse — the cause is upstream of the parser. Read the [MLX-GEN] line for this attempt BEFORE changing anything: it reports the framework's own generatedTokens, which says whether the model emitted nothing (sampling / chat template) or emitted output that was discarded downstream (tool-call parsing). Those two have opposite fixes.")
-            return .abort(
-                reason: "The model returned no output \(attempt) times in a row — not an unreadable answer, but nothing at all. Check this profile's Repetition Penalty (values near 1.05 are typical; high values over a small repetition-context window can suppress the model's first token) and Temperature. If those look right, the model's chat template or its tool-call format may not be producing a usable turn."
-            )
+            // A native-API (cloud / Ollama native) empty reply has a different usual cause: a
+            // reasoning model that spent its whole output limit thinking (CR-42).
+            let reason = generator == "Native"
+                ? "The model returned no answer \(attempt) times in a row. On a reasoning model (o-series, GPT-5, Gemini thinking) this usually means its reasoning used the whole output-token limit before it wrote anything — raise Max Tokens in this profile, or lower Reasoning Effort."
+                : "The model returned no output \(attempt) times in a row — not an unreadable answer, but nothing at all. Check this profile's Repetition Penalty (values near 1.05 are typical; high values over a small repetition-context window can suppress the model's first token) and Temperature. If those look right, the model's chat template or its tool-call format may not be producing a usable turn."
+            return .abort(reason: reason)
         }
 
         // ⚠️ `.networkRetry` deliberately, NOT `.parseRetry` — it re-runs the iteration WITHOUT
         // putting a corrective alert into the model's context. `modelSlotAction` uses the same
         // case for the same reason. Zero delay: nothing external needs time to settle, the next
         // attempt just needs a fresh sample.
-        logger.warning("[GEN_EMPTY] \(generator) returned no output (\(attempt)/\(cap)) — retrying with the same message array (tool-schema key order may differ between renders; see BridgedToolsStore). CONSEQUENCE: no corrective alert enters the model's context (there is no output to correct, and the parse-failure alert would be a false statement that also grows the prompt every attempt), and the parse budget is untouched.")
+        logger.warning("[GEN_EMPTY] \(generator) returned no output (\(attempt)/\(cap)) — retrying with the same message array. CONSEQUENCE: only sampling can change the result — prompts now render byte-identically (swift-jinja 2.5.1 + SWIFT_DETERMINISTIC_HASHING), so at low temperature an identical retry can reproduce the same output (a discarded MLX tool call no longer reaches here: it is reported as a parse failure instead). Also: no corrective alert enters the model's context (there is no output to correct, and the parse-failure alert would be a false statement that also grows the prompt every attempt), and the parse budget is untouched.")
         return .networkRetry(
             message: "The model returned nothing — retrying (\(attempt)/\(cap))...",
             delaySeconds: 0

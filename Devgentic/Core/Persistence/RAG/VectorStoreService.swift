@@ -18,13 +18,30 @@ import os
 /// taking the document head — a whole-file parent clamped to its first 8K chars
 /// loses any match past that point (the exact failure seen in manual testing:
 /// symbols in a file's first ~8K chars answered fine, later ones "not found").
-struct RetrievedDocument {
-    let parent: ParentDocumentEntity
+///
+/// ⚠️ A VALUE, copied out of the entity: retrieval runs off the main actor (CR-29), and
+/// `ParentDocumentEntity` is an ObjectBox class — not Sendable, and lazily backed by the store.
+struct RetrievedDocument: Sendable {
+    let parentID: Id
+    let sourceMessageID: UUID
+    let sourceIdentifier: String
+    let timestamp: Date
+    let fullTextContent: String
     /// Text of the closest chunk — the anchor for centered injection windows.
     let bestChunkText: String
     /// Raw cosine distance of the best chunk — the pure semantic signal. Hybrid
     /// BM25 fusion reorders results but never mutates this value.
     let distance: Double
+
+    init(parent: ParentDocumentEntity, bestChunkText: String, distance: Double) {
+        self.parentID = parent.id
+        self.sourceMessageID = parent.sourceMessageID
+        self.sourceIdentifier = parent.sourceIdentifier
+        self.timestamp = parent.timestamp
+        self.fullTextContent = parent.fullTextContent
+        self.bestChunkText = bestChunkText
+        self.distance = distance
+    }
 }
 
 // MARK: - Vector Store Service
@@ -57,6 +74,39 @@ final class VectorStoreService: @unchecked Sendable {
     }
     private let backing: Backing?
 
+    /// ⚠️⚠️ EVERY write to the store goes through this lock.
+    ///
+    /// Concurrent explicit write transactions (`runInTransaction`) on one ObjectBox `Store`
+    /// DEADLOCK, nondeterministically, when they run on Swift-concurrency threads: probed
+    /// 2026-10-11 with 4 concurrent writers × 10 rounds. A bare `put` survived; `put` inside a
+    /// transaction, findIds+put, put+query-remove, and even find+put (on a rerun) all hung
+    /// forever in `obx_txn_write` with no thread holding the transaction. The same shape behind
+    /// this lock passed every run. ObjectBox admits one writer at a time anyway, so serialising
+    /// here costs no throughput — it only makes the wait deterministic. Writers (the detached
+    /// indexers, conversation delete) all run off the main thread.
+    private let writeLock = NSLock()
+
+    /// Latched by a `dbFull` write; cleared by a delete that frees space. Guarded by `writeLock`.
+    ///
+    /// ⚠️ A write that hits the cap takes ~13 s inside ObjectBox before it throws (measured
+    /// 2026-10-11, independent of the write's size) — while holding `writeLock`. Unlatched, every
+    /// later message and attachment would pay that again, and the deletes the store-full notice
+    /// asks the user for would queue behind them. Latched, they refuse instantly.
+    private var storeIsFull = false
+
+    /// Conversations deleted this session. Guarded by `writeLock`, and checked INSIDE it by every
+    /// write — so no write can land after its conversation's delete (RAG-5).
+    ///
+    /// ⚠️ The delete used to race the fire-and-forget indexers: the user-message path checked
+    /// nothing, the assistant path checked "does the conversation exist?" once and then awaited N
+    /// embeddings before writing, and attachments (the longest window, ~1k serial embeds) checked
+    /// nothing. Any of them could write a deleted conversation's text back AFTER its vectors were
+    /// removed — permanently, since nothing collected orphans. With cross-conversation search on
+    /// the roadmap, that is deleted content resurfacing. In memory is enough: a deleted
+    /// conversation can produce no new writes after relaunch, and orphans from a crash between
+    /// the two deletes are collected by `removeOrphanedConversations` at launch.
+    private var deletedConversations: Set<String> = []
+
     /// False when the vector store could not be opened. Retrieval is disabled; everything else works.
     var isAvailable: Bool { backing != nil }
     private let logger = DGLogger(category: "VectorStoreService")
@@ -67,6 +117,12 @@ final class VectorStoreService: @unchecked Sendable {
     /// L2-normalised vectors from EmbeddingService ensure cosine_distance = 1 − dot_product.
     /// Equivalent to the previous similarity threshold of 0.3 (distance ≤ 0.7 → similarity ≥ 0.3).
     private let maximumCosineDistance: Double = 0.7
+
+    /// On-disk ceiling for the vector store, in KB. ObjectBox's default is 1 GiB and at the cap
+    /// every write throws `dbFull` — so it is set explicitly, sized for years of memory (~4 KB per
+    /// chunk incl. the HNSW graph ⇒ ~1M chunks), and hitting it is handled loudly (RAG-13). LMDB
+    /// maps this much ADDRESS SPACE, not memory; the file only grows as data is written.
+    static let maxDatabaseSizeKB: UInt64 = 4 * 1024 * 1024
 
     // MARK: - Schema Versioning
 
@@ -90,14 +146,41 @@ final class VectorStoreService: @unchecked Sendable {
         case openAsIs
         /// Fresh directory: write the marker, wipe nothing.
         case stampOnly
-        /// Unreadable schema (older, unmarked, or from a NEWER build): set aside and rebuild —
-        /// the only lossy path, and it's loud.
+        /// Unreadable OLDER (or unmarked) schema: set aside and rebuild — the only lossy path, and
+        /// it's loud.
         case wipeAndStamp
+        /// A NEWER build's store: open nothing and touch nothing; retrieval is off for this launch.
+        ///
+        /// ⚠️ It used to take `wipeAndStamp` (RAG-31). A downgrade then moved the newer store to the
+        /// one `-superseded` slot and stamped an empty v1; going back to the newer build quarantined
+        /// THAT into the same slot — replacing the original store, permanently. Running an older
+        /// build must never cost the newer build its memory.
+        case leaveNewerUntouched
     }
 
-    static func schemaGateAction(markerVersion: Int?, databaseExists: Bool) -> SchemaGateAction {
-        if markerVersion == currentSchemaVersion { return .openAsIs }
+    /// - Parameter storedEmbeddingModel: the `embeddingModelFilename` record; nil when absent
+    ///   (a store from before it existed — accepted as the current model and stamped).
+    static func schemaGateAction(markerVersion: Int?, databaseExists: Bool, storedEmbeddingModel: String? = nil) -> SchemaGateAction {
+        if let markerVersion, markerVersion > currentSchemaVersion { return .leaveNewerUntouched }
+        if markerVersion == currentSchemaVersion {
+            // RAG-32: same schema, different model → incomparable vectors. Set aside, never mix.
+            if databaseExists, let stored = storedEmbeddingModel, stored != EmbeddingService.modelIdentifier {
+                return .wipeAndStamp
+            }
+            return .openAsIs
+        }
         return databaseExists ? .wipeAndStamp : .stampOnly
+    }
+
+    /// Records `EmbeddingService.modelIdentifier` beside the schema marker (RAG-32).
+    static let embeddingModelFilename = "embedding-model"
+
+    /// Thrown out of `init` for `.leaveNewerUntouched`, so the ordinary degrade path runs.
+    struct NewerSchemaOnDisk: Error, CustomStringConvertible {
+        let version: Int
+        var description: String {
+            "the vector-db was written by a NEWER build (schema v\(version), this build reads v\(VectorStoreService.currentSchemaVersion)); it is left untouched"
+        }
     }
 
     // MARK: - Initialization
@@ -158,39 +241,54 @@ final class VectorStoreService: @unchecked Sendable {
             // cannot disagree with it.
             let markerURL = appSupport.appendingPathComponent(Self.schemaMarkerFilename)
             let existingContents = (try? FileManager.default.contentsOfDirectory(atPath: appSupport.path)) ?? []
-            let databaseExists = existingContents.contains { $0 != Self.schemaMarkerFilename }
+            let modelURL = appSupport.appendingPathComponent(Self.embeddingModelFilename)
+            let databaseExists = existingContents.contains { $0 != Self.schemaMarkerFilename && $0 != Self.embeddingModelFilename }
             let markerVersion = (try? String(contentsOf: markerURL, encoding: .utf8))
                 .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let storedModel = (try? String(contentsOf: modelURL, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
-            switch Self.schemaGateAction(markerVersion: markerVersion, databaseExists: databaseExists) {
+            switch Self.schemaGateAction(markerVersion: markerVersion, databaseExists: databaseExists, storedEmbeddingModel: storedModel) {
             case .openAsIs, .stampOnly:
                 break
+            case .leaveNewerUntouched:
+                throw NewerSchemaOnDisk(version: markerVersion ?? 0)
             case .wipeAndStamp:
                 Self.quarantineSupersededStore(
                     at: appSupport,
                     previousVersion: markerVersion,
-                    logger: logger
+                    logger: logger,
+                    reason: markerVersion == Self.currentSchemaVersion
+                        ? "it was embedded by a different model ('\(storedModel ?? "?")', this build uses '\(EmbeddingService.modelIdentifier)') — its vectors are not comparable"
+                        : nil
                 )
             }
 
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true, attributes: nil)
 
+            if storedModel != EmbeddingService.modelIdentifier || markerVersion != Self.currentSchemaVersion {
+                do {
+                    try EmbeddingService.modelIdentifier.write(to: modelURL, atomically: true, encoding: .utf8)
+                } catch {
+                    logger.error("[RAG] Vector store: failed recording the embedding model (\(error.localizedDescription)). CONSEQUENCE: a later model swap could not be detected for this store, and its vectors would be mixed with incomparable ones.")
+                }
+            }
             if markerVersion != Self.currentSchemaVersion {
                 do {
                     try String(Self.currentSchemaVersion).write(to: markerURL, atomically: true, encoding: .utf8)
                 } catch {
-                    logger.error("Vector store: failed writing schema marker (\(error.localizedDescription)). CONSEQUENCE: the next launch finds a database with no marker and sets it aside as an unreadable schema, starting an empty index.")
+                    logger.error("[RAG] Vector store: failed writing schema marker (\(error.localizedDescription)). CONSEQUENCE: the next launch finds a database with no marker and sets it aside as an unreadable schema, starting an empty index.")
                 }
             }
 
-            let store = try Store(directoryPath: appSupport.path)
+            let store = try Store(directoryPath: appSupport.path, maxDbSizeInKByte: Self.maxDatabaseSizeKB)
             self.backing = Backing(
                 store: store,
                 parentBox: store.box(for: ParentDocumentEntity.self),
                 childBox: store.box(for: ChildChunkEntity.self)
             )
 
-            logger.info("VectorStoreService (HNSW) initialized. DB path: \(appSupport.path)")
+            logger.info("[RAG] Vector store open (HNSW). DB path: \(appSupport.path)")
         } catch {
             // ⚠️ DEGRADE, do not trap. This runs on the cold launch path; a `fatalError` here took
             // the whole app down — with no message, no path and no dialog — because a SECONDARY
@@ -207,6 +305,31 @@ final class VectorStoreService: @unchecked Sendable {
         }
     }
 
+    #if DEBUG
+    /// Test-only: a private store at `directory` with its own size cap — so the store-full path
+    /// (RAG-13) can be driven without filling the shared store. No schema gate, no marker.
+    init(testDirectory directory: URL, maxDatabaseSizeKB: UInt64) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = try Store(directoryPath: directory.path, maxDbSizeInKByte: maxDatabaseSizeKB)
+        self.backing = Backing(store: store,
+                               parentBox: store.box(for: ParentDocumentEntity.self),
+                               childBox: store.box(for: ChildChunkEntity.self))
+    }
+
+    /// Test-only: whether a `dbFull` has latched writes off.
+    var isLatchedFullForTesting: Bool { writeLock.withLock { storeIsFull } }
+
+    /// Test-only: the parent rows for one source in one conversation, as (id, text) — so a test can
+    /// tell WHICH copy of a source survived a replace.
+    func parentTextsForTesting(sourceIdentifier: String, conversationID: UUID) throws -> [String] {
+        guard let backing else { return [] }
+        return try backing.parentBox.query { ParentDocumentEntity.sourceIdentifier == sourceIdentifier }
+            .build().find()
+            .filter { $0.conversationID == conversationID }
+            .map(\.fullTextContent)
+    }
+    #endif
+
     /// Moves a superseded vector-db aside instead of deleting it.
     ///
     /// ⚠️ This used to be `removeItem` — an irreversible delete of semantic memory that CANNOT be
@@ -220,7 +343,7 @@ final class VectorStoreService: @unchecked Sendable {
     ///
     /// Static and side-effect-explicit so it is testable without constructing the singleton —
     /// matching `schemaGateAction`, which is pure for the same reason.
-    static func quarantineSupersededStore(at storeURL: URL, previousVersion: Int?, logger: DGLogger) {
+    static func quarantineSupersededStore(at storeURL: URL, previousVersion: Int?, logger: DGLogger, reason: String? = nil) {
         let fileManager = FileManager.default
         let supersededURL = storeURL.deletingLastPathComponent()
             .appendingPathComponent(storeURL.lastPathComponent + "-superseded", isDirectory: true)
@@ -233,9 +356,9 @@ final class VectorStoreService: @unchecked Sendable {
             if fileManager.fileExists(atPath: storeURL.path) {
                 try fileManager.moveItem(at: storeURL, to: supersededURL)
             }
+            let why = reason ?? "its schema (\(previousVersion.map(String.init) ?? "unmarked")) is not v\(currentSchemaVersion)"
             logger.warning(
-                "[RAG] On-disk vector schema (\(previousVersion.map(String.init) ?? "unmarked")) is not "
-                + "v\(currentSchemaVersion) — moved \(bytes) bytes ASIDE to "
+                "[RAG] The on-disk vector store cannot be used: \(why) — moved \(bytes) bytes ASIDE to "
                 + "\(supersededURL.lastPathComponent) and starting a fresh index. CONSEQUENCE: semantic "
                 + "recall of existing turns is gone until they are re-indexed by new activity, and "
                 + "there is no reindex-from-transcripts mechanism — but the old index is on disk, not "
@@ -268,32 +391,135 @@ final class VectorStoreService: @unchecked Sendable {
 
     // MARK: - Public API
 
-    /// Adds a semantic parent document and its associated child chunks to the vector database.
+    /// Outcome of writing one source's vectors.
+    enum WriteOutcome: Equatable {
+        case written
+        /// The store is at its size cap. Nothing changed — a replace keeps the PRIOR vectors.
+        case storeFull
+        /// The conversation was deleted this session — writing would resurrect its memory.
+        case conversationDeleted
+        case storeUnavailable
+        case failed
+    }
+
+    /// Writes one source's vectors (a message, or an attached file), REPLACING any earlier copy of
+    /// the same source in the same conversation — in ONE write transaction.
     ///
-    /// The child's `conversationID` is denormalised from the parent here so that HNSW result
-    /// post-filtering can scope by conversation without an additional relation traversal per result.
-    func addSemanticDocument(parent: ParentDocumentEntity, children: [ChildChunkEntity]) {
+    /// ⚠️ Add first, then remove. The old order (remove, then add, in separate transactions) meant
+    /// a full store deleted the source's previous vectors and stored nothing — memory loss on the
+    /// very write that failed (RAG-13). And two concurrent re-indexes of one source could both
+    /// remove, then both add, leaving duplicate parents that crowd the limit-3 slots (RAG-17).
+    /// ObjectBox serialises write transactions, so each replace now sees the other's result.
+    ///
+    /// The prior copies are found by ID ONLY (`findIds` + the indexed relation), never by loading
+    /// parents — a file parent's `fullTextContent` is the whole file.
+    @discardableResult
+    func replaceSemanticDocument(parent: ParentDocumentEntity, children: [ChildChunkEntity]) -> WriteOutcome {
+        let conversationKey = parent.conversationID.uuidString
+        let source = parent.sourceIdentifier
+        let tag = "conv \(conversationKey.prefix(8)) source \(source.isEmpty ? "(none)" : String(source.suffix(40)))"
         guard let backing else {
             logger.warning(
-                "[RAG] Skipping index of \(children.count) chunk(s) for conversation "
-                + "\(parent.conversationID.uuidString.prefix(8)): the vector store is unavailable. "
+                "[RAG] Skipping index of \(children.count) chunk(s) for \(tag): the vector store is unavailable. "
                 + "CONSEQUENCE: this content will not be retrievable by semantic search, and there is "
                 + "no reindex-from-transcripts mechanism, so it stays unindexed until it is written "
                 + "again on a launch where the store opens."
             )
-            return
+            return .storeUnavailable
         }
-        let childBox = backing.childBox
+        for child in children {
+            child.parentDocument.target = parent
+            child.conversationID = conversationKey
+        }
+        enum Gate { case full, deleted, written(parents: Int, chunks: UInt64) }
         do {
-            let convIDString = parent.conversationID.uuidString
-            for child in children {
-                child.parentDocument.target = parent
-                child.conversationID = convIDString
+            // ONE lock acquisition decides and writes: the full latch, the tombstone and the
+            // transaction cannot be separated by a delete.
+            let gate: Gate = try writeLock.withLock {
+                if storeIsFull { return .full }
+                if deletedConversations.contains(conversationKey) { return .deleted }
+                let replaced: (parents: Int, chunks: UInt64) = try backing.store.runInTransaction {
+                // Prior copies of THIS source in THIS conversation — ids only.
+                var priorParentIDs: [EntityId<ParentDocumentEntity>] = []
+                if !source.isEmpty {
+                    let sameSource = try backing.parentBox.query {
+                        ParentDocumentEntity.sourceIdentifier == source
+                    }.build().findIds()
+                    if !sameSource.isEmpty {
+                        let priorChunks = try backing.childBox.query {
+                            ChildChunkEntity.conversationID == conversationKey
+                                && Self.parentRelation.isIn(sameSource.map(\.value))
+                        }.build().find()
+                        priorParentIDs = Array(Set(priorChunks.compactMap { $0.parentDocument.targetId }))
+                    }
+                }
+                try backing.childBox.put(children)
+                guard !priorParentIDs.isEmpty else { return (0, 0) }
+                let removedChunks = try backing.childBox.query {
+                    Self.parentRelation.isIn(priorParentIDs.map(\.value))
+                }.build().remove()
+                try backing.parentBox.remove(priorParentIDs)
+                return (priorParentIDs.count, removedChunks)
+                }
+                return .written(parents: replaced.parents, chunks: replaced.chunks)
             }
-            try childBox.put(children)
-            logger.debug("Indexed \(children.count) HNSW child chunks for parent \(parent.sourceMessageID.uuidString).")
+            let replaced: (parents: Int, chunks: UInt64)
+            switch gate {
+            case .full:
+                logger.warning(
+                    "[RAG] Vector store is FULL — \(children.count) chunk(s) for \(tag) refused without a write attempt. "
+                    + "CONSEQUENCE: this content is not searchable; deleting conversations frees space and re-enables indexing."
+                )
+                return .storeFull
+            case .deleted:
+                logger.notice(
+                    "[RAG] Not indexing \(children.count) chunk(s) for \(tag): the conversation was DELETED this session. "
+                    + "CONSEQUENCE: none — its memory stays deleted (this write raced the delete and lost, as it must)."
+                )
+                return .conversationDeleted
+            case .written(let parents, let chunks):
+                replaced = (parents, chunks)
+            }
+            logger.debug("[RAG] Indexed \(children.count) chunk(s) for \(tag)\(replaced.parents > 0 ? " — replaced \(replaced.parents) prior copy(ies), \(replaced.chunks) chunk(s)" : "").")
+            return .written
+        } catch ObjectBoxError.dbFull(let message) {
+            writeLock.withLock { storeIsFull = true }
+            logger.error(
+                "[RAG] Vector store FULL (cap \(Self.maxDatabaseSizeKB / 1024) MB) — \(children.count) chunk(s) for \(tag) NOT written: \(message). "
+                + "CONSEQUENCE: new conversation memory and attachments are no longer searchable until space is freed; "
+                + "the source's PREVIOUS vectors were kept (the replace is one transaction)."
+            )
+            Self.adviseStoreFull(conversationID: parent.conversationID)
+            return .storeFull
         } catch {
-            logger.error("Failed to add semantic document to vector store: \(error.localizedDescription)")
+            logger.error(
+                "[RAG] Failed to index \(children.count) chunk(s) for \(tag): \(error.localizedDescription). "
+                + "CONSEQUENCE: this content is not retrievable by semantic search; the source's previous "
+                + "vectors, if any, were kept (the replace is one transaction)."
+            )
+            return .failed
+        }
+    }
+
+    /// The chunk→parent relation as a QUERY property. Typed explicitly: inside a query closure
+    /// `ChildChunkEntity.parentDocument` resolves to the instance `ToOne`, not the generated
+    /// static property of the same name.
+    private static var parentRelation: Property<ChildChunkEntity, Id, ParentDocumentEntity> {
+        Property<ChildChunkEntity, Id, ParentDocumentEntity>.parentDocument
+    }
+
+    /// The store-full notice. Process-wide condition, surfaced in the conversation that hit it.
+    private static func adviseStoreFull(conversationID: UUID) {
+        Task { @MainActor in
+            AdvisoryCenter.shared.post(Advisory(
+                conversationID: conversationID,
+                category: .knowledgeStoreFull,
+                message: "Conversation memory is full — new messages and attached files are no longer "
+                    + "being added to search. Delete old conversations to free space.",
+                actionLabel: "Show Index",
+                action: .revealInFinder(path: VectorStoreService.storeDirectoryPath),
+                dedupeKey: "\(conversationID.uuidString)|knowledgeStoreFull"
+            ))
         }
     }
 
@@ -308,13 +534,12 @@ final class VectorStoreService: @unchecked Sendable {
     ///   - queryEmbedding: L2-normalised 384-D vector from `EmbeddingService`.
     ///   - limit: Maximum number of unique parent documents to return.
     ///   - conversationID: If set, only chunks belonging to this conversation are considered.
-    ///   - excludedParentMessageIDs: Parents with these sourceMessageIDs are skipped
-    ///     DURING collection — they must not occupy limit slots. Post-filtering after
-    ///     the cap starved a real turn to zero injected documents while an injectable
-    ///     file chunk sat at rank 4: history ranks high precisely because BM25 loves
-    ///     the query's own recent phrasing.
+    ///   - exclusion: Parents skipped DURING collection — they must not occupy limit
+    ///     slots. Post-filtering after the cap starved a real turn to zero injected
+    ///     documents while an injectable file chunk sat at rank 4: history ranks high
+    ///     precisely because BM25 loves the query's own recent phrasing.
     /// - Returns: Relevant `ParentDocumentEntity` objects, ordered by semantic proximity.
-    func findNearest(to queryEmbedding: [Float], queryText: String? = nil, limit: Int, conversationID: UUID?, excludedParentMessageIDs: Set<UUID> = []) -> [RetrievedDocument] {
+    func findNearest(to queryEmbedding: [Float], queryText: String? = nil, limit: Int, conversationID: UUID?, exclusion: RetrievalExclusion = .none) -> [RetrievedDocument] {
         // Conversation-scoped retrieval (the only production path) uses an EXACT scan
         // over the conversation's own chunks, NOT the HNSW index. ObjectBox applies
         // property conditions AFTER `nearestNeighbors` selects its maxCount candidates
@@ -324,7 +549,7 @@ final class VectorStoreService: @unchecked Sendable {
         // count is small (hundreds to low thousands), so the exact scan is fast, immune
         // to crowding by construction, and skips HNSW's approximation error.
         if let convID = conversationID {
-            return findNearestInConversation(queryEmbedding: queryEmbedding, queryText: queryText, limit: limit, conversationID: convID, excludedParentMessageIDs: excludedParentMessageIDs)
+            return findNearestInConversation(queryEmbedding: queryEmbedding, queryText: queryText, limit: limit, conversationID: convID, exclusion: exclusion)
         }
 
         guard let backing else {
@@ -354,7 +579,7 @@ final class VectorStoreService: @unchecked Sendable {
             let results: [ObjectWithScore<ChildChunkEntity>] = try query.findWithScores()
 
             if results.isEmpty {
-                logger.debug("HNSW search returned no candidates.")
+                logger.debug("[RAG] HNSW search returned no candidates.")
                 return []
             }
 
@@ -369,19 +594,19 @@ final class VectorStoreService: @unchecked Sendable {
                 // every subsequent result will also fail.
                 guard result.score <= maximumCosineDistance else { break }
 
-                if let parent = result.object.parentDocument.target, !seenParentIDs.contains(parent.id) {
-                    seenParentIDs.insert(parent.id)
-                    guard !excludedParentMessageIDs.contains(parent.sourceMessageID) else { continue }
-                    hits.append(RetrievedDocument(parent: parent, bestChunkText: result.object.chunkText, distance: result.score))
-                    scoresSummary.append(String(format: "d=%.3f", result.score))
-                }
+                guard let parentID = result.object.parentDocument.targetId?.value,
+                      seenParentIDs.insert(parentID).inserted,
+                      let parent = result.object.parentDocument.target,
+                      !exclusion.excludes(parent) else { continue }
+                hits.append(RetrievedDocument(parent: parent, bestChunkText: result.object.chunkText, distance: result.score))
+                scoresSummary.append(String(format: "d=%.3f", result.score))
             }
 
-            logger.info("HNSW: \(hits.count) documents retrieved ([\(scoresSummary.joined(separator: ", "))], maxDist: \(self.maximumCosineDistance)).")
+            logger.info("[RAG] HNSW: \(hits.count) documents retrieved ([\(scoresSummary.joined(separator: ", "))], maxDist: \(self.maximumCosineDistance)).")
             return hits
 
         } catch {
-            logger.error("HNSW vector search failed: \(error.localizedDescription)")
+            logger.error("[RAG] HNSW vector search failed: \(error.localizedDescription). CONSEQUENCE: this search returns nothing.")
             return []
         }
     }
@@ -389,7 +614,7 @@ final class VectorStoreService: @unchecked Sendable {
     /// Exact conversation-scoped search: fetch the conversation's chunks via the
     /// denormalised String key (an indexed property query, no vector work in the
     /// engine), then rank them in Swift. See `findNearest` for why this is NOT HNSW.
-    private func findNearestInConversation(queryEmbedding: [Float], queryText: String?, limit: Int, conversationID: UUID, excludedParentMessageIDs: Set<UUID>) -> [RetrievedDocument] {
+    private func findNearestInConversation(queryEmbedding: [Float], queryText: String?, limit: Int, conversationID: UUID, exclusion: RetrievalExclusion) -> [RetrievedDocument] {
         guard let backing else { return [] }   // `findNearest` already logged the outage once.
         let childBox = backing.childBox
         do {
@@ -397,8 +622,19 @@ final class VectorStoreService: @unchecked Sendable {
                 ChildChunkEntity.conversationID == conversationID.uuidString
             }.build().find()
 
+            // ⚠️ CR-29: this scan (fetch + dense + BM25 + RRF) is synchronous and grows with the
+            // conversation — measured at 1.6 s for one large attachment. On the main thread it
+            // freezes the UI for every send; the send path calls it from a nonisolated context.
+            let onMainThread = Thread.isMainThread
+            if onMainThread {
+                logger.warning("[RAG] Conversation-memory scan ran on the MAIN thread — conv \(conversationID.uuidString.prefix(8)), \(chunks.count) chunk(s). CONSEQUENCE: the UI is frozen for the whole scan. Call `findNearest` from a nonisolated context.")
+            }
+            #if DEBUG
+            Self.scanThreadObserver?(onMainThread)
+            #endif
+
             guard !chunks.isEmpty else {
-                logger.debug("Scoped search: conversation has no indexed chunks.")
+                logger.debug("[RAG] Conversation \(conversationID.uuidString.prefix(8)) has no indexed chunks.")
                 return []
             }
 
@@ -408,15 +644,28 @@ final class VectorStoreService: @unchecked Sendable {
                 queryText: queryText,
                 limit: limit,
                 maximumDistance: maximumCosineDistance,
-                excludedSourceMessageIDs: excludedParentMessageIDs
+                exclusion: exclusion
             )
-            logger.info("Scoped scan: \(hits.count) documents from \(chunks.count) conversation chunks (maxDist: \(self.maximumCosineDistance)).")
+            logger.info("[RAG] Scoped scan (conv \(conversationID.uuidString.prefix(8))): \(hits.count) document(s) from \(chunks.count) chunk(s) (maxDist: \(self.maximumCosineDistance)).")
             return hits
         } catch {
-            logger.error("Scoped vector search failed: \(error.localizedDescription)")
+            logger.error("[RAG] Scoped scan FAILED (conv \(conversationID.uuidString.prefix(8))): \(error.localizedDescription). CONSEQUENCE: no conversation memory this turn; the request goes out without it.")
             return []
         }
     }
+
+    #if DEBUG
+    /// Test-only totals, so a test can prove a delete removed PARENTS too — not just the chunks a
+    /// conversation-scoped search would show.
+    func documentCountsForTesting() throws -> (parents: Int, chunks: Int) {
+        guard let backing else { return (0, 0) }
+        return (try backing.parentBox.count(), try backing.childBox.count())
+    }
+
+    /// Test hook: called with `Thread.isMainThread` for every conversation-scoped scan, so a test
+    /// can prove the send path keeps the scan off the main thread (CR-29).
+    nonisolated(unsafe) static var scanThreadObserver: (@Sendable (_ onMainThread: Bool) -> Void)?
+    #endif
 
     // MARK: - Ranking (hybrid: dense + BM25, fused by rank)
 
@@ -456,7 +705,8 @@ final class VectorStoreService: @unchecked Sendable {
         queryText: String? = nil,
         limit: Int,
         maximumDistance: Double,
-        excludedSourceMessageIDs: Set<UUID> = []
+        exclusion: RetrievalExclusion = .none,
+        resolveParent: (ChildChunkEntity) -> ParentDocumentEntity? = { $0.parentDocument.target }
     ) -> [RetrievedDocument] {
         // Dense engine — always on.
         var candidates: [(chunk: ChildChunkEntity, distance: Double)] = []
@@ -471,7 +721,7 @@ final class VectorStoreService: @unchecked Sendable {
         let query = queryText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let lexical = query.isEmpty
             ? (scores: [Double](repeating: 0, count: candidates.count), distinctive: false)
-            : bm25Analysis(queryText: query, chunkTexts: candidates.map { $0.chunk.chunkText })
+            : bm25Analysis(queryText: query, documents: candidates.map { bm25Document(stored: $0.chunk) })
 
         let ordered: [(index: Int, distance: Double, bm25: Double)]
         if lexical.distinctive {
@@ -490,78 +740,158 @@ final class VectorStoreService: @unchecked Sendable {
         let identifierWords = lexical.distinctive ? lexicalTokens(from: query).filter(isIdentifierLike) : []
 
         var hits: [RetrievedDocument] = []
-        var seenParentIDs: Set<Id> = []
+        // Every parent is DECIDED once — accepted or rejected — and keyed by id. Resolving
+        // `parentDocument.target` decodes the parent's whole `fullTextContent` (a file parent is
+        // the entire file), and each chunk holds its own `ToOne`, so the old resolve-then-check
+        // decoded the same multi-MB parent once per candidate: 1.3 s of a 1.6 s send with one
+        // large attachment, because history exclusion kept the loop from ever filling `limit`.
+        var decidedParentIDs: Set<Id> = []
         for entry in ordered {
             guard hits.count < limit else { break }
             let candidate = candidates[entry.index]
             if candidate.distance > maximumDistance {
+                // Dense-only order is ascending by distance and has no exception lane, so
+                // nothing after the first past-threshold candidate can pass either.
+                guard lexical.distinctive else { break }
                 guard !identifierWords.isEmpty,
                       lexicalBoost(tokens: identifierWords, chunkText: candidate.chunk.chunkText) >= 0.7
                 else { continue }
             }
-            if let parent = candidate.chunk.parentDocument.target, !seenParentIDs.contains(parent.id) {
-                seenParentIDs.insert(parent.id)
-                // Excluded (history/self) parents are skipped HERE, before they
-                // can claim a limit slot — post-filtering after the cap let the
-                // query's own echo + prior turns fill all three slots while the
-                // injectable file chunk sat at rank 4 (2026-07-13 comparison log).
-                guard !excludedSourceMessageIDs.contains(parent.sourceMessageID) else { continue }
-                hits.append(RetrievedDocument(parent: parent, bestChunkText: candidate.chunk.chunkText, distance: candidate.distance))
-            }
+            guard let parentID = candidate.chunk.parentDocument.targetId?.value,
+                  decidedParentIDs.insert(parentID).inserted,
+                  let parent = resolveParent(candidate.chunk) else { continue }
+            // Excluded parents (carried in full / this turn's files / after a Redo
+            // boundary) are skipped HERE, before they can claim a limit slot —
+            // post-filtering after the cap let the query's own echo + prior turns
+            // fill all three slots while the injectable file chunk sat at rank 4
+            // (2026-07-13 comparison log).
+            guard !exclusion.excludes(parent) else { continue }
+            hits.append(RetrievedDocument(parent: parent, bestChunkText: candidate.chunk.chunkText, distance: candidate.distance))
         }
         return hits
     }
 
+    /// A chunk's BM25 view: its tokens space-delimited with a leading and trailing space (so a
+    /// whole-token match is the byte search `" term "`), and its token count.
+    struct BM25Document: Sendable, Equatable {
+        let terms: String
+        let length: Int
+    }
+
+    /// Tokenises once — at chunk construction (`ChildChunkEntity.bm25Terms`), not per send.
+    static func bm25Document(for text: String) -> BM25Document {
+        let tokens = bm25Tokens(from: text)
+        return BM25Document(terms: tokens.isEmpty ? "" : " " + tokens.joined(separator: " ") + " ",
+                            length: tokens.count)
+    }
+
+    /// The stored view, or — for a row written before `bm25Terms` existed — one computed now.
+    static func bm25Document(stored chunk: ChildChunkEntity) -> BM25Document {
+        if chunk.bm25Terms.isEmpty, !chunk.chunkText.isEmpty { return bm25Document(for: chunk.chunkText) }
+        return BM25Document(terms: chunk.bm25Terms, length: chunk.bm25Length)
+    }
+
     /// BM25 scores for each chunk against the query, plus the fusion-router
     /// verdict. Document frequencies are computed over the SAME candidate set
-    /// being ranked — at conversation scale (hundreds of chunks) this costs
-    /// ~a millisecond and needs no persisted term statistics.
+    /// being ranked, so no corpus statistics are persisted.
     ///
     /// Router: the query has distinctive lexical signal when at least one query
     /// word actually occurs in the corpus AND is either identifier-like or rare
     /// (in ≤ 25% of chunks). "Rare" covers the chat case — proper nouns and
     /// codenames — that isIdentifierLike's shape rules can't see.
     static func bm25Analysis(queryText: String, chunkTexts: [String]) -> (scores: [Double], distinctive: Bool) {
-        let chunkTermFrequencies: [[String: Int]] = chunkTexts.map { text in
-            var frequencies: [String: Int] = [:]
-            for token in bm25Tokens(from: text) { frequencies[token, default: 0] += 1 }
-            return frequencies
-        }
-        var documentFrequency: [String: Int] = [:]
-        for frequencies in chunkTermFrequencies {
-            for term in frequencies.keys { documentFrequency[term, default: 0] += 1 }
-        }
-        let chunkLengths = chunkTermFrequencies.map { Double($0.values.reduce(0, +)) }
-        let corpusSize = Double(chunkTexts.count)
-        let averageLength = max(1.0, chunkLengths.reduce(0, +) / corpusSize)
+        bm25Analysis(queryText: queryText, documents: chunkTexts.map(bm25Document(for:)))
+    }
+
+    /// ⚠️ Counts only the QUERY's terms in each chunk (RAG-40). BM25 needs nothing else: a query
+    /// term's frequency per chunk, its document frequency, and chunk lengths. Building a full
+    /// term-frequency map of every chunk on every send cost ~58 µs/chunk; a few byte searches
+    /// over pre-tokenised text cost a fraction of that. Scores are IDENTICAL to the tokenising
+    /// version (pinned by `testStoredTermsScoreExactlyLikeTokenisingEveryChunk`).
+    static func bm25Analysis(queryText: String, documents: [BM25Document]) -> (scores: [Double], distinctive: Bool) {
+        var scores = [Double](repeating: 0, count: documents.count)
+        guard !documents.isEmpty else { return (scores, false) }
 
         let queryTokens = Set(bm25Tokens(from: queryText)).sorted()
-        var scores = [Double](repeating: 0, count: chunkTexts.count)
-        guard !queryTokens.isEmpty else { return (scores, false) }
+        let routerWords = lexicalTokens(from: queryText)
+        // Every term whose frequencies are needed: the scored tokens and the router's words.
+        let terms = Array(Set(queryTokens).union(routerWords.map { $0.lowercased() }))
+        let needles = terms.map { Array(" \($0) ".utf8) }
 
-        var inverseDocumentFrequency: [String: Double] = [:]
-        for term in queryTokens {
-            guard let df = documentFrequency[term] else { continue }
-            inverseDocumentFrequency[term] = log(1.0 + (corpusSize - Double(df) + 0.5) / (Double(df) + 0.5))
-        }
-
-        for (index, frequencies) in chunkTermFrequencies.enumerated() {
-            guard chunkLengths[index] > 0 else { continue }
-            let lengthNorm = 1.0 - bm25B + bm25B * chunkLengths[index] / averageLength
-            var score = 0.0
-            for term in queryTokens {
-                guard let occurrences = frequencies[term], let idf = inverseDocumentFrequency[term] else { continue }
-                let frequency = Double(occurrences)
-                score += idf * (frequency * (bm25K1 + 1.0)) / (frequency + bm25K1 * lengthNorm)
+        // frequencies[d][t] = occurrences of terms[t] in documents[d]
+        var frequencies = [[Int]](repeating: [Int](repeating: 0, count: terms.count), count: documents.count)
+        var documentFrequency = [Int](repeating: 0, count: terms.count)
+        for (d, document) in documents.enumerated() where document.length > 0 {
+            var haystack = document.terms
+            haystack.withUTF8 { bytes in
+                for (t, needle) in needles.enumerated() {
+                    let count = occurrences(of: needle, in: bytes)
+                    frequencies[d][t] = count
+                    if count > 0 { documentFrequency[t] += 1 }
+                }
             }
-            scores[index] = score
         }
 
-        let distinctive = lexicalTokens(from: queryText).contains { word in
-            guard let df = documentFrequency[word.lowercased()], df >= 1 else { return false }
-            return isIdentifierLike(word) || 4 * df <= max(4, chunkTexts.count)
+        let corpusSize = Double(documents.count)
+        let averageLength = max(1.0, Double(documents.reduce(0) { $0 + $1.length }) / corpusSize)
+        let termIndex = Dictionary(uniqueKeysWithValues: terms.enumerated().map { ($1, $0) })
+
+        if !queryTokens.isEmpty {
+            var idf: [Int: Double] = [:]
+            for term in queryTokens {
+                let t = termIndex[term]!
+                guard documentFrequency[t] > 0 else { continue }
+                let df = Double(documentFrequency[t])
+                idf[t] = log(1.0 + (corpusSize - df + 0.5) / (df + 0.5))
+            }
+            for (d, document) in documents.enumerated() where document.length > 0 {
+                let lengthNorm = 1.0 - bm25B + bm25B * Double(document.length) / averageLength
+                var score = 0.0
+                for term in queryTokens {
+                    let t = termIndex[term]!
+                    guard let weight = idf[t], frequencies[d][t] > 0 else { continue }
+                    let frequency = Double(frequencies[d][t])
+                    score += weight * (frequency * (bm25K1 + 1.0)) / (frequency + bm25K1 * lengthNorm)
+                }
+                scores[d] = score
+            }
+        }
+
+        let distinctive = routerWords.contains { word in
+            guard let t = termIndex[word.lowercased()] else { return false }
+            let df = documentFrequency[t]
+            return df >= 1 && (isIdentifierLike(word) || isRare(documentFrequency: df, corpusSize: documents.count))
         }
         return (scores, distinctive)
+    }
+
+    /// Fewest chunks for which "in ≤ 25% of them" means anything (RAG-34). Below this, EVERY word
+    /// in one chunk was "rare" (`max(4, n)` made df = 1 qualify), so filler words switched fusion
+    /// on in small conversations. Identifier-like tokens still fuse at any size.
+    static let minimumCorpusForRarity = 8
+
+    static func isRare(documentFrequency df: Int, corpusSize: Int) -> Bool {
+        corpusSize >= minimumCorpusForRarity && 4 * df <= corpusSize
+    }
+
+    /// Non-overlapping-safe count of `needle` (`" term "`) in `haystack`. Consecutive tokens
+    /// share a delimiter (`" a a "` holds `" a "` twice), so the search resumes ON the match's
+    /// trailing space.
+    static func occurrences(of needle: [UInt8], in haystack: UnsafeBufferPointer<UInt8>) -> Int {
+        guard let base = haystack.baseAddress, needle.count > 0, haystack.count >= needle.count else { return 0 }
+        return needle.withUnsafeBytes { (needleBytes: UnsafeRawBufferPointer) -> Int in
+            let start = UnsafeRawPointer(base)
+            var count = 0
+            var offset = 0
+            while offset <= haystack.count - needle.count {
+                guard let hit = memmem(start + offset, haystack.count - offset,
+                                       needleBytes.baseAddress, needle.count) else { break }
+                count += 1
+                let matchAt: Int = start.distance(to: UnsafeRawPointer(hit))
+                offset = matchAt + needle.count - 1
+            }
+            return count
+        }
     }
 
     /// Lowercased BM25 token stream: whole words (split on non-identifier chars)
@@ -686,6 +1016,68 @@ final class VectorStoreService: @unchecked Sendable {
 
     // MARK: - Deletion (store hygiene)
 
+    /// Removes one conversation's chunks and their parents. Call inside a write transaction.
+    private static func removeRows(ofConversation key: String, childBox: Box<ChildChunkEntity>,
+                                   parentBox: Box<ParentDocumentEntity>) throws -> (chunks: UInt64, parents: UInt64) {
+        let childQuery = try childBox.query { ChildChunkEntity.conversationID == key }.build()
+        // Derive parents from the denormalised children — parent.conversationID is a converted
+        // UUID (stored as String), so going through the plain-String child key avoids querying
+        // across the converter.
+        let children = try childQuery.find()
+        guard !children.isEmpty else { return (0, 0) }
+        // Parent IDS, never parents: `target` decodes each parent's whole text, once per chunk —
+        // 32 s for a conversation holding three large files (RAG-8).
+        let parentIDs = Set(children.compactMap { $0.parentDocument.targetId?.value })
+        let removedChildren = try childQuery.remove()
+        let removedParents = try parentBox.remove(Array(parentIDs))
+        return (removedChildren, removedParents)
+    }
+
+    /// Removes conversation memory whose conversation no longer exists — left by a crash between
+    /// the SwiftData delete and this store's, or by a write that raced a delete before tombstones
+    /// existed (RAG-5). Destructive: the launch sweep runs it only when the schema is unchanged.
+    ///
+    /// ⚠️ An EMPTY `liveConversationIDs` is refused, not obeyed: "no conversations exist" is far
+    /// more likely to be a store that did not load than a user who deleted everything — and obeying
+    /// it would erase every conversation's memory. (Deletes clean up after themselves; this sweep
+    /// only collects strays.)
+    /// - Returns: the number of orphaned conversations removed.
+    @discardableResult
+    func removeOrphanedConversations(liveConversationIDs: Set<UUID>) -> Int {
+        guard let backing else { return 0 }
+        guard !liveConversationIDs.isEmpty else {
+            logger.warning("[RAG] Orphan sweep SKIPPED — the conversation list is empty. CONSEQUENCE: none now; vectors of conversations deleted without cleanup (if any) stay on disk until a launch that sees at least one conversation.")
+            return 0
+        }
+        let live = Set(liveConversationIDs.map(\.uuidString))
+        do {
+            let swept: (conversations: Int, chunks: UInt64, parents: UInt64) = try writeLock.withLock {
+                try backing.store.runInTransaction {
+                    let stored = try backing.childBox.query().build()
+                        .property(ChildChunkEntity.conversationID).distinct().findStrings()
+                    let orphans = stored.filter { !live.contains($0) }
+                    var chunks: UInt64 = 0, parents: UInt64 = 0
+                    for key in orphans {
+                        deletedConversations.insert(key)
+                        let removed = try Self.removeRows(ofConversation: key, childBox: backing.childBox, parentBox: backing.parentBox)
+                        chunks += removed.chunks
+                        parents += removed.parents
+                    }
+                    return (orphans.count, chunks, parents)
+                }
+            }
+            if swept.conversations > 0 {
+                logger.notice("[RAG] Orphan sweep removed memory of \(swept.conversations) deleted conversation(s): \(swept.chunks) chunk(s), \(swept.parents) parent(s). CONSEQUENCE: their content can no longer be retrieved by any search.")
+            } else {
+                logger.info("[RAG] Orphan sweep: every indexed conversation still exists (\(live.count) live).")
+            }
+            return swept.conversations
+        } catch {
+            logger.error("[RAG] Orphan sweep FAILED: \(error.localizedDescription). CONSEQUENCE: memory of deleted conversations, if any, stays on disk until the next sweep.")
+            return 0
+        }
+    }
+
     /// Deletes ALL vector data belonging to a conversation — child chunks and their
     /// parent documents. Called when the conversation itself is deleted, so its
     /// memory dies with it. (Before this API the store was append-only: orphaned
@@ -704,74 +1096,29 @@ final class VectorStoreService: @unchecked Sendable {
         let parentBox = backing.parentBox
         do {
             let convIDString = conversationID.uuidString
-            let childQuery = try childBox.query {
-                ChildChunkEntity.conversationID == convIDString
-            }.build()
-
-            // Derive parents from the denormalised children — parent.conversationID is
-            // a converted UUID (stored as String), so going through the plain-String
-            // child key avoids querying across the converter.
-            let children = try childQuery.find()
-            guard !children.isEmpty else { return }
-
-            var parentsByID: [Id: ParentDocumentEntity] = [:]
-            for child in children {
-                if let parent = child.parentDocument.target {
-                    parentsByID[parent.id] = parent
+            // One transaction, behind the write lock (see `writeLock`): a delete racing an
+            // indexer is exactly the concurrent-writer shape that deadlocked.
+            let removed: (chunks: UInt64, parents: UInt64) = try writeLock.withLock {
+                // Tombstone FIRST, under the same lock every write checks (RAG-5).
+                deletedConversations.insert(convIDString)
+                return try backing.store.runInTransaction {
+                    try Self.removeRows(ofConversation: convIDString, childBox: childBox, parentBox: parentBox)
                 }
             }
-
-            let removedChildren = try childQuery.remove()
-            try parentBox.remove(Array(parentsByID.values))
-            logger.info("Vector cleanup: removed \(removedChildren) chunks + \(parentsByID.count) parents for conversation \(convIDString).")
-        } catch {
-            logger.error("Vector cleanup failed for conversation \(conversationID.uuidString): \(error.localizedDescription)")
-        }
-    }
-
-    /// Deletes prior index entries for one source (a file path or message UUID) within
-    /// a conversation — the replace-on-reindex primitive. Re-attaching a file or
-    /// re-finalizing a message calls this before `addSemanticDocument`, so the same
-    /// content never accumulates duplicate vectors that crowd the retrieval slots.
-    /// Rows written before `sourceIdentifier` existed carry "" and are never matched.
-    func removeDocuments(sourceIdentifier: String, conversationID: UUID) {
-        guard !sourceIdentifier.isEmpty else { return }
-        guard let backing else {
-            logger.warning(
-                "[RAG] Cannot remove indexed documents for source '\(sourceIdentifier)': the vector "
-                + "store is unavailable. CONSEQUENCE: stale vectors for this source remain on disk and "
-                + "can still be retrieved on a launch where the store opens."
-            )
-            return
-        }
-        let childBox = backing.childBox
-        let parentBox = backing.parentBox
-        do {
-            let matchingParents = try parentBox.query {
-                ParentDocumentEntity.sourceIdentifier == sourceIdentifier
-            }.build().find()
-                .filter { $0.conversationID == conversationID }
-            guard !matchingParents.isEmpty else { return }
-
-            let parentIDs = Set(matchingParents.map(\.id))
-
-            // Children carry the conversation key (plain String) — fetch the
-            // conversation's chunks once and drop those pointing at the doomed parents.
-            let conversationChildren = try childBox.query {
-                ChildChunkEntity.conversationID == conversationID.uuidString
-            }.build().find()
-            let doomedChildren = conversationChildren.filter { child in
-                guard let parent = child.parentDocument.target else { return false }
-                return parentIDs.contains(parent.id)
+            guard removed.chunks > 0 else { return }
+            let wasFull = writeLock.withLock { () -> Bool in
+                defer { storeIsFull = false }
+                return storeIsFull
             }
-
-            try childBox.remove(doomedChildren)
-            try parentBox.remove(matchingParents)
-            logger.debug("Replace-on-reindex: removed \(matchingParents.count) prior parent(s) + \(doomedChildren.count) chunk(s) for source '\(sourceIdentifier)'.")
+            if wasFull {
+                logger.notice("[RAG] Vector store had been FULL — a conversation delete freed space, so indexing is re-enabled. (conv \(convIDString.prefix(8)))")
+            }
+            logger.info("[RAG] Deleted conversation memory (conv \(convIDString.prefix(8))): \(removed.chunks) chunk(s) + \(removed.parents) parent(s).")
         } catch {
-            logger.error("Replace-on-reindex removal failed for '\(sourceIdentifier)': \(error.localizedDescription)")
+            logger.error("[RAG] Deleting conversation memory FAILED (conv \(conversationID.uuidString.prefix(8))): \(error.localizedDescription). CONSEQUENCE: its vectors stay on disk — the next launch's orphan sweep removes them once the conversation itself is gone; it is tombstoned, so nothing new is written for it this launch.")
         }
     }
+
 }
 
 /// Failures resolving the vector store's location, before ObjectBox is involved.

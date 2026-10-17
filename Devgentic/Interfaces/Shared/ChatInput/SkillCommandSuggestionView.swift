@@ -20,6 +20,9 @@ import SwiftUI
 struct SkillCommandSuggestionView: View {
 
     let items: [SkillCommandItem]
+    /// Names several linked skills share — said here, because a collision removes the choice the
+    /// list would otherwise appear to offer. See `SkillCommandOffer.collisionNotes`.
+    var collisionNotes: [String] = []
     let query: String
     @Binding var selectedItemID: String?
     let onSelect: (SkillCommandItem) -> Void
@@ -53,36 +56,56 @@ struct SkillCommandSuggestionView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8))
         } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(items) { item in
-                            Button { onSelect(item) } label: { row(item) }
-                                .buttonStyle(.plain)
-                                .id(item.id)
-                                .onHover { hovering in
-                                    withAnimation(.easeInOut(duration: 0.1)) {
-                                        hoveredItemID = hovering ? item.id : nil
-                                    }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(collisionNotes, id: \.self) { note in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.orange)
+                        Text(note)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8))
+                }
+                list
+            }
+        }
+    }
+
+    private var list: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(items) { item in
+                        Button { onSelect(item) } label: { row(item) }
+                            .buttonStyle(.plain)
+                            .id(item.id)
+                            .onHover { hovering in
+                                withAnimation(.easeInOut(duration: 0.1)) {
+                                    hoveredItemID = hovering ? item.id : nil
                                 }
-                            if items.last?.id != item.id {
-                                Divider().padding(.leading, 40)
                             }
+                        if items.last?.id != item.id {
+                            Divider().padding(.leading, 40)
                         }
                     }
                 }
-                .frame(maxHeight: min(CGFloat(items.count) * rowHeight, maxListHeight))
-                .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(theme.secondaryText.opacity(0.15), lineWidth: 1)
-                )
-                // Keyboard selection has to drag the list with it, or arrowing past the visible
-                // rows moves an invisible cursor.
-                .onChange(of: selectedItemID) { _, new in
-                    guard let new else { return }
-                    withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(new, anchor: .center) }
-                }
+            }
+            .frame(maxHeight: min(CGFloat(items.count) * rowHeight, maxListHeight))
+            .background(theme.secondaryBackground, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(theme.secondaryText.opacity(0.15), lineWidth: 1)
+            )
+            // Keyboard selection has to drag the list with it, or arrowing past the visible
+            // rows moves an invisible cursor.
+            .onChange(of: selectedItemID) { _, new in
+                guard let new else { return }
+                withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(new, anchor: .center) }
             }
         }
     }

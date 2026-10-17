@@ -245,9 +245,12 @@ final class CheckpointAwareFormatterTests: XCTestCase {
 
         let tool = ConversationHistoryTool(chatHistory: history)
 
-        // The tool should have 4 turn records (2 pre-checkpoint + 2 post-checkpoint)
-        // Checkpoint message itself should NOT create a turn record
-        XCTAssertEqual(tool.turnRecords.count, 4, "Checkpoint messages should be filtered out of turn records")
+        // ⚠️ CORRECTED 2026-10-10 (readiness CR-11). This asserted 4 records — the 2 COMPACTED turns
+        // plus the 2 live ones — which is the defect itself: the skeleton numbers only the turns after
+        // the checkpoint (see the formatter tests above, which exclude "Old query …"), so the tool's
+        // extra leading records shifted every index onto a compacted turn. The tool now holds exactly
+        // the turns the skeleton numbers; compacted turns are represented by the checkpoint summary.
+        XCTAssertEqual(tool.turnRecords.count, 2, "the tool must hold exactly the turns the skeleton numbers")
 
         // Verify no turn record contains checkpoint content
         for record in tool.turnRecords {
@@ -260,9 +263,11 @@ final class CheckpointAwareFormatterTests: XCTestCase {
         let (history, _) = makeHistoryWithCheckpoint()
         let tool = ConversationHistoryTool(chatHistory: history)
 
-        // Index 0 should be the first real turn pair
+        // ⚠️ CORRECTED 2026-10-10 (CR-11): index 0 is the first turn AFTER the checkpoint — the turn the
+        // skeleton labels get_conversation_history(0). It used to assert "Old query 1", a compacted turn.
         let result = try await tool.call(arguments: ConversationHistoryTool.Arguments.testInit(index: 0))
-        XCTAssertTrue(result.contains("Old query 1"), "Index 0 should be the first real turn")
+        XCTAssertTrue(result.contains("New query 1"), "Index 0 must be the turn the skeleton labels 0:\n\(result)")
+        XCTAssertFalse(result.contains("Old query"), "a compacted turn must not answer a skeleton index")
     }
 }
 

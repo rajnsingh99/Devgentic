@@ -116,6 +116,7 @@ struct ProfileValidator {
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))
                 errors.append(contentsOf: validateInstructions(config.instructions, requirePresence: true))
                 errors.append(contentsOf: validateAdvancedConfiguration(config.llmConfig))
+                errors.append(contentsOf: validateToolReferences(config))
                 // Warn if local model lacks tool capabilities (cloud providers always support tools).
                 //
                 // ⚠️ ADVISORY, and it must stay advisory. `cognitiveCapability` is a detection
@@ -127,9 +128,11 @@ struct ProfileValidator {
                 // no tool-capable local model is installed: the picker deliberately lets the
                 // selection stand, and the save then refuses it.
                 //
-                // The describing still happens, in the places that can act on it: the MLX picker's
-                // alert, the Ollama picker's "no tool-capable models installed" notice, and the
-                // Inference Capability badge. This finding adds the record; it does not add a gate.
+                // The describing still happens, in the places that can act on it: the model
+                // catalog's tools badge on each card and the Inference Capability badge. (The MLX
+                // and Ollama pickers that carried the alert and notice quoted above were deleted
+                // on 2026-10-09 — the catalog replaced them.) This finding adds the record; it does not
+                // add a gate.
                 // ⚠️ `.openAICompatible` is EXCLUDED ON PURPOSE, not by oversight (register G96,
                 // where this was filed as a gap and is refuted here). The list is not "local
                 // providers" — it is "providers whose capability is actually MEASURED". Only the
@@ -176,6 +179,7 @@ struct ProfileValidator {
                 errors.append(contentsOf: validateInstructions(config.instructions))
             case .agent(let config):
                 errors.append(contentsOf: validateInstructions(config.instructions))
+                errors.append(contentsOf: validateToolReferences(config))
             case .code(let config):
                 errors.append(contentsOf: validateInstructions(config.instructions))
             case .imageGen, .workflow:
@@ -318,6 +322,17 @@ struct ProfileValidator {
             )]
         }
         return []
+    }
+
+    /// Instructions that name a tool this agent cannot call — not enabled, renamed, or removed.
+    ///
+    /// ⚠️ ADVISORY, never blocking (see `InstructionToolReferences`): the run still works, the model
+    /// just cannot follow that sentence. Agent profiles only — a Bot has no tools to enable, and a
+    /// Code profile's loadout comes from `CodeToolPreset`, not from `config.tools`.
+    static func validateToolReferences(_ config: AgentConfig) -> [ProfileValidationError] {
+        let enabled = Set(config.tools.filter(\.isEnabled).map(\.name))
+        return InstructionToolReferences.check(instructions: config.instructions, enabledToolNames: enabled)
+            .map { ProfileValidationError(field: "instructions", message: $0.message, severity: .advisory) }
     }
 
     // MARK: - Shared Rules (single definition, several consumers)

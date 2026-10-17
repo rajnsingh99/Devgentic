@@ -42,11 +42,7 @@ enum FileChange: Equatable {
 
     /// Parse a file operation from a confirmation's tool name + structured arguments (A1).
     /// Returns nil for non-file tools or unparseable args (banner falls back to the JSON view).
-    ///
-    /// `previewPath` is the destination for tools whose arguments do NOT name a file — today only
-    /// `update_project_context`, which takes `content` and writes a path fixed by the project.
-    /// Nil for everything else; those read their target out of `arguments` as they always have.
-    static func parse(toolName: String, arguments: JSONValue?, previewPath: String? = nil) -> FileChange? {
+    static func parse(toolName: String, arguments: JSONValue?) -> FileChange? {
         guard case .object(let dict)? = arguments else { return nil }
         func value(_ keys: [String]) -> String? {
             for key in keys { if case .string(let v)? = dict[key] { return v } }
@@ -109,30 +105,6 @@ enum FileChange: Equatable {
             guard case .string(let p)? = dict["file_path"], !p.isEmpty else { return nil }
             return .write(path: p, content: value(contentKeys) ?? "", append: false)
 
-        // ⚠️⚠️ THE ONLY UNREVIEWED WRITE IN CODE MODE, until 2026-09-20. Every other mutating
-        // tool parked on a banner; this one dispatched silently — and it is the write with the
-        // LARGEST blast radius, because `.devgentic/context.md` is injected into the system
-        // prompt of every future conversation for the project, not just this one.
-        //
-        // Field-observed: the model wrote "These classes contain methods like `greeting()` and
-        // `farewell()`" about a file containing neither. That sentence then steered a later edit
-        // to the wrong anchor. Rendered as a diff against the file on disk, a false claim about
-        // the user's own code is obvious at a glance — which is the whole control.
-        //
-        // The target comes from `previewPath`, never from `dict`: the tool derives its own
-        // destination from the run's project, so a path taken from model-supplied arguments could
-        // preview a different file than the one about to be overwritten.
-        case "update_project_context":
-            guard let path = previewPath, !path.isEmpty else { return nil }
-            // ⚠️ This tool's OWN alias list, not `contentKeys`. The two overlap but differ at
-            // both ends: `contentKeys` carries `string`, which this decoder rejects, and omits
-            // `markdown`/`context`, which it accepts. Previewing a key the tool cannot decode
-            // draws a diff for a call that is about to fail.
-            return .write(
-                path: path,
-                content: value(UpdateProjectContextTool.contentArgumentAliases) ?? "",
-                append: false)
-
         case "edit_code_single":
             guard case .string(let p)? = dict["file_path"], !p.isEmpty,
                   case .string(let oldStr)? = dict["old_string"],
@@ -159,6 +131,9 @@ enum FileChange: Equatable {
     }
 }
 
+// `diffLineText`, `DiffLineRow` and `DiffLinesList` live in `CodeViewer/DiffLineView.swift`,
+// shared with the Git Changes panel.
+
 /// The path the tool will ACTUALLY act on, abbreviated with `~` for display.
 ///
 /// Resolving first is load-bearing, not cosmetic. A model that emits a bare relative path
@@ -167,23 +142,6 @@ enum FileChange: Equatable {
 /// like an edit to the file the user had attached, while the write landed in the home
 /// folder (field-observed 2026-07-25). Resolved, the same call reads `~/January2026.java`
 /// and the wrong target is obvious before the user approves it.
-/// A diff row as attributed text, with the intra-line changed runs emphasized.
-///
-/// `DiffUtility.generateDiff` populates `segments` for modified line pairs; when it
-/// didn't (pure add/delete, or refinement declined the pair) the whole line renders
-/// plainly, which is the correct fallback.
-private func diffLineText(_ result: DiffResult, emphasisBackground: Color) -> Text {
-    guard let segments = result.segments, segments.count > 1 else {
-        return Text(result.line)
-    }
-    return segments.reduce(Text("")) { partial, segment in
-        let piece = segment.isEmphasized
-            ? Text(segment.text).bold()
-            : Text(segment.text)
-        return partial + piece
-    }
-}
-
 private func displayPath(_ path: String) -> String {
     (FilePathResolver.resolve(path) as NSString).abbreviatingWithTildeInPath
 }
@@ -271,50 +229,12 @@ private struct WriteFilePreview: View {
                     .foregroundColor(theme.warningColor)
             } else {
                 ScrollView(.vertical, showsIndicators: true) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(diff.prefix(400)) { result in
-                            diffLine(result)
-                        }
-                        if diff.count > 400 {
-                            Text("… \(diff.count - 400) more lines")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(theme.tertiaryText)
-                                .padding(.vertical, 2)
-                        }
-                    }
+                    DiffLinesList(diff: diff)
                 }
                 .frame(maxHeight: 170)
             }
         }
         .task(id: path) { await computeDiff() }
-    }
-
-    @ViewBuilder
-    private func diffLine(_ result: DiffResult) -> some View {
-        let (bg, fg, sign): (Color, Color, String) = {
-            switch result.type {
-            case .added:     return (theme.successColor.opacity(0.14), theme.successColor, "+")
-            case .deleted:   return (theme.errorColor.opacity(0.14), theme.errorColor, "−")
-            case .unchanged: return (Color.clear, theme.tertiaryText, " ")
-            }
-        }()
-        HStack(spacing: 4) {
-            Text(sign).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundColor(fg).frame(width: 8)
-            // Intra-line refinement: modified pairs highlight just the changed characters
-            // instead of tinting the whole line. Lived in `CodeDiffView` until the panel
-            // stopped diffing; this banner is now its only consumer, so it lives here.
-            (result.line.isEmpty
-                ? Text(" ")
-                : diffLineText(result, emphasisBackground: fg.opacity(0.24)))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(result.type == .unchanged ? theme.secondaryText : fg)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 0.5)
-        .background(bg)
     }
 
     private func computeDiff() async {

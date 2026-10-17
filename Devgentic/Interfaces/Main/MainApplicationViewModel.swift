@@ -125,9 +125,6 @@ final class MainApplicationViewModel {
             logger.info("Saved 'useStreamingResponse' setting to UserDefaults: \(newValue)")
         }
     }
-    var isWebSearchEnabled: Bool = false
-    var webSearchAPIKey: String?
-    var isWebSearchActive: Bool = false
 
     // Intelligence Core
 
@@ -232,8 +229,8 @@ final class MainApplicationViewModel {
     /// navigation sites route their transition through `workflowEditGuard.attempt`.
     let workflowEditGuard = WorkflowEditGuard()
 
-    /// Switches to the given interface mode, clearing conversation and profile selection.
-    /// This resets the view to either the Welcome screen (chat) or the Empty Workflow view (workflow).
+    /// Switches to the given interface mode, RESUMING where that mode was left (its conversation —
+    /// and in Code its project — or its Home with the profile picked there). Drafts stay per mode.
     /// Routed through `workflowEditGuard` so leaving a dirty workflow canvas prompts Save/Discard/Cancel.
     func switchInterfaceMode(to mode: InterfaceMode) {
         guard mode != interfaceMode else { return }
@@ -260,25 +257,50 @@ final class MainApplicationViewModel {
             // performInterfaceSwitch nulls selectedConversationID, so set the mode first
             // (only when it actually differs) and select the target afterward.
             if self.interfaceMode != targetMode {
-                self.performInterfaceSwitch(to: targetMode)
+                self.performInterfaceSwitch(to: targetMode, resume: false)
             }
             self.selectedConversationID = conversationID
         }
     }
 
-    private func performInterfaceSwitch(to mode: InterfaceMode) {
+    /// Where each mode was left — see `ModeResumeMemory`.
+    @ObservationIgnored private var modeResume = ModeResumeMemory()
+    /// Modes entered at least once this app session (Code's first entry resets; see below).
+    @ObservationIgnored private var modesVisited: Set<InterfaceMode> = []
+
+    /// - Parameter resume: land where `mode` was last left. `false` for callers that select
+    ///   their own target right after (`navigateToPendingInteraction`) — resuming first would
+    ///   select, and start loading, a conversation only to replace it.
+    private func performInterfaceSwitch(to mode: InterfaceMode, resume: Bool = true) {
+        let leaving = interfaceMode
+        modeResume.leave(leaving, at: .init(conversationID: selectedConversationID,
+                                            profileID: backendConfiguration.selectedProfileID))
+        modesVisited.insert(leaving)
+        let firstVisit = !modesVisited.contains(mode)
+        modesVisited.insert(mode)
+
+        let spot = resume
+            ? modeResume.resume(mode) { [persistenceService] in persistenceService.getConversation(withId: $0) != nil }
+            : ModeResumeMemory.Spot()
+
         interfaceMode = mode
-        // Deselecting is what clears the composer now: the per-conversation draft restore
-        // swaps in the "new chat" draft (see ComposerDraftStore). The old
-        // `clearAttachedFiles()` ran BEFORE this line, so the draft saved for the
-        // conversation being left captured zero attachments and the user lost them.
-        // Both branches stay consistent — if the id was already nil the box already holds
-        // that same new-chat draft, so there is nothing to swap.
-        selectedConversationID = nil
-        backendConfiguration.selectedProfileID = nil
+        // ⚠️ Mode and selection change in the SAME pass, so the composer sees one draft-key change
+        // (old mode + conversation → new mode + conversation) and swaps the draft once. Drafts are
+        // keyed per mode, so nothing typed here follows the user into the other mode.
+        selectedConversationID = spot.conversationID
+        // A resumed conversation brings its own profile (loaded on selection); Home gets back the
+        // profile that was picked on it.
+        backendConfiguration.selectedProfileID = spot.profileID
         chatHistoryViewModel.currentChatMessages = []
         settingsCoordinator.didChangeInterfaceMode(mode)
-        logger.info("Switched interface mode to \(mode.rawValue).")
+        // Code's FIRST entry this session lands on a clean Home: nothing to resume, and the Code
+        // profile can still carry the folder of the last launch, which would show instead of
+        // "Select Project folder". Later entries resume — the session's project is the one left.
+        if mode == .code, firstVisit, resume, spot.conversationID == nil {
+            codeSessionManager?.resetSession()
+        }
+        syncExplorerToInterfaceMode()
+        logger.info("Switched interface mode \(leaving.rawValue) → \(mode.rawValue) — \(spot.conversationID.map { "resumed conversation \($0.uuidString.prefix(8))" } ?? "Home\(spot.profileID != nil ? " with its profile" : "")")\(firstVisit ? " (first visit this session)" : "").")
     }
 
     // MARK: - Workflow Execution State
@@ -578,9 +600,7 @@ final class MainApplicationViewModel {
         conversationSwitchCoordinator = ConversationSwitchCoordinator(
             viewModel: self,
             chatHistoryViewModel: chatHistoryViewModel,
-            persistenceService: persistenceService,
-            backendConfiguration: backendConfiguration,
-            ollamaService: ollamaService
+            persistenceService: persistenceService
         )
 
         // Messaging pipeline lives in its own coordinator. Constructed before
@@ -637,6 +657,25 @@ final class MainApplicationViewModel {
             logger.error("[CODE] configureCodeSession REPLACED the bound manager (\(ObjectIdentifier(existing).debugDescription) → \(ObjectIdentifier(manager).debugDescription)). CONSEQUENCE: more than one CodeSessionManager is live, so the instance the views mutate may not be the one the send path reads — which silently drops the Code system prompt. Find the second construction site.")
         }
         self.codeSessionManager = manager
+        // The Explorer's folder buttons pick the PROJECT while in Code — see ExplorerViewModel.Scope.
+        explorerViewModel.chooseCodeProject = { [weak self] url in self?.chooseCodeFolder(url) }
+        syncExplorerToInterfaceMode()
+    }
+
+    /// Points the shared Explorer at the folder the CURRENT mode owns:
+    ///  • Code — the Code session's project, or none on Home ("Select Project folder");
+    ///  • every other mode — Chat's own remembered folder, or none ("Open Folder").
+    ///
+    /// ⚠️ Called on every event that can change either side: a mode switch, a Code conversation
+    /// selection (whatever its outcome), Code Home, and a Code folder pick. It used to be synced
+    /// only when the Code folder CHANGED, so a session whose folder was already open
+    /// (`alreadyOpen`) left Chat's folder in the Explorer until the Project popup was tapped.
+    func syncExplorerToInterfaceMode() {
+        if interfaceMode == .code {
+            explorerViewModel.showCodeProject(codeSessionManager?.projectPath)
+        } else {
+            explorerViewModel.showChatFolder()
+        }
     }
 
     /// Refreshes the code profile's instructions and sets it as the selected profile for send.
@@ -689,24 +728,8 @@ final class MainApplicationViewModel {
     // MARK: - Settings (forwards to SettingsCoordinator)
     //
     // Load + persist paths live in `SettingsCoordinator`. These forwards are
-    // kept so the SwiftUI settings views (GeneralSettings, CoreIntelligence,
-    // ChatInput's API key popup) can keep calling `viewModel.didChange...()`
-    // / `viewModel.saveAndEnableWebSearch(...)` without refactoring.
-
-    func toggleWebSearch() {
-        settingsCoordinator.toggleWebSearch()
-    }
-
-    /// - Returns: false when the key could not be stored in the Keychain (register KC-2); the
-    ///   feature is then left disabled and the caller must say so.
-    @discardableResult
-    func saveAndEnableWebSearch(apiKey: String) -> Bool {
-        settingsCoordinator.saveAndEnableWebSearch(apiKey: apiKey)
-    }
-
-    func disableAndRemoveWebSearch() {
-        settingsCoordinator.disableAndRemoveWebSearch()
-    }
+    // kept so the SwiftUI settings views (GeneralSettings, CoreIntelligence)
+    // can keep calling `viewModel.didChange...()` without refactoring.
 
     // `loadWorkflowRunHistoryIfNeeded` (was a private helper here) and
     // `setupConversationLoader` (was a ~65-line method) both moved to

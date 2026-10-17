@@ -395,10 +395,17 @@ struct CustomTextEditor: NSViewRepresentable {
             // NSTextView's default cancelOperation invokes complete: (word completions). When the
             // host opts in (QuickAccess panel), hand Escape to the window so its cancelOperation
             // (panel dismiss / HITL-deny) runs instead.
+            //
+            // `super` only when NSTextView actually implements it: on macOS 26 it does not, and the
+            // super call raised "unrecognized selector" on every Escape in the composer
+            // (2026-10-06 device run). Otherwise Escape goes up the responder chain, which is
+            // what AppKit does with a command this view would not have handled.
             if coordinator?.parent.escapePassesThrough == true {
                 self.window?.cancelOperation(sender)
-            } else {
+            } else if NSTextView.instancesRespond(to: #selector(NSResponder.cancelOperation(_:))) {
                 super.cancelOperation(sender)
+            } else {
+                nextResponder?.tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: sender)
             }
         }
 

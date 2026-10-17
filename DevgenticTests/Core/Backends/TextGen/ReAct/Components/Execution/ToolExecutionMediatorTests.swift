@@ -28,32 +28,30 @@ final class ToolExecutionMediatorTests: XCTestCase {
 
     // MARK: - T5: Permission Pre-flight Mapping
 
-    func testPermissions_FsSmartSearch_RequiresFileSystemPermissions() {
-        for tool in ["spotlight_search", "fs_smart_search"] {
-            let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
-            XCTAssertEqual(perms.count, 3, tool)
-            XCTAssertTrue(perms.contains(.desktop), tool)
-            XCTAssertTrue(perms.contains(.documents), tool)
-            XCTAssertTrue(perms.contains(.downloads), tool)
-        }
+    func testPermissions_SpotlightSearch_RequiresFileSystemPermissions() {
+        let perms = ToolExecutionMediator.getRequiredPermissions(for: "spotlight_search")
+        XCTAssertEqual(perms.count, 3)
+        XCTAssertTrue(perms.contains(.desktop))
+        XCTAssertTrue(perms.contains(.documents))
+        XCTAssertTrue(perms.contains(.downloads))
     }
 
     func testPermissions_FsReadMetadata_RequiresFileSystemPermissions() {
-        for tool in ["read_file_metadata", "fs_read_metadata"] {
+        for tool in ["read_file_metadata"] {
             let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
             XCTAssertEqual(perms.count, 3, tool)
         }
     }
 
     func testPermissions_FsWatchFolder_RequiresFileSystemPermissions() {
-        for tool in ["watch_folder", "fs_watch_folder"] {
+        for tool in ["watch_folder"] {
             let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
             XCTAssertEqual(perms.count, 3, tool)
         }
     }
 
     func testPermissions_FsOrganizeBatch_RequiresFileSystemPermissions() {
-        for tool in ["batch_move_files", "fs_organize_batch"] {
+        for tool in ["batch_move_files"] {
             let perms = ToolExecutionMediator.getRequiredPermissions(for: tool)
             XCTAssertEqual(perms.count, 3, tool)
         }
@@ -149,9 +147,9 @@ final class ToolExecutionMediatorTests: XCTestCase {
     func testValidation_EmptyRequiredString_ReturnsError() {
         let schema = makeSearchSchema()
         let args: [String: JSONValue] = ["search_term": .string(""), "search_scope": .null]
-        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "spotlight_search")
         XCTAssertEqual(errors.count, 1)
-        XCTAssertTrue(errors[0].contains("fs_smart_search"))
+        XCTAssertTrue(errors[0].contains("spotlight_search"))
         XCTAssertTrue(errors[0].contains("search_term"))
         XCTAssertTrue(errors[0].contains("cannot be empty"))
     }
@@ -159,7 +157,7 @@ final class ToolExecutionMediatorTests: XCTestCase {
     func testValidation_NullRequiredParam_ReturnsError() {
         let schema = makeSearchSchema()
         let args: [String: JSONValue] = ["search_term": .null]
-        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "spotlight_search")
         XCTAssertEqual(errors.count, 1)
         XCTAssertTrue(errors[0].contains("cannot be null"))
     }
@@ -167,7 +165,7 @@ final class ToolExecutionMediatorTests: XCTestCase {
     func testValidation_MissingRequiredParam_ReturnsError() {
         let schema = makeSearchSchema()
         let args: [String: JSONValue] = ["search_scope": .string("/tmp")]
-        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "spotlight_search")
         XCTAssertEqual(errors.count, 1)
         XCTAssertTrue(errors[0].contains("not provided"))
     }
@@ -175,7 +173,7 @@ final class ToolExecutionMediatorTests: XCTestCase {
     func testValidation_WhitespaceOnlyString_ReturnsError() {
         let schema = makeSearchSchema()
         let args: [String: JSONValue] = ["search_term": .string("   \n\t  ")]
-        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "spotlight_search")
         XCTAssertEqual(errors.count, 1)
         XCTAssertTrue(errors[0].contains("cannot be empty"))
     }
@@ -183,7 +181,7 @@ final class ToolExecutionMediatorTests: XCTestCase {
     func testValidation_ValidArgs_NoErrors() {
         let schema = makeSearchSchema()
         let args: [String: JSONValue] = ["search_term": .string("Acme")]
-        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "spotlight_search")
         XCTAssertTrue(errors.isEmpty)
     }
 
@@ -191,7 +189,7 @@ final class ToolExecutionMediatorTests: XCTestCase {
         // search_scope is NOT in required[], so null is fine
         let schema = makeSearchSchema()
         let args: [String: JSONValue] = ["search_term": .string("files"), "search_scope": .null]
-        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "spotlight_search")
         XCTAssertTrue(errors.isEmpty, "Optional params should not trigger validation errors")
     }
 

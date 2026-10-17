@@ -133,29 +133,20 @@ struct ChatBubbleView: View {
 
 }
 
-// MARK: - Bot: Sparkle Loading View
+// MARK: - Bot: Loading View (Gyroscopic Flux)
 struct SparkleLoadingView: View {
     var headline: String?
     @Environment(\.appTheme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isAnimating = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "sparkles")
-                // `isActive:` rather than `value:` so Reduce Motion can stop it. A bounce
-                // repeating for as long as the agent is loading is the most motion-heavy
-                // effect in the chat.
-                .symbolEffect(.bounce.up.byLayer, options: .repeating, isActive: isAnimating && !reduceMotion)
-                .font(.system(.body, weight: .semibold))
-                .foregroundColor(theme.accentColor)
+            DevgenticActivityIndicator(style: .gyroscope, size: 16, tint: theme.accentColor)
 
             Text(headline ?? String(localized: "Generating..."))
                 .font(theme.fontBody.weight(.medium))
                 .foregroundColor(theme.secondaryText)
         }
         .padding(.vertical, 4)
-        .onAppear { isAnimating = true }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(headline ?? String(localized: "Generating response"))
     }
@@ -421,7 +412,12 @@ struct VariantsSelectionView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if let agentResponse = message.agentResponse {
                         ForEach(Array(zip(agentResponse.variants.indices, agentResponse.variants)), id: \.0) { index, variant in
-                            Button(action: { message.agentResponse?.selectedVariantIndex = index; isPresented = false }) {
+                            Button(action: {
+                                message.agentResponse?.selectedVariantIndex = index
+                                // Conversation memory follows the chosen version, not the newest one.
+                                RAGIndexingService.reindexSelectedVariant(of: message)
+                                isPresented = false
+                            }) {
                                 HStack {
                                     Text(variant.content.textContent ?? String(localized: "Empty Response")).lineLimit(3).font(.body).foregroundColor(theme.primaryText).frame(maxWidth: .infinity, alignment: .leading)
                                     Spacer()

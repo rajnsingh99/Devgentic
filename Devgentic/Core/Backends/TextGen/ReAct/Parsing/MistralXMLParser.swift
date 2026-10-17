@@ -155,11 +155,12 @@ struct MistralXMLParser: CognitiveParserProtocol {
         // Try decoding the JSON arguments inside the <arguments> tag
         let cleanArgs = argsString.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanArgs.isEmpty && cleanArgs != "{}" {
-            if let data = cleanArgs.data(using: .utf8),
-               let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
+            // CR-19: the shared repairs (raw newlines, invalid escapes, trailing commas) first.
+            if let decoded = JSONStructuralSanitizer.decodeObject(cleanArgs) {
                 arguments = decoded
             } else {
-                logger.warning("MistralXMLParser: Failed to decode hybrid JSON arguments: \(cleanArgs.prefix(100))")
+                logger.warning("MistralXMLParser: Failed to decode hybrid JSON arguments: \(cleanArgs.count) chars (snippet at debug: model output is content, CR-57)")
+                logger.debug("MistralXMLParser: snippet: \(cleanArgs.prefix(100))")
             }
         }
         return PendingToolCall(id: UUID().uuidString, name: cleanName, arguments: arguments)
@@ -172,7 +173,8 @@ struct MistralXMLParser: CognitiveParserProtocol {
             let cleaned = payload.trimmingCharacters(in: .init(charactersIn: " \t\n\r,;"))
             guard let cleanData = cleaned.data(using: .utf8),
                   let call = try? JSONDecoder().decode(MistralToolCall.self, from: cleanData) else {
-                logger.warning("MistralXMLParser: Failed to decode fallback payload: \(payload.prefix(200))")
+                logger.warning("MistralXMLParser: Failed to decode fallback payload: \(payload.count) chars (snippet at debug: model output is content, CR-57)")
+                logger.debug("MistralXMLParser: snippet: \(payload.prefix(200))")
                 return nil
             }
             return PendingToolCall(id: UUID().uuidString, name: call.name, arguments: call.arguments)

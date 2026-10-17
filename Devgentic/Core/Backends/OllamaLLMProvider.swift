@@ -57,7 +57,21 @@ struct OllamaLLMProvider: LLMProvider {
 
     /// Shared POST `/api/chat` (non-streaming) → extracted assistant content string.
     /// Accepts `[[String: Any]]` so callers can attach per-message `images` arrays.
+    /// This provider's engine, as the local-inference coordinator names it.
+    private var inferenceEngine: InferenceEngine {
+        .ollama(baseURL: InferenceEngine.normalizedOllamaURL(config.baseURL.absoluteString))
+    }
+
+    /// The `num_ctx` this request sends — Ollama reloads a model asked for with a different one.
+    private var requestedContext: Int? {
+        OllamaContextWindowPolicy.configuredNumCtx(in: config.options)
+    }
+
     private func postChat(messages: [[String: Any]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
+        // The local-inference gate: holds (or waits for) the local lock and counts this generation.
+        let generation = try await LocalInferenceScope.beginGeneration(engine: inferenceEngine, modelID: config.modelName,
+                                                                       contextTokens: requestedContext)
+        defer { generation.end() }
         let url = config.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url, timeoutInterval: config.timeout)
         request.httpMethod = "POST"
@@ -155,6 +169,9 @@ struct OllamaLLMProvider: LLMProvider {
     /// both benefit from the same error handling, thinking-unsupported auto-heal, and
     /// KV-cache-miss proxy metrics.
     private func dispatchCognitiveRequest(body: [String: Any]) async throws -> ModernCognitiveStep {
+        let generation = try await LocalInferenceScope.beginGeneration(engine: inferenceEngine, modelID: config.modelName,
+                                                                       contextTokens: requestedContext)
+        defer { generation.end() }
         let url = config.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url, timeoutInterval: config.timeout)
         request.httpMethod = "POST"
@@ -256,26 +273,16 @@ struct OllamaLLMProvider: LLMProvider {
         // registry) inside NativeStructuredGenerator. The explicit empty registry
         // is therefore CORRECT — this pipeline only parses and classifies; the
         // provider-format tool dicts in scope would be the wrong type anyway.
+        // Its `.failed` verdict is PROVISIONAL for the same reason: with no
+        // registry it can only judge by shape, so NativeParsePipeline re-decides
+        // it (answer vs. attempted call) against the run's real tool names.
         if pendingTools.isEmpty && !content.isEmpty {
-            let (prose, jsonBlock) = Self.splitProseAndJSON(content)
-            let pipeline = CognitiveParsePipeline(
-                expectedDialect: .nativeJSON,
-                modelId: config.modelName,
-                registeredTools: []
-            )
-            let parsed = pipeline.parse(raw: jsonBlock.isEmpty ? content : jsonBlock)
-
-            // Prefer the captured prose prefix; fall back to the parser's reasoning
-            // only if that parser found a real (non-placeholder) reasoning field.
-            // Placeholder strings like "Executing..." are filtered downstream.
-            let reasoning = prose.isEmpty ? parsed.reasoning : prose
-            let usage = json.flatMap { TokenUsage.fromOllama($0) }
-            return ModernCognitiveStep(
-                reasoning: reasoning,
-                thought: thinking,               // preserve Ollama's separate thinking channel
-                toolCalls: parsed.toolCalls,
-                tokenUsage: usage ?? parsed.tokenUsage,
-                parseOutcome: parsed.parseOutcome  // forward pipeline's verdict (.success / .failed / .genuineCompletion)
+            return Self.contentFallbackStep(
+                content: content,
+                thinking: thinking,
+                usage: json.flatMap { TokenUsage.fromOllama($0) },
+                modelName: config.modelName,
+                toolNames: Self.declaredToolNames(in: body["tools"])
             )
         }
 
@@ -288,6 +295,65 @@ struct OllamaLLMProvider: LLMProvider {
     }
 
     // MARK: - Content-Leak Helpers (G7)
+
+    /// The function names in an Ollama `tools` array (`[{"type":"function","function":{"name":…}}]`).
+    static func declaredToolNames(in tools: Any?) -> Set<String> {
+        guard let tools = tools as? [[String: Any]] else { return [] }
+        return Set(tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String })
+    }
+
+    /// The content-fallback step for a reply whose `tool_calls` were empty but whose
+    /// `content` was not (see the call site in the native dispatch). `static` so the
+    /// content → step mapping can be exercised without a live Ollama server.
+    ///
+    /// `toolNames` — the tools this request offered. Not a registry (validation stays one level
+    /// up); only so the cascade can recognise a leaked call by its tool NAME — e.g. a cut-off
+    /// `{"name": "read_file", "path": "a.ja` — instead of accepting it as the final answer.
+    static func contentFallbackStep(
+        content: String,
+        thinking: String?,
+        usage: TokenUsage?,
+        modelName: String,
+        toolNames: Set<String> = []
+    ) -> ModernCognitiveStep {
+        // Split the VISIBLE text. On raw `content` the first balanced block can sit inside a
+        // `<think>` block — a call the model only considered was extracted and run (2026-10-05).
+        // The cascade below strips thinking itself (`OutputSanitizer`); this split ran before it.
+        let visible = OutputSanitizer.stripThinkBlocks(content)
+        let (prose, jsonBlock) = Self.splitProseAndJSON(visible)
+        let pipeline = CognitiveParsePipeline(
+            expectedDialect: .nativeJSON,
+            modelId: modelName,
+            knownToolNames: toolNames,
+            registeredTools: []
+        )
+        let parsed = pipeline.parse(raw: jsonBlock.isEmpty ? content : jsonBlock)
+
+        // Prefer the captured prose prefix; fall back to the parser's reasoning
+        // only if that parser found a real (non-placeholder) reasoning field.
+        // Placeholder strings like "Executing..." are filtered downstream.
+        //
+        // ⚠️ Except on a FAILED parse that recovered nothing: then hand up the
+        // WHOLE content. `NativeParsePipeline` decides whether that content is an
+        // attempted call (retry) or the answer — and if it is the answer, a
+        // prose prefix cut at the first `{`/`[` would truncate it (a reply ending
+        // in a ```json analysis block lost everything after its first sentence).
+        let reasoning: String = {
+            if parsed.toolCalls.isEmpty, case .failed = parsed.parseOutcome { return content }
+            return prose.isEmpty ? parsed.reasoning : prose
+        }()
+        return ModernCognitiveStep(
+            reasoning: reasoning,
+            thought: thinking,               // preserve Ollama's separate thinking channel
+            toolCalls: parsed.toolCalls,
+            tokenUsage: usage ?? parsed.tokenUsage,
+            parseOutcome: parsed.parseOutcome,  // forward pipeline's verdict (.success / .failed / .genuineCompletion)
+            // These calls were pulled out of TEXT, not a structured channel. If none of them
+            // names a tool this run offers, `NativeParsePipeline` asks whether the text is the
+            // answer — and needs the whole of it, not the prose before the first brace.
+            callsRecoveredFromText: parsed.toolCalls.isEmpty ? nil : visible
+        )
+    }
 
     /// Splits a content string that mixes prose and a bare tool-call JSON into
     /// `(prose, jsonBlock)`. Walks the string once with brace-depth tracking to
@@ -343,10 +409,26 @@ struct OllamaLLMProvider: LLMProvider {
     }
 
     func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
+        let engine = inferenceEngine
+        let model = config.modelName
+        let context = requestedContext
+        let generation = LocalInferenceScope.GenerationSlot()
         // Ollama streams newline-delimited JSON (not SSE). The shared transport owns the
         // read loop, cancellation, and stall timeout (#13); the local rate-limit gate is
         // applied by CloudRequestPipeline.executeLocalStream (#12).
-        SSEStreamParser.stream(
+        return SSEStreamParser.stream(
+            // The local-inference gate, COUNTED like every other generation: begun in `beforeOpen`,
+            // ended in `onClose` when the reader ends — so a park in a sibling branch cannot release
+            // the lock while this stream is still decoding (it used to be gated but never counted).
+            // Runs in the transport's reader task, which inherits the run's task-locals.
+            // ⚠️ `beforeOpen`, never inside `openBytes`: the stall watchdog is paused only for
+            // `beforeOpen`, and a wait for the lock longer than 60 s otherwise failed the stream as
+            // a stalled connection.
+            beforeOpen: {
+                generation.hold(try await LocalInferenceScope.beginGeneration(engine: engine, modelID: model,
+                                                                              contextTokens: context))
+            },
+            onClose: { generation.end() },
             openBytes: {
                 let url = self.config.baseURL.appendingPathComponent("api/chat")
                 var request = URLRequest(url: url, timeoutInterval: self.config.timeout)
@@ -380,22 +462,34 @@ struct OllamaLLMProvider: LLMProvider {
                       (json["done"] as? Bool) == true else { return nil }
                 return TokenUsage.fromOllama(json)
             },
-            handleLine: { line, _ in
-                guard !line.isEmpty,
-                      let lineData = line.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
-                    return .skip
-                }
-                let content = (json["message"] as? [String: Any])?["content"] as? String ?? ""
-                let done = (json["done"] as? Bool) ?? false
-                if done {
-                    return content.isEmpty ? .finish : .emitThenFinish(content)
-                }
-                return content.isEmpty ? .skip : .emit(content)
-            }
+            // ⚠️ The decoder itself, not a closure around it, so tests run exactly this.
+            handleLine: Self.ollamaStreamLine
         )
     }
     
+    /// One NDJSON line of an Ollama `/api/chat` stream.
+    static func ollamaStreamLine(_ line: String, _ event: String) -> SSELineDirective {
+        guard !line.isEmpty,
+              let lineData = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+            return .skip
+        }
+        // ⚠️⚠️ CR-15: Ollama reports a failure MID-STREAM as `{"error": "…"}` on a 200 response (a
+        // runner crash, out of memory). It has no `message` and no `done`, so it was skipped, the
+        // connection closed, the stream finished cleanly — and a cut-off or empty answer was saved
+        // as a success.
+        if let error = json["error"] as? String {
+            logger.error("[OLLAMA] Server reported an error mid-response: \(error). CONSEQUENCE: the turn fails with that message instead of saving a truncated answer as a success.")
+            return .fail(LLMProviderError.invalidResponse("Ollama reported an error mid-response: \(error)"))
+        }
+        let content = (json["message"] as? [String: Any])?["content"] as? String ?? ""
+        let done = (json["done"] as? Bool) ?? false
+        if done {
+            return content.isEmpty ? .finish : .emitThenFinish(content)
+        }
+        return content.isEmpty ? .skip : .emit(content)
+    }
+
     /// Maps this app's option keys onto Ollama's `options` object.
     ///
     /// ⚠️ `static` so the mapping is testable without a live provider — the same reason

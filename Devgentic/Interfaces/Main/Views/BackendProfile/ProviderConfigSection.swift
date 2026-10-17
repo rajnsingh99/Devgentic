@@ -24,7 +24,7 @@ struct ProviderConfigSection: View {
     /// Called when the user switches providers (old, new). Use for capability resets.
     var onProviderChanged: ((_ oldProvider: ApiProvider, _ newProvider: ApiProvider) -> Void)? = nil
 
-    /// Optional custom MLX content (e.g. ImageGen uses Flux2ModelPickerView instead of MLXModelPickerView).
+    /// Optional custom MLX content (e.g. ImageGen uses Flux2ModelPickerView instead of the model catalog).
     var customMLXContent: AnyView? = nil
 
     // MARK: - Internal State

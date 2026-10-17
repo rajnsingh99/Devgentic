@@ -64,20 +64,27 @@ enum SkillResolution {
     /// Returns `nil` when the profile configures no skills at all, so callers can keep the existing
     /// "no skills ⇒ no `load_skill` tool, no prompt layer" behaviour on an explicit nil rather than
     /// on an empty array that might mean something else.
+    ///
+    /// - Parameter reporting: `false` silences this function's own log lines and changes nothing
+    ///   else. For the `/` picker, which re-resolves on every keystroke so that it offers exactly
+    ///   what a run would get: the run's resolution already reports every unresolved link, missing
+    ///   pin and name collision once per run, and repeating them per keystroke would bury them.
     static func resolve(
         for config: AgentConfig,
         profileName: String,
-        store: SkillStore = .shared
+        store: SkillStore = .shared,
+        reporting: Bool = true
     ) -> SkillResolutionOutcome? {
 
         guard let selections = config.skillSelections, !selections.isEmpty else { return nil }
-        return resolveSelections(selections, profileName: profileName, store: store)
+        return resolveSelections(selections, profileName: profileName, store: store, reporting: reporting)
     }
 
     private static func resolveSelections(
         _ selections: [SkillSelection],
         profileName: String,
-        store: SkillStore
+        store: SkillStore,
+        reporting: Bool
     ) -> SkillResolutionOutcome {
 
         var outcome = SkillResolutionOutcome()
@@ -88,7 +95,7 @@ enum SkillResolution {
             // unresolved is the honest answer and keeps the profile's configuration intact; the
             // store has already logged the cause with its own consequence.
             outcome.unresolved = linked
-            logger.error("[SKILL_RESOLVE] Profile '\(profileName)': the skill library could not be read, so all \(linked.count) linked skill(s) are unresolved. CONSEQUENCE: this run gets NO skills and `load_skill` is not registered — the configuration is untouched and the next run retries.")
+            if reporting { logger.error("[SKILL_RESOLVE] Profile '\(profileName)': the skill library could not be read, so all \(linked.count) linked skill(s) are unresolved. CONSEQUENCE: this run gets NO skills and `load_skill` is not registered — the configuration is untouched and the next run retries.") }
             return outcome
         }
 
@@ -107,7 +114,7 @@ enum SkillResolution {
             let version: SkillVersionSD?
             if let pinned = selection.pinnedVersionID {
                 version = skill.versions.first { $0.id == pinned }
-                if version == nil {
+                if version == nil, reporting {
                     logger.error("[SKILL_RESOLVE] Profile '\(profileName)': skill '\(skill.name)' pins version '\(pinned)', which is not in the library. CONSEQUENCE: the skill is SKIPPED for this run rather than silently falling back to the latest version — a pin exists precisely so the instructions do not change underneath the profile. Re-pin it or clear the pin.")
                 }
             } else {
@@ -143,7 +150,7 @@ enum SkillResolution {
         outcome.manifests = deduped
         if !collisions.isEmpty {
             outcome.nameCollisions = Array(Set(collisions)).sorted()
-            logger.error("[SKILL_RESOLVE] Profile '\(profileName)': \(outcome.nameCollisions.count) skill name(s) come from MORE THAN ONE library skill: \(outcome.nameCollisions.joined(separator: ", ")). CONSEQUENCE: only one copy of each is offered to the model — skills are addressed by NAME, so the others are unreachable by `load_skill` whichever the user meant. Rename one, or unlink it.")
+            if reporting { logger.error("[SKILL_RESOLVE] Profile '\(profileName)': \(outcome.nameCollisions.count) skill name(s) come from MORE THAN ONE library skill: \(outcome.nameCollisions.joined(separator: ", ")). CONSEQUENCE: only one copy of each is offered to the model — skills are addressed by NAME, so the others are unreachable by `load_skill` whichever the user meant. Rename one, or unlink it.") }
         }
 
         // Stable, machine-independent order — this becomes prompt bytes.
@@ -154,9 +161,9 @@ enum SkillResolution {
         // a healthy run said nothing at all and an empty <available_skills> was indistinguishable
         // from a profile with no skills linked.
         let offered = outcome.manifests.map { "\($0.name)@\($0.versionID ?? "?")" }.joined(separator: ", ")
-        logger.notice("[SKILL_RESOLVE] Profile '\(profileName)': \(outcome.manifests.count) skill(s) reach this run — \(offered.isEmpty ? "NONE" : offered). CONSEQUENCE: exactly these names appear in <available_skills> and exactly these versions are what `load_skill` returns; anything the user linked that is missing here is accounted for by the lines that follow.")
+        if reporting { logger.notice("[SKILL_RESOLVE] Profile '\(profileName)': \(outcome.manifests.count) skill(s) reach this run — \(offered.isEmpty ? "NONE" : offered). CONSEQUENCE: exactly these names appear in <available_skills> and exactly these versions are what `load_skill` returns; anything the user linked that is missing here is accounted for by the lines that follow.") }
 
-        if !outcome.unresolved.isEmpty {
+        if !outcome.unresolved.isEmpty, reporting {
             logger.error("[SKILL_RESOLVE] Profile '\(profileName)': \(outcome.unresolved.count) linked skill(s) are NOT in the library and were skipped: \(outcome.unresolved.map(\.name).joined(separator: ", ")). CONSEQUENCE: the agent runs without them and cannot load them — they were deleted from the library, or are still drafts. They remain linked, so restoring or un-drafting the skill brings them back.")
         }
         return outcome

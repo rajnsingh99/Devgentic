@@ -58,7 +58,7 @@ final class ContextCutStrategyTests: XCTestCase {
     func testAutomaticKeepsTheEndOfCommandOutput() {
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "run_command"), .keepEnd)
         XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "get_task_output"), .keepEnd)
-        XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "command_output"), .keepEnd)
+        XCTAssertEqual(ContextCutStrategy.automatic.resolved(forTool: "get_task_output"), .keepEnd)
     }
 
     func testAutomaticKeepsTheStartOfReadsAndSearches() {

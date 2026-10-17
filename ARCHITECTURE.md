@@ -1,338 +1,243 @@
 # Devgentic — Architecture
 
-<!-- Drafted at commit cef4ece, 2026-09-29; revised the same commit after the M02/M03/M06/M11 module deep dives; A3 public-safety pass 2026-10-01 (all citations re-verified; admission wording corrected). Re-verify cited line numbers when revising. -->
+A short tour of how Devgentic is built, for anyone reading the code for the first time.
+The [README](README.md) explains what the app does; this document explains how it fits together.
 
-A map of how Devgentic is put together, for a developer reading the code for the first time.
-The [README](README.md) says what the app does; this document says how it is built and why.
-Companion documents: [SECURITY.md](SECURITY.md) (trust model and reporting), [PRIVACY.md](PRIVACY.md)
-(data handling), [CONTRIBUTING.md](CONTRIBUTING.md) (building and conventions).
+Related documents: [SECURITY.md](SECURITY.md) (trust model, reporting a vulnerability) ·
+[PRIVACY.md](PRIVACY.md) (what data goes where) · [CONTRIBUTING.md](CONTRIBUTING.md) (building and conventions).
+
+<!-- Maintenance note: this file deliberately cites file and type names, not line numbers, so it
+     does not go stale on every edit. Re-check names when you move or rename things. -->
 
 ---
 
-## 1. What Devgentic is — and is not
+## 1. The big picture
 
-Devgentic is a native macOS app for building and running AI agents. A user defines **backend
-profiles** — a model bound to capabilities and settings — and runs them on different surfaces:
-a chat window driven by a ReAct agent loop, a node-graph workflow canvas, a project-scoped
-coding workspace, a global-hotkey panel, or a floating voice orb. Inference runs locally (MLX
-on Apple Silicon, or a local Ollama server) or against a cloud provider; tools are a mix of
-built-in macOS automation and anything a connected MCP server exposes.
+Devgentic is a native macOS app for building and running AI agents.
 
-What it deliberately is **not**:
+You create **profiles**. A profile is a model plus the tools, settings and instructions it should use.
+You then run a profile on one of several **surfaces**:
 
-- **Not sandboxed, and therefore not App Store–distributed.** The app exists to run shell
-  commands, edit files, send Apple Events, and automate the UI on the user's machine, with the
-  user's privileges. The App Sandbox is incompatible with that job, so the entitlements file
-  carries only the four resource-access keys the features need — microphone, Apple Events,
-  calendars/reminders, contacts — and none of the `com.apple.security.cs.*` hardening opt-outs
-  (`Devgentic/Devgentic.entitlements`). Distribution is Developer ID–signed and notarized
-  releases from the GitHub repository instead.
-- **Not a service.** There is no backend of any kind. The app holds no account system, sends no
-  telemetry, and every conversation, file and key stays on the Mac unless a profile's model
-  provider is cloud-hosted — in which case sending the request to that provider is the feature
-  (`PRIVACY.md`).
-- **Not multi-user.** Where the app is driven remotely (ChatOps), it assumes one operator:
-  the account that completed pairing. `SECURITY.md` states this trust model plainly.
+- a **chat** window
+- a **workflow** canvas, where steps are wired together as a graph
+- a **Code** workspace scoped to a project folder
+- a global-hotkey **QuickAccess** panel
+- a floating voice **Orb**
+- a **scheduler** for unattended runs
+- **remote chat bridges** (Telegram, Discord, Slack) that let you drive the app from your phone
 
-## 2. Tech stack
+The model can run **locally** (MLX on Apple Silicon, or an Ollama server) or in the **cloud**
+(OpenAI, Anthropic, Google, OpenRouter, or any OpenAI-compatible endpoint). Agents act through
+**tools**: built-in macOS capabilities such as files, shell, git and calendar, plus anything a
+connected [MCP](https://modelcontextprotocol.io) server offers.
+
+### What it deliberately is not
+
+- **Not sandboxed.** The app exists to run commands, edit files and automate the Mac with *your*
+  privileges, which the App Sandbox does not allow. So it is distributed as a Developer ID–signed,
+  notarized download from GitHub, not through the App Store.
+- **Not a service.** There is no Devgentic server, no account and no telemetry. Your conversations,
+  files and keys stay on your Mac. The one exception is a cloud model: sending your request to that
+  provider is what choosing it means (see [PRIVACY.md](PRIVACY.md)).
+- **Not multi-user.** Remote control through chat assumes one operator: the account that paired
+  with the Mac.
+
+## 2. Technology
 
 | | |
 |---|---|
-| Language | Swift 5 language mode with `SWIFT_STRICT_CONCURRENCY = complete` (`Devgentic.xcodeproj/project.pbxproj:560-561`) |
-| UI | SwiftUI, AppKit where SwiftUI does not reach (menus, panels, overlay scrollers) |
-| Deployment target | macOS 26.1 (`project.pbxproj:456`); Apple Silicon required for the MLX backend |
-| Persistence | SwiftData (primary store), ObjectBox (RAG vector index), GRDB (trace/log store), Keychain (secrets) |
-| Local inference | [mlx-swift](https://github.com/ml-explore/mlx-swift) and [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm); [WhisperKit](https://github.com/argmaxinc/WhisperKit) for dictation/transcription |
-| Remote inference | Direct HTTPS to OpenAI, Anthropic, Google, OpenRouter, and any OpenAI-compatible endpoint |
-| Agent protocol | [MCP swift-sdk](https://github.com/modelcontextprotocol/swift-sdk) for tool servers |
-| Updates | [Sparkle](https://github.com/sparkle-project/Sparkle), EdDSA signatures |
-| Other packages | GRDB.swift (SQLite), swift-markdown, CodeEditSourceEditor + Highlightr (code viewer), HotKey (global hotkeys), CoreXLSX / SwiftDocX (document readers), swift-transformers, flux-2-swift-mlx (image generation) |
+| Language / UI | Swift with strict concurrency checking; SwiftUI, with AppKit where SwiftUI falls short |
+| Platform | macOS 26.1 or later, Apple Silicon only (arm64) |
+| Local AI | [mlx-swift](https://github.com/ml-explore/mlx-swift) and [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm); [WhisperKit](https://github.com/argmaxinc/WhisperKit) for speech-to-text |
+| Cloud AI | Direct HTTPS to each provider |
+| Tool protocol | MCP [swift-sdk](https://github.com/modelcontextprotocol/swift-sdk) |
+| Storage | SwiftData (main store), ObjectBox (search index), GRDB/SQLite (traces), Keychain (secrets) |
+| Updates | [Sparkle](https://github.com/sparkle-project/Sparkle) with signed updates |
 
-Dependencies are resolved by Swift Package Manager from the Xcode project; the pinned set is
-committed in `Package.resolved`, and licences are collected in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Dependencies come from Swift Package Manager; exact versions are pinned in `Package.resolved` and
+their licences are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## 3. Repository layout
+## 3. Where things live
 
-| Path | Contents |
+| Folder | What it holds |
 |---|---|
-| `Devgentic/` | The app target. |
-| `Devgentic/Core/Backends/` | Per-provider LLM services and the generation stack. `TextGen/ReAct/` is the agent loop; `WorkflowGen/` is the workflow engine; `ImageGen/` is text-to-image. |
-| `Devgentic/Core/Persistence/` | The SwiftData schema (`SwiftData/`), the RAG stack (`RAG/`), and provider-key stores. |
-| `Devgentic/Core/Utils/` | Cross-cutting runtime services: stream orchestration (`ActiveStreamManager`), human-approval plumbing (`InteractionCenter`, `ExecutionSuspensionService`, `SessionToolApprovals`), history rendering (`EpisodicHistoryFormatter`), capability/risk metadata. |
-| `Devgentic/Core/Service/` | Long-lived app services, e.g. the task scheduler (`Scheduler/SchedulerService.swift`). |
-| `Devgentic/Core/Skills/` | The skills library: import, ingest, versioning, launch migration. |
-| `Devgentic/Core/Storage/`, `Core/Types/`, `Core/Constants/`, `Core/Updates/` | Media storage, shared types and constants, Sparkle glue (`SoftwareUpdater.swift`). |
-| `Devgentic/Interfaces/` | Every SwiftUI surface. `Main/` (main window, sidebar, profile editor, workflow canvas, tool library, MCP and settings), `Shared/` (chat timeline, composer, components), `Code/`, `QuickAccess/`, `Onboarding/`, `CommandPalette/`. The native tool implementations live under `Main/Views/Tooling/Local/`. |
-| `Devgentic/ChatOps/` | The Telegram, Discord and Slack bridges: transports, pairing, authorization, command parsing, and the mirror that posts run state back to chat. |
-| `Devgentic/Orb/` | The voice orb — self-contained wake-word/duplex audio surface. |
-| `Devgentic/Intelligence/` | Routing and model-capability analysis (Morning Brief, personal profile). |
-| `Devgentic/Observaliblity/` | Tracing and diagnostics. (The directory name is misspelled in the source tree; the code is consistent about it.) |
-| `DevgenticTests/` | Unit tests (~650 files), including source-scanning "drift" tests that read production source and fail when invariants are violated. |
-| `generated/` | Committed ObjectBox codegen output — see [README](README.md) for why there is no build phase for it. |
-| `scripts/` | Release signing/verification scripts (see `CONTRIBUTING.md`). |
-| `model-devgentic.json` | The ObjectBox entity model for the RAG store. |
+| `Devgentic/Core/Backends/` | Everything that talks to a model. `TextGen/ReAct/` is the agent loop, `WorkflowGen/` is the workflow engine, `ImageGen/` is image generation. |
+| `Devgentic/Core/Persistence/` | The database schema, the document search (RAG) stack, and key storage. |
+| `Devgentic/Core/Utils/` | Shared runtime machinery: the stream manager, the approval queue, time-limit handling, history formatting. |
+| `Devgentic/Core/Service/`, `Skills/`, `Storage/`, `Updates/` | The task scheduler, the skills library, media files, and the updater. |
+| `Devgentic/Interfaces/` | All SwiftUI screens: `Main/` (window, sidebar, profile editor, workflow canvas, tool library, settings), `Shared/` (chat timeline and composer), `Code/`, `QuickAccess/`, `Onboarding/`, `CommandPalette/`. Native tool implementations are in `Main/Views/Tooling/Local/`. |
+| `Devgentic/ChatOps/` | The Telegram, Discord and Slack bridges. |
+| `Devgentic/Orb/` | The voice orb: wake word, speech in and out. |
+| `Devgentic/Intelligence/` | Model-capability analysis and routing. |
+| `Devgentic/Observaliblity/` | Tracing and diagnostics. (Yes, the folder name has a typo; the code uses it consistently.) |
+| `Devgentic/Services/`, `Utilities/`, `Resources/` | Administrator-privilege command execution (via AppleScript), small shared helpers, and bundled assets (embedding model, model price list). |
+| `DevgenticTests/` | Unit tests, including "drift" tests that read the source and fail if a design rule is broken. |
+| `generated/` | Committed ObjectBox generated code (there is no build step for it; see the README). |
+| `scripts/` | Release signing and verification scripts. |
 
-## 4. Runtime overview
+## 4. How a request flows
 
-One idea: every surface — local or remote — funnels into the same stream orchestrator, which
-runs a profile's model with a resolved tool set, and every durable thing it touches sits in one
-of four stores.
+Every surface sends its work to the same place. A profile's model runs with its tools, and anything
+worth keeping lands in one of four stores.
 
 ```mermaid
 flowchart LR
     subgraph Surfaces
-        MW[Main window chat]
-        QA[QuickAccess panel]
-        ORB[Orb voice]
-        SCH[Scheduler tasks]
-        CO[ChatOps bridges<br/>Telegram / Discord / Slack]
+        A[Chat / Code / QuickAccess / Orb]
+        B[Scheduler]
+        C[Telegram / Discord / Slack]
     end
 
-    ASM["ActiveStreamManager<br/>(main actor, one stream per conversation)"]
-    BOS[BackendOrchestrationService]
-    AC["AgentConnect<br/>prompt + tool resolution"]
-    EXE["ReActAgentExecutor<br/>(actor, agent loop)"]
+    S[ActiveStreamManager<br/>one run per conversation]
+    O[BackendOrchestrationService<br/>picks the model]
+    G[AgentConnect<br/>builds prompt and tool list]
+    R[ReActAgentExecutor<br/>the agent loop]
+    M[Models<br/>MLX / Ollama / Cloud]
+    T[Tools<br/>native + MCP]
+    H[Approval queue<br/>InteractionCenter]
+    D[(Data stores<br/>SwiftData, ObjectBox,<br/>Keychain, files)]
 
-    subgraph Models
-        MLX[MLX]
-        OLL[Ollama]
-        CLD[Cloud providers]
-    end
-
-    TOOLS[Native tools + MCP servers]
-    HITL["InteractionCenter +<br/>ExecutionSuspensionService (HITL)"]
-
-    subgraph State
-        SD[(SwiftData store)]
-        VDB[(ObjectBox vector index)]
-        KC[Keychain]
-        UD[UserDefaults / files]
-    end
-
-    Surfaces --> ASM --> BOS --> AC --> EXE
-    EXE --> Models
-    EXE --> TOOLS
-    EXE <--> HITL
-    ASM --> SD
-    AC --> VDB
-    BOS --> KC
-    HITL --> CO
+    A --> S
+    B --> S
+    C --> S
+    S --> O --> G --> R
+    R --> M
+    R --> T
+    R <--> H
+    S --> D
 ```
 
 ## 5. Key flows
 
-### 5.1 A chat turn through the agent loop
+### 5.1 A chat turn
 
-1. The composer (`Devgentic/Interfaces/Shared/ChatInput/`) hands the message to
-   `MainApplicationViewModel`, which submits it to
-   `ActiveStreamManager.startMessageStream` (`Devgentic/Core/Utils/ActiveStreamManager.swift:436`).
-   One stream per conversation. A second *local* submit while one is running is queued, not
-   dropped — it serialises behind the live run and the waiting state is visible on screen
-   (`ConversationAdmission.swift`, "queue, never drop"); a second *ChatOps* turn is refused with
-   an explanation instead, because a queued remote message would leave the operator waiting on an
-   answer that cannot arrive.
-2. The stream manager persists the user message, derives conversation history from the store
-   (never from view state), and hands the turn to `BackendOrchestrationService`
-   (`ActiveStreamManager.swift:705`), which resolves the profile's model into an `LLMProvider`
-   and runs the prompt-fit check against the model's context window.
-3. `AgentConnect` (`Devgentic/Core/Backends/TextGen/AgentConnect.swift`) builds the system
-   prompt — instructions, episodic memory rendered by `EpisodicHistoryFormatter`
-   (`Devgentic/Core/Utils/EpisodicHistoryFormatter.swift`), RAG context, skill manifests — and
-   resolves the tool set: built-in tools from `NativeToolCatalog`
-   (`Devgentic/Core/Backends/TextGen/NativeToolCatalog.swift`) plus `DynamicMCPTool` wrappers
-   for connected MCP servers.
-4. `ReActAgentExecutor` (`Devgentic/Core/Backends/TextGen/ReAct/ReActAgentExecutor.swift:22`)
-   — an `actor` — runs the loop: request → parse the model's output with the parser for its
-   dialect (`ReAct/Parsing/`) → execute requested tools → record observations → repeat until
-   the model signals completion or the iteration cap (default 15, `ReActAgentExecutor.swift:35`).
-   The loop carries the conversation on one of two substrates: providers with native tool calling
-   get a growing, prefix-stable turn array; MLX and dialect models get the prompt rebuilt each
-   iteration with run history carried as a working-memory scratchpad — both are bounded, compacted,
-   and pressure-reported.
-5. Each step is published as an `AgentStreamEvent` (`Devgentic/Core/Utils/AgentStreamEvent.swift`)
-   on an `AsyncThrowingStream`; the stream manager writes messages to SwiftData as they arrive
-   and updates the timeline.
-6. The run ends with an honest verdict: a user denial or a skipped clarification is a choice, not
-   a failure; a failure the agent retried to success is a blip; what remains turns `.completed`
-   into `.completedWithWarnings`. Episodic memory stores degraded runs as failures, so a
-   best-effort answer is never re-served later as a clean recipe for the task
-   (`ReActAgentExecutor.swift:1625-1653`, `Devgentic/Core/Backends/TextGen/ReAct/Components/Memory/SessionGraph.swift:36-38`).
+1. The composer hands the message to `ActiveStreamManager`, which allows **one run per conversation**.
+   If you send a second message while one is running, it waits its turn and the screen says so.
+   A second message arriving from a chat bridge is refused with an explanation instead, because a
+   queued remote message could leave the sender waiting on an answer that never comes.
+2. The stream manager saves your message and rebuilds the conversation history **from the database**,
+   never from what is on screen. `BackendOrchestrationService` then picks the model's provider and
+   checks the prompt fits the model's context window.
+3. `AgentConnect` assembles the system prompt (instructions, remembered past turns, retrieved
+   document snippets, skills) and the tool list.
+4. `ReActAgentExecutor` runs the **agent loop**: ask the model, read its reply, run any tools it
+   asked for, feed the results back, and repeat until it gives a final answer or reaches the
+   iteration limit (15 by default). Different models speak different tool-calling "dialects", so
+   there is a parser per dialect.
+5. Each step is published as an event; the stream manager saves messages as they arrive and updates
+   the screen, so a crash or Stop still leaves a consistent transcript.
+6. The run ends with an honest verdict. A tool you denied is your choice, not a failure; a failure
+   the agent recovered from is a blip; anything else is reported as "completed with warnings".
 
-### 5.2 A tool call that needs approval (HITL)
+### 5.2 A tool call that needs approval
 
-1. Each tool carries a per-profile `requiresConfirmation` flag — set in the Tool Library
-   (`Devgentic/Interfaces/Main/Views/Tooling/Local/utils/LocalToolManager.swift` feeds the UI) —
-   and a risk label from `HITLRiskTier` (`Devgentic/Core/Utils/AgentStreamEvent.swift`).
-   Whether the user is asked is exactly what the profile configured.
-2. When a gated call is reached, `ActiveStreamManager.enqueueHITL`
-   (`ActiveStreamManager.swift:1459`) parks the run through
-   `ExecutionSuspensionService` (`Devgentic/Core/Utils/ExecutionSuspensionService.swift`) and
-   posts a pending item to `InteractionCenter`
-   (`Devgentic/Core/Utils/InteractionCenter.swift`), which is the single queue every surface
-   reads.
-3. The main window renders the pending call as a banner showing the tool, its resolved
-   arguments, and its risk label. An "allow for this chat" choice is stored per-conversation —
-   and per workflow node, since a grant in one node must not answer for another — by
-   `SessionToolApprovals` (`Devgentic/Core/Utils/SessionToolApprovals.swift`), and is never
-   served to an unattended run, which refuses the tool with an honest observation instead of
-   parking for an answer nobody will give. A cancelled wait is never recorded as a denial.
-4. The resolution resumes the suspension and the loop continues. A denial is recorded into
-   episodic memory, so later turns know the user refused.
-5. If the run is being mirrored to chat (5.3), the same pending item is posted there with
-   buttons; whoever answers is carried on the resolution so every surface shows the true source —
-   and a machine resolution (a Stop, a deadline) is never rendered as a person's decision.
+Human-in-the-loop (HITL) approval is how you stay in control.
 
-### 5.3 A ChatOps message
+1. Each profile decides which tools must ask first, and each tool carries a risk label.
+2. When the agent reaches such a tool, the run **pauses** and an item is posted to a single queue,
+   `InteractionCenter`, that every surface reads from.
+3. You see the tool, its arguments and its risk label, and can allow it, allow it for this chat, or
+   deny it. Unattended runs never reuse a "for this chat" grant; they refuse the tool and say so.
+4. Your answer resumes the run. A denial is remembered, so later turns know you refused.
+5. If the run is being mirrored to a chat bridge, the same prompt appears there with buttons.
+   Whoever answers is recorded, so a Stop or a timeout is never shown as a person's decision.
 
-1. Pairing is one-time and PIN-based: the user starts it in Settings, a six-digit PIN is
-   generated on the Mac, and the first chat message carrying it binds that chat — and that
-   sender's account — as the authorized operator. Guessing is rate-limited per origin by
-   `PairingAttemptPolicy` (`Devgentic/ChatOps/Services/PairingAttemptPolicy.swift`).
-2. Each platform has its own transport: Telegram polling
-   (`ChatOps/Services/TelegramListener.swift`), Discord Gateway
-   (`ChatOps/Services/DiscordGatewayClient.swift`), Slack Socket Mode
-   (`ChatOps/Services/SlackSocketClient.swift`). Inbound messages are authorized by
-   `ChatOpsSecurityGate` (`ChatOps/Services/ChatOpsSecurityGate.swift`) against the paired
-   account, the bound channel, and the per-provider security tier (read-only → full access).
-   The channel is an address; the paired account is the identity — in a shared channel, a
-   bystander is refused in silence, because replying would confirm a Mac is listening. The one
-   refusal that answers is rate-limiting the paired operator, who has already proved who they are.
-3. An admitted free-text turn goes through `ChatOpsCommandService.submitTurn`
-   (`ChatOps/Services/ChatOpsCommandService.swift`), which refuses if a run is already live in
-   the conversation, requires the mirror to attach (`attachMirror` returns `Bool` — a run whose
-   answer cannot get back is not started), and only then submits the message into the *same*
-   stream path as a local turn, in its own conversation.
-4. As the run progresses, the mirror renders state — replies, HITL prompts, plan reviews —
-   through `RemoteView`/`RemoteRendering` into platform-shaped messages, strips credentials on
-   the way out (`RemoteEgressSanitizer`), fits the result to the platform's message budget, and
-   posts it via the platform API client. Mirroring is consented per run: only runs started from
-   that chat are mirrored, and a run the mirror cannot attribute is refused rather than trusted.
-5. Tool approvals and clarifications answered from chat resolve the same `InteractionCenter`
-   items as a local click; `/cancel`, `/status` and similar verbs are parsed by
-   `ChatOpsCommand` (`ChatOps/Models/ChatOpsCommand.swift`).
+### 5.3 A message from a chat bridge
+
+1. **Pairing** is a one-time step: you start it in Settings, the Mac shows a six-digit PIN, and the
+   first chat message carrying that PIN binds that chat *and that sender's account* as the operator.
+   Guessing is rate-limited.
+2. Each platform has its own connection (Telegram polling, Discord Gateway, Slack Socket Mode).
+   Every incoming message is checked against the paired account, the bound channel and a
+   per-platform permission tier (read-only up to full access). Strangers get no reply at all, so
+   they cannot tell a Mac is listening.
+3. An accepted message enters the **same run path** as a local one, in its own conversation.
+4. A "mirror" turns run state (answers, approval prompts, plans) into messages for that platform,
+   removing credentials on the way out. Only runs started from that chat are mirrored.
 
 ### 5.4 A workflow run
 
-1. A workflow profile is a node graph authored on the canvas
-   (`Devgentic/Interfaces/Main/Views/WorkflowCanvas/`); node layout is persisted by
-   `WorkflowLayoutStore` (`Devgentic/Core/Persistence/SwiftData/WorkflowLayoutStore.swift`).
-   Node kinds include profile nodes (an LLM step), routers, code transforms, Action nodes
-   (tool calls), Gate nodes (a human decision mid-run), and triggers/actions.
-2. A run starts from the canvas, a scheduled task, or a trigger. `WorkflowStreamProvider`
-   (`Devgentic/Core/Backends/WorkflowGen/WorkflowStreamProvider.swift`) adapts the run to the
-   same stream/event model as chat, and `WorkflowExecutor`
-   (`Devgentic/Core/Backends/WorkflowGen/WorkflowExecutor.swift`) walks the graph, carrying
-   variables between nodes in a `WorkflowExecutionContext`
-   (`Devgentic/Core/Backends/WorkflowGen/WorkflowExecutionContext.swift`).
-3. Action nodes run tools with the node's own tool configuration — including the approval
-   check, which suspends through the same `ExecutionSuspensionService` as the agent path;
-   Gate nodes pause the whole run until the user answers.
-4. Run records land in `WorkflowRunHistoryStore`; a run still marked running at the next
-   launch is reconciled to interrupted (`Devgentic/DevgenticApp.swift:129`).
+1. A workflow is a graph drawn on the canvas. Node types include model steps, routers, code
+   transforms, tool-calling **Action** nodes, and **Gate** nodes that wait for a human.
+2. A run can start from the canvas, a schedule, or a trigger. `WorkflowExecutor` walks the graph and
+   passes variables between nodes; `WorkflowStreamProvider` presents the run to the rest of the app
+   using the same event model as chat.
+3. Action nodes use the same approval mechanism as the agent loop. Gate nodes pause the whole run
+   until someone answers.
+4. Runs are recorded in a history store. A run still marked "running" at the next launch is marked
+   interrupted.
 
-## 6. Persistence map
+## 6. Where data is stored
 
-| What | Where | How |
-|---|---|---|
-| Conversations, messages, profiles, prompts, scheduled tasks, skills registry, workflow layouts and run history, download history, MCP server config | One SwiftData store (`DevgenticSchema`, `Devgentic/Core/Persistence/SwiftData/DevgenticSchema.swift`) at `~/Library/Application Support/DevgenticSD.store` (`DevgenticSchema.swift:88`, `:158`). Schema versions and a migration plan are declared up front (`DevgenticSchemaVersions.swift`); opening the store is the app's first launch-critical step (`Devgentic/DevgenticApp.swift:28-44`). | SwiftData |
-| RAG vector index (chunks, embeddings, parent documents) | An ObjectBox store under `Application Support/<bundle-id>/vector-db` (`Devgentic/Core/Persistence/RAG/VectorStoreService.swift`). Its generated code is committed under `generated/`, driven by `model-devgentic.json`. | ObjectBox |
-| Trace/log records for observability | SQLite via GRDB (`Devgentic/Observaliblity/`), exportable in diagnostics bundles. | GRDB |
-| API keys, bot tokens, OAuth tokens | Login Keychain only. Six stores implement the `KeychainAccessing` protocol: provider keys (`Devgentic/Interfaces/Shared/ChatInput/SecureKeyStorage.swift`), provider key shapes (`Devgentic/Core/Persistence/ProviderKeyStore.swift`), web-search keys (`Devgentic/Core/Persistence/WebSearchKeyStore.swift`), ChatOps credentials (`Devgentic/ChatOps/Models/ChatOpsConfig.swift`), MCP secrets (`Devgentic/Interfaces/Main/Views/Tooling/Mcp/MCPSecretStore.swift`), Hugging Face token (`Devgentic/Interfaces/Main/Views/BackendProfile/MlxLLM/HuggingFaceTokenStore.swift`). | Keychain |
-| User preferences, per-provider settings, window state | `UserDefaults` | — |
-| Attachments and generated images | Managed media files (`Devgentic/Core/Storage/MediaStore.swift`) | Files |
-| Skills content | Files under the app's support directory, indexed by the SwiftData skill entities (`Devgentic/Core/Skills/`) | Files |
+| What | Where |
+|---|---|
+| Conversations, messages, profiles, prompts, scheduled tasks, skills registry, workflow layouts and history, MCP server config | **SwiftData** store in `~/Library/Application Support` (`DevgenticSchema`) |
+| Document search index (chunks and embeddings for RAG) | **ObjectBox** database under Application Support |
+| Traces and logs for diagnostics | **SQLite** via GRDB (`Devgentic/Observaliblity/`) |
+| API keys, bot tokens, OAuth tokens | **macOS Keychain** only |
+| Preferences and window state | `UserDefaults` |
+| Attachments, generated images, skill files | Files under the app's support directory |
 
-Deletions and recoveries are deliberately explicit: if the primary store will not open, the app
-diagnoses the failure, tells the user where the data is, and offers a reversible "move aside" —
-it never silently deletes (`DevgenticApp.swift:232-369`).
+The app never silently deletes data. If the main store will not open, it explains what went wrong,
+tells you where the data is, and offers a reversible "move aside".
 
-## 7. Security model
+## 7. Security model in brief
 
-The trust model is **local**: the app runs unsandboxed with the user's privileges, on the
-premise that the user is the authority over their own machine. `SECURITY.md` states what is and
-is not considered a vulnerability under that model. The layers that make it defensible:
+The model is **local trust**: the app runs with your privileges, on the premise that you control your
+own machine. [SECURITY.md](SECURITY.md) spells out what counts as a vulnerability under that model.
+The safeguards:
 
-- **Per-tool consent.** Every tool's confirmation behaviour is configured per profile; a tool
-  set to "ask" always asks, and destructive actions are split out of multiplexer tools so they
-  can be gated individually.
-- **HITL as the spine.** Approvals flow through one queue (`InteractionCenter`) and one
-  suspension service, whether raised from chat, a workflow, or a remote bridge.
-- **Argument hygiene.** Model-supplied values never become shell command strings (argv only),
-  AppleScript values are escaped at a single choke point, and invoked programs receive `--`
-  before model-supplied patterns so they cannot be read as flags. The git and search tools
-  additionally neutralize config-driven code execution (`Devgentic/Interfaces/Main/Views/Tooling/Local/`,
-  see `GitCommandBuilder` and the search tools' argv construction).
-- **A declarative safety policy.** `Devgentic/SafetyPolicy.json` defines regex rules — blocked
-  and confirm-required patterns for destructive shell usage — loaded by
-  `Devgentic/Core/Utils/SecurityTools.swift`.
-- **Secrets stay in the Keychain** (see the persistence map); no key material is stored in
-  SwiftData, defaults, or files.
-- **Egress control for ChatOps.** Everything posted to a third-party chat service passes a
-  credential-stripping floor (`Devgentic/ChatOps/Services/RemoteEgressSanitizer.swift`), and
-  authorization binds one paired account, never just a channel.
-- **Hardened runtime + Developer ID signing** on release builds, with notarized, Sparkle-EdDSA-
-  verified updates (`SUFeedURL` and `SUPublicEDKey` in `Devgentic/Info.plist:65-67`; the update
-  flow lives in `Devgentic/Core/Updates/SoftwareUpdater.swift`). The release pipeline verifies
-  the signature of the exported app before notarization (`CONTRIBUTING.md`).
+- **You approve risky tools.** Confirmation is configured per profile, and destructive actions are
+  separated from broader tools so they can be gated on their own.
+- **One approval path.** Chat, workflows and chat bridges all use the same queue.
+- **Careful arguments.** Model-supplied values are never glued into shell command strings (they are
+  passed as separate arguments), AppleScript values are escaped in one place, and programs receive `--`
+  before model-supplied patterns so they cannot be mistaken for options.
+- **A safety policy file.** `Devgentic/SafetyPolicy.json` lists blocked and confirm-first patterns
+  for destructive shell usage.
+- **Secrets stay in the Keychain**, never in the database, defaults or files.
+- **Outbound filtering for chat bridges.** Anything posted to a third-party chat service has
+  credentials stripped first, and access is tied to one paired account, never just a channel.
+- **Signed releases.** Release builds use Developer ID signing, the hardened runtime and notarization;
+  updates are verified with Sparkle's EdDSA signatures.
 
-## 8. Concurrency model
+## 8. Concurrency in brief
 
-- The build compiles with `SWIFT_STRICT_CONCURRENCY = complete` in Swift 5 language mode, so
-  actor isolation and `Sendable` are checked everywhere even though the codebase predates
-  Swift 6 mode.
-- **UI and orchestration are main-actor.** View models and the stream orchestrator are
-  `@MainActor @Observable` (`ActiveStreamManager.swift:41-42`), so timeline state has one owner.
-- **The agent loop is an actor.** `ReActAgentExecutor` runs iterations off the main actor and
-  reports back over `AsyncThrowingStream<AgentStreamEvent>` (`ReActAgentExecutor.swift:47`).
-- **Long-lived recorders are plain actors** (`LogRecorder`, `TraceRecorder` in
-  `Devgentic/Observaliblity/`), kept independent of the main actor so a fatal-shutdown flush
-  cannot be starved by the UI (`DevgenticApp.swift:590-591`).
-- **Streams are conversation-scoped and single.** `ActiveStreamManager` keeps one live stream
-  per conversation: a second local submit is queued, not dropped, and the waiting run says so on
-  screen; a second ChatOps turn is refused while a run is live (§5.3). Runs never overlap in one
-  conversation, and the stream persists incrementally so a crash or Stop leaves a consistent
-  transcript. History for each turn is *derived* from the store rather than accepted from the
-  calling surface.
-- **Time limits bound compute, not wall clock.** A run parks indefinitely on a human decision
-  with no watchdog of its own — the surrounding container (a workflow node's timeout, a
-  schedule's limit) owns any deadline — and parked time is credited back to the owner chain, so
-  a run that waited an hour for an approval is not killed by a five-minute limit
-  (`ParkScope`, `ExecutionBudget`, `ComputeTimeoutSentinel`, `DeadlineRace` in
-  `Devgentic/Core/Utils/`). Inner limits are shortened to fit outer ones, so the inner fires
-  first and delivers its partial output.
-- **Startup work is staged deliberately.** Non-critical bootstrap (skills sweep, download
-  reconciliation, MCP server connections, scheduler arming) runs after the store opens, in a
-  defined order, rather than blocking first paint (`DevgenticApp.swift:76-230`).
+- UI state and the stream manager live on the **main actor**, so each conversation's timeline has a
+  single owner.
+- The **agent loop is a Swift actor**, so it runs off the main thread and reports back through an
+  async stream of events.
+- Logging and tracing are separate actors, so a final flush on shutdown is not starved by the UI.
+- **Time limits count working time, not waiting time.** A run waiting on your approval has no
+  deadline of its own, and the time it spent parked is credited back, so a five-minute limit does not
+  kill a run that waited an hour for you. Inner limits are shortened to fit inside outer ones.
+- **Startup is staged.** Only opening the database blocks the first window; skills, downloads, MCP
+  connections and the scheduler start afterwards.
 
-## 9. Building, testing, releasing
+## 9. Building and testing
 
 ```bash
 xcodebuild -project Devgentic.xcodeproj -scheme devgentic -destination 'platform=macOS' build
 ```
 
-Tests use a two-phase `build-for-testing` / `test-without-building` split; parts of the suite
-load real Whisper and embedding models, so target the classes you care about rather than
-running everything (details and caveats in the [README](README.md)). Conventions that the build
-enforces — including the file-header rule — are in
-[CONTRIBUTING.md](CONTRIBUTING.md), which also covers the CLA, Developer ID signing, and the
-release verification script.
+Some tests load real speech and embedding models, so run the classes you care about rather than the
+whole suite. Details are in the [README](README.md); conventions, the CLA and release signing are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 10. Glossary
 
 | Term | Meaning |
 |---|---|
-| **Backend profile** | The unit of configuration: a model + its provider settings, capabilities, tools, history strategy, and risk posture. Profiles are shared across surfaces — the same profile can be a chat agent, a workflow node, or the Orb. |
-| **ReAct loop** | The agent execution model: the model reasons, calls tools, observes results, and repeats until it emits a final answer or hits the iteration cap (`ReActAgentExecutor`). |
-| **HITL** | Human-in-the-loop: the approval gate that parks a run until a person approves, edits, or denies a tool call (or answers a workflow Gate node). |
-| **Episodic memory** | The structured XML record of past turns and tool actions rendered into the system prompt each request, so the agent remembers what it did and what the user denied. |
-| **Native tool** | A built-in macOS capability the model can call (filesystem, shell, git, AppleScript, EventKit, UI automation, …), declared in `NativeToolCatalog`. |
-| **MCP** | Model Context Protocol: the standard for external tool servers. Connected servers contribute dynamic tools (`DynamicMCPTool`) and can request sampling or user input (elicitation). |
-| **Skill** | A versioned instruction package in the skills library that a profile can load at runtime via the `load_skill` tool. |
-| **Gate node** | A workflow node that pauses the run for a human decision before continuing. |
-| **Park** | A run paused on a human decision (tool approval, clarification, plan review, gate). A park has no deadline of its own — the surrounding run, node or schedule owns any limit, and the waiting time is not counted against it. |
-| **Mirror** | The ChatOps component that projects a run's state — replies, prompts, approvals — into a Telegram/Discord/Slack chat (`RemoteMirrorService`). |
-| **Pairing** | The PIN-based handshake that binds one chat and one sender account to the Mac as the authorized ChatOps operator. |
-| **Security tier** | The per-provider ChatOps permission level (read-only → standard → full access) that decides which remote verbs are available. |
-| **RAG** | Retrieval-augmented generation: documents are chunked, embedded locally, and stored in the ObjectBox index; relevant chunks are injected into the prompt. |
-| **Trace** | The observability record of a run — spans, tool calls, errors — stored via GRDB and viewable in the trends dashboard. |
+| **Profile** | A model plus its provider settings, tools, instructions and risk settings. The same profile can power a chat, a workflow node or the Orb. |
+| **ReAct loop** | The agent cycle: reason, call a tool, observe the result, repeat until done. |
+| **HITL** | Human-in-the-loop: a run pauses until a person approves, edits or denies a tool call. |
+| **Park** | A run paused waiting on a person (approval, question, plan review or gate). |
+| **Episodic memory** | A structured record of past turns and tool actions included in the prompt, so the agent remembers what it did and what you refused. |
+| **Native tool** | A built-in macOS capability the model can call, listed in `NativeToolCatalog`. |
+| **MCP** | Model Context Protocol, the standard for external tool servers. |
+| **Skill** | A versioned instruction package a profile can load on demand. |
+| **Gate node** | A workflow step that waits for a human decision. |
+| **Mirror** | The component that shows a run's state in a Telegram, Discord or Slack chat. |
+| **Pairing** | The PIN handshake that binds one chat and one account to the Mac as its operator. |
+| **RAG** | Retrieval-augmented generation: documents are split, embedded locally and searched, and relevant snippets are added to the prompt. |
+| **Trace** | A diagnostic record of a run: steps, tool calls and errors. |

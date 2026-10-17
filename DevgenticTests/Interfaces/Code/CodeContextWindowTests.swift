@@ -119,7 +119,7 @@ final class FixedCostWarningTests: XCTestCase {
                            breakdown: ContextOccupancy(toolChars: toolChars, knowledgeChars: knowledgeChars))
     }
 
-    /// The device case: 14K chars of tools + 2K instructions + 362 of context.md in an 8K window.
+    /// The device case: 14K chars of tools + 2K instructions + 362 of project knowledge in an 8K window.
     func testTheDeviceCaseWarns() {
         let u = usage(toolChars: 14_044, knowledgeChars: 362, window: 8_192)
         XCTAssertTrue(u.fixedCostIsHigh)

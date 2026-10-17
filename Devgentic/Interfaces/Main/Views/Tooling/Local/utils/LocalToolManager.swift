@@ -54,9 +54,7 @@ enum ToolConfirmationDefaults {
             "list_directory",
             "read_file",
             "get_system_stats",
-            "fs_smart_search",
             "spotlight_search",
-            "fs_read_metadata",
             "read_file_metadata",
             "project_tree",
             "glob_files",
@@ -68,6 +66,9 @@ enum ToolConfirmationDefaults {
             "diff_files",
             "git",
             "get_task_output",
+            // Changes no state on this machine; the query leaving the device IS the feature, and
+            // the user opted in by choosing a provider in Settings → Web Search.
+            "web_search",
             // `stop_background_task` is NOT here: it changes state. See `ownWorkOnlyTools`.
             // (`codebase_map`, `git_tool`, `command_output` and `command_stop` were names of tools
             // that no longer exist.)

@@ -78,9 +78,15 @@ struct ToolNameResolver: Sendable {
     /// Runtime tool registry for this agent invocation.
     let registeredTools: [AgentTool]
 
-    /// Jaro-Winkler similarity threshold for fuzzy matching.
-    /// 0.85 is tight enough to avoid false positives like `delete_file` → `delete_folder`
-    /// while still catching `finalanswer` → `final_answer`.
+    /// Jaro-Winkler similarity threshold for fuzzy matching. Catches `finalanswer` → `final_answer`.
+    ///
+    /// ⚠️ READINESS CR-51 (2026-10-12). This comment used to claim 0.85 blocks `delete_file` →
+    /// `delete_folder`. It does not: that pair scores ≈ 0.93, and `create_file` → `create_folder`
+    /// ≈ 0.94 — so a `create_file(path: "notes.md", content: …)` the registry lacked ran as
+    /// `create_folder`, made a DIRECTORY named `notes.md` and dropped the content. Similarity is not
+    /// a safety gate. Two guards in `resolve` are: `namesDifferOnlyByTypos` (a different WORD is a
+    /// different tool) and `carriesForeignArguments` (arguments the target doesn't take mean the
+    /// model meant another tool).
     static let fuzzyThreshold: Double = 0.85
 
     /// Static alias table for well-known terminator hallucinations. These are the
@@ -162,10 +168,23 @@ struct ToolNameResolver: Sendable {
         let candidates = registeredTools
             .map { (tool: $0, score: Self.jaroWinkler(emittedName, $0.name)) }
             .filter { $0.score >= Self.fuzzyThreshold && Self.lengthCompatible(emittedName, $0.tool.name) }
+            .filter { candidate in
+                guard Self.namesDifferOnlyByTypos(emittedName, candidate.tool.name) else {
+                    logger.notice("[TOOLRESOLVE] Fuzzy match '\(emittedName)' → '\(candidate.tool.name)' (jw=\(String(format: "%.2f", candidate.score))) REJECTED: the names differ by a whole word, not a typo. CONSEQUENCE: not run as that tool; the model is told the name is unknown and offered suggestions.")
+                    return false
+                }
+                return true
+            }
             .sorted { $0.score > $1.score }
 
+        var foreignArgumentRejects = Set<String>()
         for (tool, score) in candidates {
             let repaired = ArgNameAliasResolver.repair(arguments: arguments, forTool: tool)
+            if repaired.missingArgs.isEmpty, !repaired.unexpectedArgs.isEmpty {
+                foreignArgumentRejects.insert(tool.name)
+                logger.notice("[TOOLRESOLVE] Fuzzy match '\(emittedName)' → '\(tool.name)' (jw=\(String(format: "%.2f", score))) REJECTED: the call carries argument(s) \(repaired.unexpectedArgs.sorted()) that '\(tool.name)' doesn't take. CONSEQUENCE: not run — running it would silently drop those arguments; the model gets an argument-fit nudge instead.")
+                continue
+            }
             if repaired.missingArgs.isEmpty {
                 logger.info("🔧 Fuzzy resolved: '\(emittedName)' → '\(tool.name)' (jw=\(String(format: "%.2f", score)))")
                 return .remapped(
@@ -179,7 +198,10 @@ struct ToolNameResolver: Sendable {
 
         // If we had fuzzy candidates but none were arg-compat, surface the best one
         // as a typed arg-mismatch so the model gets a targeted nudge about the fit.
-        if let bestCandidate = candidates.first {
+        // A candidate rejected for FOREIGN arguments is skipped: the call is evidence the model
+        // meant a different tool, so nudging it toward this one would be wrong — it falls through
+        // to "unknown" with suggestions instead.
+        if let bestCandidate = candidates.first(where: { !foreignArgumentRejects.contains($0.tool.name) }) {
             let repaired = ArgNameAliasResolver.repair(arguments: arguments, forTool: bestCandidate.tool)
             logger.info("⚠️ Fuzzy candidate '\(bestCandidate.tool.name)' rejected on arg fit for '\(emittedName)'")
             return .argSchemaMismatch(
@@ -200,6 +222,51 @@ struct ToolNameResolver: Sendable {
 
         logger.warning("❓ Unknown tool '\(emittedName)'; suggestions: \(suggestions.isEmpty ? "<none>" : suggestions.joined(separator: ", "))")
         return .unknown(attempted: emittedName, suggestions: Array(suggestions))
+    }
+
+    // MARK: - Word Gate (CR-51)
+
+    /// Whether two tool names differ only by typos — the same words, possibly misspelt or joined —
+    /// rather than by a whole word. `final_answr`/`final_answer` and `finalanswer`/`final_answer`
+    /// pass; `create_file`/`create_folder` and `delete_file`/`delete_folder` don't.
+    ///
+    /// Names are split on `_`, `-` and `.`. With different word counts the names are compared with
+    /// the separators removed (a joined or split word). With the same count, each word pair must be
+    /// within a typo's distance: at most 1 edit (a swap counts as one), or 2 for words of 8+ characters.
+    static func namesDifferOnlyByTypos(_ a: String, _ b: String) -> Bool {
+        let separators: (Character) -> Bool = { $0 == "_" || $0 == "-" || $0 == "." }
+        let aWords = a.lowercased().split(whereSeparator: separators).map(String.init)
+        let bWords = b.lowercased().split(whereSeparator: separators).map(String.init)
+        guard aWords.count == bWords.count else {
+            return editDistance(aWords.joined(), bWords.joined()) <= 1
+        }
+        for (x, y) in zip(aWords, bWords) where x != y {
+            let allowed = min(x.count, y.count) >= 8 ? 2 : 1
+            if editDistance(x, y) > allowed { return false }
+        }
+        return true
+    }
+
+    /// Edit distance where a swap of two adjacent characters counts as ONE edit (optimal string
+    /// alignment) — `fiel`/`file` is the typo it looks like, not two substitutions. Tool names are
+    /// short, so the O(n·m) table is trivial.
+    static func editDistance(_ a: String, _ b: String) -> Int {
+        let a = Array(a), b = Array(b)
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+        var d = [[Int]](repeating: [Int](repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in 0...a.count { d[i][0] = i }
+        for j in 0...b.count { d[0][j] = j }
+        for i in 1...a.count {
+            for j in 1...b.count {
+                let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+                if i > 1, j > 1, a[i - 1] == b[j - 2], a[i - 2] == b[j - 1] {
+                    d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+                }
+            }
+        }
+        return d[a.count][b.count]
     }
 
     // MARK: - Length Gate

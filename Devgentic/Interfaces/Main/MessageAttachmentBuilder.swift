@@ -13,9 +13,8 @@
 //  (`BackendOrchestrationService.assembleTextFileContent`) reads EVERY
 //  non-image attachment, so everything that isn't an image must be recorded
 //  on the message too — otherwise the transcript lies about what the model
-//  received. Both type classifiers are keyed entirely off the path extension,
-//  so extension-less files (Makefile, LICENSE, Dockerfile, .env — their
-//  `pathExtension` is "") match neither and need the read-probe fallback.
+//  received. Classification is `AttachmentClassifier` — shared with the backend
+//  and RAG indexing — so the three sites cannot disagree about a file's kind.
 //
 
 import Foundation
@@ -34,30 +33,41 @@ struct MessageAttachmentBuilder {
     /// persisted `ChatMessage` will carry. Files that can't be represented are
     /// logged — a silent drop here is what made the transcript diverge from the
     /// model input (ATT-1).
-    func build(from files: [FileSystemItem]) async -> (textFiles: [AttachedTextFile], imageFiles: [AttachedImageFile]) {
+    ///
+    /// - Parameter deliveryMode: the profile's `AttachmentDeliveryMode`. When given, each text
+    ///   file records what the model will receive (`AttachedTextFile.delivery`) by running the
+    ///   backend's own `DirectInjectionPlan`. nil records no delivery (a sender with no files).
+    func build(from files: [FileSystemItem], deliveryMode: AttachmentDeliveryMode? = nil) async -> (textFiles: [AttachedTextFile], imageFiles: [AttachedImageFile]) {
         var textFiles: [AttachedTextFile] = []
         var imageFiles: [AttachedImageFile] = []
 
         for fileItem in files {
-            let mimeType = fileProcessorService.getFileMimeType(for: fileItem.url)
             let fileExtension = fileItem.url.pathExtension
             let attributes = try? FileManager.default.attributesOfItem(atPath: fileItem.url.path)
             let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
 
-            if fileProcessorService.isTextFile(mimeType: mimeType, url: fileItem.url) {
-                if let content = await fileProcessorService.readFileContent(for: fileItem.url) {
+            // ⚠️ The SAME classifier the backend uses to decide what the model receives —
+            // a private classifier here is exactly how the transcript drifted (ATT-1, and
+            // `.svg` recorded as text while it shipped as an image).
+            let kind = AttachmentClassifier.classify(fileItem)
+            switch kind {
+            case .text, .document:
+                // Extension-less files (Makefile, LICENSE, .env) classify as `.text` by their
+                // content, so they need no fallback branch any more.
+                // The backend's reader at the backend's cap — so a file is recorded here exactly
+                // when `assembleTextFileContent` reads it, which the delivery plan below needs.
+                if let content = try? await fileProcessorService.readFileContentOrThrow(for: fileItem.url, maxSize: DirectInjectionBudget.readCap) {
                     let textFile = AttachedTextFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, content: content, size: fileSize)
                     textFiles.append(textFile)
                 } else {
-                    // readFileContent logged the cause; state the CONSEQUENCE here —
-                    // this drop was previously silent, and a missing record is the
-                    // exact divergence class ATT-1 is about.
-                    logger.warning("Text attachment '\(fileItem.name)' couldn't be read — it will be missing from the transcript; the backend read will surface its own failure notice.")
+                    // readFileContent logged the cause; state the CONSEQUENCE here.
+                    logger.warning("\(kind.rawValue.capitalized) attachment '\(fileItem.name)' couldn't be read — it will be missing from the transcript; the backend read will surface its own failure notice.")
                 }
-            } else if fileProcessorService.isImageFile(mimeType: mimeType, url: fileItem.url) {
+
+            case .image:
                 // [M7] Reject an oversized image BEFORE reading it into memory. Fan-in safety net
-                // for every sender (main / ChatOps / QuickAccess / Scheduler), redo, and any file
-                // that grew since it was picked; interactive attaches are also warned at the picker.
+                // for every sender (main / QuickAccess / Scheduler), redo, and any file that grew
+                // since it was picked; interactive attaches are refused earlier by AttachmentIntake.
                 // `fileSize` was already stat'd above, so a huge file is never read.
                 guard fileSize <= ImageConstraints.maxAttachmentImageBytes else {
                     logger.warning("Skipping oversized image attachment '\(fileItem.name)' — \(fileSize) bytes exceeds the \(ImageConstraints.maxAttachmentImageBytes)-byte cap.")
@@ -72,30 +82,45 @@ struct MessageAttachmentBuilder {
                 } catch {
                     logger.error("Could not read image data for file: \(fileItem.name)")
                 }
-            } else if fileItem.isDirectory {
-                // ATT-3 (known, deferred): folders are offered by the picker but the
-                // send pipeline never expands them — the backend read fails for them
-                // too. Log the drop so it's traceable instead of invisible.
+
+            case .folder:
+                // ATT-3 (known, deferred): no send path expands a folder; direct injection
+                // fails to read it. Log the drop so it's traceable instead of invisible.
                 logger.warning("Folder attachment '\(fileItem.name)' isn't supported by the send pipeline — not persisted; the backend will surface a read failure for it.")
-            } else {
-                // ATT-1 fallback: no classifier matched. Both classifiers are keyed
-                // off the path extension, so extension-less files (Makefile, LICENSE,
-                // Dockerfile, .env — `pathExtension` is "") land here even though the
-                // backend's direct-injection path reads and sends them (it skips only
-                // images). Mirror the backend: persist anything that reads as UTF-8
-                // text so the transcript records what the model actually received.
-                // A genuinely binary file fails the same UTF-8 read on both sides,
-                // so transcript and model input still agree when this probe fails.
-                if let content = await fileProcessorService.readFileContent(for: fileItem.url) {
-                    logger.log("Attachment '\(fileItem.name)' (mime: \(mimeType)) matched no type classifier; persisted as text — the backend injects every non-image attachment (ATT-1 fallback).")
-                    let textFile = AttachedTextFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, content: content, size: fileSize)
-                    textFiles.append(textFile)
-                } else {
-                    logger.warning("Attachment '\(fileItem.name)' (mime: \(mimeType)) matched no classifier and isn't readable as text — omitted from the transcript; the backend will surface its own failure notice.")
-                }
+
+            case .binary, .video:
+                // AttachmentIntake refuses these at attach time; one can still arrive from a
+                // non-interactive sender or a file rewritten since it was attached. The backend's
+                // read fails for it too, so transcript and model input still agree.
+                logger.warning("Attachment '\(fileItem.name)' is \(kind.rawValue) content no send path can carry — omitted from the transcript; the backend will surface its own failure notice.")
             }
         }
 
+        if let deliveryMode {
+            textFiles = Self.recordingDelivery(on: textFiles, mode: deliveryMode)
+        }
         return (textFiles, imageFiles)
+    }
+
+    /// Stamps each text file with what the model receives. ⚠️ Runs `DirectInjectionPlan` — the
+    /// backend's assembler — over the same files in the same order, so the transcript can no
+    /// longer imply the model saw content it didn't (it used to store a 120K file whole while
+    /// the model received none of it). Images aren't in `textFiles`; the backend skips them too.
+    static func recordingDelivery(on textFiles: [AttachedTextFile], mode: AttachmentDeliveryMode) -> [AttachedTextFile] {
+        let deliveries: [AttachmentDelivery]
+        switch mode {
+        case .pathManifest:
+            deliveries = Array(repeating: .pathOnly, count: textFiles.count)
+        case .inject(let includeAbsolutePaths):
+            deliveries = DirectInjectionPlan.assemble(
+                textFiles.map { .init(name: $0.name, path: $0.url.path, content: $0.content) },
+                includeAbsolutePaths: includeAbsolutePaths
+            ).deliveries
+        }
+        return zip(textFiles, deliveries).map { file, delivery in
+            var stamped = file
+            stamped.delivery = delivery
+            return stamped
+        }
     }
 }

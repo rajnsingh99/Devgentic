@@ -6,7 +6,7 @@
 #
 #   scripts/release.sh <version> [--notes <release-notes.html>] [--allow-dirty]
 #
-#   e.g. scripts/release.sh 0.9.0 --notes docs/release-notes/0.9.0.html
+#   e.g. scripts/release.sh 1.0.0 --notes docs/release-notes/1.0.0.html
 #
 # Pipeline: archive → export (Developer ID) → signing gate → notarize + staple the app → DMG →
 # sign + notarize + staple the DMG → EdDSA-sign it into appcast.xml → checksum.
@@ -98,6 +98,20 @@ PLIST_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' Devgentic/Info.pl
 [[ "$("$SPARKLE_BIN/generate_keys" -p)" == "$PLIST_KEY" ]] \
   || die "the Keychain's Sparkle key does not match SUPublicEDKey in Info.plist — every installed copy would REJECT this update"
 ok "Sparkle key matches SUPublicEDKey"
+
+# Cost estimates come from the bundled price list (ModelPriceList). A warning, not a stop: stale
+# prices only make cost figures wrong, and a model added since shows no cost at all.
+PRICES_FETCHED="$(python3 -c 'import json;print(json.load(open("Devgentic/Resources/ModelPrices.json"))["_source"]["fetched"])' 2>/dev/null || true)"
+if [[ -z "$PRICES_FETCHED" ]]; then
+  printf '  \033[33m!\033[0m ModelPrices.json is missing or unreadable — run scripts/update-model-prices.py\n'
+else
+  PRICES_AGE_DAYS=$(( ( $(date +%s) - $(date -j -f %Y-%m-%d "$PRICES_FETCHED" +%s) ) / 86400 ))
+  if (( PRICES_AGE_DAYS > 45 )); then
+    printf '  \033[33m!\033[0m model prices are %s days old (fetched %s) — run scripts/update-model-prices.py and commit\n' "$PRICES_AGE_DAYS" "$PRICES_FETCHED"
+  else
+    ok "model prices fetched $PRICES_FETCHED"
+  fi
+fi
 
 # ------------------------------------------------------------------------ previous appcast
 mkdir -p "$RELEASE_ROOT"

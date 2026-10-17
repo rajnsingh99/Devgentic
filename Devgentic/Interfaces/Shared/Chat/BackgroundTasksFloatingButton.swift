@@ -43,7 +43,9 @@ struct BackgroundTasksFloatingButton: View {
     private var isVisible: Bool {
         Self.shouldShow(hasConversation: conversationID != nil,
                         taskCount: tasks.count,
-                        panelIsOpen: chatHistoryViewModel.isBackgroundTasksVisible || chatHistoryViewModel.isCodeViewerPanelPresented)
+                        panelIsOpen: chatHistoryViewModel.isBackgroundTasksVisible
+                            || chatHistoryViewModel.isCodeViewerPanelPresented
+                            || chatHistoryViewModel.isGitChangesPanelPresented)
     }
 
     /// The rule itself, promoted out of the view body.

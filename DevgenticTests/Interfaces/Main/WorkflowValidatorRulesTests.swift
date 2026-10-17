@@ -307,6 +307,36 @@ final class WorkflowValidatorRulesTests: XCTestCase {
         XCTAssertEqual(warnings(issues, containing: "isn't currently available").count, 1)
     }
 
+    // MARK: - Built-in tool that needs setup (web_search)
+
+    private func webSearchActionNode() -> WorkflowNode {
+        let tool = Tool(
+            name: "web_search", description: "test tool", isEnabled: true,
+            requiresConfirmation: false, sourceId: ToolSource.builtInSourceID,
+            parameters: ToolParameters(type: "object", properties: [:], required: [])
+        )
+        return WorkflowNode(kind: .action(ActionNodeConfig(tool: tool)), position: .zero, displayName: "Search")
+    }
+
+    /// An Action node embeds its own tool and never passes through a profile, so the Tool
+    /// Library's block on enabling does not reach it. Unconfigured ⇒ a design-time warning; once
+    /// configured ⇒ none. Uses the real `UserDefaults.standard` (the validator reads the live
+    /// config), restored afterwards.
+    func testActionToolThatNeedsSetupWarnsUntilConfigured() {
+        let config = WebSearchConfig()
+        let savedProvider = config.provider, savedURL = config.searxngURL
+        addTeardownBlock { config.provider = savedProvider; config.searxngURL = savedURL }
+
+        config.provider = .google
+        WebSearchKeyStore.delete(for: .google)
+        let node = webSearchActionNode()
+        XCTAssertEqual(warnings(validate(layout([node, codeNode()])), containing: "needs setup").count, 1)
+
+        config.provider = .searxng
+        config.searxngURL = "http://localhost:8080"
+        XCTAssertTrue(warnings(validate(layout([node, codeNode()])), containing: "needs setup").isEmpty)
+    }
+
     // MARK: - Sub-workflow nesting (WF-VA1 ≡ WF-NS5 ≡ WF-SE4)
     // (Originally exercised through Loop bodies; rewritten onto sub-workflow nodes when the Loop
     //  was retired 2026-08-15. The RULES under test — the shared extractor, cycle detection, the
@@ -390,9 +420,9 @@ final class WorkflowValidatorRulesTests: XCTestCase {
 
     // MARK: - WF-CC2 / WF-CC5: same-level MLX model contention (design-time warning)
     //
-    // ⚠️ `MLXService` keeps ONE model container resident, so two same-level nodes on DIFFERENT MLX
-    // models evict each other on every generation call; two on the SAME model share one container
-    // for free. `WorkflowExecutor.profileDispatchLanes` (WF-CC2) partitions the PROFILE group at
+    // ⚠️ `MLXService` keeps ONE model container resident and generates one request at a time
+    // (decision D6), so ANY two same-level MLX nodes run one after another, same model or not.
+    // `WorkflowExecutor.profileDispatchLanes` (WF-CC2) partitions the PROFILE group at
     // runtime; `WorkflowExecutor.structuralDispatchLanes` (WF-CC5) now does the same for the
     // STRUCTURAL group (Router `.condition` fallbacks + nested sub-workflow nodes). Both halves are
     // ACTUALLY FIXED at runtime now — these warnings are informational (this step runs slower, not
@@ -445,14 +475,16 @@ final class WorkflowValidatorRulesTests: XCTestCase {
                       "MUST stay a warning — the graph is legal and it runs; an error would block the run")
     }
 
-    /// The negative case that pins the key as the MODEL rather than the provider.
-    func testSameLevelSameMLXModel_IsNotFlagged() {
+    /// Decision D6: same-model siblings also run one after another at runtime, so the warning
+    /// describes them too — the rule and `profileDispatchLanes` must agree.
+    func testSameLevelSameMLXModel_IsFlagged() {
         let a = mlxBotProfile("qwen3-8b", name: "A")
         let b = mlxBotProfile("qwen3-8b", name: "B")
         let l = fanOut([botNode(a), botNode(b)], into: codeNode(name: "Merge"))
 
-        XCTAssertTrue(warnings(validate(l, profiles: [a.id: a, b.id: b]), containing: Self.mlxWarning).isEmpty,
-                      "same-model siblings share one container — flagging them would be a false alarm, and a rule that flags safe shapes teaches people to run past the panel")
+        let issues = validate(l, profiles: [a.id: a, b.id: b])
+        XCTAssertEqual(warnings(issues, containing: Self.mlxWarning).count, 2)
+        XCTAssertTrue(errors(issues, containing: "MLX model").isEmpty, "MUST stay a warning")
     }
 
     /// A cloud sibling never touches the MLX slot.

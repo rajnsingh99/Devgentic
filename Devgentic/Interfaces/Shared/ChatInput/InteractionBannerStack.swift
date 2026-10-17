@@ -311,8 +311,7 @@ private struct PermissionInteractionBanner: View {
     private var fileChange: FileChange? {
         FileChange.parse(
             toolName: confirmation.toolName,
-            arguments: effectiveArguments,
-            previewPath: confirmation.previewPath)
+            arguments: effectiveArguments)
     }
 
     /// A3: top-level string arguments the user can correct before approving.

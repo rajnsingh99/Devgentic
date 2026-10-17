@@ -194,7 +194,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
 
     /// Lines the in-memory tail keeps per task.
     ///
-    /// Sized for the MODEL, not the card. The card wants the last handful; `command_output` is a
+    /// Sized for the MODEL, not the card. The card wants the last handful; `get_task_output` is a
     /// model reading why a build failed, and a Swift compile error with its context notes, or a
     /// crash backtrace, runs well past twenty lines. Cutting there would lose the actual error —
     /// the same defect class the head+tail cut (now `ToolResultBudget.fit`) exists to close.
@@ -492,7 +492,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         if foreground {
             logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(id) launched in the FOREGROUND (pid \(process.processIdentifier)), bounded at \(Int(timeout))s, log: \(logURL.path). CONSEQUENCE: the caller waits for it; the log is written live, so it is readable while the command runs and survives a crash.")
         } else {
-            logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(id) launched (pid \(process.processIdentifier)), bounded at \(Int(timeout))s, log: \(logURL.path). CONSEQUENCE: output is collectable via command_output and the task is killed at its bound whether or not the model checks back.")
+            logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(id) launched (pid \(process.processIdentifier)), bounded at \(Int(timeout))s, log: \(logURL.path). CONSEQUENCE: output is collectable via get_task_output and the task is killed at its bound whether or not the model checks back.")
         }
         announce(taskID: id, conversationID: conversationID)
         return snapshot
@@ -906,7 +906,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     /// Rotates a log that has outgrown `maxLogBytes`: keeps the tail, discards the file, says so.
     ///
     /// ⚠️ ORDER MATTERS. The drain runs FIRST, so the last 200 lines are already in memory before
-    /// the bytes holding them are thrown away — the card and `command_output` see no gap at all
+    /// the bytes holding them are thrown away — the card and `get_task_output` see no gap at all
     /// across a rotation. Truncating first would discard output that had never been read.
     ///
     /// Rotation rather than "stop at N bytes": a log capped by refusing further writes would go
@@ -945,7 +945,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
         entry.pending = Data()
         lock.unlock()
 
-        logger.notice("[BGPROC] \(entry.id) log rotated at \(size / 1_048_576) MB. CONSEQUENCE: earlier output is gone from disk — the last \(Self.maxTailLines) lines survive in the task's card and in command_output, and the file keeps growing from here.")
+        logger.notice("[BGPROC] \(entry.id) log rotated at \(size / 1_048_576) MB. CONSEQUENCE: earlier output is gone from disk — the last \(Self.maxTailLines) lines survive in the task's card and in get_task_output, and the file keeps growing from here.")
     }
 
     /// Sweeps now, then once every `sweepInterval` for as long as this registry lives. Off the
@@ -967,7 +967,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
     /// Per FILE, by modification date. See `defaultLogRetention` for why not per directory.
     ///
     /// ⚠️ A log whose command is still RUNNING is never touched, whatever its age or size: deleting
-    /// it would cut the card and `command_output` off from a live task, and its bytes are already
+    /// it would cut the card and `get_task_output` off from a live task, and its bytes are already
     /// bounded by `enforceLogCap`. At launch nothing is running, so this skips nothing then.
     ///
     /// Internal rather than private so tests can run one pass without waiting for the timer.
@@ -1090,7 +1090,7 @@ final class BackgroundProcessRegistry: @unchecked Sendable {
             isRootRunning: { entry.process.isRunning },
             alsoKnown: remembered(for: entry))
 
-        logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(taskID) stopped on request: it and \(descendants) descendant process(es) found under it were sent SIGTERM, with SIGKILL to follow in \(Int(Self.sigkillGrace))s for anything still running. CONSEQUENCE: its log keeps whatever it wrote and stays readable via command_output.")
+        logger.info("[BGPROC] conv \(conversationID.uuidString.prefix(8)) — \(taskID) stopped on request: it and \(descendants) descendant process(es) found under it were sent SIGTERM, with SIGKILL to follow in \(Int(Self.sigkillGrace))s for anything still running. CONSEQUENCE: its log keeps whatever it wrote and stays readable via get_task_output.")
         return entry.snapshot
     }
 

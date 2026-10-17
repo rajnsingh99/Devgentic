@@ -63,7 +63,8 @@ final class RemoteModelsGateTests: XCTestCase {
         let providers = ProfileCapabilityFilter.allowedProviders(for: .imageGen)
         XCTAssertFalse(providers.contains(.openAI))
         XCTAssertFalse(providers.contains(.google))
-        XCTAssertTrue(providers.contains(.mlx))
+        XCTAssertEqual(providers.contains(.mlx), MLXImageGenAvailability.isCompiledIn,
+                       "MLX is an image provider only in a build that includes on-device generation")
         XCTAssertTrue(providers.contains(.ollama))
     }
 
@@ -103,8 +104,9 @@ final class RemoteModelsGateTests: XCTestCase {
 
     // MARK: - New imageGen profile default
 
-    func testImageGenDefaultFallsBackToMLXWhileHidden() {
-        XCTAssertEqual(ProfileCapabilityFilter.defaultImageGenProvider, .mlx,
+    func testImageGenDefaultFallsBackToALocalProviderWhileHidden() {
+        XCTAssertEqual(ProfileCapabilityFilter.defaultImageGenProvider,
+                       MLXImageGenAvailability.isCompiledIn ? .mlx : .ollama,
                        "A new image-gen profile must not open on a hidden provider")
         setShowRemoteModels(true)
         XCTAssertEqual(ProfileCapabilityFilter.defaultImageGenProvider, .openAI,

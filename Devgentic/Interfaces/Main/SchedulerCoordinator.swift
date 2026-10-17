@@ -290,7 +290,8 @@ final class SchedulerCoordinator {
             conversationID: conversationID,
             query: prompt,
             files: fileItems,
-            fileProcessorService: fileProcessorService
+            fileProcessorService: fileProcessorService,
+            deliveryMode: AttachmentDeliveryMode.resolve(for: config.profile)
         )
         // ⚠️ Set BEFORE the send, exactly as QuickAccess and Orb do. Only the AGENT message
         // carried `.scheduled`, so `[STREAM_START]` — which reads the source off the USER message

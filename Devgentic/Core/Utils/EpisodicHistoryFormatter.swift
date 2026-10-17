@@ -556,11 +556,18 @@ struct EpisodicHistoryFormatter {
         return "    <turn status=\"\(turnStatus(for: turn))\" goal=\"\(goal)\" recency=\"\(recency)\">\n"
     }
 
+    /// Whether this turn's `<outcome>` would only repeat an answer the native turns carry in full.
+    static func outcomeIsCarriedNatively(_ turn: TurnPair, _ answersCarriedNatively: Set<UUID>) -> Bool {
+        guard turn.outcomeIsResponseClip, let id = turn.agentMessageID else { return false }
+        return answersCarriedNatively.contains(id)
+    }
+
     /// A turn rendered in FULL: outcome, params, errors, and what each action changed.
     private static func renderInlineTurn(_ turn: TurnPair, recency: String, includeImageNames: Bool,
                                          elidedActionIDs: Set<UUID> = [],
                                          toolsAvailable: Bool = true,
-                                         staleness: EffectStalenessCheck = .unknown) -> String {
+                                         staleness: EffectStalenessCheck = .unknown,
+                                         answersCarriedNatively: Set<UUID> = []) -> String {
         var xml = turnOpenTag(turn, recency: recency)
 
         // Image label — names the images the user attached on this turn so the model
@@ -573,7 +580,13 @@ struct EpisodicHistoryFormatter {
 
         // Agent response context — present on every turn so follow-ups
         // like "delete the first one" can resolve referents.
-        if let outcome = turn.outcome {
+        //
+        // ⚠️ EXCEPT when that same answer already rides in full as a native assistant turn
+        // (`answersCarriedNatively`, from `NativeHistoryConverter.buildCarryingProvenance`).
+        // Then `<outcome>` was a 200-char clip of text the model had complete right beside it —
+        // the answer twice, once cut mid-word. `goal` stays: it is what ties these actions to
+        // the question they served.
+        if let outcome = turn.outcome, !outcomeIsCarriedNatively(turn, answersCarriedNatively) {
             xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
         }
 
@@ -807,6 +820,17 @@ struct EpisodicHistoryFormatter {
     /// context overflow caused by effect growth was undiagnosable from logs. An elision is
     /// a silent drop, so it is logged at info with its consequence spelled out; the quiet
     /// case still records the size at debug so growth is visible before it bites.
+    /// Says how many `<outcome>` clips were left out because the native turns carry those
+    /// answers in full. Request path only (a nil correlation is a gauge measurement).
+    private static func logCarriedOutcomes(_ inlineTurns: [TurnPair], _ answersCarriedNatively: Set<UUID>,
+                                           strategy: String, correlation: String?) {
+        guard let correlation, !answersCarriedNatively.isEmpty else { return }
+        let omitted = inlineTurns.filter { outcomeIsCarriedNatively($0, answersCarriedNatively) }.count
+        guard omitted > 0 else { return }
+        let kept = inlineTurns.filter { $0.outcome != nil }.count - omitted
+        episodicLogger.info("[EPISODIC] \(correlation) \(strategy): omitted \(omitted) <outcome> clip(s) — those answers ride in full as native assistant turns; \(kept) outcome(s) kept (synthesized, or not carried natively). CONSEQUENCE: each answer reaches the model once, complete, instead of twice with one copy cut at 200 chars.")
+    }
+
     private static func logEpisodicBudget(strategy: String, messages: Int, turnsRendered: Int,
                                           inlineTurns: Int, onDemandEffects: Int, xmlChars: Int,
                                           outcome: EffectBudgetOutcome, correlation: String?,
@@ -853,6 +877,17 @@ struct EpisodicHistoryFormatter {
         episodicLogger.debug("[EPISODIC] \(tag)\(shape), \(inlineTurns) inline, \(carried).")
     }
 
+    /// THE turn list `get_conversation_history(N)` numbers — what every pointer skeleton enumerates.
+    ///
+    /// ⚠️⚠️ ONE DEFINITION (readiness CR-11, 2026-10-10). The skeletons numbered the turns AFTER the
+    /// latest checkpoint from 0, while `ConversationHistoryTool` numbered every turn from the start of
+    /// the conversation — compacted rows are never deleted. After one compaction "Call
+    /// get_conversation_history(0)" returned the OLDEST compacted turn, diffs included, and "undo that"
+    /// could revert the wrong file change. The tool now reads this, so the two cannot disagree.
+    static func retrievableTurns(from history: [ChatMessage]) -> [TurnPair] {
+        turnContext(from: history).turns
+    }
+
     /// Turns after the latest checkpoint, plus how many the checkpoint stands in for.
     /// `compactedTurnCount` is 0 without a checkpoint so the preamble is omitted entirely.
     private static func turnContext(from history: [ChatMessage]) -> (turns: [TurnPair], summary: String?, compactedCount: Int) {
@@ -891,7 +926,8 @@ struct EpisodicHistoryFormatter {
                       effectBudget: Int? = nil,
                       correlation: String? = nil,
                       toolsAvailable: Bool = true,
-                      staleness: EffectStalenessCheck = .unknown) -> String {
+                      staleness: EffectStalenessCheck = .unknown,
+                      answersCarriedNatively: Set<UUID> = []) -> String {
         // EVERY branch forwards `toolsAvailable`. Two of them did not, and because the
         // builders below it defaulted the flag to true, a tool-less profile silently got the
         // agent rendering: no `<tool_availability>` preface, full diff bodies inline, and
@@ -904,13 +940,15 @@ struct EpisodicHistoryFormatter {
                                             includeImageNames: includeImageNames,
                                             effectBudget: effectBudget, correlation: correlation,
                                             strategyLabel: strategy.rawValue,
-                                            toolsAvailable: toolsAvailable, staleness: staleness)
+                                            toolsAvailable: toolsAvailable, staleness: staleness,
+                                            answersCarriedNatively: answersCarriedNatively)
         case .fullHistory:
             return buildRecentHistoryString(from: history, limit: history.count,
                                             includeImageNames: includeImageNames,
                                             effectBudget: effectBudget, correlation: correlation,
                                             strategyLabel: strategy.rawValue,
-                                            toolsAvailable: toolsAvailable, staleness: staleness)
+                                            toolsAvailable: toolsAvailable, staleness: staleness,
+                                            answersCarriedNatively: answersCarriedNatively)
         case .pointer:
             return buildPointerHistoryString(from: history, correlation: correlation,
                                              strategyLabel: strategy.rawValue,
@@ -920,7 +958,8 @@ struct EpisodicHistoryFormatter {
                                             includeImageNames: includeImageNames,
                                             effectBudget: effectBudget, correlation: correlation,
                                             strategyLabel: strategy.rawValue,
-                                            toolsAvailable: toolsAvailable, staleness: staleness)
+                                            toolsAvailable: toolsAvailable, staleness: staleness,
+                                            answersCarriedNatively: answersCarriedNatively)
         }
     }
 
@@ -944,7 +983,8 @@ struct EpisodicHistoryFormatter {
                                          effectBudget: Int? = nil, correlation: String? = nil,
                                          strategyLabel: String = "recent",
                                          toolsAvailable: Bool = true,
-                                         staleness: EffectStalenessCheck = .unknown) -> String {
+                                         staleness: EffectStalenessCheck = .unknown,
+                                         answersCarriedNatively: Set<UUID> = []) -> String {
         let (turns, summary, compacted) = turnContext(from: history)
         let recentTurns = turns.suffix(limit)
         // No bodies are rendered without tools, so there is nothing for the budget to spend.
@@ -960,9 +1000,11 @@ struct EpisodicHistoryFormatter {
                 includeImageNames: includeImageNames,
                 elidedActionIDs: budgeted.elidedActionIDs,
                 toolsAvailable: toolsAvailable,
-                staleness: staleness
+                staleness: staleness,
+                answersCarriedNatively: answersCarriedNatively
             )
         }
+        logCarriedOutcomes(Array(recentTurns), answersCarriedNatively, strategy: strategyLabel, correlation: correlation)
 
         let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,
                            toolsAvailable: toolsAvailable)
@@ -1024,7 +1066,8 @@ struct EpisodicHistoryFormatter {
                                          effectBudget: Int? = nil, correlation: String? = nil,
                                          strategyLabel: String = "hybrid",
                                          toolsAvailable: Bool = true,
-                                         staleness: EffectStalenessCheck = .unknown) -> String {
+                                         staleness: EffectStalenessCheck = .unknown,
+                                         answersCarriedNatively: Set<UUID> = []) -> String {
         let (turns, summary, compacted) = turnContext(from: history)
         let pointerCount = max(0, turns.count - inlineCount)
         // Only the inline segment carries effect bodies, so only it is budgeted — and with no
@@ -1043,8 +1086,11 @@ struct EpisodicHistoryFormatter {
                                     toolsAvailable: toolsAvailable, staleness: staleness)
                 : renderInlineTurn(turn, recency: recency, includeImageNames: includeImageNames,
                                    elidedActionIDs: budgeted.elidedActionIDs,
-                                   toolsAvailable: toolsAvailable, staleness: staleness)
+                                   toolsAvailable: toolsAvailable, staleness: staleness,
+                                   answersCarriedNatively: answersCarriedNatively)
         }
+        logCarriedOutcomes(Array(turns.dropFirst(pointerCount)), answersCarriedNatively,
+                           strategy: strategyLabel, correlation: correlation)
 
         let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,
                            toolsAvailable: toolsAvailable)
@@ -1094,6 +1140,12 @@ struct EpisodicHistoryFormatter {
         /// Surfaced as `<termination>` in the XML so the model sees explicit context
         /// for circuit-breaker aborts and iteration exhaustion.
         let terminalReason: String?
+        /// The agent message this turn's answer came from; nil for an orphaned question.
+        var agentMessageID: UUID? = nil
+        /// True when `outcome` is a clip of the agent's own response text — the case that can
+        /// duplicate a native assistant turn. False for SYNTHESIZED outcomes (cancelled or
+        /// empty turns: "Completed: … (Terminated by user)"), which no native turn carries.
+        var outcomeIsResponseClip: Bool = false
     }
 
     /// Pairs consecutive user↔agent messages into logical turns.
@@ -1104,6 +1156,15 @@ struct EpisodicHistoryFormatter {
         var pendingUserImages: [String] = []
 
         for message in history {
+            // ⚠️ SAME RULE AS `NativeHistoryConverter.pairMessages`: a row this build cannot read is
+            // skipped AND clears the pending user turn. The native pairing did this and this one did
+            // not, so one unreadable row shifted every later index between the native skeleton and
+            // `get_conversation_history` (CR-11).
+            guard !message.content.isUnrecognised else {
+                pendingUserText = nil
+                pendingUserImages = []
+                continue
+            }
             if message.sender == .user {
                 pendingUserText = message.content.textContent ?? ""
                 pendingUserImages = message.attachedImageFiles?.map(\.name) ?? []
@@ -1180,7 +1241,9 @@ struct EpisodicHistoryFormatter {
                     fullResponse: fullResponse,
                     wasCancelled: wasCancelled,
                     terminalOutcome: message.terminalOutcome,
-                    terminalReason: message.terminalReason
+                    terminalReason: message.terminalReason,
+                    agentMessageID: message.id,
+                    outcomeIsResponseClip: !(wasCancelled || responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 ))
                 pendingUserText = nil
                 pendingUserImages = []

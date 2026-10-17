@@ -97,42 +97,22 @@ struct Qwen3CoderDeepXMLParser: CognitiveParserProtocol {
                   let valueRange = Range(match.range(at: 2), in: body) else { continue }
 
             let key = String(body[keyRange])
-            let rawValue = String(body[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-            result[key] = inferValueType(rawValue)
+            // ⚠️⚠️ CR-21: the TEXT, kept as written — one framing newline trimmed each side (what
+            // vLLM's parser does), never all whitespace. Types come from the tool's SCHEMA in
+            // `CognitiveParsePipeline.coercingToSchema`, not from what the value looks like: shape
+            // typing turned `{"name":"app"}` content into an object (`write_file` then failed on
+            // every JSON file), `1.10` into `1.1`, and dropped trailing newlines from file content.
+            result[key] = .string(Self.trimmingOneFramingNewline(String(body[valueRange])))
         }
         return result
     }
 
-    /// Coerces a text parameter value to a JSONValue using lightweight type inference.
-    /// Falls back to `.string` when nothing more specific matches. No schema lookup —
-    /// we preserve the raw text and let downstream tool validation handle mismatches.
-    private func inferValueType(_ raw: String) -> JSONValue {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // null / None
-        let lowered = trimmed.lowercased()
-        if lowered == "null" || lowered == "none" { return .null }
-
-        // booleans
-        if lowered == "true" { return .bool(true) }
-        if lowered == "false" { return .bool(false) }
-
-        // number
-        if let d = Double(trimmed) {
-            return .number(d)
-        }
-
-        // nested JSON (object / array)
-        if (trimmed.hasPrefix("{") && trimmed.hasSuffix("}")) ||
-           (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) {
-            if let data = trimmed.data(using: .utf8),
-               let value = try? JSONDecoder().decode(JSONValue.self, from: data) {
-                return value
-            }
-        }
-
-        // default: string (preserving the raw text including any embedded newlines)
-        return .string(raw)
+    /// Removes at most one newline at each end — the line breaks around `<parameter=…>` tags.
+    static func trimmingOneFramingNewline(_ raw: String) -> String {
+        var value = Substring(raw)
+        if value.hasPrefix("\r\n") { value = value.dropFirst(2) } else if value.hasPrefix("\n") { value = value.dropFirst() }
+        if value.hasSuffix("\r\n") { value = value.dropLast(2) } else if value.hasSuffix("\n") { value = value.dropLast() }
+        return String(value)
     }
 
     private func extractReasoning(from text: String, extractedCount: Int) -> String {

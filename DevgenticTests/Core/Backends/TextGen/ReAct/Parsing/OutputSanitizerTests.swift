@@ -161,6 +161,32 @@ final class OutputSanitizerTests: XCTestCase {
         // Matched pair — the close tag should survive since it's not truly orphaned
         // (the sanitizer only strips trailing orphans, the open tag keeps it matched)
         XCTAssertTrue(result.cleaned.contains("<tool_call>"))
+        // ⚠️ The assertion this test was missing. The close tag WAS stripped, so the drift
+        // detector and Mistral XML's parser saw an unclosed call — a valid call ending the
+        // reply was shown as the answer on 6 dialects (2026-10-05).
+        XCTAssertTrue(result.cleaned.contains("</tool_call>"), "the close tag of a real pair was stripped")
+    }
+
+    func testOrphanTag_SecondCloseWithOnlyOneOpenerIsStripped() {
+        let input = "<tool_call>{\"name\": \"a\"}</tool_call> trailing text </tool_call>"
+        let result = OutputSanitizer.sanitize(input)
+        XCTAssertEqual(result.cleaned.components(separatedBy: "</tool_call>").count - 1, 1)
+    }
+
+    // MARK: - Call markers survive a parse-path sanitize
+
+    func testPythonTagIsKeptOnlyWhenParsingForCalls() {
+        let input = #"<|python_tag|>{"name": "read_file", "parameters": {"path": "a"}}<|eot_id|>"#
+        XCTAssertFalse(OutputSanitizer.sanitize(input).cleaned.contains("<|python_tag|>"))
+        let parsed = OutputSanitizer.sanitize(input, preservingCallMarkers: true).cleaned
+        XCTAssertTrue(parsed.contains("<|python_tag|>"), "the call marker the drift probe reads was stripped")
+        XCTAssertFalse(parsed.contains("<|eot_id|>"), "control tokens are still stripped")
+    }
+
+    func testStripThinkBlocksRemovesOnlyThinking() {
+        let input = "<think>maybe read_file</think>```tool_code\nread_file(path=\"a\")\n```<|python_tag|>"
+        XCTAssertEqual(OutputSanitizer.stripThinkBlocks(input),
+                       "```tool_code\nread_file(path=\"a\")\n```<|python_tag|>")
     }
 
     // MARK: - S14: Special Token Markers
@@ -380,7 +406,7 @@ final class OutputSanitizerTests: XCTestCase {
     }
 
     func testSanitizeForUI_PlainText_Unchanged() {
-        let input = "I will search for files on the Desktop using fs_smart_search."
+        let input = "I will search for files on the Desktop using spotlight_search."
         let result = OutputSanitizer.sanitizeForUI(input)
         XCTAssertEqual(result, input, "Plain text without scaffold tags should pass through unchanged")
     }

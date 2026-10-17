@@ -89,7 +89,7 @@ struct ModelFitBadgeView: View {
     }
 }
 
-/// A slightly larger inline indicator for model pickers, showing estimated RAM and a brief explanation.
+/// A slightly larger inline indicator for model lists, showing estimated RAM and a brief explanation.
 struct ModelFitInlineView: View {
     let assessment: ModelFitAssessment
 

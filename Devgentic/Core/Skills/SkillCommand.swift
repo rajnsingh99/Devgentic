@@ -40,32 +40,84 @@ struct SkillCommand: Equatable, Sendable {
     let arguments: String
 }
 
+/// One skill the `/` picker offers: the copy a run would actually load.
+struct OfferedSkillCommand: Equatable, Sendable {
+    /// The library skill id — the picker's row identity.
+    let skillID: String
+    /// The addressable name a command types.
+    let name: String
+    let displayName: String
+    /// The RESOLVED version's description — a pinned profile shows its pin, not `latest`.
+    let description: String
+}
+
+/// What `/` offers on one profile, and what the send path will expand: one value, read by both.
+struct SkillCommandOffer: Equatable, Sendable {
+    /// Exactly the skills the run would get, one per name.
+    var skills: [OfferedSkillCommand] = []
+    /// Names more than one linked, enabled skill shares. Only one copy of each is in `skills`.
+    var collisions: [String] = []
+
+    static let none = SkillCommandOffer()
+
+    /// The names a command may be rewritten for.
+    var names: Set<String> { Set(skills.map(\.name)) }
+
+    /// One line per collision, naming the copy that is actually reachable.
+    ///
+    /// ⚠️ Said in the picker rather than only logged, because the picker is where the user makes the
+    /// choice the collision takes away from them.
+    var collisionNotes: [(name: String, note: String)] {
+        collisions.compactMap { name in
+            guard let reachable = skills.first(where: { $0.name == name }) else { return nil }
+            return (name, "Several linked skills are named /\(name) — only '\(reachable.displayName)' is reachable. Rename or unlink the others.")
+        }
+    }
+}
+
 /// Which skills a `/` command can actually reach, for one profile.
 ///
-/// ⚠️⚠️ ONE DEFINITION, USED BY BOTH SIDES, BECAUSE THEY DISAGREED. The picker listed the whole
-/// library while the send-path rewrite accepted only names the profile had LINKED, so choosing an
-/// offered skill that happened not to be linked left the text exactly as typed and shipped a literal
-/// `/data-cleaner do the thing` to the model. The picker was advertising skills the send path would
-/// refuse. Whatever this returns is what the user is offered AND what will expand — a divergence is
-/// no longer representable.
+/// ⚠️⚠️ ONE DEFINITION, USED BY BOTH SIDES, BECAUSE THEY DISAGREED — TWICE. First the picker listed
+/// the whole library while the send-path rewrite accepted only names the profile had LINKED. Then
+/// both sides read a SET OF NAMES while the picker filtered the library by name, so two skills both
+/// called `learn` each got a row (even an unlinked or disabled copy) while every row inserted the
+/// same `/learn` and the run loaded whichever skill id sorted first — picking "Spanish tutor" ran
+/// "Swift coach". This now asks `SkillResolution`, the function the RUN uses, so the picker offers
+/// exactly what the run will load: linked, enabled, resolvable, one copy per name, pin honoured.
 ///
 /// ⚠️ Non-agent profiles reach nothing. Bot, workflow and imageGen runs register no `load_skill`, so
 /// a directive naming a skill would be an instruction the model cannot carry out.
 enum SkillCommandReachability {
 
-    /// The addressable names this profile can be given a directive about.
-    static func reachableNames(in details: ProfileDetails?) -> Set<String> {
-        guard let details else { return [] }
-        let selections: [SkillSelection]
+    /// What this profile's `/` can offer and expand.
+    @MainActor
+    static func offer(in details: ProfileDetails?, store: SkillStore = .shared) -> SkillCommandOffer {
+        guard let details else { return .none }
+        let config: AgentConfig
         switch details {
-        case .agent(let config): selections = config.skillSelections ?? []
+        case .agent(let agentConfig): config = agentConfig
         // ⚠️ `.code` persists selections but the runtime gives Code profiles no skills, so a
         // directive there would name something the run cannot load. Offering it would be the same
         // lie this type exists to prevent.
-        case .code, .bot, .workflow, .imageGen: return []
+        case .code, .bot, .workflow, .imageGen: return .none
         }
-        // Disabled selections are excluded: they do not reach a run.
-        return Set(selections.filter(\.isEnabled).map(\.name))
+        // ⚠️ `reporting: false` — the composer re-resolves on every keystroke, and the run's own
+        // resolution already reports unresolved links and collisions once per run.
+        guard let outcome = SkillResolution.resolve(for: config, profileName: "composer",
+                                                    store: store, reporting: false) else { return .none }
+        // `SkillManifest` carries no display label; the library does. A skill missing here falls
+        // back to its name rather than disappearing from a list the run will still load it from.
+        let library = (try? store.fetchRunnableSkills().get()) ?? []
+        let displayNames = Dictionary(library.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+        return SkillCommandOffer(
+            skills: outcome.manifests.map {
+                // ⚠️ `folderPath` carries the SKILL ID — see `SkillResolution.manifest(for:version:)`.
+                OfferedSkillCommand(skillID: $0.folderPath, name: $0.name,
+                                    displayName: displayNames[$0.folderPath] ?? $0.name,
+                                    description: $0.description)
+            },
+            collisions: outcome.nameCollisions
+        )
     }
 
     /// Whether the `/` picker should appear at all for this profile.

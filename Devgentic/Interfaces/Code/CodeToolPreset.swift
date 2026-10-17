@@ -68,22 +68,18 @@ enum CodeToolPreset {
 
     /// Whether a tool the Code pipeline INJECTS at run time must park on an approval banner.
     ///
-    /// `defaultTools` above declares this for every user-visible preset tool. `update_project_context`
-    /// is not in that list — `AgentConnect` appends it per run, with the project path baked in —
-    /// so its answer lived as a bare `false` literal at that call site and nothing here showed
-    /// that Code mode had a mutating tool the user never saw.
+    /// `defaultTools` above declares this for every user-visible preset tool. The memory tools
+    /// (`remember`, `forget`, `recall`) are not in that list — `AgentConnect` appends them per run
+    /// with the project path baked in — so their answer lives here rather than as a bare literal
+    /// at that call site.
     ///
-    /// ⚠️⚠️ It writes `.devgentic/context.md`, which is injected into the system prompt of every
-    /// FUTURE conversation for the project. That makes it the longest-lived write in the app, and
-    /// it was the only one that ran unreviewed. Field-observed 2026-09-20: a model wrote that a
-    /// class "contains methods like `greeting()` and `farewell()`" about a file containing
-    /// neither, and that sentence went on to steer a later edit to the wrong anchor.
-    static func injectedToolRequiresConfirmation(_ toolName: String) -> Bool {
-        switch toolName {
-        case "update_project_context": return true
-        default:                       return false
-        }
-    }
+    /// All `false` (2026-10-06). Their predecessor, `update_project_context`, parked on a diff
+    /// banner because it rewrote one whole file that every later conversation read, unchecked.
+    /// `remember` writes one small entry and refuses unverified claims itself (a command must
+    /// have exited 0 in the conversation, files must exist); a mid-task banner for that was
+    /// friction without a review it could add. Phase 2's Memory panel is where entries are
+    /// reviewed and undone.
+    static func injectedToolRequiresConfirmation(_ toolName: String) -> Bool { false }
 
     /// Builds a preset entry from the catalogue.
     ///

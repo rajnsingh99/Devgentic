@@ -243,13 +243,26 @@ actor TraceRecorder {
         }
     }
 
-    /// Records the run's accumulated token usage + estimated cost on the trace (D1).
-    /// Looks up the model from the trace row so callers needn't thread it. No-op for zero
-    /// usage. Call once at trace end.
+    /// Records the run's accumulated token usage + cost on the trace (D1). No-op for zero usage.
+    /// Call once at trace end.
+    ///
+    /// The cost is `usage.costUSD` — each call priced when its usage was read, at its own model
+    /// (`ModelPriceList`), then summed. It used to be the run's TOTAL priced once at the trace's
+    /// model, which charged a call to another model at the wrong rate and could never apply a
+    /// per-call rate such as the long-context tier.
     func recordTokenUsage(traceID: String, usage: TokenUsage) {
         guard let store, usage.totalTokens > 0 else { return }
         let modelName = (try? store.fetchTrace(traceID: traceID))?.modelName
-        let cost = TokenPricing.estimatedCostUSD(model: modelName, usage: usage)
+        let cost = usage.costUSD
+        if usage.costIsPartial, let cost {
+            logger.notice("[PRICING] trace \(traceID): cost $\(String(format: "%.6f", cost)) covers only the calls that could be priced. CONSEQUENCE: the run's real cost is higher — a call ran on a model with no known price (a local model, a custom endpoint, or one missing from ModelPrices.json).")
+        }
+        // The run-level evidence of a provider prompt cache, for every provider at once (Claude
+        // also logs `[ANTHROPIC-CACHE]` per request). The split itself is not stored: the trace
+        // keeps the prompt total, and the cost already prices it.
+        if usage.cacheReadTokens > 0 || usage.cacheWriteTokens > 0 {
+            logger.info("[TOKENS] trace \(traceID): \(usage.inputTokens) prompt tokens, \(usage.cacheReadTokens) read from the provider's cache, \(usage.cacheWriteTokens) written to it; \(usage.outputTokens) out; model '\(modelName ?? "?")'.")
+        }
         do {
             try store.updateTraceTokens(
                 traceID: traceID,

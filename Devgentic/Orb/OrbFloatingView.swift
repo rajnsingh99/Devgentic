@@ -156,19 +156,31 @@ struct OrbFloatingView: View {
                 transcriptCaption
             }
 
-            // Config bubbles, floated off the orb's top-right
-            VStack(spacing: 10) {
-                OrbBubbleButton(
-                    systemName: "person.crop.circle",
-                    help: "Switch profile",
-                    action: { controller.requestProfileSwitch() }
-                )
-            }
+            // Close, floated off the orb's top-right — shown ONLY while the pointer is over the
+            // panel, so the resting orb stays wordless. Before this the only ways out were Escape
+            // and the right-click menu, neither discoverable. Switch Profile lives in that menu.
+            // ⚠️ Hidden means out of the hit-test and the accessibility tree too: an invisible
+            // button that still takes clicks would close the orb under a user aiming at the orb.
+            // VoiceOver keeps "Close Orb" through `orbActions`.
+            OrbBubbleButton(
+                systemName: "xmark",
+                help: "Close Orb",
+                action: onClose
+            )
             .offset(x: 92, y: -54)
+            .opacity(isPanelHovered ? 1 : 0)
+            .allowsHitTesting(isPanelHovered)
+            .accessibilityHidden(!isPanelHovered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.opacity(0.001))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) { isPanelHovered = hovering }
+        }
     }
+
+    /// The pointer is over the orb panel — the close button shows only then.
+    @State private var isPanelHovered = false
 
     /// The orb's actions, used by BOTH the right-click menu and VoiceOver's Actions rotor.
     ///

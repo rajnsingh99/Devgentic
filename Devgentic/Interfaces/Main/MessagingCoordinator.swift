@@ -189,10 +189,10 @@ final class MessagingCoordinator {
             return
         }
 
-        // Code mode: refresh instructions (picks up context.md changes) and set selectedProfileID.
+        // Code mode: refresh instructions and the project-knowledge display copy, and set selectedProfileID.
         if vm.interfaceMode == .code {
             logger.info("[CODE] ────────── Code mode send initiated ──────────")
-            logger.info("[CODE] Query preview: \(String(plainUserQueryFromEditor.prefix(120)))")
+            logger.debug("[CODE] Query preview: \(String(plainUserQueryFromEditor.prefix(120)))") // CR-57: the query is content — debug only
             // ⚠️ The return value is LOAD-BEARING. This call used to be fire-and-forget: when it
             // could not prepare the profile it logged a warning and the send continued, shipping
             // the model a profile with no Code system prompt and no project root. Refusing here is
@@ -254,12 +254,10 @@ final class MessagingCoordinator {
             }
         }
 
-        // Auto-title if empty
-        if let conversationSD = persistenceService.getConversation(withId: conversationIDToUse) {
-            if conversationSD.userDefinedTitle == nil || conversationSD.userDefinedTitle?.isEmpty == true {
-                conversationSD.userDefinedTitle = plainUserQueryFromEditor
-                logger.info("Auto-setting conversation title to: \(plainUserQueryFromEditor)")
-            }
+        // Auto-title if empty — through the store, which SAVES it (RAG-39). It used to be set on the
+        // model here and left pending on the shared context across the send's awaits.
+        if persistenceService.getConversation(withId: conversationIDToUse) != nil {
+            persistenceService.setTitleIfUntitled(plainUserQueryFromEditor, for: conversationIDToUse)
         } else {
             logger.error("[sendMessage] CRITICAL: Could not find conversation for ID: \(conversationIDToUse.uuidString)")
             chatHistoryViewModel.isSending = false
@@ -276,7 +274,8 @@ final class MessagingCoordinator {
             let userMessage = await self.createUserMessage(
                 conversationID: conversationIDToUse,
                 query: plainUserQueryFromEditor,
-                files: filesForBackend
+                files: filesForBackend,
+                deliveryMode: AttachmentDeliveryMode.resolve(for: config.profile)
             )
 
             self.chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
@@ -782,15 +781,24 @@ final class MessagingCoordinator {
             return
         }
 
-        if candidates.count > 1 {
+        // Queued runs are EXPECTED here — admission serialises arrivals behind the running run — so
+        // only two runs that have both STARTED are the anomaly worth an error.
+        let started = candidates.filter { !$0.isQueued }
+        if started.count > 1 {
             // Should be impossible under the product model (one root run per conversation) and
             // will be refused at claim time by admission control. Until then Redo on an older
             // message while a newer run streams can produce it, so say so rather than pick silently.
-            logger.error("[RUN_STOP] ⚠️ conversation \(target.conversationID.uuidString.prefix(8)) holds \(candidates.count) live runs: \(candidates.map { $0.messageID.uuidString.prefix(8) }.joined(separator: ", ")). CONSEQUENCE: Stop cancels only \(target.messageID.uuidString.prefix(8)) (most recently started, unparked first); the others keep streaming and must be stopped by pressing Stop again.")
+            logger.error("[RUN_STOP] ⚠️ conversation \(target.conversationID.uuidString.prefix(8)) holds \(started.count) started runs: \(started.map { $0.messageID.uuidString.prefix(8) }.joined(separator: ", ")). CONSEQUENCE: Stop cancels only \(target.messageID.uuidString.prefix(8)) (most recently started, unparked first); the others keep streaming and must be stopped by pressing Stop again.")
         }
 
-        logger.info("[RUN_STOP] Cancelling run \(target.messageID.uuidString.prefix(8)) in conversation \(target.conversationID.uuidString.prefix(8)) (parked: \(target.isParked)) — user pressed Stop.")
+        logger.info("[RUN_STOP] Cancelling run \(target.messageID.uuidString.prefix(8)) in conversation \(target.conversationID.uuidString.prefix(8)) (parked: \(target.isParked), queued: \(target.isQueued), \(candidates.count - 1) other run(s) waiting) — user pressed Stop. CONSEQUENCE: \(candidates.count > 1 ? "the queued run(s) behind it start next" : "nothing else is affected").")
         activeStreamManager.cancelStream(for: target.messageID)
+
+        // ⚠️ A QUEUED target has no park, and the drain below is CONVERSATION-wide: it would resolve
+        // some other run's approval with `false` while that run's task is NOT cancelled — a denial
+        // nobody made (CR-4). The resolver only picks a queued run when nothing has started, so
+        // there is nothing to drain anyway.
+        guard !target.isQueued else { return }
 
         // [HITL/P0] If a HITL banner is up for this conversation, drain the parked suspension
         // immediately so Stop returns at once. The suspend* cancellation handlers cover the
@@ -854,7 +862,7 @@ final class MessagingCoordinator {
         source: MessageSource,
         config: BackendRequestConfig
     ) {
-        guard let conversationSD = persistenceService.getConversation(withId: conversationID) else {
+        guard persistenceService.getConversation(withId: conversationID) != nil else {
             logger.error("[ChatOps] Could not find conversation for ID: \(conversationID.uuidString)")
             return
         }
@@ -866,10 +874,8 @@ final class MessagingCoordinator {
             return
         }
 
-        // Auto-title if empty (same as sendMessage)
-        if conversationSD.userDefinedTitle == nil || conversationSD.userDefinedTitle?.isEmpty == true {
-            conversationSD.userDefinedTitle = prompt
-        }
+        // Auto-title if empty (same as sendMessage) — saved by the store (RAG-39).
+        persistenceService.setTitleIfUntitled(prompt, for: conversationID)
 
         // ⚠️⚠️ THE MAC WINDOW IS NOT MOVED, AND THAT IS THE POINT. This used to assign
         // `vm.selectedConversationID = conversationID` on every remote turn, so a message arriving
@@ -1066,9 +1072,10 @@ final class MessagingCoordinator {
     /// `SchedulerCoordinator` before this change, and on 2026-09-06 that coordinator stopped
     /// calling this at all in favour of the static factory. Left internal because nothing depends
     /// on tightening it; it is no longer part of any cross-type contract.
-    func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) async -> ChatMessage {
+    func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem],
+                           deliveryMode: AttachmentDeliveryMode? = nil) async -> ChatMessage {
         await Self.makeUserMessage(conversationID: conversationID, query: query, files: files,
-                                   fileProcessorService: fileProcessorService)
+                                   fileProcessorService: fileProcessorService, deliveryMode: deliveryMode)
     }
 
     /// The same factory, as a free function over its one real dependency.
@@ -1082,11 +1089,15 @@ final class MessagingCoordinator {
         conversationID: UUID,
         query: String,
         files: [FileSystemItem],
-        fileProcessorService: FileProcessorService
+        fileProcessorService: FileProcessorService,
+        deliveryMode: AttachmentDeliveryMode? = nil
     ) async -> ChatMessage {
         // Classification + reads live in MessageAttachmentBuilder (testable
         // without the coordinator's VM graph — see ATT-1 contract note there).
-        let attachments = await MessageAttachmentBuilder(fileProcessorService: fileProcessorService).build(from: files)
+        // ⚠️ Every sender with files passes `AttachmentDeliveryMode.resolve(for: profile)` so the
+        // chip records what the model receives; nil records nothing.
+        let attachments = await MessageAttachmentBuilder(fileProcessorService: fileProcessorService)
+            .build(from: files, deliveryMode: deliveryMode)
 
         return ChatMessage(
             conversationId: conversationID,

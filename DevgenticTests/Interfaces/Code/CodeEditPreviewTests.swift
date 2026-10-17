@@ -54,7 +54,6 @@ final class CodeEditPreviewTests: XCTestCase {
         "start_background_task",
         // Ends a background process this agent started. Changes machine state, touches no file.
         "stop_background_task",
-        "command_stop",
     ]
 
     func testEveryMutatingPresetToolProducesAPreview() {

@@ -7,7 +7,7 @@
 //  Tests for HybridSearchService.filesystemScan — the bounded disk-walk fallback
 //  that runs when a SCOPED Spotlight query returns zero rows. Spotlight excludes
 //  volatile locations (/private/tmp, /var/folders) from its index, so index-empty
-//  ≠ disk-empty there; the fallback is what makes an fs_smart_search "success"
+//  ≠ disk-empty there; the fallback is what makes an spotlight_search "success"
 //  mean "the answer reflects the disk".
 //
 //  The temp directories these tests create live under /var/folders — genuinely

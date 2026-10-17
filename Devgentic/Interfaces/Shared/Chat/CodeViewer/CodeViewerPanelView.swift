@@ -270,6 +270,9 @@ private final class SyntaxThemeCache {
 struct CodeViewerPanelView: View {
     @Environment(ChatHistoryViewModel.self) var chatHistoryViewModel
     @Environment(ThemeManager.self) var themeManager
+    /// Optional: absent wherever the app root's environment does not reach. Its snapshot is non-nil
+    /// only in Code mode with a loaded repository (the store follows no project elsewhere).
+    @Environment(GitChangesStore.self) private var gitChangesStore: GitChangesStore?
     @Environment(\.appTheme) private var appTheme
     @Environment(\.surfaceStyle) private var surfaceStyle
 
@@ -1004,6 +1007,34 @@ struct CodeViewerPanelView: View {
                     .frame(width: 1, height: 14)
             }
 
+            // Switch to Git Changes (Code mode, repository loaded). "Open in Code Viewer" from the
+            // Changes panel closes it via slot exclusion — this is the way back.
+            if let snapshot = gitChangesStore?.snapshot {
+                let totals = snapshot.totals()
+                Button {
+                    chatHistoryViewModel.showGitChanges()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 11, weight: .semibold))
+                        if !snapshot.files.isEmpty {
+                            GitLineCountsLabel(added: totals.added, deleted: totals.deleted, fontSize: 10)
+                        }
+                    }
+                    .foregroundColor(accentTint)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(accentTint.opacity(0.12))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(String(localized: "Switch to Changes"))
+
+                Capsule()
+                    .fill(secondaryTextColor.opacity(0.2))
+                    .frame(width: 1, height: 14)
+            }
+
             // GROUP 4: Presentation & Window Controls
             HStack(spacing: 3) {
                 // Side-by-side split with the chat
@@ -1492,25 +1523,16 @@ fileprivate struct CodeViewerTabStrip: View {
     }
 }
 
-// MARK: - Live Pulse Dot
+// MARK: - Live Pulse Indicator (Syntax Nexus)
 
-/// The "agent is writing" indicator: a small dot pulsing its opacity. Shared by the tab
-/// chip and the floating pill (internal, not fileprivate, for that reason).
+/// The "agent is writing code" indicator: uses the Syntax Nexus indicator.
+/// Shared by the tab chip and the floating pill (internal, not fileprivate, for that reason).
 struct LivePulseDot: View {
     let color: Color
-    @State private var dimmed = false
 
     var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 7, height: 7)
-            .opacity(dimmed ? 0.25 : 1)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                    dimmed = true
-                }
-            }
-            .accessibilityLabel(String(localized: "Agent is writing"))
+        DevgenticActivityIndicator(style: .syntaxNexus, size: 12, tint: color)
+            .accessibilityLabel(String(localized: "Agent is writing code"))
     }
 }
 

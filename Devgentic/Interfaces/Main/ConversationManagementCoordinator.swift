@@ -78,6 +78,8 @@ final class ConversationManagementCoordinator {
 
         if vm.interfaceMode == .code {
             vm.codeSessionManager?.resetSession()
+            // Home has no project — the Explorer shows "Select Project folder", not the last one.
+            vm.syncExplorerToInterfaceMode()
         }
 
         logger.info("Deselected conversation, returning to welcome screen.")
@@ -102,9 +104,8 @@ final class ConversationManagementCoordinator {
         guard let vm = viewModel else { return }
         // ⚠️ FIRST, before either slot's own publish is queued — see `MCPRootsProvider.setWorkspace`.
         Task { await MCPRootsProvider.setWorkspace(url) }
-        vm.explorerViewModel.selectedRootURL = url
-        vm.explorerViewModel.loadDirectoryContents(for: url)
         vm.codeSessionManager?.updateProjectPath(url)
+        vm.syncExplorerToInterfaceMode()
     }
 
     /// The user picked a folder from the composer or the welcome screen.
@@ -152,11 +153,9 @@ final class ConversationManagementCoordinator {
         }
         let outcome = manager.openProject(forConversationPath: path)
         logger.info("[CODE_PROJECT] Selected session \(conversationID.uuidString) — bound folder: \(path.map { "'\(URL(fileURLWithPath: $0).lastPathComponent)'" } ?? "none"), outcome: \(String(describing: outcome)).")
-        if outcome == .restored, let path {
-            let url = URL(fileURLWithPath: path)
-            vm.explorerViewModel.selectedRootURL = url
-            vm.explorerViewModel.loadDirectoryContents(for: url)
-        }
+        // EVERY outcome, not just `.restored`: on `.alreadyOpen` the Code folder is right but the
+        // Explorer may still be showing Chat's folder (the bug fixed here).
+        vm.syncExplorerToInterfaceMode()
     }
 
     /// Why a send from the selected Code conversation must not run, or nil when it may.
@@ -473,10 +472,9 @@ final class ConversationManagementCoordinator {
         }
     }
 
+    /// Saved by the store (RAG-39) — this used to set the model and never save it.
     func renameConversation(conversationID: UUID, newTitle: String) {
-        guard let conversationSD = persistenceService.getConversation(withId: conversationID) else { return }
-        let trimmedTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        conversationSD.userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
+        persistenceService.setTitle(newTitle, for: conversationID)
     }
 
     // MARK: - Export

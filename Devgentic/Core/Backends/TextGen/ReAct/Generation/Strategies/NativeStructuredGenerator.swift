@@ -51,7 +51,11 @@ struct NativeStructuredGenerator: CognitiveGenerator {
             // Like working memory: the native executor delivers attachments in the
             // kickoff user turn it appends after these seeded messages — rendering
             // them here too would emit a duplicate consecutive user message.
-            includeAttachmentContext: false
+            includeAttachmentContext: false,
+            // The per-message part (history, time, retrieval) leads the executor's kickoff turn,
+            // beside the query it carries — layout B. A workflow node has no kickoff carrier of its
+            // own (its input rides the prefix user message built here), so it keeps it here.
+            includeTurnContext: context.workflowContext != nil
         )
     }
 
@@ -65,6 +69,7 @@ struct NativeStructuredGenerator: CognitiveGenerator {
         let executionMessages = compileMessages(from: context)
         let nativeTools = toolAdapter.formatForNativeAPI(context.availableTools)
         let raw = try await model.generateCognitiveStep(messages: executionMessages, tools: nativeTools)
+        try Self.refuseEmptyReply(raw, model: model.modelName, reqId: "conformance")
         return NativeParsePipeline(
             registeredTools: context.availableTools,
             modelId: model.modelName,
@@ -81,6 +86,7 @@ struct NativeStructuredGenerator: CognitiveGenerator {
         nativeMessages: [[String: Any]],
         availableTools: [AgentTool],
         iteration: Int,
+        runToolNames: Set<String> = [],
         onTextDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> ModernCognitiveStep {
         let reqId = UUID().uuidString.prefix(8)
@@ -106,20 +112,39 @@ struct NativeStructuredGenerator: CognitiveGenerator {
 
         let duration = Date().timeIntervalSince(startTime)
         logLLMOps.info("✅ [Native:\(reqId)] Response received in \(String(format: "%.4f", duration))s")
+        try Self.refuseEmptyReply(raw, model: model.modelName, reqId: String(reqId))
         logLLMOps.debug("📄 [Native:\(reqId)] Raw step. \(raw.toolCalls.count) tool calls pre-validation.")
 
         // Validate tool names + repair arg keys against the runtime registry.
         // This catches hallucinated tool names from models that sneak wrong names
         // past the provider's API (Ollama content-fallback, or occasional cloud
         // provider drift under prompt pressure).
+        // `runToolNames` lets a zero-call step be recognised as a broken call to any
+        // tool this run offers (see NativeParsePipeline).
         let validated = NativeParsePipeline(
             registeredTools: availableTools,
             modelId: model.modelName,
-            iteration: iteration
+            iteration: iteration,
+            runToolNames: runToolNames
         ).validate(step: raw)
 
         logLLMOps.info("✅ [Native:\(reqId)] Post-validate: \(validated.toolCalls.count) tool(s), outcome=\(String(describing: validated.parseOutcome))")
 
         return validated
+    }
+    /// Throws `GenerationError.emptyResponse` for a step with no text and no tool call.
+    ///
+    /// ⚠️ READINESS CR-42 (2026-10-11). The prompted generators already did this; the native one
+    /// didn't, so an empty reply validated as `.genuineCompletion` and the run ENDED as completed with
+    /// a canned answer and no retry. The usual cause on a cloud reasoning model (o-series, GPT-5) is
+    /// reasoning that spent the whole output-token limit before any answer — hence the thought size
+    /// in the log. Now it takes the same path as every other generator's empty reply: a bounded
+    /// retry (`LLMRetryStrategy`), then a stop that says the model returned nothing.
+    static func refuseEmptyReply(_ step: ModernCognitiveStep, model: String, reqId: String) throws {
+        guard step.toolCalls.isEmpty,
+              step.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let thoughtChars = step.thought?.count ?? 0
+        logLLMOps.error("❌ [Native:\(reqId)] Empty reply from '\(model)' — no text and no tool call\(thoughtChars > 0 ? " (\(thoughtChars) chars of reasoning: it likely spent the whole output-token limit)" : ""). CONSEQUENCE: retried as an empty response, not accepted as a finished answer.")
+        throw GenerationError.emptyResponse(generator: "Native")
     }
 }

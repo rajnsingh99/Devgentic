@@ -5,9 +5,8 @@
 //  Devgentic
 //
 //  Owns the read/persist paths for every persisted user setting the VM
-//  exposes: streaming response toggle, intelligence core toggle, the web
-//  search API key (Keychain, via `WebSearchKeyStore` — register KC-2) plus
-//  its active state, and the persisted interface mode (UserDefaults).
+//  exposes: streaming response toggle, intelligence core toggle and the
+//  persisted interface mode (UserDefaults).
 //
 //  Scope choice: state stays on `MainApplicationViewModel`. SwiftUI views
 //  use `Bindable(viewModel).useStreamingResponse` directly — moving the
@@ -43,7 +42,7 @@ final class SettingsCoordinator {
 
     /// Pulls every persisted setting into the VM in a single pass. Run once
     /// from `MainApplicationViewModel.init` before anything else uses these
-    /// values (the conversation loader observes `isWebSearchActive`, etc.).
+    /// values.
     func load() {
         guard let vm = viewModel else { return }
 
@@ -65,32 +64,7 @@ final class SettingsCoordinator {
         // `bool(forKey:)` and would read an absent key as false — the opposite of the shipped
         // default.
 
-        // Web search: the key lives in the Keychain. Presence determines enablement; active state
-        // starts off. Under XCTest the Keychain is an in-memory stand-in, so this read is safe there.
-        switch WebSearchKeyStore.read() {
-        case .found(let key):
-            vm.webSearchAPIKey = key
-        case .notFound:
-            vm.webSearchAPIKey = nil
-        case .failed:
-            // The store has logged the OSStatus; this line says what the user will see.
-            vm.webSearchAPIKey = nil
-            logger.error(
-                "[SETTINGS] The web-search API key could not be read from the Keychain, so web search "
-                + "starts DISABLED this session although a key may well be stored. CONSEQUENCE: the "
-                + "feature presents as unconfigured; the key is untouched and comes back on a launch "
-                + "where the Keychain is readable (unlock it, or re-grant access after an update)."
-            )
-        }
-        vm.isWebSearchEnabled = !(vm.webSearchAPIKey ?? "").isEmpty
-        vm.isWebSearchActive = false
-
         logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(vm.useStreamingResponse)")
-        if vm.isWebSearchEnabled {
-            logger.info("Web search is enabled (API key found in the Keychain).")
-        } else {
-            logger.info("Web search is disabled (no API key in the Keychain).")
-        }
     }
 
     // MARK: - Individual-Setting Change Persisters
@@ -105,49 +79,5 @@ final class SettingsCoordinator {
     /// the VM after the mode has been updated in memory.
     func didChangeInterfaceMode(_ mode: MainApplicationViewModel.InterfaceMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: interfaceModeDefaultsKey)
-    }
-
-    // MARK: - Web Search
-
-    func toggleWebSearch() {
-        guard let vm = viewModel else { return }
-        guard vm.isWebSearchEnabled else { return }
-        vm.isWebSearchActive.toggle()
-        logger.info("Web search active state toggled to: \(vm.isWebSearchActive)")
-    }
-
-    /// Stores the key in the Keychain and enables web search.
-    /// - Returns: false when the key could NOT be stored — in which case nothing is enabled, and
-    ///   the caller must tell the user rather than dismiss as though it succeeded (register KC-2).
-    ///   The store never falls back to plaintext.
-    @discardableResult
-    func saveAndEnableWebSearch(apiKey: String) -> Bool {
-        guard let vm = viewModel else { return false }
-        guard WebSearchKeyStore.save(apiKey) else {
-            // The store has logged the OSStatus and its consequence. The feature stays off so the
-            // UI cannot claim a credential the app does not hold.
-            vm.webSearchAPIKey = nil
-            vm.isWebSearchEnabled = false
-            vm.isWebSearchActive = false
-            return false
-        }
-        vm.webSearchAPIKey = apiKey
-        vm.isWebSearchEnabled = true
-        vm.isWebSearchActive = true
-        logger.info("Saved the web search API key to the Keychain and enabled search.")
-        return true
-    }
-
-    func disableAndRemoveWebSearch() {
-        guard let vm = viewModel else { return }
-        let removed = WebSearchKeyStore.delete()
-        vm.webSearchAPIKey = nil
-        vm.isWebSearchEnabled = false
-        vm.isWebSearchActive = false
-        if removed {
-            logger.info("Removed the web search API key from the Keychain and disabled search.")
-        }
-        // A failed delete is logged by the store with its consequence: the feature is off for this
-        // session, but the key survives and web search comes back on the next launch.
     }
 }

@@ -371,7 +371,7 @@ struct SmartSearchTool: DevgenticTool {
             
             // Robust alias checking for scope
             var scope: String? = nil
-            let scopeKeys = ["search_scope", "scope", "path", "folder", "directory", "searchScope"]
+            let scopeKeys = ToolPathKeys.spotlightScope
             
             for key in scopeKeys {
                 if let codingKey = DynamicKey(stringValue: key),
@@ -475,7 +475,7 @@ struct ReadMetadataTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
             
             var foundPath: String? = nil
-            let keys = ["path", "filePath", "file", "filename"]
+            let keys = ToolPathKeys.fileMetadata
             for key in keys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let str = try? container.decode(String.self, forKey: codingKey) {
@@ -569,7 +569,7 @@ struct OrganizeBatchTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
             
             var foundPaths: [String]? = nil
-            let possibleKeys = ["sourcePaths", "source_paths", "paths", "files", "sourcePath", "source_path", "path", "file", "src", "source", "from"]
+            let possibleKeys = ToolPathKeys.batchMoveSources
             for key in possibleKeys {
                 if let codingKey = DynamicKey(stringValue: key) {
                     if let arrayVal = try? container.decode([String].self, forKey: codingKey) {
@@ -587,7 +587,7 @@ struct OrganizeBatchTool: DevgenticTool {
             self.sourcePaths = validPaths
             
             var foundDest: String? = nil
-            let destKeys = ["destinationFolder", "destination_folder", "destination", "folder", "target", "dst", "to", "targetPath", "target_path", "output"]
+            let destKeys = ToolPathKeys.batchMoveDestination
             for key in destKeys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let dest = try? container.decode(String.self, forKey: codingKey) {
@@ -832,7 +832,7 @@ struct WatchFolderTool: DevgenticTool {
             self.action = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "action")!))
 
             var foundPath: String? = nil
-            let keys = ["path", "folder", "directory", "dir"]
+            let keys = ToolPathKeys.watchFolder
             for key in keys {
                 if let codingKey = DynamicKey(stringValue: key),
                    let str = try? container.decode(String.self, forKey: codingKey) {

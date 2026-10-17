@@ -133,17 +133,6 @@ final class TimelineTurnReconstructorTests: XCTestCase {
 
     // MARK: - Loop bookkeeping
 
-    func testReadingToolSuccessCountReDerived() {
-        let events: [TimelineEvent] = [
-            tool("read_file", step: 1, output: "x", success: true),
-            tool("code_search", step: 1, output: "y", success: true),
-            tool("write_file", step: 2, output: "z", success: true),
-            tool("read_file", step: 2, output: "fail", success: false) // failed → must NOT count
-        ]
-        let r = TimelineTurnReconstructor.reconstruct(from: events, parkedOperationID: nil)
-        XCTAssertEqual(r.readingToolSuccessCount, 2)
-    }
-
     func testReasoningAttachedToStep() {
         let events: [TimelineEvent] = [
             reasoning("I should read the file first."),

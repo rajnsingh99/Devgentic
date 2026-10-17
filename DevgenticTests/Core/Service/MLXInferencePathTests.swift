@@ -172,6 +172,33 @@ final class MLXAsyncScanTests: XCTestCase {
         XCTAssertTrue(service.isInstalled(repoId: "mlx-community/Phi-4-mini-instruct-4bit"))
     }
 
+    /// Waits until a walk STARTED after `count` has begun. Bounded by wall-clock time, not a
+    /// yield count: 500 yields were enough on an idle machine and not under a loaded full suite,
+    /// where the sample landed before the background walk began and the test failed on a
+    /// correct implementation.
+    private func waitForWalk(on service: MLXModelService, after count: Int) async {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while service.scanCount == count, ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+    }
+
+    /// The first walk is started BY init, synchronously — so a caller awaiting `ensureLoaded()`
+    /// straight after construction joins it. It used to be launched from a deferred Task: that
+    /// caller started its own walk, then the deferred forcing Task started a second one.
+    func testEarlyCallersJoinTheWalkInitStarted() async throws {
+        try installModel("mlx-community/Phi-4-mini-instruct-4bit")
+        let service = MLXModelService(modelsRootOverride: root)
+        XCTAssertEqual(service.scanCount, 1, "init must have started its walk before returning")
+
+        await service.ensureLoaded()
+        // Give any deferred launch work every chance to start a stray walk.
+        for _ in 0..<200 { await Task.yield() }
+
+        XCTAssertEqual(service.scanCount, 1, "a second walk ran at launch over the same tree")
+        XCTAssertTrue(service.isInstalled(repoId: "mlx-community/Phi-4-mini-instruct-4bit"))
+    }
+
     /// Concurrent callers must coalesce onto one walk rather than racing several over the
     /// same multi-gigabyte tree.
     func testConcurrentEnsureLoadedCallsCoalesce() async throws {
@@ -222,11 +249,7 @@ final class MLXAsyncScanTests: XCTestCase {
         // Put a walk in flight and leave it running.
         let background = Task { @MainActor in await service.refreshInstalledModelsAsync(force: true) }
         let before = service.scanCount
-        var spins = 0
-        while service.scanCount == before, spins < 500 {
-            await Task.yield()
-            spins += 1
-        }
+        await waitForWalk(on: service, after: before)
         let joinedWalk = service.scanCount
         XCTAssertGreaterThan(joinedWalk, before, "precondition: a walk should now be in flight")
 
@@ -254,12 +277,9 @@ final class MLXAsyncScanTests: XCTestCase {
 
         let background = Task { @MainActor in await service.refreshInstalledModelsAsync(force: true) }
         let before = service.scanCount
-        var spins = 0
-        while service.scanCount == before, spins < 500 {
-            await Task.yield()
-            spins += 1
-        }
+        await waitForWalk(on: service, after: before)
         let joinedWalk = service.scanCount
+        XCTAssertGreaterThan(joinedWalk, before, "precondition: a walk should now be in flight")
 
         await service.refreshInstalledModelsAsync()
         _ = await background.value

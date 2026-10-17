@@ -47,6 +47,10 @@ struct MCPSamplingContext: Sendable {
     let runMessageID: UUID?
 
     let registeredAt: Date
+
+    /// Identifies THIS registration, so the run that made it can withdraw exactly it — and not a
+    /// newer run's context for the same conversation that replaced it (CR-18).
+    let registrationID = UUID()
 }
 
 @MainActor
@@ -71,9 +75,21 @@ final class MCPSamplingBroker {
         contexts[context.conversationID] = context
     }
 
-    func unregister(conversationID: UUID) {
-        contexts[conversationID] = nil
-        for (source, conversation) in lastConversationBySource where conversation == conversationID {
+    /// Withdraws a run's context when the run ends.
+    ///
+    /// ⚠️⚠️ THIS HAD NO CALLER (readiness CR-18, 2026-10-10). Every run registered and none withdrew,
+    /// so contexts — each holding a full `ProviderConfig`, API key included — piled up for the life of
+    /// the process. A server sampling OUTSIDE any run then fell back to the newest of them: the
+    /// approval appeared in an unrelated conversation and the call was billed to a finished run's
+    /// profile and key, stale even if the profile had since been edited; and the "no conversation —
+    /// REFUSED" branch could never fire after the first run.
+    ///
+    /// ⚠️ Matched on `registrationID`, not the conversation: a newer run in the same conversation
+    /// may have replaced this context, and ending the older run must not withdraw the newer one's.
+    func unregister(_ context: MCPSamplingContext) {
+        guard contexts[context.conversationID]?.registrationID == context.registrationID else { return }
+        contexts[context.conversationID] = nil
+        for (source, conversation) in lastConversationBySource where conversation == context.conversationID {
             lastConversationBySource[source] = nil
         }
     }
@@ -212,7 +228,7 @@ final class MCPSamplingBroker {
 
     /// Prefer the conversation that last drove this source; fall back to the most recently
     /// registered context so a server sampling before its first tool call still resolves.
-    private func resolveContext(for sourceID: UUID) -> MCPSamplingContext? {
+    func resolveContext(for sourceID: UUID) -> MCPSamplingContext? {
         if let conversationID = lastConversationBySource[sourceID], let context = contexts[conversationID] {
             return context
         }

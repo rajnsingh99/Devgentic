@@ -34,36 +34,42 @@ actor IntelligenceCoreService {
 
     static let shared = IntelligenceCoreService()
 
-    private let logger = DGLogger(category: "IntelligenceCoreService")
+    private static let logger = DGLogger(category: "IntelligenceCoreService")
+    private var logger: DGLogger { Self.logger }
 
-    private var modelContainer: ModelContainer?
-
-    /// Tracks which feature currently holds the model in memory.
-    private var currentCaller: ICCallerFeature?
-
-    /// Timestamp when the model was last loaded — used to calculate session duration.
-    private var loadTimestamp: Date?
+    /// Which model is resident and the one load in flight — see `ICModelResidency` (CR-32).
+    private let residency: ICModelResidency<ModelContainer>
 
     /// Cumulative inference count since app launch.
     private var totalInferenceCount: Int = 0
 
-    private init() {}
+    /// ⚠️ The MLX buffer-cache cap is set by whichever MLX container starts FIRST. A session that
+    /// only ever uses this one (Morning Brief at launch, nothing local after) never starts
+    /// `MLXService`, and ran with MLX's default — a cache as large as the memory limit.
+    private init() {
+        MLXMemoryPolicy.configure()
+        residency = ICModelResidency(
+            selection: { Self.selectedModelName },
+            idleReleaseSeconds: Self.idleReleaseSeconds,
+            loader: { name, caller, loadID in try await Self.loadContainer(named: name, caller: caller, loadID: loadID) },
+            onFree: { name, _, _ in Self.didFree(name) }
+        )
+    }
 
     // MARK: - Model Resolution
 
     /// The user-selected model name from UserDefaults, or empty if none selected.
-    private var selectedModelName: String {
+    private static var selectedModelName: String {
         UserDefaults.standard.string(forKey: AppSettings.coreIntelligenceModelKey) ?? ""
     }
 
     /// Whether a model has been selected in Core Intelligence settings.
     var hasModelSelected: Bool {
-        !selectedModelName.isEmpty
+        !Self.selectedModelName.isEmpty
     }
 
-    /// Resolves the local path of the selected model from MLXModelService.
-    private func resolveModelPath() async -> URL? {
-        let modelName = selectedModelName
+    /// Resolves the local path of `modelName` from MLXModelService.
+    private static func resolveModelPath(_ modelName: String) async -> URL? {
         guard !modelName.isEmpty else { return nil }
         // See AgentConnect: the scan is off-actor, so wait for it rather than risk
         // reading an empty list and rejecting a model that is installed.
@@ -76,7 +82,7 @@ actor IntelligenceCoreService {
     // MARK: - Memory Snapshot
 
     /// Captures a snapshot of current memory state for logging.
-    private func memorySnapshot() -> (available: String, gpuCache: String) {
+    private static func memorySnapshot() -> (available: String, gpuCache: String) {
         let profile = SystemHardwareProfiler.shared.profile
         let gpuActive = MLX.GPU.activeMemory
         let gpuCache = MLX.GPU.cacheMemory
@@ -87,22 +93,17 @@ actor IntelligenceCoreService {
 
     // MARK: - Model Lifecycle
 
-    /// Loads the user-selected model into memory.
+    /// Loads the user-selected model into memory (or reuses it if it is already resident).
     /// - Parameter caller: The feature requesting the load — used for diagnostics.
     func load(caller: ICCallerFeature = .unknown) async throws {
-        // Any new demand cancels a pending idle free — this is what lets a turn's
-        // sequential IC features (RAG rewrite → compaction → synthesis) share one load.
-        cancelIdleRelease()
-        releasePolicy.didLoad()
+        _ = try await residency.prepare(caller: caller)
+    }
 
-        if modelContainer != nil {
-            logger.info("[IC Load] Model already in memory — reusing for \(caller.rawValue). Previous caller: \(self.currentCaller?.rawValue ?? "none")")
-            currentCaller = caller
-            return
-        }
-
-        guard hasModelSelected else {
-            logger.error("[IC Load] REJECTED — No model selected. Caller: \(caller.rawValue)")
+    /// The residency's loader: resolves `name` on disk and loads it. Only `ICModelResidency` calls
+    /// this, and it never runs two at once.
+    private static func loadContainer(named name: String, caller: ICCallerFeature, loadID: String) async throws -> ModelContainer {
+        guard !name.isEmpty else {
+            logger.error("[IC Load] load \(loadID) REJECTED — No model selected. Caller: \(caller.rawValue)")
             throw NSError(
                 domain: "IntelligenceCoreService",
                 code: 400,
@@ -110,20 +111,20 @@ actor IntelligenceCoreService {
             )
         }
 
-        guard let localPath = await resolveModelPath() else {
-            logger.error("[IC Load] REJECTED — Model '\(self.selectedModelName)' not found on disk. Caller: \(caller.rawValue)")
+        guard let localPath = await resolveModelPath(name) else {
+            logger.error("[IC Load] load \(loadID) REJECTED — Model '\(name)' not found on disk. Caller: \(caller.rawValue)")
             throw NSError(
                 domain: "IntelligenceCoreService",
                 code: 404,
-                userInfo: [NSLocalizedDescriptionKey: "Selected model '\(selectedModelName)' not found. It may have been deleted from the Model Store."]
+                userInfo: [NSLocalizedDescriptionKey: "Selected model '\(name)' not found. It may have been deleted from the Model Store."]
             )
         }
 
         let preMemory = memorySnapshot()
         let loadStart = CFAbsoluteTimeGetCurrent()
 
-        logger.notice("[IC Load] BEGIN — Model: \(self.selectedModelName), Caller: \(caller.rawValue)")
-        logger.info("[IC Load] Pre-load memory — System: \(preMemory.available), GPU: \(preMemory.gpuCache)")
+        logger.notice("[IC Load] load \(loadID) BEGIN — Model: \(name), Caller: \(caller.rawValue)")
+        logger.info("[IC Load] load \(loadID) Pre-load memory — System: \(preMemory.available), GPU: \(preMemory.gpuCache)")
 
         // mlx-swift-lm 3.x: `loadModelContainer(from:using:)` replaces the old
         // `loadModelContainer(configuration:)`. The tokenizer loader is our own bridge
@@ -132,15 +133,13 @@ actor IntelligenceCoreService {
             from: localPath,
             using: HuggingFaceTokenizerLoader()
         )
-        self.modelContainer = container
-        self.currentCaller = caller
-        self.loadTimestamp = Date()
 
         let loadDuration = CFAbsoluteTimeGetCurrent() - loadStart
         let postMemory = memorySnapshot()
 
-        logger.notice("[IC Load] COMPLETE — \(String(format: "%.2f", loadDuration))s, Caller: \(caller.rawValue)")
-        logger.info("[IC Load] Post-load memory — System: \(postMemory.available), GPU: \(postMemory.gpuCache)")
+        logger.notice("[IC Load] load \(loadID) COMPLETE — '\(name)' in \(String(format: "%.2f", loadDuration))s, Caller: \(caller.rawValue)")
+        logger.info("[IC Load] load \(loadID) Post-load memory — System: \(postMemory.available), GPU: \(postMemory.gpuCache)")
+        return container
     }
 
     // MARK: - Release Policy
@@ -152,114 +151,32 @@ actor IntelligenceCoreService {
     // after an idle grace period, and any new load cancels it. A turn's features therefore
     // share ONE load, while an idle app still gives the memory back.
     //
-    // `activeLeases` additionally guarantees a feature can never free the model out from
-    // under another's in-flight generation. That was previously possible: `unload` nil'd
-    // the container and called `MLX.GPU.clearCache()` unconditionally. The generation
-    // itself survived (it captures the container before its first suspension) but the
-    // cache was cleared mid-inference and the next caller reloaded a resident model.
+    // Leases additionally guarantee a feature can never free the model out from under
+    // another's in-flight generation. The decision table is `ICReleasePolicy`; the residency
+    // (which model, which load) is `ICModelResidency`.
 
     /// Seconds the model stays resident after the last feature releases it.
     private static let idleReleaseSeconds: Double = 60
 
-    /// Residency decision table — see `ICReleasePolicy` (pure, unit-tested).
-    private var releasePolicy = ICReleasePolicy()
-
-    /// Pending idle free. Cancelled by any new load.
-    private var idleReleaseTask: Task<Void, Never>?
-
-    private func beginLease() {
-        releasePolicy.beginLease()
-        cancelIdleRelease()
-    }
-
-    private func endLease(caller: ICCallerFeature) {
-        apply(releasePolicy.endLease(), caller: caller, reason: "last generation finished")
-    }
-
-    private func cancelIdleRelease() {
-        idleReleaseTask?.cancel()
-        idleReleaseTask = nil
-    }
-
-    /// Performs whatever the policy decided.
-    private func apply(_ action: ICReleasePolicy.Action, caller: ICCallerFeature, reason: String) {
-        switch action {
-        case .none:
-            if releasePolicy.activeLeases > 0 {
-                logger.info("[IC Release] Release requested by \(caller.rawValue), but \(self.releasePolicy.activeLeases) generation(s) still in flight — deferred until they finish.")
-            }
-        case .scheduleIdleRelease:
-            scheduleIdleRelease(caller: caller)
-        case .freeNow:
-            cancelIdleRelease()
-            performUnload(caller: caller, reason: reason)
-        }
-    }
-
-    private func scheduleIdleRelease(caller: ICCallerFeature) {
-        cancelIdleRelease()
-        guard modelContainer != nil else { return }
-        let seconds = Self.idleReleaseSeconds
-        logger.info("[IC Release] Idle release scheduled in \(Int(seconds))s — requested by: \(caller.rawValue). Any request before then reuses the loaded model.")
-        idleReleaseTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            await self?.performIdleRelease(caller: caller)
-        }
-    }
-
-    private func performIdleRelease(caller: ICCallerFeature) {
-        // Re-checked under actor isolation: demand may have arrived while we slept.
-        guard !Task.isCancelled, releasePolicy.shouldHonorElapsedIdleRelease else {
-            logger.info("[IC Release] Idle release skipped — model is back in use (leases: \(self.releasePolicy.activeLeases)).")
-            return
-        }
-        performUnload(caller: caller, reason: "idle for \(Int(Self.idleReleaseSeconds))s")
-    }
-
     /// Signals that `caller` is finished with the model. Does NOT free immediately — see
     /// the release-policy note above. Safe to call while other features are mid-flight.
-    func releaseHold(caller: ICCallerFeature = .unknown) {
-        apply(releasePolicy.requestRelease(), caller: caller, reason: "released by \(caller.rawValue)")
+    func releaseHold(caller: ICCallerFeature = .unknown) async {
+        await residency.requestRelease(caller: caller)
     }
 
     /// Frees the model as soon as it is safe to do so, skipping the idle grace period.
-    /// For deliberate teardown — Core Intelligence switched off, or the IC model changed,
-    /// where lingering residency would let the next inference reuse the OLD model.
-    func unloadNow(caller: ICCallerFeature = .unknown) {
-        apply(releasePolicy.requestImmediateRelease(), caller: caller, reason: "immediate teardown")
+    /// For deliberate teardown — Core Intelligence switched off. (A changed IC model no longer
+    /// needs this: the next request compares the resident model with the selection and swaps.)
+    func unloadNow(caller: ICCallerFeature = .unknown) async {
+        await residency.requestImmediateRelease(caller: caller)
     }
 
-    /// Unloads the model from memory and clears GPU cache.
-    /// - Parameter caller: The feature requesting the unload.
-    private func performUnload(caller: ICCallerFeature = .unknown, reason: String) {
-        cancelIdleRelease()
-        releasePolicy.didFree()
-
-        guard modelContainer != nil else {
-            logger.debug("[IC Unload] No-op — model not loaded. Caller: \(caller.rawValue)")
-            return
-        }
-
+    /// The residency dropped `name`: give the buffer cache back and log the effect.
+    private static func didFree(_ name: String) {
         let preMemory = memorySnapshot()
-        let sessionDuration: String
-        if let loadTime = loadTimestamp {
-            let elapsed = Date().timeIntervalSince(loadTime)
-            sessionDuration = String(format: "%.1fs", elapsed)
-        } else {
-            sessionDuration = "unknown"
-        }
-
-        modelContainer = nil
-        MLX.GPU.clearCache()
-
+        MLXMemoryPolicy.clearBufferCache(caller: "Core Intelligence unload")
         let postMemory = memorySnapshot()
-
-        logger.notice("[IC Unload] Model released — Session: \(sessionDuration), Reason: \(reason), Loaded by: \(self.currentCaller?.rawValue ?? "unknown"), Unloaded by: \(caller.rawValue)")
-        logger.info("[IC Unload] Memory freed — Before GPU: \(preMemory.gpuCache) → After GPU: \(postMemory.gpuCache)")
-
-        currentCaller = nil
-        loadTimestamp = nil
+        logger.info("[IC Unload] '\(name)' memory freed — Before GPU: \(preMemory.gpuCache) → After GPU: \(postMemory.gpuCache)")
     }
 
     // MARK: - Inference
@@ -271,16 +188,9 @@ actor IntelligenceCoreService {
     ///   - temperature: Sampling temperature.
     ///   - caller: The feature requesting generation.
     func generate(messages: [[String: String]], maxTokens: Int = 1024, temperature: Float = 0.6, caller: ICCallerFeature = .unknown) async throws -> String {
-        try await load(caller: caller)
-
-        guard let container = modelContainer else {
-            throw NSError(domain: "IntelligenceCoreService", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model container not available."])
-        }
-
-        // Hold a lease for the whole generation so no other feature can free the model (or
-        // clear the GPU cache) mid-inference. `defer` covers the throwing paths too.
-        beginLease()
-        defer { endLease(caller: caller) }
+        // Loads (or joins the load of, or reuses) the SELECTED model and takes a lease in one step,
+        // so no other feature can free the model (or clear the GPU cache) mid-inference.
+        let container = try await residency.beginGeneration(caller: caller)
 
         let genStart = CFAbsoluteTimeGetCurrent()
         let promptTokenCount = messages.reduce(0) { $0 + ($1["content"]?.count ?? 0) / 4 } // Rough estimate
@@ -290,24 +200,39 @@ actor IntelligenceCoreService {
         logger.notice("[IC Generate #\(inferenceNum)] BEGIN — Caller: \(caller.rawValue), maxTokens: \(maxTokens), temp: \(temperature), ~promptTokens: \(promptTokenCount)")
 
         let wrapped = UnsafeSendable(messages)
-        let result = try await container.perform { context in
-            let promptTokens = try context.tokenizer.applyChatTemplate(messages: wrapped.value.map { $0 as [String: any Sendable] })
-            let lmInput = LMInput(tokens: MLXArray(promptTokens))
-            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: temperature)
+        let result: String
+        do {
+            result = try await container.perform { context in
+                let promptTokens = try context.tokenizer.applyChatTemplate(messages: wrapped.value.map { $0 as [String: any Sendable] })
+                let lmInput = LMInput(tokens: MLXArray(promptTokens))
+                let parameters = GenerateParameters(maxTokens: maxTokens, temperature: temperature)
 
-            let stream = try MLXLMCommon.generate(
-                input: lmInput,
-                parameters: parameters,
-                context: context
-            )
+                let stream = try MLXLMCommon.generate(
+                    input: lmInput,
+                    parameters: parameters,
+                    context: context
+                )
 
-            var fullText = ""
-            for await generation in stream {
-                if case .chunk(let text) = generation {
-                    fullText += text
+                var fullText = ""
+                for await generation in stream {
+                    if case .chunk(let text) = generation {
+                        fullText += text
+                    }
                 }
+                return fullText
             }
-            return fullText
+        } catch {
+            await residency.endGeneration(caller: caller)
+            throw error
+        }
+        await residency.endGeneration(caller: caller)
+
+        // ⚠️ Timeout inventory D-27: `MLXLMCommon.generate`'s stream ends NORMALLY on
+        // cancellation, so a stopped call used to return its partial text as the answer — a
+        // half-written synthesis or a truncated RAG rewrite reported as success.
+        if Task.isCancelled {
+            logger.notice("[IC Generate #\(inferenceNum)] CANCELLED after \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - genStart))s, \(result.count) chars, Caller: \(caller.rawValue). CONSEQUENCE: the partial text is discarded and the caller sees a cancellation.")
+            throw CancellationError()
         }
 
         let genDuration = CFAbsoluteTimeGetCurrent() - genStart
@@ -316,7 +241,7 @@ actor IntelligenceCoreService {
 
         logger.notice("[IC Generate #\(inferenceNum)] COMPLETE — \(String(format: "%.2f", genDuration))s, ~\(outputTokenEstimate) output tokens, ~\(String(format: "%.1f", tokPerSec)) tok/s, Caller: \(caller.rawValue)")
 
-        let postMemory = memorySnapshot()
+        let postMemory = Self.memorySnapshot()
         logger.info("[IC Generate #\(inferenceNum)] Post-generate GPU: \(postMemory.gpuCache)")
 
         return result

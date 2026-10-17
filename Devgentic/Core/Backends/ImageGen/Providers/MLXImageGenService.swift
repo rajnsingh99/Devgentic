@@ -9,9 +9,43 @@
 //  MLX-based local image generation using the flux-2-swift-mlx library.
 //  Wraps Flux2Pipeline for Apple Silicon T2I and I2I generation.
 //
+//  ⚠️ COMPILED OUT (2026-10-06). flux-2-swift-mlx 2.2.0 does not build against mlx-swift ≥ 0.31.4
+//  (its `ResumableAdamW` overrides an `AdamW` initializer that changed), and its 3.x line pins
+//  mlx-swift to one exact version. That held the whole MLX stack back, including the
+//  mlx-swift-lm release that reports rejected tool calls. The package was removed; this code is
+//  kept, unchanged, behind `MLX_IMAGE_GEN`.
+//
+//  To bring it back:
+//    1. re-add the flux-2-swift-mlx package (products `Flux2Core` + `FluxTextEncoders`) at a
+//       version that builds against the app's mlx-swift pin;
+//    2. add `MLX_IMAGE_GEN` to SWIFT_ACTIVE_COMPILATION_CONDITIONS for the app AND test targets.
+//  A named flag rather than `canImport(Flux2Core)`: a stale `Flux2Core.swiftmodule` left in
+//  DerivedData would make `canImport` true with nothing to link, which fails at link time.
+//  Expect some fix-up on re-enable — the compiler does not check code while it is switched off.
+//
 
 import Foundation
 import os
+
+/// Whether this build can generate images on-device with MLX. The ONE place the rest of the app
+/// asks: provider pickers, the capability analyzer and the provider factory all read it, so
+/// the image-generation picker never offers a provider the factory cannot build.
+enum MLXImageGenAvailability {
+    static var isCompiledIn: Bool {
+        #if MLX_IMAGE_GEN
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Shown when a saved image profile still names MLX in a build without it.
+    static let unavailableMessage =
+        "On-device MLX image generation isn't included in this build. "
+        + "Switch this profile to OpenAI, Gemini, or Ollama."
+}
+
+#if MLX_IMAGE_GEN
 import Flux2Core
 import CoreGraphics
 import ImageIO
@@ -225,3 +259,5 @@ struct MLXImageGenService: ImageGenProvider, Sendable {
         return data as Data
     }
 }
+
+#endif // MLX_IMAGE_GEN

@@ -23,20 +23,11 @@ import Foundation
 @MainActor
 enum PreSendFitHint {
 
-    /// Binary containers whose on-disk size wildly overstates extracted text
-    /// (a PDF's bytes ≫ its text) — skipped here; send-time measures the truth.
-    static let binaryContainerExtensions: Set<String> = [
-        "pdf", "doc", "docx", "rtf", "rtfd", "pptx", "xlsx", "pages", "key", "numbers"
-    ]
-
-    /// Images ride the native vision payload, never the text-injection path — so they
-    /// are excluded from the CHAR estimate. They are not free, though: they are priced
-    /// separately in tokens via `PromptFitCheck.estimatedImageTokens`. Until that term
-    /// existed, attaching a 6 MB screenshot to an 8K-window model produced no warning
-    /// at all, which made this gauge quietly dishonest about its most common overflow.
-    static let imageExtensions: Set<String> = [
-        "png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "bmp"
-    ]
+    // ⚠️ File kinds come from `AttachmentClassifier` — the owner the backend, the transcript and
+    // attach-time intake already ask. This file used to carry its own extension lists, and they
+    // disagreed with the send: an `.svg` was priced as text here but shipped as an image, an
+    // `.xls` was priced by its binary bytes, and an extension-less text file was missed by
+    // the image check entirely.
 
     /// Re-evaluates the composer state and posts/clears the overflow advisory.
     /// Called on attachment and profile changes — human-speed events, no debounce.
@@ -125,12 +116,27 @@ enum PreSendFitHint {
         ))
     }
 
-    /// Byte sizes of the attachments that will flow through TEXT injection —
-    /// images and binary containers excluded. Stat only; no content is read.
+    /// Byte sizes of the attachments that will flow through TEXT injection. Stat for the size;
+    /// classifying reads at most `BinaryFileProbe.probeLength` bytes of the head.
+    ///
+    /// Priced:
+    ///  • `.text` — its bytes ARE what gets injected.
+    ///  • a `.document` whose bytes are plain text (CSV, TSV, RTF) — a usable bound on what
+    ///    extraction yields: under for CSV (cells gain ` | ` table padding), over for RTF
+    ///    (markup). Either is capped at the per-file budget by the injection arithmetic.
+    /// Not priced: images (in tokens, `imageURLs`); binary documents (PDF, DOCX, XLSX — their
+    /// bytes overstate the extracted text by orders of magnitude; send-time measures the
+    /// truth); binaries, videos and folders, which deliver no content.
     static func estimatableSizes(of files: [FileSystemItem]) -> [Int] {
         files.compactMap { file in
-            let ext = file.url.pathExtension.lowercased()
-            guard !imageExtensions.contains(ext), !binaryContainerExtensions.contains(ext) else { return nil }
+            switch AttachmentClassifier.classify(file) {
+            case .text:
+                break
+            case .document where !BinaryFileProbe.contentLooksBinary(file.url):
+                break
+            case .document, .image, .folder, .video, .binary:
+                return nil
+            }
             return (try? file.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
         }
     }
@@ -141,7 +147,7 @@ enum PreSendFitHint {
     /// because `ImageTokenHeuristic` falls back to a flat per-image estimate.
     static func imageURLs(of files: [FileSystemItem]) -> [URL] {
         files.compactMap { file in
-            imageExtensions.contains(file.url.pathExtension.lowercased()) ? file.url : nil
+            AttachmentClassifier.classify(file) == .image ? file.url : nil
         }
     }
 }

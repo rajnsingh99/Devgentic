@@ -55,4 +55,8 @@ struct UserAction: Sendable, CustomStringConvertible {
     /// User tapped the refresh button (or pressed ⌘R) in the Ollama model
     /// store, explicitly asking the server to be re-probed.
     static let ollamaRefreshButton = UserAction(description: "ollama.refresh.button")
+
+    /// User pressed Download (or Retry) on the Setup Assistant's model step with Ollama selected.
+    /// A stale "disconnected" from before they started Ollama must not fail the download.
+    static let onboardingDownloadButton = UserAction(description: "onboarding.model.download")
 }

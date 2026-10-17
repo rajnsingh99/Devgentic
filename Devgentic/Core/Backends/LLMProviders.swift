@@ -241,6 +241,14 @@ enum LLMProviderError: LocalizedError {
     /// budget is just latency. User-facing message suggests switching profile
     /// type or model.
     case toolsUnsupported(modelName: String)
+    /// The provider's own safety system declined the request — Anthropic `stop_reason: "refusal"`,
+    /// Gemini `promptFeedback.blockReason` or a safety `finishReason`. HTTP 200, so nothing upstream
+    /// saw a failure: the user got an empty or cut-off answer with no explanation (readiness CR-16).
+    /// Deterministic for the same request, so never retried.
+    case refused(provider: String, detail: String)
+    /// A stream that closed cleanly but never said it had finished (no `finish_reason`): cut off
+    /// upstream, by a proxy or gateway. Transient — the same request normally completes (CR-26).
+    case streamEndedEarly(provider: String)
 
     var errorDescription: String? {
         switch self {
@@ -254,6 +262,10 @@ enum LLMProviderError: LocalizedError {
             return "'\(modelName)' does not support extended thinking."
         case .toolsUnsupported(let modelName):
             return "\(modelName) doesn't support tool calling. Use this model in a Bot profile for chat or switch to a tool-capable model."
+        case .refused(let provider, let detail):
+            return "\(provider) declined to answer this request (\(detail)). Rephrasing it may help, or try a different model."
+        case .streamEndedEarly(let provider):
+            return "The \(provider) response stream ended before the model finished. This is usually a dropped connection; retrying normally works."
         }
     }
     

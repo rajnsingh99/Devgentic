@@ -130,7 +130,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Search for Python files"),
             makeAgentMessage("Found files.", toolEvents: [
-                (name: "fs_smart_search", params: "{\"search_term\":\"*.py\",\"search_scope\":\"/tmp\"}", output: nil, isSuccess: true, failureCategory: nil)
+                (name: "spotlight_search", params: "{\"search_term\":\"*.py\",\"search_scope\":\"/tmp\"}", output: nil, isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -161,21 +161,21 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
             makeUserMessage("Read and search files"),
             makeAgentMessage("Done.", toolEvents: [
                 (name: "read_file", params: "{\"path\":\"/tmp/a.txt\"}", output: "content", isSuccess: true, failureCategory: nil),
-                (name: "fs_smart_search", params: "{\"search_term\":\"hello\"}", output: "found", isSuccess: true, failureCategory: nil)
+                (name: "spotlight_search", params: "{\"search_term\":\"hello\"}", output: "found", isSuccess: true, failureCategory: nil)
             ])
         ]
 
         let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
 
         XCTAssertTrue(xml.contains("tool=\"read_file\""))
-        XCTAssertTrue(xml.contains("tool=\"fs_smart_search\""))
+        XCTAssertTrue(xml.contains("tool=\"spotlight_search\""))
     }
 
     func testXMLEscaping() {
         let history: [ChatMessage] = [
             makeUserMessage("Find files with \"special\" <chars> & symbols"),
             makeAgentMessage("Done.", toolEvents: [
-                (name: "fs_smart_search", params: "{\"search_term\":\"<>&\\\"\"}", output: nil, isSuccess: true, failureCategory: nil)
+                (name: "spotlight_search", params: "{\"search_term\":\"<>&\\\"\"}", output: nil, isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -212,7 +212,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         let history: [ChatMessage] = [
             makeUserMessage("Search for logs"),
             makeAgentMessage("Found logs.", toolEvents: [
-                (name: "fs_smart_search", params: "{\"search_term\":\"*.log\",\"search_scope\":\"/var\"}", output: "found 5", isSuccess: true, failureCategory: nil)
+                (name: "spotlight_search", params: "{\"search_term\":\"*.log\",\"search_scope\":\"/var\"}", output: "found 5", isSuccess: true, failureCategory: nil)
             ])
         ]
 
@@ -223,7 +223,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         XCTAssertEqual(episode.actions.count, 1)
 
         let action = episode.actions[0]
-        XCTAssertEqual(action.toolName, "fs_smart_search")
+        XCTAssertEqual(action.toolName, "spotlight_search")
         XCTAssertEqual(action.params["search_term"], "*.log")
         XCTAssertEqual(action.params["search_scope"], "/var")
         XCTAssertEqual(action.status, .success)

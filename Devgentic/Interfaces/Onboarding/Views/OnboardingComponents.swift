@@ -11,17 +11,21 @@ import SwiftUI
 
 // MARK: - Secondary Button (Back, Cancel, etc.) with Hover Effect
 struct OnboardingSecondaryButton: View {
-    let title: String
+    /// `LocalizedStringKey`, as `TactileButton` takes: a `String` here rendered verbatim, so every
+    /// onboarding button label was missing from the String Catalog.
+    let title: LocalizedStringKey
     let icon: String?
+    let shortcut: KeyboardShortcut?
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
 
-    init(_ title: String, icon: String? = nil, action: @escaping () -> Void) {
+    init(_ title: LocalizedStringKey, icon: String? = nil, shortcut: KeyboardShortcut? = nil, action: @escaping () -> Void) {
         self.title = title
         self.icon = icon
+        self.shortcut = shortcut
         self.action = action
     }
 
@@ -50,6 +54,7 @@ struct OnboardingSecondaryButton: View {
             .scaleEffect(isHovered && !reduceMotion ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
+        .keyboardShortcut(shortcut)
         .pointingHandCursor()
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
@@ -61,9 +66,11 @@ struct OnboardingSecondaryButton: View {
 
 // MARK: - Primary Action Button with Hover Lift and Arrow Nudge
 struct OnboardingPrimaryButton: View {
-    let title: String
+    let title: LocalizedStringKey
     let icon: String
     let isEnabled: Bool
+    /// Return triggers the step's main action. Off where Return must stay with a text editor.
+    let isDefaultAction: Bool
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
@@ -71,10 +78,12 @@ struct OnboardingPrimaryButton: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
 
-    init(_ title: String, icon: String = "arrow.right", isEnabled: Bool = true, action: @escaping () -> Void) {
+    init(_ title: LocalizedStringKey, icon: String = "arrow.right", isEnabled: Bool = true,
+         isDefaultAction: Bool = true, action: @escaping () -> Void) {
         self.title = title
         self.icon = icon
         self.isEnabled = isEnabled
+        self.isDefaultAction = isDefaultAction
         self.action = action
     }
 
@@ -187,6 +196,7 @@ struct OnboardingPrimaryButton: View {
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
+        .keyboardShortcut(isDefaultAction ? .defaultAction : nil)
         .pointingHandCursor(enabled: isEnabled)
         .disabled(!isEnabled)
         .onHover { hovering in

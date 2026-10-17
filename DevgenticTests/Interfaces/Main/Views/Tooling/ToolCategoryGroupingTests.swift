@@ -91,7 +91,7 @@ final class ToolCategoryGroupingTests: XCTestCase {
     }
 
     /// `Internal` is deliberately absent: `ask_user`, `final_answer`, `load_skill`,
-    /// `update_project_context` and `get_conversation_history` are injected per run, never
+    /// the Code memory tools and `get_conversation_history` are injected per run, never
     /// offered in the Library. Pinned so a well-meaning "every category needs a group" change
     /// does not surface them.
     func testInternalToolsAreNotGrouped() {
@@ -182,7 +182,7 @@ final class ToolCategoryGroupingTests: XCTestCase {
     /// The specific tool that was wrong, pinned by name so the fix cannot silently regress.
     func testWatchFolderIsNotTreatedAsReadOnly() {
         let watcher = NativeToolCatalog.libraryTools
-            .first { $0.name == "watch_folder" || $0.name == "fs_watch_folder" }
+            .first { $0.name == "watch_folder" }
             .map { $0.executable() }
         XCTAssertNotNil(watcher, "watch_folder is no longer offered in the Library")
 
@@ -192,6 +192,6 @@ final class ToolCategoryGroupingTests: XCTestCase {
             `list` is read-only, and this default is per-tool.
             """)
         XCTAssertEqual(HITLRiskTier.classify(toolName: "watch_folder"), .moderate)
-        XCTAssertEqual(HITLRiskTier.classify(toolName: "fs_watch_folder"), .moderate)
+        XCTAssertEqual(HITLRiskTier.classify(toolName: "watch_folder"), .moderate)
     }
 }

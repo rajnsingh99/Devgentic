@@ -33,9 +33,9 @@ A developer's map of how the app is put together — components, key flows, pers
 
 - **macOS 26.1** or later (the deployment target)
 - **Xcode 26.2** — what the project is developed and built against
-- **Apple Silicon** for the MLX backend; everything else is architecture-agnostic
+- **Apple Silicon** (arm64 only; there is no Intel build)
 
-No package manager to install: dependencies are Swift Package Manager only, resolved by Xcode from a tracked `Package.resolved` (15 direct packages, 41 pins). Their licences are collected in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+No package manager to install: dependencies are Swift Package Manager only, resolved by Xcode from a tracked `Package.resolved` (39 pins). Their licences are collected in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Build
 
@@ -95,6 +95,10 @@ This is pre-release software that drives shell commands, edits files and automat
 [`PRIVACY.md`](PRIVACY.md) is the full statement. In short: the app is local-first, has no backend of its own, and sends no analytics or telemetry anywhere. Your conversations, files and configuration stay on your Mac.
 
 The exception is the one you choose. A cloud profile sends its requests to whichever provider you configured — that is what a cloud profile *is*. A local `MLX` or `Ollama` profile keeps inference on the machine.
+
+## Support
+
+Devgentic is free and always will be. If it's useful, a ⭐ star on this repo helps others find it. And if it saves you time and you'd like to say thanks, you can [sponsor development on GitHub](https://github.com/sponsors/rajnsingh99). It's entirely optional, and nothing in the app is held back for supporters.
 
 ## Contributing
 

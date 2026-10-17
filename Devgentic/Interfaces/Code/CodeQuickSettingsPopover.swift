@@ -62,6 +62,7 @@ struct CodeQuickSettingsPopover: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 executionSection
+                memorySection
                 toolApprovalsPointer
             }
             .padding(.horizontal, 18)
@@ -276,6 +277,42 @@ struct CodeQuickSettingsPopover: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    // MARK: - Project memory
+
+    private var memorySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("PROJECT MEMORY")
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Suggest memories after each answer")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text("One extra model call after the answer proposes facts worth keeping. Nothing is saved until you accept it.")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { draft.suggestMemories ?? false },
+                    set: { draft.suggestMemories = $0 ? true : nil }))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.surfaceOverlay)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.8)
+            )
         }
     }
 

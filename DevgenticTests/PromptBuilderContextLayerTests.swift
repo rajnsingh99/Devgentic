@@ -8,7 +8,7 @@
 //
 //  Covers the 2026-07 file-context redesign contract in PromptBuilder:
 //  - <knowledge_base> renders as a system layer iff a payload is present
-//  - attachmentContext leads the USER message, never the system <task>
+//  - attachmentContext leads the USER message, never the system message
 //  - the native path can exclude attachments (kickoff turn delivers them)
 //
 
@@ -158,8 +158,8 @@ final class PromptBuilderContextLayerTests: XCTestCase {
         )
 
         let system = systemContent(of: messages)
-        XCTAssertFalse(system.contains("import Cocoa"), "file text must NOT land in the system <task> block")
-        XCTAssertTrue(system.contains("<task>\nWhat does this code do?"), "task carries only the typed query")
+        XCTAssertFalse(system.contains("import Cocoa"), "file text must NOT land in the system message")
+        XCTAssertFalse(system.contains("What does this code do?"), "layout B: the question rides the user message only")
 
         let users = userContents(of: messages)
         XCTAssertEqual(users.count, 1)
@@ -192,7 +192,8 @@ final class PromptBuilderContextLayerTests: XCTestCase {
             isNativeFlow: true,
             layerConfig: .agent,
             includeWorkingMemory: false,
-            includeAttachmentContext: false
+            includeAttachmentContext: false,
+            includeTurnContext: false
         )
 
         XCTAssertTrue(
@@ -265,15 +266,19 @@ final class PromptBuilderContextLayerTests: XCTestCase {
     func testSemanticContext_AbsentWhenGroundingEmpty() {
         // Post-sentinel-removal: no retrieval → empty grounding → no hollow layer.
         let context = makeContext(ragContext: "")
-        let system = systemContent(of: PromptBuilder.buildStandardMessages(context: context, layerConfig: .bot))
-        XCTAssertFalse(system.contains("<semantic_context>"), "empty grounding must not emit a placeholder block")
+        let messages = PromptBuilder.buildStandardMessages(context: context, layerConfig: .bot)
+        XCTAssertFalse((systemContent(of: messages) + userContents(of: messages).joined()).contains("<semantic_context>"),
+                       "empty grounding must not emit a placeholder block")
     }
 
+    /// Retrieved for THIS question, so it rides the user message (layout B), never the system one.
     func testSemanticContext_RendersWhenRetrievalReturnedContent() {
         let context = makeContext(ragContext: "PRIOR TURN: we discussed the parser rewrite.")
-        let system = systemContent(of: PromptBuilder.buildStandardMessages(context: context, layerConfig: .bot))
-        XCTAssertTrue(system.contains("<semantic_context>"))
-        XCTAssertTrue(system.contains("parser rewrite"))
+        let messages = PromptBuilder.buildStandardMessages(context: context, layerConfig: .bot)
+        let user = userContents(of: messages).joined()
+        XCTAssertTrue(user.contains("<semantic_context>"))
+        XCTAssertTrue(user.contains("parser rewrite"))
+        XCTAssertFalse(systemContent(of: messages).contains("parser rewrite"))
     }
 
     // MARK: - Combined

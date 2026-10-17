@@ -273,7 +273,7 @@ struct ErrorRecoverySection: View {
                     Text("On Budget Exhausted")
                         .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(theme.primaryText)
-                    Text("When max iterations are reached without completion")
+                    Text("When max iterations or parse-failure retries run out without an answer")
                         .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
                         .lineSpacing(2.5)

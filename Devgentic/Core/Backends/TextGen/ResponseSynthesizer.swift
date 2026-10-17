@@ -194,12 +194,33 @@ struct ResponseSynthesizer {
                 Task { await IntelligenceCoreService.shared.releaseHold(caller: .responseSynthesis) }
             }
 
-            let response = try await IntelligenceCoreService.shared.generate(
-                messages: messages,
-                maxTokens: 1024,
-                temperature: 0.6,
-                caller: .responseSynthesis
-            )
+            // ⚠️ READINESS CR-58 (2026-10-12). This call had no bound. It runs AFTER the agent has
+            // finished, while the turn still shows as working — so a cold Intelligence Core load
+            // that stalled, or a generation that never ended, left a finished turn spinning
+            // indefinitely. `DeadlineRace` returns at its limit even when the work ignores
+            // cancellation (an MLX load does), and the deterministic answer is used instead.
+            let raceMessages = UnsafeSendable(messages)
+            let outcome = try await DeadlineRace.run(limit: Self.synthesisDeadlineSeconds, stopGrace: 1) {
+                // The local lock: never waited for here (see `claimForInTurnIntelligence`).
+                try await LocalInferenceCoordinator.inTurnIntelligence(
+                    feature: "response synthesis", on: await Self.coordinator()
+                ) {
+                    try await IntelligenceCoreService.shared.generate(
+                        messages: raceMessages.value,
+                        maxTokens: 1024,
+                        temperature: 0.6,
+                        caller: .responseSynthesis
+                    )
+                }
+            }
+            let response: String
+            switch outcome {
+            case .finished(let result):
+                response = try result.get()
+            case .timedOut(let elapsed, _):
+                logger.error("[Synthesizer] IC synthesis TIMED OUT after \(Int(elapsed))s (limit \(Int(Self.synthesisDeadlineSeconds))s) — tools: \(summary.toolResults.count). CONSEQUENCE: the turn ends with the deterministic answer instead of waiting on the Intelligence Core; the abandoned generation is cancelled.")
+                return buildDeterministicFallback(summary: summary)
+            }
 
             // Strip think blocks and special tokens that the IC model may emit.
             // Uses the scoped sanitizer — does NOT strip code fences or wrapper tags
@@ -210,11 +231,27 @@ struct ResponseSynthesizer {
             onUsage?(.estimated(inputChars: systemPrompt.count + prompt.count, outputChars: response.count))
             logger.info("✅ [Synthesizer] IC synthesis succeeded.")
             return cleaned
+        } catch let busy as LocalInferenceCoordinator.LocalSlotBusy {
+            logger.notice("[Synthesizer] IC synthesis SKIPPED — the local model is busy (\(busy.holder)). CONSEQUENCE: the turn ends with the deterministic answer now, instead of waiting behind another run.")
+            return buildDeterministicFallback(summary: summary)
+        } catch is CancellationError {
+            // A stop is not a synthesis failure. The IC no longer hands back its partial text as
+            // an answer (D-27), so the half-written response is discarded rather than shown.
+            logger.notice("[Synthesizer] IC synthesis was cancelled. CONSEQUENCE: its partial text is discarded; using the deterministic fallback.")
+            return buildDeterministicFallback(summary: summary)
         } catch {
             logger.error("❌ [Synthesizer] IC synthesis failed (\(error.localizedDescription)). Using deterministic fallback.")
             return buildDeterministicFallback(summary: summary)
         }
     }
+
+    /// Wall-clock bound on the whole IC synthesis call, model load included (CR-58). Synthesis is
+    /// at most 1,024 tokens from a small local model; past a minute something is stuck.
+    static let synthesisDeadlineSeconds: TimeInterval = 60
+
+    /// The coordinator in-turn synthesis claims the local lock from. Tests point it at their own.
+    nonisolated(unsafe) static var coordinatorOverride: LocalInferenceCoordinator?
+    @MainActor static func coordinator() -> LocalInferenceCoordinator { coordinatorOverride ?? .shared }
 
     // MARK: - System Prompt (Synthesis Context)
 

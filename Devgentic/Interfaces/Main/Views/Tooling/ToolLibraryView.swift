@@ -129,6 +129,9 @@ struct ToolLibraryView: View {
     /// and revokes its OAuth grant, so it is confirmed rather than done on one click.
     @State private var pendingDeletion: ToolSource? = nil
 
+    /// Tools a bulk "enable" skipped because they cannot work until set up, with the reason.
+    @State private var skippedForSetup: [String] = []
+
 
     var body: some View {
         // Navigation (categories, MCP servers, Installed/Discover, Discover facets) lives in
@@ -148,6 +151,20 @@ struct ToolLibraryView: View {
         .frame(maxWidth: .infinity)
         .sheet(item: $bugReportSource) { source in
             MCPBugReportSheet(source: source)
+        }
+        .alert("Setup needed", isPresented: Binding(
+            get: { !skippedForSetup.isEmpty },
+            set: { if !$0 { skippedForSetup = [] } }
+        )) {
+            Button("Open Settings") {
+                if let pane = skippedForSetup.compactMap({ NativeToolCatalog.setupSettings(for: $0) }).first {
+                    router.navigateToSettings(pane)
+                }
+                skippedForSetup = []
+            }
+            Button("OK", role: .cancel) { skippedForSetup = [] }
+        } message: {
+            Text("Not enabled because they need setup first: \(skippedForSetup.joined(separator: ", ")).")
         }
         .onAppear { publishFavoriteCount() }
         .onChange(of: configuredTools.count) { _, _ in publishFavoriteCount() }
@@ -406,11 +423,20 @@ struct ToolLibraryView: View {
 
     private func bulkSetState(_ state: BulkToolState) {
         var tools = configuredTools
+        var skipped: [String] = []
 
         for rowID in selectedToolIDs {
             guard let row = displayedRows.first(where: { $0.id == rowID }) else { continue }
             let name = row.definition.name
             let sourceId = row.source.id
+
+            // A tool that cannot work yet is never enabled in bulk; it is reported instead.
+            if state != .disabled, sourceId == ToolSource.builtInSourceID,
+               NativeToolCatalog.setupBlocker(for: name) != nil,
+               !tools.contains(where: { $0.name == name && $0.sourceId == sourceId }) {
+                skipped.append(name)
+                continue
+            }
 
             switch state {
             case .ask:
@@ -450,6 +476,7 @@ struct ToolLibraryView: View {
             configuredTools = tools
             selectedToolIDs.removeAll()
         }
+        skippedForSetup = skipped
     }
 
     private func bulkToggleFavorite() {
@@ -793,6 +820,18 @@ private struct ToolRowContent: View {
     @State private var isShowingDetails = false
     @State private var isShowingSettings = false
     @State private var isShowingStateDropdown = false
+    @Environment(MainViewRouter.self) private var router
+
+    /// Why this built-in cannot work yet (no provider/key), or nil. Read live each render, but
+    /// only a handful of catalogue entries declare one, so most rows cost nothing.
+    private var setupBlocker: String? {
+        row.source.id == ToolSource.builtInSourceID ? NativeToolCatalog.setupBlocker(for: row.definition.name) : nil
+    }
+
+    /// The pane behind this tool's "Setup" option; non-nil even when already configured.
+    private var setupPane: SettingsCategory? {
+        row.source.id == ToolSource.builtInSourceID ? NativeToolCatalog.setupSettings(for: row.definition.name) : nil
+    }
 
     private var isCardActive: Bool {
         isHovered || isShowingDetails || isShowingSettings || isShowingStateDropdown
@@ -877,6 +916,21 @@ private struct ToolRowContent: View {
 
                             ToolRiskBadge(tier: row.riskTier)
 
+                            if let blocker = setupBlocker {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.system(size: 7, weight: .bold))
+                                    Text("SETUP NEEDED")
+                                        .font(.system(size: 8, weight: .bold))
+                                }
+                                .foregroundColor(theme.warningColor)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(theme.warningColor.opacity(0.1))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .help(blocker)
+                            }
+
                             if let timeout = configuredTimeout {
                                 ToolTimeoutBadge(timeout: timeout)
                             }
@@ -918,6 +972,8 @@ private struct ToolRowContent: View {
                             definition: row.definition,
                             instructions: instructions,
                             isLocked: isLocked,
+                            setupBlocker: setupBlocker,
+                            onOpenSetup: setupPane.map { pane in { router.navigateToSettings(pane) } },
                             isShowingDropdown: $isShowingStateDropdown
                         )
                     }
@@ -1231,6 +1287,9 @@ fileprivate struct ToolStateControl: View {
     let definition: ToolDefinition
     let instructions: String
     var isLocked: Bool = false
+    /// Why the tool cannot work yet; while non-nil it cannot be switched ON from here.
+    var setupBlocker: String? = nil
+    var onOpenSetup: (() -> Void)? = nil
     @Binding var isShowingDropdown: Bool
 
     @Environment(\.appTheme) private var theme
@@ -1302,7 +1361,9 @@ fileprivate struct ToolStateControl: View {
                 .padding(.top, 4)
                 .padding(.bottom, 2)
 
-            ForEach(ToolControlState.allCases, id: \.self) { state in
+            // Not configured yet: only "Disabled" and "Setup" make sense. Once configured the
+            // normal three come back, with "Setup" still last for changing the configuration.
+            ForEach(ToolControlState.allCases.filter { setupBlocker == nil || $0 == .disabled }, id: \.self) { state in
                 let isOptionLocked = (state == .disabled && isLocked)
                 StateDropdownOptionRow(
                     state: state,
@@ -1319,6 +1380,17 @@ fileprivate struct ToolStateControl: View {
                         }
                     }
                 )
+            }
+
+            if let onOpenSetup {
+                SetupOptionRow(
+                    subtitle: setupBlocker ?? "Change this tool's configuration in Settings.",
+                    needsAttention: setupBlocker != nil,
+                    theme: theme
+                ) {
+                    isShowingDropdown = false
+                    onOpenSetup()
+                }
             }
         }
     }
@@ -1392,6 +1464,8 @@ fileprivate struct ToolStateControl: View {
 
     private func selectState(_ state: ToolControlState) {
         guard state != currentState else { return }
+        // Defence in depth: the dropdown already disables these options.
+        if state != .disabled, currentState == .disabled, setupBlocker != nil { return }
 
         switch state {
         case .disabled:
@@ -1432,6 +1506,54 @@ fileprivate struct ToolStateControl: View {
                 configuredTools.append(newTool)
             }
         }
+    }
+}
+
+/// The fourth entry in a tool's execution-mode dropdown: opens the Settings pane where the tool
+/// is configured. Not a state — choosing it changes nothing in the profile.
+fileprivate struct SetupOptionRow: View {
+    let subtitle: String
+    let needsAttention: Bool
+    let theme: any Theme
+    let onSelect: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(alignment: .center, spacing: 10) {
+                let tint = needsAttention ? theme.warningColor : theme.accentColor
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(tint.opacity(0.14))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(tint)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Setup")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(theme.primaryText)
+                    Text(subtitle)
+                        .font(.system(size: 10))
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(theme.secondaryText)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(isHovered ? theme.secondaryText.opacity(0.08) : Color.clear))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { isHovered = $0 }
     }
 }
 

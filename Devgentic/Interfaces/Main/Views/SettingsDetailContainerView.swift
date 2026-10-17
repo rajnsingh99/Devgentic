@@ -20,15 +20,20 @@ struct SettingsDetailContainerView: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        VStack(spacing: 0) {
-            DynamicIslandBar(title: category.localizedTitle, icon: category.iconName)
+        if category == .mlxModelStore {
+            category.destination
+                .environment(mainViewModel)
+        } else {
+            VStack(spacing: 0) {
+                DynamicIslandBar(title: category.localizedTitle, icon: category.iconName)
 
-            ScrollView {
-                category.destination
-                    .environment(mainViewModel)
-                    .padding(24)
-                    .frame(maxWidth: ViewLayout.maxContentWidth)
-                    .frame(maxWidth: .infinity)
+                ScrollView {
+                    category.destination
+                        .environment(mainViewModel)
+                        .padding(24)
+                        .frame(maxWidth: ViewLayout.maxContentWidth)
+                        .frame(maxWidth: .infinity)
+                }
             }
         }
     }

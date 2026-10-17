@@ -61,15 +61,15 @@ final class WorkflowStructuralDispatchLaneTests: XCTestCase {
                        "the unconstrained Code node rides with the FIRST lane, same as profileDispatchLanes")
     }
 
-    /// ⚠️ THE TEST THAT FORBIDS OVER-PARTITIONING for Routers, mirroring
-    /// `WorkflowMLXDispatchLaneTests.testOneMLXModel_SingleLane`.
-    func testTwoRoutersSameModel_SingleLane() {
+    /// Decision D6, mirroring `WorkflowMLXDispatchLaneTests.testOneMLXModel_OneLanePerNode`: two
+    /// same-model AI Classifiers run one after another, never as concurrent decodes.
+    func testTwoRoutersSameModel_OneLaneEach() {
         let lanes = WorkflowExecutor.structuralDispatchLanes([
             conditionNode("R1", model: "qwen3-8b"),
             conditionNode("R2", model: "qwen3-8b")
         ])
-        XCTAssertEqual(lanes.count, 1,
-                       "same-model Routers share one container (MLXService early-return) — splitting them costs parallelism for zero benefit")
+        XCTAssertEqual(lanes.map { $0.members.map(\.displayName) }, [["R1"], ["R2"]])
+        XCTAssertEqual(lanes.map(\.slot), ["mlx:qwen3-8b", "mlx:qwen3-8b"])
     }
 
     func testRouterWithFallbackDisabled_NeverContends() {

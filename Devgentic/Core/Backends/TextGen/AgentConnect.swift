@@ -69,6 +69,8 @@ class AgentConnect: @unchecked Sendable {
                     // 1. Extract Configuration & Tools based on Profile Type
                     let llmConfig: ProviderConfig
                     var instructions: String?
+                    // Code only: AGENTS.md + the memory listing, rendered as its own layer.
+                    var projectKnowledge: String?
                     let rawTools: [Tool]
                     let isBotFlow: Bool
                     var skillManifests: [SkillManifest]?
@@ -146,6 +148,7 @@ class AgentConnect: @unchecked Sendable {
                         // Code mode uses the agent pipeline with pre-configured coding tools.
                         llmConfig = config.llmConfig
                         instructions = config.instructions
+                        projectKnowledge = Self.codeProjectKnowledge(config, traceTag: traceContext.traceID)
                         rawTools = config.tools
                         isBotFlow = false
                         // ⚠️ Code profiles do NOT get skills, and this is a decision, not an
@@ -164,6 +167,14 @@ class AgentConnect: @unchecked Sendable {
                         }
                         logger.info("[CODE] AgentConnect extracted Code config — provider: \(config.llmConfig.apiProvider.rawValue), model: \(config.llmConfig.modelName), tools: \(config.tools.count), projectPath: \(config.projectPath ?? "nil"), traceID: \(traceContext.traceID)")
                     }
+
+                    // A new Code run makes the previous answer's memory pass moot (and it would
+                    // compete with this run for a local model).
+                    if case .code = profile.details {
+                        await ProjectMemorySuggester.shared.cancel(conversationID: conversationID)
+                    }
+                    // What this run's tools did, for the optional end-of-run memory pass.
+                    let memoryEvidence = ProjectMemoryRunEvidence()
 
                     // 2. Select Cognitive Strategy & Rate Limit Boundary
                     let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider, modelName: llmConfig.modelName)
@@ -225,13 +236,17 @@ class AgentConnect: @unchecked Sendable {
                     // connection with no conversation attached. Record which profile and model
                     // should service it for this run, so the approval banner can be raised in the
                     // right conversation and the call billed to the profile the user chose.
-                    await MCPSamplingBroker.shared.register(context: MCPSamplingContext(
+                    let samplingContext = MCPSamplingContext(
                         conversationID: conversationID,
                         providerConfig: llmConfig,
                         profileID: profile.id,
                         runMessageID: traceContext.messageID,
                         registeredAt: Date()
-                    ))
+                    )
+                    await MCPSamplingBroker.shared.register(context: samplingContext)
+                    // ⚠️ Withdrawn when this run ends, on every exit — see `MCPSamplingBroker.unregister`
+                    // (CR-18). A context outliving its run serves sampling with a stale profile and key.
+                    defer { Task { await MCPSamplingBroker.shared.unregister(samplingContext) } }
 
                     var activeTools = await self.resolveExecutableTools(
                         profileTools: ReportOnlyRun.allowedProfileTools(rawTools),
@@ -262,20 +277,15 @@ class AgentConnect: @unchecked Sendable {
                         activeTools.insert(finalAnswerTool, at: 0)
                     }
 
-                    // 5.6 Code mode: inject project context tool.
-                    if case .code(let codeConfig) = profile.details, let projectPath = codeConfig.projectPath {
-                        let contextTool = UpdateProjectContextTool(projectPath: projectPath)
-                        // ⚠️⚠️ `true` since 2026-09-20. This was the ONE write in Code mode that
-                        // ran unreviewed, and it is the only write that outlives the conversation:
-                        // `.devgentic/context.md` is injected into the system prompt of every
-                        // future conversation for this project. A small model asserting something
-                        // false about the code therefore contaminated every later run, with no
-                        // banner, no diff and no undo. The banner previews it as a real diff
-                        // against the file on disk — see `FileChange.parse`.
-                        activeTools.append(self.wrapTool(
-                            contextTool,
-                            requiresConfirmation: CodeToolPreset.injectedToolRequiresConfirmation(contextTool.name)))
-                        logger.info("[CODE] Code tool set assembled — \(activeTools.count) tools so far, incl. final_answer and update_project_context. CONSEQUENCE: this is NOT the final loadout — get_conversation_history is appended later, once the history is known. The authoritative list is the [TOOLS] line below.")
+                    // 5.6 Code mode: the project-memory tools. Offered on every Code run, for every
+                    // model — no reading gate and no "now available" alert, which is what turned
+                    // memory into a task of its own for small models (2026-10-06 device runs).
+                    // `remember` checks what it is told instead; see `RememberTool.validate`.
+                    let memoryTools = Self.codeMemoryTools(for: profile.details, conversationID: conversationID,
+                                                           messageID: traceContext.messageID)
+                    if !memoryTools.isEmpty {
+                        activeTools.append(contentsOf: memoryTools)
+                        logger.info("[CODE] Code tool set assembled — \(activeTools.count) tools so far, incl. final_answer, remember, forget and recall. CONSEQUENCE: this is NOT the final loadout — get_conversation_history is appended later, once the history is known. The authoritative list is the [TOOLS] line below.")
                     }
 
                     // 6. Initialize Evaluation Session (Metrics)
@@ -411,6 +421,26 @@ class AgentConnect: @unchecked Sendable {
                         //     flow and learns tool-call structure from the in-request
                         //     iteration scratchpad alone.
                         //   - MLX (non-native): keeps `recentHistory` only, no turn pairs.
+                        // Native turns are built FIRST so the episodic XML below can leave out the
+                        // `<outcome>` clips of answers these turns already carry in full.
+                        var answersCarriedNatively = Set<UUID>()
+                        if isNativeProvider {
+                            let native = NativeHistoryConverter.buildCarryingProvenance(
+                                strategy: historyStrategy,
+                                from: effectiveHistory,
+                                charBudget: charBudget,
+                                includeImages: historyImagesEnabled,
+                                correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)",
+                                // Same value the episodic build below is given. These two are the
+                                // only emitters of the `get_conversation_history(N)` instruction,
+                                // and they must agree — one gated and one not is how a prompt
+                                // comes to contradict itself.
+                                toolsAvailable: !isBotFlow
+                            )
+                            nativeHistoryTurns = native.turns
+                            answersCarriedNatively = native.fullAnswerMessageIDs
+                        }
+
                         // Episodic XML — one dispatch for all four strategies, shared with
                         // the fit gauges so what they measure is what ships.
                         recentHistory = EpisodicHistoryFormatter.build(
@@ -425,23 +455,9 @@ class AgentConnect: @unchecked Sendable {
                             // request path — once per send. `ContextWindowGauge` builds the same
                             // XML to SIZE it, on every recompute, and takes the `.unknown`
                             // default so the composer never touches the filesystem.
-                            staleness: .live
+                            staleness: .live,
+                            answersCarriedNatively: answersCarriedNatively
                         )
-
-                        if isNativeProvider {
-                            nativeHistoryTurns = NativeHistoryConverter.build(
-                                strategy: historyStrategy,
-                                from: effectiveHistory,
-                                charBudget: charBudget,
-                                includeImages: historyImagesEnabled,
-                                correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)",
-                                // Same value the episodic build above is given. These two are the
-                                // only emitters of the `get_conversation_history(N)` instruction,
-                                // and they must agree — one gated and one not is how a prompt
-                                // comes to contradict itself.
-                                toolsAvailable: !isBotFlow
-                            )
-                        }
 
                         // Only inject get_conversation_history tool if pointer references
                         // were actually emitted in the built history. This avoids a dead tool
@@ -474,6 +490,14 @@ class AgentConnect: @unchecked Sendable {
                     // details." Delivery was fine — `activeTools` is consumed further down — so
                     // the only thing wrong was the log, which is the thing an operator has.
                     logger.info("[TOOLS] Final loadout for \(profile.profileType.rawValue) run — \(activeTools.count) tool(s): [\(activeTools.map(\.name).joined(separator: ", "))]. CONSEQUENCE: this is exactly what the model is offered; anything named in the prompt but missing here cannot be called.")
+                    // ⚠️ Name what the instructions promise but the loadout lacks. The line above only
+                    // lists what IS offered, so "use fs_smart_search first" — a tool renamed away
+                    // nine days earlier — went unremarked on every run (2026-10-04).
+                    for reference in InstructionToolReferences.check(
+                        instructions: instructions, enabledToolNames: Set(activeTools.map(\.name))
+                    ) {
+                        logger.warning("[TOOLS] Instructions reference '\(reference.name)' — \(reference.message) CONSEQUENCE: the model is told to use a tool it cannot call; expect a wasted step or a guess.")
+                    }
                     
                     // Extract resilience config from agent profile
                     // ⚠️ register B44 — THE live defect, and it sat 85 lines above A7's own
@@ -533,6 +557,7 @@ class AgentConnect: @unchecked Sendable {
                     // here, after history and every context block exist, because those are exactly
                     // what it must be sized around. See `MemoryBudgetConfig.derive`.
                     let reservedPromptChars = (instructions?.count ?? 0)
+                        + (projectKnowledge?.count ?? 0)
                         + (recentHistory?.count ?? 0)
                         + (attachmentContext?.count ?? 0)
                         + (knowledgeBaseContext?.count ?? 0)
@@ -586,6 +611,7 @@ class AgentConnect: @unchecked Sendable {
                         contextWindowTokens: contextWindow,
                         cutPolicy: cutPolicy
                     )
+                    input.projectKnowledge = projectKnowledge
                     input.largeRequestConfirmChars = LargeRequestGate.confirmChars(
                         provider: llmConfig.apiProvider, baseURL: llmConfig.baseURL)
 
@@ -698,6 +724,7 @@ class AgentConnect: @unchecked Sendable {
                                     if case .content(let chunk) = event {
                                         accumulated += chunk
                                     }
+                                    memoryEvidence.observe(event)
                                     continuation.yield(event)
                                 }
                                 return accumulated
@@ -713,6 +740,7 @@ class AgentConnect: @unchecked Sendable {
                             if case .content(let chunk) = event {
                                 accumulated += chunk
                             }
+                            memoryEvidence.observe(event)
                             continuation.yield(event)
                         }
                         finalOutputAccumulator = accumulated
@@ -728,6 +756,26 @@ class AgentConnect: @unchecked Sendable {
                     if let plan = pendingCompaction {
                         await HistoryCompactionService.shared.scheduleExecution(
                             plan: plan, conversationID: conversationID, conversationModel: llmConfig)
+                    }
+
+                    // …and, when the project asks for it, propose memories from what the run did.
+                    if ProjectMemorySuggester.isEnabled(for: profile.details),
+                       case .code(let codeConfig) = profile.details, let projectPath = codeConfig.projectPath,
+                       let answerID = traceContext.messageID {
+                        let modelConfig = llmConfig
+                        await ProjectMemorySuggester.shared.schedule(
+                            evidence: memoryEvidence, userRequest: userInput, answer: finalOutputAccumulator,
+                            projectPath: projectPath, conversationID: conversationID, messageID: answerID
+                        ) { messages in
+                            // ⚠️ CR-9: a background run of its own on the local lock, not this finished
+                            // turn's identity — see `LocalInferenceCoordinator.runBackgroundLocal`.
+                            try await LocalInferenceCoordinator.shared.runBackgroundLocal(
+                                feature: "Project memory suggestions", conversationID: conversationID, config: modelConfig
+                            ) {
+                                let model = try await AgentConnect().initializeModel(config: modelConfig, isBotFlow: true)
+                                return try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+                            }
+                        }
                     }
                     
                 } catch is CancellationError {
@@ -773,9 +821,13 @@ class AgentConnect: @unchecked Sendable {
                     // 1. Extract profile config (same switch as streamAgentResponse lines 54-96)
                     let llmConfig: ProviderConfig
                     var instructions: String?
+                    // Code only: AGENTS.md + the memory listing, rendered as its own layer.
+                    var projectKnowledge: String?
                     let rawTools: [Tool]
                     let isBotFlow: Bool
                     var skillManifests: [SkillManifest]?
+                    // Code only: the project folder that confines this node's file tools (CR-56).
+                    var nodeWorkspaceRoot: String?
 
                     switch profile.details {
                     case .bot(let config):
@@ -802,8 +854,19 @@ class AgentConnect: @unchecked Sendable {
                     case .code(let config):
                         llmConfig = config.llmConfig
                         instructions = config.instructions
+                        projectKnowledge = Self.codeProjectKnowledge(config, traceTag: "workflow-node")
                         rawTools = config.tools
                         isBotFlow = false
+                        // ⚠️ READINESS CR-56 (2026-10-12). The chat path confines a Code run to
+                        // its project folder; this node path never passed the folder on, so a Code
+                        // profile used as a workflow node ran UNCONFINED — relative paths resolved
+                        // against the home directory and writes anywhere were allowed.
+                        nodeWorkspaceRoot = config.projectPath
+                        if let root = config.projectPath {
+                            logger.info("[WORKSPACE] Workflow node '\(workflowContext.nodeName)' (Code profile) confined to \(root) — conv \(conversationID.uuidString.prefix(8)). CONSEQUENCE: relative tool paths resolve against this folder; writes outside it are refused and reads outside it ask the user (or are refused when nobody can answer).")
+                        } else {
+                            logger.error("[WORKSPACE] Workflow node '\(workflowContext.nodeName)' uses a Code profile with NO project folder — conv \(conversationID.uuidString.prefix(8)). CONSEQUENCE: this node is UNCONFINED — no path is checked and a relative path resolves against the home directory. Set the profile's project folder.")
+                        }
                         // Same deliberate exclusion as the chat path above; see the note there.
                         skillManifests = nil
                         let orphaned = CodeModeSkillDiagnostics.inertSkillNames(in: config)
@@ -854,13 +917,17 @@ class AgentConnect: @unchecked Sendable {
                     // connection with no conversation attached. Record which profile and model
                     // should service it for this run, so the approval banner can be raised in the
                     // right conversation and the call billed to the profile the user chose.
-                    await MCPSamplingBroker.shared.register(context: MCPSamplingContext(
+                    let samplingContext = MCPSamplingContext(
                         conversationID: conversationID,
                         providerConfig: llmConfig,
                         profileID: profile.id,
                         runMessageID: traceContext.messageID,
                         registeredAt: Date()
-                    ))
+                    )
+                    await MCPSamplingBroker.shared.register(context: samplingContext)
+                    // ⚠️ Withdrawn when this run ends, on every exit — see `MCPSamplingBroker.unregister`
+                    // (CR-18). A context outliving its run serves sampling with a stale profile and key.
+                    defer { Task { await MCPSamplingBroker.shared.unregister(samplingContext) } }
 
                     var activeTools = await self.resolveExecutableTools(
                         profileTools: ReportOnlyRun.allowedProfileTools(rawTools),
@@ -952,6 +1019,7 @@ class AgentConnect: @unchecked Sendable {
                         conversationID: conversationID,
                         tools: activeTools,
                         longTermMemory: longTermMemory,
+                        workspaceRoot: nodeWorkspaceRoot,
                         recentHistory: nil,
                         generatorStrategy: generator,
                         workingMemory: {
@@ -959,6 +1027,7 @@ class AgentConnect: @unchecked Sendable {
                                 contextWindow: contextWindow, tier: modelTier,
                                 // Same rule as the main path: the room the node's fixed prompt leaves.
                                 reservedChars: (instructions?.count ?? 0)
+                                    + (projectKnowledge?.count ?? 0)
                                     + (workflowContext.attachmentContext?.count ?? 0)
                                     + (nodeToolGuidance?.count ?? 0)
                                     + userInputForNode.count
@@ -988,6 +1057,7 @@ class AgentConnect: @unchecked Sendable {
                         contextWindowTokens: contextWindow,
                         cutPolicy: nodeCutPolicy
                     )
+                    input.projectKnowledge = projectKnowledge
                     input.largeRequestConfirmChars = LargeRequestGate.confirmChars(
                         provider: llmConfig.apiProvider, baseURL: llmConfig.baseURL)
 
@@ -1094,7 +1164,7 @@ class AgentConnect: @unchecked Sendable {
             case .none:
                 // ⚠️ This used to THROW a 405 and refuse the run outright (register G94). It was the
                 // second of two enforcements of the same heuristic, and it made a promise the app
-                // had already made to the user unkeepable: MLXModelPickerView tells them the check
+                // had already made to the user unkeepable: the MLX picker (since deleted) told them the check
                 // "is a name-based heuristic and is often wrong for new or re-quantized models — if
                 // you know it supports tools, keep it selected", and that same file states
                 // "Tool-capability is LABELLED, not enforced". Keeping the model selected then
@@ -1110,8 +1180,8 @@ class AgentConnect: @unchecked Sendable {
                 // rejects a tools param answers 400, which
                 // `ProviderErrorClassifier.classify(statusCode:rawBody:)` already turns into a named
                 // error. That is the same policy the cloud arms above follow deliberately, and the
-                // same one the Ollama picker documents ("the runtime gate reports the failure
-                // honestly rather than trapping the picker"). User decision, 2026-08-06.
+                // same one the former Ollama picker documented ("the runtime gate reports the
+                // failure honestly rather than trapping the picker"). User decision, 2026-08-06.
                 //
                 // ⚠️ The refusal CANNOT be made selective today even where it would be justified:
                 // `CognitiveProfile.toolSupportCaveat` distinguishes an authoritative
@@ -1466,7 +1536,7 @@ class AgentConnect: @unchecked Sendable {
                 }
                 // No user override — use dynamic defaults tuned to model characteristics
                 if let metadata = llmConfig.cognitiveProfile.metadata {
-                    return .recommended(for: metadata)
+                    return .recommended(for: metadata, profile: isBotFlow ? .chat : .agent)
                 }
                 return .default()
             }()
@@ -1489,6 +1559,48 @@ class AgentConnect: @unchecked Sendable {
     /// `internal` rather than `private` ONLY so the no-cross-source-fallback invariant below can
     /// be tested directly. It has no other callers outside this type; the tool-shadowing rule it
     /// enforces is a security boundary, and a source scan is too weak a guard for one.
+    /// Names a configured tool may never take, because `AgentConnect` injects a tool under each.
+    ///
+    /// ⚠️ Derived from `NativeToolCatalog.injectedToolNames` — THE list of injected tools — never
+    /// written out here. A second hand-kept list is how an injected tool gets added without being
+    /// reserved, which is the exact shape of CR-2.
+    static var reservedInjectedToolNames: Set<String> { NativeToolCatalog.injectedToolNames }
+
+    /// What `deduplicatingToolNames` kept and why it dropped the rest.
+    struct ToolNameDeduplication {
+        var kept: [AgentTool] = []
+        /// Names a later tool repeated; the first registration won.
+        var duplicates: [String] = []
+        /// Configured tools dropped because their name is reserved for an injected tool.
+        var shadowingReserved: [String] = []
+    }
+
+    /// One name, one tool — with injected names reserved against configured tools.
+    ///
+    /// Pure so the rule is testable without a tool store. `firstConfiguredIndex` splits the list:
+    /// tools before it were injected by `resolveExecutableTools` itself (`ask_user`, `load_skill`)
+    /// and keep their reserved names; a tool at or after it is user-configured and may not take one.
+    static func deduplicatingToolNames(
+        _ tools: [AgentTool],
+        firstConfiguredIndex: Int,
+        reserved: Set<String> = reservedInjectedToolNames
+    ) -> ToolNameDeduplication {
+        var result = ToolNameDeduplication()
+        var seen = Set<String>()
+        for (index, tool) in tools.enumerated() {
+            if index >= firstConfiguredIndex, reserved.contains(tool.name) {
+                result.shadowingReserved.append(tool.name)
+                continue
+            }
+            guard seen.insert(tool.name).inserted else {
+                result.duplicates.append(tool.name)
+                continue
+            }
+            result.kept.append(tool)
+        }
+        return result
+    }
+
     func resolveExecutableTools(
         profileTools: [Tool],
         conversationID: UUID,
@@ -1535,6 +1647,9 @@ class AgentConnect: @unchecked Sendable {
         // 3. User-Configured / External Tools (Standard resolution)
         // -----------------------------------------------------------------
         let allToolSources = await UnifiedToolStore.shared.sources
+
+        // Everything from here on is a user-configured tool; everything before is injected.
+        let firstConfiguredToolIndex = activeTools.count
 
         var unresolved: [String] = []
         for toolConfig in profileTools where toolConfig.isEnabled {
@@ -1663,12 +1778,27 @@ class AgentConnect: @unchecked Sendable {
         // Anthropic rejects that outright (400, "duplicate tool name"), so ONE colliding
         // MCP server broke every request in the conversation rather than just its own tool.
         // Keep the first occurrence (built-ins resolve first) and drop the rest loudly.
-        var seenToolNames = Set<String>()
-        var duplicates: [String] = []
-        activeTools = activeTools.filter { tool in
-            if seenToolNames.insert(tool.name).inserted { return true }
-            duplicates.append(tool.name)
-            return false
+        //
+        // ⚠️⚠️ INJECTED NAMES ARE RESERVED, not merely "first wins". `final_answer`, `remember`,
+        // `forget`, `recall` and `get_conversation_history` are appended by the CALLER after this
+        // function returns, so a configured tool already holding one of those names survived this
+        // filter — `DynamicMCPTool.name` is the server's raw name, nothing namespaces it — and the
+        // caller then added a second. Anthropic 400d every request; every other provider TRAPPED in
+        // `ToolExecutionLoop`'s lookup on the first tool batch (readiness CR-2). The injected copy
+        // must win: the run's own protocol (`final_answer`, project memory) depends on it.
+        let deduplicated = Self.deduplicatingToolNames(activeTools, firstConfiguredIndex: firstConfiguredToolIndex)
+        activeTools = deduplicated.kept
+        let duplicates = deduplicated.duplicates
+        let shadowingReserved = deduplicated.shadowingReserved
+        if !shadowingReserved.isEmpty {
+            logger.error("""
+                [TOOLRESOLVE] ⚠️ Dropped \(shadowingReserved.count) configured tool(s) whose name \
+                Devgentic reserves for a tool it injects itself: \(shadowingReserved.sorted().joined(separator: ", ")). \
+                CONSEQUENCE: the built-in keeps the name and the configured tool is unreachable this \
+                run — two tools sharing a name fail the whole request on Anthropic and crashed every \
+                other provider. Rename the tool on its MCP server to use it. \
+                [profile \(profileID?.uuidString ?? "unknown") conv \(conversationID)]
+                """)
         }
         if !duplicates.isEmpty {
             logger.error("""
@@ -1734,7 +1864,7 @@ class AgentConnect: @unchecked Sendable {
     /// Wraps a concrete DevgenticTool into an AgentTool with type-erased execution closure.
     /// Thin alias for `AgentToolFactory.wrap`, kept because the injected control-plane tools
     /// (`ask_user`, `final_answer`, `get_conversation_history`, `load_skill`,
-    /// `update_project_context`) are built here with run-scoped data and read better unqualified.
+    /// `remember`) are built here with run-scoped data and read better unqualified.
     private func wrapTool<T: DevgenticTool>(_ tool: T, requiresConfirmation: Bool, timeout: TimeInterval? = nil, timeoutMessage: String? = nil) -> AgentTool {
         AgentToolFactory.wrap(tool, requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
     }
@@ -1742,6 +1872,44 @@ class AgentConnect: @unchecked Sendable {
     /// Wraps an already-erased `AgentTool` (the MCP path) with this profile's settings.
     private func wrapTool(_ tool: AgentTool, requiresConfirmation: Bool, timeout: TimeInterval? = nil, timeoutMessage: String? = nil) -> AgentTool {
         AgentToolFactory.rewrap(tool, requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+    }
+
+    // MARK: - Code project knowledge
+
+    /// `remember`, `forget` and `recall` for a Code profile with a folder; empty for anything else.
+    /// `messageID` is the answer the run streams into; each change is recorded against it so that
+    /// answer can show "Saved 1 memory" and undo it.
+    static func codeMemoryTools(for details: ProfileDetails, conversationID: UUID, messageID: UUID?) -> [AgentTool] {
+        guard case .code(let config) = details, let projectPath = config.projectPath else { return [] }
+        let remember = RememberTool(projectPath: projectPath, conversationID: conversationID, messageID: messageID)
+        let forget = ForgetTool(projectPath: projectPath, conversationID: conversationID, messageID: messageID)
+        let recall = RecallTool(projectPath: projectPath)
+        // ⚠️ Through `ReportOnlyRun`, here where the tools are built, so no caller can hand an
+        // unwatched run `remember`/`forget` (CR-17). An attended run is unchanged.
+        return ReportOnlyRun.allowedInjectedTools([
+            AgentToolFactory.wrap(remember, requiresConfirmation: CodeToolPreset.injectedToolRequiresConfirmation(remember.name)),
+            AgentToolFactory.wrap(forget, requiresConfirmation: CodeToolPreset.injectedToolRequiresConfirmation(forget.name)),
+            AgentToolFactory.wrap(recall, requiresConfirmation: CodeToolPreset.injectedToolRequiresConfirmation(recall.name)),
+        ])
+    }
+
+    /// A Code run's project knowledge: the project's `AGENTS.md` and memory listing, read from
+    /// disk now — so an edit to either, or a `remember` in the previous conversation, is in this run
+    /// without the profile being rewritten. Nil when the project has neither, or the run has no folder.
+    ///
+    /// ⚠️ Its own layer (`AgentInput.projectKnowledge`), never glued onto the instructions: the
+    /// instructions head the system message, and this text changes whenever a memory is saved or a
+    /// stale mark flips — which would make every later token of the prompt unreusable (layout B).
+    static func codeProjectKnowledge(_ config: AgentConfig, traceTag: String) -> String? {
+        guard let projectPath = config.projectPath else { return nil }
+        let knowledge = CodeSystemPrompt.projectKnowledge(forProject: projectPath, apiProvider: config.llmConfig.apiProvider)
+        let name = URL(fileURLWithPath: projectPath).lastPathComponent
+        if let section = knowledge.section {
+            logger.info("[CODE] Project knowledge for '\(name)' added to the prompt — \(section.count) chars (AGENTS.md + \(knowledge.memoryEntries) memory entr(ies)), trace \(traceTag).")
+        } else {
+            logger.info("[CODE] '\(name)' has no AGENTS.md and no memory entries — nothing added, trace \(traceTag).")
+        }
+        return knowledge.section
     }
 
     // MARK: - Native Tool Resolution
@@ -1848,7 +2016,7 @@ class AgentConnect: @unchecked Sendable {
                 }
             }
             if config.apiProvider == .mlx, let meta = config.modelMetadata {
-                let rec = MLXAdvancedConfig.recommended(for: meta)
+                let rec = MLXAdvancedConfig.recommended(for: meta, profile: .forProfileType(profile.profileType))
                 return "Auto-Detected (temp: \(rec.temperature), topP: \(rec.topP), repPenalty: \(rec.repetitionPenalty), repCtx: \(rec.repetitionContextSize), maxTok: \(rec.maxTokens))"
             }
             return "None"
@@ -1866,7 +2034,7 @@ class AgentConnect: @unchecked Sendable {
         Metadata: \(metadata)
         Advanced Options: \(advConfig)
         Tools Enabled (pre-flight — see the [TOOLS] line for the final loadout): [\(toolNames)]
-        System Instructions: \(instructions?.prefix(100) ?? "None")\( (instructions?.count ?? 0) > 100 ? "..." : "") (\(instructions?.count ?? 0) chars)
+        System Instructions: \(instructions.map { "\($0.count) chars" } ?? "None")
         -----------------------------------------
         """
         logger.notice("\(logMsg)")

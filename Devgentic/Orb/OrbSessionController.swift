@@ -250,6 +250,38 @@ final class OrbSessionController {
     /// `OrbVoiceOutput.releaseAudio()`, which deallocates the synthesizer first.
     private static let audioSettleDelay: TimeInterval = 1.0
 
+    /// The settle used instead when the microphone is BLUETOOTH and Orb has just spoken (or the
+    /// last session opened deaf). Earbuds must switch from their playback mode to their microphone
+    /// mode before they can record, and 1 s was not always enough: device test 2026-10-10 (OnePlus
+    /// Buds Pro 3) opened deaf after the greeting and after an answer, with the headset logging
+    /// "Abandoning I/O cycle because reconfig pending" through the failed start.
+    static let bluetoothAudioSettleDelay: TimeInterval = 2.5
+
+    /// How long to wait before opening the microphone. Pure.
+    /// - Parameters:
+    ///   - secondsSinceSpeech: since Orb's speech output last released its audio; nil if it never spoke.
+    ///   - afterDeadSession: the previous session opened but delivered no audio.
+    static func settleDelay(bluetoothInput: Bool, secondsSinceSpeech: TimeInterval?,
+                            afterDeadSession: Bool) -> TimeInterval {
+        guard bluetoothInput else { return audioSettleDelay }
+        if afterDeadSession { return bluetoothAudioSettleDelay }
+        // ⚠️ Only right after speech. A 45 s passive recycle with nothing said needs no mode
+        // switch, and a longer settle there is a longer deaf gap in which the wake word is lost.
+        if let secondsSinceSpeech, secondsSinceSpeech < bluetoothAudioSettleDelay { return bluetoothAudioSettleDelay }
+        return audioSettleDelay
+    }
+
+    /// Whether the watchdog ends a WhisperKit session that has delivered no audio, so the retry
+    /// ladder reopens the microphone now instead of after the session's own timeout. Pure.
+    ///
+    /// ⚠️ Device test 2026-10-10: a deaf session was only WARNED about at 3 s, then waited out —
+    /// 13 s and 19 s in the log, and up to the 45 s recycle while waiting for the wake word — and
+    /// the very first retry recovered every time. A narration listener is left alone: it is closed
+    /// with the answer and its audio is never classified.
+    static func endsDeadSession(receivedAudio: Bool, sessionAge: TimeInterval, narrationListener: Bool) -> Bool {
+        !receivedAudio && !narrationListener && sessionAge > deadAudioWarningDelay
+    }
+
     /// Releases the speech synthesisers and waits out the CoreAudio race — UNLESS the duplex
     /// engine is up and cancelling echo, in which case there is nothing to race.
     ///
@@ -281,7 +313,15 @@ final class OrbSessionController {
         // The narrator holds its own synthesizer for the length of an answer; BOTH audio units
         // must be gone before the HAL is asked for the input device.
         speaker.releaseAudio()
-        try? await Task.sleep(nanoseconds: UInt64(Self.audioSettleDelay * 1_000_000_000))
+        let lastSpeech = [voice.lastAudioReleasedAt, speaker.lastAudioReleasedAt].compactMap { $0 }.max()
+        let afterDeadSession = consecutiveDeadSessions > 0
+        let delay = Self.settleDelay(bluetoothInput: MicrophoneSelection.shared.sessionInputIsBluetooth,
+                                     secondsSinceSpeech: lastSpeech.map { Date().timeIntervalSince($0) },
+                                     afterDeadSession: afterDeadSession)
+        if delay > Self.audioSettleDelay {
+            logger.info("[ORB_SESSION]\(self.tag) The microphone is Bluetooth and \(afterDeadSession ? "the last session opened deaf" : "Orb has just spoken") — waiting \(String(format: "%.1f", delay))s instead of \(String(format: "%.1f", Self.audioSettleDelay))s before opening it. CONSEQUENCE: the headset finishes switching from playback to its microphone first; opened sooner, the session starts deaf (-10877 / error 35).")
+        }
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
     /// Consecutive dead sessions before surfacing voiceUnavailable instead of retrying.
     private static let maxDeadSessions = 4
@@ -1749,7 +1789,7 @@ final class OrbSessionController {
                 // this can be caught.
                 if !self.receivedAudio, !self.micTroubleDetected, age > Self.deadAudioWarningDelay {
                     self.micTroubleDetected = true
-                    self.logger.warning("[ORB_ASR]\(self.tag) No audio after \(String(format: "%.1f", age))s of an OPEN mic session — the engine started but is delivering nothing. CONSEQUENCE: the orb now shows NO AUDIO and offers Repair Audio in its right-click menu; retries continue underneath.")
+                    self.logger.warning("[ORB_ASR]\(self.tag) No audio after \(String(format: "%.1f", age))s of an OPEN mic session — the engine started but is delivering nothing. CONSEQUENCE: the orb now shows NO AUDIO and offers Repair Audio in its right-click menu; \(self.sessionOpenedDuringNarration ? "this narration listener closes with the answer" : "the session is ended now and the microphone reopened").")
                 }
 
                 // ⚠️ Every `stopStreaming()` below must name its cause. Five distinct endings —
@@ -1760,6 +1800,14 @@ final class OrbSessionController {
                 @MainActor func endSession(_ cause: String) async {
                     self.logger.info("[ORB_ASR]\(self.tag) Ending the mic session — \(cause). CONSEQUENCE: the session closes and its transcript is classified; the loop decides whether to reopen.")
                     _ = await WhisperRecognitionService.shared.stopStreaming()
+                }
+
+                // A dead session is ENDED, not waited out — the post-session check then counts it
+                // and the retry ladder reopens the microphone (see `endsDeadSession`).
+                if Self.endsDeadSession(receivedAudio: self.receivedAudio, sessionAge: age,
+                                        narrationListener: self.sessionOpenedDuringNarration) {
+                    await endSession("no audio after \(String(format: "%.1f", age))s — the microphone opened deaf, so it is reopened now")
+                    return
                 }
 
                 switch self.stage {
@@ -3078,7 +3126,7 @@ final class OrbSessionController {
         }
     }
 
-    /// `fs_smart_search` reads as "fs smart search", not "fs underscore smart underscore search".
+    /// `spotlight_search` reads as "spotlight search", not "spotlight underscore search".
     static func spokenToolName(_ toolName: String) -> String {
         toolName.replacingOccurrences(of: "_", with: " ")
                 .replacingOccurrences(of: "-", with: " ")

@@ -4,19 +4,14 @@
 //  AttachmentSizingTests.swift
 //  DevgenticTests
 //
-//  The composer priced attachments as `min(statBytes, perFileBudget)`, summed until the total
-//  budget. Two things about the reader make that wrong:
+//  The context gauge prices attachments with `PromptFitCheck.attachmentInjectionChars`, the
+//  backend builds them with `DirectInjectionPlan.assemble`, and the transcript records each
+//  file's `AttachmentDelivery` from the same plan. The INVARIANT pinned here is that the
+//  gauge's number equals the length of what the assembler actually emits — not any particular
+//  arithmetic, so a policy change (2026-10-04: over-budget files are CUT, no longer dropped)
+//  moves both together instead of failing on the correct fix.
 //
-//   1. `readFileContentOrThrow` THROWS `.tooLarge` when `content.count > maxSize` — it does
-//      NOT truncate — and `assembleTextFileContent` records the failure and moves on. So an
-//      oversized file contributes ZERO, while the composer charged the full 50,000.
-//   2. Every included file carries `--- Start of file: … ---` / `--- End of file: … ---`
-//      wrapper text, which the composer charged nothing for.
-//
-//  And a `.stateless` profile never injects content at all — it hands over a path manifest
-//  and lets the agent `read_file` on demand. Charging file bytes there over-warned by orders
-//  of magnitude on a large attachment, with a banner the user could only clear by detaching a
-//  file that was costing almost nothing.
+//  A `.stateless` profile hands over a path manifest instead; see `estimatedAttachmentChars`.
 //
 
 import XCTest
@@ -24,73 +19,99 @@ import XCTest
 
 final class AttachmentSizingTests: XCTestCase {
 
-    // MARK: - Dropped, not clipped
+    /// ASCII so stat'd bytes == decoded chars — the one case where the gauge is exact.
+    private func files(_ lengths: [Int]) -> [DirectInjectionPlan.File] {
+        lengths.enumerated().map { index, length in
+            .init(name: "f\(index).txt", path: "/p/f\(index).txt", content: String(repeating: "a", count: length))
+        }
+    }
 
-    /// The headline correction. A file past the per-file budget is refused by the reader, so
-    /// it must cost nothing — not the budget.
-    func testFileOverThePerFileBudgetContributesNothing() {
-        let oversized = DirectInjectionBudget.perFile + 1
+    private func gauge(for files: [DirectInjectionPlan.File], includeAbsolutePaths: Bool) -> Int {
+        PromptFitCheck.attachmentInjectionChars(
+            forFileSizes: files.map(\.content.count),
+            wrapperWidths: files.map {
+                DirectInjectionPlan.wrapperWidth(
+                    name: $0.name,
+                    label: DirectInjectionPlan.wrapperLabel(name: $0.name, path: $0.path, includeAbsolutePaths: includeAbsolutePaths))
+            })
+    }
+
+    // MARK: - The invariant: gauge == what ships
+
+    func testGaugeEqualsAssembledLengthAcrossTheBudgetBoundaries() {
+        let perFile = DirectInjectionBudget.perFile
+        let cases: [[Int]] = [
+            [],
+            [100, 200],
+            [perFile],                                   // inclusive boundary
+            [perFile + 1],                               // cut by one
+            [1_000, perFile + 5_000, 2_000],             // a cut file between full ones
+            Array(repeating: 60_000, count: 10),         // total budget runs out mid-batch
+            Array(repeating: 40_000, count: 20),
+            [50_000, 50_000, 50_000, 49_500, 5_000],     // remaining room under minimumSlice
+        ]
+        for lengths in cases {
+            for includePaths in [false, true] {
+                let batch = files(lengths)
+                XCTAssertEqual(
+                    gauge(for: batch, includeAbsolutePaths: includePaths),
+                    DirectInjectionPlan.assemble(batch, includeAbsolutePaths: includePaths).text.count,
+                    "lengths \(lengths), paths \(includePaths)")
+            }
+        }
+    }
+
+    // MARK: - Plan behaviour
+
+    func testOverBudgetFileIsCutNotDropped() {
+        let total = DirectInjectionBudget.perFile + 10_000
+        let (text, deliveries) = DirectInjectionPlan.assemble(files([total]), includeAbsolutePaths: false)
+        XCTAssertEqual(deliveries, [.truncated(sentChars: DirectInjectionBudget.perFile, totalChars: total)])
+        XCTAssertTrue(text.contains("[Truncated: only the first \(DirectInjectionBudget.perFile) of \(total)"),
+                      "the model must be told it saw part of the file")
+    }
+
+    func testFileAtTheBudgetIsSentWhole() {
+        XCTAssertEqual(DirectInjectionPlan.assemble(files([DirectInjectionBudget.perFile]), includeAbsolutePaths: false).deliveries,
+                       [.full])
+    }
+
+    func testFilesPastTheTotalBudgetAreOmitted() {
+        let deliveries = DirectInjectionPlan.assemble(files(Array(repeating: 60_000, count: 6)), includeAbsolutePaths: false).deliveries
+        XCTAssertEqual(Array(deliveries.prefix(3)), [
+            .truncated(sentChars: 50_000, totalChars: 60_000),
+            .truncated(sentChars: 50_000, totalChars: 60_000),
+            .truncated(sentChars: 50_000, totalChars: 60_000),
+        ])
+        XCTAssertEqual(deliveries.last, .omitted(totalChars: 60_000))
+    }
+
+    /// Room smaller than `minimumSlice` omits rather than sending a meaningless sliver.
+    func testASliverOfRemainingRoomOmitsInsteadOfCutting() {
+        // Four files leave ~250 chars of the 200K total — under minimumSlice.
+        let deliveries = DirectInjectionPlan.assemble(files([50_000, 50_000, 50_000, 49_500, 5_000]), includeAbsolutePaths: false).deliveries
+        XCTAssertEqual(Array(deliveries.prefix(4)), [.full, .full, .full, .full])
+        XCTAssertEqual(deliveries.last, .omitted(totalChars: 5_000))
+    }
+
+    func testAFileOverTheReadCapCostsNothing() {
         XCTAssertEqual(
-            PromptFitCheck.attachmentInjectionChars(forFileSizes: [oversized], wrapperCharsPerFile: 0), 0,
-            "the reader throws .tooLarge — the model never sees this file"
-        )
-    }
-
-    func testFileExactlyAtTheBudgetIsStillCounted() {
-        XCTAssertEqual(
-            PromptFitCheck.attachmentInjectionChars(
-                forFileSizes: [DirectInjectionBudget.perFile], wrapperCharsPerFile: 0),
-            DirectInjectionBudget.perFile,
-            "the boundary is inclusive — > maxSize throws, == does not"
-        )
-    }
-
-    /// One oversized file must not suppress the others; the reader skips it and continues.
-    func testAnOversizedFileDoesNotSuppressItsNeighbours() {
-        let sizes = [1_000, DirectInjectionBudget.perFile + 5_000, 2_000]
-        XCTAssertEqual(
-            PromptFitCheck.attachmentInjectionChars(forFileSizes: sizes, wrapperCharsPerFile: 0),
-            3_000
-        )
-    }
-
-    /// Regression guard on the old behaviour, kept as a witness.
-    func testTheOldClampWouldHaveChargedTheWholeBudget() {
-        let oversized = DirectInjectionBudget.perFile * 3
-        let now = PromptFitCheck.attachmentInjectionChars(forFileSizes: [oversized], wrapperCharsPerFile: 0)
-        let oldClamp = min(oversized, DirectInjectionBudget.perFile)
-        XCTAssertEqual(now, 0)
-        XCTAssertEqual(oldClamp, DirectInjectionBudget.perFile, "documents the defect: \(oldClamp) phantom chars")
-    }
-
-    // MARK: - Wrappers
-
-    func testWrapperCharsAreChargedPerIncludedFile() {
-        let withWrapper = PromptFitCheck.attachmentInjectionChars(
-            forFileSizes: [100, 200], wrapperCharsPerFile: 80)
-        XCTAssertEqual(withWrapper, 300 + 160)
-    }
-
-    /// A dropped file carries no wrapper either — it never reaches the assembler.
-    func testDroppedFilesCarryNoWrapper() {
-        XCTAssertEqual(
-            PromptFitCheck.attachmentInjectionChars(
-                forFileSizes: [DirectInjectionBudget.perFile + 1], wrapperCharsPerFile: 500),
-            0
-        )
-    }
-
-    // MARK: - Total budget
-
-    func testTotalBudgetStopsAccumulation() {
-        let many = Array(repeating: 40_000, count: 20)   // 800K raw vs a 200K ceiling
-        let charged = PromptFitCheck.attachmentInjectionChars(forFileSizes: many, wrapperCharsPerFile: 0)
-        XCTAssertLessThanOrEqual(charged, DirectInjectionBudget.total)
-        XCTAssertGreaterThan(charged, DirectInjectionBudget.total / 2, "it should fill most of the budget")
+            PromptFitCheck.attachmentInjectionChars(forFileSizes: [DirectInjectionBudget.readCap + 1], wrapperCharsPerFile: 80), 0,
+            "the reader throws .tooLarge before the plan ever sees it")
     }
 
     func testNoAttachmentsCostNothing() {
         XCTAssertEqual(PromptFitCheck.attachmentInjectionChars(forFileSizes: [], wrapperCharsPerFile: 80), 0)
     }
 
+    // MARK: - Delivery storage codec (the ONLY codec — see AttachmentDelivery.storage)
+
+    func testDeliveryStorageRoundTrips() {
+        let all: [AttachmentDelivery] = [.full, .truncated(sentChars: 50_000, totalChars: 120_000), .omitted(totalChars: 9), .pathOnly]
+        for delivery in all {
+            let stored = delivery.storage
+            XCTAssertEqual(AttachmentDelivery(kind: stored.kind, sent: stored.sent, total: stored.total), delivery)
+        }
+        XCTAssertNil(AttachmentDelivery(kind: nil, sent: nil, total: nil), "a row written before the column reads as unrecorded")
+    }
 }

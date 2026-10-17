@@ -27,6 +27,31 @@ private func ignoringCancellation(_ seconds: Double) async {
     }
 }
 
+/// Occupies every cooperative-pool thread at the CALLER's priority for `seconds` — a process-wide
+/// scheduling stall — and returns once it holds (or after 2 s). Blocking is the point: no async work
+/// at that priority can start until it ends.
+///
+/// ⚠️ The priority matters. The pool keeps a thread budget per QoS, so a stall at the default
+/// priority leaves a test running from the main actor (`.high`) entirely untouched.
+private func stallTheCooperativePool(for seconds: Double) {
+    final class Started: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func increment() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+    let started = Started()
+    let width = ProcessInfo.processInfo.activeProcessorCount
+    let priority = Task.currentPriority
+    for _ in 0..<width {
+        Task.detached(priority: priority) { started.increment(); blockThisThread(for: seconds) }
+    }
+    let deadline = Date().addingTimeInterval(2)
+    while started.value < width, Date() < deadline { blockThisThread(for: 0.005) }
+}
+
+private func blockThisThread(for seconds: Double) { Thread.sleep(forTimeInterval: seconds) }
+
 /// Resolves every Action node's tool to `tool`; everything else goes to the stock mock.
 private final class SingleToolProvider: WorkflowStreamProvider, @unchecked Sendable {
     let base = MockWorkflowStreamProvider()
@@ -104,10 +129,29 @@ final class WorkflowTimeoutContractTests: XCTestCase {
     // MARK: - P5: the structural bound returns at its limit and reports real compute
 
     func testTheStructuralBoundReturnsAtItsLimit() async {
+        await assertTheStructuralBoundReturnsAtItsLimit()
+    }
+
+    /// ⚠️ 2026-10-10: P5 failed at 7.6 s, 8.55 s and 23.6 s against a 7 s stopwatch while the bound was
+    /// correct — its own clock (`elapsed`) passed each time and the work was still running. The time
+    /// was lost to the PROCESS (the bound could not even start), which a stopwatch cannot tell apart
+    /// from a bound that holds. A 3 s stall reproduces the 8.55 s failure exactly.
+    func testTheStructuralBoundReturnsAtItsLimitThroughAStall() async {
+        stallTheCooperativePool(for: 3)
+        await assertTheStructuralBoundReturnsAtItsLimit()
+    }
+
+    private func assertTheStructuralBoundReturnsAtItsLimit() async {
+        // ⚠️ The gap between this and `limit + structuralStopGrace` (5.5 s) is the whole signal: a bound
+        // that holds returns after it, one that does not returns long before it.
+        let workSeconds: Double = 60
+        let log = InvocationLog()
         let start = ContinuousClock.now
         do {
             _ = try await WorkflowExecutor.withComputeTimeout(0.5, conversationID: UUID(), nodeName: "probe") {
-                await ignoringCancellation(20)
+                log.started()
+                await ignoringCancellation(workSeconds)
+                log.completed()
                 return "WORK-DONE"
             }
             XCTFail("the bound never fired")
@@ -119,8 +163,70 @@ final class WorkflowTimeoutContractTests: XCTestCase {
             XCTFail("unexpected \(error)")
         }
         let waited = ContinuousClock.now - start
-        XCTAssertLessThan(waited, .seconds(0.5 + WorkflowExecutor.structuralStopGrace + 1.5),
-                          "the bound waited \(waited) for work that ignores cancellation (P5 held until the work finished)")
+        XCTAssertEqual(log.counts.starts, 1)
+        // ⚠️ THE DISCRIMINATOR: the work's own state when the bound returned, not a stopwatch.
+        XCTAssertEqual(log.counts.completions, 0,
+                       "the bound returned only after its work finished (\(waited)) — P5 held until the work finished")
+        XCTAssertLessThan(waited, .seconds(workSeconds / 2),
+                          "the bound waited \(waited) for work that ignores cancellation (P5 held)")
+    }
+
+    /// The suspicion of 2026-10-10, kept as a guard: another run's open local-model queue wait must not
+    /// pause THIS bound's compute clock. Queue-wait credit goes only to the waiter's own `ParkScope`
+    /// chain — never process-wide (see `ExecutionSuspensionService.beginQueueWait`).
+    func testAnotherRunsQueueWaitDoesNotPauseThisBound() async throws {
+        let service = ExecutionSuspensionService.shared
+        let otherRun = UUID()
+        await service.registerScope(otherRun, conversationID: UUID(), attended: true)
+        let wait = UUID()
+        await ParkScope.$chain.withValue([otherRun]) { await service.beginQueueWait(wait) }
+
+        // Honours cancellation, so a correct bound returns at once; a paused one returns its result
+        // after 30 s. The OUTCOME tells them apart, not a stopwatch.
+        let outcome: String
+        do {
+            outcome = try await WorkflowExecutor.withComputeTimeout(0.5, conversationID: UUID(), nodeName: "probe") {
+                try await Task.sleep(for: .seconds(30))
+                return "WORK-DONE"
+            }
+        } catch let error as AgentExecutionError {
+            guard case .executionTimeout = error.reason else { throw error }
+            outcome = "TIMED-OUT"
+        }
+        await service.endQueueWait(wait)
+        await service.unregisterScope(otherRun)
+
+        XCTAssertEqual(outcome, "TIMED-OUT", "another run's queue wait paused this bound until its work finished")
+    }
+
+    // MARK: - The [WF_TIMEOUT] line tells a stall from a bound that held
+
+    func testTheTimeoutLineReportsWallClockAndTheTimeBeforeTheBoundStarted() {
+        let line = WorkflowExecutor.timeoutReport(nodeName: "probe", limit: 0.5, compute: 0.52,
+                                                  wall: 8.55, beforeStart: 3.04, abandoned: true)
+        XCTAssertTrue(line.hasPrefix("[WF_TIMEOUT] Node 'probe' exceeded its 0.5s compute budget"), line)
+        XCTAssertTrue(line.contains("0.5s compute, time awaiting a human excluded"), line)
+        XCTAssertTrue(line.contains("8.6s wall-clock from entering the bound, 3.0s of it before its clock started"), line)
+        XCTAssertTrue(line.contains("did not stop within 5s of being cancelled and is abandoned"), line)
+        XCTAssertTrue(WorkflowExecutor.timeoutReport(nodeName: "n", limit: 1, compute: 1, wall: 1, beforeStart: 0,
+                                                     abandoned: false).contains("its work was stopped."))
+    }
+
+    /// ⚠️ WIRING. The unit test above passes with the call cut. Source-scanned, comment-stripped.
+    func testTheStructuralBoundLogsTheTimeoutReport() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let file = repoRoot.appendingPathComponent("Devgentic/Core/Backends/WorkflowGen/WorkflowExecutor.swift")
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("sources not reachable — running outside a checkout")
+        }
+        let code = try String(contentsOf: file, encoding: .utf8)
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        let pattern = #"static func withComputeTimeout<[\s\S]{0,200}?let called = ContinuousClock\.now[\s\S]{0,1200}?let raceCalled = ContinuousClock\.now\s*let outcome = try await DeadlineRace\.run[\s\S]{0,800}?case \.timedOut\(let elapsed, let afterStop\):\s*logger\.error\(timeoutReport\(nodeName: nodeName, limit: limit, compute: elapsed,\s*wall: DeadlineRace\.seconds\(ContinuousClock\.now - called\),\s*beforeStart: DeadlineRace\.seconds\(raceCalled - called\)"#
+        XCTAssertNotNil(code.range(of: pattern, options: .regularExpression),
+                        "withComputeTimeout's timeout must log timeoutReport with wall-clock measured from entering the bound")
     }
 
     // MARK: - Action attempt limit (decision 2 + D-28)

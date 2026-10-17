@@ -187,8 +187,8 @@ extension ContextWindowUsage {
     /// reads the profile store for the cross-model comparison.
     /// - Parameter extraKnowledgeChars: characters of KNOWN, always-injected context the
     ///   generic history/attachment estimate can't see from the composer — today, Code
-    ///   mode's `.devgentic/context.md` project context, added into the system prompt on
-    ///   every message. 0 for ordinary chat.
+    ///   mode's project knowledge (`AGENTS.md` + memory listing), added into the system
+    ///   prompt on every message. 0 for ordinary chat.
     /// - Parameter messages: the history the NEXT request would carry, **OLDEST-FIRST** —
     ///   from `ChatHistoryViewModel.resolveContextHistory(for:)`, NOT `currentChatMessages`.
     ///   Passing the render window is the bug this signature exists to prevent: the window is
@@ -342,7 +342,7 @@ extension ContextWindowUsage {
     ) -> (totalTokens: Int, breakdown: ContextOccupancy)? {
         // A brand-new chat with nothing attached reads as empty, not as the ~0.7K the
         // fixed layer overhead alone would imply. Code mode's always-injected project
-        // context counts as real content, so a fresh code session with a large context.md
+        // knowledge counts as real content, so a fresh code session with a large AGENTS.md
         // correctly reads as already partly full.
         guard !messages.isEmpty || !attachedFiles.isEmpty || extraKnowledgeChars > 0 else { return nil }
 
@@ -373,7 +373,9 @@ extension ContextWindowUsage {
             // the ring's whole claim is that it measures what actually ships. Omitting it
             // defaulted to false and left every `<attached_images>` line in the blob
             // unmeasured — an under-count, i.e. the direction that fails to warn.
-            includeImageNames: profile.supportsVisionInput
+            includeImageNames: profile.supportsVisionInput,
+            // Same flag the request path uses to drop `<outcome>` clips the native turns duplicate.
+            carriesProse: profile.carriesHistoryProse
         )
         // Measured, not summed. The raw `textContent` sum over every message ignored the
         // per-strategy turn limit AND the char budget's trimming AND whether the provider
@@ -773,40 +775,30 @@ struct ContextWindowBreakdown: View {
     /// Core when it is on, otherwise this conversation's own model; the transcript is untouched,
     /// only what is sent from the next turn changes.
     private var compactRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Button {
-                    guard let onCompact, !isCompacting else { return }
-                    isCompacting = true
-                    compactStatus = nil
-                    Task { @MainActor in
-                        compactStatus = await onCompact()
-                        isCompacting = false
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        if isCompacting {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "arrow.down.right.and.arrow.up.left").font(.system(size: 10))
-                        }
-                        Text(isCompacting ? "Compacting…" : "Compact history")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundColor(canCompact ? theme.accentColor : theme.secondaryText)
+        VStack(alignment: .leading, spacing: 5) {
+            BreakdownActionButton(
+                icon: "arrow.down.right.and.arrow.up.left",
+                title: isCompacting ? "Compacting history…" : "Compact history",
+                isLoading: isCompacting,
+                isEnabled: canCompact && !isCompacting,
+                tooltip: canCompact
+                    ? "Summarize earlier turns into a checkpoint. The 5 most recent messages are kept; the transcript is not changed."
+                    : "Available once the current run finishes."
+            ) {
+                guard let onCompact, !isCompacting else { return }
+                isCompacting = true
+                compactStatus = nil
+                Task { @MainActor in
+                    compactStatus = await onCompact()
+                    isCompacting = false
                 }
-                .buttonStyle(.plain)
-                .disabled(!canCompact || isCompacting)
-                .help(canCompact
-                      ? "Summarize earlier turns into a checkpoint. The 5 most recent messages are kept; the transcript is not changed."
-                      : "Available once the current run finishes.")
-                Spacer()
             }
             if let compactStatus {
                 Text(compactStatus)
                     .font(.system(size: 10))
                     .foregroundColor(theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 4)
             }
         }
     }
@@ -818,8 +810,9 @@ struct ContextWindowBreakdown: View {
     private var cutStrategyRow: some View {
         HStack(spacing: 6) {
             Image(systemName: "scissors")
-                .font(.system(size: 11))
+                .font(.system(size: 10))
                 .foregroundColor(theme.secondaryText)
+                .frame(width: 14)
             Text("If a tool result doesn't fit, keep")
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
@@ -867,12 +860,12 @@ struct ContextWindowBreakdown: View {
                         .font(.system(size: 11))
                         .foregroundColor(theme.secondaryText)
                     if row.isTools, let profileID = usage.profileID, let onOpenTools {
-                        Button { onOpenTools(profileID) } label: {
-                            Image(systemName: "slider.horizontal.3").font(.system(size: 10))
-                                .foregroundColor(theme.accentColor)
+                        BreakdownMiniIconButton(
+                            icon: "slider.horizontal.3",
+                            tooltip: "Open this profile's Tool Library — tools you switch off stop costing context"
+                        ) {
+                            onOpenTools(profileID)
                         }
-                        .buttonStyle(.plain)
-                        .help("Open this profile's Tool Library — tools you switch off stop costing context")
                     }
                     Spacer()
                     Text("~\(PromptFitCheck.roundedK(row.tokens))")
@@ -911,6 +904,7 @@ struct ContextWindowBreakdown: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 10))
                 .foregroundColor(theme.errorColor)
+                .frame(width: 14)
             Text("Last turn went over the window at step \(overflow.step) (\(PromptFitCheck.roundedK(overflow.promptTokens)) of \(PromptFitCheck.roundedK(overflow.windowTokens))). The start of the prompt was dropped, so the model may have lost its instructions — which can end a run without an answer.")
                 .font(.system(size: 11))
                 .foregroundColor(theme.primaryText)
@@ -920,36 +914,34 @@ struct ContextWindowBreakdown: View {
 
     /// "Prompt and tools use 5.5K of 8K before you type" — with the two things that change it.
     private func fixedCostRow(_ fixed: Int) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
                     .foregroundColor(theme.warningColor)
+                    .frame(width: 14)
                 Text("Prompt and tools use \(PromptFitCheck.roundedK(fixed)) of this model's \(usage.windowDisplay) window before you type. A long task will run out of room, and the start of the prompt — the instructions — is what gets dropped.")
                     .font(.system(size: 11))
                     .foregroundColor(theme.primaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 if let raise = raiseContextAction {
-                    Button(action: raise) {
-                        Label("Raise context size", systemImage: "arrow.up.forward.circle")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(theme.accentColor)
-                    }
-                    .buttonStyle(.plain)
+                    BreakdownActionButton(
+                        icon: "arrow.up.forward.circle",
+                        title: "Raise context size",
+                        action: raise
+                    )
                 }
                 if let profileID = usage.profileID, let onOpenTools {
-                    Button { onOpenTools(profileID) } label: {
-                        Label("Tools…", systemImage: "wrench.and.screwdriver")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(theme.accentColor)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Fewer enabled tools means a smaller fixed cost on every step")
+                    BreakdownActionButton(
+                        icon: "wrench.and.screwdriver",
+                        title: "Tools…",
+                        tooltip: "Fewer enabled tools means a smaller fixed cost on every step",
+                        action: { onOpenTools(profileID) }
+                    )
                 }
             }
-            .padding(.leading, 16)
         }
     }
 
@@ -964,8 +956,9 @@ struct ContextWindowBreakdown: View {
         let prefix = turn.isEstimated ? "~" : ""
         return HStack(spacing: 6) {
             Image(systemName: "number.circle")
-                .font(.system(size: 11))
+                .font(.system(size: 10))
                 .foregroundColor(theme.secondaryText)
+                .frame(width: 14)
             Text(usage.turnSpansMultipleCalls ? "Last turn (all steps)" : "Last turn (actual)")
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
@@ -1027,6 +1020,7 @@ struct ContextWindowBreakdown: View {
             Image(systemName: icon)
                 .font(.system(size: 10))
                 .foregroundColor(theme.secondaryText)
+                .frame(width: 14)
             Text(text)
                 .font(.system(size: 11))
                 .foregroundColor(theme.secondaryText)
@@ -1038,32 +1032,187 @@ struct ContextWindowBreakdown: View {
     /// window. Falls back to instructional text when no settings action is wired.
     @ViewBuilder
     private func cappedNote(trained: Int) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             noteRow(
                 icon: "arrow.up.forward.circle",
                 text: "\(usage.windowDisplay) allocated of \(PromptFitCheck.roundedK(trained)) the model supports."
             )
             if let raise = raiseContextAction {
-                Button {
-                    raise()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "slider.horizontal.3").font(.system(size: 10))
-                        Text("Raise Context Window").font(.system(size: 11, weight: .medium))
-                        Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
-                    }
-                    .foregroundColor(theme.accentColor)
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, 16)
-                .help("Open this profile's Advanced settings to raise its context window")
+                BreakdownActionButton(
+                    icon: "slider.horizontal.3",
+                    title: "Raise Context Window",
+                    trailingIcon: "chevron.right",
+                    tooltip: "Open this profile's Advanced settings to raise its context window",
+                    action: raise
+                )
             } else {
                 Text("Raise Context Window in the profile's Advanced settings to use more.")
                     .font(.system(size: 11))
                     .foregroundColor(theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 16)
+                    .padding(.leading, 20)
             }
         }
+    }
+}
+
+// MARK: - Breakdown Button Components
+
+/// A tactile macOS action button with smooth hover illumination, distinct borders,
+/// haptic feedback, and aligned layout within the Context Window popover.
+private struct BreakdownActionButton: View {
+    var icon: String? = nil
+    let title: String
+    var trailingIcon: String? = nil
+    var isLoading: Bool = false
+    var isEnabled: Bool = true
+    var tooltip: String? = nil
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: {
+            guard isEnabled && !isLoading else { return }
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            action()
+        }) {
+            HStack(spacing: 6) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 12, height: 12)
+                } else if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(iconColor)
+                        .frame(width: 12)
+                }
+
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(textColor)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if let trailingIcon, !isLoading {
+                    Image(systemName: trailingIcon)
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(trailingIconColor)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5.5)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(backgroundColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(strokeColor, lineWidth: 0.8)
+            )
+            .shadow(
+                color: isHovered && isEnabled ? theme.accentColor.opacity(0.18) : Color.clear,
+                radius: 3,
+                x: 0,
+                y: 1
+            )
+            .scaleEffect(isHovered && isEnabled && !reduceMotion ? 1.01 : 1.0)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor(enabled: isEnabled && !isLoading)
+        .disabled(!isEnabled || isLoading)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.75)) {
+                isHovered = hovering
+            }
+        }
+        .help(tooltip ?? "")
+    }
+
+    private var iconColor: Color {
+        guard isEnabled else { return theme.secondaryText.opacity(0.5) }
+        return isHovered ? theme.accentColor : theme.accentColor.opacity(0.9)
+    }
+
+    private var textColor: Color {
+        guard isEnabled else { return theme.secondaryText.opacity(0.5) }
+        return isHovered ? theme.primaryText : theme.primaryText.opacity(0.92)
+    }
+
+    private var trailingIconColor: Color {
+        guard isEnabled else { return theme.secondaryText.opacity(0.4) }
+        return isHovered ? theme.accentColor : theme.secondaryText.opacity(0.7)
+    }
+
+    private var backgroundColor: Color {
+        guard isEnabled else {
+            return theme.isDark ? Color.white.opacity(0.03) : Color.black.opacity(0.02)
+        }
+        if isHovered {
+            return theme.accentColor.opacity(0.18)
+        } else {
+            return theme.accentColor.opacity(0.08)
+        }
+    }
+
+    private var strokeColor: Color {
+        guard isEnabled else {
+            return theme.dividerColor.opacity(0.2)
+        }
+        if isHovered {
+            return theme.accentColor.opacity(0.45)
+        } else {
+            return theme.accentColor.opacity(0.22)
+        }
+    }
+}
+
+/// A compact icon button (18×18pt) with hover feedback, border glow, and pointing cursor
+/// for inline row actions such as opening the Tool Library.
+private struct BreakdownMiniIconButton: View {
+    let icon: String
+    var tooltip: String? = nil
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            action()
+        }) {
+            Image(systemName: icon)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundColor(isHovered ? theme.accentColor : theme.accentColor.opacity(0.85))
+                .frame(width: 18, height: 18)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(theme.accentColor.opacity(isHovered ? 0.22 : 0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(
+                            theme.accentColor.opacity(isHovered ? 0.45 : 0.20),
+                            lineWidth: 0.8
+                        )
+                )
+                .scaleEffect(isHovered ? 1.08 : 1.0)
+                .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.75)) {
+                isHovered = hovering
+            }
+        }
+        .help(tooltip ?? "")
     }
 }

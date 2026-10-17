@@ -12,7 +12,7 @@ import Contacts
 /// Deleting a calendar event, as its own tool.
 ///
 /// It was an `action` on `manage_calendar` until 2026-07-31. The problem was not the multiplexing
-/// itself — `git_tool`'s seven subcommands share a noun and an output shape and are fine — but that
+/// itself — `git`'s seven subcommands share a noun and an output shape and are fine — but that
 /// this one bundled frequent harmless READS with an irreversible write under a single name, and a
 /// tool carries exactly one `requiresConfirmation`. The user could not express "ask before
 /// deleting, not before reading", and being prompted on every read is worse than useless: it

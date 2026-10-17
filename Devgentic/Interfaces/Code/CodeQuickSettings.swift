@@ -48,6 +48,11 @@ struct CodeQuickSettings: Codable, Hashable, Sendable {
     /// small one fills before any work is done (seen on device 2026-09-24: 5.5K of 8K).
     var contextTokens: Int?
 
+    /// After each answer, one extra model call proposes facts for project memory, which the user
+    /// accepts or dismisses (`ProjectMemorySuggester`). `nil` → off, the default: it costs a model
+    /// call per answer, which on a local model holds the GPU for a few seconds.
+    var suggestMemories: Bool?
+
     /// True when nothing has been changed from the preset — used to decide whether the toolbar
     /// button shows a "modified" dot.
     var isDefault: Bool {
@@ -55,6 +60,7 @@ struct CodeQuickSettings: Codable, Hashable, Sendable {
             && executionTimeout == nil
             && thinkingEnabled == nil
             && contextTokens == nil
+            && suggestMemories == nil
     }
 
     static let `default` = CodeQuickSettings()

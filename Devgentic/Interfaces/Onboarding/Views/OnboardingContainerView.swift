@@ -11,9 +11,12 @@ import SwiftUI
 import AppKit
 
 struct OnboardingContainerView: View {
-    let onComplete: () -> Void
+    /// Called when the Setup Assistant closes, with the profile it created (nil when a re-run is
+    /// cancelled). The app passes it to `OnboardingCompletion.apply`.
+    let onComplete: (_ createdProfileID: UUID?) -> Void
 
     @State private var viewModel = OnboardingViewModel()
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -42,6 +45,30 @@ struct OnboardingContainerView: View {
                             insertion: .opacity.combined(with: .offset(x: 20)),
                             removal: .opacity.combined(with: .offset(x: -20))
                         ))
+                case .behavior:
+                    OnboardingBehaviorView(viewModel: viewModel)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(x: 20)),
+                            removal: .opacity.combined(with: .offset(x: -20))
+                        ))
+                case .features:
+                    OnboardingFeaturesView(viewModel: viewModel)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(x: 20)),
+                            removal: .opacity.combined(with: .offset(x: -20))
+                        ))
+                case .permissions:
+                    OnboardingPermissionsView(viewModel: viewModel)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(x: 20)),
+                            removal: .opacity.combined(with: .offset(x: -20))
+                        ))
+                case .privacy:
+                    OnboardingPrivacyView(viewModel: viewModel)
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .offset(x: 20)),
+                            removal: .opacity.combined(with: .offset(x: -20))
+                        ))
                 case .themeCustomization:
                     OnboardingThemeView(viewModel: viewModel)
                         .transition(.asymmetric(
@@ -65,6 +92,13 @@ struct OnboardingContainerView: View {
         .background(theme.primaryBackground)
         .background(OnboardingWindowAccessor())
         .navigationTitle("")
+        // A re-run must start the theme step from the user's current choices, not first-run defaults.
+        .onAppear {
+            viewModel.adoptCurrentTheme(from: themeManager)
+            viewModel.adoptCurrentSettings()
+        }
+        // Read here, not only on the profile step: it decides whether Cancel is offered at all.
+        .onAppear { viewModel.refreshExistingProfileNames() }
     }
 
     // MARK: - Window Header Bar (Single Color, Clean UI, Traffic Light Safe)
@@ -83,8 +117,16 @@ struct OnboardingContainerView: View {
 
             Spacer()
 
-            // Stage Navigation Bubble Capsule
-            stageBubblesGroup
+            // Stage Navigation Bubble Capsule. Nine labelled stages don't fit the minimum window
+            // width, so it falls back to compact bubbles (current step labelled, others as dots).
+            ViewThatFits(in: .horizontal) {
+                stageBubblesGroup(compact: false)
+                stageBubblesGroup(compact: true)
+            }
+
+            if viewModel.canCancelSetup {
+                cancelSetupButton
+            }
         }
         .frame(height: 52)
         .padding(.leading, 82) // Safe clearance for macOS traffic lights (red, yellow, green)
@@ -93,11 +135,30 @@ struct OnboardingContainerView: View {
         .padding(.bottom, 8)
     }
 
+    // MARK: - Cancel (re-runs only)
+    private var cancelSetupButton: some View {
+        Button {
+            viewModel.cancelSetup(themeManager: themeManager, onComplete: onComplete)
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(theme.secondaryText)
+                .frame(width: 26, height: 26)
+                .background(theme.secondaryBackground.opacity(0.6))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.cancelAction)
+        .pointingHandCursor()
+        .help("Cancel setup and keep your current profiles and theme (Esc)")
+        .accessibilityLabel("Cancel Setup")
+    }
+
     // MARK: - Stage Bubbles Group
-    private var stageBubblesGroup: some View {
+    private func stageBubblesGroup(compact: Bool) -> some View {
         HStack(spacing: 2) {
             ForEach(OnboardingViewModel.Step.allCases) { step in
-                stageBubbleItem(step: step)
+                stageBubbleItem(step: step, compact: compact)
             }
         }
         .padding(3)
@@ -107,10 +168,12 @@ struct OnboardingContainerView: View {
             Capsule()
                 .stroke(theme.dividerColor.opacity(0.4), lineWidth: 1)
         )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Setup progress")
     }
 
     @ViewBuilder
-    private func stageBubbleItem(step: OnboardingViewModel.Step) -> some View {
+    private func stageBubbleItem(step: OnboardingViewModel.Step, compact: Bool) -> some View {
         let isCurrent = viewModel.currentStep == step
         let isPast = viewModel.currentStep.rawValue > step.rawValue
 
@@ -137,58 +200,109 @@ struct OnboardingContainerView: View {
                 )
             )
             .shadow(color: Color.accentColor.opacity(0.4), radius: 6, x: 0, y: 2)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isSelected)
+            .accessibilityHint("Current step")
         } else if isPast {
             // Clickable Completed Stage with Hover Feedback
-            PastStageBubbleButton(step: step) {
+            PastStageBubbleButton(step: step, compact: compact) {
                 viewModel.goToStep(step)
             }
+            .disabled(viewModel.isDownloading)
         } else {
             // Inactive / Upcoming Stage
-            Text(step.title)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(theme.secondaryText.opacity(0.6))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+            Group {
+                if compact {
+                    Circle()
+                        .fill(theme.secondaryText.opacity(0.35))
+                        .frame(width: 6, height: 6)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 10)
+                        .help(step.title)
+                } else {
+                    Text(step.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(theme.secondaryText.opacity(0.6))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                }
+            }
+            .accessibilityElement()
+            .accessibilityLabel(step.title)
         }
     }
 }
 
 // MARK: - Window Accessor for Onboarding
-private struct OnboardingWindowAccessor: NSViewRepresentable {
-    let targetWidth: CGFloat = 880
-    let targetHeight: CGFloat = 800
+/// Sizes and centres the window ONCE when onboarding appears, and gives the window back as it was
+/// when onboarding goes away.
+///
+/// ⚠️ It used to run on every `updateNSView` — every state change, including each 250 ms download
+/// poll — and snap any window more than 15 pt off 880×800 back to centre, so the user could not
+/// resize it. It also set `minSize` and never restored it, so the MAIN window kept onboarding's
+/// 840×720 minimum after setup finished.
+struct OnboardingWindowAccessor: NSViewRepresentable {
+    static let targetSize = NSSize(width: 880, height: 800)
+    static let minimumSize = NSSize(width: 840, height: 720)
+
+    final class Coordinator {
+        weak var window: NSWindow?
+        var previousMinSize: NSSize?
+        var previousFrame: NSRect?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async {
-            guard let window = view.window else { return }
-            configureWindow(window)
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { [weak view] in
+            guard let window = view?.window else { return }
+            Self.configureOnce(window, coordinator: coordinator)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            guard let window = nsView.window else { return }
-            configureWindow(window)
+        // Only for the case where the view had no window yet when it was made.
+        guard context.coordinator.window == nil else { return }
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { [weak nsView] in
+            guard let window = nsView?.window else { return }
+            Self.configureOnce(window, coordinator: coordinator)
         }
     }
 
-    private func configureWindow(_ window: NSWindow) {
-        window.minSize = NSSize(width: 840, height: 720)
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        guard let window = coordinator.window else { return }
+        if let previousMinSize = coordinator.previousMinSize {
+            window.minSize = previousMinSize
+        }
+        // Give the window back at the size it had, when that was at least onboarding's size (the
+        // main app's layout). A smaller window stays where onboarding left it rather than shrink.
+        if let previousFrame = coordinator.previousFrame {
+            window.setFrame(previousFrame, display: true, animate: true)
+        }
+    }
 
-        let currentSize = window.frame.size
-        // If current window is significantly different from target size, animate to target size and center
-        if abs(currentSize.height - targetHeight) > 15 || abs(currentSize.width - targetWidth) > 15 {
-            if let screen = window.screen ?? NSScreen.main {
-                let screenRect = screen.visibleFrame
-                let newX = screenRect.origin.x + (screenRect.width - targetWidth) / 2
-                let newY = screenRect.origin.y + (screenRect.height - targetHeight) / 2
-                let newFrame = NSRect(x: newX, y: newY, width: targetWidth, height: targetHeight)
-                window.setFrame(newFrame, display: true, animate: true)
-            } else {
-                window.setContentSize(NSSize(width: targetWidth, height: targetHeight))
-            }
+    static func configureOnce(_ window: NSWindow, coordinator: Coordinator) {
+        guard coordinator.window == nil else { return }
+        coordinator.window = window
+        coordinator.previousMinSize = window.minSize
+        let isLargerThanOnboarding = window.frame.width >= targetSize.width && window.frame.height >= targetSize.height
+        coordinator.previousFrame = isLargerThanOnboarding ? window.frame : nil
+
+        window.minSize = minimumSize
+        let size = window.frame.size
+        guard abs(size.height - targetSize.height) > 15 || abs(size.width - targetSize.width) > 15 else { return }
+        if let screen = window.screen ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            let frame = NSRect(x: visible.origin.x + (visible.width - targetSize.width) / 2,
+                               y: visible.origin.y + (visible.height - targetSize.height) / 2,
+                               width: targetSize.width, height: targetSize.height)
+            window.setFrame(frame, display: true, animate: true)
+        } else {
+            window.setContentSize(targetSize)
         }
     }
 }
@@ -196,6 +310,7 @@ private struct OnboardingWindowAccessor: NSViewRepresentable {
 // MARK: - Past Stage Bubble Button with Hover Effect
 private struct PastStageBubbleButton: View {
     let step: OnboardingViewModel.Step
+    var compact: Bool = false
     let action: () -> Void
     @Environment(\.appTheme) private var theme
     @State private var isHovered: Bool = false
@@ -206,11 +321,13 @@ private struct PastStageBubbleButton: View {
                 Image(systemName: "checkmark")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundColor(.green)
-                Text(step.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(isHovered ? theme.primaryText : theme.secondaryText)
+                if !compact {
+                    Text(step.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(isHovered ? theme.primaryText : theme.secondaryText)
+                }
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, compact ? 7 : 10)
             .padding(.vertical, 6)
             .background(isHovered ? Color.green.opacity(0.18) : Color.green.opacity(0.08))
             .clipShape(Capsule())
@@ -218,6 +335,9 @@ private struct PastStageBubbleButton: View {
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+        .help(step.title)
+        .accessibilityLabel(step.title)
+        .accessibilityHint("Completed. Go back to this step.")
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering

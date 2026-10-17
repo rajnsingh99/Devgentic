@@ -173,7 +173,8 @@ enum WorkflowStreamCollector {
     // MARK: - Gate Helper
 
     /// Consumes a workflow stream, auto-responding to the first gate by choosing `option`. Passing
-    /// `nil` resolves the gate with no choice (simulating a timeout / cancel — the gate then fails).
+    /// `nil` resolves the gate with no choice: a DISMISSAL, so the Gate node settles as cancelled
+    /// and takes no branch (CR-47). Only a Gate's own timer expires it.
     /// A brief delay lets the suspension register before responding.
     static func collectWithGateChoice(
         from stream: AsyncThrowingStream<AgentStreamEvent, Error>,

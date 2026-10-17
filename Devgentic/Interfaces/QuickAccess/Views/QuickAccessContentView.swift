@@ -13,6 +13,8 @@ import SwiftUI
 import AppKit // For NSPasteboard / NSOpenPanel
 import UniformTypeIdentifiers // For .fileURL drag-and-drop
 
+private let logger = DGLogger(category: "QuickAccessContentView")
+
 struct QuickAccessContentView: View {
     // --- Callbacks ---
     var dismiss: () -> ()
@@ -53,6 +55,9 @@ struct QuickAccessContentView: View {
     @State private var showingProfilePopup: Bool = false
     // [QA revival P2a] Files attached to the next message (panel-local; passed to send()).
     @State private var attachedFiles: [FileSystemItem] = []
+    /// Attachments the panel's profile will cut — same preview as the main composer.
+    @State private var deliveryWarnings: [DeliveryWarning] = []
+    @State private var deliveryWarningTask: Task<Void, Never>?
     @State private var isDropTargeted: Bool = false
 
     /// [Context gauge] Occupancy of the panel model's window for this conversation
@@ -158,10 +163,12 @@ struct QuickAccessContentView: View {
                 // suppression) as the main window's banner. Same stacking rule too: HITL
                 // above, advisory anchored next to the input, so transient HITL banners
                 // come and go without displacing it.
-                if let advisory = session.conversationID.flatMap({ AdvisoryCenter.shared.current(for: $0) }) {
+                if let advisory = AdvisoryCenter.shared.current(for: session.conversationID ?? Advisory.allConversations) {
                     QuickAccessAdvisoryBanner(
                         advisory: advisory,
-                        onOpenProfileSettings: { profileID in onOpenProfileSettings?(profileID) }
+                        onOpenProfileSettings: { profileID in onOpenProfileSettings?(profileID) },
+                        onProceedRun: { messageID in mainAppViewModel.activeStreamManager.proceedHeldRun(messageID: messageID) },
+                        onStopRun: { messageID in mainAppViewModel.activeStreamManager.cancelStream(for: messageID) }
                     )
                     .environment(\.appTheme, themeManager.currentTheme)
                     .frame(maxWidth: isExpanded ? expandedInputAreaMaxAllowedWidth : .infinity)
@@ -210,16 +217,19 @@ struct QuickAccessContentView: View {
         // [Pre-send fit hint] Same composer-state advisory as the main window —
         // fires when attachments or the panel's profile change, before a send.
         .onChange(of: attachedFiles.count) { _, _ in
+            refreshDeliveryWarnings()
             evaluatePreSendFit()
             recomputeContextGauge()
         }
         .onChange(of: session.backendConfiguration.selectedProfileID) { _, _ in
+            recheckAttachmentsForProfile()
+            refreshDeliveryWarnings()
             evaluatePreSendFit()
             recomputeContextGauge()
         }
         // [Context gauge] Recompute occupancy when a turn is added (history grows) or a
         // send settles (final message + real usage land). Mirrors the main composer.
-        .onChange(of: session.chatHistoryViewModel.currentChatMessages.count) { _, _ in recomputeContextGauge() }
+        .onChange(of: session.chatHistoryViewModel.contextGaugeTurnKey) { _, _ in recomputeContextGauge() }
         .onChange(of: session.isSending) { _, _ in recomputeContextGauge() }
         .onChange(of: isExpanded) { _, newValue in
             // [Unified card] Pass explicit intent; collapsed target = the card's measured height
@@ -319,6 +329,9 @@ struct QuickAccessContentView: View {
             // render window. See `ChatHistoryViewModel.resolveContextHistory(for:)`.
             let history: [ChatMessage]
             if let conversationID {
+                // RAG-6: one resolve per burst — see the main composer's `recomputeContextGauge`.
+                try? await Task.sleep(for: ChatHistoryViewModel.contextGaugeSettle)
+                guard !Task.isCancelled else { return }
                 history = await session.chatHistoryViewModel.resolveContextHistory(for: conversationID)
             } else {
                 history = session.chatHistoryViewModel.currentChatMessages.sorted { $0.timestamp < $1.timestamp }
@@ -598,6 +611,9 @@ extension QuickAccessContentView {
         VStack(alignment: .leading, spacing: 8) {
             // 1. Attached File Chips — ABOVE the editor, matching the main composer
             // (ChatInputAreaView renders AttachedFilesDisplayView above the input area).
+            if !deliveryWarnings.isEmpty {
+                DeliveryWarningPanel(warnings: deliveryWarnings)
+            }
             if !attachedFiles.isEmpty {
                 AttachedFilesDisplayView(attachedFiles: attachedFiles) { file in
                     attachedFiles.removeAll { $0.id == file.id }
@@ -742,6 +758,7 @@ extension QuickAccessContentView {
             )
             .frame(width: 356, height: 460)
             .environment(\.appTheme, themeManager.currentTheme)
+            .environment(\.surfaceStyle, themeManager.surfaceStyle)
             .tint(themeManager.currentTheme.accentColor)
             .preferredColorScheme(themeManager.currentTheme.colorScheme)
         }
@@ -903,11 +920,54 @@ extension QuickAccessContentView {
         return FileAttachmentPicker.handleDrop(providers) { item in appendAttachments([item]) }
     }
 
+    /// ⚠️ The panel keeps its own list (it isn't the main composer), so it applies
+    /// `AttachmentIntake` itself — it skipped every check before.
     private func appendAttachments(_ items: [FileSystemItem]) {
-        for item in items where !attachedFiles.contains(where: { $0.id == item.id }) {
+        // Against the panel's own profile — a folder is refused where it injects (ATT-3).
+        let mode = session.selectedProfile.map { AttachmentDeliveryMode.resolve(for: $0) }
+        let (accepted, refused) = AttachmentIntake.partition(items, deliveryMode: mode)
+        if !refused.isEmpty {
+            logger.warning("[ATTACH] QuickAccess refused \(refused.count) attachment(s): \(refused.map { "\($0.item.name) — \($0.reason)" }.joined(separator: "; ")). CONSEQUENCE: not attached; an alert tells the user why.")
+            FileAttachmentPicker.presentRefusals(refused, attachedTo: editorTextView?.window)
+        }
+        for item in accepted where !attachedFiles.contains(where: { $0.id == item.id }) {
             attachedFiles.append(item)
         }
         if !isExpanded { isExpanded = true }
+    }
+
+    /// The panel's profile changed: re-run intake over what is already attached and drop what
+    /// the new profile can't carry (a folder under an injecting profile), with an alert.
+    /// `session.selectedProfile` derives from `selectedProfileID`, so it is already the new one.
+    private func recheckAttachmentsForProfile() {
+        guard !attachedFiles.isEmpty else { return }
+        let mode = session.selectedProfile.map { AttachmentDeliveryMode.resolve(for: $0) }
+        let (accepted, refused) = AttachmentIntake.partition(attachedFiles, deliveryMode: mode)
+        guard !refused.isEmpty else { return }
+        attachedFiles = accepted
+        logger.notice("[ATTACH] QuickAccess profile switch removed \(refused.count) attachment(s): \(refused.map { "\($0.item.name) — \($0.reason)" }.joined(separator: "; ")). CONSEQUENCE: removed now with an alert, instead of failing at send.")
+        FileAttachmentPicker.presentRefusals(refused, removed: true, attachedTo: editorTextView?.window)
+    }
+
+    /// Pre-send truncation warnings for the panel — the same `DeliveryWarnings` preview the main
+    /// composer runs, against the panel's own profile.
+    private func refreshDeliveryWarnings() {
+        deliveryWarningTask?.cancel()
+        let profile = session.selectedProfile
+        guard case .inject(let paths)? = profile.map({ AttachmentDeliveryMode.resolve(for: $0) }) else {
+            deliveryWarnings = []
+            return
+        }
+        let candidates = attachedFiles
+            .filter { [.text, .document].contains(AttachmentClassifier.classify($0)) }
+            .map { DeliveryWarnings.Candidate(name: $0.name, path: $0.url.path, url: $0.url) }
+        let lane = DeliveryWarnings.Lane.attachment(includeAbsolutePaths: paths)
+        let remedy = DeliveryWarnings.Remedy.forProfileType(profile?.profileType)
+        deliveryWarningTask = Task {
+            let outcomes = await DeliveryWarnings.outcomes(for: candidates, lane: lane, reader: FileProcessorService())
+            guard !Task.isCancelled else { return }
+            deliveryWarnings = DeliveryWarnings.warnings(for: outcomes, lane: lane, remedy: remedy)
+        }
     }
 
     private func copyLastMessageToClipboard() {

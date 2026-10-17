@@ -6,8 +6,9 @@
 //
 //  Manages the Code interface's singleton profile persisted in SwiftData.
 //  Handles model + project selection, cognitive profile capture, project
-//  folder coordination with the Explorer sidebar, and .devgentic/context.md
-//  lifecycle (auto-creation, file watching, prompt injection).
+//  folder coordination with the Explorer sidebar. The project's own knowledge
+//  (`AGENTS.md`, `.devgentic/memory/`) is read per run — see `CodeSystemPrompt.projectKnowledge`;
+//  this type only caches a copy for the Context gauge and the inspector.
 //
 //  ⚠️ ONE PERMANENT PROFILE, SETTINGS PER PROJECT (2026-09-24). The row is created once and never
 //  deleted — Home resets it to the preset instead. Everything the user can change (limits,
@@ -95,11 +96,18 @@ final class CodeSessionManager {
     /// "Raise context size" when the prompt and tools fill most of the window.
     var showQuickSettings: Bool = false
 
-    // MARK: - Project Memory (cached)
+    // MARK: - Project knowledge (cached for display)
 
-    /// Cached content of `.devgentic/context.md`. Updated on file change via the monitor
-    /// and on initial project open. `nil` means the file doesn't exist or is empty.
-    var projectMemoryContent: String?
+    /// What the next run will append to the prompt for this project — `AGENTS.md` and the memory
+    /// listing — or nil when the project has neither. A DISPLAY copy for the Context gauge and the
+    /// inspector, refreshed when a folder opens and on every send; runs read the disk themselves,
+    /// so a stale copy here can never reach a model.
+    var projectKnowledgeContent: String?
+
+    /// How many memory entries the open project has, for the inspector button.
+    var projectMemoryEntryCount: Int = 0
+
+    @ObservationIgnored private var memoryObserver: NSObjectProtocol?
 
     // MARK: - Private
 
@@ -108,10 +116,6 @@ final class CodeSessionManager {
     /// the current project's copy — see `CodeQuickSettingsStore`.
     private static let quickSettingsKey = CodeQuickSettingsStore.defaultsKey
     private static let recentPathsKey = "devgentic.codeRecentProjectPaths"
-    private static let devgenticDirName = ".devgentic"
-    private static let projectMemoryFileName = ".devgentic/context.md"
-
-    @ObservationIgnored private var contextFileMonitor: FileSystemMonitor?
 
     /// Set when `init()` kept the stored handle but could not READ the row, because the store threw
     /// rather than reporting the row absent. The first `ensureCodeProfile()` that manages to read
@@ -174,14 +178,27 @@ final class CodeSessionManager {
             logger.info("[CODE_PROFILE] Initialized with no stored handle — an existing code profile is adopted on first use if one is on disk.")
         }
 
-        // If a project path was restored, bootstrap memory and ensure it's in recents
+        // If a project path was restored, load its knowledge and ensure it's in recents
         // (covers first launch after this feature ships for existing users).
         if let restored = projectPath {
             rememberRecentPath(restored)
-            bootstrapProjectMemory()
+            refreshProjectKnowledge()
             // Restored across launches — publish it too, or the roots list would only be
             // populated by an explicit folder change during the session.
             Task { await MCPRootsProvider.setCodeProjectRoot(restored) }
+        }
+
+        // A `remember`/`forget` (or an Undo) changes what the next run is told; refresh the
+        // display copy now rather than at the next send, so the gauge and inspector are current.
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: .projectMemoryDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            let changedPath = note.object as? String
+            MainActor.assumeIsolated {
+                guard let self, let open = self.projectPath?.standardizedFileURL.path else { return }
+                guard changedPath.map({ URL(fileURLWithPath: $0).standardizedFileURL.path == open }) ?? true else { return }
+                self.refreshProjectKnowledge()
+            }
         }
     }
 
@@ -308,7 +325,7 @@ final class CodeSessionManager {
         }
 
         CodeQuickSettingsStore.save(settings, for: path, defaults: defaults, now: Date())
-        logger.info("[CODE_SETTINGS] Saved quick settings for '\(URL(fileURLWithPath: path).lastPathComponent)' — maxIterations: \(settings.maxIterations.map(String.init) ?? "no cap"), timeout: \(settings.executionTimeout.map { String(Int($0)) } ?? "default")s, thinking: \(settings.thinkingEnabled.map(String.init) ?? "default").")
+        logger.info("[CODE_SETTINGS] Saved quick settings for '\(URL(fileURLWithPath: path).lastPathComponent)' — maxIterations: \(settings.maxIterations.map(String.init) ?? "no cap"), timeout: \(settings.executionTimeout.map { String(Int($0)) } ?? "default")s, thinking: \(settings.thinkingEnabled.map(String.init) ?? "default"), memory suggestions: \(settings.suggestMemories == true ? "on" : "off").")
 
         applyQuickSettingsToProfile(settings)
     }
@@ -531,7 +548,7 @@ final class CodeSessionManager {
         }
 
         rememberRecentPath(url)
-        bootstrapProjectMemory()
+        refreshProjectKnowledge()
     }
 
     /// Puts a Code conversation's own folder back when it is selected.
@@ -595,27 +612,20 @@ final class CodeSessionManager {
 
     // MARK: - A run in a conversation's own project
 
-    /// The prompt a Code run in `projectPath` is given.
-    static func instructions(forProject projectPath: String, apiProvider: ApiProvider, projectContext: String?) -> String {
+    /// The prompt a Code run in `projectPath` is stored with. The project's own knowledge is NOT
+    /// part of it: `AgentConnect` appends `AGENTS.md` and the memory listing when the run starts.
+    static func instructions(forProject projectPath: String, apiProvider: ApiProvider, tier: ModelTier?) -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
         // CodeSystemPrompt picks the XML or markdown variant by provider (Claude → XML, others →
-        // markdown) and formats the project_context injection to match.
+        // markdown).
         return CodeSystemPrompt.production(
             projectPath: projectPath,
             projectName: URL(fileURLWithPath: projectPath).lastPathComponent,
             currentDate: dateFormatter.string(from: Date()),
             apiProvider: apiProvider,
-            projectContext: projectContext
+            wording: CodeSystemPrompt.Wording.forTier(tier)
         )
-    }
-
-    /// `.devgentic/context.md` in `projectPath`, or nil when missing or empty.
-    static func readProjectContext(inProject projectPath: String) -> String? {
-        let memoryURL = URL(fileURLWithPath: projectPath).appendingPathComponent(projectMemoryFileName)
-        guard let content = try? String(contentsOf: memoryURL, encoding: .utf8),
-              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return content
     }
 
     /// The Code profile as a run in `conversationProjectPath` must see it.
@@ -624,7 +634,7 @@ final class CodeSessionManager {
     /// the composer starts is always for the open project, but a background-task wake, a scheduled
     /// run or a resume after approval starts for ITS conversation — possibly while another project
     /// is open. Taken from the row as-is, such a run got the other project's folder, prompt,
-    /// context.md, tools and limits. This builds the conversation's own, in memory; the row is not
+    /// tools and limits. This builds the conversation's own, in memory; the row is not
     /// touched.
     ///
     /// Returns `profile` unchanged when it is not Code, the conversation has no folder, or the folder
@@ -644,7 +654,7 @@ final class CodeSessionManager {
         }
         apply(CodeQuickSettingsStore.settings(for: target, defaults: defaults), to: &config)
         config.instructions = instructions(forProject: target, apiProvider: config.llmConfig.apiProvider,
-                                           projectContext: readProjectContext(inProject: target))
+                                           tier: config.llmConfig.modelMetadata?.tier)
         config.projectPath = target
 
         let name = URL(fileURLWithPath: target).lastPathComponent
@@ -749,8 +759,8 @@ final class CodeSessionManager {
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    /// Refreshes the code profile's instructions with the latest system prompt + project memory.
-    /// Called before each send to pick up context.md changes.
+    /// Refreshes the code profile's instructions with the latest system prompt, and the display
+    /// copy of the project's knowledge. Called before each send.
     func refreshInstructionsOnProfile() {
         guard let profileID = codeProfileID,
               var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
@@ -766,15 +776,11 @@ final class CodeSessionManager {
         let projectPathStr = projectPath?.path ?? "/"
         let projectName = projectPath?.lastPathComponent ?? "?"
 
-        let memoryContent = loadProjectMemory()
+        refreshProjectKnowledge()
+        let tier = agentConfig.llmConfig.modelMetadata?.tier
         let instructions = Self.instructions(forProject: projectPathStr,
                                              apiProvider: agentConfig.llmConfig.apiProvider,
-                                             projectContext: memoryContent)
-        if let projectMemory = memoryContent {
-            logger.info("[CODE] Injected project context into instructions (\(projectMemory.count) chars)")
-        } else {
-            logger.debug("[CODE] No project context to inject (context.md empty or missing)")
-        }
+                                             tier: tier)
 
         agentConfig.instructions = instructions
         agentConfig.projectPath = projectPathStr
@@ -814,7 +820,7 @@ final class CodeSessionManager {
 
         do {
             try BackendProfileStore.shared.saveProfile(profile)
-            logger.info("[CODE] Instructions refreshed — project: '\(projectName)', instructions: \(instructions.count) chars")
+            logger.info("[CODE] Instructions refreshed — project: '\(projectName)', instructions: \(instructions.count) chars, wording: \(CodeSystemPrompt.Wording.forTier(tier).rawValue) (model tier \(tier?.rawValue ?? "unknown")). CONSEQUENCE: tiny and small models get the compact wording of the same rules.")
         } catch {
             // ⚠️ Store validation rejects a profile with no model, so this fires for a session
             // that has a folder but no model yet. Harmless in practice — `attemptSend` refuses to
@@ -834,10 +840,8 @@ final class CodeSessionManager {
     /// The model is kept: it is the "last used" fallback a project with no remembered model starts
     /// with.
     func resetSession() {
-        // Stop file watcher
-        contextFileMonitor?.stop()
-        contextFileMonitor = nil
-        projectMemoryContent = nil
+        projectKnowledgeContent = nil
+        projectMemoryEntryCount = 0
 
         let leaving = projectPath
         // ⚠️ `ensureCodeProfile()`, not `codeProfileID`. The handle is resolved lazily, so a Home
@@ -992,115 +996,24 @@ final class CodeSessionManager {
         return merged
     }
 
-    // MARK: - Project Memory Lifecycle
+    // MARK: - Project knowledge
 
-    /// Called when a project path is set (or restored from persistence).
-    /// Ensures `.devgentic/context.md` exists, loads its content, and starts watching for changes.
-    private func bootstrapProjectMemory() {
-        let projectName = projectPath?.lastPathComponent ?? "?"
-        logger.info("[CODE] Bootstrapping project memory for '\(projectName)'")
-        ensureProjectMemoryExists()
-        projectMemoryContent = readProjectMemoryFromDisk()
-        startContextFileMonitor()
-        logger.info("[CODE] Project memory bootstrap complete — cached: \(self.projectMemoryContent != nil), chars: \(self.projectMemoryContent?.count ?? 0), monitor: \(self.contextFileMonitor != nil)")
-    }
-
-    /// Creates `.devgentic/context.md` with a template if it doesn't already exist.
-    private func ensureProjectMemoryExists() {
-        guard let projectURL = projectPath else { return }
-
-        let devgenticDir = projectURL.appendingPathComponent(Self.devgenticDirName)
-        let contextFile = devgenticDir.appendingPathComponent("context.md")
-
-        guard !FileManager.default.fileExists(atPath: contextFile.path) else {
-            logger.info("Project memory file already exists at \(contextFile.path)")
+    /// Re-reads `AGENTS.md` and the memory listing into the display copy. Creates nothing: a
+    /// project without either simply has no section (the old `context.md` was created from a
+    /// template on open, which put an untracked `.devgentic/` into every repository opened).
+    func refreshProjectKnowledge() {
+        guard let projectURL = projectPath else {
+            projectKnowledgeContent = nil
+            projectMemoryEntryCount = 0
             return
         }
-
-        do {
-            if !FileManager.default.fileExists(atPath: devgenticDir.path) {
-                try FileManager.default.createDirectory(at: devgenticDir, withIntermediateDirectories: true)
-            }
-            let template = Self.contextTemplate(projectName: projectURL.lastPathComponent)
-            try template.write(to: contextFile, atomically: true, encoding: .utf8)
-            logger.info("Created project memory file at \(contextFile.path)")
-        } catch {
-            logger.error("Failed to create project memory file: \(error.localizedDescription)")
-        }
-    }
-
-    /// Reads `.devgentic/context.md` from disk. Returns nil if missing or empty.
-    private func readProjectMemoryFromDisk() -> String? {
-        guard let projectURL = projectPath else { return nil }
-        let memoryURL = projectURL.appendingPathComponent(Self.projectMemoryFileName)
-        guard FileManager.default.fileExists(atPath: memoryURL.path),
-              let content = try? String(contentsOf: memoryURL, encoding: .utf8),
-              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        logger.info("Loaded project memory from \(memoryURL.path) (\(content.count) chars)")
-        return content
-    }
-
-    /// Returns the cached project memory content, falling back to a disk read.
-    func loadProjectMemory() -> String? {
-        if let cached = projectMemoryContent { return cached }
-        projectMemoryContent = readProjectMemoryFromDisk()
-        return projectMemoryContent
-    }
-
-    // MARK: - File Watcher
-
-    /// Starts monitoring `.devgentic/` for context.md changes.
-    private func startContextFileMonitor() {
-        contextFileMonitor?.stop()
-        contextFileMonitor = nil
-
-        guard let projectURL = projectPath else { return }
-
-        let devgenticDir = projectURL.appendingPathComponent(Self.devgenticDirName)
-        guard FileManager.default.fileExists(atPath: devgenticDir.path) else { return }
-
-        let monitor = FileSystemMonitor { [weak self] changedURLs in
-            let contextFileName = "context.md"
-            let relevant = changedURLs.contains { $0.lastPathComponent == contextFileName }
-            guard relevant else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.projectMemoryContent = self.readProjectMemoryFromDisk()
-                logger.info("Project memory reloaded via file watcher (\(self.projectMemoryContent?.count ?? 0) chars)")
-            }
-        }
-        monitor.start(path: devgenticDir.path)
-        contextFileMonitor = monitor
-        logger.info("Context file monitor started for \(devgenticDir.path)")
-    }
-
-    // MARK: - Template
-
-    /// Seed template for a new `.devgentic/context.md` file.
-    private static func contextTemplate(projectName: String) -> String {
-        """
-        # \(projectName) — Project Context
-
-        > This file is maintained by the Devgentic agent. It accumulates project knowledge
-        > across sessions so the agent can provide better, more context-aware assistance.
-        > You can also edit this file manually — changes are picked up automatically.
-
-        ## Architecture
-
-
-        ## Key Files
-
-
-        ## Build & Run
-
-
-        ## Patterns & Conventions
-
-
-        ## Notes
-
-        """
+        let store = ProjectMemoryStore(projectRoot: projectURL)
+        projectMemoryEntryCount = store.entries().count
+        let agents = ProjectInstructionsFile.read(inProject: projectURL.path)
+        projectKnowledgeContent = CodeSystemPrompt.projectKnowledgeSection(
+            agentsInstructions: agents,
+            memoryListing: store.promptListing(),
+            apiProvider: provider)
+        logger.debug("[CODE] Project knowledge for '\(projectURL.lastPathComponent)': AGENTS.md \(agents.map { "\($0.count) chars" } ?? "absent"), memory \(store.entries().count) entr(ies), \(self.projectKnowledgeContent?.count ?? 0) chars in all.")
     }
 }

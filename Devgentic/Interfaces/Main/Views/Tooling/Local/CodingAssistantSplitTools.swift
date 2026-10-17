@@ -36,7 +36,7 @@ struct EditCodeSingleTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
 
             var fp: String? = nil
-            for key in ["file_path", "filePath", "path", "file"] {
+            for key in ToolPathKeys.codingFile {
                 if let ck = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: ck) {
                     fp = val
@@ -102,7 +102,7 @@ struct EditCodeBatchTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
 
             var fp: String? = nil
-            for key in ["file_path", "filePath", "path", "file"] {
+            for key in ToolPathKeys.codingFile {
                 if let ck = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: ck) {
                     fp = val
@@ -174,6 +174,7 @@ struct CodeSearchTextTool: DevgenticTool {
 
     func call(arguments: Arguments) async throws -> String {
         return await RipgrepRunner.run(
+            tool: name,
             pattern: arguments.pattern,
             path: arguments.path,
             glob: arguments.glob,
@@ -214,6 +215,7 @@ struct CodeSearchSymbolTool: DevgenticTool {
 
     func call(arguments: Arguments) async throws -> String {
         return await RipgrepRunner.run(
+            tool: name,
             pattern: arguments.pattern,
             path: arguments.path,
             glob: arguments.glob,
@@ -252,6 +254,7 @@ struct CodeSearchFilesTool: DevgenticTool {
 
     func call(arguments: Arguments) async throws -> String {
         return await RipgrepRunner.run(
+            tool: name,
             pattern: arguments.pattern,
             path: arguments.path,
             glob: arguments.glob,
@@ -286,7 +289,7 @@ struct CreateNewFileTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
 
             var fp: String? = nil
-            for key in ["file_path", "filePath", "path", "file"] {
+            for key in ToolPathKeys.codingFile {
                 if let ck = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: ck) {
                     fp = val
@@ -341,7 +344,7 @@ struct OverwriteFileTool: DevgenticTool {
             let container = try decoder.container(keyedBy: DynamicKey.self)
 
             var fp: String? = nil
-            for key in ["file_path", "filePath", "path", "file"] {
+            for key in ToolPathKeys.codingFile {
                 if let ck = DynamicKey(stringValue: key),
                    let val = try? container.decode(String.self, forKey: ck) {
                     fp = val
@@ -510,6 +513,7 @@ private enum FileCreator {
 private enum RipgrepRunner {
 
     static func run(
+        tool: String,
         pattern: String,
         path: String,
         glob: String?,
@@ -568,15 +572,24 @@ private enum RipgrepRunner {
         // grep / ripgrep write one "Permission denied" line per unreadable directory to
         // STDERR, and this site attached stderr to a pipe it never read — over a home
         // directory that passes 64 KB easily and the search hangs forever.
-        let rawOutput: String
+        let run: ProcessRunner.Result
         do {
-            rawOutput = try ProcessRunner.run(process).standardOutput
+            run = try ProcessRunner.run(process)
         } catch {
             return "Error running search: \(error.localizedDescription)"
         }
 
-        if rawOutput.isEmpty {
+        // Read the exit status, not just stdout — see `SearchRunReport`.
+        let rawOutput: String
+        let incompleteNote: String?
+        switch SearchRunReport.interpret(run, program: rgPath == nil ? "grep" : "ripgrep", tool: tool, pattern: pattern) {
+        case .failed(let message):
+            return message
+        case .noMatches:
             return "No matches found for '\(pattern)'."
+        case .output(let output, let note):
+            rawOutput = output
+            incompleteNote = note
         }
 
         // `maxResults` bounds PRINTED LINES, not matches — with context on, one match prints up
@@ -627,6 +640,7 @@ private enum RipgrepRunner {
         // `noun + "es"` produced "filees" on the files-only path — the one `code_search_files`
         // always takes. Shared pluraliser now, so the two search tools cannot disagree.
         let noun = filesOnly ? "file" : "match"
-        return "\(result)\n(\(reportedCount) \(CodeSearchTool.pluralise(noun, count: reportedCount)))"
+        let summary = "\(result)\n(\(reportedCount) \(CodeSearchTool.pluralise(noun, count: reportedCount)))"
+        return incompleteNote.map { "\(summary)\n\($0)" } ?? summary
     }
 }

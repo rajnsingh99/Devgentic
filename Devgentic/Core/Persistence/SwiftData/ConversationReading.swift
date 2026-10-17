@@ -248,7 +248,9 @@ extension ChatPersistenceStore: ConversationReading {
         // first `offset` rows in Swift would materialise every skipped conversation's messages and
         // derive every skipped title — precisely the cost `ConversationRow.init` warns about.
         descriptor.fetchOffset = max(0, offset)
-        return try context.fetch(descriptor).map(ConversationRow.init(_:))
+        return try context.fetch(descriptor).map {
+            ConversationRow($0, isEmpty: try !ChatPersistenceStore.hasMessages(conversationID: $0.id, in: context))
+        }
     }
 
     /// How many of the newest conversations a search looks at.
@@ -343,7 +345,8 @@ extension ChatPersistenceStore: ConversationReading {
         }
         // Reuses the shipped single-row lookup rather than a second descriptor — it is already the
         // uncapped, id-keyed query, and duplicating it is how the three bridges ended up with six.
-        return getConversation(withId: id).map(ConversationRow.init(_:))
+        guard let context = modelContainer?.mainContext, let sd = getConversation(withId: id) else { return nil }
+        return ConversationRow(sd, isEmpty: try !ChatPersistenceStore.hasMessages(conversationID: sd.id, in: context))
     }
 
     func reusableEmptyConversationID(preferring preferred: UUID?) throws -> UUID? {
@@ -354,8 +357,8 @@ extension ChatPersistenceStore: ConversationReading {
 
         // Fast path: the conversation the caller is already in, when it is empty.
         if let preferred,
-           let active = getConversation(withId: preferred),
-           active.messages.isEmpty {
+           getConversation(withId: preferred) != nil,
+           try !ChatPersistenceStore.hasMessages(conversationID: preferred, in: context) {
             return preferred
         }
 
@@ -366,7 +369,9 @@ extension ChatPersistenceStore: ConversationReading {
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
         )
         descriptor.fetchLimit = Self.reusableEmptyScanLimit
-        return try context.fetch(descriptor).first { $0.messages.isEmpty }?.id
+        return try context.fetch(descriptor).first {
+            try !ChatPersistenceStore.hasMessages(conversationID: $0.id, in: context)
+        }?.id
     }
 }
 
@@ -378,11 +383,14 @@ extension ConversationRow {
     /// `userDefinedTitle` it sorts `messages` and JSON-decodes `contentData` until it finds the
     /// first non-empty text message. It stops at that first hit, and it skips the scan entirely
     /// when a user title exists. This is the cost the bridges already pay per row today.
-    init(_ sd: ConversationSD) {
+    ///
+    /// `isEmpty` is passed in, from `ChatPersistenceStore.hasMessages` (CR-68), never read from
+    /// `sd.messages`: that faults the whole relationship, for every row of a 200-row scan.
+    init(_ sd: ConversationSD, isEmpty: Bool) {
         self.id = sd.id
         self.title = sd.toRowStruct().displayTitle
         self.timestamp = sd.timestamp
-        self.isEmpty = sd.messages.isEmpty
+        self.isEmpty = isEmpty
         self.boundProfileID = sd.backendEntityId
     }
 }

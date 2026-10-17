@@ -112,7 +112,8 @@ final class ModelCatalogService {
                     descriptionText: local.digest.map { "Digest: \($0.prefix(12))" } ?? "",
                     baseURL: baseURL,
                     tags: [],
-                    fitAssessment: assessment
+                    fitAssessment: assessment,
+                    detectedProfile: profile
                 )
             }
             cachedOllamaModels = items
@@ -152,7 +153,8 @@ final class ModelCatalogService {
                 descriptionText: item.localPath.lastPathComponent,
                 baseURL: nil,
                 tags: [],
-                fitAssessment: assessment
+                fitAssessment: assessment,
+                detectedProfile: profile
             )
         }
         cachedMLXModels = items

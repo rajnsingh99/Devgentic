@@ -151,31 +151,32 @@ final class TraceRecorderSeamTests: XCTestCase {
         XCTAssertEqual(span?.status, .completed, "a same-time replay must not flip a closed span's status")
     }
 
-    // MARK: - Model name → cost (the always-NULL-cost fix)
+    // MARK: - Cost (the always-NULL-cost fix, now priced per call)
 
-    func testBeginTraceWithModelNameYieldsNonNilCost() async throws {
+    /// The trace stores the run's cost as its calls were priced — each at its own model, when its
+    /// usage was read — and never re-prices the total from the trace's model name.
+    func testTheTraceStoresTheCostItsCallsWerePricedAt() async throws {
         let ctx = await beginTrace(modelName: "claude-sonnet-4")
         await recorder.recordTokenUsage(
             traceID: ctx.traceID,
-            usage: TokenUsage(inputTokens: 1_000_000, outputTokens: 100_000, isEstimated: false)
+            usage: TokenUsage(inputTokens: 1_000_000, outputTokens: 100_000, isEstimated: false, costUSD: 0.42)
         )
         let row = try store.fetchTrace(traceID: ctx.traceID)
         XCTAssertEqual(row?.modelName, "claude-sonnet-4")
         XCTAssertEqual(row?.inputTokens, 1_000_000)
-        let cost = try XCTUnwrap(row?.estimatedCostUSD, "a priced model must produce a cost")
-        // claude-sonnet pricing: 1M in @ $3 + 0.1M out @ $15/1M = 3.0 + 1.5
-        XCTAssertEqual(cost, 4.5, accuracy: 0.01)
+        let cost = try XCTUnwrap(row?.estimatedCostUSD, "a priced run must store its cost")
+        XCTAssertEqual(cost, 0.42, accuracy: 1e-12, "the summed per-call cost, not the total re-priced at the trace's model")
         XCTAssertEqual(row?.tokensEstimated, false)
     }
 
-    func testBeginTraceWithoutModelNameLeavesCostNilButKeepsTokens() async throws {
-        let ctx = await beginTrace(modelName: nil) // e.g. a workflow run
+    func testAnUnpricedRunLeavesCostNilButKeepsTokens() async throws {
+        let ctx = await beginTrace(modelName: "claude-sonnet-4")
         await recorder.recordTokenUsage(
             traceID: ctx.traceID,
             usage: TokenUsage(inputTokens: 500, outputTokens: 100, isEstimated: true)
         )
         let row = try store.fetchTrace(traceID: ctx.traceID)
-        XCTAssertNil(row?.estimatedCostUSD, "no model → no price attribution, honestly nil")
+        XCTAssertNil(row?.estimatedCostUSD, "no call was priced → honestly nil, even with a known model name")
         XCTAssertEqual(row?.inputTokens, 500)
         XCTAssertEqual(row?.tokensEstimated, true)
     }

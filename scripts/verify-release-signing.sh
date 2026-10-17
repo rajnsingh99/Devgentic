@@ -127,6 +127,18 @@ else
   fail "Release does not set ENABLE_HARDENED_RUNTIME = YES — the build cannot be notarized"
 fi
 
+# 2b. Apple silicon only. Without ARCHS the Release build is universal: the x86_64 slice is about
+# half the download and nothing guards MLX on Intel. Set at PROJECT level so every target and
+# package inherits it; every ARCHS line in the project must say arm64.
+ARCHS_LINES="$(grep -E '^[[:space:]]*ARCHS = ' "$PBXPROJ")"
+if [[ -z "$ARCHS_LINES" ]]; then
+  fail "the project sets no ARCHS — Release builds a universal (x86_64 + arm64) binary"
+elif printf '%s\n' "$ARCHS_LINES" | grep -qv 'ARCHS = arm64;'; then
+  fail "an ARCHS setting other than arm64: $(printf '%s\n' "$ARCHS_LINES" | grep -v 'ARCHS = arm64;' | head -1 | xargs)"
+else
+  pass "ARCHS = arm64 (Apple silicon only)"
+fi
+
 # 3. Secure timestamp — notarization rejects signatures without one.
 if printf '%s' "$BLOCK" | grep -q 'OTHER_CODE_SIGN_FLAGS.*--timestamp'; then
   pass "OTHER_CODE_SIGN_FLAGS carries --timestamp"
@@ -244,6 +256,14 @@ if [[ -n "$APP_PATH" ]]; then
       fail "the built app is AD-HOC signed — keychain ACLs will not survive an update"
     else
       fail "not signed with Developer ID (authority: $(printf '%s' "$SIGINFO" | sed -n 's/^Authority=//p' | head -1))"
+    fi
+
+    APP_EXEC="$APP_PATH/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist" 2>/dev/null)"
+    APP_ARCHS="$(lipo -archs "$APP_EXEC" 2>/dev/null)"
+    if [[ "$APP_ARCHS" == "arm64" ]]; then
+      pass "executable is arm64 only"
+    else
+      fail "executable architectures are '${APP_ARCHS:-<unreadable>}', expected arm64 only"
     fi
 
     if [[ -d "$APP_PATH/Contents/Frameworks/Sparkle.framework" ]]; then

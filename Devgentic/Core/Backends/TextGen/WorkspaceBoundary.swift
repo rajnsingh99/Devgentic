@@ -62,6 +62,11 @@ enum WorkspaceBoundary {
     ///   working_directory — batch_command
     ///   file_a, file_b    — diff_files
     ///
+    /// ⚠️ This is the GENERIC set, checked for every tool. A tool's own aliases (`file`, `dest`,
+    /// `sourcePaths`, …) come from `ToolPathKeys.byTool` — the list its decoder reads — and are
+    /// checked only for THAT tool, because the same name is not a path everywhere (CR-6). Read keys
+    /// through `ToolPathKeys.pathArguments(forTool:)`, never this set alone.
+    ///
     /// ⚠️ `pattern`, `glob`, `symbol`, `old_string`, `new_string`, `content` and `args` are
     /// deliberately ABSENT. They carry search text or file CONTENT, and rewriting one would be
     /// the content-corruption defect this project has already shipped four times.
@@ -78,7 +83,7 @@ enum WorkspaceBoundary {
     /// Preset tools that only read. Everything else is treated as mutating — the safe direction
     /// for a name this list has not been taught.
     static let readOnlyToolNames: Set<String> = [
-        "read_file", "list_directory", "project_tree", "codebase_map", "glob_files",
+        "read_file", "list_directory", "project_tree", "glob_files",
         "find_definition", "file_overview",
         "code_search_text", "code_search_symbol", "code_search_files",
         "diff_files",
@@ -88,7 +93,7 @@ enum WorkspaceBoundary {
         // inside a larger repo, which is the common layout) would have its git calls REFUSED
         // outright instead of prompting. If a write action is ever added to that tool, remove it
         // from this list in the same commit.
-        "git", "git_tool",
+        "git",
         // Report on, and read the log of, a background task. Both take a `task_id` and no path,
         // so `evaluate` is never reached for them today — they are listed because this set is the
         // app's answer to "does this tool only read", and `CodeEditPreviewTests` derives from it.
@@ -98,7 +103,7 @@ enum WorkspaceBoundary {
         // ⚠️ `stop_background_task` is deliberately NOT here. It ends a process — the machine is in a
         // different state afterwards — and only its lack of a FILE to diff keeps it out of the
         // preview requirement.
-        "get_task_output", "command_output",
+        "get_task_output",
     ]
 
     /// Paths outside the project that ordinary development legitimately needs, so a shell command
@@ -137,8 +142,60 @@ enum WorkspaceBoundary {
     /// is otherwise a one-step escape that a prefix check on the literal string cannot see. The
     /// root is canonicalised the same way so a `/tmp` → `/private/tmp` project still matches
     /// itself.
+    ///
+    /// ⚠️⚠️ RESOLVED ONE COMPONENT AT A TIME, so a path that does not exist YET is still resolved
+    /// (readiness CR-7, 2026-10-10). This used to be `resolvingSymlinksInPath()`, which returns a
+    /// path that does not exist UNCHANGED — symlinked parents included. With `link -> /elsewhere`
+    /// inside the project (committed in a cloned repo, or made by `ln -s` via `run_command`),
+    /// `create_new_file("link/x")` was judged inside the project and the OS followed the link and
+    /// wrote outside it. The inverse also happened: a project under a symlinked root falsely refused
+    /// new files, because the root was resolved and the new path was not.
+    ///
+    /// Each existing component that is a symlink is replaced by its target and the walk restarts;
+    /// components that do not exist are kept as written. The CALLER rewrites the tool's argument to
+    /// this result, so the tool acts on exactly the location that was checked. Bounded at 40 hops
+    /// (the kernel's own `MAXSYMLINKS`) so a link cycle cannot hang a tool call.
+    ///
+    /// ⚠️ NOT `standardizedFileURL` / `standardizingPath` for the normalisation: both turn
+    /// `/private/var/…` back into `/var/…` whenever that exists, which undid every `/var` and `/tmp`
+    /// link this resolves and restarted the walk until the hop limit — the first version of this
+    /// function resolved nothing under `/var/folders`. `lexicalComponents` only folds `.` and `..`.
     static func canonical(_ path: String) -> String {
-        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        let absolute = path.hasPrefix("/") ? path : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(path)
+        var pending = lexicalComponents(absolute)
+        var resolved = "/"
+        var index = 1   // components[0] is "/"
+        var hops = 0
+        while index < pending.count {
+            let candidate = (resolved as NSString).appendingPathComponent(pending[index])
+            if hops < 40, let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: candidate) {
+                hops += 1
+                let target = destination.hasPrefix("/")
+                    ? destination
+                    : (resolved as NSString).appendingPathComponent(destination)
+                let remainder = pending[(index + 1)...]
+                pending = lexicalComponents(target) + remainder
+                resolved = "/"
+                index = 1
+                continue
+            }
+            resolved = candidate
+            index += 1
+        }
+        return resolved
+    }
+
+    /// `["/", a, b, …]` with `.` dropped and `..` folded — purely lexical, touching nothing on disk.
+    private static func lexicalComponents(_ absolutePath: String) -> [String] {
+        var parts: [String] = []
+        for component in absolutePath.split(separator: "/", omittingEmptySubsequences: true) {
+            switch component {
+            case ".": continue
+            case "..": if !parts.isEmpty { parts.removeLast() }
+            default: parts.append(String(component))
+            }
+        }
+        return ["/"] + parts
     }
 
     // MARK: - Decision
@@ -228,7 +285,7 @@ struct WorkspaceBoundaryDecision {
 
     /// ⚠️ `repositoryLocator` exists for ONE tool. See `applyRepositoryDiscovery` below: every
     /// other preset tool acts on the path it was handed, so validating the argument is the whole
-    /// job. `git_tool` acts on whatever repository git DISCOVERS by walking up from that path,
+    /// job. `git` acts on whatever repository git DISCOVERS by walking up from that path,
     /// which can be — and on the common "module inside a larger repo" layout usually is —
     /// outside the project.
     static func evaluate(
@@ -246,22 +303,40 @@ struct WorkspaceBoundaryDecision {
         var rewritten = arguments
         var worst: Outcome = .proceed
 
-        for (key, value) in arguments.sorted(by: { $0.key < $1.key }) {
-            guard WorkspaceBoundary.pathArgumentNames.contains(key),
-                  case .string(let raw) = value,
-                  !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+        // ⚠️ THIS tool's path arguments — the generic set plus the aliases its own decoder reads
+        // (`ToolPathKeys`). See CR-6 in that file for what the generic set alone missed.
+        let pathKeys = ToolPathKeys.pathArguments(forTool: toolName)
 
+        /// Checks one path, folds its verdict into `worst`, and returns the resolved form.
+        func check(_ raw: String) -> String? {
+            guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             switch WorkspaceBoundary.evaluate(path: raw, toolName: toolName, projectRoot: root) {
             case .allowed(let resolved):
-                rewritten[key] = .string(resolved)
+                return resolved
             case .needsApproval(let resolved, let reason):
-                rewritten[key] = .string(resolved)
                 // A refusal already recorded wins — one write outside the project condemns the
                 // whole call, however many of its other arguments were merely readable.
                 if case .refuse = worst {} else { worst = .askUser(reason: reason) }
+                return resolved
             case .refused(let resolved, let reason):
-                rewritten[key] = .string(resolved)
                 worst = .refuse(reason: reason)
+                return resolved
+            }
+        }
+
+        for (key, value) in arguments.sorted(by: { $0.key < $1.key }) where pathKeys.contains(key) {
+            switch value {
+            case .string(let raw):
+                if let resolved = check(raw) { rewritten[key] = .string(resolved) }
+            case .array(let items):
+                // ⚠️ `batch_move_files.sourcePaths` is an ARRAY of paths. String-only checking let
+                // every element through unexamined (CR-6). Non-string elements are left alone.
+                rewritten[key] = .array(items.map { item in
+                    guard case .string(let raw) = item, let resolved = check(raw) else { return item }
+                    return .string(resolved)
+                })
+            default:
+                continue
             }
         }
 
@@ -288,7 +363,7 @@ struct WorkspaceBoundaryDecision {
     /// saw a compliant in-project path and allowed it; the output covered sibling folders the
     /// user never pointed the agent at.
     ///
-    /// The verdict is `askUser`, not `refuse`, and that is deliberate on two counts. `git_tool`
+    /// The verdict is `askUser`, not `refuse`, and that is deliberate on two counts. `git`
     /// is read-only, and the boundary's whole policy is that reads outside the project ASK while
     /// writes are refused — treating this as a write would contradict it. And the parent-repo
     /// layout is legitimate and common: the user can simply say yes, once, having been told
@@ -300,7 +375,7 @@ struct WorkspaceBoundaryDecision {
         current: Outcome,
         locator: GitRepositoryLocator
     ) -> Outcome {
-        guard toolName == "git" || toolName == "git_tool" else { return current }
+        guard toolName == "git" else { return current }
 
         // Only when the ARGUMENT check found nothing to object to. A path already outside the
         // project has produced its own verdict, and asking twice about one call would park the

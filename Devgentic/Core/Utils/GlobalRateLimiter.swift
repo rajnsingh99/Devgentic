@@ -261,6 +261,37 @@ actor GlobalRateLimiter {
         drainAndPenalize(key: category.rawValue, category: category, penaltySeconds: penaltySeconds)
     }
 
+    /// Waits until the bucket would have a token, WITHOUT taking it. Returns the time waited.
+    ///
+    /// ⚠️ For callers ABOVE the HTTP layer — the ReAct loop, Planning, Reflexion. The token itself is
+    /// taken exactly once per request by `CloudRequestPipeline`, which every metered provider call
+    /// goes through. These callers used `wait(forKey:)` too, so each model call cost TWO tokens and
+    /// every limit was effectively halved (a `:free` OpenRouter model got ~10 steps/min, not 20).
+    /// They still want backpressure — pause before a step rather than fire it into a dry bucket, and
+    /// show "Throttling…" while doing it — which is what this provides without the second charge.
+    @discardableResult
+    func waitForCapacity(forKey key: String, category: RateLimitCategory) async -> TimeInterval {
+        let delay = timeUntilNextToken(forKey: key, category: category)
+        // Debt is bounded by `drainAndPenalize` (≤ 1 h); clamp anyway so a bad value can't trap
+        // the `UInt64` conversion.
+        guard delay > 0, delay.isFinite else { return 0 }
+        let bounded = min(delay, 3600)
+        do {
+            try await Task.sleep(nanoseconds: UInt64(bounded * 1_000_000_000))
+        } catch {
+            logger.warning("Rate limit capacity wait interrupted.")
+        }
+        return bounded
+    }
+
+    /// Tokens the bucket would hold right now (refill included), or nil when it doesn't exist yet.
+    /// Read-only; for diagnostics and tests.
+    func availableTokens(forKey key: String) -> Double? {
+        guard let bucket = buckets[key] else { return nil }
+        let refill = Date().timeIntervalSince(bucket.lastRefill) * bucket.tokensPerSecond
+        return min(bucket.maxBurst, bucket.currentTokens + refill)
+    }
+
     /// Checks the current estimated wait time without consuming a token.
     func timeUntilNextToken(forKey key: String, category: RateLimitCategory) -> TimeInterval {
         guard category != .local else { return 0 } // local is unmetered

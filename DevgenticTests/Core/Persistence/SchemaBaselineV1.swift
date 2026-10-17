@@ -12,6 +12,10 @@
 //  was collapsed into this one before any build reached anyone; see `DevgenticSchemaVersions.swift`.
 //  15 entities. Amended once more before any build shipped, at the 2026-10-03 fresh start:
 //  `ConversationSD.backendType` and `ConversationSD.openAIThreadID` removed (both unread).
+//  Amended again 2026-10-11, still pre-ship (owner decision, RAG-10 / CR-66): composite indexes
+//  `ChatMessageSD (conversationId, timestamp)` and `WorkflowRunRecordSD (conversationID, timestamp)`.
+//  Index-only — attributes unchanged. Indexes are outside Core Data's version hash, so stores
+//  created before this amendment open unchanged and simply lack the two indexes.
 //
 //  ⚠️ ONCE A BUILD SHIPS, THIS FILE IS A HISTORICAL RECORD AND IS NEVER EDITED. A schema change
 //  then gets a NEW `SchemaBaselineV2`, and the drift test is pointed at it; this file keeps saying
@@ -51,6 +55,9 @@ ENTITY AttachedImageFileSD
   UNIQUE (id)
 ENTITY AttachedTextFileSD
   ATTR content: String [required]
+  ATTR deliveryKind: Optional<String> [optional]
+  ATTR deliverySentChars: Optional<Int> [optional]
+  ATTR deliveryTotalChars: Optional<Int> [optional]
   ATTR fileExtension: String [required]
   ATTR id: UUID [required,unique] options=unique
   ATTR name: String [required]
@@ -93,6 +100,7 @@ ENTITY ChatMessageSD
   REL  attachedTextFiles: Array<AttachedTextFileSD> [required] -> AttachedTextFileSD delete=cascade inverse=none
   REL  conversation: Optional<ConversationSD> [optional] -> ConversationSD delete=nullify inverse=messages
   UNIQUE (id)
+  INDEX (binary+conversationId+timestamp)
 ENTITY ConversationSD
   ATTR backendEntityId: Optional<UUID> [optional]
   ATTR id: UUID [required,unique] options=unique
@@ -223,5 +231,6 @@ ENTITY WorkflowRunRecordSD
   ATTR workflowProfileID: UUID [required]
   REL  conversation: Optional<ConversationSD> [optional] -> ConversationSD delete=nullify inverse=workflowRuns
   UNIQUE (id)
+  INDEX (binary+conversationID+timestamp)
 """
 }

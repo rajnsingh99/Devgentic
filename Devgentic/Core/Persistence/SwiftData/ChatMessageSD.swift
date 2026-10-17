@@ -18,6 +18,20 @@ final class ChatMessageSD {
     @Attribute(.unique) var id: UUID
     var conversationId: UUID
     var timestamp: Date
+
+    /// Every hot read is "this conversation's messages, by time" — page loads, the per-send
+    /// history resolve, the context gauge, search, export, counts. Without this index each one
+    /// was a FULL scan of every conversation's messages plus a temp B-tree sort, mostly on the
+    /// main actor (measured on a 50k-row copy: 23 ms per fetch → under 0.1 ms; RAG-10 / CR-66).
+    /// Composite so the same index serves the predicate AND the sort.
+    ///
+    /// ⚠️ An EXISTING store does NOT gain this index. SwiftData/Core Data leave indexes out of the
+    /// model's version hash, so a store written before it opens as already-compatible: no
+    /// migration runs and no index is built (probed 2026-10-11 on a copy of a real store: opened
+    /// clean, 151 rows intact, index absent). Only stores CREATED by a build that declares it
+    /// have it. Fine before the first release; after it, adding an index to existing stores
+    /// needs a forced migration (a new schema version or `@Attribute(hashModifier:)`).
+    #Index<ChatMessageSD>([\.conversationId, \.timestamp])
     var senderType: String
     var traceID: String?
     var profileTypeRaw: String?
@@ -175,7 +189,15 @@ final class ChatMessageSD {
             do {
                 message.tokenUsage = try JSONDecoder().decode(TokenUsage.self, from: data)
             } catch {
-                logger.warning("[DECODE] Message \(self.id.uuidString.prefix(8)): tokenUsageData undecodable (\(data.count) bytes) — usage badge lost for this load.")
+                // CR-63: marked, so neither writer turns the nil this produces into a NULL column.
+                message.tokenUsageDecodeFailed = true
+                logger.error(
+                    "[PERSISTENCE] [DECODE] Message \(self.id.uuidString.prefix(8)): tokenUsageData "
+                    + "UNDECODABLE (\(data.count) bytes) — \(error.localizedDescription). CONSEQUENCE: "
+                    + "the usage badge and this message's share of the conversation's token and cost "
+                    + "totals are missing on this load; the stored bytes are PROTECTED from being "
+                    + "nulled by that empty state and kept for a build that can read them."
+                )
             }
         }
 
@@ -366,10 +388,13 @@ final class ChatMessageSD {
                 version: Self.timelineBlobVersion
               ).dataToWrite
             : nil
-        let tokenUsageData = Self.encodeAuxiliaryBlob(
-            message.tokenUsage, column: "tokenUsageData", messageID: message.id,
-            version: Self.tokenUsageBlobVersion
-        ).dataToWrite
+        // CR-63: `canPersistTokenUsage`, for the same rebuilt-from-a-load reason as the two above.
+        let tokenUsageData: Data? = message.canPersistTokenUsage
+            ? Self.encodeAuxiliaryBlob(
+                message.tokenUsage, column: "tokenUsageData", messageID: message.id,
+                version: Self.tokenUsageBlobVersion
+              ).dataToWrite
+            : nil
 
         let sd = ChatMessageSD(
             id: message.id,

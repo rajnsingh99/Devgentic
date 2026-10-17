@@ -52,7 +52,7 @@ final class ToolRegistryDriftTests: XCTestCase {
     /// Tools constructed directly by `AgentConnect` rather than from the catalogue, each built
     /// with run-scoped data a startup catalogue could not supply: `ask_user` and `final_answer`
     /// drive the ReAct loop itself, `get_conversation_history` carries the run's chat history,
-    /// `load_skill` its skill manifests, and `update_project_context` a Code profile's project
+    /// `load_skill` its skill manifests, and the memory tools (`remember`, `forget`, `recall`) a Code profile's project
     /// folder. Deliberately outside the catalogue — they are control-plane, not user-selectable.
     ///
     /// `get_conversation_history` was missing from this list until 2026-07-31: its

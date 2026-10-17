@@ -255,15 +255,52 @@ struct ModernCognitiveStep: Sendable {
     /// Opaque on purpose: nothing here reads it; the tool-turn adapter only echoes it.
     let reasoningReplay: JSONValue?
 
-    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseOutcome: ParseOutcome? = nil, reasoningReplay: JSONValue? = nil) {
+    /// The visible reply text when `toolCalls` were RECOVERED from it rather than delivered on a
+    /// structured channel — Ollama's content fallback sets it; nil everywhere else. It lets
+    /// `NativeParsePipeline` tell "a JSON object in the answer that looked like a call" from a real
+    /// structured call to an unknown tool, and hand the WHOLE reply back when it is the answer
+    /// (`reasoning` there is only the prose before the first brace). See bug 3, 2026-10-06.
+    let callsRecoveredFromText: String?
+
+    /// Calls the model made in THIS step that failed validation while siblings passed (CR-52). The
+    /// step is still `.success` (partial progress beats none), and the execution loop reports each
+    /// one to the model as not run, with the reason. Empty whenever every call validated.
+    let rejectedCalls: [RejectedSiblingCall]
+
+    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseOutcome: ParseOutcome? = nil, reasoningReplay: JSONValue? = nil, callsRecoveredFromText: String? = nil, rejectedCalls: [RejectedSiblingCall] = []) {
+        self.rejectedCalls = rejectedCalls
         self.reasoning = reasoning
         self.thought = thought
         self.reasoningReplay = reasoningReplay
+        self.callsRecoveredFromText = callsRecoveredFromText
         self.toolCalls = toolCalls
         self.tokenUsage = tokenUsage
         // Default derivation: non-empty tool calls ⇒ success; empty ⇒ genuineCompletion.
         // Callers that detected a parse failure must pass `.failed(reason)` explicitly.
         self.parseOutcome = parseOutcome ?? (toolCalls.isEmpty ? .genuineCompletion : .success)
+    }
+}
+
+/// A call that failed validation in a step where other calls passed (CR-52).
+struct RejectedSiblingCall: Sendable {
+    let call: PendingToolCall
+    let reason: ParseFailureReason
+
+    /// What the model is told in place of a result.
+    var modelNote: String {
+        switch reason {
+        case .unknownToolName(let attempted, let suggestions):
+            let hint = suggestions.isEmpty ? "" : " Did you mean: \(suggestions.joined(separator: ", "))?"
+            return "Not run: there is no tool named '\(attempted)'.\(hint) The other calls in this step did run."
+        case .argSchemaMismatch(let attempted, let resolvedTo, let missing, let unexpected):
+            var parts: [String] = []
+            if !missing.isEmpty { parts.append("missing required: \(missing.joined(separator: ", "))") }
+            if !unexpected.isEmpty { parts.append("not accepted: \(unexpected.joined(separator: ", "))") }
+            let target = attempted == resolvedTo ? "'\(resolvedTo)'" : "'\(attempted)' (taken as '\(resolvedTo)')"
+            return "Not run: \(target) was called with the wrong arguments (\(parts.joined(separator: "; "))). The other calls in this step did run."
+        default:
+            return "Not run: this call could not be validated (\(String(describing: reason))). The other calls in this step did run."
+        }
     }
 }
 
@@ -299,6 +336,14 @@ enum AgentState: Codable, Equatable, Sendable {
         /// so this renders everywhere without touching a switch, and `EvaluationLogger` counts
         /// iterations by comparing specific cases — so waiting correctly does not count as one.
         case queued = "Waiting its turn"
+        /// Admitted in its conversation, but another run on this Mac holds the local model (the
+        /// local inference coordinator's lock). Distinct from `.queued` because the remedy is
+        /// different: that run is elsewhere, usually in another conversation. Who holds it is in
+        /// the conversation's advisory banner; this label stays short.
+        case awaitingLocalModel = "Waiting for the local model"
+        /// Phase 7: held until its user chooses Proceed or Stop (a concern, e.g. memory) — the banner
+        /// above the input says why and counts down to the auto-deny.
+        case awaitingConfirmation = "Waiting for you to proceed"
     }
 
     enum ActingDetail: Codable, Equatable, Sendable {
@@ -684,6 +729,10 @@ struct AgentInput: Sendable {
     /// budgeted content (directInjection) or a path manifest (stateless).
     var knowledgeBaseContext: String? = nil
 
+    /// Code runs only: the project's `AGENTS.md` + memory listing, read when the run started
+    /// (`AgentConnect.codeProjectKnowledge`). Its own layer — see `SemanticContext.projectKnowledge`.
+    var projectKnowledge: String? = nil
+
     /// MCP server-authored guidance on how to drive THIS run's tools, rendered as `<tool_guidance>`.
     ///
     /// ⚠️ Separate from `knowledgeBaseContext` on purpose (owner decision 2026-08-20). It used to
@@ -927,7 +976,12 @@ struct EnvironmentFacts: Sendable {
     /// home. Under App Sandbox it would silently return the container path — switch to
     /// `getpwuid(getuid())` if sandboxing is ever enabled.
     let homeDirectory: String
+    /// The DAY only — it renders in the system message, which must stay byte-identical across a
+    /// conversation's messages (layout B). The time of day is `currentTime`.
     let currentDate: String
+    /// The time of day, rendered in the per-message part of the user message, never the system
+    /// message: a clock to the minute there changed the prompt's bytes on every message.
+    let currentTime: String?
 
     /// The project folder a Code run is confined to, or nil when the run is unconfined.
     ///
@@ -940,13 +994,19 @@ struct EnvironmentFacts: Sendable {
     /// after that was fixed. When this is set the block names the project instead.
     let workspaceRoot: String?
 
-    init(osVersion: String, shellType: String, userName: String, homeDirectory: String, currentDate: String, workspaceRoot: String? = nil) {
+    init(osVersion: String, shellType: String, userName: String, homeDirectory: String, currentDate: String, currentTime: String? = nil, workspaceRoot: String? = nil) {
         self.osVersion = osVersion
         self.shellType = shellType
         self.userName = userName
         self.homeDirectory = homeDirectory
         self.currentDate = currentDate
+        self.currentTime = currentTime
         self.workspaceRoot = workspaceRoot
+    }
+
+    /// The one place the two clock strings are formatted, so every path splits them the same way.
+    static func clock(at date: Date = Date()) -> (date: String, time: String) {
+        (date.formatted(date: .numeric, time: .omitted), date.formatted(date: .omitted, time: .shortened))
     }
 }
 
@@ -1004,6 +1064,12 @@ struct SemanticContext: Sendable {
     /// layer: budgeted content (directInjection) or a path manifest (stateless).
     var knowledgeBaseContext: String? = nil
 
+    /// Code runs only: `AGENTS.md` + the memory listing, rendered as the LAST section of the system
+    /// message. Kept out of `instructions` on purpose: it changes whenever a memory is saved or a
+    /// stale mark flips, and anything that changes must sit after everything that doesn't, or the
+    /// next request can reuse none of the prompt (layout B — see `PromptBuilder`).
+    var projectKnowledge: String? = nil
+
     /// MCP server-authored guidance on how to drive THIS run's tools, rendered as `<tool_guidance>`.
     ///
     /// ⚠️ Separate from `knowledgeBaseContext` on purpose (owner decision 2026-08-20). It used to
@@ -1030,6 +1096,14 @@ struct SemanticContext: Sendable {
     /// (Run-Report Phase 3). Defaulted nil — construction sites that don't carry
     /// tracing (planning fixtures, tests) stay untouched and emit nothing.
     var traceContext: TraceContext? = nil
+
+    /// Every tool name this RUN offers — a superset of `availableTools` whenever an iteration
+    /// withholds a tool from its schema (none does since the reading gate was removed on
+    /// 2026-10-06; the split stays so a future per-iteration filter cannot reopen the hole). Read
+    /// only to RECOGNISE an attempted call (`AttemptedToolCallGrammar`): a broken call to a
+    /// withheld tool is still a call, not an answer. Never offered to the model from here. Defaulted empty — construction sites
+    /// without a run (planning, tests) recognise against `availableTools` alone.
+    var runToolNames: Set<String> = []
 }
 
 // MARK: - Agent Failure Reasons
@@ -1151,6 +1225,9 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
         if let iterations = exhaustedIterationCount(in: text) {
             return .iterationBudgetExhausted(iterations: iterations)
         }
+        if let stop = formatCorrectionsExhausted(in: text) {
+            return .consecutiveParseFailures(count: stop.count, lastError: stop.last)
+        }
         if text.contains("Breaking stale loop") {
             // "Tool 'X' has been called N times with the same parameters…"
             let action = text.split(separator: "'").dropFirst().first.map(String.init) ?? "the same action"
@@ -1160,6 +1237,34 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
             return .repetitiveActionLoop(action: action, count: count)
         }
         return .modelError(provider: provider, error: text)
+    }
+
+    /// The executor's parse-loop stop message (`ReActAgentExecutor`, the "On Parse Failure" limit).
+    ///
+    /// Built HERE, next to `formatCorrectionsExhausted(in:)`, so the classifier reads exactly what the
+    /// executor emits. Without this a workflow node stopped by the limit was classified
+    /// `.modelError`, whose remediation tells the author to check connectivity and credentials.
+    static func formatCorrectionsExhaustedMessage(count: Int, last: String, identicalReplies: Bool) -> String {
+        identicalReplies
+            ? "\(identicalReplyPrefix)\(count)\(formatStopInfix)\(last)) — likely a parser/dialect mismatch."
+            : "\(unreadableRepliesPrefix)\(count)\(formatStopInfix)\(last))."
+    }
+
+    private static let unreadableRepliesPrefix = "The model's replies could not be read "
+    private static let identicalReplyPrefix = "The model sent the same unreadable reply "
+    private static let formatStopInfix = " times in a row (last: "
+
+    /// The count and last failure from a `formatCorrectionsExhaustedMessage`, or nil if `text` is
+    /// not one. Total, like `exhaustedIterationCount(in:)`: an unreadable count yields nil.
+    static func formatCorrectionsExhausted(in text: String) -> (count: Int, last: String)? {
+        guard let prefix = [unreadableRepliesPrefix, identicalReplyPrefix].first(where: { text.hasPrefix($0) }) else {
+            return nil
+        }
+        let rest = text.dropFirst(prefix.count)
+        guard let infix = rest.range(of: formatStopInfix),
+              let count = Int(rest[..<infix.lowerBound]),
+              let close = rest[infix.upperBound...].lastIndex(of: ")") else { return nil }
+        return (count, String(rest[infix.upperBound..<close]))
     }
 
     /// The iteration count from an exhaustion message, or nil if this is not one.

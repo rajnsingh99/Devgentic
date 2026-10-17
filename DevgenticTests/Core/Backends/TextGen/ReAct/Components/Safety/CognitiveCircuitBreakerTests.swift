@@ -51,7 +51,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
 
         let action1 = breaker.evaluateRepetitiveActions([makeObservation(toolName: "list_directory", output: "file1.txt")])
         let action2 = breaker.evaluateRepetitiveActions([makeObservation(toolName: "read_file", output: "contents")])
-        let action3 = breaker.evaluateRepetitiveActions([makeObservation(toolName: "fs_smart_search", output: "found it")])
+        let action3 = breaker.evaluateRepetitiveActions([makeObservation(toolName: "spotlight_search", output: "found it")])
 
         if case .proceed = action1 {} else { XCTFail("Expected .proceed for unique action 1") }
         if case .proceed = action2 {} else { XCTFail("Expected .proceed for unique action 2") }
@@ -62,13 +62,13 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         // G2 dual-channel warning: the 2nd identical iteration warns (UI + model
         // alert) so the model can course-correct before the 3rd-strike abort.
         var breaker = CognitiveCircuitBreaker()
-        let identicalObs = [makeObservation(toolName: "fs_smart_search", output: "No results")]
+        let identicalObs = [makeObservation(toolName: "spotlight_search", output: "No results")]
 
         _ = breaker.evaluateRepetitiveActions(identicalObs)
         let action2 = breaker.evaluateRepetitiveActions(identicalObs)
 
         if case .proceedWithWarning(let uiMessage, let modelAlert) = action2 {
-            XCTAssertTrue(uiMessage.contains("fs_smart_search"), "UI warning should name the tool")
+            XCTAssertTrue(uiMessage.contains("spotlight_search"), "UI warning should name the tool")
             XCTAssertTrue(modelAlert.contains("final_answer"), "Model alert should offer the final_answer escape hatch")
         } else {
             XCTFail("Expected .proceedWithWarning on 2nd identical iteration, got \(action2)")
@@ -77,7 +77,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
 
     func testRepetitiveActions_IdenticalObservations_AbortsAtThreshold() {
         var breaker = CognitiveCircuitBreaker()
-        let identicalObs = [makeObservation(toolName: "fs_smart_search", params: "{\"search_term\":\"\"}", output: "No results found matching ''.")]
+        let identicalObs = [makeObservation(toolName: "spotlight_search", params: "{\"search_term\":\"\"}", output: "No results found matching ''.")]
 
         let action1 = breaker.evaluateRepetitiveActions(identicalObs)
         let action2 = breaker.evaluateRepetitiveActions(identicalObs)
@@ -88,7 +88,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
 
         // 3rd identical iteration should abort
         if case .abort(let trigger) = action3 {
-            XCTAssertTrue(trigger.reason.contains("fs_smart_search"), "Abort reason should mention the tool name")
+            XCTAssertTrue(trigger.reason.contains("spotlight_search"), "Abort reason should mention the tool name")
             XCTAssertTrue(trigger.reason.contains("3"), "Abort reason should mention the count")
         } else {
             XCTFail("Expected .abort on 3rd identical iteration, got \(action3)")
@@ -97,8 +97,8 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
 
     func testRepetitiveActions_BreaksWhenOutputChanges() {
         var breaker = CognitiveCircuitBreaker()
-        let emptyResult = [makeObservation(toolName: "fs_smart_search", output: "No results")]
-        let successResult = [makeObservation(toolName: "fs_smart_search", output: "Found: document.pdf")]
+        let emptyResult = [makeObservation(toolName: "spotlight_search", output: "No results")]
+        let successResult = [makeObservation(toolName: "spotlight_search", output: "Found: document.pdf")]
 
         _ = breaker.evaluateRepetitiveActions(emptyResult) // 1st
         _ = breaker.evaluateRepetitiveActions(emptyResult) // 2nd (warns)
@@ -115,7 +115,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
     func testRepetitiveActions_MultipleToolsSameIteration() {
         var breaker = CognitiveCircuitBreaker()
         let multiToolObs = [
-            makeObservation(toolName: "fs_smart_search", output: "No results"),
+            makeObservation(toolName: "spotlight_search", output: "No results"),
             makeObservation(toolName: "recall_conversation_history", output: "No context found")
         ]
 
@@ -138,7 +138,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         // appearing 3× across ANY iterations aborts. (This pattern used to slip
         // through before the G3 global-frequency check.)
         var breaker = CognitiveCircuitBreaker()
-        let obs1 = [makeObservation(toolName: "fs_smart_search", output: "No results")]
+        let obs1 = [makeObservation(toolName: "spotlight_search", output: "No results")]
 
         _ = breaker.evaluateRepetitiveActions(obs1) // global count 1
         _ = breaker.evaluateRepetitiveActions(obs1) // global count 2 (warns)
@@ -149,7 +149,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         // Back to obs1: 3rd global occurrence → abort despite the interruption
         let action4 = breaker.evaluateRepetitiveActions(obs1)
         if case .abort(let trigger) = action4 {
-            XCTAssertTrue(trigger.reason.contains("fs_smart_search"), "Abort should name the repeated tool, got: \(trigger.reason)")
+            XCTAssertTrue(trigger.reason.contains("spotlight_search"), "Abort should name the repeated tool, got: \(trigger.reason)")
             XCTAssertTrue(trigger.reason.contains("3"), "Abort should mention the global count, got: \(trigger.reason)")
         } else {
             XCTFail("Expected .abort via global frequency cap on 3rd occurrence, got \(action4)")

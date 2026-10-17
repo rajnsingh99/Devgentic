@@ -231,10 +231,8 @@ final class CapabilityCardRouter {
     func completeTool(output: ToolOutput, failureCategory: ToolFailureCategory?, durationMs: Int?) -> Bool {
         var completed = false
         let handled = withActiveEvents { events in
-            guard let idx = events.lastIndex(where: {
-                if case .toolExecution(let d) = $0 { return d.name == output.toolName && d.isExecuting }
-                return false
-            }) else { return }
+            // CR-41: matched by name AND params — see `ToolRowMatcher`.
+            guard let idx = ToolRowMatcher.index(in: events, for: output) else { return }
             if case .toolExecution(var d) = events[idx] {
                 d.params = output.params
                 // Cap, snapshots and effect must match `completeToolTimelineEvent` exactly.
@@ -257,6 +255,7 @@ final class CapabilityCardRouter {
                 d.postWriteContent = output.postWriteContent
                 d.effect = ActionEffect.from(toolExecution: d)
                 events[idx] = .toolExecution(d)
+                EditPatchStore.recordIfCode(d, in: message)
                 completed = true
             }
         }

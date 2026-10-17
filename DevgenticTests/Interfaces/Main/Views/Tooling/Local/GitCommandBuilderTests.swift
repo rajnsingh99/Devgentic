@@ -384,4 +384,81 @@ final class GitCommandBuilderTests: XCTestCase {
             XCTAssertTrue(argv.contains("--no-textconv"), "\(action) is missing --no-textconv")
         }
     }
+
+    // MARK: - Environment (GIT_OPTIONAL_LOCKS)
+
+    func testEnvironmentDisablesOptionalLocksAndColour() {
+        let env = GitCommandBuilder.environment(inheriting: ["PATH": "/usr/bin"])
+        XCTAssertEqual(env["GIT_OPTIONAL_LOCKS"], "0")
+        XCTAssertEqual(env["TERM"], "dumb")
+        XCTAssertEqual(env["PATH"], "/usr/bin", "the inherited environment is kept")
+    }
+
+    /// An inherited value must not win — a user shell exporting `GIT_OPTIONAL_LOCKS=1` (or a colour
+    /// TERM) would otherwise reopen the race.
+    func testOverridesBeatTheInheritedEnvironment() {
+        let env = GitCommandBuilder.environment(inheriting: ["GIT_OPTIONAL_LOCKS": "1", "TERM": "xterm-256color"])
+        XCTAssertEqual(env["GIT_OPTIONAL_LOCKS"], "0")
+        XCTAssertEqual(env["TERM"], "dumb")
+    }
+
+    /// One source: the Git Changes panel uses the SAME overrides as the agent's tool.
+    func testThePanelSharesTheToolsEnvironment() {
+        XCTAssertEqual(GitUICommand.environmentOverrides, GitCommandBuilder.environmentOverrides)
+    }
+
+    /// ⚠️ WIRING, end to end: the real `git` tool running `status` on a repo whose index is
+    /// stat-stale must leave `.git/index` untouched. Verified 2026-10-04 that a plain `git status`
+    /// REWRITES it here (taking `index.lock` — the lock a user's concurrent `git commit` then
+    /// trips on). Fails if the tool stops passing `GitCommandBuilder.environment()`.
+    func testTheAgentsStatusDoesNotRewriteTheIndex() async throws {
+        let repo = FileManager.default.temporaryDirectory.appendingPathComponent("GitLock-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repo) }
+
+        func git(_ args: [String]) throws {
+            let run = try ProcessRunner.run(
+                executable: "/usr/bin/git",
+                arguments: ["-C", repo.path, "-c", "user.name=t", "-c", "user.email=t@t",
+                            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"] + args)
+            guard run.succeeded else { throw XCTSkip("git unavailable here: \(run.standardError)") }
+        }
+        try git(["init", "-q", "-b", "main", "."])
+        let file = repo.appendingPathComponent("f.txt")
+        try "a\n".write(to: file, atomically: true, encoding: .utf8)
+        try git(["add", "f.txt"])
+        try git(["commit", "-q", "-m", "init"])
+
+        // Make the index stat-stale: the file's mtime moves past what the index recorded. Git's
+        // timestamps are second-granular, so step over a second boundary on each side.
+        let index = repo.appendingPathComponent(".git/index")
+        try await Task.sleep(for: .milliseconds(1100))
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
+        try await Task.sleep(for: .milliseconds(1100))
+        let before = try FileManager.default.attributesOfItem(atPath: index.path)[.modificationDate] as? Date
+
+        let arguments = try JSONDecoder().decode(GitTool.Arguments.self,
+                                                 from: Data(#"{"action":"status","path":"\#(repo.path)"}"#.utf8))
+        let output = try await GitTool().call(arguments: arguments)
+        XCTAssertFalse(output.hasPrefix("Error"), output)
+
+        let after = try FileManager.default.attributesOfItem(atPath: index.path)[.modificationDate] as? Date
+        XCTAssertEqual(before, after, "the agent's `git status` rewrote .git/index — it took index.lock")
+    }
+
+    /// No call site may build its own git environment again.
+    func testNoGitCallSiteBuildsItsOwnEnvironment() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for path in ["Devgentic/Interfaces/Main/Views/Tooling/Local/GitIntegrationTool.swift",
+                     "Devgentic/Core/Backends/TextGen/GitRepositoryLocator.swift"] {
+            guard let source = try? String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) else {
+                throw XCTSkip("\(path) not reachable — running outside a checkout")
+            }
+            XCTAssertFalse(source.contains(#"["TERM"] = "dumb""#), "\(path) builds its own git environment")
+            XCTAssertTrue(source.contains("GitCommandBuilder.environment()"), "\(path) does not use the shared environment")
+        }
+    }
 }

@@ -27,11 +27,11 @@ final class OrbApprovalPromptTests: XCTestCase {
     }
 
     func testToolConfirmationNamesTheToolInSpeakableForm() {
-        let confirmation = PendingToolConfirmation(toolName: "fs_smart_search", params: "{}")
+        let confirmation = PendingToolConfirmation(toolName: "spotlight_search", params: "{}")
         let prompt = OrbSessionController.approvalPrompt(for: pending(.toolConfirmation(confirmation)))
-        XCTAssertTrue(prompt.contains("fs smart search"),
+        XCTAssertTrue(prompt.contains("spotlight search"),
                       "underscores must be spoken as spaces, not as the word 'underscore'")
-        XCTAssertFalse(prompt.contains("fs_smart_search"))
+        XCTAssertFalse(prompt.contains("spotlight_search"))
     }
 
     func testThePromptNEVERCarriesTheArguments() {

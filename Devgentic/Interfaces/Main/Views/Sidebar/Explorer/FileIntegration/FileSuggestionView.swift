@@ -17,6 +17,9 @@ struct FileSuggestionView: View {
     // MARK: - Properties
     let files: [FileSystemItem]
     let suggestionQuery: String
+    var source: FileSuggestionSource = .ready
+    /// false until the first search since opening completes — see `FileSuggestionState.hasResults`.
+    var hasResults: Bool = true
 
     // MARK: - State
     @Binding var selectedItemID: FileSystemItem.ID?
@@ -34,15 +37,11 @@ struct FileSuggestionView: View {
     var body: some View {
         Group {
             if !files.isEmpty {
-                // CASE 1: Files found
                 fileListView
-            } else if !suggestionQuery.isEmpty {
-                // CASE 2: Query exists, but no files found
-                emptyStateView(text: "No matching files found.")
             } else {
-                // CASE 3: Initial Trigger (@ typed, query is empty, results pending)
-                // This fixes the issue where the view didn't appear immediately on typing "@"
-                emptyStateView(text: "Type to search files")
+                // An empty list says WHY. "Type to search files" used to stand in for all of
+                // these — including a search that simply had not run yet.
+                emptyStateView(text: emptyMessage)
             }
         }
     }
@@ -94,6 +93,24 @@ struct FileSuggestionView: View {
         }
     }
     
+    static func emptyMessage(source: FileSuggestionSource, hasResults: Bool, query: String) -> String {
+        switch source {
+        case .noFolder:
+            return String(localized: "No folder open. Open one in the Explorer to mention its files.")
+        case .indexing:
+            return String(localized: "Indexing files…")
+        case .ready:
+            if !hasResults { return String(localized: "Searching…") }
+            return query.isEmpty
+                ? String(localized: "No files in this folder.")
+                : String(localized: "No matching files found.")
+        }
+    }
+
+    private var emptyMessage: String {
+        Self.emptyMessage(source: source, hasResults: hasResults, query: suggestionQuery)
+    }
+
     private func emptyStateView(text: String) -> some View {
         Text(text)
             .font(.caption)

@@ -5,9 +5,8 @@
 //  Devgentic
 //
 //  [Q8] Shared file-attachment picking for the main composer (ChatInputAreaView) and the
-//  QuickAccess panel. The accept policy — files + folders, multi-select, video/movie excluded,
-//  FileSystemItem construction — lived in two near-identical copies; centralizing it means a
-//  change to the rules (new excluded types, size limits, security scopes) applies to both.
+//  QuickAccess panel: panel presentation, drop handling and FileSystemItem construction.
+//  The accept/refuse POLICY is `AttachmentIntake`, applied where the items land.
 //
 
 import AppKit
@@ -15,52 +14,39 @@ import UniformTypeIdentifiers
 
 enum FileAttachmentPicker {
 
-    /// Not accepted as a chat attachment (video/movie).
-    private static func isExcluded(_ url: URL) -> Bool {
-        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
-            return type.conforms(to: .video) || type.conforms(to: .movie)
-        }
-        return false
-    }
-
-    private static func isImage(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType)?.conforms(to: .image) ?? false
-    }
-
-    private static func fileByteSize(_ url: URL) -> Int64 {
-        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-    }
-
-    /// [M7] An image whose file exceeds the reject cap — refused (never modified) to keep the
-    /// oversized file from ever being read into memory, persisted, or sent. Uses a fast size stat
-    /// (no full read), so even a multi-GB file is rejected cheaply.
-    static func isOversizedImage(_ url: URL) -> Bool {
-        isImage(url) && fileByteSize(url) > ImageConstraints.maxAttachmentImageBytes
-    }
-
-    /// Builds an accepted FileSystemItem for `url`, or nil if excluded / oversized / non-existent.
+    /// Builds the FileSystemItem for `url`, or nil if nothing exists there.
+    ///
+    /// ⚠️ No accept/refuse policy here — that is `AttachmentIntake`, applied by the
+    /// destination (`ChatInputViewModel.addAttachedFiles`, QuickAccess `appendAttachments`).
+    /// This file used to refuse oversized images and silently drop video itself, which the
+    /// composer's `@` picker never passed through.
     private static func item(for url: URL) -> FileSystemItem? {
-        guard !isExcluded(url), !isOversizedImage(url) else { return nil }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
         return FileSystemItem(id: url, name: url.lastPathComponent, url: url, isDirectory: isDir.boolValue)
     }
 
-    /// [M7] Tell the user which images were refused for exceeding the cap (they were dropped, not
-    /// attached). Must run on the main thread (NSAlert).
-    private static func warnOversized(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        let mb = ImageConstraints.maxAttachmentImageBytes / (1024 * 1024)
-        let names = urls.map { $0.lastPathComponent }.joined(separator: ", ")
+    /// Shows `AttachmentIntake` refusals as an alert — for surfaces with no toast host (the
+    /// QuickAccess panel). `attachedTo`: present as a sheet on that window; a floating
+    /// non-activating panel would otherwise hide a detached alert behind itself.
+    @MainActor
+    static func presentRefusals(_ refused: [AttachmentIntake.Refusal], removed: Bool = false, attachedTo window: NSWindow?) {
+        guard let message = AttachmentIntake.summary(refused, removed: removed) else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = urls.count == 1 ? "Image too large" : "\(urls.count) images too large"
-        alert.informativeText = "\(names) — over the \(mb) MB limit, so \(urls.count == 1 ? "it was" : "they were") not attached."
-        alert.runModal()
+        alert.messageText = removed
+            ? (refused.count == 1 ? String(localized: "Attachment removed") : String(localized: "\(refused.count) attachments removed"))
+            : (refused.count == 1 ? String(localized: "File not attached") : String(localized: "\(refused.count) files not attached"))
+        alert.informativeText = message
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
     }
 
     /// Presents an NSOpenPanel (files + folders, multi-select) and delivers the accepted items
-    /// on the main thread. `onItems` is not called when the user cancels or picks only excluded files.
+    /// on the main thread. `onItems` is not called when the user cancels.
     ///
     /// `attachedTo`: pass the hosting window to present the picker as a SHEET on it. Required for
     /// the QuickAccess panel — it floats at `.floating` level in a non-activating app, so a
@@ -78,7 +64,6 @@ enum FileAttachmentPicker {
 
         let handle: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK else { return }
-            warnOversized(panel.urls.filter { isOversizedImage($0) }) // [M7] feedback for refused images
             let items = panel.urls.compactMap { item(for: $0) }
             if !items.isEmpty { onItems(items) }
         }
@@ -98,8 +83,6 @@ enum FileAttachmentPicker {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 DispatchQueue.main.async {
-                    // [M7] Refuse an oversized image with feedback instead of attaching it.
-                    if isOversizedImage(url) { warnOversized([url]); return }
                     if let fileItem = item(for: url) { onItem(fileItem) }
                 }
             }

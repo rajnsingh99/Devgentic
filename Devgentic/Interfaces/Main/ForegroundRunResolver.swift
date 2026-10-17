@@ -66,6 +66,17 @@ enum ForegroundRunResolver {
         /// below (an anomaly path), never whether a run is a candidate, so it is not load-bearing
         /// here. Tracked in `LLM_Execution_Concurrency_Design.md` §7(a).
         let isParked: Bool
+        /// Waiting in `ConversationAdmission` for this conversation's current run to finish — it has
+        /// done no work yet.
+        ///
+        /// ⚠️⚠️ WHY THIS EXISTS (readiness CR-4, 2026-10-10). A queued run is registered in
+        /// `activeStreams` BEFORE it waits (so Stop and the sidebar see it at once), which made it the
+        /// newest unparked run — so Stop targeted IT, not the run actually working. Cancelling it did
+        /// nothing (its wait ignored cancellation) and the running run could not be stopped from the
+        /// composer while a ChatOps / scheduled / Orb message waited behind it. Worse, if the working
+        /// run was parked on an approval, Stop's conversation-wide park drain resolved that approval
+        /// with `false` while its task was NOT cancelled — recorded as a denial the user never made.
+        var isQueued: Bool = false
     }
 
     /// Every live run belonging to `conversation`, in no particular order.
@@ -85,16 +96,26 @@ enum ForegroundRunResolver {
     /// background scheduled or ChatOps run no longer locks the composer, and Stop can no longer
     /// reach across conversations to kill it.
     ///
-    /// Total, deterministic, and side-effect free. When a conversation somehow holds more than one
-    /// live run, prefer an actively-streaming run over a parked one, then the most recently
-    /// started, then lowest message id — so the answer never depends on dictionary ordering.
+    /// Total, deterministic, and side-effect free. When a conversation holds more than one live run,
+    /// prefer an actively-streaming run, then a parked one, then a QUEUED one — then the most
+    /// recently started, then lowest message id — so the answer never depends on dictionary ordering.
+    ///
+    /// ⚠️ Queued LAST, not merely "unparked". A queued run has done nothing yet; the run in front of
+    /// it is the one the user is watching and means to stop. And stopping a parked run must cancel
+    /// ITS task, which is what keeps its approval from being recorded as a denial (CR-4).
     nonisolated static func foregroundRun(live: [LiveRun], selectedConversation: UUID?) -> LiveRun? {
         let candidates = liveRuns(in: selectedConversation, from: live)
         if candidates.count <= 1 { return candidates.first }
         return candidates.max { a, b in
-            if a.isParked != b.isParked { return a.isParked }
+            if rank(a) != rank(b) { return rank(a) < rank(b) }
             if a.startedAt != b.startedAt { return a.startedAt < b.startedAt }
             return a.messageID.uuidString < b.messageID.uuidString
         }
+    }
+
+    /// Higher is the better Stop target: working, then waiting on the user, then not started.
+    private nonisolated static func rank(_ run: LiveRun) -> Int {
+        if run.isQueued { return 0 }
+        return run.isParked ? 1 : 2
     }
 }

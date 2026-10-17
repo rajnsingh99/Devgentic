@@ -136,52 +136,47 @@ final class PromptFitCheckTests: XCTestCase {
 
     // MARK: - Composer-side attachment estimate (pre-send hint)
 
-    /// The estimate DROPS an oversized file rather than clamping it, because
-    /// `readFileContentOrThrow` THROWS `.tooLarge` past the per-file budget instead of
-    /// truncating — `assembleTextFileContent` records the failure and moves on, so the model
-    /// never sees one character of it. The old clamp charged the full 50,000 regardless, and
-    /// that phantom cost posted an overflow advisory the user could only clear by detaching a
-    /// file that was costing nothing.
-    ///
-    /// The mechanics of the rule are `AttachmentSizingTests`' job. What is pinned here is the
-    /// arithmetic the ADVISORY is computed from, including the case that suite does not cover:
-    /// a batch of individually-oversized files, where the old clamp did not merely over-charge
-    /// but saturated the total budget.
-    func testEstimatedAttachmentChars_DoesNotBillFilesTheReaderRefuses() {
+    /// The estimate bills what the injection plan SHIPS (user decision 2026-10-04: an
+    /// over-budget text file is CUT to the budget, no longer dropped whole):
+    ///  • a file past the READ cap is never read, so it costs nothing;
+    ///  • a file past the per-file budget costs the slice that ships plus its marker;
+    ///  • files within budget pass through at size.
+    /// The mechanics are `AttachmentSizingTests`' job; this pins the advisory's inputs.
+    func testEstimatedAttachmentChars_BillsWhatThePlanShips() {
         XCTAssertEqual(
             PromptFitCheck.attachmentInjectionChars(forFileSizes: [5_000_000], wrapperCharsPerFile: 0), 0,
-            "a 5 MB file is refused whole — charging it the budget over-warns by 50K phantom chars"
+            "a 5 MB file is past the read cap — it is never read, so the model gets none of it"
         )
-        // Files under the budget still pass through at size; the advisory must keep firing on
-        // the attachments that genuinely do reach the prompt.
         XCTAssertEqual(
             PromptFitCheck.attachmentInjectionChars(forFileSizes: [18_379, 32_549], wrapperCharsPerFile: 0),
             18_379 + 32_549
         )
-        // Ten 60K files are ten separate refusals, not a filled 200K budget. Under the clamp
-        // this read as the entire total budget — the worst version of the defect, since not
-        // one of those files contributes anything to the request.
+        let cut = PromptFitCheck.attachmentInjectionChars(forFileSizes: [120_000], wrapperCharsPerFile: 0)
         XCTAssertEqual(
-            PromptFitCheck.attachmentInjectionChars(
-                forFileSizes: Array(repeating: 60_000, count: 10), wrapperCharsPerFile: 0),
-            0
+            cut,
+            DirectInjectionBudget.perFile
+                + DirectInjectionPlan.truncationMarker(sent: DirectInjectionBudget.perFile, total: 120_000).count,
+            "an over-budget file ships its first perFile chars plus the marker"
         )
         XCTAssertEqual(PromptFitCheck.attachmentInjectionChars(forFileSizes: [], wrapperCharsPerFile: 0), 0)
     }
 
-    /// The consequence one layer up, which is this file's actual subject: an attachment set
-    /// that ships nothing must not trip the banner. Under the clamp the same 600 KB priced at
-    /// the full 200K budget — ~67K tokens against an 8K window — and fired an advisory whose
-    /// stated cause did not exist.
-    func testRefusedAttachmentsDoNotTripTheOverflowAdvisory() {
-        let chars = PromptFitCheck.attachmentInjectionChars(
+    /// The consequence one layer up: a file the reader never reads must not trip the banner,
+    /// while ten 60K files — which now ship ~200K of cut content — must.
+    func testAdvisoryTracksWhatActuallyShips() {
+        let unread = PromptFitCheck.attachmentInjectionChars(forFileSizes: [5_000_000], wrapperCharsPerFile: 0)
+        XCTAssertFalse(PromptFitCheck.exceeds(
+            estimatedTokens: PromptFitCheck.estimatedTokens(
+                attachmentChars: unread, knowledgeChars: 0, retrievalChars: 0, queryChars: 7, historyChars: 0),
+            windowTokens: 8_192))
+
+        let cut = PromptFitCheck.attachmentInjectionChars(
             forFileSizes: Array(repeating: 60_000, count: 10), wrapperCharsPerFile: 0)
-        let tokens = PromptFitCheck.estimatedTokens(
-            attachmentChars: chars, knowledgeChars: 0, retrievalChars: 0,
-            queryChars: 7, historyChars: 0
-        )
-        XCTAssertFalse(PromptFitCheck.exceeds(estimatedTokens: tokens, windowTokens: 8_192),
-                       "every one of these files is refused by the reader — the prompt is a bare query")
+        XCTAssertTrue(PromptFitCheck.exceeds(
+            estimatedTokens: PromptFitCheck.estimatedTokens(
+                attachmentChars: cut, knowledgeChars: 0, retrievalChars: 0, queryChars: 7, historyChars: 0),
+            windowTokens: 8_192),
+            "cut content reaches the prompt — the old 'refused, costs nothing' premise no longer holds")
     }
 
     func testPreSendEstimate_ObservedTwoFileCase_TripsAdvisory() {
@@ -193,5 +188,57 @@ final class PromptFitCheckTests: XCTestCase {
         )
         XCTAssertTrue(PromptFitCheck.exceeds(estimatedTokens: tokens, windowTokens: 8_192),
                       "the pre-send estimate must flag the same case the send-time check flags")
+    }
+}
+
+/// Phase 7 run banners: a run's state outranks ambient advice, and cannot be dismissed away.
+@MainActor
+final class AdvisoryRunBannerTests: XCTestCase {
+
+    private func run(_ conv: UUID, _ category: Advisory.Category, priority: Int) -> Advisory {
+        Advisory(conversationID: conv, category: category, message: "\(category)", actionLabel: nil, action: nil,
+                 dedupeKey: "\(conv)|\(category)", tone: .info, dismissible: false, priority: priority)
+    }
+
+    /// ⚠️ Before phase 7 the latest post won: a fit hint posted while the user typed HID the banner
+    /// saying their run was waiting.
+    func testAnAmbientHintPostedLaterDoesNotHideARunBanner() {
+        let center = AdvisoryCenter()
+        let conv = UUID()
+        center.post(run(conv, .localModelBusy, priority: Advisory.runStatePriority))
+        center.post(Advisory(conversationID: conv, category: .contextOverflow, message: "fit", actionLabel: nil, action: nil, dedupeKey: "fit"))
+        XCTAssertEqual(center.current(for: conv)?.category, .localModelBusy)
+        center.clear(category: .localModelBusy, conversationID: conv)
+        XCTAssertEqual(center.current(for: conv)?.category, .contextOverflow, "the hint shows once the run state is gone")
+    }
+
+    func testTheQuestionOutranksTheQueueStatus() {
+        let center = AdvisoryCenter()
+        let conv = UUID()
+        center.post(run(conv, .runNeedsConfirmation, priority: Advisory.runQuestionPriority))
+        center.post(run(conv, .localModelBusy, priority: Advisory.runStatePriority))
+        XCTAssertEqual(center.current(for: conv)?.category, .runNeedsConfirmation)
+    }
+
+    func testARunBannerCannotBeDismissed() {
+        let center = AdvisoryCenter()
+        let conv = UUID()
+        let banner = run(conv, .runNeedsConfirmation, priority: Advisory.runQuestionPriority)
+        center.post(banner)
+        center.dismiss(banner)
+        XCTAssertEqual(center.current(for: conv)?.category, .runNeedsConfirmation)
+    }
+
+    func testTheCountdownReadsMinutesAndSecondsAndStopsAtZero() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(AdvisoryBannerStyle.remaining(until: now.addingTimeInterval(120), now: now), "2:00")
+        XCTAssertEqual(AdvisoryBannerStyle.remaining(until: now.addingTimeInterval(61.2), now: now), "1:02")
+        XCTAssertEqual(AdvisoryBannerStyle.remaining(until: now.addingTimeInterval(-5), now: now), "0:00")
+    }
+
+    func testTheQuestionNamesTheConcernWithoutAdvice() {
+        let text = ActiveStreamManager.confirmationNotice([.memory(modelID: "qwen", estimatedBytes: 20 << 30, budgetBytes: 18 << 30)])
+        XCTAssertTrue(text.hasPrefix("'qwen' is estimated at ~"), text)
+        XCTAssertTrue(text.hasSuffix("It may run very slowly or fail."), text)
     }
 }

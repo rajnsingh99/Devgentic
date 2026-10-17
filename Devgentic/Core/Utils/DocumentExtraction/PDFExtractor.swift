@@ -34,12 +34,16 @@ struct PDFExtractor: DocumentExtractor {
         var method = "pdfkit"
 
         // Phase 1: Try PDFKit text extraction
+        // Length tracked as pages are added: `fullText.count` is O(n), and asking it once per page
+        // made extracting a long PDF quadratic (RAG-35).
+        var extractedCount = 0
         for i in 0..<pageCount {
             guard let page = pdfDocument.page(at: i) else { continue }
             if let pageText = page.string {
                 fullText += pageText + "\n\n"
+                extractedCount += pageText.count + 2
             }
-            if fullText.count >= maxSize { break }
+            if extractedCount >= maxSize { break }
         }
 
         // Phase 2: If PDFKit returned little/no text, try OCR via Vision
@@ -81,6 +85,7 @@ struct PDFExtractor: DocumentExtractor {
 
     private func extractViaOCR(document: PDFDocument, maxSize: Int) async throws -> String {
         var ocrText = ""
+        var ocrCount = 0
 
         for i in 0..<document.pageCount {
             guard let page = document.page(at: i) else { continue }
@@ -118,11 +123,12 @@ struct PDFExtractor: DocumentExtractor {
                 let pageText = try await recognizeText(in: cgImage)
                 logger.debug("OCR page \(i + 1): extracted \(pageText.count) chars")
                 ocrText += pageText + "\n\n"
+                ocrCount += pageText.count + 2
             } catch {
                 logger.error("Vision OCR failed on page \(i + 1): \(error.localizedDescription)")
             }
 
-            if ocrText.count >= maxSize { break }
+            if ocrCount >= maxSize { break }   // tracked, not `ocrText.count` (O(n) per page, RAG-35)
         }
 
         logger.info("Vision OCR complete: \(ocrText.count) chars total across \(document.pageCount) pages")

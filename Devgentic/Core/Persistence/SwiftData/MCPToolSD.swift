@@ -88,6 +88,33 @@ final class MCPToolDefinitionModel {
     /// Current persisted shape of `parametersData` (`ToolParameters` → object root, inline key).
     static let parametersBlobVersion = 1
 
+    /// What a tool's schema reads as when `parametersData` is absent or cannot be decoded.
+    static let placeholderParameters = ToolParameters(type: "object", properties: [:], required: [])
+
+    /// The stored blobs to KEEP when this tool is rebuilt from `incoming` (CR-64).
+    ///
+    /// ⚠️ READINESS CR-64 (2026-10-12). A blob this build cannot decode loads as a placeholder (an
+    /// empty schema, no icons, no annotations). "Save unverified" hands `existing.tools`, which are
+    /// exactly those placeholders, straight back to `updateTool`, which rebuilt every child from
+    /// them and overwrote the stored schemas with the placeholders: a real tool schema was lost
+    /// for good the first time the user fixed an unrelated config field. Same rule as the chat
+    /// columns' `canPersist…`: a blob is kept only when it could NOT be read AND the incoming value
+    /// is the very placeholder that failed read produced. A real incoming value always wins.
+    /// Returns nil for a field that should be encoded from `incoming` as usual.
+    func blobsToPreserve(whenRebuiltFrom incoming: ToolDefinition) -> (parameters: Data?, icons: Data?, annotations: Data?) {
+        let parameters: Data? = parametersData.flatMap { data in
+            (try? JSONDecoder().decode(ToolParameters.self, from: data)) == nil
+                && incoming.parameters == Self.placeholderParameters ? data : nil
+        }
+        let icons: Data? = iconsData.flatMap { data in
+            (try? JSONDecoder().decode([ToolIcon].self, from: data)) == nil && incoming.icons == nil ? data : nil
+        }
+        let annotations: Data? = annotationsData.flatMap { data in
+            (try? JSONDecoder().decode(ToolAnnotations.self, from: data)) == nil && incoming.annotations == nil ? data : nil
+        }
+        return (parameters, icons, annotations)
+    }
+
     init(
         name: String,
         toolDescription: String,
@@ -119,21 +146,29 @@ extension MCPToolItem {
                 do {
                     parameters = try JSONDecoder().decode(ToolParameters.self, from: data)
                 } catch {
-                    logger.warning("Failed to decode parameters for tool \(model.name): \(error). Using default.")
-                    parameters = ToolParameters(type: "object", properties: [:], required: [])
+                    logger.error("[PERSISTENCE] MCP tool '\(model.name)' on '\(serverName)': parametersData UNDECODABLE (\(data.count) bytes) — \(error.localizedDescription). CONSEQUENCE: the tool is offered with an EMPTY schema on this load, so a model calling it gets no argument guidance; the stored bytes are kept by every rebuild that hands this placeholder back (CR-64).")
+                    parameters = MCPToolDefinitionModel.placeholderParameters
                 }
             } else {
-                parameters = ToolParameters(type: "object", properties: [:], required: [])
+                parameters = MCPToolDefinitionModel.placeholderParameters
             }
 
             var icons: [ToolIcon]? = nil
             if let data = model.iconsData {
-                icons = try? JSONDecoder().decode([ToolIcon].self, from: data)
+                do {
+                    icons = try JSONDecoder().decode([ToolIcon].self, from: data)
+                } catch {
+                    logger.warning("[PERSISTENCE] MCP tool '\(model.name)' on '\(serverName)': iconsData UNDECODABLE (\(data.count) bytes). CONSEQUENCE: the tool shows no icon on this load; the stored bytes are kept (CR-64).")
+                }
             }
 
             var annotations: ToolAnnotations? = nil
             if let data = model.annotationsData {
-                annotations = try? JSONDecoder().decode(ToolAnnotations.self, from: data)
+                do {
+                    annotations = try JSONDecoder().decode(ToolAnnotations.self, from: data)
+                } catch {
+                    logger.warning("[PERSISTENCE] MCP tool '\(model.name)' on '\(serverName)': annotationsData UNDECODABLE (\(data.count) bytes). CONSEQUENCE: its read-only/destructive hints are missing on this load; the stored bytes are kept (CR-64).")
+                }
             }
 
             return ToolDefinition(

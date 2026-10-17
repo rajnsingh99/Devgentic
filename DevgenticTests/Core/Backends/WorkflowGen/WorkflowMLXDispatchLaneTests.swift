@@ -20,11 +20,13 @@ import XCTest
 ///   - keying on the PROVIDER only, ignoring the model (under-partition: fails to split two
 ///     different models)
 ///         → `testTwoDistinctMLXModels_Split` + `testThreeDistinctModels_ThreeLanesInFirstSeenOrder`
-///   - giving every MLX node its own lane (over-partition: serializes same-model siblings)
-///         → `testOneMLXModel_SingleLane` + `testModelNameIsTrimmed_AndBlankBindsNoSlot`
 ///
-/// ⚠️ Both DIRECTIONS are pinned deliberately. Under-partitioning leaves the bug; over-partitioning
-/// is arguably worse, because it silently costs parallelism on a workload that was always safe.
+/// ⚠️⚠️ DECISION D6 (owner, 2026-10-07) REVERSED the other direction this file used to pin. Same-model
+/// siblings were kept in one parallel lane ("over-partitioning costs parallelism on a workload that
+/// was always safe"). They now get one lane EACH: the weights are shared, but each concurrent decode
+/// allocates its own KV cache, mlx-swift-lm has no batched generation (so concurrency gains nothing),
+/// and concurrent decode on one container was never verified on device. Pinned by
+/// `testOneMLXModel_OneLanePerNode` and `testSameModelLanesAreAdjacent`.
 final class WorkflowMLXDispatchLaneTests: XCTestCase {
 
     private func profile(_ name: String, _ provider: ApiProvider, _ model: String) -> BackendProfileModel {
@@ -67,24 +69,41 @@ final class WorkflowMLXDispatchLaneTests: XCTestCase {
         XCTAssertEqual(lanes[1].slot, "mlx:llama3-3b")
     }
 
-    // MARK: - U2: DIFFERENT-model-only — the assertion that pins the whole design
+    // MARK: - U2: one MLX node per lane (decision D6)
 
-    /// ⚠️ THE TEST THAT FORBIDS OVER-PARTITIONING. Serializing every MLX node — the intuitive
-    /// reading of "MLX has one slot, so run MLX nodes one at a time" — would split this level for
-    /// no reason: both nodes want the SAME model, so `MLXService.loadModel` early-returns for the
-    /// second one (MLXService.swift:215-219) and nothing is ever evicted. Measured: mutating
-    /// `mlxSlotKey(for:)` to return a per-profile key reddens exactly this test and
-    /// `testModelNameIsTrimmed_AndBlankBindsNoSlot`.
-    func testOneMLXModel_SingleLane() {
+    /// ⚠️ D6: two siblings on the SAME model no longer share a lane — each decode would carry its
+    /// own KV cache and run at a fraction of the speed, for no throughput gain.
+    func testOneMLXModel_OneLanePerNode() {
         let lanes = WorkflowExecutor.profileDispatchLanes([
             entry("Cloud", .openAI, "gpt"),
             entry("A", .mlx, "qwen3-8b"),
             entry("B", .mlx, "qwen3-8b")
         ])
 
-        XCTAssertEqual(lanes.count, 1,
-                       "same-model MLX siblings share ONE container (MLXService.swift:215-219) — splitting them costs parallelism for zero benefit")
-        XCTAssertEqual(names(lanes), [["Cloud", "A", "B"]], "a single lane preserves input order exactly")
+        XCTAssertEqual(names(lanes), [["Cloud", "A"], ["B"]],
+                       "same-model MLX siblings run one after another; the cloud node still rides with the first lane")
+        XCTAssertEqual(lanes.map(\.slot), ["mlx:qwen3-8b", "mlx:qwen3-8b"])
+    }
+
+    /// Nodes on one model run back to back, so the model is loaded once for all of them.
+    func testSameModelLanesAreAdjacent() {
+        let lanes = WorkflowExecutor.profileDispatchLanes([
+            entry("A1", .mlx, "alpha"),
+            entry("B1", .mlx, "beta"),
+            entry("A2", .mlx, "alpha")
+        ])
+        XCTAssertEqual(names(lanes), [["A1"], ["A2"], ["B1"]],
+                       "grouped by first-seen model so 'alpha' is not unloaded and reloaded between A1 and A2")
+    }
+
+    /// One MLX node beside cloud / Ollama nodes contends with nothing: the level is unchanged.
+    func testOneMLXNodeBesideOthers_SingleLane() {
+        let lanes = WorkflowExecutor.profileDispatchLanes([
+            entry("Cloud", .openAI, "gpt"),
+            entry("A", .mlx, "qwen3-8b"),
+            entry("Local", .ollama, "llama")
+        ])
+        XCTAssertEqual(names(lanes), [["Cloud", "A", "Local"]], "a single lane preserves input order exactly")
     }
 
     /// Whitespace must not manufacture a phantom second model.
@@ -97,7 +116,8 @@ final class WorkflowMLXDispatchLaneTests: XCTestCase {
             entry("A", .mlx, "qwen3-8b"),
             entry("B", .mlx, " qwen3-8b ")
         ])
-        XCTAssertEqual(lanes.count, 1, "the same model spelled with padding is the same model")
+        XCTAssertEqual(lanes.map(\.slot), ["mlx:qwen3-8b", "mlx:qwen3-8b"],
+                       "the same model spelled with padding is the same model (adjacent lanes, one slot)")
     }
 
     // MARK: - U3: Ollama is not MLX
@@ -149,8 +169,8 @@ final class WorkflowMLXDispatchLaneTests: XCTestCase {
             entry("A", .mlx, "alpha"),
             entry("B2", .mlx, "beta")
         ])
-        XCTAssertEqual(lanes.count, 2)
-        XCTAssertEqual(names(lanes), [["B", "B2"], ["A"]],
-                       "lanes follow first-seen model order, and same-model nodes stay together in one parallel lane")
+        XCTAssertEqual(lanes.count, 3)
+        XCTAssertEqual(names(lanes), [["B"], ["B2"], ["A"]],
+                       "lanes follow first-seen model order, one node each, same-model lanes adjacent")
     }
 }

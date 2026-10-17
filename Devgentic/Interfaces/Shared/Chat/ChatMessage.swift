@@ -1236,6 +1236,15 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// likewise excluded from `CodingKeys` and `==`.
     @ObservationIgnored var agentResponseDecodeFailed: Bool = false
 
+    /// Set when `tokenUsageData` could not be decoded on this load.
+    ///
+    /// ⚠️ READINESS CR-63 (2026-10-12). The fourth column of this kind, and the last one missed: a
+    /// failed decode leaves `tokenUsage == nil`, and both writers persist nil, so the first
+    /// re-persist of the message (the history reconcile write-back, a resume, an in-flight flush)
+    /// erased the stored usage and cost for good. Load-scoped, on the VALUE object, and excluded
+    /// from `CodingKeys` and `==`, for the same reasons as `timelineDecodeFailed`.
+    @ObservationIgnored var tokenUsageDecodeFailed: Bool = false
+
     /// Whether it is safe to persist `content` over the stored blob.
     ///
     /// False only in the exact case that loses data: the decode failed AND the caller is handing
@@ -1254,6 +1263,13 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// repairable rather than frozen.
     var canPersistAgentResponse: Bool {
         !(agentResponseDecodeFailed && agentResponse == nil)
+    }
+
+    /// Whether it is safe to persist `tokenUsage` over the stored blob (CR-63). Same shape as
+    /// `canPersistAgentResponse`: false only when the decode failed AND nothing has replaced the nil
+    /// it produced, so a run that later reports real usage still writes it.
+    var canPersistTokenUsage: Bool {
+        !(tokenUsageDecodeFailed && tokenUsage == nil)
     }
 
     /// Whether it is safe to persist `timelineEvents` over the stored blob.
@@ -1496,20 +1512,9 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// same choice `ChatPersistenceStore.fetchSearchDocuments` and `ChatSearchDecomposition`
     /// already make, and for the same reason. Do not "optimise" this back onto the cache.
     func getBlocksForIndexing() -> [ContentBlock] {
-        switch content {
-        case .plainText(let text), .markdownText(let text):
-            return parseMarkdown(text)
-        case .codeBlock(let language, let code):
-            return [ContentBlock(id: "block-0", type: .code(language: language ?? "text", content: code, fileName: nil))]
-        case .error, .mediaArtifact:
-            return []
-        case .unknown:
-            // Not indexed for RAG. Indexing an opaque payload would put JSON scaffolding into the
-            // retrieval corpus and surface it as if it were something the user wrote.
-            return []
-        case .checkpoint(let summary):
-            return parseMarkdown(summary)
-        }
+        // One rule, in one place: the indexer parses a Sendable SNAPSHOT (RAG-16), and this
+        // delegates to the same code so the two cannot drift.
+        IndexableMessage(self).blocksForIndexing()
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
@@ -1606,6 +1611,9 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
 // (AttachedTextFile, AttachedImageFile, MessageContent structs remain unchanged)
 struct AttachedTextFile: Codable, Equatable, Identifiable {
     var id = UUID(); let name: String; let url: URL; let fileExtension: String; let content: String; let size: Int64
+    /// What the model received for this file — `content` stays the FULL file (the code viewer
+    /// opens it). nil = not recorded (a sender that never ran the delivery plan).
+    var delivery: AttachmentDelivery? = nil
     static func == (lhs: AttachedTextFile, rhs: AttachedTextFile) -> Bool { return lhs.id == rhs.id && lhs.url == rhs.url }
 }
 

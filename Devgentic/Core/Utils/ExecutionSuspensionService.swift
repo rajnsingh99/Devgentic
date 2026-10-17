@@ -125,6 +125,15 @@ actor ExecutionSuspensionService {
     /// AND, separately, each time bound in the park's OWNER CHAIN — which is what the timeouts read
     /// (HITL Waiting Contract, decision A; see `ParkScope`).
     private func beginPark(_ conversationID: UUID, operationID: UUID) {
+        // Local inference coordinator, phase 4: a run waiting on a human gives the local lock up.
+        // The run is read off the CALLER's task, like the owner chain below; the end is reported from
+        // `endPark`, which every resolution path reaches, so the two stay in lockstep.
+        if let runID = LocalInferenceScope.runID {
+            operationToLocalRun[operationID] = runID
+            Task { @MainActor in LocalInferenceCoordinator.shared.parkBegan(runID: runID, operationID: operationID) }
+        } else {
+            logger.debug("[LOCAL-COORD] Park \(operationID.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)) is outside any run (no run id on its task). CONSEQUENCE: the local lock is not given up for it.")
+        }
         let depth = (parkDepth[conversationID] ?? 0) + 1
         parkDepth[conversationID] = depth
         if depth == 1 { parkBegan[conversationID] = Date() }
@@ -150,12 +159,9 @@ actor ExecutionSuspensionService {
 
     /// Called when an operation stops waiting — resolved, cancelled or timed out, all the same here.
     private func endPark(_ conversationID: UUID, operationID: UUID) {
-        for scope in operationToScopes.removeValue(forKey: operationID) ?? [] {
-            guard let scopeDepth = scopeParkDepth[scope], scopeDepth > 0 else { continue }
-            scopeParkDepth[scope] = scopeDepth - 1
-            if scopeDepth == 1, let began = scopeParkBegan.removeValue(forKey: scope) {
-                scopeParkedTotal[scope, default: 0] += Date().timeIntervalSince(began)
-            }
+        releaseScopeCredit(operationID)
+        if let runID = operationToLocalRun.removeValue(forKey: operationID) {
+            Task { @MainActor in LocalInferenceCoordinator.shared.parkEnded(runID: runID, operationID: operationID) }
         }
 
         guard let depth = parkDepth[conversationID], depth > 0 else { return }
@@ -165,7 +171,53 @@ actor ExecutionSuspensionService {
         parkedTotal[conversationID, default: 0] += Date().timeIntervalSince(began)
     }
 
+    /// Ends the scope credit `operationID` was paying into.
+    private func releaseScopeCredit(_ operationID: UUID) {
+        for scope in operationToScopes.removeValue(forKey: operationID) ?? [] {
+            guard let scopeDepth = scopeParkDepth[scope], scopeDepth > 0 else { continue }
+            scopeParkDepth[scope] = scopeDepth - 1
+            if scopeDepth == 1, let began = scopeParkBegan.removeValue(forKey: scope) {
+                scopeParkedTotal[scope, default: 0] += Date().timeIntervalSince(began)
+            }
+        }
+    }
+
+    // MARK: - Local-model queue credit (local inference coordinator, phase 2)
+
+    /// A run is waiting in line for the local model. Its time bounds — the caller's `ParkScope`
+    /// chain — are paused exactly as a HITL park pauses them, so a queued scheduled run is not timed
+    /// out by minutes it spent waiting for another run to finish.
+    ///
+    /// ⚠️ SCOPE CREDIT ONLY. It is NOT a park in the conversation: nothing is waiting on a human, so
+    /// `parkDepth` / `cumulativeParkedTime` stay untouched, and so does anything that asks whether a
+    /// run is awaiting someone. A wait outside any chain (no bound open) credits nothing — unlike an
+    /// out-of-chain HITL park, there is no conversation-wide fallback, because the run knows its own
+    /// chain here.
+    func beginQueueWait(_ waitID: UUID) {
+        let owners = ParkScope.chain
+        guard !owners.isEmpty else {
+            logger.debug("[LOCAL-COORD] Queue wait \(waitID.uuidString.prefix(8)) is outside any time bound. CONSEQUENCE: nothing to credit — no limit is running for it.")
+            return
+        }
+        logger.debug("[LOCAL-COORD] Queue wait \(waitID.uuidString.prefix(8)) pauses \(owners.count) time bound(s) until it ends.")
+        operationToScopes[waitID] = owners
+        for scope in owners {
+            let scopeDepth = (scopeParkDepth[scope] ?? 0) + 1
+            scopeParkDepth[scope] = scopeDepth
+            if scopeDepth == 1 { scopeParkBegan[scope] = Date() }
+        }
+    }
+
+    /// The wait ended — admitted or withdrawn. Idempotent.
+    func endQueueWait(_ waitID: UUID) {
+        releaseScopeCredit(waitID)
+    }
+
     // MARK: - Owner-chain park credit (HITL Waiting Contract, decision A)
+
+    /// Parked operation → the run it parked (`LocalInferenceScope.runID` at park time). Removed in
+    /// `endPark`, the one place every park ends.
+    private var operationToLocalRun: [UUID: UUID] = [:]
 
     /// Open time bounds → their conversation, so an out-of-chain park can find them.
     private var activeScopes: [UUID: UUID] = [:]
@@ -731,12 +783,41 @@ actor ExecutionSuspensionService {
 
     /// Posts an HITL resolved notification on the main actor for cross-surface deduplication.
     /// Centralizes the pattern used by all resume/timeout paths to prevent drift.
+    // MARK: - Resolution memory (readiness CR-40)
+
+    /// Operations resolved recently, oldest first. Bounded: it only has to outlive the gap between
+    /// a request being raised and its banner being shown.
+    private var recentlyResolved: [UUID] = []
+    private var recentlyResolvedSet: Set<UUID> = []
+    private static let recentlyResolvedLimit = 512
+
+    /// Whether `operationID` has already been answered, denied, cancelled or drained.
+    ///
+    /// ⚠️ CR-40 (2026-10-12). The stream manager shows a banner only after awaiting a persistence
+    /// flush, and a request can be resolved inside that wait (a Stop, a remote ChatOps answer, a
+    /// drain). The resolution notification then found no banner to remove, the banner was shown
+    /// anyway, and it could never be answered or dismissed. "Not pending" is not the same
+    /// question: a request is raised BEFORE its suspension registers, so a pending check could hide
+    /// a live banner and hang the run. Only an operation actually resolved is reported here.
+    func wasResolved(_ operationID: UUID) -> Bool {
+        recentlyResolvedSet.contains(operationID)
+    }
+
+    private func rememberResolved(_ operationID: UUID) {
+        guard recentlyResolvedSet.insert(operationID).inserted else { return }
+        recentlyResolved.append(operationID)
+        if recentlyResolved.count > Self.recentlyResolvedLimit {
+            recentlyResolvedSet.remove(recentlyResolved.removeFirst())
+        }
+    }
+
     private func postResolved(
         name: Notification.Name,
         operationID: UUID,
         conversationID: UUID?,
         extraInfo: sending [String: Any] = [:]
     ) {
+        rememberResolved(operationID)
         let wrappedExtra = UnsafeSendable(extraInfo)
         Task { @MainActor in
             var userInfo: [String: Any] = [HITLResolvedKey.operationID: operationID]

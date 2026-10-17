@@ -117,6 +117,9 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         logger.info("[TTS] Synthesizer released (\(reason)) — CoreAudio output context freed.")
     }
 
+    /// Whether the silent-test-host notice has been logged this process.
+    private static var reportedSilentTestHost = false
+
     /// Test seam: whether a synthesizer (and its audio context) is currently held.
     var isSynthesizerLoaded: Bool { synthesizer != nil }
 
@@ -778,7 +781,23 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
         activeUtteranceGeneration = utteranceGeneration
         spokenUpTo = 0
         restartOnResume = false
-        ensureSynthesizer().speak(utterance)
+        let synth = ensureSynthesizer()
+        // ⚠️ NO AUDIO IN THE TEST HOST. The test host IS the app, so every Read Aloud test spoke
+        // out loud on the developer's machine and kept a live XPC session with the speech service
+        // across hundreds of speak→stop cycles. On 2026-10-11 one of those sessions delivered a
+        // callback (`-[AUHostDelegate speechSynthesisMetadataAvailable:speechRequest:]`) to an
+        // audio host that was already torn down, and the host crashed mid-suite. The transport
+        // tests drive state through seams (replayed completions, `isSynthesizerLoaded`), so they
+        // need the synthesizer to EXIST, never to speak. Same rule as `TestHost.permits`: refuse an
+        // outward side effect that has no test value.
+        if TestHost.isRunning {
+            if !Self.reportedSilentTestHost {
+                Self.reportedSilentTestHost = true
+                logger.notice("[TESTHOST] Read Aloud is SILENT in the XCTest host — utterances are tracked but never handed to AVSpeechSynthesizer. CONSEQUENCE: no audio and no speech-service XPC traffic during tests; completions come only from the test seams. (Logged once.)")
+            }
+        } else {
+            synth.speak(utterance)
+        }
 
         // ⚠️ Stopping a PAUSED synthesizer is documented to clear its queue; whether it also
         // clears the paused FLAG is not. An utterance enqueued into a still-paused synthesizer

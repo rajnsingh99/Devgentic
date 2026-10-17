@@ -34,7 +34,7 @@ final class NativeJSONParserTests: XCTestCase {
           "tool_calls": [
             {"name": "list_directory", "arguments": {"path": "/tmp"}},
             {"name": "read_file", "arguments": {"path": "/tmp/test.txt"}},
-            {"name": "fs_read_metadata", "arguments": {"path": "/tmp"}}
+            {"name": "read_file_metadata", "arguments": {"path": "/tmp"}}
           ]
         }
         """
@@ -42,7 +42,7 @@ final class NativeJSONParserTests: XCTestCase {
         XCTAssertEqual(result.toolCalls.count, 3)
         XCTAssertEqual(result.toolCalls[0].name, "list_directory")
         XCTAssertEqual(result.toolCalls[1].name, "read_file")
-        XCTAssertEqual(result.toolCalls[2].name, "fs_read_metadata")
+        XCTAssertEqual(result.toolCalls[2].name, "read_file_metadata")
     }
 
     func testFastPath_EmptyToolCallsArray() {

@@ -124,7 +124,7 @@ final class VectorStoreHygieneTests: XCTestCase {
             maximumDistance: 0.7
         )
         XCTAssertEqual(ranked.count, 1, "exact scoped scan must surface B's chunk despite 60 closer foreign chunks")
-        XCTAssertEqual(ranked.first?.parent.fullTextContent, "B-target")
+        XCTAssertEqual(ranked.first?.fullTextContent, "B-target")
     }
 
     func testRankConversationChunks_RespectsThresholdLimitAndParentDedup() throws {
@@ -151,9 +151,9 @@ final class VectorStoreHygieneTests: XCTestCase {
         )
 
         XCTAssertEqual(ranked.count, 2, "shared parent dedups to one, threshold drops the far chunk")
-        XCTAssertEqual(ranked.first?.parent.fullTextContent, "shared-parent", "closest chunk's parent ranks first")
-        XCTAssertEqual(ranked.last?.parent.fullTextContent, "distinct-parent")
-        XCTAssertFalse(ranked.contains { $0.parent.fullTextContent == "past-threshold" })
+        XCTAssertEqual(ranked.first?.fullTextContent, "shared-parent", "closest chunk's parent ranks first")
+        XCTAssertEqual(ranked.last?.fullTextContent, "distinct-parent")
+        XCTAssertFalse(ranked.contains { $0.fullTextContent == "past-threshold" })
     }
 
     // MARK: - 4. Lexical exact-match boost (symbol queries)
@@ -174,7 +174,7 @@ final class VectorStoreHygieneTests: XCTestCase {
             chunks, against: unitVector(lean: 0), limit: 5, maximumDistance: 0.7
         )
         XCTAssertFalse(
-            semanticOnly.contains { $0.parent.fullTextContent.contains("addAttachedFiles") },
+            semanticOnly.contains { $0.fullTextContent.contains("addAttachedFiles") },
             "precondition: without the boost the symbol chunk must be beyond the threshold"
         )
 
@@ -215,17 +215,15 @@ final class VectorStoreHygieneTests: XCTestCase {
         try seed(conversation: survivor, embedding: unitVector(lean: 0.2), text: "survivor")
 
         // The exact removal shape VectorStoreService.deleteDocuments uses:
-        // children by plain-String conversation key; parents derived via relation.
+        // children by plain-String conversation key; parent IDS read off the relation
+        // (`targetId`, never `target` — that decodes each parent's whole text, RAG-8).
         let childQuery = try childBox.query {
             ChildChunkEntity.conversationID == doomed.uuidString
         }.build()
         let children = try childQuery.find()
-        var parentsByID: [Id: ParentDocumentEntity] = [:]
-        for child in children {
-            if let parent = child.parentDocument.target { parentsByID[parent.id] = parent }
-        }
+        let parentIDs = Set(children.compactMap { $0.parentDocument.targetId?.value })
         let removed = try childQuery.remove()
-        try parentBox.remove(Array(parentsByID.values))
+        try parentBox.remove(Array(parentIDs))
 
         XCTAssertEqual(removed, 5)
         XCTAssertEqual(try childBox.count(), 1, "survivor conversation's chunk must remain")

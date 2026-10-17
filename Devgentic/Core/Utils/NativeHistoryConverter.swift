@@ -109,22 +109,67 @@ struct NativeHistoryConverter {
         correlation: String = "",
         toolsAvailable: Bool
     ) -> [HistoryTurn] {
+        buildCarryingProvenance(strategy: strategy, from: history, charBudget: charBudget,
+                                includeImages: includeImages, correlation: correlation,
+                                toolsAvailable: toolsAvailable).turns
+    }
+
+    /// The native turns plus WHICH answers they carry in full.
+    ///
+    /// The episodic XML (`EpisodicHistoryFormatter`) used to repeat a 200-char clip of every
+    /// answer in `<outcome>` even when the same answer rode right beside it as a complete
+    /// assistant turn — so the model read each answer twice, once cut mid-word. The formatter
+    /// now drops `<outcome>` for exactly the answers listed here.
+    ///
+    /// ⚠️ The set is the ground truth of what SURVIVED this builder — after the turn limit, the
+    /// char-budget trim and the checkpoint cut. Pointer skeletons are NOT in it (their assistant
+    /// turn is a fetch instruction, not the answer). Matching by message id rather than position
+    /// is deliberate: the two builders pair messages under slightly different rules (this one
+    /// skips unreadable rows), so the Nth turn here is not reliably the Nth turn there, and an
+    /// off-by-one would hide an answer the model has nowhere else to read.
+    static func buildCarryingProvenance(
+        strategy: HistoryStrategy,
+        from history: [ChatMessage],
+        charBudget: Int,
+        includeImages: Bool = false,
+        correlation: String = "",
+        toolsAvailable: Bool
+    ) -> NativeHistory {
         switch strategy {
         case .recentHistory:
-            return buildNativeTurns(from: history, limit: EpisodicHistoryFormatter.recentTurnLimit,
-                                    charBudget: charBudget, includeImages: includeImages,
-                                    correlation: correlation)
+            return nativeTurns(from: history, limit: EpisodicHistoryFormatter.recentTurnLimit,
+                               charBudget: charBudget, includeImages: includeImages,
+                               correlation: correlation)
         case .fullHistory:
-            return buildNativeTurns(from: history, limit: nil, charBudget: charBudget,
-                                    includeImages: includeImages, correlation: correlation)
+            return nativeTurns(from: history, limit: nil, charBudget: charBudget,
+                               includeImages: includeImages, correlation: correlation)
         case .pointer:
-            return buildPointerTurns(from: history, includeImages: includeImages,
-                                     correlation: correlation, toolsAvailable: toolsAvailable)
+            // Every skeleton keeps its question whole, so every paired user message is carried.
+            // Paired the same way `buildPointerTurns` pairs (checkpoint cut, unreadable rows skipped).
+            let pointerUserIDs = Set(pairMessages(from: extractCheckpointContext(from: history).filteredHistory,
+                                                  includeImages: false).map(\.userMessageID))
+            return NativeHistory(turns: buildPointerTurns(from: history, includeImages: includeImages,
+                                                          correlation: correlation, toolsAvailable: toolsAvailable),
+                                 fullAnswerMessageIDs: [], fullUserMessageIDs: pointerUserIDs)
         case .hybrid:
-            return buildHybridTurns(from: history, inlineCount: EpisodicHistoryFormatter.hybridInlineCount,
-                                    charBudget: charBudget, includeImages: includeImages,
-                                    correlation: correlation, toolsAvailable: toolsAvailable)
+            return hybridTurns(from: history, inlineCount: EpisodicHistoryFormatter.hybridInlineCount,
+                               charBudget: charBudget, includeImages: includeImages,
+                               correlation: correlation, toolsAvailable: toolsAvailable)
         }
+    }
+
+    /// Native turns and the agent message ids whose answers they carry in full.
+    struct NativeHistory {
+        let turns: [HistoryTurn]
+        let fullAnswerMessageIDs: Set<UUID>
+        /// User messages whose text these turns carry verbatim. Wider than the answer set: the
+        /// pointer and hybrid skeletons replace the ANSWER with a fetch instruction but keep the
+        /// question whole.
+        var fullUserMessageIDs: Set<UUID> = []
+
+        /// Every message the model reads in full from these turns — what conversation-memory
+        /// retrieval must not re-inject (`BackendOrchestrationService.retrievalExclusion`).
+        var messageIDsCarriedInFull: Set<UUID> { fullAnswerMessageIDs.union(fullUserMessageIDs) }
     }
 
     static func buildNativeTurns(
@@ -134,12 +179,23 @@ struct NativeHistoryConverter {
         includeImages: Bool = false,
         correlation: String = ""
     ) -> [HistoryTurn] {
+        nativeTurns(from: history, limit: limit, charBudget: charBudget,
+                    includeImages: includeImages, correlation: correlation).turns
+    }
+
+    private static func nativeTurns(
+        from history: [ChatMessage],
+        limit: Int?,
+        charBudget: Int,
+        includeImages: Bool,
+        correlation: String
+    ) -> NativeHistory {
 
         // Extract checkpoint context — if a checkpoint exists, only convert turns after it.
         let (contextTurns, filteredHistory) = extractCheckpointContext(from: history)
 
         let pairs = pairMessages(from: filteredHistory, includeImages: includeImages)
-        guard !pairs.isEmpty else { return contextTurns }
+        guard !pairs.isEmpty else { return NativeHistory(turns: contextTurns, fullAnswerMessageIDs: []) }
 
         // Apply turn limit (take most recent)
         let limited: ArraySlice<TurnPair>
@@ -149,18 +205,12 @@ struct NativeHistoryConverter {
             limited = pairs[pairs.startIndex...]
         }
 
-        // Convert to turns
-        var candidates: [(HistoryTurn, HistoryTurn)] = []
-        for pair in limited {
-            candidates.append((pair.userTurn, pair.assistantTurn))
-        }
-
         // Apply char budget (newest-first, drop oldest when exceeded)
         var totalChars = 0
-        var budgetedPairs: [(HistoryTurn, HistoryTurn)] = []
+        var budgetedPairs: [TurnPair] = []
 
-        for pair in candidates.reversed() {
-            let pairChars = pair.0.budgetChars + pair.1.budgetChars
+        for pair in limited.reversed() {
+            let pairChars = pair.userTurn.budgetChars + pair.assistantTurn.budgetChars
             if totalChars + pairChars > charBudget {
                 break
             }
@@ -171,13 +221,14 @@ struct NativeHistoryConverter {
         // Reverse back to chronological order and flatten
         budgetedPairs.reverse()
         var messages: [HistoryTurn] = contextTurns // Prepend checkpoint context if present
-        for (user, assistant) in budgetedPairs {
-            messages.append(user)
-            messages.append(assistant)
+        for pair in budgetedPairs {
+            messages.append(pair.userTurn)
+            messages.append(pair.assistantTurn)
         }
 
-        logTrim(strategy: "native", candidates: candidates.count, kept: budgetedPairs.count, chars: totalChars, budget: charBudget, turns: messages, correlation: correlation)
-        return messages
+        logTrim(strategy: "native", candidates: limited.count, kept: budgetedPairs.count, chars: totalChars, budget: charBudget, turns: messages, correlation: correlation)
+        return NativeHistory(turns: messages, fullAnswerMessageIDs: Set(budgetedPairs.map(\.agentMessageID)),
+                             fullUserMessageIDs: Set(budgetedPairs.map(\.userMessageID)))
     }
 
     // MARK: - Pointer Turns (Skeleton + Tool Reference)
@@ -246,11 +297,24 @@ struct NativeHistoryConverter {
         correlation: String = "",
         toolsAvailable: Bool
     ) -> [HistoryTurn] {
+        hybridTurns(from: history, inlineCount: inlineCount, charBudget: charBudget,
+                    includeImages: includeImages, correlation: correlation,
+                    toolsAvailable: toolsAvailable).turns
+    }
+
+    private static func hybridTurns(
+        from history: [ChatMessage],
+        inlineCount: Int,
+        charBudget: Int,
+        includeImages: Bool,
+        correlation: String,
+        toolsAvailable: Bool
+    ) -> NativeHistory {
         // Extract checkpoint context — if a checkpoint exists, only convert turns after it.
         let (contextTurns, filteredHistory) = extractCheckpointContext(from: history)
 
         let pairs = pairMessages(from: filteredHistory, includeImages: includeImages)
-        guard !pairs.isEmpty else { return contextTurns }
+        guard !pairs.isEmpty else { return NativeHistory(turns: contextTurns, fullAnswerMessageIDs: []) }
 
         let totalPairs = pairs.count
         let pointerCount = max(0, totalPairs - inlineCount)
@@ -279,6 +343,8 @@ struct NativeHistoryConverter {
         // Recent turns — full format (with charBudget)
         var recentChars = 0
         var recentMessages: [HistoryTurn] = []
+        var fullAnswerIDs = Set<UUID>()
+        var fullUserIDs = Set(pairs.prefix(pointerCount).map(\.userMessageID))
 
         for index in (pointerCount..<totalPairs).reversed() {
             let pair = pairs[index]
@@ -289,11 +355,13 @@ struct NativeHistoryConverter {
             recentChars += pairChars
             recentMessages.insert(pair.assistantTurn, at: 0)
             recentMessages.insert(pair.userTurn, at: 0)
+            fullAnswerIDs.insert(pair.agentMessageID)
+            fullUserIDs.insert(pair.userMessageID)
         }
 
         messages.append(contentsOf: recentMessages)
         logTrim(strategy: "hybrid", candidates: totalPairs - pointerCount, kept: recentMessages.count / 2, chars: recentChars, budget: charBudget, turns: messages, correlation: correlation)
-        return messages
+        return NativeHistory(turns: messages, fullAnswerMessageIDs: fullAnswerIDs, fullUserMessageIDs: fullUserIDs)
     }
 
     // MARK: - Budget Logging
@@ -317,6 +385,10 @@ struct NativeHistoryConverter {
         let userTurn: HistoryTurn
         let assistantTurn: HistoryTurn
         let toolNames: [String]
+        /// The agent message this pair's answer came from — the key `NativeHistory` reports.
+        let agentMessageID: UUID
+        /// The user message this pair's question came from.
+        let userMessageID: UUID
     }
 
     // MARK: - Pairing
@@ -327,6 +399,7 @@ struct NativeHistoryConverter {
     private static func pairMessages(from history: [ChatMessage], includeImages: Bool) -> [TurnPair] {
         var pairs: [TurnPair] = []
         var pendingUser: HistoryTurn? = nil
+        var pendingUserID: UUID? = nil
 
         for message in history {
             // ⚠️ A message this build cannot READ must not be sent as an EMPTY STRING.
@@ -344,18 +417,20 @@ struct NativeHistoryConverter {
                 // Clear any pending user turn: without this, the NEXT assistant message would pair
                 // with a stale earlier user turn and the model would see a mismatched exchange.
                 pendingUser = nil
+                pendingUserID = nil
                 continue
             }
 
             if message.sender == .user {
-                let text = message.content.textContent ?? ""
+                let text = Self.nonEmptyUserText(for: message)
                 var parts: [HistoryTurn.Part] = [.text(text)]
                 if includeImages {
                     parts.append(contentsOf: mediaParts(for: message))
                 }
                 pendingUser = HistoryTurn(role: .user, parts: parts)
+                pendingUserID = message.id
 
-            } else if message.sender == .agent, let userTurn = pendingUser {
+            } else if message.sender == .agent, let userTurn = pendingUser, let userID = pendingUserID {
                 let agentText = buildAssistantContent(from: message)
 
                 // Extract tool names for pointer skeleton
@@ -370,9 +445,12 @@ struct NativeHistoryConverter {
                 pairs.append(TurnPair(
                     userTurn: userTurn,
                     assistantTurn: HistoryTurn(role: .assistant, text: agentText),
-                    toolNames: toolNames
+                    toolNames: toolNames,
+                    agentMessageID: message.id,
+                    userMessageID: userID
                 ))
                 pendingUser = nil
+                pendingUserID = nil
             }
         }
 
@@ -409,7 +487,34 @@ struct NativeHistoryConverter {
     /// `<episodic_memory>` XML (built by `EpisodicHistoryFormatter`), so this
     /// function keeps the assistant turn clean of anything resembling a
     /// structural tool call.
-    private static func buildAssistantContent(from message: ChatMessage) -> String {
-        message.content.textContent ?? ""
+    ///
+    /// ⚠️⚠️ NEVER EMPTY (readiness CR-10, 2026-10-10). This returned `textContent ?? ""`, and Anthropic
+    /// and Gemini reject an empty text turn with HTTP 400 — so ONE empty turn failed every request in
+    /// the conversation until it aged out of the window. Ways to get one: an image-gen reply
+    /// (`.mediaArtifact`, nil text), and a reply left as `.markdownText("")` by a force-quit mid-run.
+    ///
+    /// ⚠️ Replaced with FACTUAL text, never skipped. Skipping would renumber every later turn, and the
+    /// pointer skeletons' `get_conversation_history(N)` indices are positions in this same pairing
+    /// (CR-11) — a dropped turn would point every later index at the wrong answer.
+    static func buildAssistantContent(from message: ChatMessage) -> String {
+        if let text = message.content.textContent, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+        if case .mediaArtifact(let artifact) = message.content {
+            return "(Generated \(artifact.kind == .image ? "an image" : "media") — not shown in this history.)"
+        }
+        return "(No response recorded)"
+    }
+
+    /// A user turn's text, never empty — same reason as `buildAssistantContent`. An image-only message
+    /// says so (its image still rides along as a `.media` part when images are included); a message
+    /// with no text at all says that, rather than becoming an empty block the provider rejects.
+    static func nonEmptyUserText(for message: ChatMessage) -> String {
+        if let text = message.content.textContent, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+        let images = message.attachedImageFiles?.count ?? 0
+        if images > 0 { return "(The user sent \(images) image\(images == 1 ? "" : "s").)" }
+        return "(No text in this message.)"
     }
 }

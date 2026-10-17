@@ -66,18 +66,6 @@ final class MockRecognitionService: RecognitionServiceProtocol {
     }
 }
 
-// MARK: - Mock Web Search Service
-
-final class MockWebSearchService: WebSearchServiceProtocol {
-    var validateCallCount = 0
-    var validateResult: (isValid: Bool, message: String) = (true, "API Key is valid.")
-
-    func validate(apiKey: String) async -> (isValid: Bool, message: String) {
-        validateCallCount += 1
-        return validateResult
-    }
-}
-
 // MARK: - Mock Prompt Service
 
 final class MockPromptService: PromptServiceProtocol {
@@ -104,7 +92,8 @@ final class MockChatInputMainDelegate: ChatInputMainDelegate {
     func addAttachedFile(fileItem: FileSystemItem) { addFileCallCount += 1 }
 
     @ObservationIgnored var addFilesCallCount = 0
-    func addAttachedFiles(fileItems: [FileSystemItem]) { addFilesCallCount += 1 }
+    @ObservationIgnored var lastAddedFiles: [FileSystemItem] = []
+    func addAttachedFiles(fileItems: [FileSystemItem]) { addFilesCallCount += 1; lastAddedFiles = fileItems }
 
     @ObservationIgnored var removeFileCallCount = 0
     func removeAttachedFile(fileItem: FileSystemItem) { removeFileCallCount += 1 }
@@ -154,7 +143,6 @@ private func makeFileItem(name: String) -> FileSystemItem {
 final class ChatInputViewModelTests: XCTestCase {
 
     private var mockRecognition: MockRecognitionService!
-    private var mockWebSearch: MockWebSearchService!
     private var mockPromptService: MockPromptService!
     private var mockDelegate: MockChatInputMainDelegate!
     private var sut: ChatInputViewModel!
@@ -163,13 +151,11 @@ final class ChatInputViewModelTests: XCTestCase {
     override func setUp() {
         super.setUp()
         mockRecognition = MockRecognitionService()
-        mockWebSearch = MockWebSearchService()
         mockPromptService = MockPromptService()
         mockDelegate = MockChatInputMainDelegate()
 
         sut = ChatInputViewModel(
             recognitionService: mockRecognition,
-            webSearchService: mockWebSearch,
             promptService: mockPromptService
         )
         sut.mainDelegate = mockDelegate
@@ -181,7 +167,6 @@ final class ChatInputViewModelTests: XCTestCase {
         sut = nil
         mockDelegate = nil
         mockPromptService = nil
-        mockWebSearch = nil
         mockRecognition = nil
         super.tearDown()
     }
@@ -193,8 +178,6 @@ final class ChatInputViewModelTests: XCTestCase {
         XCTAssertFalse(sut.isStreaming)
         XCTAssertTrue(sut.attachedFiles.isEmpty)
         XCTAssertFalse(sut.showModelSelectorPopover)
-        XCTAssertFalse(sut.showAPIKeyInputPopup)
-        XCTAssertEqual(sut.apiKeyInput, "")
     }
 
     func testInitialSuggestionStates() {
@@ -202,75 +185,6 @@ final class ChatInputViewModelTests: XCTestCase {
         XCTAssertTrue(sut.promptSuggestionState.filteredItems.isEmpty)
         XCTAssertFalse(sut.fileSuggestionState.isShowing)
         XCTAssertTrue(sut.fileSuggestionState.filteredItems.isEmpty)
-    }
-
-    // MARK: - API Key Validation
-
-    func testValidateAPIKeySuccess() async {
-        mockWebSearch.validateResult = (true, "API Key is valid.")
-        sut.apiKeyInput = "valid-key-123"
-
-        await sut.validateEnteredAPIKey()
-
-        XCTAssertEqual(mockWebSearch.validateCallCount, 1)
-        if case .valid = sut.validationState {
-            // Expected
-        } else {
-            XCTFail("Expected .valid state, got \(sut.validationState)")
-        }
-    }
-
-    func testValidateAPIKeyFailure() async {
-        mockWebSearch.validateResult = (false, "Invalid key")
-        sut.apiKeyInput = "bad-key"
-
-        await sut.validateEnteredAPIKey()
-
-        if case .invalid(let msg) = sut.validationState {
-            XCTAssertEqual(msg, "Invalid key")
-        } else {
-            XCTFail("Expected .invalid state")
-        }
-    }
-
-    func testValidateAPIKeySkipsEmptyInput() async {
-        sut.apiKeyInput = ""
-        await sut.validateEnteredAPIKey()
-        XCTAssertEqual(mockWebSearch.validateCallCount, 0, "Should not call service for empty key")
-    }
-
-    func testValidateAPIKeySetsValidatingStateDuringRequest() async {
-        mockWebSearch.validateResult = (true, "OK")
-        sut.apiKeyInput = "key"
-
-        // The validating state is set synchronously before the await
-        let task = Task { @MainActor in
-            await sut.validateEnteredAPIKey()
-        }
-        // Give a moment for the state to be set
-        try? await Task.sleep(nanoseconds: 10_000_000)
-        await task.value
-
-        // After completion it should be .valid, not .validating
-        if case .valid = sut.validationState { } else {
-            XCTFail("Final state should be .valid")
-        }
-    }
-
-    // MARK: - Reset API Key Popup State
-
-    func testResetAPIKeyPopupState() {
-        sut.apiKeyInput = "some-key"
-        sut.validationState = .valid
-        sut.showAPIKeyInputPopup = true
-
-        sut.resetAPIKeyPopupState()
-
-        XCTAssertEqual(sut.apiKeyInput, "")
-        XCTAssertFalse(sut.showAPIKeyInputPopup)
-        if case .idle = sut.validationState { } else {
-            XCTFail("Expected .idle after reset")
-        }
     }
 
     // MARK: - Delegate Mediation
@@ -285,6 +199,137 @@ final class ChatInputViewModelTests: XCTestCase {
         let files = [makeFileItem(name: "a.swift"), makeFileItem(name: "b.swift")]
         sut.addAttachedFiles(fileItems: files)
         XCTAssertEqual(mockDelegate.addFilesCallCount, 1)
+    }
+
+    // MARK: - Binary attachment gate
+    //
+    // Regression: `@Ja` auto-focused `January2026.class` (sorts before `.java`), it was
+    // attached, and the send path's UTF-8 read dropped it — the model got the prompt alone.
+
+    private func writeTempFile(_ name: String, _ bytes: [UInt8]) throws -> FileSystemItem {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent(name)
+        try Data(bytes).write(to: url)
+        return FileSystemItem(id: url, name: name, url: url, isDirectory: false)
+    }
+
+    /// Java class-file header: CAFEBABE magic, then a NUL-bearing version field.
+    private let classFileBytes: [UInt8] = [0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x41, 0x00, 0x1F]
+
+    func testBinaryAttachmentIsRefusedAndNeverReachesTheDelegate() throws {
+        let binary = try writeTempFile("January2026.class", classFileBytes)
+
+        let refused = sut.addAttachedFile(fileItem: binary)
+
+        XCTAssertEqual(refused.map(\.item.name), ["January2026.class"])
+        XCTAssertEqual(mockDelegate.addFileCallCount, 0, "a refused binary must not be attached")
+        XCTAssertEqual(mockDelegate.addFilesCallCount, 0)
+    }
+
+    func testMixedSelectionAttachesOnlyTheTextFiles() throws {
+        let binary = try writeTempFile("January2026.class", classFileBytes)
+        let source = try writeTempFile("January2026.java", Array("class January2026 {}".utf8))
+
+        let refused = sut.addAttachedFiles(fileItems: [binary, source])
+
+        XCTAssertEqual(refused.map(\.item.name), ["January2026.class"])
+        XCTAssertEqual(mockDelegate.lastAddedFiles.map(\.name), ["January2026.java"])
+    }
+
+    /// Wiring: the composer's mode reaches intake — a folder is refused for an injecting
+    /// profile and attached for a stateless one.
+    func testFolderIsRefusedOnlyWhenTheProfileInjects() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let folder = FileSystemItem(id: dir, name: "java", url: dir, isDirectory: true)
+
+        XCTAssertEqual(sut.addAttachedFile(fileItem: folder, deliveryMode: .inject(includeAbsolutePaths: false)).map(\.item.name), ["java"])
+        XCTAssertEqual(mockDelegate.addFileCallCount, 0)
+
+        XCTAssertTrue(sut.addAttachedFile(fileItem: folder, deliveryMode: .pathManifest).isEmpty)
+        XCTAssertEqual(mockDelegate.addFileCallCount, 1)
+    }
+
+    /// A folder attached under a stateless profile is REMOVED when the active profile becomes
+    /// one that injects contents — not left to fail at send. Text files stay.
+    func testRecheckRemovesWhatTheNewProfileCannotCarry() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let folder = FileSystemItem(id: dir, name: "java", url: dir, isDirectory: true)
+        let source = try writeTempFile("Main.java", Array("class Main {}".utf8))
+        mockDelegate.attachedFiles = [folder, source]
+        sut.setupMainDelegateObservers()   // refresh the mirrored snapshot
+
+        XCTAssertTrue(sut.recheckAttachments(deliveryMode: .pathManifest).isEmpty, "a stateless agent can list the folder")
+        XCTAssertEqual(mockDelegate.removeFileCallCount, 0)
+
+        let removed = sut.recheckAttachments(deliveryMode: .inject(includeAbsolutePaths: false))
+        XCTAssertEqual(removed.map(\.item.name), ["java"])
+        XCTAssertEqual(mockDelegate.removeFileCallCount, 1, "only the folder leaves; the text file stays")
+    }
+
+    // MARK: - @ picker re-sync
+
+    private func waitFor(_ condition: @escaping () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !condition() {
+            guard ContinuousClock.now < deadline else { return XCTFail("condition not met") }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    /// A fresh `@` has the empty query — the same as last time — so no search ran: the popup
+    /// showed the PREVIOUS folder's files (screenshots, 2026-10-04) or "Type to search". Opening
+    /// must search at once, closing must forget, and reopening must list what is there NOW.
+    func testOpeningThePickerSearchesTheCurrentFolderEveryTime() async throws {
+        var folderFiles = [makeFileItem(name: "adk.py")]
+        var searches = 0
+        sut.onFileSearchRequest = { _ in
+            searches += 1
+            return (folderFiles, [], .ready)
+        }
+
+        sut.fileSuggestionState.isShowing = true
+        try await waitFor { self.sut.fileSuggestionState.hasResults }
+        XCTAssertEqual(sut.fileSuggestionState.filteredItems.map(\.name), ["adk.py"])
+
+        sut.fileSuggestionState.isShowing = false
+        try await waitFor { !self.sut.fileSuggestionState.hasResults }
+        XCTAssertTrue(sut.fileSuggestionState.filteredItems.isEmpty, "closing forgets the old folder's list")
+
+        folderFiles = [makeFileItem(name: "app.py")]   // the user switched folders
+        sut.fileSuggestionState.isShowing = true       // same empty query as before
+        try await waitFor { self.sut.fileSuggestionState.hasResults }
+        XCTAssertEqual(sut.fileSuggestionState.filteredItems.map(\.name), ["app.py"])
+        XCTAssertEqual(searches, 2, "every open searches, even with an unchanged query")
+    }
+
+    func testThePickerKnowsWhyItIsEmpty() async throws {
+        sut.onFileSearchRequest = { _ in ([], [], .noFolder) }
+        sut.fileSuggestionState.isShowing = true
+        try await waitFor { self.sut.fileSuggestionState.hasResults }
+        XCTAssertEqual(sut.fileSuggestionState.source, .noFolder)
+    }
+
+    func testEmptyStateMessages() {
+        typealias V = FileSuggestionView
+        XCTAssertTrue(V.emptyMessage(source: .noFolder, hasResults: true, query: "").contains("No folder open"))
+        XCTAssertEqual(V.emptyMessage(source: .indexing, hasResults: false, query: ""), "Indexing files…")
+        XCTAssertEqual(V.emptyMessage(source: .ready, hasResults: false, query: ""), "Searching…",
+                       "not-yet-searched is not 'no files'")
+        XCTAssertEqual(V.emptyMessage(source: .ready, hasResults: true, query: ""), "No files in this folder.")
+        XCTAssertEqual(V.emptyMessage(source: .ready, hasResults: true, query: "zz"), "No matching files found.")
+    }
+
+    func testTextAttachmentIsAccepted() throws {
+        let source = try writeTempFile("January2026.java", Array("class January2026 {}".utf8))
+
+        XCTAssertTrue(sut.addAttachedFile(fileItem: source).isEmpty)
+        XCTAssertEqual(mockDelegate.addFileCallCount, 1)
     }
 
     func testRemoveAttachedFileDelegatesToMain() {
@@ -578,25 +623,6 @@ final class ChatInputViewModelTests: XCTestCase {
         XCTAssertEqual(store.recordingTime, 42.0)
     }
 
-    // MARK: - Validation State
-
-    func testValidationStateEquality() {
-        // ValidationState doesn't need Equatable for UI, but test the enum works
-        sut.validationState = .idle
-        if case .idle = sut.validationState { } else { XCTFail("Expected idle") }
-
-        sut.validationState = .validating
-        if case .validating = sut.validationState { } else { XCTFail("Expected validating") }
-
-        sut.validationState = .valid
-        if case .valid = sut.validationState { } else { XCTFail("Expected valid") }
-
-        sut.validationState = .invalid("error msg")
-        if case .invalid(let msg) = sut.validationState {
-            XCTAssertEqual(msg, "error msg")
-        } else { XCTFail("Expected invalid") }
-    }
-
     // MARK: - PromptSuggestionState / FileSuggestionState
 
     func testPromptSuggestionStateDefaults() {
@@ -623,7 +649,6 @@ final class ChatInputViewModelTests: XCTestCase {
     func testDelegateMethodsAreNilSafe() {
         let orphanVM = ChatInputViewModel(
             recognitionService: mockRecognition,
-            webSearchService: mockWebSearch,
             promptService: mockPromptService
         )
         // mainDelegate is nil — these should not crash

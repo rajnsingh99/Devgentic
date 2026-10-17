@@ -68,6 +68,14 @@ enum ProcessRunner {
         /// between "that was all of it" and "that was all of it so far".
         let outputComplete: Bool
 
+        /// Bytes dropped from the MIDDLE of stdout by the head/tail capture cap; 0 when stdout is
+        /// whole. Independent of `outputComplete` (that one is about descendants holding the pipe).
+        ///
+        /// Exists for callers that PARSE stdout. The gap is otherwise marked only by inline text,
+        /// and a structured parser reading across it sees a corrupted record and a plausible-looking
+        /// partial list — the Git Changes panel would present some files as all of them.
+        let standardOutputElidedBytes: Int
+
         var succeeded: Bool { exitCode == 0 }
 
         /// stdout, then stderr under a marker when both are present — the shape most callers
@@ -105,7 +113,7 @@ enum ProcessRunner {
     /// so this is about scheduling latency, and it was never the limiting factor in any
     /// measured case. It is the price of not silently dropping a forked worker's output, and
     /// it still returns 16× faster than waiting for the descendant.
-    private static let descendantGrace: TimeInterval = 0.25
+    static let descendantGrace: TimeInterval = 0.25
 
     /// Ceiling on the join after we cancel the sources. Cancellation is prompt, so reaching
     /// this means something is badly wrong; returning beats hanging.
@@ -159,7 +167,7 @@ enum ProcessRunner {
             // ⚠️ `.userInitiated`, matching the caller. `run` blocks on `group.wait` until these
             // pumps finish, so a default-QoS queue here makes a user-initiated thread wait on
             // lower-priority work — which Thread Performance Checker reports as a priority
-            // inversion on every git_tool call, and which genuinely slows the wait under load.
+            // inversion on every `git` call, and which genuinely slows the wait under load.
             source = DispatchSource.makeReadSource(
                 fileDescriptor: fd,
                 queue: DispatchQueue(label: label, qos: .userInitiated))
@@ -250,6 +258,7 @@ enum ProcessRunner {
 
     /// The one implementation. `timeout == nil` is an unbounded run.
     private static func execute(_ process: Process, timeout: TimeInterval?, label: String,
+                                descendantGrace: TimeInterval = descendantGrace,
                                 onStarted: ((Process) -> Void)? = nil) throws -> TimedResult {
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -343,7 +352,8 @@ enum ProcessRunner {
             standardOutput: String(decoding: out.data, as: UTF8.self),
             standardError: String(decoding: err.data, as: UTF8.self),
             exitCode: exitCode,
-            outputComplete: complete
+            outputComplete: complete,
+            standardOutputElidedBytes: out.elided
         )
 
         if !complete {
@@ -417,10 +427,16 @@ enum ProcessRunner {
     /// - Warning: a descendant that inherited the write end keeps running, and loses its reader.
     ///   It will take SIGPIPE on its next write. Redirect it (`cmd > log 2>&1 &`) if it is meant
     ///   to outlive the call.
+    ///
+    /// - Parameter descendantGrace: how long to keep draining after the child is reaped. Callers
+    ///   leave the default; a test widens it to pin the MECHANISM (drain past exit, stop at EOF)
+    ///   without racing the scheduler against a 0.25 s window.
     static func run(_ process: Process, timeout: TimeInterval,
+                    descendantGrace: TimeInterval = descendantGrace,
                     onStarted: ((Process) -> Void)? = nil) throws -> TimedResult {
         try execute(process, timeout: timeout,
                     label: process.executableURL?.lastPathComponent ?? "process",
+                    descendantGrace: descendantGrace,
                     onStarted: onStarted)
     }
 

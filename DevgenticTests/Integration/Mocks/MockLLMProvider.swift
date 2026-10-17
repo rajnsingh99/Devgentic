@@ -35,6 +35,9 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
     /// Track messages received for assertion in tests.
     private(set) var receivedCognitiveMessages: [[[String: String]]] = []
     private(set) var receivedGenerateMessages: [[[String: String]]] = []
+    /// `MLXPromptCacheScope.key` as each cognitive step saw it, so a test can prove which calls
+    /// name their conversation to the MLX prompt cache.
+    private(set) var receivedPromptCacheKeys: [String?] = []
 
     /// Full initializer for tests that need both generate() and generateCognitiveStep().
     init(steps: [ModernCognitiveStep] = [], generateResponses: [String] = []) {
@@ -49,6 +52,7 @@ final class MockLLMProvider: LLMProvider, @unchecked Sendable {
         tools: [[String: Any]]?
     ) async throws -> ModernCognitiveStep {
         receivedCognitiveMessages.append(messages)
+        receivedPromptCacheKeys.append(MLXPromptCacheScope.key)
 
         guard stepIndex < steps.count else {
             return ModernCognitiveStep(reasoning: "No more scripted steps.")

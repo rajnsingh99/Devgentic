@@ -54,10 +54,6 @@ protocol RecognitionServiceProtocol {
     func setAutoStopEnabled(_ enabled: Bool)
 }
 
-protocol WebSearchServiceProtocol {
-    func validate(apiKey: String) async -> (isValid: Bool, message: String)
-}
-
 protocol PromptServiceProtocol {
     func getAllPrompts() -> [DevPrompt]
     /// Records that a prompt was inserted into chat input. Drives the
@@ -69,7 +65,6 @@ protocol PromptServiceProtocol {
 
 extension WhisperRecognitionService: RecognitionServiceProtocol {}
 
-extension WebSearchService: WebSearchServiceProtocol {}
 extension PromptService: PromptServiceProtocol {}
 
 // MARK: - State Structures
@@ -89,6 +84,8 @@ struct SkillSuggestionState {
     var isShowing: Bool = false
     var query: String = ""
     var filteredItems: [SkillCommandItem] = []
+    /// One line per name more than one linked skill shares, among the names the query matches.
+    var collisionNotes: [String] = []
     var triggerRange: NSRange? = nil
     var selectedID: String? = nil
 }
@@ -101,20 +98,32 @@ struct SkillCommandItem: Identifiable, Equatable, Hashable {
     let description: String
 }
 
+/// Where the `@` picker's files come from right now — drives its empty state, so an empty list
+/// says WHY ("no folder", "indexing", "no files") instead of a generic "Type to search".
+enum FileSuggestionSource: Equatable {
+    case noFolder
+    case indexing
+    case ready
+
+    @MainActor
+    static func of(_ explorer: ExplorerViewModel) -> FileSuggestionSource {
+        if explorer.selectedRootURL == nil { return .noFolder }
+        if explorer.isIndexing && explorer.allSuggestableFiles.isEmpty { return .indexing }
+        return .ready
+    }
+}
+
 struct FileSuggestionState {
     var isShowing: Bool = false
     var query: String = ""
     var filteredItems: [FileSystemItem] = []
+    var source: FileSuggestionSource = .ready
+    /// A search has completed since the picker opened. Until then the list is not "empty", it
+    /// is not-yet-known — the view must not claim "no files" for it.
+    var hasResults: Bool = false
     var triggerRange: NSRange? = nil
     var selectedID: FileSystemItem.ID? = nil
     var multiSelectedIDs: Set<FileSystemItem.ID> = []
-}
-
-enum ValidationState {
-    case idle
-    case validating
-    case valid
-    case invalid(String)
 }
 
 // MARK: - Isolated Recording Display Store
@@ -142,9 +151,6 @@ final class ChatInputViewModel {
     enum WhisperAlertKind { case download, delete }
     var activeWhisperAlert: WhisperAlertKind?
     var showWhisperAlert: Bool = false
-    var showAPIKeyInputPopup: Bool = false
-    var apiKeyInput: String = ""
-    var validationState: ValidationState = .idle
 
     // MARK: - Recording Display
     let recordingDisplay = RecordingDisplayStore()
@@ -164,7 +170,7 @@ final class ChatInputViewModel {
 
     // MARK: - Delegates
     @ObservationIgnored weak var mainDelegate: (any ChatInputMainDelegate)?
-    @ObservationIgnored var onFileSearchRequest: ((String) -> (candidates: [FileSystemItem], attached: [FileSystemItem]))?
+    @ObservationIgnored var onFileSearchRequest: ((String) -> (candidates: [FileSystemItem], attached: [FileSystemItem], source: FileSuggestionSource))?
 
     // MARK: - Mediated Main ViewModel Access
     // These mirror mainDelegate state so SwiftUI re-renders when they change.
@@ -173,16 +179,95 @@ final class ChatInputViewModel {
     private(set) var attachedFiles: [FileSystemItem] = []
     private(set) var isStreaming: Bool = false
 
-    func addAttachedFile(fileItem: FileSystemItem) { mainDelegate?.addAttachedFile(fileItem: fileItem) }
-    func addAttachedFiles(fileItems: [FileSystemItem]) { mainDelegate?.addAttachedFiles(fileItems: fileItems) }
+    /// Attaches the file unless `AttachmentIntake` refuses it.
+    /// - Returns: the refusals (empty when attached) — callers surface them to the user.
+    ///
+    /// ⚠️ Every composer attach route (`@` picker, drag-and-drop, file panels) funnels through
+    /// these two methods, so this is where the intake policy applies for Chat and Code.
+    ///
+    /// - Parameter deliveryMode: the ACTIVE profile's mode — decides whether a folder is
+    ///   accepted (see `AttachmentIntake`). nil when no profile is resolved yet.
+    @discardableResult
+    func addAttachedFile(fileItem: FileSystemItem, deliveryMode: AttachmentDeliveryMode? = nil) -> [AttachmentIntake.Refusal] {
+        addAttachedFiles(fileItems: [fileItem], deliveryMode: deliveryMode)
+    }
+
+    @discardableResult
+    func addAttachedFiles(fileItems: [FileSystemItem], deliveryMode: AttachmentDeliveryMode? = nil) -> [AttachmentIntake.Refusal] {
+        let (accepted, refused) = AttachmentIntake.partition(fileItems, deliveryMode: deliveryMode)
+        if !refused.isEmpty {
+            logger.warning("[ATTACH] Refused \(refused.count) attachment(s): \(refused.map { "\($0.item.name) — \($0.reason)" }.joined(separator: "; ")). CONSEQUENCE: not attached; the user is told why instead of the file failing at send with a read error the model never sees.")
+        }
+        guard !accepted.isEmpty else { return refused }
+        if accepted.count == 1, fileItems.count == 1 {
+            mainDelegate?.addAttachedFile(fileItem: accepted[0])
+        } else {
+            mainDelegate?.addAttachedFiles(fileItems: accepted)
+        }
+        return refused
+    }
     func removeAttachedFile(fileItem: FileSystemItem) { mainDelegate?.removeAttachedFile(fileItem: fileItem) }
+
+    /// Attachments the model will receive only part of (or none of) under the active profile —
+    /// shown above the chips by `DeliveryWarningPanel`. Empty when nothing is lost.
+    var deliveryWarnings: [DeliveryWarning] = []
+    @ObservationIgnored private var deliveryWarningTask: Task<Void, Never>?
+
+    /// Recomputes `deliveryWarnings` for the current attachments by running the backend's own
+    /// read-then-plan (`DeliveryWarnings.outcomes`). Only an INJECTING profile can lose content;
+    /// a path-manifest profile hands over paths, so it never warns.
+    func refreshDeliveryWarnings(mode: AttachmentDeliveryMode?, profileType: ProfileType?,
+                                 reader: FileProcessorService = FileProcessorService()) {
+        deliveryWarningTask?.cancel()
+        guard case .inject(let includeAbsolutePaths)? = mode else {
+            deliveryWarnings = []
+            return
+        }
+        // The backend injects every non-image attachment; files that fail to read (folders,
+        // binaries) drop out of the plan there too, so only text and documents are candidates.
+        let candidates = attachedFiles
+            .filter { [.text, .document].contains(AttachmentClassifier.classify($0)) }
+            .map { DeliveryWarnings.Candidate(name: $0.name, path: $0.url.path, url: $0.url) }
+        guard !candidates.isEmpty else {
+            deliveryWarnings = []
+            return
+        }
+        let lane = DeliveryWarnings.Lane.attachment(includeAbsolutePaths: includeAbsolutePaths)
+        let remedy = DeliveryWarnings.Remedy.forProfileType(profileType)
+        deliveryWarningTask = Task { [weak self] in
+            let outcomes = await DeliveryWarnings.outcomes(for: candidates, lane: lane, reader: reader)
+            guard !Task.isCancelled, let self else { return }
+            let warnings = DeliveryWarnings.warnings(for: outcomes, lane: lane, remedy: remedy)
+            if warnings != self.deliveryWarnings {
+                self.deliveryWarnings = warnings
+                if !warnings.isEmpty {
+                    self.logger.info("[ATTACH] Pre-send: \(warnings.count) attachment(s) won't reach the model in full: \(warnings.map(\.fileName).joined(separator: ", ")). CONSEQUENCE: shown above the chips with the reason and a suggestion; the send still cuts them to the budget.")
+                }
+            }
+        }
+    }
+
+    /// Re-runs intake over what is ALREADY attached and removes what the active profile can no
+    /// longer carry. Intake ran against the profile active at attach time; a later switch
+    /// (Code → a bot, say) or a restored draft can leave a folder in a composer whose profile
+    /// injects contents, where it would only fail at send.
+    /// - Returns: the removed files, for the caller to report.
+    @discardableResult
+    func recheckAttachments(deliveryMode: AttachmentDeliveryMode?) -> [AttachmentIntake.Refusal] {
+        let (_, refused) = AttachmentIntake.partition(attachedFiles, deliveryMode: deliveryMode)
+        guard !refused.isEmpty else { return [] }
+        for refusal in refused {
+            mainDelegate?.removeAttachedFile(fileItem: refusal.item)
+        }
+        logger.notice("[ATTACH] Re-check removed \(refused.count) attachment(s) the active profile can't carry: \(refused.map { "\($0.item.name) — \($0.reason)" }.joined(separator: "; ")). CONSEQUENCE: they leave the composer now, with a notice, instead of failing at send.")
+        return refused
+    }
     func cancelStreamingResponse() { mainDelegate?.cancelStreamingResponse() }
     func getQueryFromHistory(direction: MainApplicationViewModel.QueryNavigationDirection) -> String? { mainDelegate?.getQueryFromHistory(direction: direction) }
     func resetQueryHistoryIndex() { mainDelegate?.resetQueryHistoryIndex() }
 
     // MARK: - Services
     @ObservationIgnored private var recognitionService: RecognitionServiceProtocol?
-    @ObservationIgnored private let webSearchService: WebSearchServiceProtocol
     @ObservationIgnored private let promptService: PromptServiceProtocol
 
     // MARK: - Private State
@@ -232,12 +317,10 @@ final class ChatInputViewModel {
     // MARK: - Initialization
     init(
         recognitionService: RecognitionServiceProtocol? = nil,
-        webSearchService: WebSearchServiceProtocol = WebSearchService(),
         promptService: PromptServiceProtocol = PromptService.shared
     ) {
         logger.info("ChatInputViewModel initialized.")
 
-        self.webSearchService = webSearchService
         self.promptService = promptService
 
         if let injectedService = recognitionService {
@@ -363,6 +446,7 @@ final class ChatInputViewModel {
     @ObservationIgnored private var fileDebounceTask: Task<Void, Never>?
     @ObservationIgnored private var lastPromptQuery: String = ""
     @ObservationIgnored private var lastFileQuery: String = ""
+    @ObservationIgnored private var lastFileShowing: Bool = false
 
     private func setupSuggestionPipelines() {
         promptQueryObserver = ObservationStream(
@@ -386,9 +470,16 @@ final class ChatInputViewModel {
         fileQueryObserver = ObservationStream(
             track: { [weak self] in
                 _ = self?.fileSuggestionState.query
+                // Redundant TODAY — `fileSuggestionState` is a struct, so reading any field
+                // tracks all of it — and kept on purpose: open/close is a real dependency of
+                // `handleFilePickerOpenOrClose`. If this state ever becomes its own @Observable
+                // class, tracking only `query` would silently stop seeing the picker open, which
+                // is exactly the stale-list bug this observer was fixed for (2026-10-05).
+                _ = self?.fileSuggestionState.isShowing
             },
             onChange: { [weak self] in
                 guard let self else { return }
+                if self.handleFilePickerOpenOrClose() { return }
                 let newQuery = self.fileSuggestionState.query
                 guard newQuery != self.lastFileQuery else { return }
                 self.lastFileQuery = newQuery
@@ -423,21 +514,47 @@ final class ChatInputViewModel {
         }
     }
 
+    /// The picker OPENING searches at once; CLOSING forgets its results.
+    ///
+    /// ⚠️ Searches used to run only when the query TEXT changed, and skipped a query equal to the
+    /// last one. A fresh `@` has the empty query — the same as last time — so nothing ran: the
+    /// popup showed the PREVIOUS folder's results (never cleared on close), or "Type to search"
+    /// when there were none, until a backspace changed the query.
+    /// - Returns: true when this change was an open/close (handled here).
+    func handleFilePickerOpenOrClose() -> Bool {
+        let showing = fileSuggestionState.isShowing
+        guard showing != lastFileShowing else { return false }
+        lastFileShowing = showing
+        fileDebounceTask?.cancel()
+        if showing {
+            lastFileQuery = fileSuggestionState.query
+            fileSuggestionState.hasResults = false
+            performFileSearch(query: fileSuggestionState.query)
+        } else {
+            lastFileQuery = ""
+            fileSearchTask?.cancel()
+            fileSuggestionState.filteredItems = []
+            fileSuggestionState.hasResults = false
+        }
+        return true
+    }
+
     private func performFileSearch(query: String) {
         guard let context = onFileSearchRequest?(query) else {
             logger.warning("File search skipped: onFileSearchRequest callback is nil (delegate not wired?).")
             return
         }
-        processFileCandidates(context.candidates, attachedFiles: context.attached)
+        processFileCandidates(context.candidates, attachedFiles: context.attached, source: context.source)
     }
 
-    /// Called by the view when ExplorerViewModel changes while file suggestions are showing.
+    /// Called by the view when the Explorer's folder, index or indexing state changes while the
+    /// picker is open — so a folder switched or indexed under an open `@` shows up live.
     func refreshFileSuggestions(using explorer: ExplorerViewModel) {
         let candidates = explorer.suggestableFiles(query: fileSuggestionState.query)
-        processFileCandidates(candidates, attachedFiles: attachedFiles)
+        processFileCandidates(candidates, attachedFiles: attachedFiles, source: .of(explorer))
     }
 
-    func processFileCandidates(_ candidates: [FileSystemItem], attachedFiles: [FileSystemItem]) {
+    func processFileCandidates(_ candidates: [FileSystemItem], attachedFiles: [FileSystemItem], source: FileSuggestionSource = .ready) {
         fileSearchTask?.cancel()
 
         fileSearchTask = Task.detached(priority: .userInitiated) {
@@ -450,6 +567,8 @@ final class ChatInputViewModel {
 
             await MainActor.run { [weak self] in
                 self?.fileSuggestionState.filteredItems = filtered
+                self?.fileSuggestionState.source = source
+                self?.fileSuggestionState.hasResults = true
                 self?.ensureFileSelection()
             }
         }
@@ -493,33 +612,37 @@ final class ChatInputViewModel {
         skillSuggestionState.isShowing = false
         skillSuggestionState.query = ""
         skillSuggestionState.filteredItems = []
+        skillSuggestionState.collisionNotes = []
         skillSuggestionState.triggerRange = nil
         skillSuggestionState.selectedID = nil
     }
 
-    /// Re-filters the `/` picker against the library.
+    /// Re-filters the `/` picker against what this profile's runs would actually load.
     ///
-    /// ⚠️ DRAFTS ARE EXCLUDED — `fetchRunnableSkills` — because a draft is never offered to an agent
-    /// even where it is linked, so a picker that listed one would let the user invoke something that
-    /// then silently does nothing.
+    /// ⚠️⚠️ BUILT FROM THE OFFER, NOT FROM THE LIBRARY. This used to fetch the library and keep rows
+    /// whose NAME was reachable, so two skills both called `learn` each got a row — an unlinked or
+    /// disabled copy included — while every row inserted the same `/learn` and the run loaded
+    /// whichever skill id sorted first. `SkillCommandOffer` comes from `SkillResolution`, the
+    /// function the run uses, so each row here is exactly the copy that will run, and a collision
+    /// is said out loud in `collisionNotes` instead of being presented as a choice.
+    ///
+    /// Drafts, deleted skills and missing pins are excluded by that same resolution.
     @MainActor
-    func refreshSkillSuggestions(reachableNames: Set<String>) {
+    func refreshSkillSuggestions(offer: SkillCommandOffer) {
         guard skillSuggestionState.isShowing else { return }
-        // ⚠️⚠️ SCOPED TO WHAT THE SEND PATH WILL ACTUALLY EXPAND. This listed the whole library,
-        // while `expandSkillCommand` accepted only names the profile had linked — so picking an
-        // offered-but-unlinked skill sent the raw `/name …` text to the model, looking for all the
-        // world like the trigger had silently failed. Both sides now read
-        // `SkillCommandReachability`, so the picker cannot advertise what the send path refuses.
-        let all = ((try? SkillStore.shared.fetchRunnableSkills().get()) ?? [])
-            .filter { reachableNames.contains($0.name) }
-            .map {
-                SkillCommandItem(id: $0.id, name: $0.name, displayName: $0.displayName,
-                                 description: $0.latestVersion?.skillDescription ?? "")
-            }
+        let all = offer.skills.map {
+            SkillCommandItem(id: $0.skillID, name: $0.name, displayName: $0.displayName,
+                             description: $0.description)
+        }
         let query = skillSuggestionState.query.lowercased()
         let matched = query.isEmpty ? all : all.filter {
             $0.name.lowercased().contains(query) || $0.displayName.lowercased().contains(query)
         }
+        // Only for names still on screen — a note about a row the query filtered away explains nothing.
+        let matchedNames = Set(matched.map(\.name))
+        skillSuggestionState.collisionNotes = offer.collisionNotes
+            .filter { matchedNames.contains($0.name) }
+            .map(\.note)
         // Prefix matches first — typing "co" should put `code-review` above `pandoc-convert`.
         skillSuggestionState.filteredItems = matched.sorted { lhs, rhs in
             let lhsPrefix = lhs.name.lowercased().hasPrefix(query)
@@ -675,6 +798,7 @@ final class ChatInputViewModel {
         fileSuggestionState.query = ""
         fileSuggestionState.triggerRange = nil
         fileSuggestionState.filteredItems = []
+        fileSuggestionState.hasResults = false
         fileSuggestionState.multiSelectedIDs = []
         fileSearchTask?.cancel()
     }
@@ -1052,20 +1176,5 @@ final class ChatInputViewModel {
         self.voiceInputState = concludeVoiceSessionAssessingDeadMic()
             ? .error(deadMicErrorMessage)
             : .available
-    }
-
-    // MARK: - API Key Validation
-    func validateEnteredAPIKey() async {
-        guard !apiKeyInput.isEmpty else { return }
-        self.validationState = .validating
-        let (isValid, message) = await webSearchService.validate(apiKey: self.apiKeyInput)
-        if isValid { self.validationState = .valid }
-        else { self.validationState = .invalid(message) }
-    }
-
-    func resetAPIKeyPopupState() {
-        apiKeyInput = ""
-        validationState = .idle
-        showAPIKeyInputPopup = false
     }
 }

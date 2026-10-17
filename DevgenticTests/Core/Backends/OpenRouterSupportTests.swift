@@ -205,13 +205,6 @@ final class OpenRouterSupportTests: XCTestCase {
         }
     }
 
-    func testUnusableEndpointDescription_WithholdsTheRawValue() {
-        let pastedKey = "sk-or-v1-0123456789abcdef0123456789abcdef"
-        let description = ConfiguredEndpoint.resolve(pastedKey).description
-        XCTAssertTrue(description.contains("unusable"), description)
-        XCTAssertFalse(description.contains(pastedKey), description)
-    }
-
     func testDefaultCognitiveCapability_OpenRouterAgent() {
         XCTAssertEqual(
             ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: .openRouter),

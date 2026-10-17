@@ -26,6 +26,7 @@ struct UserBubbleContentView: View {
                         ForEach(attachedTextFiles) { file in
                             FileAttachmentCardView(
                                 fileName: file.name,
+                                deliveryNote: file.delivery?.note,
                                 action: {
                                     let fileExtension = (file.name as NSString).pathExtension
                                     chatHistoryViewModel.showCodeInViewer(language: fileExtension, code: file.content)

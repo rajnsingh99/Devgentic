@@ -688,7 +688,7 @@ final class SchedulerService {
     private func saveContext() {
         guard let context = mainContext, context.hasChanges else { return }
         do {
-            try context.save()
+            try SharedContextSave.save(context, "scheduler")
         } catch {
             logger.error("Failed to save SwiftData context: \(error.localizedDescription)")
         }

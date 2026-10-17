@@ -26,19 +26,123 @@ final class ExplorerViewModelTests: XCTestCase {
 
     private var tempDir: URL!
     private var viewModel: ExplorerViewModel!
+    /// A throwaway defaults suite: the Explorer never touches the developer's real Chat folder
+    /// bookmark, and "Chat has no folder" holds on every machine.
+    private var defaults: UserDefaults!
+    private var suiteName: String!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("ExplorerViewModelTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        viewModel = ExplorerViewModel()
+        suiteName = "ExplorerViewModelTests-\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+        viewModel = ExplorerViewModel(defaults: defaults)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tempDir)
         viewModel = nil
+        defaults.removePersistentDomain(forName: suiteName)
         try super.tearDownWithError()
+    }
+
+    // MARK: - Per-mode folder ownership
+    //
+    // Chat and Code share this Explorer but own different folders. Code's project used to
+    // overwrite Chat's (switching back showed the Code project), and Code Home inherited
+    // whatever was showing instead of "Select Project folder".
+
+    private func makeFolder(_ name: String) throws -> URL {
+        let url = tempDir.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    func testCodeProjectDoesNotReplaceChatsFolder() throws {
+        let chatFolder = try makeFolder("notes")
+        let project = try makeFolder("java")
+
+        viewModel.openChatFolder(chatFolder)
+        viewModel.showCodeProject(project)
+        XCTAssertEqual(viewModel.scope, .code)
+        XCTAssertEqual(viewModel.selectedRootURL, project)
+        XCTAssertEqual(viewModel.chatRootURL, chatFolder, "Code borrows the Explorer; Chat's folder is kept")
+
+        viewModel.showChatFolder()
+        XCTAssertEqual(viewModel.scope, .chat)
+        XCTAssertEqual(viewModel.selectedRootURL, chatFolder, "back in Chat, Chat's folder — not the Code project")
+    }
+
+    /// Code Home shows NO folder (the "Select Project folder" state) and must not forget Chat's.
+    func testCodeHomeShowsNoFolderAndKeepsChats() throws {
+        let chatFolder = try makeFolder("notes")
+        viewModel.openChatFolder(chatFolder)
+
+        viewModel.showCodeProject(nil)
+        XCTAssertNil(viewModel.selectedRootURL)
+        XCTAssertEqual(viewModel.scope, .code)
+
+        viewModel.showChatFolder()
+        XCTAssertEqual(viewModel.selectedRootURL, chatFolder)
+    }
+
+    /// The `@` index belongs to the open folder. Leaving it behind made Chat's empty Explorer
+    /// offer Code's `java` files in the `@` picker (screenshots, 2026-10-04).
+    func testTheAtIndexIsDroppedWithItsFolder() async throws {
+        let project = try makeFolder("java")
+        try "class A {}".write(to: project.appendingPathComponent("January2026.java"), atomically: true, encoding: .utf8)
+
+        viewModel.showCodeProject(project)
+        try await waitUntil { !self.viewModel.allSuggestableFiles.isEmpty }
+
+        viewModel.showChatFolder()   // a fresh defaults suite → Chat has no folder
+        XCTAssertNil(viewModel.selectedRootURL)
+        XCTAssertTrue(viewModel.allSuggestableFiles.isEmpty, "Chat with no folder must offer nothing")
+
+        viewModel.showCodeProject(project)
+        try await waitUntil { !self.viewModel.allSuggestableFiles.isEmpty }
+        viewModel.showCodeProject(nil)
+        XCTAssertTrue(viewModel.allSuggestableFiles.isEmpty, "Code Home must offer nothing")
+    }
+
+    /// A slow index of the OLD folder must not land on top of the new one.
+    func testALateIndexOfTheOldFolderIsDiscarded() async throws {
+        let old = try makeFolder("old")
+        try "x".write(to: old.appendingPathComponent("Old.java"), atomically: true, encoding: .utf8)
+        let new = try makeFolder("new")
+        try "y".write(to: new.appendingPathComponent("New.java"), atomically: true, encoding: .utf8)
+
+        viewModel.showCodeProject(new)
+        try await waitUntil { self.viewModel.allSuggestableFiles.contains { $0.name == "New.java" } }
+
+        // Deterministic stand-in for the race: an index of the OLD folder completing while
+        // `new` is open (as one started before a mode switch would).
+        await viewModel.indexAllFiles(from: old)
+
+        XCTAssertEqual(viewModel.allSuggestableFiles.map(\.name), ["New.java"])
+    }
+
+    private func waitUntil(timeout: Duration = .seconds(3), _ condition: @escaping () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else { return XCTFail("condition not met within \(timeout)") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    /// ⚠️ The bookmark is CHAT's. Showing nothing for Code Home used to run the nil-root path,
+    /// which deleted it — Chat's folder was then gone after the next launch.
+    func testCodeHomeDoesNotDeleteChatsBookmark() throws {
+        let key = "explorerLastOpenedFolderBookmark"
+        let sentinel = Data("sentinel".utf8)
+        defaults.set(sentinel, forKey: key)
+
+        viewModel.showCodeProject(try makeFolder("java"))
+        viewModel.showCodeProject(nil)
+
+        XCTAssertEqual(defaults.data(forKey: key), sentinel)
     }
 
     func testNonSecurityScopedFolderLoadsContentsSuccessfully() async throws {

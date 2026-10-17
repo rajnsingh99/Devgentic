@@ -101,9 +101,17 @@ final class ChatHistoryViewModel {
         // gets missed by the fifth. Both panels occupy the same trailing slot, so showing one has
         // to hide the other or they overlap.
         //
-        // The `if` is what stops this recursing: setting this true assigns the other false, whose
-        // own `didSet` then sees false and does nothing.
-        didSet { if isCodeViewerVisible { isBackgroundTasksVisible = false } }
+        // The `if` is what stops this recursing: setting this true assigns the others false, whose
+        // own `didSet`s then see false and do nothing.
+        //
+        // THREE panels share the slot (Code Viewer, Background Tasks, Git Changes). Each `didSet`
+        // closes BOTH others — a pairwise rule that forgot one would let two panels overlap.
+        didSet {
+            if isCodeViewerVisible {
+                isBackgroundTasksVisible = false
+                isGitChangesVisible = false
+            }
+        }
     }
 
     /// Whether the Background Tasks panel is on screen. Deliberately NOT gated on having tasks —
@@ -111,7 +119,25 @@ final class ChatHistoryViewModel {
     /// says "nothing has run yet" is a useful answer; a panel that vanishes when the last task is
     /// discarded looks broken.
     var isBackgroundTasksVisible: Bool = false {
-        didSet { if isBackgroundTasksVisible { isCodeViewerVisible = false } }
+        didSet {
+            if isBackgroundTasksVisible {
+                isCodeViewerVisible = false
+                isGitChangesVisible = false
+            }
+        }
+    }
+
+    /// Whether the Git Changes panel (Code interface only) is on screen. Like Background Tasks, NOT
+    /// gated on content: "working tree clean" / "not a git repository" are answers worth showing.
+    /// The Code-mode gate lives at the mount site and in `FloatingPillStack`, not here — this flag
+    /// is only the slot's occupancy.
+    var isGitChangesVisible: Bool = false {
+        didSet {
+            if isGitChangesVisible {
+                isCodeViewerVisible = false
+                isBackgroundTasksVisible = false
+            }
+        }
     }
     /// How the panel occupies the window (overlay / split / full — see
     /// `CodeViewerPresentation`). A MODE rather than a stored width so the panel keeps
@@ -127,6 +153,13 @@ final class ChatHistoryViewModel {
     /// Defaults to `.split`.
     var backgroundTasksPresentation: CodeViewerPresentation = .split
     @ObservationIgnored private var lastNonFullBackgroundTasksPresentation: CodeViewerPresentation = .split
+
+    /// How the Git Changes panel occupies the window. Defaults to `.split`.
+    var gitChangesPresentation: CodeViewerPresentation = .split
+    @ObservationIgnored private var lastNonFullGitChangesPresentation: CodeViewerPresentation = .split
+    /// The panel's All / Staged / Unstaged filter. Kept here (not in the panel's `@State`) so it
+    /// survives closing and reopening the panel.
+    var gitChangesFilter: GitChangesFilter = .all
 
     /// The panel's width WHILE a divider drag is in flight; nil when no drag is running.
     ///
@@ -189,6 +222,18 @@ final class ChatHistoryViewModel {
         backgroundTasksFocusTaskID = nil
     }
 
+    /// The Git Changes panel is presented purely on its own flag — see the property.
+    var isGitChangesPanelPresented: Bool { isGitChangesVisible }
+
+    /// Opens the Git Changes panel, closing the other two (the `didSet` does the closing).
+    func showGitChanges() {
+        isGitChangesVisible = true
+    }
+
+    func hideGitChanges() {
+        isGitChangesVisible = false
+    }
+
     /// Task cards saved in ONE conversation's timeline — the task list's history across launches
     /// (see `BackgroundTaskHistory`). Holds only the most recently refreshed conversation: the pill
     /// and the panel both follow `viewerOwningConversationID`, so no second one is ever read.
@@ -245,10 +290,13 @@ final class ChatHistoryViewModel {
     /// store holds its partial text (`flushInFlight`), so counting it makes the ring climb
     /// through a run and drop when the row is replaced by the final answer.
     func resolveContextHistory(for conversationID: UUID) async -> [ChatMessage] {
+        // Image bytes omitted: the gauge COUNTS history images (`estimatedHistoryImageTokens`) and
+        // never ships them, so loading every screenshot's external blob for it was pure cost.
         let resolved = await BackendHistoryResolver.resolve(
             conversationID: conversationID,
             inMemory: currentChatMessages,
-            persistence: persistenceService
+            persistence: persistenceService,
+            omittingImageBytes: true
         )
         // Replies only — see the note above on why this is NOT the request path's turn-level set.
         let omitting = activeStreamManager.liveReplyIDs()
@@ -309,6 +357,26 @@ final class ChatHistoryViewModel {
     /// that method's doc) — backend history is now unconditionally resolved from the store
     /// through `BackendHistoryResolver`, so this flag can be flipped for paging reasons alone.
     var canLoadMorePages = true
+
+    /// Rows appended by scroll-back pagination since the conversation was loaded.
+    ///
+    /// Exists for `contextGaugeTurnKey` alone. A page of OLDER messages changes the render
+    /// window, never the request — the request is resolved from the store — so keying the gauge
+    /// on the raw count re-ran its 300-message resolve on every scroll-back page (RAG-6).
+    private(set) var olderPagesLoadedCount = 0
+
+    /// Changes when a turn is added, removed or spliced in, but NOT when scroll-back pages in
+    /// older rows. The context gauge recomputes on this rather than `currentChatMessages.count`.
+    ///
+    /// Stale only in the safe direction: a wholesale `currentChatMessages = []` from outside this
+    /// type leaves the paging tally behind, which changes the key (one extra recompute) until the
+    /// next load resets it.
+    var contextGaugeTurnKey: Int { currentChatMessages.count - olderPagesLoadedCount }
+
+    /// How long a gauge recompute waits for its trigger burst to settle before resolving (RAG-6).
+    /// A send fires 3–4 triggers within a few ms (user row, reply row, streaming on); the ring
+    /// moves this much later and the resolve runs once.
+    static let contextGaugeSettle: Duration = .milliseconds(120)
 
     /// Set when scroll-back stopped because the resident window hit `maxResidentMessages`,
     /// NOT because the store ran out. Kept separate from `canLoadMorePages` precisely so
@@ -516,7 +584,7 @@ final class ChatHistoryViewModel {
         // Was a read whose result was DISCARDED by an empty `MainActor.run` body, under a
         // comment claiming it fed a diff in the pending tab. The panel carries no diff.
         let path = payload.path
-        Task { [weak self] in
+        let preRead = Task { [weak self] in
             let pre = await Task.detached(priority: .utility) { () -> String? in
                 guard FileManager.default.fileExists(atPath: path) else { return "" }
                 guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
@@ -555,7 +623,20 @@ final class ChatHistoryViewModel {
                 }
             }
         }
+        #if DEBUG
+        preWriteReadTaskForTesting = preRead
+        #else
+        _ = preRead
+        #endif
     }
+
+    #if DEBUG
+    /// Test seam: the most recent pre-read `handleAgentWriteBegan` fired. The read runs on a
+    /// detached `.utility` task, OFF the main actor, so a test polling `preWriteDisk` with
+    /// `Task.yield()` has no ordering against it — under load the yield budget ran out before
+    /// the read landed (flaky `RejectedLiveWriteDriftBaselineTests`). Awaiting this is exact.
+    @ObservationIgnored private(set) var preWriteReadTaskForTesting: Task<Void, Never>?
+    #endif
 
     /// The write finished: settle the tab (success) or mark it rejected (denied/failed —
     /// the tab shows a proposal that never reached disk).
@@ -1069,6 +1150,28 @@ final class ChatHistoryViewModel {
             lastNonFullBackgroundTasksPresentation = backgroundTasksPresentation
         }
         logger.info("[BackgroundTasks] Presentation → \(self.backgroundTasksPresentation.rawValue).")
+    }
+
+    /// Toggles full-width presentation for the Git Changes panel.
+    func toggleGitChangesExpansion() {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            if gitChangesPresentation == .full {
+                gitChangesPresentation = lastNonFullGitChangesPresentation
+            } else {
+                lastNonFullGitChangesPresentation = gitChangesPresentation
+                gitChangesPresentation = .full
+            }
+        }
+        logger.info("[GitUI] Presentation → \(self.gitChangesPresentation.rawValue).")
+    }
+
+    /// Toggles side-by-side split with the chat for the Git Changes panel. From full-width it goes straight to split.
+    func toggleGitChangesSplit() {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            gitChangesPresentation = (gitChangesPresentation == .split) ? .overlay : .split
+            lastNonFullGitChangesPresentation = gitChangesPresentation
+        }
+        logger.info("[GitUI] Presentation → \(self.gitChangesPresentation.rawValue).")
     }
 
     /// Hides the panel but KEEPS the tabs — the floating reopen button takes over.
@@ -1882,6 +1985,10 @@ final class ChatHistoryViewModel {
             // Atomic replace: original is only removed after temp is in place
             _ = try FileManager.default.replaceItemAt(target, withItemAt: tempURL)
         }.value
+        // The ONE write path all three user saves share (⌘S, Apply, Save As) — so one post here
+        // tells disk-state observers (the Git Changes panel) about every user save. Reached only
+        // on success: every failure above throws past it.
+        await WorkspaceActivity.post(reason: "saved \(fileURL.lastPathComponent)")
     }
 
     func copyMessageContentToClipboard(message: ChatMessage) {
@@ -2078,6 +2185,7 @@ final class ChatHistoryViewModel {
 
         guard let selectedID = id else {
             currentChatMessages = []
+            olderPagesLoadedCount = 0
             loadedConversationID = nil
             return
         }
@@ -2148,6 +2256,7 @@ final class ChatHistoryViewModel {
             // OPTIMIZATION: Keep messages in Descending Order (Newest -> Oldest).
             // We REMOVED .reversed() here. This aligns with the View's .reversed() loop.
             self.currentChatMessages = sortedDescending
+            self.olderPagesLoadedCount = 0
             self.loadedConversationID = selectedID
             // The corpus belongs to the previous conversation (or a stale snapshot of this
             // one); drop it so search re-fetches against what is actually loaded.
@@ -2231,6 +2340,7 @@ final class ChatHistoryViewModel {
             // OPTIMIZATION: Append to the end of the array (Newest...Oldest -> Append Older).
             // Since we are storing Descending, older messages go to the end (Index N).
             self.currentChatMessages.append(contentsOf: olderMessages)
+            self.olderPagesLoadedCount += olderMessages.count
 
             trimMarkdownCachesOutsideWindow()
         }

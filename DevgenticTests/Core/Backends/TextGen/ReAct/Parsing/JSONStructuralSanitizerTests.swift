@@ -115,7 +115,13 @@ final class JSONStructuralSanitizerTests: XCTestCase {
     /// walker keys on quotes, not lines, so string tracking must hold anyway.
     func testRawNewlineInsideAStringDoesNotBreakSpanTracking() {
         let out = repair("{\"content\": \"a = True\nb = None\", \"n\": True,}")
-        XCTAssertTrue(out.contains("a = True\nb = None"), "content untouched, raw newline and all")
+        // ⚠️ CHANGED 2026-10-10 (CR-19): asserted on the DECODED value, which is the invariant. This
+        // used to check the repaired TEXT still held a raw newline — but a raw newline inside a string
+        // is what made the document invalid, and the repair now escapes it (`\n`), which decodes to
+        // the same characters. What must hold is that `True`/`None` INSIDE the string were not touched.
+        struct C: Decodable { let content: String }
+        let decoded = try? JSONDecoder().decode(C.self, from: Data(out.utf8))
+        XCTAssertEqual(decoded?.content, "a = True\nb = None", "content untouched, newline and all")
         XCTAssertTrue(out.contains("\"n\": true"), "the real literal outside the string is repaired")
         XCTAssertFalse(out.contains("true,}"), "and the trailing comma is gone")
     }

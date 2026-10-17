@@ -43,6 +43,11 @@ final class WorkflowRunRecordSD {
     /// Denormalized conversation FK for index-friendly queries.
     var conversationID: UUID
 
+    /// The "index-friendly" queries above had no index to use (RAG-10 / CR-66): every read is
+    /// this conversation's runs by time, so one composite serves predicate and sort.
+    /// ⚠️ Existing stores do not gain it — see the note on `ChatMessageSD`'s `#Index`.
+    #Index<WorkflowRunRecordSD>([\.conversationID, \.timestamp])
+
     var workflowProfileID: UUID
     var workflowName: String
     var timestamp: Date

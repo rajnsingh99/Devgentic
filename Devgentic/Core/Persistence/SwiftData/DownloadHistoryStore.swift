@@ -452,7 +452,7 @@ final class DownloadHistoryStore {
     private func save() -> Result<Void, DownloadHistoryError> {
         guard let context = mainContext else { return .failure(.containerUnavailable) }
         do {
-            try context.save()
+            try SharedContextSave.save(context, "download history")
             return .success(())
         } catch {
             logger.error("SwiftData save failed: \(error.localizedDescription)")

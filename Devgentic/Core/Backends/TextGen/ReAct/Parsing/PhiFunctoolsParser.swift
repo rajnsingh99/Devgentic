@@ -123,7 +123,8 @@ struct PhiFunctoolsParser: CognitiveParserProtocol {
             logger.info("PhiFunctoolsParser: Decoded array after sanitization.")
             return decoded
         }
-        logger.warning("PhiFunctoolsParser: Failed to decode array: \(trimmed.prefix(200))")
+        logger.warning("PhiFunctoolsParser: Failed to decode array: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("PhiFunctoolsParser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 

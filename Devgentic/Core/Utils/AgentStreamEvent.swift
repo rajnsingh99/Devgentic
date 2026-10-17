@@ -578,8 +578,16 @@ struct ToolOutput: Sendable, Identifiable, Equatable {
     /// read back JUST AFTER a successful edit — the post-state the params can't provide.
     /// Nil for full-content writers (their params ARE the post-state) and failures.
     let postWriteContent: String?
+    /// The params the call's timeline ROW was created with, when they differ from `params` — set
+    /// only where a run changes a call's params between the row and its result (the user editing
+    /// them in the confirmation banner). `ToolRowMatcher` matches on this, so the result lands on
+    /// its own row, never on a parallel same-name one (CR-41).
+    ///
+    /// ⚠️ In-flight only: deliberately NOT encoded. It joins a live result to a live row; a
+    /// persisted output has already been placed.
+    let rowParams: String?
 
-    init(id: UUID = UUID(), toolName: String, params: String = "", output: String, isSuccess: Bool, preWriteContent: String? = nil, postWriteContent: String? = nil) {
+    init(id: UUID = UUID(), toolName: String, params: String = "", output: String, isSuccess: Bool, preWriteContent: String? = nil, postWriteContent: String? = nil, rowParams: String? = nil) {
         self.id = id
         self.toolName = toolName
         self.params = params
@@ -587,7 +595,11 @@ struct ToolOutput: Sendable, Identifiable, Equatable {
         self.isSuccess = isSuccess
         self.preWriteContent = preWriteContent
         self.postWriteContent = postWriteContent
+        self.rowParams = rowParams
     }
+
+    /// The params that identify this output's timeline row.
+    var matchingParams: String { rowParams ?? params }
 }
 
 // Backward-compatible Codable: legacy persisted data may lack the `params`,
@@ -606,6 +618,7 @@ extension ToolOutput: Codable {
         isSuccess = try c.decode(Bool.self, forKey: .isSuccess)
         preWriteContent = try c.decodeIfPresent(String.self, forKey: .preWriteContent)
         postWriteContent = try c.decodeIfPresent(String.self, forKey: .postWriteContent)
+        rowParams = nil   // in-flight only — see the property
     }
 }
 
@@ -648,7 +661,7 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
         if ToolCapability.executesArbitraryCode(toolName) { return .destructive }
 
         switch toolName {
-        case "delete_file", "batch_move_files", "fs_organize_batch",
+        case "delete_file", "batch_move_files",
              // Split out of read/write multiplexers 2026-07-31 precisely so they could be
              // labelled and gated as what they are. Each removes something with no undo:
              // an event, a reminder, a process (SIGKILL), or every tag on a file.
@@ -665,9 +678,9 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
              // to reach `.destructive` faster would fail the test that keeps the set honest.
              "update_skill":
             return .destructive
-        case "write_file", "move_file", "copy_file", "create_folder", "watch_folder", "fs_watch_folder":
+        case "write_file", "move_file", "copy_file", "create_folder", "watch_folder":
             return .moderate
-        case "read_file", "list_directory", "spotlight_search", "fs_smart_search", "read_file_metadata", "fs_read_metadata",
+        case "read_file", "list_directory", "spotlight_search", "read_file_metadata",
              "get_system_stats", "web_search",
              // The former Code-only read tools, in the Library since 2026-09-24. Read-only, and
              // `LocalToolManager` already defaulted them to no confirmation — this tier said
@@ -698,21 +711,6 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
     /// indistinguishably from a native guarantee. Optional so pre-SE3 persisted confirmations
     /// (G1 park/resume) decode as nil.
     var riskIsServerDeclared: Bool?
-    /// The on-disk file this tool will write, when the ARGUMENTS do not name one.
-    ///
-    /// ⚠️⚠️ Exists for `update_project_context`, whose only argument is `content` — the target is
-    /// fixed by the run's project, not chosen by the model. Without this the banner had nothing
-    /// to preview against and fell back to raw JSON, which is how a paragraph asserting two
-    /// methods that do not exist was approved into `.devgentic/context.md` and then injected into
-    /// every subsequent conversation for that project (field-observed 2026-09-20).
-    ///
-    /// ⚠️ Deliberately NOT injected into `arguments`. The banner makes every top-level string
-    /// argument editable, and this tool derives its own destination — so an edited path would be
-    /// silently ignored and the write would land somewhere other than what was approved. It is a
-    /// preview hint, and only that.
-    ///
-    /// Optional so pre-existing persisted confirmations (G1 park/resume) still decode.
-    var previewPath: String?
 
     init(
         id: UUID = UUID(),
@@ -720,8 +718,7 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
         params: String,
         risk: HITLRiskTier = .moderate,
         arguments: JSONValue? = nil,
-        riskIsServerDeclared: Bool? = nil,
-        previewPath: String? = nil
+        riskIsServerDeclared: Bool? = nil
     ) {
         self.id = id
         self.toolName = toolName
@@ -729,7 +726,6 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
         self.risk = risk
         self.arguments = arguments
         self.riskIsServerDeclared = riskIsServerDeclared
-        self.previewPath = previewPath
     }
 }
 

@@ -94,9 +94,15 @@ final class NativeSeedingIntegrationTests: XCTestCase {
         let kickoff = try XCTUnwrap(firstRequest.last)
 
         XCTAssertEqual(kickoff["role"], "user")
-        XCTAssertEqual(
-            kickoff["content"], "What is 2+2?",
-            "Unseeded runs must keep the kickoff turn byte-identical to the user input"
-        )
+        // Layout B: the kickoff turn leads with the per-message turn context (no history or
+        // retrieval here, so just the time line), then the user input — and nothing else: an
+        // unseeded run adds no `<prior_context>` and no other bytes.
+        let content = try XCTUnwrap(kickoff["content"])
+        let parts = content.components(separatedBy: "\n\n")
+        XCTAssertEqual(parts.count, 2, "Unseeded runs must carry only the turn context and the user input — got: \(content)")
+        XCTAssertTrue(parts.first?.hasPrefix("Current time: ") ?? false, "The turn context must lead the kickoff turn")
+        XCTAssertEqual(parts.last, "What is 2+2?", "The user input must close the kickoff turn, byte-identical")
+        XCTAssertFalse(firstRequest.first?["content"]?.contains("Current time") ?? true,
+                       "The time must ride the kickoff turn, never the system message")
     }
 }

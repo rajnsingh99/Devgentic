@@ -724,9 +724,18 @@ struct ConversationSidebarView: View {
 
     /// Single-pass partition: filters by mode, splits pinned/unpinned, and date-groups in one traversal.
     private var partitioned: PartitionedConversations {
-        // Build profile type lookup for mode-based filtering.
-        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
-        let typeMap = Dictionary(profiles.map { ($0.id, $0.profileType) }, uniquingKeysWith: { first, _ in first })
+        // Profile type lookup for LEGACY rows only (no denormalized `profileTypeRaw`), built on first
+        // need. ⚠️ Was built unconditionally: a fetch + snapshot of every profile on each of the
+        // 2–3 evaluations per body, which ran on every streaming flush (RAG-28) even when no row
+        // needed it.
+        var typeMap: [UUID: ProfileType]?
+        func profileType(for id: UUID) -> ProfileType? {
+            if typeMap == nil {
+                let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+                typeMap = Dictionary(profiles.map { ($0.id, $0.profileType) }, uniquingKeysWith: { first, _ in first })
+            }
+            return typeMap?[id]
+        }
         let allowedTypes = viewModel.interfaceMode.allowedProfileTypes
 
         let calendar = Calendar.current
@@ -749,7 +758,7 @@ struct ConversationSidebarView: View {
             let resolvedProfileType: ProfileType?
             if let raw = conversation.profileTypeRaw, let pt = ProfileType(rawValue: raw) {
                 resolvedProfileType = pt
-            } else if let profileID = conversation.backendEntityId, let pt = typeMap[profileID] {
+            } else if let profileID = conversation.backendEntityId, let pt = profileType(for: profileID) {
                 resolvedProfileType = pt
             } else {
                 resolvedProfileType = nil

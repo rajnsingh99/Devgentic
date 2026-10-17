@@ -152,15 +152,16 @@ struct CodeDedicatedView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(theme.secondaryText)
 
-                if let content = codeSessionManager.projectMemoryContent {
+                if codeSessionManager.projectKnowledgeContent != nil {
+                    let count = codeSessionManager.projectMemoryEntryCount
                     Circle()
                         .fill(Color.green)
                         .frame(width: 5, height: 5)
-                    Text("Project Structure · \(content.count) chars")
+                    Text("Project Context · \(count) memor\(count == 1 ? "y" : "ies")")
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundColor(theme.primaryText)
                 } else {
-                    Text("Project Structure · Not indexed")
+                    Text("Project Context · None yet")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(theme.secondaryText)
                 }
@@ -182,12 +183,9 @@ struct CodeDedicatedView: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingContextInspector, arrowEdge: .bottom) {
-            CodeContextInspectorPopover(
-                projectURL: codeSessionManager.projectPath,
-                contextContent: codeSessionManager.projectMemoryContent
-            )
+            CodeContextInspectorPopover(projectURL: codeSessionManager.projectPath)
         }
-        .help("Inspect the project structure and linked codebase context (.devgentic/context.md)")
+        .help("What every run in this project is told: AGENTS.md and the project memory (.devgentic/memory)")
     }
 
     // MARK: - Empty State (Actionable Onboarding Checklist Cards)

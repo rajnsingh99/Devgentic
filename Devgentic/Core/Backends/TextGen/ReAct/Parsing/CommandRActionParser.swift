@@ -67,6 +67,13 @@ struct CommandRActionParser: CognitiveParserProtocol {
 
     /// Locates each `Action:` segment and extracts the JSON array inside its code fence
     /// (or bare array if no fence).
+    ///
+    /// ⚠️ READINESS CR-55 (2026-10-12). The search resumed just after each `Action:`, NOT after the
+    /// array it consumed, while each `Action:` takes the first array FOLLOWING it. So any second
+    /// `Action:` before or inside that array (a "Next Action: …" in the thought, or the word inside
+    /// an argument string) read the SAME array again and every call in it was emitted twice. The
+    /// loop's exact-duplicate removal happened to stop the double run; the parse is now right on
+    /// its own: the search resumes after the consumed array.
     private func extractToolCalls(from text: String) -> [PendingToolCall] {
         var results: [PendingToolCall] = []
         var searchStart = text.startIndex
@@ -75,8 +82,7 @@ struct CommandRActionParser: CognitiveParserProtocol {
             let afterAction = actionRange.upperBound
 
             // Prefer fenced JSON; fall back to bare balanced array.
-            let slice = extractJSONArraySlice(from: String(text[afterAction...]))
-            guard let arraySlice = slice else {
+            guard let (arraySlice, consumedEnd) = extractJSONArraySlice(in: text, from: afterAction) else {
                 searchStart = afterAction
                 continue
             }
@@ -84,45 +90,31 @@ struct CommandRActionParser: CognitiveParserProtocol {
             if let decoded = decodeArray(arraySlice) {
                 results.append(contentsOf: decoded.compactMap { toPendingCall($0) })
             }
-            // Advance past what we consumed.
-            searchStart = afterAction
+            // Advance past what we CONSUMED, not just past this `Action:` (CR-55).
+            searchStart = consumedEnd
         }
 
         return results
     }
 
-    private func extractJSONArraySlice(from text: String) -> String? {
-        // Try fenced ``` json ... ``` first.
+    /// The first JSON array after `start` (fenced, else bare) and the index just past it.
+    private func extractJSONArraySlice(in fullText: String, from start: String.Index) -> (String, String.Index)? {
+        let text = fullText[start...]
         let fencePatterns = [
             #"```json\s*\n([\s\S]*?)\n\s*```"#,
             #"```\s*\n([\s\S]*?)\n\s*```"#
         ]
         for pattern in fencePatterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            if let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-               let bodyRange = Range(match.range(at: 1), in: text) {
-                return String(text[bodyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let match = regex.firstMatch(in: fullText, range: NSRange(start..<fullText.endIndex, in: fullText)),
+               let bodyRange = Range(match.range(at: 1), in: fullText),
+               let wholeRange = Range(match.range, in: fullText) {
+                return (String(fullText[bodyRange]).trimmingCharacters(in: .whitespacesAndNewlines), wholeRange.upperBound)
             }
         }
         // Fallback: bare balanced `[...]`.
-        guard let openIdx = text.firstIndex(of: "[") else { return nil }
-
-        var depth = 0
-        var inString = false
-        var escaped = false
-        for idx in text[openIdx...].indices {
-            let c = text[idx]
-            if escaped { escaped = false; continue }
-            if c == "\\" && inString { escaped = true; continue }
-            if c == "\"" { inString.toggle(); continue }
-            if inString { continue }
-            if c == "[" { depth += 1 }
-            else if c == "]" {
-                depth -= 1
-                if depth == 0 { return String(text[openIdx...idx]) }
-            }
-        }
-        return nil
+        guard let range = BalancedJSONScanner.balancedRange(in: fullText, from: text.startIndex, opener: "[") else { return nil }
+        return (String(fullText[range]), range.upperBound)
     }
 
     private func toPendingCall(_ obj: ToolCallObject) -> PendingToolCall? {
@@ -146,7 +138,8 @@ struct CommandRActionParser: CognitiveParserProtocol {
             logger.info("CommandRActionParser: Decoded array after sanitization.")
             return decoded
         }
-        logger.warning("CommandRActionParser: Failed to decode array: \(trimmed.prefix(200))")
+        logger.warning("CommandRActionParser: Failed to decode array: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("CommandRActionParser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 

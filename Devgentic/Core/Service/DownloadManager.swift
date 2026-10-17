@@ -63,6 +63,24 @@ enum ModelBackendType: String, Equatable, Hashable {
 /// driving a real download, and so a typo can't silently drop a case.
 /// ⚠️ `CaseIterable` so the notification-policy test covers the real set rather than a
 /// hand-written array that a new terminal state would slip past unnoticed.
+private let classifierLogger = DGLogger(category: "DownloadManager")
+
+/// How a download ENDED, as the service that ran it saw it.
+///
+/// ⚠️ Recorded by the service itself, synchronously, BEFORE it flips `isDownloading` off, so the
+/// history bridge reads the truth instead of inferring it. Inference was the CR-35 defect class:
+/// a percentage says how far a download got, never how it stopped.
+enum DownloadEnding: String, Equatable, Sendable {
+    case succeeded, failed, cancelled, paused
+}
+
+/// A `DownloadEnding` and the model it belongs to, so a bridge never applies one download's
+/// ending to another's record.
+struct RecordedDownloadEnding: Equatable, Sendable {
+    let modelID: String
+    let ending: DownloadEnding
+}
+
 enum DownloadTerminalClassification: String, CaseIterable {
     case completed
     case failed
@@ -428,6 +446,7 @@ final class DownloadManager {
                 _ = service.modelPullError
                 _ = service.pullCompletedBytes
                 _ = service.pullTotalBytes
+                _ = service.pullTerminalState
             },
             onChange: { [weak self] in
                 self?.reconcileOllama(
@@ -436,7 +455,8 @@ final class DownloadManager {
                     modelName: service.modelToPull,
                     errorMessage: service.modelPullError,
                     completedBytes: service.pullCompletedBytes,
-                    totalBytes: service.pullTotalBytes
+                    totalBytes: service.pullTotalBytes,
+                    terminalState: service.pullTerminalState
                 )
             }
         )
@@ -448,7 +468,8 @@ final class DownloadManager {
         modelName: String,
         errorMessage: String?,
         completedBytes: Int64?,
-        totalBytes: Int64?
+        totalBytes: Int64?,
+        terminalState: OllamaService.PullTerminalState? = nil
     ) {
         if isPulling && !modelName.isEmpty {
             if let id = ollamaActiveID, activeRecordMatches(id, modelName: modelName) {
@@ -490,20 +511,16 @@ final class DownloadManager {
             // `loadLocalModels()`, whose first line is `guard …, !isPullingModel, … else
             // { return }` — and `isPullingModel` is still true at that point, so it returned
             // having fetched nothing and `isInstalledNow` was ALWAYS false. Classification
-            // silently rested on the `progress >= 0.99` fallback below. The pull path now calls
+            // silently rested on a percentage fallback (since removed — CR-35). The pull path now calls
             // an unguarded `performLocalModelRefresh()`; if that is ever reverted, this line goes
             // back to being a lie and this branch goes back to being dead.
             let isInstalledNow = OllamaService.shared.localModels.contains { $0.name == modelIdentifier }
-            let classification: DownloadTerminalClassification
-            if let err = errorMessage, !err.isEmpty {
-                classification = .failed
-                _ = DownloadHistoryStore.shared.markFailed(id: id, message: err)
-            } else if isInstalledNow || progress >= 0.99 {
-                classification = .completed
-                _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: totalBytes)
-            } else {
-                classification = .cancelled
-                _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
+            let classification = Self.classifyOllamaPull(terminalState: terminalState, errorMessage: errorMessage,
+                                                         isInstalledNow: isInstalledNow)
+            switch classification {
+            case .failed:    _ = DownloadHistoryStore.shared.markFailed(id: id, message: errorMessage ?? "The pull failed.")
+            case .completed: _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: totalBytes)
+            default:         _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
             }
             logTerminal(backend: .ollama, recordID: id, modelIdentifier: modelIdentifier,
                         classification: classification, progress: progress,
@@ -511,6 +528,60 @@ final class DownloadManager {
             clearTransients(recordID: id, backend: .ollama, modelIdentifier: modelIdentifier)
             ollamaActiveID = nil
         }
+    }
+
+    /// How a finished Ollama pull is recorded.
+    ///
+    /// ⚠️ READINESS CR-35 (2026-10-12). A pull with no error and `progress >= 0.99` was recorded
+    /// COMPLETED — but Ollama reports progress PER LAYER (each layer runs 0 → 100 %), and a cancel
+    /// clears the error, so a pull cancelled near the end of any layer went into history as a
+    /// finished download of a model that is not there. The service's own terminal state is the
+    /// truth; without one (an older code path), only an error or the installed list decides —
+    /// never the percentage.
+    static func classifyOllamaPull(terminalState: OllamaService.PullTerminalState?, errorMessage: String?,
+                                   isInstalledNow: Bool) -> DownloadTerminalClassification {
+        switch terminalState {
+        case .succeeded?: return .completed
+        case .cancelled?: return .cancelled
+        case .failed?:    return .failed
+        case .started?, nil:
+            if let err = errorMessage, !err.isEmpty { return .failed }
+            return isInstalledNow ? .completed : .cancelled
+        }
+    }
+
+    /// How a finished MLX or Whisper download is recorded (the CR-35 follow-up, 2026-10-13).
+    ///
+    /// ⚠️ Both bridges used `isInstalledNow || progress >= 0.99 → completed`, else cancelled. The
+    /// percentage never says how a download STOPPED: it only happened to be right because every
+    /// cancel and pause path resets progress to 0 first (and Whisper's SUCCESS path does too,
+    /// which made the fallback dead there). What it actually decided was the one case it got
+    /// wrong: a download that SUCCEEDED but that the installed scan does not list (an
+    /// unrecognised layout or publisher spelling) was recorded as CANCELLED. The service's own
+    /// `lastDownloadEnding` decides now. Without one for this model (an older path), only the
+    /// error, the pause marker and the installed list decide, never the percentage.
+    static func classifyEndedDownload(
+        backend: ModelBackendType, modelIdentifier: String, ending: RecordedDownloadEnding?,
+        errorMessage: String?, isInstalledNow: Bool, isPausedNow: Bool
+    ) -> DownloadTerminalClassification {
+        if let ending, ending.modelID == modelIdentifier {
+            switch ending.ending {
+            case .succeeded:
+                if !isInstalledNow {
+                    classifierLogger.warning("[DOWNLOAD] \(backend.rawValue) '\(modelIdentifier)' finished successfully but is NOT in the installed list. CONSEQUENCE: recorded as completed, because the download did complete; if the model does not appear in the picker, its folder layout is not one the scanner recognises.")
+                }
+                return .completed
+            case .failed:    return .failed
+            case .cancelled: return .cancelled
+            case .paused:    return .paused
+            }
+        }
+        if let ending {
+            classifierLogger.error("[DOWNLOAD] \(backend.rawValue) ending for '\(ending.modelID)' does not belong to the record for '\(modelIdentifier)'. CONSEQUENCE: it is ignored, and this record is classified from the error, pause marker and installed list.")
+        }
+        if let err = errorMessage, !err.isEmpty { return .failed }
+        if isInstalledNow { return .completed }
+        return isPausedNow ? .paused : .cancelled
     }
 
     // MARK: - MLX bridge
@@ -584,25 +655,22 @@ final class DownloadManager {
             // (synchronous on MainActor) before flipping isDownloading,
             // so installedModels is fresh at this moment.
             // Goes through the shared identity comparator: an exact `displayName ==` test
-            // never matched for publishers other than `mlx-community`, so a successful
-            // download of those fell through to the `progress >= 0.99` fallback and could
-            // be written to history as `.cancelled`.
+            // never matched for publishers other than `mlx-community`. The service's recorded
+            // ending decides the classification now; the installed check only adds the
+            // "finished but not listed" warning (see `classifyEndedDownload`).
             let isInstalledNow = MLXModelService.shared.isInstalled(repoId: modelIdentifier)
-            let classification: DownloadTerminalClassification
-            if let err = errorMessage, !err.isEmpty {
-                classification = .failed
-                _ = DownloadHistoryStore.shared.markFailed(id: id, message: err)
-            } else if isInstalledNow || progress >= 0.99 {
-                classification = .completed
-                _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: totalBytes)
-            } else if MLXModelService.shared.pausedRepoId == modelIdentifier {
-                // A pause and a cancel both stop the task; only the pause keeps the bytes, so
-                // recording it as cancelled would tell the user their progress was discarded.
-                classification = .paused
-                _ = DownloadHistoryStore.shared.markPaused(id: id)
-            } else {
-                classification = .cancelled
-                _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
+            // A pause and a cancel both stop the task; only the pause keeps the bytes, so
+            // recording it as cancelled would tell the user their progress was discarded.
+            let classification = Self.classifyEndedDownload(
+                backend: .mlx, modelIdentifier: modelIdentifier,
+                ending: MLXModelService.shared.lastDownloadEnding,
+                errorMessage: errorMessage, isInstalledNow: isInstalledNow,
+                isPausedNow: MLXModelService.shared.pausedRepoId == modelIdentifier)
+            switch classification {
+            case .failed:    _ = DownloadHistoryStore.shared.markFailed(id: id, message: errorMessage ?? "Download failed")
+            case .completed: _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: totalBytes)
+            case .paused:    _ = DownloadHistoryStore.shared.markPaused(id: id)
+            case .cancelled: _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
             }
             logTerminal(backend: .mlx, recordID: id, modelIdentifier: modelIdentifier,
                         classification: classification, progress: progress,
@@ -693,16 +761,15 @@ final class DownloadManager {
             // before resetDownloadState flips isDownloading=false, so
             // this is the authoritative "installed?" check.
             let isInstalledNow = WhisperModelDownloadService.shared.downloadedModelIds.contains(modelIdentifier)
-            let classification: DownloadTerminalClassification
-            if let err = errorMessage, !err.isEmpty {
-                classification = .failed
-                _ = DownloadHistoryStore.shared.markFailed(id: id, message: err)
-            } else if isInstalledNow || progress >= 0.99 {
-                classification = .completed
-                _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: recordTotal)
-            } else {
-                classification = .cancelled
-                _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
+            let classification = Self.classifyEndedDownload(
+                backend: .whisper, modelIdentifier: modelIdentifier,
+                ending: WhisperModelDownloadService.shared.lastDownloadEnding,
+                errorMessage: errorMessage, isInstalledNow: isInstalledNow, isPausedNow: false)
+            switch classification {
+            case .failed:    _ = DownloadHistoryStore.shared.markFailed(id: id, message: errorMessage ?? "Download failed")
+            case .completed: _ = DownloadHistoryStore.shared.markCompleted(id: id, fileSizeBytes: recordTotal)
+            case .paused:    _ = DownloadHistoryStore.shared.markPaused(id: id)
+            case .cancelled: _ = DownloadHistoryStore.shared.markCancelled(id: id, reason: nil)
             }
             logTerminal(backend: .whisper, recordID: id, modelIdentifier: modelIdentifier,
                         classification: classification, progress: progress,

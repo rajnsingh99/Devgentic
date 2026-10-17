@@ -220,12 +220,17 @@ struct ActivityBarView: View {
     @Binding var selectedTab: SidebarTab?
     @Binding var isSidebarVisible: Bool
     @Environment(\.appTheme) private var theme
+    @Environment(MainApplicationViewModel.self) private var viewModel
 
     // ⚠️ The ONE site that is not compiler-enforced. Every other `SidebarTab` switch fails the
     // build when a case is missing; this hand-written array does not — a tab omitted here exists,
     // routes, and persists its selection, with no button anywhere to reach it.
     private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .tools, .skills]
     private let bottomTabs: [SidebarTab] = [.settings]
+
+    private var visibleTopTabs: [SidebarTab] {
+        topTabs.filter { $0.isVisible(in: viewModel.interfaceMode) }
+    }
 
     var body: some View {
         VStack(spacing: 7) {
@@ -237,7 +242,7 @@ struct ActivityBarView: View {
                 .frame(width: 22, height: 1)
                 .padding(.vertical, 3)
 
-            ForEach(topTabs) { tab in
+            ForEach(visibleTopTabs) { tab in
                 ActivityBarButton(
                     tab: tab,
                     selectedTab: $selectedTab,
@@ -257,5 +262,17 @@ struct ActivityBarView: View {
         }
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .onAppear {
+            ensureValidSelectedTab(for: viewModel.interfaceMode)
+        }
+        .onChange(of: viewModel.interfaceMode) { _, newMode in
+            ensureValidSelectedTab(for: newMode)
+        }
+    }
+
+    private func ensureValidSelectedTab(for mode: MainApplicationViewModel.InterfaceMode) {
+        if let current = selectedTab, !current.isVisible(in: mode) {
+            selectedTab = .conversations
+        }
     }
 }

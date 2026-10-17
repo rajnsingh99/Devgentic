@@ -100,7 +100,8 @@ struct MistralV3Parser: CognitiveParserProtocol {
                     results.append(contentsOf: decoded.compactMap { toPendingCall($0) })
                     continue
                 }
-                logger.warning("MistralV3Parser: Failed to decode JSON array: \(arraySlice.prefix(200))")
+                logger.warning("MistralV3Parser: Failed to decode JSON array: \(arraySlice.count) chars (snippet at debug: model output is content, CR-57)")
+                logger.debug("MistralV3Parser: snippet: \(arraySlice.prefix(200))")
                 continue
             }
             results.append(contentsOf: decoded.compactMap { toPendingCall($0) })

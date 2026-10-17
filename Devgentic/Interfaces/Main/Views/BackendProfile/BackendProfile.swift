@@ -934,9 +934,11 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     /// `apiKey` is cleared too (changed 2026-09-27). It used to survive on the theory that "a key
     /// mismatched to the new cloud provider fails visibly in the model-list fetch" — but that fetch
     /// is itself a request to the NEW vendor carrying the OLD vendor's credential, so the "visible
-    /// failure" was the leak. Switching away and back still restores a pasted key: the editor keeps
-    /// a per-provider stash for the session (`ProviderConfigSection.stashedKeys`), and
-    /// `ProviderKeyShape` refuses at send time any key that plainly belongs to another vendor.
+    /// failure" was the leak. Nothing needs restoring on switch-back: since 2026-10-03 the key for
+    /// OpenAI, Anthropic, Google and OpenRouter lives once per PROVIDER (`AppProviderKeyStore`) and
+    /// `BackendProfile.details` injects the new provider's own key. `.openAICompatible` keys stay per
+    /// profile, so switching to it starts empty. `ProviderKeyShape` still refuses at send time any key
+    /// that plainly belongs to another vendor.
     /// `cognitiveCapability` is reset to `.none`;
     /// profile-type-aware defaults are layered on by the `onProviderChanged` callbacks
     /// via `ProfileCapabilityFilter`.

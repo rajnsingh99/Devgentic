@@ -441,7 +441,7 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
 
         model.discardUnreadableConfiguration(replacingWith: replacement, reason: reason)
         do {
-            try context.save()
+            try SharedContextSave.save(context, "profiles: discard unreadable \(id)")
             return true
         } catch {
             logger.error(
@@ -540,10 +540,10 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             let advisories = validationErrors.advisories
             if !advisories.isEmpty {
                 logger.notice(
-                    "[PROFILE] '\(snapshot.displayName)' saved with \(advisories.count) advisory "
+                    "[PROFILE] '\(snapshot.displayName)' (\(snapshot.id.uuidString.prefix(8))) saved with \(advisories.count) advisory "
                     + "finding(s): \(advisories.map { "\($0.field): \($0.message)" }.joined(separator: " | ")). "
                     + "CONSEQUENCE: none for the save — these describe likely-degraded behaviour and "
-                    + "are surfaced by the model pickers, not by refusing the write."
+                    + "are surfaced by the model catalog's badges, not by refusing the write. Called from \(caller)"
                 )
             }
             if !blockers.isEmpty {
@@ -621,7 +621,7 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
                 logger.info("[PROFILE_SAVE] Inserted '\(snapshot.displayName)' (\(snapshot.id.uuidString)) from \(caller)")
             }
 
-            try context.save()
+            try SharedContextSave.save(context, "profiles: save '\(snapshot.displayName)'")
             // ⚠️ Register A34. Returned, not just logged. An advisory that only reaches the log can
             // never reach the person who can act on it, and the two rules that exist today both had
             // to hand-build their own bespoke UI to be seen at all. Handing them back means the next
@@ -648,7 +648,7 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         do {
             if let toDelete = try context.fetch(descriptor).first {
                 context.delete(toDelete)
-                try context.save()
+                try SharedContextSave.save(context, "profiles: delete \(id)")
                 // ⚠️ After the row is gone, not before: a failed save would otherwise leave a
                 // profile whose credential had already been destroyed. A key must never outlive
                 // the profile that owned it — that was one of the two distinct harms in the

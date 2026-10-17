@@ -115,7 +115,7 @@ enum CallAgentTool {
                     return (output: "Error: call_agent requires a 'task' (string) parameter.", artifacts: [])
                 }
 
-                logger.info("Spawning agent for task: \(taskDescription.prefix(100))")
+                logger.info("Spawning agent for a task of \(taskDescription.count) chars") // CR-57: the task is content
 
                 // Enforce concurrency limit
                 await limiter.acquire()

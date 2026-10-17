@@ -227,14 +227,17 @@ final class RejectedLiveWriteDriftBaselineTests: XCTestCase {
              fileName: (path as NSString).lastPathComponent, isSuccess: success, preWriteContent: pre)
     }
 
-    /// Polls for the async pre-read `handleAgentWriteBegan` fires — same idiom
-    /// `LiveWriteSettlementTests.waitForGate` uses for the equivalent race.
+    /// Awaits the pre-read `handleAgentWriteBegan` fires. ⚠️ NOT a `Task.yield()` poll: the read
+    /// runs on a detached `.utility` task off the main actor, so main-actor yields have no
+    /// ordering against it and a yield budget ran out under load (`waitForGate` elsewhere can
+    /// poll only because its gate is armed ON the main actor).
     private func waitForPreWriteDisk(path: String) async {
-        for _ in 0 ..< 500 {
-            if viewModel.codeViewerTabs.first(where: { $0.filePath == path })?.preWriteDisk != nil { return }
-            await Task.yield()
+        guard let preRead = viewModel.preWriteReadTaskForTesting else {
+            return XCTFail("handleAgentWriteBegan fired no pre-read")
         }
-        XCTFail("preWriteDisk never landed")
+        await preRead.value
+        XCTAssertNotNil(viewModel.codeViewerTabs.first(where: { $0.filePath == path })?.preWriteDisk,
+                        "preWriteDisk never landed")
     }
 
     /// The defect: a denied write kept the PROPOSAL as the drift baseline (by definition

@@ -22,7 +22,10 @@ enum ImageIntent: Sendable {
     /// Generate a new image from a text description.
     case textToImage(prompt: String)
     /// Generate a variation of an existing image with a guiding prompt.
-    case imageToImage(prompt: String, sourceImage: Data)
+    /// - Parameter inferred: true when no image was ATTACHED and the edit was inferred from the wording
+    ///   plus a recent generated image. An inferred edit the model cannot perform falls back to a new
+    ///   image; an attached one is the user's explicit ask, so its failure is reported (CR-13).
+    case imageToImage(prompt: String, sourceImage: Data, inferred: Bool)
 }
 
 // MARK: - Image Intent Resolver
@@ -46,19 +49,19 @@ enum ImageIntentResolver {
         // CONDITION A: User explicitly attached an image → Image-to-Image
         if let images = attachedImages, let firstImage = images.first {
             logger.info("Intent resolved: Image-to-Image (user attached image)")
-            return .imageToImage(prompt: userQuery, sourceImage: firstImage)
+            return .imageToImage(prompt: userQuery, sourceImage: firstImage, inferred: false)
         }
 
         // CONDITION B: Check if chat history has recent generated images
         // and user's query suggests a variation
         let recentArtifacts = extractRecentImageArtifacts(from: chatHistory)
 
-        if !recentArtifacts.isEmpty && looksLikeVariationRequest(userQuery) {
+        if !recentArtifacts.isEmpty && isEditRequest(userQuery) {
             // Try to resolve the source image from the most recent artifact
             if let lastArtifact = recentArtifacts.first,
                let imageData = try? await lastArtifact.reference.resolve() {
                 logger.info("Intent resolved: Image-to-Image (variation of recent artifact)")
-                return .imageToImage(prompt: userQuery, sourceImage: imageData)
+                return .imageToImage(prompt: userQuery, sourceImage: imageData, inferred: true)
             }
         }
 
@@ -92,10 +95,20 @@ enum ImageIntentResolver {
         return artifacts
     }
 
-    /// Simple heuristic to detect if the user's query is requesting a variation/edit
-    /// rather than a completely new image.
-    private static func looksLikeVariationRequest(_ query: String) -> Bool {
+    /// Whether the query asks to EDIT the last image rather than draw a new one.
+    ///
+    /// ⚠️⚠️ WHOLE WORDS AND PHRASES, never substrings (readiness CR-13, 2026-10-10). This was
+    /// `lowered.contains($0)`, so "a cat on a l-ADD-er", "a time-LESS portrait" and "a colour-FIX-ed
+    /// print" were all "edits" of whatever image came before — and a guessed capability then refused
+    /// them. Matching a word by its letters is the shape-matching this codebase keeps paying for.
+    static func isEditRequest(_ query: String) -> Bool {
         let lowered = query.lowercased()
+        return editPhrases.contains { phrase in
+            lowered.range(of: "\\b\(NSRegularExpression.escapedPattern(for: phrase))\\b", options: .regularExpression) != nil
+        }
+    }
+
+    private static let editPhrases: [String] = {
         let variationKeywords = [
             "make it", "change it", "modify", "adjust", "tweak",
             "more", "less", "brighter", "darker", "warmer", "cooler",
@@ -104,6 +117,6 @@ enum ImageIntentResolver {
             "same but", "keep the", "update it", "redo",
             "improve", "enhance", "fix", "correct"
         ]
-        return variationKeywords.contains(where: { lowered.contains($0) })
-    }
+        return variationKeywords
+    }()
 }

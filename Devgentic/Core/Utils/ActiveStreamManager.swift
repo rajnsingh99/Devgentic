@@ -36,6 +36,16 @@ protocol ActiveStreamMirrorDelegate: AnyObject {
     ///   must therefore treat it as a refusal, never as permission.
     func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, startedBy: MessageSource, for conversationID: UUID)
     func activeStreamManager(_ manager: ActiveStreamManager, didEndStream message: ChatMessage)
+    /// A started run is WAITING for the local model, which another run holds (local inference
+    /// coordinator). Called once, when it starts waiting; `notice` is the plain-language status.
+    func activeStreamManager(_ manager: ActiveStreamManager, didQueueForLocalModel message: ChatMessage,
+                             notice: String, startedBy: MessageSource, for conversationID: UUID)
+}
+
+extension ActiveStreamMirrorDelegate {
+    /// Only the remote mirror has someone to tell; every other observer ignores it.
+    func activeStreamManager(_ manager: ActiveStreamManager, didQueueForLocalModel message: ChatMessage,
+                             notice: String, startedBy: MessageSource, for conversationID: UUID) {}
 }
 
 @Observable @MainActor
@@ -60,6 +70,10 @@ final class ActiveStreamManager {
     /// ⚠️ The busy test is injected rather than owned by that type, so `activeStreams` stays the
     /// single source of "what is running" — the `streamingMessageID`/`streamingMessage` pair this
     /// dictionary already replaced is what a second copy of that state turns into.
+    /// One LOCAL run at a time, across conversations — layer 2 beneath `admission`. Settable so tests
+    /// can observe registration without the process-wide instance.
+    @ObservationIgnored var inferenceCoordinator: LocalInferenceCoordinator = .shared
+
     @ObservationIgnored private lazy var admission = ConversationAdmission { [weak self] conversationID, messageID in
         guard let self else { return false }
         return Self.isConversationBusy(self.activeStreams, conversationID: conversationID, excluding: messageID)
@@ -378,6 +392,18 @@ final class ActiveStreamManager {
     ///   identity branch as unreachable from here rather than as the normal case.
     ///
     /// `static` over plain values so the derivation is testable with no manager and no view model.
+    /// The text conversation memory is searched with: what the user actually SAID (the
+    /// persisted row), not the model-facing query. `promptOverride` decorates the latter — Orb
+    /// appends a ~300-char spoken-style hint, a background-task wake sends its own prompt — and
+    /// that decoration swamped MiniLM's 128-token window and switched BM25 fusion on for the
+    /// hint's own words (RAG-19). Falls back to the model query when the row has no text (an
+    /// image-only turn), so retrieval never runs on an empty string it did not run on before.
+    static func retrievalQuery(for userMessage: ChatMessage, modelQuery: String) -> String {
+        guard let said = userMessage.content.textContent,
+              !said.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return modelQuery }
+        return said
+    }
+
     static func deriveHistory(
         userMessage: ChatMessage,
         omitting: Set<UUID> = [],
@@ -593,8 +619,12 @@ final class ActiveStreamManager {
         if !attended {
             logger.notice("[ATTENDANCE] Run \(agentMessage.id.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)) is UNATTENDED (started by \(userMessage.messageSource.rawValue), remote responder: \(WorkflowRunAttendance.hasRemoteResponder)). CONSEQUENCE: standing 'allow for this chat' grants are NOT served to it, and ask_user plus any tool confirmation are refused with an honest observation instead of parking for an answer nobody will give.")
         }
+        // ⚠️ The run's identity travels with it for the same reason its origin does: the local
+        // providers report which run touched a model through `LocalInferenceScope.runID`, read deep
+        // inside orchestration where nothing else names the run.
         let streamTask = WorkflowRunAttendance.$isAttended.withValue(attended) {
             WorkflowRunAttendance.$origin.withValue(userMessage.messageSource) {
+            LocalInferenceScope.$runID.withValue(agentMessage.id) {
             Task { [weak self] in
             guard let self = self else { return }
 
@@ -602,16 +632,29 @@ final class ActiveStreamManager {
             // chokepoint — all seven call sites are covered by one line, including any future one.
             // The task is created (so Stop and `activeTasks` work immediately) but does no work
             // until the conversation is free. See `admissionQueue`.
+            // The wait behind this conversation's own run is credited to the run's time bounds like a
+            // wait for the local model — a scheduled run's deadline must not run out in line. Only
+            // when a bound is open (a scheduled run's): otherwise there is nothing to credit.
+            let admissionCredit: UUID? = ParkScope.chain.isEmpty ? nil : UUID()
+            if let admissionCredit { await ExecutionSuspensionService.shared.beginQueueWait(admissionCredit) }
             let waited = await self.admission.awaitTurn(
                 conversationID: conversationID, messageID: agentMessage.id,
                 // ⚠️ Said on screen, not just in the log. A queued run otherwise shows the ordinary
                 // thinking indicator, so a ChatOps message sent while the user is typing locally
                 // looks like the app has stalled rather than like it is second in line.
-                onWait: { agentMessage.agentState = .thinking(.queued) })
-            if waited { agentMessage.agentState = .thinking(.reasoning) }
+                onWait: {
+                    agentMessage.agentState = .thinking(.queued)
+                    self.conversationQueueBegan(agentMessage, conversationID: conversationID)
+                })
+            if let admissionCredit { await ExecutionSuspensionService.shared.endQueueWait(admissionCredit) }
+            if waited {
+                agentMessage.agentState = .thinking(.reasoning)
+                self.conversationQueueEnded(agentMessage, conversationID: conversationID)
+            }
             if Task.isCancelled {
                 logger.info("[ADMISSION] Run \(agentMessage.id.uuidString.prefix(8)) was cancelled while waiting for conversation \(conversationID.uuidString.prefix(8)).")
-                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: CancellationError())
+                Self.markWithdrawnBeforeStart(agentMessage, workflow: workflowExecutionState)
+                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
                 // ⚠️ The SAME two lines every other exit of this task ends with. This early return
                 // used to skip them, so a run cancelled while QUEUED never called `onComplete` —
                 // and `SchedulerCoordinator.sendScheduledMessage` waits on exactly that callback.
@@ -624,6 +667,89 @@ final class ActiveStreamManager {
                 return
             }
 
+            // ⚠️ LAYER 2, AFTER layer 1 — never before. The coordinator decides across
+            // conversations; a run still queued behind its OWN conversation is not competing for
+            // the machine yet, and registering it early would put it in the local queue twice over.
+            // A local run WAITS here while another local run holds the lock (cloud-only runs never
+            // do). Released in `finalizeMessage`, beside `admitNext`.
+            // The observer covers EVERY wait of this run: this one, and any later one when the run
+            // takes the lock back after a HITL answer (phase 4).
+            let startedBy = userMessage.messageSource
+            let localAcquire = await self.inferenceCoordinator.acquire(
+                InferenceRunManifest.build(
+                    runID: agentMessage.id,
+                    conversationID: conversationID,
+                    profile: config.profile,
+                    source: userMessage.messageSource,
+                    attended: attended,
+                    isRegeneration: isRegeneration && resumeState == nil,
+                    isResume: resumeState != nil),
+                observer: LocalWaitObserver(
+                    onHold: { [weak self] position, _ in
+                        self?.localWaitBegan(agentMessage, conversationID: conversationID,
+                                             startedBy: startedBy, position: position)
+                    },
+                    onWaitEnded: { [weak self] _ in
+                        self?.localWaitEnded(agentMessage, conversationID: conversationID)
+                    },
+                    onConfirmationNeeded: { [weak self] concerns, deadline in
+                        self?.localConfirmationNeeded(agentMessage, conversationID: conversationID,
+                                                      concerns: concerns, deadline: deadline)
+                    },
+                    onConfirmed: { [weak self] in
+                        self?.localConfirmed(agentMessage, conversationID: conversationID)
+                    },
+                    onPositionChanged: { [weak self] position, _ in
+                        self?.localPositionChanged(agentMessage, conversationID: conversationID, position: position)
+                    }))
+            var localQueueWait: TimeInterval = 0
+            switch localAcquire {
+            case .admitted(let waited):
+                localQueueWait = waited
+            case .cancelled:
+                logger.info("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) was cancelled while waiting for the local model.")
+                Self.markWithdrawnBeforeStart(agentMessage, workflow: workflowExecutionState)
+                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
+                // The same two lines every other exit of this task ends with — see the
+                // conversation-admission early return above for what skipping them cost.
+                self.removeTask(for: agentMessage.id)
+                onComplete()
+                return
+            case .denied(let reason):
+                let refusal = LocalInferenceRefusal(reason: reason)
+                workflowExecutionState?.handleError(refusal.localizedDescription)
+                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: refusal)
+                self.removeTask(for: agentMessage.id)
+                onComplete()
+                return
+            }
+
+            // ⚠️ THE GLOBAL TIME CEILING (local inference coordinator, phase 5) — the outermost limit on
+            // every run, opened HERE, at admission, so time spent in either queue never counts. COMPUTE
+            // time: the ceiling's scope joins the run's owner chain, so HITL parks and local-model waits
+            // anywhere in the run pause it (owner-chain credit). Its frame is the outermost
+            // `ExecutionBudget`, so a turn, node or tool limit inside is shortened to fit and fires
+            // first, with its own honest outcome.
+            let ceilingScope = UUID()
+            let ceiling = LocalInferenceCoordinator.globalCeiling
+            let ceilingFrame: ExecutionBudget.Frame? = if let ceiling {
+                await ExecutionBudget.frame(
+                    owner: "the \(ToolExecutionMediator.describe(ceiling)) limit on any run",
+                    limit: ceiling, scope: ceilingScope)
+            } else { nil }
+            if let ceiling {
+                logger.debug("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) — global ceiling \(ToolExecutionMediator.describe(ceiling)) of compute time opened (scope \(ceilingScope.uuidString.prefix(8))).")
+            } else {
+                logger.info("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) has NO global ceiling (Settings → General → Maximum Run Time is Off). CONSEQUENCE: only its own profile, node and tool limits bound it.")
+            }
+            let ceilingTask: Task<Void, Never>? = ceiling.map { limit in
+                Task { @MainActor [weak self] in
+                    await self?.enforceGlobalCeiling(limit, scope: ceilingScope, on: agentMessage)
+                }
+            }
+            await ParkScope.withScope(ceilingScope, conversationID: conversationID) {
+            await ExecutionBudget.$frames.withValue(ExecutionBudget.frames + (ceilingFrame.map { [$0] } ?? [])) {
+
             // Structured Plan & Execute / Reflexion cards (chat + code agents only).
             // Workflow runs keep the legacy flat milestone chips: their capability
             // events carry no node attribution, and parallel workflow nodes would
@@ -634,6 +760,11 @@ final class ActiveStreamManager {
             do {
                 let traceContext = TraceContext(profile: config.profile, messageID: agentMessage.id)
                 agentMessage.traceID = traceContext.traceID
+                // The wait happened before this trace existed, so it is recorded as a metric on it.
+                if localQueueWait > 0 {
+                    let waitedMs = Int(localQueueWait * 1000)
+                    Task { await TraceRecorder.shared.emitMetric(span: traceContext, key: "local_queue_wait", valueMs: waitedMs) }
+                }
                 // Run-Report Phase 5: the workflow run record carries the same join key,
                 // so run history and the trace store stop being unlinkable (old Seam 4).
                 workflowExecutionState?.traceID = traceContext.traceID
@@ -660,9 +791,11 @@ final class ActiveStreamManager {
                         conversationID: conversationID,
                         messageID: agentMessage.id,
                         // The resolved model for single-model profiles (bot/agent/code/imageGen);
-                        // nil for workflows, which have no single model. This column is what
-                        // `recordTokenUsage` prices against — passing nil here was why
-                        // `traces.estimatedCostUSD` had been NULL on every run ever recorded.
+                        // nil for workflows, which have no single model. A label for the trace:
+                        // cost no longer prices against it — each call is priced at its own model
+                        // when its usage is read (`ModelPriceList`), and `recordTokenUsage` stores
+                        // their sum. (Passing nil here was once why `traces.estimatedCostUSD` had
+                        // been NULL on every run; with per-call pricing, workflows get a cost too.)
                         modelName: config.profile.resolvedLLMConfig?.modelName
                     )
 
@@ -672,7 +805,7 @@ final class ActiveStreamManager {
                     // row to `trace_configs` cascading on `traces.traceID`.
                     //
                     // TODO: pass `codeMemoryContent` from MainApplicationViewModel
-                    // (reads from CodeSessionManager.projectMemoryContent) for a
+                    // (CodeSystemPrompt.projectKnowledge) for a
                     // complete Code-mode snapshot. Current capture records only
                     // the project path — memory length/hash stay nil.
                     // ⚠️ The LIVE-detected capability, not the stored copy, so a trace records the
@@ -711,6 +844,10 @@ final class ActiveStreamManager {
                     conversationID: conversationID,
                     userQuery: userQuery,
                     currentUserMessageID: userMessage.id,
+                    retrievalQuery: Self.retrievalQuery(for: userMessage, modelQuery: userQuery),
+                    // A Redo/Resume regenerates `existingMessage`: memory from it onward is the
+                    // rejected answer and the conversation's "future" (RAG-4).
+                    regenerating: existingMessage.map { RegenerationBoundary(messageID: $0.id, timestamp: $0.timestamp) },
                     history: history,
                     files: files,
                     context: traceContext,
@@ -796,7 +933,7 @@ final class ActiveStreamManager {
                         // tools use their server-declared annotations (labelled as such), and a
                         // name collision floors at .moderate — see ToolRiskResolver.
                         let riskResolution = ToolRiskResolver.resolve(toolName: toolName)
-                        self.enqueueHITL(
+                        await self.enqueueHITL(
                             operationID: operationID,
                             kind: .toolConfirmation(PendingToolConfirmation(
                                 id: operationID,
@@ -804,8 +941,7 @@ final class ActiveStreamManager {
                                 params: params,
                                 risk: riskResolution.risk,
                                 arguments: JSONValue.parseStructured(params),
-                                riskIsServerDeclared: riskResolution.serverDeclared,
-                                previewPath: Self.previewPath(forTool: toolName, profile: config.profile)
+                                riskIsServerDeclared: riskResolution.serverDeclared
                             )),
                             conversationID: conversationID,
                             profileType: config.profile.profileType,
@@ -821,7 +957,7 @@ final class ActiveStreamManager {
                         agentMessage.agentState = .interaction(.clarification)
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
-                        self.enqueueHITL(
+                        await self.enqueueHITL(
                             operationID: operationID,
                             kind: .clarification(PendingClarification(id: operationID, question: question, options: options, multiline: multiline)),
                             conversationID: conversationID,
@@ -838,7 +974,7 @@ final class ActiveStreamManager {
                         agentMessage.agentState = .interaction(.gate)
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
-                        self.enqueueHITL(
+                        await self.enqueueHITL(
                             operationID: operationID,
                             kind: .gate(PendingGate(id: operationID, prompt: prompt, options: options, deadline: deadline, inputText: inputText, highlights: highlights)),
                             conversationID: conversationID,
@@ -852,6 +988,8 @@ final class ActiveStreamManager {
 
                     case .toolSucceeded(let output, let durationMs, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
+                        // ANY successful tool may have changed files — see `WorkspaceActivity`.
+                        WorkspaceActivity.post(reason: "tool \(output.toolName) succeeded")
                         if let payload = AgentLiveWriteEvent.completed(toolName: output.toolName, params: output.params, isSuccess: true, preWriteContent: output.preWriteContent, conversationID: conversationID) {
                             NotificationCenter.default.post(name: AgentLiveWriteEvent.completed, object: nil,
                                                             userInfo: [AgentLiveWriteEvent.payloadKey: payload])
@@ -1124,7 +1262,7 @@ final class ActiveStreamManager {
                                 detail: "Plan with \(subtasks.count) subtask\(subtasks.count == 1 ? "" : "s") awaiting approval"
                             ))
                         }
-                        self.enqueueHITL(
+                        await self.enqueueHITL(
                             operationID: operationID,
                             kind: .planReview(PendingPlanReview(id: operationID, subtasks: subtasks)),
                             conversationID: conversationID,
@@ -1356,8 +1494,14 @@ final class ActiveStreamManager {
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: error)
             }
             
+            }
+            }
+            // The run is over (finalized above): the ceiling has nothing left to stop.
+            ceilingTask?.cancel()
+
             self.removeTask(for: agentMessage.id)
             onComplete()
+        }
         }
         }
         }
@@ -1370,7 +1514,7 @@ final class ActiveStreamManager {
     /// Mutates the matching executing `.toolExecution` timeline event into its completed state.
     /// Routes to the workflow node's per-node timeline when `sourceNodeID` is present,
     /// else falls back to the message's root timeline. `failureCategory == nil` means success.
-    private static func completeToolTimelineEvent(
+    static func completeToolTimelineEvent(
         output: ToolOutput,
         failureCategory: ToolFailureCategory?,
         durationMs: Int?,
@@ -1410,31 +1554,31 @@ final class ActiveStreamManager {
         }
 
         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
-            if let idx = wfState.nodeTimelines[nodeID]?.lastIndex(where: {
-                if case .toolExecution(let data) = $0 {
-                    return data.name == output.toolName && data.isExecuting
-                }
-                return false
+            if let idx = wfState.nodeTimelines[nodeID].flatMap({
+                ToolRowMatcher.index(in: $0, for: output)
             }) {
                 if case .toolExecution(var data) = wfState.nodeTimelines[nodeID]![idx] {
                     updater(&data)
                     wfState.nodeTimelines[nodeID]![idx] = .toolExecution(data)
                     logger.debug("[WF_ROUTE] Tool '\(output.toolName)' completed → node [\(nodeID)] success=\(output.isSuccess) category=\(failureCategory?.rawValue ?? "nil")")
                 }
+            } else {
+                logger.warning("[TIMELINE] '\(output.toolName)' finished in node [\(nodeID)] but no executing row has its params. CONSEQUENCE: no row is completed — completing a guessed row would show another call's result on it.")
             }
             return
         }
 
-        if let index = agentMessage.timelineEvents.lastIndex(where: {
-            if case .toolExecution(let data) = $0 {
-                return data.name == output.toolName && data.isExecuting
-            }
-            return false
-        }) {
+        if let index = ToolRowMatcher.index(in: agentMessage.timelineEvents, for: output) {
             if case .toolExecution(var data) = agentMessage.timelineEvents[index] {
                 updater(&data)
                 agentMessage.timelineEvents[index] = .toolExecution(data)
+                EditPatchStore.recordIfCode(data, in: agentMessage)
             }
+        } else if agentMessage.timelineEvents.contains(where: {
+            if case .toolExecution(let data) = $0 { return data.isExecuting && data.name == output.toolName }
+            return false
+        }) {
+            logger.warning("[TIMELINE] '\(output.toolName)' finished but no executing row of that name has its params. CONSEQUENCE: no row is completed — completing a guessed row would show another call's result on it.")
         }
     }
 
@@ -1442,23 +1586,7 @@ final class ActiveStreamManager {
     /// of truth across chat / code / workflow / scheduled. Builds the source-attributed origin
     /// (interface + workflow node identity + banner title). Replaces the retired per-message
     /// `ChatMessage.pendingInteraction` and per-workflow `WorkflowExecutionState.pendingInteractions`.
-    /// The file a confirmation will write when its ARGUMENTS do not name one.
-    ///
-    /// ⚠️ Derived from the profile THIS RUN is using, not from any current-session global. A
-    /// parked confirmation can outlive the user switching projects; reading a shared
-    /// `CodeSessionManager` here would preview the change against whichever folder happens to be
-    /// open when the banner renders, which is a different file than the one being approved.
-    ///
-    /// Returns nil for every other tool, which is the overwhelming majority — their target is in
-    /// their arguments and `FileChange.parse` reads it from there.
-    private static func previewPath(forTool toolName: String, profile: BackendProfileModel) -> String? {
-        guard toolName == "update_project_context",
-              case .code(let codeConfig) = profile.details,
-              let projectPath = codeConfig.projectPath else { return nil }
-        return UpdateProjectContextTool.contextFilePath(inProject: projectPath)
-    }
-
-    private func enqueueHITL(
+    func enqueueHITL(
         operationID: UUID,
         kind: PendingInteraction,
         conversationID: UUID,
@@ -1470,7 +1598,13 @@ final class ActiveStreamManager {
         sourceNodeName: String? = nil,
         profileID: UUID?,
         traceContext: TraceContext
-    ) {
+    ) async {
+        // ⚠️ CR-40: every caller awaits a persistence flush before getting here, and the request
+        // can be resolved during it. Showing its banner now would leave one nobody can answer.
+        if await ExecutionSuspensionService.shared.wasResolved(operationID) {
+            logger.notice("[HITL] op \(operationID.uuidString.prefix(8)) was resolved before its banner could be shown (conversation \(conversationID.uuidString.prefix(8))). CONSEQUENCE: no banner is raised and no trace record is opened; the run has already moved on.")
+            return
+        }
         guard let interactionCenter else {
             // A park with no center means the run waits on an interaction NOBODY can
             // ever answer — that must never be silent.
@@ -1668,7 +1802,10 @@ final class ActiveStreamManager {
                 // `.distantPast` only if the two maps ever diverge; it degrades the tie-break to
                 // "loses to everything", never the candidacy itself.
                 startedAt: streamStartedAt[message.id] ?? .distantPast,
-                isParked: parked
+                isParked: parked,
+                // ⚠️ From admission, the one place that knows: a queued run's message looks exactly
+                // like a working one (`.streaming`, registered, timestamped). See `LiveRun.isQueued`.
+                isQueued: admission.isWaiting(message.id)
             )
         }
     }
@@ -1681,6 +1818,14 @@ final class ActiveStreamManager {
         
         logger.info("Cancelling stream task for message ID: \(messageId.uuidString)")
         taskToCancel.cancel()
+        // ⚠️ A QUEUED run's task is suspended in `ConversationAdmission`'s `withCheckedContinuation`,
+        // which ignores cancellation — so cancelling the task alone did NOTHING until the run in
+        // front finished (CR-4). Withdrawing the waiter resumes it, and it exits through its own
+        // `Task.isCancelled` branch (withdrawn-before-start, finalize, `onComplete`). Harmless for a
+        // run that is not waiting.
+        if let conversationID = activeStreams[messageId]?.conversationId {
+            admission.forget(messageID: messageId, inConversation: conversationID)
+        }
     }
 
     /// [HITL/P5] Cancel any active stream(s) for a conversation. Used on conversation deletion so a
@@ -1712,6 +1857,220 @@ final class ActiveStreamManager {
         await persistenceService.addMessage(message, toConversation: conversationID)
     }
 
+    /// The pending "waiting for the local model" banner per run, so the wait's end can cancel it.
+    @ObservationIgnored private var localQueueBanners: [UUID: Task<Void, Never>] = [:]
+    /// The newest wording of each waiting run's notice — the delayed banner shows THIS, and a position
+    /// change rewrites it (phase 7).
+    @ObservationIgnored private var localQueueNotices: [UUID: String] = [:]
+    /// Runs whose queue banner is on screen, so a position change updates it in place.
+    @ObservationIgnored private var localQueueBannerShown: Set<UUID> = []
+
+    /// A run started waiting for the local model — at its start, or to take the lock back after a HITL
+    /// answer. ⚠️ Said on screen and to a remote chat, not just in the log: a run waiting for ANOTHER
+    /// conversation's run otherwise looks exactly like a hung one.
+    private func localWaitBegan(_ agentMessage: ChatMessage, conversationID: UUID,
+                                startedBy: MessageSource, position: Int) {
+        agentMessage.agentState = .thinking(.awaitingLocalModel)
+        let holder = inferenceCoordinator.holderManifest
+        let notice = Self.localQueueNotice(
+            holder: holder,
+            holderTitle: holder?.conversationID.flatMap { persistenceService.getConversation(withId: $0)?.userDefinedTitle },
+            position: position)
+        let delegates = liveMirrorDelegates
+        logger.info("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)) shows as WAITING for the local model (position \(position), holder \(holder.map { "\($0.runID.uuidString.prefix(8)) (\($0.origin))" } ?? "none")); \(delegates.count) mirror delegate(s) told. CONSEQUENCE: the banner follows if the wait lasts \(Self.localQueueBannerDelay).")
+        for delegate in delegates {
+            delegate.activeStreamManager(self, didQueueForLocalModel: agentMessage, notice: notice,
+                                         startedBy: startedBy, for: conversationID)
+        }
+        localQueueNotices[agentMessage.id] = notice
+        // The banner only for a wait that LASTS: a run admitted a second later should not flash one.
+        localQueueBanners[agentMessage.id]?.cancel()
+        localQueueBanners[agentMessage.id] = Task { @MainActor [weak self] in
+            guard (try? await Task.sleep(for: Self.localQueueBannerDelay)) != nil, let self else { return }
+            logger.notice("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) is still waiting for the local model after \(Self.localQueueBannerDelay) — banner shown in conversation \(conversationID.uuidString.prefix(8)).")
+            self.localQueueBannerShown.insert(agentMessage.id)
+            self.postLocalQueueBanner(agentMessage.id, conversationID: conversationID)
+        }
+    }
+
+    /// The queue banner — plain status, not dismissible (it goes when the wait does), above ambient
+    /// advisories so a fit hint cannot hide it (phase 7).
+    private func postLocalQueueBanner(_ messageID: UUID, conversationID: UUID) {
+        guard let notice = localQueueNotices[messageID] else { return }
+        AdvisoryCenter.shared.post(Advisory(
+            conversationID: conversationID, category: .localModelBusy, message: notice,
+            actionLabel: nil, action: nil,
+            dedupeKey: "\(conversationID.uuidString)|localModelBusy|\(messageID.uuidString)",
+            tone: .info, dismissible: false, priority: Advisory.runStatePriority))
+    }
+
+    /// The line moved: the run's notice (and its banner, when shown) says where it stands now.
+    private func localPositionChanged(_ agentMessage: ChatMessage, conversationID: UUID, position: Int) {
+        let holder = inferenceCoordinator.holderManifest
+        localQueueNotices[agentMessage.id] = Self.localQueueNotice(
+            holder: holder,
+            holderTitle: holder?.conversationID.flatMap { persistenceService.getConversation(withId: $0)?.userDefinedTitle },
+            position: position)
+        logger.debug("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) is now number \(position) in line — notice updated\(self.localQueueBannerShown.contains(agentMessage.id) ? " and its banner rewritten" : "").")
+        if localQueueBannerShown.contains(agentMessage.id) {
+            postLocalQueueBanner(agentMessage.id, conversationID: conversationID)
+        }
+    }
+
+    /// The pending "waiting for this conversation's run" banner per run (phase 7).
+    @ObservationIgnored private var conversationQueueBanners: [UUID: Task<Void, Never>] = [:]
+
+    /// A run is queued behind its OWN conversation's current run (`ConversationAdmission`). After the
+    /// same short delay as the local-model wait, the banner says so — plain status, not dismissible.
+    private func conversationQueueBegan(_ agentMessage: ChatMessage, conversationID: UUID) {
+        logger.info("[ADMISSION] Run \(agentMessage.id.uuidString.prefix(8)) is queued behind conversation \(conversationID.uuidString.prefix(8))'s current run. CONSEQUENCE: shown as 'Waiting its turn'; the banner follows if the wait lasts \(Self.localQueueBannerDelay).")
+        conversationQueueBanners[agentMessage.id]?.cancel()
+        conversationQueueBanners[agentMessage.id] = Task { @MainActor in
+            guard (try? await Task.sleep(for: Self.localQueueBannerDelay)) != nil else { return }
+            logger.notice("[ADMISSION] Run \(agentMessage.id.uuidString.prefix(8)) still waits behind conversation \(conversationID.uuidString.prefix(8))'s current run — banner shown.")
+            AdvisoryCenter.shared.post(Advisory(
+                conversationID: conversationID, category: .conversationQueue,
+                message: Self.conversationQueueNotice,
+                actionLabel: nil, action: nil,
+                dedupeKey: "\(conversationID.uuidString)|conversationQueue|\(agentMessage.id.uuidString)",
+                tone: .info, dismissible: false, priority: Advisory.runStatePriority))
+        }
+    }
+
+    /// The conversation wait ended — admitted or cancelled.
+    private func conversationQueueEnded(_ agentMessage: ChatMessage, conversationID: UUID) {
+        guard let banner = conversationQueueBanners.removeValue(forKey: agentMessage.id) else { return }
+        banner.cancel()
+        logger.debug("[ADMISSION] Run \(agentMessage.id.uuidString.prefix(8)) no longer waits behind its conversation — banner (if shown) cleared.")
+        AdvisoryCenter.shared.clear(category: .conversationQueue, conversationID: conversationID)
+    }
+
+    nonisolated static let conversationQueueNotice =
+        "Your message is queued behind this conversation's current run and starts by itself when that run finishes."
+
+    // MARK: Phase 7 — asking before a run starts
+
+    /// The run is held until its user chooses Proceed or Stop. The banner asks at once (no delay — it
+    /// has a deadline), with a live countdown to the auto-deny.
+    private func localConfirmationNeeded(_ agentMessage: ChatMessage, conversationID: UUID,
+                                         concerns: [RunConcern], deadline: Date) {
+        agentMessage.agentState = .thinking(.awaitingConfirmation)
+        let message = Self.confirmationNotice(concerns)
+        logger.notice("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)) is ASKING its user to proceed: \(concerns.map(\.description).joined(separator: "; ")). CONSEQUENCE: banner with Proceed and Stop shown; auto-denied at \(deadline.formatted(date: .omitted, time: .standard)) with no answer.")
+        AdvisoryCenter.shared.post(Advisory(
+            conversationID: conversationID, category: .runNeedsConfirmation, message: message,
+            actionLabel: "Proceed", action: .proceedRun(messageID: agentMessage.id),
+            dedupeKey: "\(conversationID.uuidString)|runNeedsConfirmation|\(agentMessage.id.uuidString)",
+            secondaryActionLabel: "Stop", secondaryAction: .stopRun(messageID: agentMessage.id),
+            tone: .warning, deadline: deadline, deadlineLabel: "Auto-denied in",
+            dismissible: false, priority: Advisory.runQuestionPriority))
+    }
+
+    /// The user chose Proceed: the question goes; the run starts, or its queue status follows.
+    private func localConfirmed(_ agentMessage: ChatMessage, conversationID: UUID) {
+        logger.info("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)): Proceed chosen — question cleared in conversation \(conversationID.uuidString.prefix(8)).")
+        AdvisoryCenter.shared.clear(category: .runNeedsConfirmation, conversationID: conversationID)
+        if agentMessage.agentState == .thinking(.awaitingConfirmation) {
+            agentMessage.agentState = .thinking(.reasoning)
+        }
+    }
+
+    /// The banner's Proceed (main window and QuickAccess).
+    func proceedHeldRun(messageID: UUID) {
+        let accepted = inferenceCoordinator.proceed(runID: messageID)
+        logger.info("[LOCAL-COORD] Proceed pressed for run \(messageID.uuidString.prefix(8)) — \(accepted ? "accepted" : "too late, nothing to do").")
+    }
+
+    /// What the asking banner says: the concern, and what may happen. The countdown and the buttons
+    /// carry the rest. No advice (architecture_readme invariant 15).
+    nonisolated static func confirmationNotice(_ concerns: [RunConcern]) -> String {
+        let what = concerns.map { $0.description.prefix(1).uppercased() + $0.description.dropFirst() }.joined(separator: ". ")
+        return "\(what). It may run very slowly or fail."
+    }
+
+    /// The wait ended (admitted or withdrawn): the banner goes, and the label stops saying "waiting".
+    private func localWaitEnded(_ agentMessage: ChatMessage, conversationID: UUID) {
+        logger.debug("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) is no longer waiting for the local model — its banner (if shown) is cleared in conversation \(conversationID.uuidString.prefix(8)).")
+        localQueueBanners.removeValue(forKey: agentMessage.id)?.cancel()
+        localQueueNotices.removeValue(forKey: agentMessage.id)
+        localQueueBannerShown.remove(agentMessage.id)
+        AdvisoryCenter.shared.clear(category: .localModelBusy, conversationID: conversationID)
+        AdvisoryCenter.shared.clear(category: .runNeedsConfirmation, conversationID: conversationID)
+        if agentMessage.agentState == .thinking(.awaitingLocalModel) || agentMessage.agentState == .thinking(.awaitingConfirmation) {
+            agentMessage.agentState = .thinking(.reasoning)
+        }
+    }
+
+    /// Stops a run that has used more than `limit` of COMPUTE (the global ceiling, phase 5). Returns
+    /// without doing anything when the run ends first — its task is cancelled by the run itself.
+    ///
+    /// ⚠️ Stamps TIMED OUT before cancelling, like the scheduler's deadline: finalize writes
+    /// "Cancelled by user" only when no outcome is set yet, and this is not the user's Stop.
+    private func enforceGlobalCeiling(_ limit: TimeInterval, scope: UUID, on agentMessage: ChatMessage) async {
+        do {
+            try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
+                limit: limit,
+                scope: scope,
+                logTag: "LOCAL-COORD",
+                subject: "Run \(agentMessage.id.uuidString.prefix(8)) (global ceiling)",
+                consequence: "the run is stopped and recorded as timed out (scope: global); time spent awaiting a human or waiting for the local model was excluded. The local lock passes to the next run.")
+        } catch is AgentExecutionError {
+            // Only a run still live: a sentinel firing in the instant after its run finalized must not
+            // rewrite a finished message's outcome.
+            guard activeStreams[agentMessage.id] != nil else {
+                logger.info("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) reached the global ceiling just as it finished. CONSEQUENCE: nothing is changed — its recorded outcome stands.")
+                return
+            }
+            agentMessage.terminalOutcome = .timedOut
+            agentMessage.terminalReason = Self.globalCeilingMessage(limit: limit)
+            cancelStream(for: agentMessage.id)
+            let parks = await ExecutionSuspensionService.shared.cancel(scope: scope)
+            logger.notice("[LOCAL-COORD] Run \(agentMessage.id.uuidString.prefix(8)) STOPPED by the global ceiling (\(ToolExecutionMediator.describe(limit)) of compute) — stamped TIMED OUT, task cancelled, \(parks.count) park(s) in its scope cancelled. CONSEQUENCE: the run ends as timed out and the local lock passes to the next run.")
+        } catch {
+            return   // cancelled: the run finished first
+        }
+    }
+
+    /// A run withdrawn before it did any work — Stop, a deadline or a deleted conversation while it
+    /// waited behind its conversation or for the local model. Stamped exactly as the run body's own
+    /// cancellation is, and then finalized WITHOUT an error.
+    ///
+    /// ⚠️ Finalizing with a `CancellationError` (as these two exits used to) records the run as
+    /// FAILED under a "Response Error" card reading "The operation couldn't be completed
+    /// (Swift.CancellationError error 1.)" — mirrored as a failure to a ChatOps chat — and leaves a
+    /// workflow run's record unsettled.
+    static func markWithdrawnBeforeStart(_ message: ChatMessage, workflow: WorkflowExecutionState?) {
+        workflow?.handleError("Cancelled", cancelled: true)
+        if message.terminalOutcome == nil {
+            message.terminalOutcome = .cancelled
+            message.terminalReason = message.terminalReason ?? "Cancelled by user"
+        }
+    }
+
+    /// The wording of a global-ceiling stop (HITL Waiting Contract §4 style).
+    nonisolated static func globalCeilingMessage(limit: TimeInterval) -> String {
+        "Run stopped: it reached the \(ToolExecutionMediator.describe(limit)) maximum run time set in Settings → General. Time spent waiting for your approval or for the local model was not counted."
+    }
+
+    /// How long a run waits for the local model before its conversation shows the banner.
+    static let localQueueBannerDelay: Duration = .seconds(5)
+
+    /// What a run waiting for the local model tells the user (banner) and a remote chat. Plain
+    /// status: who holds the model and where this run stands — no advice (architecture_readme invariant 15).
+    nonisolated static func localQueueNotice(holder: InferenceRunManifest?, holderTitle: String?, position: Int) -> String {
+        let models = holder?.localModels.map(\.modelID).joined(separator: ", ") ?? ""
+        let model = models.isEmpty ? "The local model" : "The local model (\(models))"
+        let title = holderTitle.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        let place: String
+        if case .intelligence(let feature)? = holder?.origin {
+            place = "\(feature) (a background task)"
+        } else {
+            place = title.map { "a run in “\($0)”" } ?? "a run in another conversation"
+        }
+        let line = position <= 1 ? "next in line" : "number \(position) in line"
+        return "\(model) is in use by \(place). This run is \(line) and starts by itself when that run finishes."
+    }
+
     /// The execution-timeout wording (HITL Waiting Contract §4), shared by chat, Code and the scheduler.
     nonisolated static func executionTimeoutMessage(limit: TimeInterval) -> String {
         "Run stopped: it exceeded its \(ToolExecutionMediator.describe(limit)) execution limit. Time spent waiting for your approval was not counted."
@@ -1719,6 +2078,8 @@ final class ActiveStreamManager {
 
     private func finalizeMessage(_ message: ChatMessage, conversationID: UUID, error: Error?) async {
         message.isStreaming = false
+        // A run ending (success, error or Stop) is when its file changes are complete.
+        WorkspaceActivity.post(reason: "run finished")
         // [G1 Piece 1] A finalized run (success, error, or user Stop) is a clean terminal state —
         // mark it `.final` so it is NOT mistaken for an interrupted run on restart. Only a process
         // death that skips finalize leaves a persisted `.streaming` / `.parkedHITL` row behind.
@@ -1841,6 +2202,8 @@ final class ActiveStreamManager {
                 if let agentError = error as? AgentExecutionError,
                    case .executionTimeout(_, let limit) = agentError.reason {
                     errorCard = .error(title: "Timed out", details: Self.executionTimeoutMessage(limit: limit))
+                } else if let refusal = error as? LocalInferenceRefusal {
+                    errorCard = .error(title: refusal.title, details: refusal.details)
                 } else {
                     errorCard = .error(title: "Response Error", details: error.localizedDescription)
                 }
@@ -1894,10 +2257,22 @@ final class ActiveStreamManager {
         
         // [RAG UPGRADE] Event-Driven Vectorization
         // Fire-and-forget: Index the final message into the vector database without blocking the UI.
+        let persistence = persistenceService
+        // Snapshot NOW, on the main actor — the detached indexer must never read the live message,
+        // which a Redo can start rewriting within the 500 ms below (RAG-16).
+        let indexable = IndexableMessage(message)
         Task.detached(priority: .background) {
             // Brief pause to ensure UI settles and CoreData write completes
             try? await Task.sleep(nanoseconds: 500_000_000)
-            await RAGIndexingService.shared.indexSingleMessage(message)
+            // ⚠️ CR-61: the conversation may have been DELETED meanwhile — deleting it is what
+            // cancelled this run. Indexing now would put content the user deleted back into the
+            // vector store, after its documents were removed.
+            let stillExists = await MainActor.run { persistence.getConversation(withId: conversationID) != nil }
+            guard stillExists else {
+                logger.notice("[RAG] Not indexing message \(message.id.uuidString.prefix(8)) — conversation \(conversationID.uuidString.prefix(8)) was deleted. CONSEQUENCE: nothing from it re-enters the vector store.")
+                return
+            }
+            await RAGIndexingService.shared.indexSingleMessage(indexable)
         }
         
         activeStreams.removeValue(forKey: message.id)
@@ -1907,6 +2282,9 @@ final class ActiveStreamManager {
         // admitting first would hand the next run a conversation that still looks occupied by the
         // one just finishing — and it would park again with nothing left to wake it.
         admission.admitNext(inConversation: conversationID)
+        // Every run end comes through here (finished, failed, cancelled); idempotent for a run that
+        // never registered (cancelled while queued behind its conversation).
+        inferenceCoordinator.unregister(runID: message.id)
         for delegate in liveMirrorDelegates {
             delegate.activeStreamManager(self, didEndStream: message)
         }
@@ -1914,6 +2292,11 @@ final class ActiveStreamManager {
         // Dispatch notification if app is in background
         let notifConversationID = conversationID
         let hasError = error != nil
+        guard let notificationTitle = Self.completionNotificationTitle(outcome: message.terminalOutcome,
+                                                                      hasError: hasError) else {
+            logger.info("[NOTIFY] No completion notification for run \(message.id.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)) — it was cancelled. CONSEQUENCE: nothing is delivered on any channel; whoever stopped it (Stop, closing the orb, a deleted conversation) already knows.")
+            return
+        }
         let summaryText: String = {
             switch message.content {
             case .plainText(let text), .markdownText(let text):
@@ -1931,7 +2314,7 @@ final class ActiveStreamManager {
             guard !userIsViewing else { return }
 
             let payload = AppNotificationPayload(
-                title: hasError ? "Query Failed" : "Query Completed",
+                title: notificationTitle,
                 body: summaryText,
                 conversationID: notifConversationID
             )
@@ -1940,6 +2323,16 @@ final class ActiveStreamManager {
     }
     
     
+    /// The title of the "your run finished" notification, or nil for a run that must not announce
+    /// itself. Pure.
+    /// ⚠️ A CANCELLED run is not announced. It used to arrive as "Query Completed", because a cancel
+    /// carries no error (device test 2026-10-10: closing the orb mid-answer notified that the query
+    /// had completed). Someone stopped it on purpose, so there is nothing to tell them.
+    nonisolated static func completionNotificationTitle(outcome: ExecutionOutcome?, hasError: Bool) -> String? {
+        if outcome == .cancelled { return nil }
+        return hasError || outcome == .failed ? "Query Failed" : "Query Completed"
+    }
+
     private func removeTask(for messageId: UUID) {
         if activeTasks.removeValue(forKey: messageId) != nil {
             logger.debug("Cleaned up and removed completed task for message ID: \(messageId.uuidString)")

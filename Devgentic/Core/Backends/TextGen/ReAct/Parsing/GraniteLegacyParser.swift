@@ -107,7 +107,8 @@ struct GraniteLegacyParser: CognitiveParserProtocol {
             logger.info("GraniteLegacyParser: Decoded array after sanitization.")
             return decoded
         }
-        logger.warning("GraniteLegacyParser: Failed to decode array: \(trimmed.prefix(200))")
+        logger.warning("GraniteLegacyParser: Failed to decode array: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("GraniteLegacyParser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 

@@ -41,6 +41,18 @@ struct ClaudeToolTurnAdapter: ToolTurnAdapter {
         ]
     }
 
+    /// ⚠️ CR-23: the previous response's thinking blocks go FIRST, exactly as received — Anthropic
+    /// rejects an assistant turn whose tool_use is not preceded by the thinking that produced it, and
+    /// a modified block fails its signature. See `ClaudeLLMProvider.thinkingReplay(in:)`.
+    func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?, replay: JSONValue?) -> [String: Any] {
+        var turn = assistantTurn(toolCalls: toolCalls, reasoning: reasoning)
+        guard case .array(let thinking)? = replay, !thinking.isEmpty,
+              let blocks = turn["content"] as? [[String: Any]] else { return turn }
+        let replayed = thinking.compactMap { $0.rawValue as? [String: Any] }
+        turn["content"] = replayed + blocks
+        return turn
+    }
+
     func toolResultTurns(observations: [ToolObservation]) -> [[String: Any]] {
         // Claude requires all tool_result blocks for a given assistant turn to
         // live inside ONE user message, not separate messages per result.

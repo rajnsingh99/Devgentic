@@ -37,6 +37,23 @@ struct GeminiToolTurnAdapter: ToolTurnAdapter {
         ]
     }
 
+    /// ⚠️ CR-23: each function-call part gets back the `thoughtSignature` the model sent with it. See
+    /// `GeminiLLMProvider.thoughtSignatureReplay(in:)`.
+    func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?, replay: JSONValue?) -> [String: Any] {
+        var turn = assistantTurn(toolCalls: toolCalls, reasoning: reasoning)
+        guard case .object(let fields)? = replay, case .array(let signatures)? = fields["functionCallThoughtSignatures"],
+              var parts = turn["parts"] as? [[String: Any]] else { return turn }
+        var callIndex = 0
+        for i in parts.indices where parts[i]["functionCall"] != nil {
+            if callIndex < signatures.count, case .string(let signature) = signatures[callIndex] {
+                parts[i]["thoughtSignature"] = signature
+            }
+            callIndex += 1
+        }
+        turn["parts"] = parts
+        return turn
+    }
+
     func toolResultTurns(observations: [ToolObservation]) -> [[String: Any]] {
         // Gemini collects all functionResponse parts into one user turn, mirroring
         // Claude's one-message-per-batch shape.

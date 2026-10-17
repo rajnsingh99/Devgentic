@@ -37,6 +37,9 @@ struct CompactionPlan: Sendable {
     let turnPairsInBatch: Int
     /// Estimated chars of all pending turns, for logging/tuning.
     let estimatedChars: Int
+    /// Where the checkpoint goes: strictly after the last compacted message and strictly before
+    /// the first one it keeps (CR-39). Readers keep `timestamp > checkpoint.timestamp`.
+    let checkpointTimestamp: Date
 }
 
 struct CompactionResult: Sendable {
@@ -175,11 +178,19 @@ actor HistoryCompactionService {
                 if let summarizerOverride {
                     result = try await execute(plan: plan, conversationID: conversationID, summarize: summarizerOverride)
                 } else if useIC {
-                    result = try await execute(plan: plan, conversationID: conversationID)
+                    // ⚠️ CR-9: through the coordinator, as a background run of its own — never under
+                    // the finished turn's identity. See `runBackgroundLocal`.
+                    result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "Compaction") {
+                        try await execute(plan: plan, conversationID: conversationID)
+                    }
                 } else {
-                    let model = try await AgentConnect().initializeModel(config: conversationModel, isBotFlow: true)
-                    result = try await execute(plan: plan, conversationID: conversationID) { messages in
-                        try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+                    result = try await LocalInferenceCoordinator.shared.runBackgroundLocal(
+                        feature: "Compaction", conversationID: conversationID, config: conversationModel
+                    ) {
+                        let model = try await AgentConnect().initializeModel(config: conversationModel, isBotFlow: true)
+                        return try await execute(plan: plan, conversationID: conversationID) { messages in
+                            try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+                        }
                     }
                 }
 
@@ -289,11 +300,18 @@ actor HistoryCompactionService {
             if let summarizerOverride {
                 result = try await execute(plan: plan, conversationID: conversationID, summarize: summarizerOverride)
             } else if useIC {
-                result = try await execute(plan: plan, conversationID: conversationID)
+                // ⚠️ CR-9: manual "Compact now" carried no run id at all — it generated outside the lock.
+                result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "Compaction (manual)") {
+                    try await execute(plan: plan, conversationID: conversationID)
+                }
             } else {
-                let model = try await AgentConnect().initializeModel(config: fallbackModel, isBotFlow: true)
-                result = try await execute(plan: plan, conversationID: conversationID) { messages in
-                    try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+                result = try await LocalInferenceCoordinator.shared.runBackgroundLocal(
+                    feature: "Compaction (manual)", conversationID: conversationID, config: fallbackModel
+                ) {
+                    let model = try await AgentConnect().initializeModel(config: fallbackModel, isBotFlow: true)
+                    return try await execute(plan: plan, conversationID: conversationID) { messages in
+                        try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+                    }
                 }
             }
             guard let sink = deliverOverride ?? checkpointSink else {
@@ -409,11 +427,16 @@ actor HistoryCompactionService {
 
         // Step 6: Find the largest batch of oldest turns that fits.
         // We compact from oldest (after checkpoint) and keep recent turns untouched.
-        let turnsToCompact = calculateBatch(
+        let fitted = calculateBatch(
             turns: turnsAfterCheckpoint,
             availableChars: availableForTurns,
             keepRecentCount: 5 // Always keep last 5 messages (2-3 turn pairs) uncompacted
         )
+        guard let boundary = alignBatchBoundary(fitted, in: turnsAfterCheckpoint) else {
+            logger.info("[COMPACTION] Skipped — no clean boundary in the \(fitted.count)-message batch (it must end on a reply, at a point the next message's timestamp is strictly later) → history passed through uncompacted.")
+            return nil
+        }
+        let turnsToCompact = boundary.batch
 
         // The ONLY structural floor now that the turn-count gate is gone: never pay an IC
         // inference to summarize fewer than ~2 turn pairs. Combined with `keepRecentCount`
@@ -432,8 +455,36 @@ actor HistoryCompactionService {
             priorSummary: priorSummary,
             checkpointNumber: checkpointNumber,
             turnPairsInBatch: turnPairsInBatch,
-            estimatedChars: estimatedChars
+            estimatedChars: estimatedChars,
+            checkpointTimestamp: boundary.checkpointTimestamp
         )
+    }
+
+    /// Trims a batch so the checkpoint can sit cleanly after it, and says where.
+    ///
+    /// ⚠️⚠️ READINESS CR-39 (2026-10-12). The checkpoint went at "last compacted + 1 ms", and every
+    /// reader keeps only messages strictly after it. A message within that millisecond — a reply
+    /// stamped right after its question — was in neither the summary nor the history: silently
+    /// gone. And the batch could end on a USER turn, so its reply stayed after the checkpoint:
+    /// the model saw an answer with no question, and native APIs got two assistant turns in a row.
+    ///
+    /// Now the batch never ends on a user message, and ends only where the next message is
+    /// strictly later; the checkpoint goes halfway between the two (or 1 ms after the end when
+    /// nothing follows). Nil when trimming leaves nothing.
+    static func alignBatchBoundary(_ batch: [ChatMessage], in turns: [ChatMessage]) -> (batch: [ChatMessage], checkpointTimestamp: Date)? {
+        var batch = batch
+        while let last = batch.last {
+            if last.sender == .user { batch.removeLast(); continue }
+            let next = turns.count > batch.count ? turns[batch.count] : nil
+            guard let next else { return (batch, last.timestamp.addingTimeInterval(0.001)) }
+            let gap = next.timestamp.timeIntervalSince(last.timestamp)
+            let midpoint = last.timestamp.addingTimeInterval(min(gap / 2, 0.001))
+            if gap > 0, midpoint > last.timestamp, midpoint < next.timestamp {
+                return (batch, midpoint)
+            }
+            batch.removeLast()   // the next message is not strictly later — no room for a checkpoint
+        }
+        return nil
     }
 
     /// Runs the planned compaction: one IC summarization, then the checkpoint message.
@@ -467,9 +518,8 @@ actor HistoryCompactionService {
         }
 
         // Step 8: Create the checkpoint ChatMessage.
-        // Timestamp is set just after the last compacted message for correct ordering.
-        let lastCompactedTimestamp = turnsToCompact.last?.timestamp ?? Date()
-        let checkpointTimestamp = lastCompactedTimestamp.addingTimeInterval(0.001)
+        // CR-39: placed by the planner between the last compacted message and the first kept one.
+        let checkpointTimestamp = plan.checkpointTimestamp
 
         let checkpointMessage = ChatMessage(
             id: UUID(),

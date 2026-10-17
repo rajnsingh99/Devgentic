@@ -132,6 +132,19 @@ struct OpenAILLMProvider: LLMProvider {
 
     private var isOpenRouter: Bool { providerCategory == .openRouter || providerCategory == .openRouterFree }
 
+    /// How this provider's calls are priced (`ModelPriceList`): OpenAI's own models from the bundled
+    /// list; OpenRouter by the cost it reports per call; a custom OpenAI-compatible endpoint never —
+    /// it is usually a local server, and a self-hosted model named `gpt-4o` is not OpenAI's.
+    var pricingKey: PricingKey {
+        let provider: PricingProvider
+        switch providerCategory {
+        case .openAI: provider = .openAI
+        case .openRouter, .openRouterFree: provider = .openRouter
+        case .openAICompatible, .local, .anthropic, .geminiFlash: provider = .unpriced
+        }
+        return PricingKey(provider: provider, model: config.modelName)
+    }
+
     /// Logs which upstream served an OpenRouter request, its generation id and its cost.
     ///
     /// ⚠️ Without these a slow, failed or oddly-behaving OpenRouter call cannot be traced: the same
@@ -300,7 +313,7 @@ struct OpenAILLMProvider: LLMProvider {
         }
 
         let content = message["content"] as? String ?? ""
-        return (content, json.flatMap { TokenUsage.fromOpenAI($0) })
+        return (content, json.flatMap { TokenUsage.fromOpenAI($0, pricing: pricingKey) })
     }
 
     // MARK: - Multimodal (Phase 3 — native image input)
@@ -409,14 +422,7 @@ struct OpenAILLMProvider: LLMProvider {
                    let toolName = function["name"] as? String {
 
                     let id = toolCall["id"] as? String ?? UUID().uuidString
-                    var argumentsDict: [String: JSONValue] = [:]
-
-                    if let argsAsString = function["arguments"] as? String,
-                       let parsedDict = (try? JSONSerialization.jsonObject(with: argsAsString.data(using: .utf8) ?? Data())) as? [String: Any] {
-                        argumentsDict = parsedDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
-                    } else if let argsAsDict = function["arguments"] as? [String: Any] {
-                        argumentsDict = argsAsDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
-                    }
+                    let argumentsDict = Self.toolArguments(function["arguments"], toolName: toolName, callID: id)
 
                     pendingTools.append(PendingToolCall(id: id, name: toolName, arguments: argumentsDict))
                 }
@@ -427,7 +433,7 @@ struct OpenAILLMProvider: LLMProvider {
         // .toolCall events, not from this field. A placeholder here would pollute any
         // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
         // Extract token usage from OpenAI API response
-        let usage = json.flatMap { TokenUsage.fromOpenAI($0) }
+        let usage = json.flatMap { TokenUsage.fromOpenAI($0, pricing: pricingKey) }
 
         return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage,
                                    reasoningReplay: Self.reasoningReplay(in: message))
@@ -471,7 +477,28 @@ struct OpenAILLMProvider: LLMProvider {
             logger.warning("⚠️ OpenAI cognitive step truncated (finish_reason: length). Configured max_tokens: \(limitDesc).")
         }
 
-        return Self.step(fromMessage: message, usage: json.flatMap { TokenUsage.fromOpenAI($0) })
+        return Self.step(fromMessage: message, usage: json.flatMap { TokenUsage.fromOpenAI($0, pricing: pricingKey) })
+    }
+
+    /// Decodes one tool call's `arguments` — a JSON string on the wire (an object from some
+    /// compatible servers).
+    ///
+    /// ⚠️ READINESS CR-26 (2026-10-11). An `arguments` string that wasn't valid JSON became `[:]` with
+    /// no log and the raw text dropped: the tool then ran with NO arguments (a tool without required
+    /// parameters runs on its defaults; one with them fails with a misleading "missing property"),
+    /// and nothing recorded why. Now the string gets the same structural repair the prompted parsers
+    /// use (raw control characters, trailing commas, …); only what still won't decode becomes `[:]`,
+    /// and that is logged with its size and consequence — never its content (file bodies, CR-57).
+    static func toolArguments(_ raw: Any?, toolName: String, callID: String) -> [String: JSONValue] {
+        if let object = raw as? [String: Any] {
+            return object.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
+        }
+        guard let text = raw as? String else { return [:] }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return [:] }       // `""` is how a no-argument call is sent
+        if let decoded = JSONStructuralSanitizer.decodeObject(trimmed) { return decoded }
+        logger.error("[OPENAI-TOOLARGS] Call \(callID.prefix(12)) to '\(toolName)': its arguments (\(trimmed.count) chars) are not a JSON object even after repair. CONSEQUENCE: the call runs with NO arguments, so the tool reports what is missing and the model can retry; a cut-off reply (finish_reason length, or a stream that ended early) is the usual cause.")
+        return [:]
     }
 
     /// Builds a step from one `chat/completions` assistant message — the non-streaming response's
@@ -486,13 +513,7 @@ struct OpenAILLMProvider: LLMProvider {
                 if let function = toolCall["function"] as? [String: Any],
                    let toolName = function["name"] as? String {
                     let id = toolCall["id"] as? String ?? UUID().uuidString
-                    var argumentsDict: [String: JSONValue] = [:]
-                    if let argsAsString = function["arguments"] as? String,
-                       let parsedDict = (try? JSONSerialization.jsonObject(with: argsAsString.data(using: .utf8) ?? Data())) as? [String: Any] {
-                        argumentsDict = parsedDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
-                    } else if let argsAsDict = function["arguments"] as? [String: Any] {
-                        argumentsDict = argsAsDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
-                    }
+                    let argumentsDict = toolArguments(function["arguments"], toolName: toolName, callID: id)
                     pendingTools.append(PendingToolCall(id: id, name: toolName, arguments: argumentsDict))
                 }
             }
@@ -562,7 +583,20 @@ struct OpenAILLMProvider: LLMProvider {
             let limitDesc = maxTokens.map { String($0) } ?? "model default"
             logger.warning("⚠️ OpenAI streamed cognitive step truncated (finish_reason: length). Configured max_tokens: \(limitDesc).")
         }
-        return Self.step(fromMessage: accumulator.message, usage: accumulator.lastUsageChunk.flatMap { TokenUsage.fromOpenAI($0) })
+        // ⚠️ CR-26: a stream that closes cleanly WITHOUT a finish_reason was cut off upstream (a proxy
+        // or gateway dropped it) — every complete chat/completions stream carries one. It used to be
+        // returned as a finished step: a half-written answer, or tool calls with truncated arguments.
+        if let incomplete = Self.incompleteStreamError(finishReason: accumulator.finishReason, chunkCount: chunkCount, model: config.modelName) {
+            throw incomplete
+        }
+        return Self.step(fromMessage: accumulator.message, usage: accumulator.lastUsageChunk.flatMap { TokenUsage.fromOpenAI($0, pricing: pricingKey) })
+    }
+
+    /// The error for a streamed step that ended without a `finish_reason`, or nil when it finished.
+    static func incompleteStreamError(finishReason: String?, chunkCount: Int, model: String) -> LLMProviderError? {
+        guard finishReason == nil else { return nil }
+        logger.error("[STREAM] OpenAI-compatible stream for '\(model)' ended after \(chunkCount) chunk(s) with no finish_reason. CONSEQUENCE: the step is treated as cut off and retried, instead of returning a partial answer or truncated tool arguments as complete.")
+        return .streamEndedEarly(provider: "OpenAI-compatible")
     }
 
     /// Like `streamLineDirective`, but hands each `data:` payload through WHOLE (as the emitted
@@ -619,7 +653,7 @@ struct OpenAILLMProvider: LLMProvider {
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
                 // `usage` is present only on the terminal include_usage chunk.
                 if json["usage"] != nil { self.logRouterMetadata(json) }
-                return TokenUsage.fromOpenAI(json)
+                return TokenUsage.fromOpenAI(json, pricing: self.pricingKey)
             },
             handleLine: { [providerCategory] line, _ in
                 Self.streamLineDirective(line, provider: providerCategory)

@@ -31,7 +31,7 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
         // 2. Extract Action (tool name)
         let terminators = ["none", "finish", "null", "done"]
         
-        guard let rawToolName = extractField(named: "Action", from: text)?.trimmingCharacters(in: .init(charactersIn: "`\"'")),
+        guard let rawToolName = Self.extractField(named: "Action", from: text)?.trimmingCharacters(in: .init(charactersIn: "`\"'")),
               !rawToolName.isEmpty,
               !terminators.contains(rawToolName.lowercased().trimmingCharacters(in: .punctuationCharacters)) else {
             // "Final Answer:", no action found, or termination word used — treat as termination
@@ -44,7 +44,21 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
         }
 
         // 3. Extract Action Input (JSON arguments)
-        let arguments = extractActionInput(from: text)
+        // ⚠️⚠️ CR-19: an Action Input that is PRESENT but undecodable used to become `[:]` and the
+        // call still went out — `final_answer` then failed as "missing answer" (`argSchemaMismatch`),
+        // which neither told the model what was wrong nor let the answer-vs-call verdict rescue it.
+        // It is now a typed malformed-JSON failure, after the shared repairs (raw newlines, invalid
+        // escapes, trailing commas) had their chance.
+        guard let arguments = extractActionInput(from: text) else {
+            logger.warning("ReActMarkdownParser: Action Input for '\(rawToolName)' is not valid JSON even after repair. CONSEQUENCE: a malformed-JSON failure — the model is told its arguments were invalid and retries; no call with empty arguments is sent.")
+            return ModernCognitiveStep(
+                reasoning: reasoning ?? text,
+                toolCalls: [],
+                parseOutcome: .failed(.malformedJSON(
+                    syntaxDetail: "the Action Input for '\(rawToolName)' is not valid JSON",
+                    rawSnippet: String(text.prefix(300))))
+            )
+        }
 
         logger.info("ReActMarkdownParser: Parsed action='\(rawToolName)' with \(arguments.count) argument(s).")
         let call = PendingToolCall(id: UUID().uuidString, name: rawToolName, arguments: arguments)
@@ -67,9 +81,15 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
         return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func extractField(named fieldName: String, from text: String) -> String? {
-        // Matches "Action: tool_name" — stops at newline
-        let pattern = "\(fieldName):\\s*([^\\n]+)"
+    /// The value of a `Field:` line, e.g. `Action: tool_name`, up to the end of that line.
+    ///
+    /// ⚠️ READINESS CR-54 (2026-10-12). This matched `Action:` ANYWHERE, case-insensitively, so
+    /// prose like "the last transaction: history shows…" produced a call to a tool named
+    /// `history`. The field must now START a line, after at most the markdown a model wraps it in
+    /// (indentation, a bullet, a quote, `**`/`__`), and the emphasis closing it (`**Action:**`) is
+    /// skipped.
+    static func extractField(named fieldName: String, from text: String) -> String? {
+        let pattern = "(?m)^[ \\t]*(?:[-*>#]+[ \\t]*)?(?:\\*\\*|__)?\(NSRegularExpression.escapedPattern(for: fieldName)):(?:\\*\\*|__)?[ \\t]*([^\\n]+)"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range(at: 1), in: text) else {
@@ -78,7 +98,9 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
         return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func extractActionInput(from text: String) -> [String: JSONValue] {
+    /// The arguments; `[:]` when there are none (no `Action Input:` at all — zero-argument tools);
+    /// nil when an Action Input is present but is not a JSON object even after repair.
+    private func extractActionInput(from text: String) -> [String: JSONValue]? {
         // Find the index of "Action Input:"
         guard let afterInputRange = text.range(of: "Action Input:", options: .caseInsensitive) else {
             logger.warning("ReActMarkdownParser: Could not locate 'Action Input:'. Using empty args.")
@@ -97,14 +119,11 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
         remainder = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
         
         // 2. Extract outermost JSON object to ignore trailing conversational text
-        guard let jsonString = extractOutermostJSON(from: remainder),
-              let data = jsonString.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) else {
-            logger.warning("ReActMarkdownParser: Could not decode Action Input JSON. Using empty args.")
-            return [:]
+        guard let jsonString = extractOutermostJSON(from: remainder) else {
+            // Nothing object-shaped follows: `Action Input: {}` / blank — a zero-argument call.
+            return remainder.isEmpty || remainder == "{}" ? [:] : nil
         }
-        
-        return decoded
+        return JSONStructuralSanitizer.decodeObject(jsonString)
     }
 
     private func extractFinalAnswer(from text: String) -> String? {

@@ -243,8 +243,9 @@ final class SkillStore {
         context.insert(skill)
 
         do {
-            try context.save()
+            try SharedContextSave.save(context, "skills: create '\(name)'")
         } catch {
+            // Best-effort only: SwiftData cannot undo a FAILED save (RAG-27, `SharedContextCommitTests`).
             context.rollback()
             logger.error("[SKILL_STORE] Creating skill '\(name)' FAILED: \(error.localizedDescription). CONSEQUENCE: nothing was written and the library is unchanged — the user can retry.")
             return .failure(.saveFailed(error.localizedDescription))
@@ -328,8 +329,9 @@ final class SkillStore {
         skill.latestVersionID = version.id
 
         do {
-            try context.save()
+            try SharedContextSave.save(context, "skills: add version to '\(skill.name)'")
         } catch {
+            // Best-effort only: SwiftData cannot undo a FAILED save (RAG-27, `SharedContextCommitTests`).
             context.rollback()
             logger.error("[SKILL_STORE] Adding a version to '\(skill.name)' FAILED: \(error.localizedDescription). CONSEQUENCE: nothing was written; the previous version is still the latest and the skill still loads.")
             return .failure(.saveFailed(error.localizedDescription))
@@ -373,8 +375,9 @@ final class SkillStore {
             let name = skill.name
             let versionCount = skill.versions.count
             context.delete(skill)
-            do { try context.save() } catch {
-                context.rollback()
+            do { try SharedContextSave.save(context, "skills: delete '\(name)'") } catch {
+                // Best-effort only: SwiftData cannot undo a FAILED save (RAG-27, `SharedContextCommitTests`).
+            context.rollback()
                 logger.error("[SKILL_STORE] Deleting '\(name)' FAILED: \(error.localizedDescription). CONSEQUENCE: the skill is still there and still linked; nothing was lost.")
                 return .failure(.saveFailed(error.localizedDescription))
             }
@@ -397,8 +400,9 @@ final class SkillStore {
         case .success(let found):
             guard let skill = found else { return .failure(.notFound(skillID)) }
             change(skill)
-            do { try context.save() } catch {
-                context.rollback()
+            do { try SharedContextSave.save(context, "skills: change \(what) of '\(skill.name)'") } catch {
+                // Best-effort only: SwiftData cannot undo a FAILED save (RAG-27, `SharedContextCommitTests`).
+            context.rollback()
                 logger.error("[SKILL_STORE] Changing the \(what) of '\(skill.name)' FAILED: \(error.localizedDescription). CONSEQUENCE: the previous value still stands and the UI should re-read rather than assume its own value took.")
                 return .failure(.saveFailed(error.localizedDescription))
             }

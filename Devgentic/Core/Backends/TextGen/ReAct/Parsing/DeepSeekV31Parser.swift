@@ -121,7 +121,8 @@ struct DeepSeekV31Parser: CognitiveParserProtocol {
             logger.info("DeepSeekV31Parser: Decoded args after sanitization.")
             return decoded
         }
-        logger.warning("DeepSeekV31Parser: Failed to decode args: \(trimmed.prefix(200))")
+        logger.warning("DeepSeekV31Parser: Failed to decode args: \(trimmed.count) chars (snippet at debug: model output is content, CR-57)")
+        logger.debug("DeepSeekV31Parser: snippet: \(trimmed.prefix(200))")
         return nil
     }
 

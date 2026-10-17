@@ -136,14 +136,15 @@ actor PlanningExecutorWrapper: Executor {
                         content: "Decomposing task into subtasks..."
                     ))
 
-                    await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                    await GlobalRateLimiter.shared.waitForCapacity(forKey: input.rateLimitKey, category: input.rateLimitCategory)
 
                     let envFacts = EnvironmentFacts(
                         osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                         shellType: "Zsh (Non-Interactive Mode)",
                         userName: NSUserName(),
                         homeDirectory: NSHomeDirectory(),
-                        currentDate: Date().formatted(date: .numeric, time: .shortened)
+                        currentDate: EnvironmentFacts.clock().date,
+                        currentTime: EnvironmentFacts.clock().time
                     )
 
                     // Read User Personal profile for planning context.
@@ -266,7 +267,7 @@ actor PlanningExecutorWrapper: Executor {
                                 : "Clarification skipped — planning with reasonable assumptions."))
 
                             // Round 2 — the answer shapes the plan; no second question allowed.
-                            await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                            await GlobalRateLimiter.shared.waitForCapacity(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                             let clarified = ClarificationContext(query: question, response: answerText)
                             let secondResult = try await generatePlanWithSlotRetry(
                                 context: makePlanContext(clarified), allowClarification: false

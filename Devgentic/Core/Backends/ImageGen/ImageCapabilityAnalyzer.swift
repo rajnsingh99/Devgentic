@@ -149,6 +149,16 @@ enum ImageCapabilityAnalyzer {
     }
 
     private static func analyzeMLX(modelName: String) -> ImageModalitySupport {
+        // A build without on-device image generation reports no support rather than
+        // advertising capabilities the provider factory will refuse.
+        guard MLXImageGenAvailability.isCompiledIn else {
+            return ImageModalitySupport(
+                supportsTextToImage: false,
+                supportsImageToImage: false,
+                maxResolution: nil,
+                supportedAspectRatios: nil
+            )
+        }
         // All Flux2 models (Klein 4B, Klein 9B, Dev 32B) support both T2I and I2I
         // via flux-2-swift-mlx library
         return ImageModalitySupport(

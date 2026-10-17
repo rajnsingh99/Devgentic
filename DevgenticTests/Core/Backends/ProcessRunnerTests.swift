@@ -196,13 +196,30 @@ final class ProcessRunnerTests: XCTestCase {
     /// stopping the instant the child is reaped drops it, and drops it NONDETERMINISTICALLY —
     /// whether it survives depends on the scheduler. Silent, timing-dependent truncation of
     /// tool output is the same class of defect as the path-normalisation corruption.
+    ///
+    /// ⚠️ Pins the MECHANISM, not the 0.25 s number. With the production grace this raced the
+    /// scheduler: forking the subshell and exec'ing `sleep` under full-suite load can take longer
+    /// than the ~200 ms of slack left after the worker's 50 ms, and it flaked (2026-10-11). A
+    /// generous grace makes "keeps draining after the child is reaped" deterministic, and the
+    /// elapsed bound proves the drain ends at EOF rather than sleeping the grace out.
     func testDescendantOutputInsideTheGraceIsKept() throws {
-        let result = try ProcessRunner.zsh("echo parent-ok; (sleep 0.05; echo WORKER_RESULT) &")
+        let started = Date()
+        let run = try ProcessRunner.run(zshProcess("echo parent-ok; (sleep 0.05; echo WORKER_RESULT) &"),
+                                        timeout: 60, descendantGrace: 20)
+        let result = run.result
 
         XCTAssertTrue(result.standardOutput.contains("parent-ok"))
         XCTAssertTrue(result.standardOutput.contains("WORKER_RESULT"),
                       "a worker writing 50ms later is not a daemon: \(result.standardOutput)")
         XCTAssertTrue(result.outputComplete)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10,
+                          "draining must end when the worker closes the pipe, not when the grace runs out")
+    }
+
+    /// The production grace stays a SHORT wait — the counterweight above must not grow into
+    /// waiting for daemons.
+    func testTheProductionGraceStaysShort() {
+        XCTAssertLessThanOrEqual(ProcessRunner.descendantGrace, 0.5)
     }
 
     /// And when output IS dropped, the caller is told. The old behaviour blocked instead, so
@@ -351,6 +368,14 @@ final class ProcessRunnerTests: XCTestCase {
                           "captured \(run.result.standardOutput.count) bytes — the cap did not hold")
         XCTAssertTrue(run.result.standardOutput.contains("elided"),
                       "a dropped middle must be marked, not silently closed over")
+        XCTAssertGreaterThan(run.result.standardOutputElidedBytes, 0,
+                             "a PARSING caller (the Git Changes panel) needs the elision as a field, not inline text")
+    }
+
+    /// The field must not degrade into always-nonzero either — it would mark every git list truncated.
+    func testWholeOutputReportsNothingElided() throws {
+        let result = try ProcessRunner.zsh("seq 1 40000")
+        XCTAssertEqual(result.standardOutputElidedBytes, 0)
     }
 
     /// `String(data:encoding:.utf8)` returns nil for ANY invalid byte, so the old code read

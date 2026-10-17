@@ -11,7 +11,7 @@ import SwiftUI
 
 struct OnboardingReadyView: View {
     @Bindable var viewModel: OnboardingViewModel
-    let onComplete: () -> Void
+    let onComplete: (_ createdProfileID: UUID?) -> Void
 
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
@@ -52,11 +52,13 @@ struct OnboardingReadyView: View {
                         .foregroundColor(.white)
                 }
 
-                Text("Setup Complete!")
+                Text(viewModel.isModelInstalled ? String(localized: "Setup Complete!") : String(localized: "Almost There"))
                     .font(.system(size: 26, weight: .bold))
                     .foregroundColor(theme.primaryText)
 
-                Text("Your workspace is configured and your local intelligence unit is ready to assist.")
+                Text(viewModel.isModelInstalled
+                     ? String(localized: "Review your profile, then launch. You can change any of this later.")
+                     : String(localized: "Your profile will be created, but its model isn't downloaded yet. Download it from the Model Store before your first chat."))
                     .font(theme.fontBody)
                     .foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center)
@@ -70,6 +72,22 @@ struct OnboardingReadyView: View {
 
             Spacer(minLength: 16)
 
+            if let error = viewModel.completionErrorMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundColor(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: 520)
+                .background(Color.red.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .padding(.bottom, 8)
+            }
+
             // Circular "Launch Devgentic" Button with Hover Effect
             roundLaunchButton
 
@@ -82,48 +100,54 @@ struct OnboardingReadyView: View {
     // MARK: - Setup Timeline Card
     private var timelineCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Node 1: Created Profile
             timelineItem(
-                label: "Created Profile",
-                value: viewModel.profileDisplayName.isEmpty ? "Local Assistant" : viewModel.profileDisplayName,
-                tag: "Active",
+                label: String(localized: "Profile"),
+                value: viewModel.trimmedProfileName,
+                tag: viewModel.selectedProfileType == .agent ? String(localized: "Agent") : String(localized: "Chat Bot"),
                 nodeColor: Color.blue,
                 isLast: false
             )
 
-            // Node 2: Profile Type
             timelineItem(
-                label: "Profile Type",
-                value: viewModel.selectedProfileType == .agent ? "Autonomous Agent" : "Chat Bot",
-                tag: viewModel.selectedProfileType == .agent ? "72 Tools" : "Conversational",
-                nodeColor: Color.indigo,
+                label: viewModel.selectedBackend == .mlx ? String(localized: "Model · MLX") : String(localized: "Model · Ollama"),
+                value: viewModel.selectedModel?.displayName ?? viewModel.selectedModelIdentifier,
+                tag: viewModel.isModelInstalled ? String(localized: "Downloaded") : String(localized: "Not downloaded"),
+                nodeColor: viewModel.isModelInstalled ? Color.cyan : Color.orange,
                 isLast: false
             )
 
-            // Node 3: Inference Engine
+            if viewModel.selectedProfileType == .agent {
+                timelineItem(
+                    label: String(localized: "Tools"),
+                    value: String(localized: "\(viewModel.enabledToolNames.count) of \(OnboardingToolPreset.tools.count) enabled"),
+                    tag: toolApprovalTag,
+                    nodeColor: Color.indigo,
+                    isLast: false
+                )
+            }
+
             timelineItem(
-                label: "Inference Engine",
-                value: viewModel.selectedBackend == .mlx ? "MLX (Apple Silicon)" : "Ollama Server",
-                tag: viewModel.selectedBackend == .mlx ? "Native Metal" : "Localhost",
-                nodeColor: Color.purple,
+                label: String(localized: "Shortcuts"),
+                value: shortcutsSummary,
+                tag: viewModel.orbEnabled ? String(localized: "Orb on") : String(localized: "Orb off"),
+                nodeColor: Color.orange,
                 isLast: false
             )
 
-            // Node 4: Active Model
             timelineItem(
-                label: "Active Model",
-                value: viewModel.selectedModelIdentifier,
-                tag: "Verified Cache",
-                nodeColor: Color.cyan,
-                isLast: false
-            )
-
-            // Node 5: Persistence
-            timelineItem(
-                label: "Persisted In",
-                value: "UserDefaults & SwiftData",
-                tag: "Saved",
+                label: String(localized: "Updates"),
+                value: viewModel.automaticUpdateChecks == true ? String(localized: "Checked automatically") : String(localized: "Only when you ask"),
+                tag: viewModel.diagnosticsEnabled ? String(localized: "Diagnostics on this Mac") : String(localized: "Diagnostics off"),
                 nodeColor: Color.green,
+                isLast: false
+            )
+
+            timelineItem(
+                label: String(localized: "System Prompt"),
+                value: viewModel.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? String(localized: "None") : (viewModel.systemPrompt == OnboardingPromptDefaults.prompt(for: viewModel.selectedProfileType) ? String(localized: "Default") : String(localized: "Custom")),
+                tag: String(localized: "\(viewModel.systemPrompt.count) chars"),
+                nodeColor: Color.purple,
                 isLast: true
             )
         }
@@ -135,6 +159,17 @@ struct OnboardingReadyView: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(theme.dividerColor.opacity(0.7), lineWidth: 1)
         )
+    }
+
+    private var shortcutsSummary: String {
+        viewModel.quickAccessEnabled
+            ? String(localized: "Quick Access \(QuickAccessConfigManager.shared.shortcutDescription)")
+            : String(localized: "Quick Access off")
+    }
+
+    private var toolApprovalTag: String {
+        let allowed = viewModel.autoApprovedToolNames.intersection(viewModel.enabledToolNames).count
+        return allowed == 0 ? String(localized: "All ask first") : String(localized: "\(allowed) without asking")
     }
 
     // MARK: - Timeline Item Row
@@ -261,7 +296,10 @@ struct OnboardingReadyView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .keyboardShortcut(.defaultAction)
         .pointingHandCursor()
+        .accessibilityLabel("Launch Devgentic")
+        .accessibilityHint("Creates your profile and opens the app")
         .onHover { hovering in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHoveringLaunch = hovering

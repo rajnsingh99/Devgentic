@@ -25,7 +25,11 @@ struct FileProcessorService {
     ///              Defaults to 500,000 characters.
     /// - Returns: The content of the file as a String, or `nil` if reading fails, the file exceeds `maxSize`,
     ///            or security-scoped access cannot be obtained.
-    func readFileContent(for url: URL, maxSize: Int = 500_000) async -> String? {
+    ///   - truncatingOversizeText: return the first `maxSize` characters of an oversized PLAIN-TEXT
+    ///     file instead of nil — what rich documents already get from their extractors. The
+    ///     conversation-memory indexer sets it (RAG-30): a 600K-char log used to be indexed as
+    ///     NOTHING while a 600K-char PDF was indexed up to the cap.
+    func readFileContent(for url: URL, maxSize: Int = 500_000, truncatingOversizeText: Bool = false) async -> String? {
         logger.debug("Attempting to read content for file: \(url.path)")
 
         let didStartAccess = url.startAccessingSecurityScopedResource()
@@ -73,6 +77,10 @@ struct FileProcessorService {
 
             let fileContent = try String(contentsOf: url, encoding: .utf8)
             if fileContent.count > maxSize {
+                if truncatingOversizeText {
+                    logger.notice("[RAG] '\(url.lastPathComponent)' is \(fileContent.count) chars — only its first \(maxSize) are returned for indexing. CONSEQUENCE: conversation memory can recall the head of this file, not the remaining \(fileContent.count - maxSize) chars.")
+                    return String(fileContent.prefix(maxSize))
+                }
                 logger.warning("File content for \(url.lastPathComponent) exceeds \(maxSize) characters (actual: \(fileContent.count)). Not inlining.")
                 return nil
             }
@@ -131,6 +139,10 @@ struct FileProcessorService {
             switch nsError.code {
             case NSFileReadNoPermissionError: throw FileRetrievalError.accessDenied(path: url.path)
             case NSFileReadNoSuchFileError:   throw FileRetrievalError.notFound(path: url.path)
+            // A UTF-8 decode failure. Foundation reports it as 261 (inapplicable encoding) or,
+            // as seen for a `.class` file, 259 ("isn't in the correct format").
+            case NSFileReadInapplicableStringEncodingError, NSFileReadCorruptFileError:
+                                              throw FileRetrievalError.notText(path: url.path)
             default:                          throw FileRetrievalError.readFailed(path: url.path, underlying: nsError.localizedDescription)
             }
         } catch {

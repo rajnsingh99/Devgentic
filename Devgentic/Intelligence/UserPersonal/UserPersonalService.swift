@@ -431,12 +431,15 @@ final class UserPersonalService {
 
         do {
             logger.notice("[User Personal] Calling IntelligenceCoreService for profile merge...")
-            let result = try await IntelligenceCoreService.shared.generate(
-                messages: messages,
-                maxTokens: 800,
-                temperature: 0.2,
-                caller: .userPersonal
-            )
+            // A background feature: it waits for the local model like a run, at the lowest priority (D7).
+            let result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "User Personal") {
+                try await IntelligenceCoreService.shared.generate(
+                    messages: messages,
+                    maxTokens: 800,
+                    temperature: 0.2,
+                    caller: .userPersonal
+                )
+            }
 
             logger.notice("[User Personal] IC unloading after profile merge...")
             await IntelligenceCoreService.shared.releaseHold(caller: .userPersonal)

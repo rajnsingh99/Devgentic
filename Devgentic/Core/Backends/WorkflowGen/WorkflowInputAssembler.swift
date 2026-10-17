@@ -159,11 +159,11 @@ enum WorkflowInputAssembler {
     /// string still gets entity-escaped (safe, visible in the log), because an unescaped boundary
     /// forgery would hand the payload its own `<instruction>` block — the injection WF-SE5 closed.
     static func escapeIfBoundaryThreat(
-        _ text: String, section: String, wrapping: PromptWrapping
+        _ text: String, section: String, wrapping: PromptWrapping, logTag: String = "[WF_EXEC]"
     ) -> String {
         guard wrapping == .xml else { return text }
         guard text.range(of: "</\(section)", options: .caseInsensitive) != nil else { return text }
-        assemblerLogger.notice("[WF_EXEC] A payload bound for the <\(section)> section contains its closing tag ('</\(section)') and was entity-escaped IN FULL (\(text.count) chars). CONSEQUENCE: the section boundary cannot be forged, but this payload reaches the model with &/</> as XML entities — if it was legitimate markup that must stay verbatim, rename or wrap the offending text upstream.")
+        assemblerLogger.notice("\(logTag) A payload bound for the <\(section)> section contains its closing tag ('</\(section)') and was entity-escaped IN FULL (\(text.count) chars). CONSEQUENCE: the section boundary cannot be forged, but this payload reaches the model with &/</> as XML entities — if it was legitimate markup that must stay verbatim, rename or wrap the offending text upstream.")
         return escapeForXMLEmbedding(text, wrapping: wrapping)
     }
 

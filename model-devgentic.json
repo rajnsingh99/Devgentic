@@ -37,14 +37,16 @@
         {
           "id": "6:7936131631944347392",
           "name": "sourceIdentifier",
-          "type": 9
+          "indexId": "4:4259552375670964992",
+          "type": 9,
+          "flags": 2056
         }
       ],
       "relations": []
     },
     {
       "id": "3:1682473059827456000",
-      "lastPropertyId": "6:2322328137919046912",
+      "lastPropertyId": "8:7334421554644074240",
       "name": "ChildChunkEntity",
       "properties": [
         {
@@ -81,14 +83,26 @@
         {
           "id": "6:2322328137919046912",
           "name": "conversationID",
+          "indexId": "3:2780367951072500992",
+          "type": 9,
+          "flags": 2056
+        },
+        {
+          "id": "7:2814076638961787904",
+          "name": "bm25Terms",
           "type": 9
+        },
+        {
+          "id": "8:7334421554644074240",
+          "name": "bm25Length",
+          "type": 6
         }
       ],
       "relations": []
     }
   ],
   "lastEntityId": "3:1682473059827456000",
-  "lastIndexId": "2:243373707592068352",
+  "lastIndexId": "4:4259552375670964992",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",
   "modelVersion": 5,

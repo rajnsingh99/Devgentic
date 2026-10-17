@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright © 2025-2026 Raj Singh
+#
+# ⚠️ The `id`s of the version / macos / hardware fields are part of a contract with the app:
+# `GitHubIssueLink` pre-fills them by name through the URL (`?template=bug_report.yml&version=…`).
+# Renaming an id silently stops the pre-fill.
+name: Bug report
+description: Something doesn't work as expected. No diagnostic bundle needed.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. **Never paste API keys, tokens, or private file contents** — this issue is public.
+        A diagnostic bundle (Report inspector → Export) helps with hard-to-reproduce problems, but it is optional.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, and what went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Ask the agent to …
+        3. See …
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Chat / agent
+        - Code mode
+        - Workflows
+        - Models (MLX / Ollama / cloud)
+        - Tools / MCP
+        - ChatOps (Telegram / Discord / Slack)
+        - Voice (dictation / Orb)
+        - Quick Access
+        - Settings / setup
+        - Updates / install
+        - Other
+  - type: input
+    id: model
+    attributes:
+      label: Model and provider (if relevant)
+      placeholder: e.g. Qwen3-8B via MLX, llama3.1 via Ollama, Claude via API
+  - type: input
+    id: version
+    attributes:
+      label: Devgentic version
+      description: Settings → About. Filled in automatically when reported from the app.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+  - type: input
+    id: hardware
+    attributes:
+      label: Mac
+      placeholder: e.g. Mac15,6 · Apple silicon
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots (optional)
+      description: Check them for personal data before posting.
+      render: shell

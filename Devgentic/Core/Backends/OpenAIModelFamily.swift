@@ -49,9 +49,30 @@ enum OpenAIModelFamily: Equatable {
             return .reasoning
         }
 
-        if id == "gpt-5" || id.hasPrefix("gpt-5-") { return .reasoning }
+        if let major = gptMajorVersion(of: id), major >= 5 { return .reasoning }
 
         return .standard
+    }
+
+    /// The major version of a `gpt-N` / `gpt-N.M` id, or nil when it isn't one.
+    ///
+    /// ⚠️ READINESS CR-27 (2026-10-11). This matched `gpt-5` and `gpt-5-…` only, so `gpt-5.1`,
+    /// `gpt-5.2`, `gpt-5.1-codex` and `openai/gpt-5.2-pro` classified `.standard`: they were sent
+    /// `max_tokens` (rejected — reasoning models take `max_completion_tokens`) plus the panel's
+    /// temperature, and the user's Reasoning Effort was silently dropped. Every GPT from 5 on is a
+    /// reasoning model, so the version is parsed rather than the spellings listed. Still anchored and
+    /// boundary-checked: the version is the digits (and at most one `.`) up to the first `-` or the
+    /// end, so `gpt-4o`, `gpt-4.1` and `gpt-5x-local` give 4, 4 and nil. A major of 50 or more is
+    /// treated as not a GPT version (a size or date in a local model's name).
+    static func gptMajorVersion(of id: String) -> Int? {
+        guard id.hasPrefix("gpt-") else { return nil }
+        let rest = id.dropFirst(4)
+        let version = rest.prefix { $0 != "-" }
+        let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...2).contains(parts.count),
+              parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }),
+              let major = Int(parts[0]), major < 50 else { return nil }
+        return major
     }
 
     /// The parameter name this family uses for an output-token cap.

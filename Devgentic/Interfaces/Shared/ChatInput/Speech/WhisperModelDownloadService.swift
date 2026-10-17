@@ -29,6 +29,10 @@ final class WhisperModelDownloadService {
     /// Whether a download is currently in progress.
     private(set) var isDownloading = false
 
+    /// How the most recent download ended (DownloadManager's history classification reads it).
+    /// Cleared when a download starts; set on every terminal path before `isDownloading` flips.
+    private(set) var lastDownloadEnding: RecordedDownloadEnding?
+
     /// 0.0 … 1.0 fraction of the current download.
     private(set) var downloadProgress: Double = 0
 
@@ -164,6 +168,7 @@ final class WhisperModelDownloadService {
         downloadProgress = 0
         downloadingModelId = modelId
         downloadError = nil
+        lastDownloadEnding = nil
         downloadCompletedBytes = nil
         downloadTotalBytes = nil
 
@@ -196,6 +201,7 @@ final class WhisperModelDownloadService {
                 }
 
                 guard !Task.isCancelled else {
+                    self.lastDownloadEnding = RecordedDownloadEnding(modelID: modelId, ending: .cancelled)
                     self.resetDownloadState()
                     return
                 }
@@ -207,6 +213,7 @@ final class WhisperModelDownloadService {
                 // refreshDownloadedModels() is synchronous (FileManager calls on MainActor),
                 // so downloadedModelIds is fully updated before we proceed.
                 self.refreshDownloadedModels()
+                self.lastDownloadEnding = RecordedDownloadEnding(modelID: modelId, ending: .succeeded)
                 self.resetDownloadState()
 
                 // Persist the selection and notify the recognition service to load
@@ -217,10 +224,12 @@ final class WhisperModelDownloadService {
                 )
             } catch {
                 guard !Task.isCancelled else {
+                    self.lastDownloadEnding = RecordedDownloadEnding(modelID: modelId, ending: .cancelled)
                     self.resetDownloadState()
                     return
                 }
                 logger.error("Download failed for '\(modelId)': \(error.localizedDescription)")
+                self.lastDownloadEnding = RecordedDownloadEnding(modelID: modelId, ending: .failed)
                 self.downloadError = error.localizedDescription
                 self.isDownloading = false
                 self.downloadingModelId = nil
@@ -237,6 +246,9 @@ final class WhisperModelDownloadService {
         // so callers (e.g. deleteModel) don't race against a half-written download.
         await task.value
         downloadTask = nil
+        if let id = downloadingModelId, lastDownloadEnding?.modelID != id {
+            lastDownloadEnding = RecordedDownloadEnding(modelID: id, ending: .cancelled)
+        }
         resetDownloadState()
     }
 

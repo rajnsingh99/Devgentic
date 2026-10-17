@@ -514,6 +514,23 @@ struct OllamaConnect {
 
     // MARK: - Streaming Operations (Pull Model)
 
+    /// How long a pull may go without receiving ANY data before it fails. Ollama streams a
+    /// progress line for every chunk it writes, so five quiet minutes means the transfer is dead.
+    static let pullIdleTimeout: TimeInterval = 300
+
+    /// The cap on the WHOLE pull. ⚠️ Timeout inventory D-27: this was 1800 s, so every pull longer
+    /// than 30 minutes failed however well it was progressing — a 40 GB model on an ordinary
+    /// connection could never finish. The idle timeout above is the real liveness check; this is
+    /// only a backstop against a connection that trickles forever (7 days, URLSession's default).
+    static let pullResourceTimeout: TimeInterval = 7 * 24 * 60 * 60
+
+    static func pullSessionConfiguration() -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = pullIdleTimeout
+        config.timeoutIntervalForResource = pullResourceTimeout
+        return config
+    }
+
     @discardableResult
     static func pullOllamaModel(name: String, baseURL: String, progressHandler: @escaping (ModelPullProgress) -> Void) -> Task<Void, Error> {
         return Task {
@@ -526,10 +543,7 @@ struct OllamaConnect {
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "stream": true])
 
-            let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 300.0
-            config.timeoutIntervalForResource = 1800.0
-            let session = URLSession(configuration: config)
+            let session = URLSession(configuration: pullSessionConfiguration())
 
             let (bytes, response) = try await session.bytes(for: request)
 

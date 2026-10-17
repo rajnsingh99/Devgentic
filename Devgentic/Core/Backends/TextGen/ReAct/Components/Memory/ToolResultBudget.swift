@@ -61,12 +61,12 @@ enum ContextCutStrategy: String, Codable, CaseIterable, Sendable {
     static func automaticChoice(forTool toolName: String) -> ContextCutStrategy {
         switch toolName {
         // Command output: the verdict, the failing test, the final error are at the end.
-        case "run_command", "get_task_output", "command_output", "batch_command":
+        case "run_command", "get_task_output", "batch_command":
             return .keepEnd
         // Reads, listings, searches: what matters is what comes first.
-        case "read_file", "list_directory", "glob_files", "project_tree", "codebase_map", "file_overview",
+        case "read_file", "list_directory", "glob_files", "project_tree", "file_overview",
              "find_definition", "code_search_text", "code_search_symbol", "code_search_files",
-             "code_search", "spotlight_search", "fs_smart_search", "web_search", "web_fetch":
+             "code_search", "spotlight_search", "web_search", "web_fetch":
             return .keepStart
         // Anything else — git, diffs, MCP servers we know nothing about: keep both ends.
         default:
@@ -177,6 +177,6 @@ enum ToolResultBudget {
         }
         return "\n\n[… \(omitted) characters omitted \(where_) of this result to fit the context window. "
             + "\(shown) To see the omitted part, ask for a narrower slice — "
-            + "a line range, a more specific search, or command_output with since_line.]\n\n"
+            + "a line range, a more specific search, or get_task_output with since_line.]\n\n"
     }
 }

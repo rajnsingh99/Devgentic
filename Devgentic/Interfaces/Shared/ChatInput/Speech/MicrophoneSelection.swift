@@ -97,6 +97,17 @@ enum MicrophoneCatalog {
         return device(for: id)
     }
 
+    /// Pure: whether a CoreAudio transport type is Bluetooth (Classic or LE).
+    static func isBluetooth(transportType: UInt32) -> Bool {
+        transportType == kAudioDeviceTransportTypeBluetooth || transportType == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// Whether a device is a Bluetooth headset or earbuds. Such a device must switch from its
+    /// playback mode to its microphone mode before it can record, and that switch takes seconds.
+    static func isBluetooth(_ id: AudioDeviceID) -> Bool {
+        isBluetooth(transportType: uint32(id, kAudioDevicePropertyTransportType))
+    }
+
     private static func device(for id: AudioDeviceID) -> MicrophoneDevice? {
         guard let uid = string(id, kAudioDevicePropertyDeviceUID),
               isListable(uid: uid, isHidden: uint32(id, kAudioDevicePropertyIsHidden) == 1,
@@ -201,6 +212,14 @@ final class MicrophoneSelection {
             logger.notice("[MIC] Session \(tag): the chosen microphone '\(name ?? "?")' is not connected. CONSEQUENCE: recording from the system default (\(self.systemDefault?.name ?? "unknown")) instead; the choice is kept for when it returns.")
             return nil
         }
+    }
+
+    /// Whether a session starting now records from a Bluetooth device — the chosen microphone, or
+    /// the system default when none is chosen or the chosen one is not connected.
+    var sessionInputIsBluetooth: Bool {
+        refresh()
+        guard let id = resolution.deviceID ?? systemDefault?.id else { return false }
+        return MicrophoneCatalog.isBluetooth(id)
     }
 
     private func startListeningIfNeeded() {

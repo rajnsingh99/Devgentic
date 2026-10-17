@@ -56,6 +56,12 @@ actor EmbeddingService {
     /// (the annotation is the only other place the contract lives).
     static let expectedDimensions = 384
 
+    /// Which model produced the stored vectors, recorded beside the vector store (RAG-32). Vectors
+    /// from two models are not comparable even at the same width, so a store written by another
+    /// model is set aside rather than mixed. Derived from the GENERATED Core ML class, so swapping
+    /// the bundled model changes it without anyone remembering to.
+    static let modelIdentifier = "\(String(describing: All_MiniLM_L6_v2.self))/\(expectedDimensions)"
+
     /// Special-token IDs, resolved from the LOADED tokenizer where possible —
     /// the BERT-vocab literals (102 / 0) remain only as fallbacks. Previously
     /// hardcoded: a tokenizer swap with different special tokens would have
@@ -74,6 +80,9 @@ actor EmbeddingService {
     /// Test hook: current number of cached embeddings.
     var cachedEmbeddingCount: Int { cache.count }
 
+    /// Whether the missing-model error has been logged this launch.
+    private var reportedModelUnavailable = false
+
     /// Lazy-loaded tokenizer instance (actor isolation provides thread safety).
     private var _tokenizer: (any Tokenizer)?
 
@@ -85,10 +94,10 @@ actor EmbeddingService {
     private init() {
         do {
             self.model = try All_MiniLM_L6_v2(configuration: MLModelConfiguration())
-            logger.info("Successfully loaded Core ML embedding model: All_MiniLM_L6_v2.")
+            logger.info("[RAG] Loaded the Core ML embedding model (\(Self.modelIdentifier)).")
         } catch {
             self.model = nil
-            logger.critical("Failed to load Core ML embedding model: \(error.localizedDescription)")
+            logger.critical("[RAG] Failed to load the Core ML embedding model: \(error.localizedDescription). CONSEQUENCE: conversation memory is OFF for this launch — nothing is indexed and retrieval finds nothing; chats themselves are unaffected.")
         }
     }
 
@@ -108,7 +117,11 @@ actor EmbeddingService {
         }
 
         guard let model = self.model else {
-            logger.error("Embedding model is not available. Cannot generate embedding.")
+            // Once per launch, not once per chunk (RAG-38): a file is ~1k chunks.
+            if !reportedModelUnavailable {
+                reportedModelUnavailable = true
+                logger.error("[RAG] Embedding requested but the model is not loaded. CONSEQUENCE: every embed this launch returns nil — nothing new is indexed and retrieval finds nothing. (Logged once.)")
+            }
             return nil
         }
 
@@ -135,22 +148,23 @@ actor EmbeddingService {
             // 6. L2-normalize the embedding (standard for sentence-transformers)
             // Use safeL2Normalize to catch zero vectors before they reach HNSW
             guard let normalizedArray = VectorMath.safeL2Normalize(floatArray) else {
-                logger.warning("Model produced a zero vector for text: '\(text.prefix(50))...' — skipping.")
+                // [M6] Length only — `text` is user content (RAG-38).
+                logger.warning("[RAG] The model produced a zero vector for a \(text.count)-char chunk. CONSEQUENCE: that chunk is not indexed.")
                 return nil
             }
 
             // 7. Enforce the width contract LOUDLY — a mismatched model would
             // otherwise poison the HNSW index (schema says 384) without a trace.
             guard normalizedArray.count == Self.expectedDimensions else {
-                logger.error("Embedding width \(normalizedArray.count) ≠ expected \(Self.expectedDimensions) — model/schema mismatch; dropping embedding.")
+                logger.error("[RAG] Embedding width \(normalizedArray.count) ≠ expected \(Self.expectedDimensions) — model/schema mismatch. CONSEQUENCE: this embedding is dropped (the chunk is not indexed, or a query retrieves nothing); every embed from this model will fail the same way.")
                 return nil
             }
 
             cacheStore(text: text, embedding: normalizedArray)
-            logger.debug("Generated embedding for text (\(text.prefix(50))...).")
+            logger.debug("[RAG] Embedded a \(text.count)-char chunk.")
             return normalizedArray
         } catch {
-            logger.error("Failed to generate embedding: \(error.localizedDescription)")
+            logger.error("[RAG] Embedding a \(text.count)-char chunk FAILED: \(error.localizedDescription). CONSEQUENCE: that chunk is not indexed (or, for a query, retrieval is skipped this turn).")
             return nil
         }
     }
@@ -175,7 +189,7 @@ actor EmbeddingService {
         if let sep = tokenizer.convertTokenToId("[SEP]") { sepTokenID = sep }
         if let pad = tokenizer.convertTokenToId("[PAD]") { padTokenID = pad }
 
-        logger.info("Successfully loaded WordPiece tokenizer for All-MiniLM-L6-v2 (sep=\(self.sepTokenID), pad=\(self.padTokenID)).")
+        logger.info("[RAG] Loaded the WordPiece tokenizer for All-MiniLM-L6-v2 (sep=\(self.sepTokenID), pad=\(self.padTokenID)).")
         return tokenizer
     }
 

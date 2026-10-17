@@ -54,6 +54,12 @@ struct NodeResultEnvelope: Sendable, Identifiable {
     /// Execution metadata (timing, token usage, tools invoked).
     let metadata: NodeExecutionMetadata
 
+    /// Ids of the `.document` artifacts in `artifacts` whose text has ALREADY been inlined into a
+    /// node on the path that delivered them here (this node, or one upstream of it). See
+    /// `WorkflowExecutor.documentsAlreadyRead`. Empty means "nobody has read them": the safe
+    /// default, which inlines again exactly as before CR-49.
+    let readDocumentIDs: Set<UUID>
+
     /// Explicit initializer (replaces the synthesized memberwise init) so that
     /// `structuredOutput` can default to `nil` — the many synthetic envelope
     /// construction sites (skips, profile-not-found, structural nodes) keep
@@ -68,7 +74,8 @@ struct NodeResultEnvelope: Sendable, Identifiable {
         output: String,
         artifacts: [MediaArtifact],
         metadata: NodeExecutionMetadata,
-        structuredOutput: JSONValue? = nil
+        structuredOutput: JSONValue? = nil,
+        readDocumentIDs: Set<UUID> = []
     ) {
         self.taskID = taskID
         self.nodeID = nodeID
@@ -80,6 +87,7 @@ struct NodeResultEnvelope: Sendable, Identifiable {
         self.artifacts = artifacts
         self.metadata = metadata
         self.structuredOutput = structuredOutput
+        self.readDocumentIDs = readDocumentIDs
     }
 }
 

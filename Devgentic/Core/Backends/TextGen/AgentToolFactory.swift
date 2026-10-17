@@ -56,7 +56,11 @@ enum AgentToolFactory {
                 let paramHint = requiredKeys.isEmpty ? "" : " Required parameters: [\(requiredKeys.joined(separator: ", "))]."
                 let rawJSON = String(data: dataArgs, encoding: .utf8) ?? "{}"
 
-                logToolExecution.error("❌ Tool Argument Decoding Failed. Tool: \(toolName). Expected Keys: \(requiredKeys). Raw Payload: \(rawJSON). Error: \(decodingError.localizedDescription)")
+                // ⚠️ READINESS CR-57 (2026-10-12). The LOG used to carry `rawJSON` too, at ERROR, the
+                // level that is always persisted: a `write_file` call's payload is the whole file. The
+                // log gets its size and the keys the model sent; the model still gets the raw payload.
+                let sentKeys = ((try? JSONSerialization.jsonObject(with: dataArgs)) as? [String: Any]).map { $0.keys.sorted() }
+                logToolExecution.error("❌ Tool Argument Decoding Failed. Tool: \(toolName). Expected Keys: \(requiredKeys). Sent keys: \(sentKeys.map { "\($0)" } ?? "not a JSON object") (\(dataArgs.count) bytes). Error: \(decodingError.localizedDescription). CONSEQUENCE: the call does not run; the model is shown what it sent and what was expected, and retries.")
 
                 throw ToolArgumentError(
                     toolName: toolName,

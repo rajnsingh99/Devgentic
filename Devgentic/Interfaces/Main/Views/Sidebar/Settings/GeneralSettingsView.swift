@@ -24,6 +24,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.diagnosticsEnabledKey) private var diagnosticsEnabled: Bool = true
     @AppStorage(AppSettings.showTimelineThoughtsKey) private var showTimelineThoughts: Bool = false
     @AppStorage(AppSettings.showRemoteModelsKey) private var showRemoteModels: Bool = false
+    @AppStorage(AppSettings.maximumRunTimeKey) private var maximumRunTime: Double = LocalInferenceCoordinator.defaultGlobalCeiling
     @AppStorage(GlobalConstants.isOnboardingComplete) private var isOnboardingComplete: Bool = true
     @ObservedObject private var softwareUpdater = SoftwareUpdater.shared
 
@@ -265,6 +266,25 @@ struct GeneralSettingsView: View {
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .tint(theme.accentColor)
+                    }
+
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
+
+                    SettingsRow(
+                        title: "Maximum Run Time",
+                        description: "Stops any single run — chat, Code, workflow or scheduled — after this much working time. Time spent waiting for your approval or for the local model is not counted. A profile's own execution limit still applies when it is shorter.",
+                        theme: theme
+                    ) {
+                        Picker("", selection: $maximumRunTime) {
+                            Text("30 min").tag(Double(30 * 60))
+                            Text("1 hour").tag(Double(60 * 60))
+                            Text("90 min").tag(Double(90 * 60))
+                            Text("2 hours").tag(Double(2 * 60 * 60))
+                            Text("4 hours").tag(Double(4 * 60 * 60))
+                            Text("Off").tag(Double(0))
+                        }
+                        .labelsHidden()
+                        .frame(width: 120)
                     }
 
                     Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)

@@ -98,7 +98,7 @@ struct LocalModel: Identifiable, Hashable {
 // MARK: - Digest-Aware Model Refresh
 
 /// Digest-aware local-model refresh shared by `OllamaService` (model manager) and
-/// `OllamaModelPickerView` (profile editor). One cheap `/api/tags` + `/api/version`
+/// `ModelCatalogService` (the profile editor's model catalog). One cheap `/api/tags` + `/api/version`
 /// probe decides which models actually need the expensive per-model `/api/show`
 /// detection fan-out: unchanged digests reuse the cached `LocalModel`. External
 /// `ollama pull`s become visible on the next refresh without re-detecting the whole
@@ -139,6 +139,20 @@ enum LocalModelRefresher {
         return plan
     }
 
+    /// `/api/tags` entries with each name once, first occurrence kept.
+    ///
+    /// ⚠️ READINESS CR-38 (2026-10-12). The list was keyed with `Dictionary(uniqueKeysWithValues:)`,
+    /// which TRAPS on a repeated key — and a proxy or gateway in front of Ollama that lists a model
+    /// twice crashed the app on every refresh, i.e. on every appearance of a model picker.
+    static func uniqueByName(_ entries: [OllamaConnect.OllamaTagEntry]) -> [OllamaConnect.OllamaTagEntry] {
+        var seen = Set<String>()
+        let unique = entries.filter { seen.insert($0.name).inserted }
+        if unique.count < entries.count {
+            logger.warning("[OLLAMA] /api/tags listed \(entries.count - unique.count) model name(s) more than once. CONSEQUENCE: each is kept once (the first entry); a proxy in front of Ollama is the usual cause.")
+        }
+        return unique
+    }
+
     /// Fetches the current model list, reusing cached detection where digests match.
     /// A failed `/api/show` degrades to a bare `LocalModel` (visible, untagged, nil
     /// digest so the next refresh retries) — a model is never silently dropped.
@@ -147,16 +161,16 @@ enum LocalModelRefresher {
         cached: [LocalModel],
         cachedDaemonVersion: String?
     ) async throws -> (models: [LocalModel], daemonVersion: String?) {
-        let entries = try await OllamaConnect.fetchLocalOllamaModelTags(baseURL: baseURL)
+        let entries = uniqueByName(try await OllamaConnect.fetchLocalOllamaModelTags(baseURL: baseURL))
         let daemonVersion = await OllamaConnect.fetchDaemonVersion(baseURL: baseURL)
         let versionChanged = daemonVersion != nil && daemonVersion != cachedDaemonVersion
 
         let plan = planRefresh(cached: cached, fresh: entries, daemonVersionChanged: versionChanged)
 
-        let cachedByName = Dictionary(uniqueKeysWithValues: cached.map { ($0.name, $0) })
+        let cachedByName = Dictionary(cached.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         var models: [LocalModel] = plan.reusableNames.compactMap { cachedByName[$0] }
 
-        let digestsByName = Dictionary(uniqueKeysWithValues: entries.map { ($0.name, $0.digest) })
+        let digestsByName = Dictionary(entries.map { ($0.name, $0.digest) }, uniquingKeysWith: { first, _ in first })
         await withTaskGroup(of: LocalModel.self) { group in
             for name in plan.namesToFetch {
                 group.addTask {
@@ -373,20 +387,61 @@ class OllamaService {
 
         } catch {
             let errorMessage = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: .ollama)
-            self.localModels = []
             self.modelLoadingError = "Failed to load models: \(errorMessage)"
-            if let urlError = error as? URLError,
-               (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost) {
+            // ⚠️ READINESS CR-37 (2026-10-12). Every refresh error wiped `localModels` while the status
+            // stayed `.connected`, so one timeout or one bad `/api/tags` body made model detection and
+            // the download coordinator treat every INSTALLED model as missing (a "not installed" pill,
+            // a needless re-pull). The list is cleared only when the server is actually gone — and
+            // then the status says so; otherwise the last good list stands.
+            if Self.refreshErrorMeansServerGone(error) {
+                self.localModels = []
                 self.serverStatus = .disconnected
+                logger.warning("[OLLAMA] Model refresh failed — the server is unreachable (\(error.localizedDescription)). CONSEQUENCE: status is disconnected and the model list is empty until it is back.")
+            } else {
+                logger.warning("[OLLAMA] Model refresh failed while the server is reachable (\(error.localizedDescription)). CONSEQUENCE: the last good list of \(self.localModels.count) model(s) is kept, so installed models are not reported missing; the next refresh retries.")
             }
         }
         isLoadingModels = false
     }
 
-    func pullModel(name: String, baseURL: String) async {
+    // MARK: - Pull reservation (readiness CR-34)
+
+    /// The pull that has claimed the one Ollama pull slot but may not have started yet.
+    ///
+    /// ⚠️ READINESS CR-34 (2026-10-12). Both `DownloadCoordinator` and `pullModel` checked
+    /// `isPullingModel` and then AWAITED (a support lookup; a 5 s server probe) before it was set, so
+    /// two quick clicks both passed: two pulls ran, `pullTask` was overwritten so the first could no
+    /// longer be cancelled, and the first one's completion cleared the second's state. The slot is
+    /// now claimed SYNCHRONOUSLY, before any await, by whoever asks first.
+    private(set) var pullReservation: UUID?
+
+    /// Whether the pull slot is taken — pulling, or claimed by a pull about to start.
+    var isPullSlotTaken: Bool { isPullingModel || pullReservation != nil }
+
+    /// Claims the pull slot. Nil when it is taken. Pass the token to `pullModel`, or give it back
+    /// with `releasePullReservation` if the pull will not start.
+    func reservePull() -> UUID? {
+        guard !isPullSlotTaken else { return nil }
+        let token = UUID()
+        pullReservation = token
+        return token
+    }
+
+    func releasePullReservation(_ token: UUID) {
+        if pullReservation == token { pullReservation = nil }
+    }
+
+    /// Whether a refresh error means the server is not there (rather than one failed request).
+    static func refreshErrorMeansServerGone(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        return urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost
+    }
+
+    func pullModel(name: String, baseURL: String, reservation: UUID? = nil) async {
         let trimmedModelName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModelName.isEmpty else {
             logger.error("[DOWNLOAD] Ollama pull refused — empty model name. CONSEQUENCE: nothing is pulled and the caller has already reported success to the user.")
+            if let reservation { releasePullReservation(reservation) }
             return
         }
         // Silent return: the caller (DownloadCoordinator) computes its outcome BEFORE
@@ -394,10 +449,15 @@ class OllamaService {
         // with no pull, no record, no sidebar row and no log line. `DownloadCoordinator`
         // now pre-checks `isPullingModel`, but log it here too — this is reachable from
         // any caller.
-        guard !isPullingModel else {
-            logger.error("[DOWNLOAD] Ollama pull of '\(trimmedModelName)' REFUSED — '\(self.modelToPull)' is already pulling. CONSEQUENCE: the request is dropped; only one Ollama pull runs at a time.")
+        guard !isPullingModel, pullReservation == nil || pullReservation == reservation else {
+            logger.error("[DOWNLOAD] Ollama pull of '\(trimmedModelName)' REFUSED — \(self.isPullingModel ? "'\(self.modelToPull)' is already pulling" : "another pull has claimed the slot and is starting"). CONSEQUENCE: the request is dropped; only one Ollama pull runs at a time.")
+            if let reservation { releasePullReservation(reservation) }
             return
         }
+        // Claimed BEFORE the first await below (CR-34); released when this call ends, however it ends.
+        let slot = reservation ?? UUID()
+        pullReservation = slot
+        defer { releasePullReservation(slot) }
         guard !isRemovingModel else {
             self.modelPullError = "Cannot pull model while another is being removed."
             return
@@ -562,64 +622,13 @@ class OllamaService {
     }
     
     // MARK: - Resource Management
-    
-    /// Unloads any currently running models from VRAM by checking /api/ps and sending keep_alive: 0.
-    /// This ensures that when we switch conversations or close the app, the GPU is freed immediately.
-    func unloadModel() async {
-        guard let url = URL(string: "\(ollamaBaseURL)/api/ps") else { return }
-        
-        do {
-            // 1. Fetch running models
-            let (data, _) = try await URLSession.shared.data(from: url)
-            
-            // Minimal structure to parse /api/ps response
-            struct ProcessResponse: Decodable {
-                struct Model: Decodable {
-                    let name: String
-                }
-                let models: [ProcessResponse.Model]
-            }
-            
-            let response = try JSONDecoder().decode(ProcessResponse.self, from: data)
-            
-            if response.models.isEmpty {
-                logger.debug("No running models to unload.")
-                return
-            }
-            
-            // 2. Unload each found model
-            for model in response.models {
-                await unloadSpecificModel(name: model.name)
-            }
-            
-        } catch {
-            logger.error("Failed to check/unload models: \(error.localizedDescription)")
-        }
-    }
-    
-    /// Helper to unload a specific model by name
-    private func unloadSpecificModel(name: String) async {
-        guard let url = URL(string: "\(ollamaBaseURL)/api/chat") else { return }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body: [String: Any] = [
-            "model": name,
-            "keep_alive": 0
-        ]
-        
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
-        do {
-            let (_, _) = try await URLSession.shared.data(for: request)
-            logger.info("Model '\(name)' unloaded successfully.")
-        } catch {
-            logger.error("Failed to unload model '\(name)': \(error.localizedDescription)")
-        }
-    }
-    
+    //
+    // ⚠️ The "unload every model in /api/ps" function that lived here is GONE (local inference
+    // coordinator, U1/U10/U11). It evicted the server's whole working set — models a parked run or
+    // ANOTHER APP was using — on every conversation switch and at quit. Ollama models are now unloaded
+    // by name, and only the ones this app used: `LocalInferenceCoordinator.unloadOllamaModelsWeUsed()`
+    // and the residency step when a run takes the local lock.
+
     func clearPullActionStatus() {
         pullStatusMessage = ""
         pullTerminalState = nil

@@ -255,7 +255,20 @@ class MLXModelService {
             : { nil }
         // Kick off the first scan without blocking init. `installedModels` is empty until it
         // lands; `ensureLoaded()` is how callers wait for it.
-        forceRefreshInstalledModels()
+        //
+        // ⚠️ The walk is STARTED here, synchronously — not from a deferred `Task`. It used to
+        // be `forceRefreshInstalledModels()`, whose Task had not run yet when a caller awaited
+        // `ensureLoaded()` in the same main-actor turn: that caller found nothing in flight and
+        // started its own walk, then the deferred forcing Task joined it and — being a forcing
+        // caller — started ANOTHER. Two walks over the model tree at launch, and a stray third
+        // `scanCount` bump that made `MLXAsyncScanTests` flaky. Now `scanTask` is set before
+        // init returns, so every early caller joins this one walk.
+        let initial = beginWalk()
+        Task { [weak self] in
+            await initial.value
+            guard let self, self.scanTask == initial else { return }
+            self.scanTask = nil
+        }
     }
     
     // MARK: - Local Discovery (Deep Scan)
@@ -323,6 +336,17 @@ func refreshInstalledModels() {
             return
         }
 
+        let task = beginWalk()
+        await task.value
+        // ⚠️ Clear only our own handle. A forcing caller that joined this walk falls through
+        // and installs its own task here; an unconditional nil would drop that reference and
+        // stop everyone arriving afterwards from coalescing onto it.
+        if scanTask == task { scanTask = nil }
+    }
+
+    /// Starts a disk walk and installs it as `scanTask`, synchronously, so any caller arriving
+    /// after this returns joins it. The caller owns clearing `scanTask` once it lands.
+    private func beginWalk() -> Task<Void, Never> {
         lastScanTime = Date()
         scanCount += 1
         let scanRoot = modelsDirectory
@@ -336,11 +360,7 @@ func refreshInstalledModels() {
             self.publish(models: scanned.0, profiles: scanned.1)
         }
         scanTask = task
-        await task.value
-        // ⚠️ Clear only our own handle. A forcing caller that joined this walk falls through
-        // and installs its own task here; an unconditional nil would drop that reference and
-        // stop everyone arriving afterwards from coalescing onto it.
-        if scanTask == task { scanTask = nil }
+        return task
     }
 
     /// Awaits at least one completed scan. Request-path consumers use this instead of reading
@@ -1000,6 +1020,7 @@ func refreshInstalledModels() {
         currentDownloadName = repoId
         downloadProgress = 0.0
         errorMessage = nil
+        lastDownloadEnding = nil
         if pausedRepoId == repoId { pausedRepoId = nil }
         // Take the slot. Any handler still unwinding from a previous occupant is now stale.
         downloadGeneration &+= 1
@@ -1143,6 +1164,7 @@ func refreshInstalledModels() {
     func finishTerminal(repoId: String, generation: UInt64, classification: String) {
         guard stillOwnsSlot(generation, repoId: repoId, phase: "terminal(\(classification))") else { return }
         logger.info("[MLXSTORE] Terminal state for '\(repoId)': \(classification). Clearing in-flight handles.")
+        lastDownloadEnding = RecordedDownloadEnding(modelID: repoId, ending: classification == "completed" ? .succeeded : .failed)
         clearDownloadHandles()
         isDownloading = false
         refreshPartialDownloads()
@@ -1153,6 +1175,7 @@ func refreshInstalledModels() {
     func finishCancelled(repoId: String, generation: UInt64, reason: String) {
         guard stillOwnsSlot(generation, repoId: repoId, phase: "cancellation") else { return }
         logger.notice("[MLXSTORE] Download of '\(repoId)' CANCELLED (\(reason)). CONSEQUENCE: the record is marked cancelled, not failed; partial files are reclaimed by the cleanup pass.")
+        lastDownloadEnding = RecordedDownloadEnding(modelID: repoId, ending: .cancelled)
         clearDownloadHandles()
         downloadProgress = 0.0
         errorMessage = nil
@@ -1183,6 +1206,10 @@ func refreshInstalledModels() {
     /// partial bytes and paused deliberately keeps them.
     var pausedRepoId: String?
 
+    /// How the most recent download ended (DownloadManager's history classification reads it).
+    /// Cleared when a download starts; set on every terminal path before `isDownloading` flips.
+    private(set) var lastDownloadEnding: RecordedDownloadEnding?
+
     /// Stops the in-flight download but **keeps every downloaded byte**.
     ///
     /// This is the whole feature: swift-transformers already resumes from `.incomplete` files
@@ -1203,6 +1230,7 @@ func refreshInstalledModels() {
         logger.notice("[MLXSTORE] PAUSING download of '\(repoId)' at \(Int(self.downloadProgress * 100))% — partial files are KEPT so the resume can continue from them via a Range request.")
 
         task.cancel()
+        lastDownloadEnding = RecordedDownloadEnding(modelID: repoId, ending: .paused)
         // ⚠️ Releasing the slot synchronously while the cancelled task is still unwinding is
         // what makes the generation bump mandatory: `resumeDownload` calls straight back into
         // `downloadModel`, so a new occupant can be installed before the old task's terminal
@@ -1476,6 +1504,9 @@ func refreshInstalledModels() {
                 }
 
                 if self.downloadTask == nil {
+                    if self.lastDownloadEnding?.modelID != modelName {
+                        self.lastDownloadEnding = RecordedDownloadEnding(modelID: modelName, ending: .cancelled)
+                    }
                     self.isDownloading = false
                     self.downloadProgress = 0.0
                     self.currentDownloadName = ""
@@ -1919,9 +1950,19 @@ func refreshInstalledModels() {
             errorMessage = "Can't delete \(item.displayName) while it's generating a response."
             return false
         }
+        // A run still registered with the local inference coordinator — holding the lock, waiting for
+        // it, or parked on a human — expects this model; deleting it would fail that run later (U12).
+        if LocalInferenceCoordinator.shared.modelsInUse(on: .mlx)
+            .contains(where: { MLXModelIdentity.matches(installed: item.displayName, candidate: $0) }) {
+            logger.error("[MLXSTORE] REFUSING to delete '\(item.displayName)' — a running, queued or parked run expects to use it. CONSEQUENCE: delete skipped; finish or stop that run first.")
+            errorMessage = "\(item.displayName) is needed by a run that hasn't finished yet. Stop or finish it before deleting the model."
+            return false
+        }
         if await MLXService.shared.isModelLoaded(at: path) {
-            logger.error("[MLXSTORE] REFUSING to delete '\(item.displayName)' — it is currently loaded in MLXService. CONSEQUENCE: delete skipped; unload or switch models first, otherwise a lazy reload would target a path that no longer exists.")
-            errorMessage = "\(item.displayName) is currently loaded. Switch to another model before deleting it."
+            logger.error("[MLXSTORE] REFUSING to delete '\(item.displayName)' — it is currently loaded in MLXService. CONSEQUENCE: delete skipped — deleting it would leave a lazy reload targeting a path that no longer exists. It unloads on MLX's 2-minute idle timer, or when a run on another local model takes the local lock.")
+            // ⚠️ Status, not a remedy: switching conversations or models no longer unloads anything
+            // (local inference coordinator, D10), so the old "switch to another model" was wrong.
+            errorMessage = "\(item.displayName) is still loaded in memory. It unloads by itself 2 minutes after its last use, or when a run on another local model starts."
             return false
         }
 

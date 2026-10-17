@@ -37,13 +37,15 @@ final class ForegroundRunResolverTests: XCTestCase {
         _ conversation: UUID,
         at offset: TimeInterval = 0,
         parked: Bool = false,
+        queued: Bool = false,
         id: UUID = UUID()
     ) -> ForegroundRunResolver.LiveRun {
         ForegroundRunResolver.LiveRun(
             messageID: id,
             conversationID: conversation,
             startedAt: t0.addingTimeInterval(offset),
-            isParked: parked
+            isParked: parked,
+            isQueued: queued
         )
     }
 
@@ -185,6 +187,35 @@ final class ForegroundRunResolverTests: XCTestCase {
             ForegroundRunResolver.foregroundRun(live: [parked, streaming], selectedConversation: convA),
             streaming
         )
+    }
+
+    // MARK: - CR-4: a queued run is never preferred over one that started
+
+    /// ⚠️⚠️ THE CR-4 DEFECT. A ChatOps / scheduled / Orb message queued behind the running run is
+    /// registered — and timestamped — first, so it was the "most recently started, unparked" run and
+    /// Stop hit it. Cancelling it did nothing, and the running run could not be stopped from here.
+    func testAQueuedRunIsNeverPreferredOverTheRunningOne() {
+        let running = run(convA, at: 0)
+        let queued = run(convA, at: 10, queued: true)
+        for order in [[running, queued], [queued, running]] {
+            XCTAssertEqual(ForegroundRunResolver.foregroundRun(live: order, selectedConversation: convA), running)
+        }
+    }
+
+    /// ⚠️ The fabricated-denial half. A PARKED run must be the target, so ITS task is cancelled — that
+    /// is what makes its approval resolve as a cancellation and not as a "Deny" nobody pressed.
+    func testAParkedRunIsPreferredOverAQueuedOne() {
+        let parked = run(convA, at: 0, parked: true)
+        let queued = run(convA, at: 10, queued: true)
+        for order in [[parked, queued], [queued, parked]] {
+            XCTAssertEqual(ForegroundRunResolver.foregroundRun(live: order, selectedConversation: convA), parked)
+        }
+    }
+
+    /// The control: a queued run alone is still stoppable — the composer shows Stop for it.
+    func testAQueuedRunAloneIsStillTheTarget() {
+        let queued = run(convA, queued: true)
+        XCTAssertEqual(ForegroundRunResolver.foregroundRun(live: [queued], selectedConversation: convA), queued)
     }
 
     func testIdenticalStartTimes_resolveDeterministicallyByMessageID() {

@@ -18,6 +18,8 @@ private let logger = DGLogger(category: "ClaudeLLMProvider")
 /// Adapts Devgentic's standard message payloads to Claude's unique top-level system prompt
 /// and `tool_use` content blocks.
 struct ClaudeLLMProvider: LLMProvider {
+    /// The model this provider's calls are priced as (`ModelPriceList`).
+    var pricingKey: PricingKey { PricingKey(provider: .anthropic, model: config.modelName) }
 
     let config: LLMProviderConfig
     var modelName: String { config.modelName }
@@ -175,30 +177,48 @@ struct ClaudeLLMProvider: LLMProvider {
             return
         }
 
-        if !extendedThinking && generation.acceptsDisabledThinking {
-            // ⚠️ Explicit disable, not omission. Thinking is ON BY DEFAULT on Opus 5 and
-            // Sonnet 5, so omitting the key would silently give the user thinking they just
-            // switched off. `output_config` is deliberately left unset here: the API's default
-            // effort (`high`) is accepted alongside disabled thinking, whereas `xhigh`/`max` are
-            // not — so sending nothing is the only value that cannot 400.
-            body["thinking"] = ["type": "disabled"]
-            return
-        }
-
-        // ⚠️ Falling through with thinking OFF is deliberate and only happens on
-        // `.adaptiveAlwaysOn` (Fable 5 / Mythos 5), where thinking cannot be turned off at all
-        // and `{"type": "disabled"}` is rejected with a 400 at every effort level. Adaptive is
-        // documented as equivalent to omitting the key, so it is the honest shape to send. The
-        // panel hides the toggle for these models; this log covers a profile that was configured
-        // on another model and then re-pointed, where the stored `false` survives.
         if !extendedThinking {
-            logger.notice("""
-                [ANTHROPIC] Extended Thinking is OFF in the profile but cannot be honoured for \
-                model '\(config.modelName)' (generation: \(generation.rawValue)) — thinking is \
-                always on for this model and sending {"type": "disabled"} returns 400. \
-                CONSEQUENCE: the request runs WITH thinking; the toggle has no effect here, and \
-                `max_tokens` (\(effectiveMaxTokens)) caps thinking and reply text together.
-                """)
+            switch generation.thinkingOffShape {
+            case .disabled:
+                // ⚠️ Explicit disable, not omission. Thinking is ON BY DEFAULT on Opus 5 and
+                // Sonnet 5, so omitting the key would silently give the user thinking they just
+                // switched off. `output_config` is deliberately left unset here: the API's default
+                // effort is accepted alongside disabled thinking, whereas `xhigh`/`max` are not —
+                // so sending nothing is the only value that cannot 400.
+                body["thinking"] = ["type": "disabled"]
+                return
+
+            case .betweenTools:
+                // ⚠️ Sonnet 5.5's "off". `disabled` is a 400 there. `between_tools` must be sent
+                // BARE — `display` alongside it is a 400, so `requestSummary` is ignored — and it
+                // is rejected at `xhigh`/`max`, so no effort is sent and the API default (`high`)
+                // applies, which is accepted.
+                body["thinking"] = ["type": "between_tools"]
+                if let effort = thinkingEffort {
+                    logger.notice("""
+                        [ANTHROPIC] Effort '\(effort)' not sent for model '\(config.modelName)' — \
+                        thinking is OFF, which this model expresses as {"type": "between_tools"}, \
+                        and that shape takes no other setting. CONSEQUENCE: the request runs at the \
+                        API default effort; turn thinking on for the effort control to apply.
+                        """)
+                }
+                return
+
+            case .notOffered:
+                // ⚠️ Falling through with thinking OFF is deliberate: Fable 5 / Mythos 5 /
+                // Opus 5.5, where thinking cannot be turned off at all and `{"type": "disabled"}`
+                // is rejected with a 400 at every effort level. Adaptive is documented as
+                // equivalent to omitting the key, so it is the honest shape to send. The panel
+                // hides the toggle for these models; this log covers a profile that was configured
+                // on another model and then re-pointed, where the stored `false` survives.
+                logger.notice("""
+                    [ANTHROPIC] Extended Thinking is OFF in the profile but cannot be honoured for \
+                    model '\(config.modelName)' (generation: \(generation.rawValue)) — thinking is \
+                    always on for this model and sending {"type": "disabled"} returns 400. \
+                    CONSEQUENCE: the request runs WITH thinking; the toggle has no effect here, and \
+                    `max_tokens` (\(effectiveMaxTokens)) caps thinking and reply text together.
+                    """)
+            }
         }
 
         var thinking: [String: Any] = ["type": "adaptive"]
@@ -211,7 +231,8 @@ struct ClaudeLLMProvider: LLMProvider {
                 [ANTHROPIC] Dropped effort '\(effort)' for model '\(config.modelName)' \
                 (generation: \(generation.rawValue)) — supported levels are \
                 \(generation.supportedEffortLevels.joined(separator: ", ")). CONSEQUENCE: the \
-                request runs at the API default effort (high) instead of the configured level.
+                request runs at the API default effort (\(AnthropicModelGeneration.defaultEffort(for: config.modelName))) \
+                instead of the configured level.
                 """)
             return
         }
@@ -239,8 +260,10 @@ struct ClaudeLLMProvider: LLMProvider {
         ]
         applyGenerationParams(to: &body)
         applyThinking(to: &body, requestSummary: true)
-        if let systemPrompt = systemPrompt { body["system"] = systemPrompt }
+        if let systemPrompt = systemPrompt, !systemPrompt.isEmpty { body["system"] = systemPrompt }
         if let tools = tools, !tools.isEmpty { body["tools"] = tools }
+        // An agent step is sent again with each tool result appended: mark its reusable prefix.
+        AnthropicPromptCaching.markBreakpoints(in: &body)
         return body
     }
 
@@ -259,6 +282,8 @@ struct ClaudeLLMProvider: LLMProvider {
         applyGenerationParams(to: &body)
         applyThinking(to: &body)
         if let systemPrompt = systemPrompt { body["system"] = systemPrompt }
+        // A bot conversation's next message shares this one's system message and history.
+        AnthropicPromptCaching.markBreakpoints(in: &body)
         return body
     }
 
@@ -315,9 +340,11 @@ struct ClaudeLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let usage = json.flatMap { TokenUsage.fromAnthropic($0) }
+        let usage = json.flatMap { TokenUsage.fromAnthropic($0, pricing: pricingKey) }
 
         // Defensive check: warn if response was truncated by max_tokens limit
+        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("⚠️ Anthropic response truncated (stop_reason: max_tokens). Configured max_tokens: \(self.maxTokens). Output may be incomplete — consider increasing maxTokens in advanced config.")
         }
@@ -411,13 +438,19 @@ struct ClaudeLLMProvider: LLMProvider {
         applyThinking(to: &body)
         if let systemPrompt = systemPrompt { body["system"] = systemPrompt }
         if let tools = tools, !tools.isEmpty { body["tools"] = tools }
+        // The image path is a bot conversation too (any image makes every later turn take it), and
+        // it re-sends prior images each message — the most expensive prefix to re-read.
+        AnthropicPromptCaching.markBreakpoints(in: &body)
 
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        logCacheUsage(json.flatMap { TokenUsage.fromAnthropic($0, pricing: pricingKey) }, path: "image")
 
+        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("⚠️ Anthropic multimodal response truncated (stop_reason: max_tokens). Configured max_tokens: \(self.maxTokens).")
         }
@@ -465,6 +498,8 @@ struct ClaudeLLMProvider: LLMProvider {
         // Defensive check: warn if response was truncated by max_tokens limit.
         // ⚠️ On the adaptive tier `max_tokens` caps thinking AND response text together, so a
         // profile tuned before thinking was enabled can truncate without any budget being set.
+        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("""
                 [ANTHROPIC] ⚠️ Cognitive step truncated (stop_reason: max_tokens) for model \
@@ -503,12 +538,14 @@ struct ClaudeLLMProvider: LLMProvider {
         let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
 
         // Extract token usage from Anthropic API response
-        let usage = json.flatMap { TokenUsage.fromAnthropic($0) }
+        let usage = json.flatMap { TokenUsage.fromAnthropic($0, pricing: pricingKey) }
+        logCacheUsage(usage, path: "agent-text")
 
         // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
         // .toolCall events, not from this field. A placeholder here would pollute any
         // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
-        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
+        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage,
+                                   reasoningReplay: pendingTools.isEmpty ? nil : Self.thinkingReplay(in: contentBlocks))
     }
 
     // MARK: - Native-Turn Cognitive Step (G12)
@@ -530,21 +567,9 @@ struct ClaudeLLMProvider: LLMProvider {
             }
         }
 
-        var body: [String: Any] = [
-            "model": config.modelName,
-            "messages": anthropicMessages,
-            "max_tokens": effectiveMaxTokens
-        ]
-        applyGenerationParams(to: &body)
-        // `requestSummary: true` because this builder parses thinking blocks into `thought`.
-        applyThinking(to: &body, requestSummary: true)
-
-        if !systemPrompt.isEmpty {
-            body["system"] = systemPrompt
-        }
-        if let tools = tools, !tools.isEmpty {
-            body["tools"] = tools
-        }
+        // The SAME builder as the text path (thinking summary, tools, cache breakpoints), so the
+        // shape tests that render `cognitiveStepBody` cover this path too.
+        let body = cognitiveStepBody(anthropicMessages: anthropicMessages, systemPrompt: systemPrompt, tools: tools)
 
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -553,6 +578,8 @@ struct ClaudeLLMProvider: LLMProvider {
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
+        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("""
                 [ANTHROPIC] ⚠️ Cognitive step truncated (stop_reason: max_tokens) for model \
@@ -588,9 +615,11 @@ struct ClaudeLLMProvider: LLMProvider {
 
         let finalReasoning = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
-        let usage = json.flatMap { TokenUsage.fromAnthropic($0) }
+        let usage = json.flatMap { TokenUsage.fromAnthropic($0, pricing: pricingKey) }
+        logCacheUsage(usage, path: "agent")
 
-        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
+        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage,
+                                   reasoningReplay: pendingTools.isEmpty ? nil : Self.thinkingReplay(in: contentBlocks))
     }
 
     // MARK: - Bot Flow (Streaming)
@@ -617,7 +646,12 @@ struct ClaudeLLMProvider: LLMProvider {
                 )
                 return bytes
             },
-            onUsage: onUsage,
+            // Usage arrives in two partials (input on `message_start`, output on `message_delta`);
+            // the parser combines them, and the call is priced once, whole — see `TokenUsage.priced`.
+            onUsage: onUsage.map { report in
+                let key = pricingKey
+                return { @Sendable usage in report(usage.priced(key)) }
+            },
             extractUsage: { line, event in
                 guard line.hasPrefix("data: ") else { return nil }
                 let payload = String(line.dropFirst(6))
@@ -629,8 +663,11 @@ struct ClaudeLLMProvider: LLMProvider {
                 case "message_start":
                     if let message = json["message"] as? [String: Any],
                        let usage = message["usage"] as? [String: Any],
-                       let input = usage["input_tokens"] as? Int {
-                        return TokenUsage(inputTokens: input, outputTokens: 0)
+                       let input = TokenUsage.anthropicInput(usage) {
+                        let partial = TokenUsage(inputTokens: input.total, outputTokens: 0,
+                                                 cacheReadTokens: input.read, cacheWriteTokens: input.written)
+                        self.logCacheUsage(partial, path: "bot")
+                        return partial
                     }
                     return nil
                 case "message_delta":
@@ -643,50 +680,117 @@ struct ClaudeLLMProvider: LLMProvider {
                     return nil
                 }
             },
-            handleLine: { line, event in
-                guard line.hasPrefix("data: ") else { return .skip }
-                let payload = String(line.dropFirst(6))
-
-                switch event {
-                case "content_block_delta":
-                    guard let data = payload.data(using: .utf8),
-                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let delta = json["delta"] as? [String: Any] else {
-                        return .skip
-                    }
-                    let deltaType = delta["type"] as? String ?? ""
-                    if deltaType == "text_delta", let text = delta["text"] as? String {
-                        return .emit(text)
-                    }
-                    // ⚠️ `thinking_delta` is deliberately NOT emitted. This branch was unreachable
-                    // until thinking was wired into the streaming builder, because that builder
-                    // never set `body["thinking"]` — so emitting it was a latent bug, not a
-                    // feature: this stream is the bot's visible reply and has no second sink, so
-                    // reasoning would splice straight into the answer text with no separation.
-                    // The agent path keeps its reasoning: `generateCognitiveStep` parses
-                    // `thinking` blocks into `ModernCognitiveStep.thought`, which the UI renders
-                    // apart from the response.
-                    // input_json_delta (tool-call argument streaming) is ignored in bot mode.
-                    return .skip
-                case "message_stop":
-                    return .finish
-                case "error":
-                    var errorMessage = "Anthropic stream error"
-                    if let data = payload.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let errorObj = json["error"] as? [String: Any],
-                       let msg = errorObj["message"] as? String {
-                        errorMessage = msg
-                    }
-                    return .fail(LLMProviderError.invalidResponse(errorMessage))
-                default:
-                    return .skip
-                }
-            }
+            // ⚠️ The decoder itself, not a closure around it, so tests run exactly this.
+            handleLine: Self.anthropicStreamLine
         )
     }
 
+    // MARK: - Stream decode (static so it is testable without a network)
+
+    /// One SSE line of an Anthropic stream.
+    static func anthropicStreamLine(_ line: String, _ event: String) -> SSELineDirective {
+        guard line.hasPrefix("data: ") else { return .skip }
+        let payload = String(line.dropFirst(6))
+        let json = payload.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+
+        switch event {
+        case "content_block_delta":
+            guard let delta = json?["delta"] as? [String: Any] else { return .skip }
+            if delta["type"] as? String == "text_delta", let text = delta["text"] as? String {
+                return .emit(text)
+            }
+            // ⚠️ `thinking_delta` is deliberately NOT emitted: this stream is the bot's visible reply
+            // and has no second sink, so reasoning would splice straight into the answer. The agent
+            // path keeps reasoning via `ModernCognitiveStep.thought`. `input_json_delta` is ignored
+            // in bot mode.
+            return .skip
+        case "message_delta":
+            // ⚠️ CR-16: a refusal arrives HERE, as a stop reason on a 200 stream. Without this the
+            // stream simply ended and the user saw an empty or cut-off answer with no explanation.
+            if let refusal = refusalError(in: json) {
+                logger.notice("[ANTHROPIC] Stream ended in a REFUSAL (\(refusal.localizedDescription)). CONSEQUENCE: the turn fails with that reason instead of saving a silent partial answer; not retried.")
+                return .fail(refusal)
+            }
+            return .skip
+        case "message_stop":
+            return .finish
+        case "error":
+            let error = json?["error"] as? [String: Any]
+            let type = error?["type"] as? String
+            let message = error?["message"] as? String ?? "Anthropic stream error"
+            // ⚠️⚠️ CR-14: mapped to the HTTP status it stands for, so the retry classifier treats
+            // an in-stream `overloaded_error` exactly like the same failure sent as a 529. It used
+            // to become `.invalidResponse`, which nothing retries: "Invalid response: Overloaded"
+            // with zero retries, where the identical HTTP 529 got three.
+            if let status = streamErrorStatus(forType: type) {
+                logger.notice("[ANTHROPIC] In-stream error '\(type ?? "?")' mapped to HTTP \(status). CONSEQUENCE: classified like that status — retried when transient (overloaded, rate limit, server error), fatal otherwise.")
+                return .fail(LLMProviderError.httpError(status, payload))
+            }
+            logger.error("[ANTHROPIC] In-stream error of unknown type '\(type ?? "nil")': \(message). CONSEQUENCE: the turn fails as an invalid response and is not retried.")
+            return .fail(LLMProviderError.invalidResponse(message))
+        default:
+            return .skip
+        }
+    }
+
+    /// The response's `thinking` / `redacted_thinking` blocks, VERBATIM — signature and all — for
+    /// replay on the next tool turn, or nil when there are none.
+    ///
+    /// ⚠️⚠️ READINESS CR-23 (2026-10-10). Thinking was reduced to its text (`thought`, for the UI) and
+    /// the `signature` was discarded, while `ClaudeToolTurnAdapter` replayed only text + `tool_use`.
+    /// Anthropic requires the thinking blocks of the last assistant turn to be passed back UNCHANGED
+    /// when a tool loop continues on the same model: on the budget-thinking tier with thinking on,
+    /// iteration 2 failed ("Expected `thinking` … found `tool_use`"); on adaptive models the reasoning
+    /// continuity was lost. Only ever replayed into the same run, on the same model, unedited.
+    static func thinkingReplay(in blocks: [[String: Any]]) -> JSONValue? {
+        let thinking = blocks.filter { ["thinking", "redacted_thinking"].contains($0["type"] as? String ?? "") }
+        guard !thinking.isEmpty else { return nil }
+        return .array(thinking.compactMap { JSONValue($0) })
+    }
+
+    /// The HTTP status an Anthropic stream `error.type` corresponds to, or nil for one this table does
+    /// not know. Mirrors Anthropic's documented error types.
+    static func streamErrorStatus(forType type: String?) -> Int? {
+        switch type {
+        case "invalid_request_error": return 400
+        case "authentication_error": return 401
+        case "billing_error": return 402
+        case "permission_error": return 403
+        case "not_found_error": return 404
+        case "request_too_large": return 413
+        case "rate_limit_error": return 429
+        case "api_error": return 500
+        case "timeout_error": return 504
+        case "overloaded_error": return 529
+        default: return nil
+        }
+    }
+
+    /// The refusal in a response or a `message_delta`, or nil. Reads `stop_details` (category +
+    /// explanation) so the user is told WHY, not merely that it happened.
+    static func refusalError(in json: [String: Any]?) -> LLMProviderError? {
+        let delta = json?["delta"] as? [String: Any]
+        let stopReason = (json?["stop_reason"] as? String) ?? (delta?["stop_reason"] as? String)
+        guard stopReason == "refusal" else { return nil }
+        let details = (json?["stop_details"] as? [String: Any]) ?? (delta?["stop_details"] as? [String: Any])
+        let parts = [(details?["category"] as? String).map { "category: \($0)" }, details?["explanation"] as? String]
+            .compactMap { $0 }.filter { !$0.isEmpty }
+        return .refused(provider: "Claude", detail: parts.isEmpty ? "no reason given" : parts.joined(separator: " — "))
+    }
+
     // MARK: - Private Helpers
+
+    /// `[ANTHROPIC-CACHE]` — how much of a breakpoint-marked request's prompt came from the cache.
+    /// The only evidence that caching works: nothing else in a run changes when it does.
+    private func logCacheUsage(_ usage: TokenUsage?, path: String) {
+        guard let usage else { return }
+        let uncached = usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens
+        if usage.cacheReadTokens > 0 || usage.cacheWriteTokens > 0 {
+            logger.info("[ANTHROPIC-CACHE] \(path) '\(self.config.modelName)': read \(usage.cacheReadTokens), wrote \(usage.cacheWriteTokens), uncached \(uncached) of \(usage.inputTokens) prompt tokens.")
+        } else {
+            logger.debug("[ANTHROPIC-CACHE] \(path) '\(self.config.modelName)': nothing cached for \(usage.inputTokens) prompt tokens. CONSEQUENCE: none if the prefix is under the model's cache minimum (~1,024 tokens); otherwise the breakpoints are not matching between requests.")
+        }
+    }
 
     /// Translates standard roles to Anthropic's expected format.
     /// Anthropic strictly requires `user` and `assistant` roles in the messages array,

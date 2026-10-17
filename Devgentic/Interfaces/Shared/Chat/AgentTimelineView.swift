@@ -625,14 +625,14 @@ struct AgentTimelineView: View {
     /// `stop_background_task`: that one CHANGES state, and an action the user took (or the agent took on
     /// their behalf) should stay visible even when its outcome is also on the card. Hide
     /// observations, keep actions.
-    private static let backgroundPollTools: Set<String> = ["get_task_output", "command_output"]
+    private static let backgroundPollTools: Set<String> = ["get_task_output"]
 
     /// Drops poll rows for tasks that already have a `.backgroundTask` card.
     ///
     /// ⚠️ Device test 2026-09-21: asked to "check on it periodically", the model produced NINE
     /// `command_status` calls in ~40 seconds — one every few seconds, because nothing lets it
     /// wait. (2026-09-23: it did it TWENTY times and hit the iteration cap; `command_status` has
-    /// since been withdrawn and the polls now arrive as `command_output`, which this folds.) Each was an ordinary tool execution, so the timeline showed nine identical
+    /// since been withdrawn and the polls now arrive as `get_task_output`, which this folds.) Each was an ordinary tool execution, so the timeline showed nine identical
     /// "Command bg_1" rows above a card that was already displaying the same status live.
     ///
     /// Folded in the VIEW, not at the source: the events stay in `timelineEvents`, so episodic
@@ -651,7 +651,7 @@ struct AgentTimelineView: View {
         return events.filter { event in
             guard case .toolExecution(let data) = event,
                   backgroundPollTools.contains(data.name) else { return true }
-            // A `command_output` with no `task_id` is the list-everything form; with a card on
+            // A `get_task_output` with no `task_id` is the list-everything form; with a card on
             // screen it is the same noise, so it folds too.
             guard let id = taskID(inParams: data.params) else { return false }
             return !carded.contains(id)
@@ -1793,13 +1793,13 @@ struct ActionDetailView: View {
                     .font(.system(size: 10))
                     .foregroundColor(Color.orange.opacity(0.85))
                     .frame(width: 13, height: 13)
-            case "list_directory", "project_tree", "codebase_map", "batch_move_files":
+            case "list_directory", "project_tree", "batch_move_files":
                 Image(systemName: "folder.fill")
                     .font(.system(size: 10))
                     .foregroundColor(Color.blue.opacity(0.85))
                     .frame(width: 13, height: 13)
             case "grep", "grep_search", "ripgrep", "code_search", "glob_files",
-                 "code_search_text", "code_search_symbol", "code_search_files", "web_search", "spotlight_search", "fs_smart_search":
+                 "code_search_text", "code_search_symbol", "code_search_files", "web_search", "spotlight_search":
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(theme.tertiaryText)
@@ -2257,10 +2257,7 @@ struct InterimReasoningRow: View {
             } label: {
                 HStack(spacing: 5) {
                     if isLive {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(theme.accentColor)
-                            .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+                        DevgenticActivityIndicator(style: .gyroscope, size: 11, tint: theme.accentColor)
                     }
 
                     Text(isLive ? String(localized: "Thinking…") : String(localized: "Thought process"))
@@ -2387,11 +2384,7 @@ struct StreamingTimelineFooter: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "sparkle")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(theme.streamingIndicator.opacity(0.95))
-                .frame(width: 14, alignment: .center)
-                .symbolEffect(.pulse, options: .repeating, isActive: context.isStreaming && !reduceMotion)
+            DevgenticActivityIndicator(style: .gyroscope, size: 12, tint: theme.streamingIndicator.opacity(0.95))
 
             // TimelineView re-renders once per second while visible and stops
             // when off-screen — cheaper than a Timer and auto-cleans on removal.
@@ -2487,12 +2480,12 @@ enum ToolArgFormatter {
         // instead of `Create Notes.swift`. The same label feeds `ConversationExporter`, so the
         // export carried the code fragment too.
         case "read_file", "write_file", "edit_file", "edit_code", "create_file",
-             "file_overview", "read_file_metadata", "fs_read_metadata", "watch_folder", "fs_watch_folder",
+             "file_overview", "read_file_metadata", "watch_folder",
              "create_new_file", "overwrite_file", "edit_code_single", "edit_code_batch":
             if let p = firstString(dict, keys: ["path", "file_path"]) {
                 return basename(p)
             }
-        case "list_directory", "spotlight_search", "fs_smart_search", "batch_move_files", "fs_organize_batch", "project_tree", "codebase_map":
+        case "list_directory", "spotlight_search", "batch_move_files", "project_tree":
             if let p = firstString(dict, keys: ["path", "directory", "dir"]) {
                 return shortPath(p)
             }
@@ -2527,7 +2520,7 @@ enum ToolArgFormatter {
             if let q = firstString(dict, keys: ["query", "topic"]) {
                 return truncate(q, 50)
             }
-        case "git", "git_tool":
+        case "git":
             if let a = firstString(dict, keys: ["action", "operation", "command"]) {
                 return a
             }
@@ -2731,13 +2724,9 @@ enum ToolArgFormatter {
         "create_file":                 "Created",
         "list_directory":              "Explored",
         "spotlight_search":            "Searched",
-        "fs_smart_search":             "Searched",
         "read_file_metadata":          "Inspected",
-        "fs_read_metadata":            "Inspected",
         "watch_folder":                "Watched",
-        "fs_watch_folder":             "Watched",
         "batch_move_files":            "Organized",
-        "fs_organize_batch":           "Organized",
         "execute_shell":               "Ran",
         "run_shell":                   "Ran",
         "bash":                        "Ran",
@@ -2757,11 +2746,9 @@ enum ToolArgFormatter {
         "call_agent":                  "Delegated",
         "recall_conversation_history": "Recalled",
         "git":                         "Git",
-        "git_tool":                    "Git",
         "find_definition":             "Located",
         "file_overview":               "Analyzed",
         "project_tree":                "Mapped",
-        "codebase_map":                "Mapped",
         "diff_files":                  "Diffed",
         // The Code profile's intent-splits. Without these `verbLabel` falls back to a generic
         // verb and `objectLabel` to "tool"/"tools", so a group of three file creations in a Code
@@ -2784,9 +2771,7 @@ enum ToolArgFormatter {
         "create_file":      ("file", "files"),
         "list_directory":   ("directory", "directories"),
         "spotlight_search": ("search", "searches"),
-        "fs_smart_search":  ("search", "searches"),
         "read_file_metadata": ("file", "files"),
-        "fs_read_metadata": ("file", "files"),
         "batch_move_files": ("file", "files"),
         "execute_shell":    ("command", "commands"),
         "run_shell":        ("command", "commands"),
@@ -2804,11 +2789,9 @@ enum ToolArgFormatter {
         "ask_user":         ("question", "questions"),
         "call_agent":       ("agent", "agents"),
         "git":              ("operation", "operations"),
-        "git_tool":         ("operation", "operations"),
         "find_definition":  ("symbol", "symbols"),
         "file_overview":    ("file", "files"),
         "project_tree":     ("codebase", "codebases"),
-        "codebase_map":     ("codebase", "codebases"),
         "diff_files":       ("diff", "diffs"),
         "create_new_file":  ("file", "files"),
         "overwrite_file":   ("file", "files"),

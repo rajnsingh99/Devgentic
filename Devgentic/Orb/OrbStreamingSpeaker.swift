@@ -47,6 +47,11 @@ final class OrbStreamingSpeaker: NSObject, AVSpeechSynthesizerDelegate {
     var correlationTag: String = ""
 
     private var synthesizer: AVSpeechSynthesizer?
+
+    /// When this output last let go of a synthesizer that had been speaking. The session controller
+    /// reads it to wait longer before opening a BLUETOOTH microphone right after speech: the headset
+    /// has to switch from its playback mode to its microphone mode first (device test 2026-10-10).
+    private(set) var lastAudioReleasedAt: Date?
     /// Used INSTEAD of `synthesizer` whenever the duplex engine is up and actually cancelling
     /// echo. Routing the answer through the app's own engine is what gives echo cancellation a
     /// reference signal to subtract — the prerequisite for hearing the user over Orb's voice.
@@ -246,6 +251,7 @@ final class OrbStreamingSpeaker: NSObject, AVSpeechSynthesizerDelegate {
     /// Drops the synthesizer so its audio unit is deallocated before the microphone opens.
     func releaseAudio() {
         SpeechService.shared.releaseExternalNarrationCanceller(ifOwnedBy: self)
+        if synthesizer != nil { lastAudioReleasedAt = Date() }
         synthesizer?.delegate = nil
         synthesizer = nil
         // ⚠️ Only the SYNTHESIZER is released here, never the engine: the engine is panel-scoped
@@ -603,7 +609,7 @@ extension OrbStreamingSpeaker {
     ///
     /// ⚠️ Deliberately does NOT touch underscores. SpeechService's private cleaner collapses
     /// `_…_` as emphasis, which silently corrupts any identifier with two or more underscores
-    /// (`fs_smart_search` → `fssmartsearch`) — in a developer tool that is the exact text most
+    /// (`spotlight_search` → `spotlightsearch`) — in a developer tool that is the exact text most
     /// worth pronouncing correctly. Under-stripping is far cheaper than corrupting a symbol.
     static func cleanForSpeech(_ line: String) -> String {
         var cleaned = line.trimmingCharacters(in: .whitespaces)

@@ -50,11 +50,18 @@ final class VectorStoreSchemaGateTests: XCTestCase {
         )
     }
 
-    func testNewerMarkedSchema_Wipes() {
-        // Downgrade: a future build's schema is just as unreadable as an old one.
+    /// RAG-31: a downgrade must leave a NEWER build's store alone. Quarantining it ("just as
+    /// unreadable as an old one") parked it in the single `-superseded` slot, and the upgrade back
+    /// then quarantined the empty v1 store over it — losing the original permanently.
+    func testNewerMarkedSchema_IsLeftUntouched() {
         XCTAssertEqual(
             VectorStoreService.schemaGateAction(markerVersion: current + 1, databaseExists: true),
-            .wipeAndStamp
+            .leaveNewerUntouched
+        )
+        XCTAssertEqual(
+            VectorStoreService.schemaGateAction(markerVersion: current + 7, databaseExists: false),
+            .leaveNewerUntouched,
+            "a newer marker is never re-stamped down, even with no data beside it"
         )
     }
 }

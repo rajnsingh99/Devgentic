@@ -24,6 +24,20 @@ private let logger = DGLogger(category: "ImageGenExecutor")
 /// 3. Streaming progress and result events via `AgentStreamEvent`
 struct ImageGenExecutor: Sendable {
 
+    /// Whether `error` ended the generation because the user stopped it.
+    ///
+    /// ⚠️ Timeout inventory D-27. Only `CancellationError` used to count, but a cloud provider's
+    /// Stop surfaces as `URLError(.cancelled)` from URLSession — or wrapped by the provider in an
+    /// `ImageGenError.providerError` string — so a deliberate Stop drew an error card and was
+    /// recorded `.failed`. The task's own cancellation flag is checked first because it is the
+    /// one signal no provider can rewrap.
+    static func isStop(_ error: Error) -> Bool {
+        if Task.isCancelled { return true }
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return false
+    }
+
     /// Executes an image generation request and returns a stream of events.
     /// - Parameters:
     ///   - intent: The resolved user intent (T2I or I2I).
@@ -49,11 +63,13 @@ struct ImageGenExecutor: Sendable {
                 await TraceRecorder.shared.beginSpan(context: genSpan, name: "imageGen", kind: .llmCall)
                 let genStart = Date()
                 do {
-                    // STEP 1: FEASIBILITY CHECK
-                    try checkFeasibility(intent: intent, capability: capability, profile: profile, continuation: continuation)
-
-                    // STEP 2: GENERATE
+                    // ⚠️⚠️ NO FEASIBILITY GATE (readiness CR-13, 2026-10-10). `capability` is GUESSED from
+                    // the model's name, and it used to refuse requests outright — gemini-2.5-flash-image,
+                    // which can edit, got an error card instead of an edit. Capability metadata may LABEL,
+                    // never GATE (standing rule): the provider attempts the request, and a provider that
+                    // genuinely cannot do it throws its own `imageToImageNotSupported`, handled below.
                     let modelName = extractModelName(from: profile)
+                    logCapabilityDisagreement(intent: intent, capability: capability, modelName: modelName)
                     await TraceRecorder.shared.emitLLMRequest(span: genSpan, model: modelName, messageCount: 1)
                     let thoughtId = UUID()
                     continuation.yield(.thought("Generating image with \(modelName)...", id: thoughtId))
@@ -73,7 +89,7 @@ struct ImageGenExecutor: Sendable {
                     switch intent {
                     case .textToImage(let prompt):
                         let negativePrompt = extractNegativePrompt(from: profile)
-                        logger.info("Executing T2I: prompt='\(prompt.prefix(50))...'")
+                        logger.info("Executing T2I: prompt=\(prompt.count) chars")
                         artifact = try await provider.generateImage(
                             prompt: prompt,
                             negativePrompt: negativePrompt,
@@ -82,17 +98,32 @@ struct ImageGenExecutor: Sendable {
                             progressHandler: progressHandler
                         )
 
-                    case .imageToImage(let prompt, let sourceImage):
+                    case .imageToImage(let prompt, let sourceImage, let inferred):
                         let negativePrompt = extractNegativePrompt(from: profile)
-                        logger.info("Executing I2I: prompt='\(prompt.prefix(50))...' sourceSize=\(sourceImage.count) bytes")
-                        artifact = try await provider.generateImageVariation(
-                            prompt: prompt,
-                            negativePrompt: negativePrompt,
-                            inputImage: sourceImage,
-                            options: options,
-                            conversationID: conversationID,
-                            progressHandler: progressHandler
-                        )
+                        logger.info("Executing I2I: prompt=\(prompt.count) chars sourceSize=\(sourceImage.count) bytes inferred=\(inferred)")
+                        do {
+                            artifact = try await provider.generateImageVariation(
+                                prompt: prompt,
+                                negativePrompt: negativePrompt,
+                                inputImage: sourceImage,
+                                options: options,
+                                conversationID: conversationID,
+                                progressHandler: progressHandler
+                            )
+                        } catch ImageGenError.imageToImageNotSupported where inferred {
+                            // The edit was only INFERRED from the wording — nobody attached an image —
+                            // and this provider cannot edit. Drawing the prompt fresh is the useful
+                            // answer; an error card for a request the user never explicitly made is not.
+                            logger.notice("[IMAGEGEN] '\(modelName)' cannot edit images, and this edit was inferred (no image attached). CONSEQUENCE: generating a NEW image from the prompt instead of showing an error.")
+                            continuation.yield(.thought("\(modelName) can't edit the previous image, so this is a new image from your prompt.", id: UUID()))
+                            artifact = try await provider.generateImage(
+                                prompt: prompt,
+                                negativePrompt: negativePrompt,
+                                options: options,
+                                conversationID: conversationID,
+                                progressHandler: progressHandler
+                            )
+                        }
                     }
 
                     // STEP 3: YIELD RESULT
@@ -111,10 +142,10 @@ struct ImageGenExecutor: Sendable {
                     continuation.yield(.executionFinished(outcome: .completed, reason: nil))
                     continuation.finish()
 
-                } catch is CancellationError {
+                } catch where Self.isStop(error) {
                     // User stop — no error card, and the outcome is `.cancelled`, not
                     // `.failed` (audit #8).
-                    logger.notice("Image generation cancelled")
+                    logger.notice("[IMAGEGEN] Image generation cancelled (\(String(describing: type(of: error)))). CONSEQUENCE: recorded as cancelled, no error card.")
                     await TraceRecorder.shared.endSpan(spanID: genSpan.spanID, status: .error)
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "Cancelled by user"))
                     continuation.finish()
@@ -142,32 +173,16 @@ struct ImageGenExecutor: Sendable {
 
     // MARK: - Private Helpers
 
-    /// Checks if the resolved intent is compatible with the model's capabilities.
-    /// Throws an error (via continuation) and halts if there's a mismatch.
-    private func checkFeasibility(
-        intent: ImageIntent,
-        capability: ImageModalitySupport,
-        profile: BackendProfileModel,
-        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
-    ) throws {
+    /// Says so when the GUESSED capability disagrees with what is about to be attempted — and changes
+    /// nothing. The label is a hint for diagnosis, never a reason to refuse (CR-13).
+    private func logCapabilityDisagreement(intent: ImageIntent, capability: ImageModalitySupport, modelName: String) {
         switch intent {
-        case .imageToImage:
-            guard capability.supportsImageToImage else {
-                let modelName = extractModelName(from: profile)
-                let errorMsg = "The model '\(modelName)' does not support Image-to-Image variations. Please select a model with I2I capability (e.g., Gemini or MLX Flux2), or provide a fresh text prompt."
-                continuation.yield(.error(.init(errorMsg)))
-                continuation.finish()
-                throw ImageGenError.imageToImageNotSupported(modelName: modelName)
-            }
-
-        case .textToImage:
-            guard capability.supportsTextToImage else {
-                let modelName = extractModelName(from: profile)
-                let errorMsg = "The model '\(modelName)' does not support Text-to-Image generation."
-                continuation.yield(.error(.init(errorMsg)))
-                continuation.finish()
-                throw ImageGenError.textToImageNotSupported(modelName: modelName)
-            }
+        case .imageToImage where !capability.supportsImageToImage:
+            logger.notice("[IMAGEGEN] '\(modelName)' is not labelled as supporting image-to-image, but the label is guessed from the name. CONSEQUENCE: attempting it anyway — the provider reports a real refusal if there is one.")
+        case .textToImage where !capability.supportsTextToImage:
+            logger.notice("[IMAGEGEN] '\(modelName)' is not labelled as supporting text-to-image, but the label is guessed from the name. CONSEQUENCE: attempting it anyway — the provider reports a real refusal if there is one.")
+        default:
+            break
         }
     }
 

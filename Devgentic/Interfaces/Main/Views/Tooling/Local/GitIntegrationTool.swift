@@ -118,6 +118,26 @@ enum GitCommandBuilder {
         "-c", "core.pager=cat",
     ]
 
+    /// Environment overrides for EVERY git process this app runs — the agent's `git` tool, the Git
+    /// Changes panel (`GitUICommand`) and `GitRepositoryLocator`. One source, so a fix lands in all.
+    ///
+    /// - `TERM=dumb` keeps colour escapes out of output that is parsed or read by the model.
+    /// - `GIT_OPTIONAL_LOCKS=0`: without it a read-only `git status` opportunistically refreshes the
+    ///   index stat cache — taking `.git/index.lock` and rewriting `.git/index`. Verified 2026-10-04
+    ///   (git 2.54): a stat-stale index is REWRITTEN by a plain `status` and untouched with this set.
+    ///   An agent `status` overlapping the user's own `git commit` / `git add` therefore made the
+    ///   USER's command fail with "Unable to create '.git/index.lock': File exists".
+    static let environmentOverrides: [String: String] = [
+        "TERM": "dumb",
+        "GIT_OPTIONAL_LOCKS": "0",
+    ]
+
+    /// `base` (the inherited environment) with `environmentOverrides` applied on top — an inherited
+    /// `GIT_OPTIONAL_LOCKS=1` or `TERM=xterm-256color` must not win.
+    static func environment(inheriting base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        base.merging(environmentOverrides) { _, override in override }
+    }
+
     /// Flags that suppress repo-nominated diff programs, passed on every diff-family action.
     ///
     /// ⚠️ `hardening` is NOT sufficient on its own, and the earlier claim that it was is wrong.
@@ -314,12 +334,11 @@ struct GitTool: DevgenticTool {
             // sequence after `waitUntilExit()`, which deadlocks once either passes the ~64 KB
             // pipe buffer — and `git log` / `git diff` pass it routinely.
             //
-            // Invoked DIRECTLY, never through `zsh -c`: see `GitCommandResolution`. `TERM` is
-            // still forced to dumb, which is what the shell path was supplying — it keeps git
-            // from emitting colour escapes into output the model has to read.
-            var env = ProcessInfo.processInfo.environment
-            env["TERM"] = "dumb"
-            let run = try ProcessRunner.run(executable: "/usr/bin/git", arguments: gitArgv, environment: env)
+            // Invoked DIRECTLY, never through `zsh -c`: see `GitCommandResolution`. The environment
+            // (dumb TERM, no optional index locks) comes from `GitCommandBuilder.environment` — the
+            // one source shared with the Git Changes panel.
+            let run = try ProcessRunner.run(executable: "/usr/bin/git", arguments: gitArgv,
+                                            environment: GitCommandBuilder.environment())
 
             // "Error:"-prefixed so `ToolExecutionMediator.isSemanticFailure` actually classifies
             // it. The previous "Git error:" missed by ONE WORD — the sniffer tests

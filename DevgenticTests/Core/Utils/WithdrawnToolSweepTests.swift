@@ -138,14 +138,16 @@ final class WithdrawnToolSweepTests: XCTestCase {
         let notTools: Set<String> = [
             "path", "working_directory", "old_string", "new_string", "task_id", "since_line",
             "command", "answer", "background", "notify_on_completion", "task_name",
-            "timeout_seconds", "src/App.java", "context.md", ".devgentic/context.md",
+            "timeout_seconds", "src/App.java", "AGENTS.md",
             "/usr/bin", "/opt/homebrew", "/tmp", "status", "n"
         ]
 
-        for provider: ApiProvider in [.anthropic, .openAI] {
+        for (provider, wording): (ApiProvider, CodeSystemPrompt.Wording) in [
+            (.anthropic, .full), (.openAI, .full), (.anthropic, .compact), (.openAI, .compact),
+        ] {
             let prompt = CodeSystemPrompt.production(
                 projectPath: "/tmp/p", projectName: "p",
-                currentDate: "2026-09-23", apiProvider: provider)
+                currentDate: "2026-09-23", apiProvider: provider, wording: wording)
 
             // Backticked snake_case words — the shape the prompt uses for every tool it names.
             let backticked = prompt.components(separatedBy: "`")

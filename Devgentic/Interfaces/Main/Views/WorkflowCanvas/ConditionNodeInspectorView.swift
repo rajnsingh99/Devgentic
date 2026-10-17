@@ -98,7 +98,7 @@ struct ConditionNodeInspectorView: View {
         // read right after a fire-and-forget refresh snapshots the EMPTY pre-scan list into
         // `@State` with nothing observing it afterwards. Opening this inspector before the
         // launch scan landed showed "No MLX models found" until it was closed and reopened.
-        // Same fix as `MLXModelPickerView`.
+        // Same fix the former `MLXModelPickerView` carried.
         .task {
             await loadInstalledModels()
         }

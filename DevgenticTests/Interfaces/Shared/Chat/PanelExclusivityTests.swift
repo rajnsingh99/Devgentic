@@ -4,9 +4,9 @@
 //  PanelExclusivityTests.swift
 //  DevgenticTests
 //
-//  The Code Viewer and the Background Tasks list occupy the SAME trailing slot. If both are marked
-//  visible they overlap, and whichever has the higher zIndex silently wins — a defect that looks
-//  like "the panel didn't open" rather than like two panels fighting.
+//  The Code Viewer, the Background Tasks list and the Git Changes panel occupy the SAME trailing
+//  slot. If two are marked visible they overlap, and whichever has the higher zIndex silently
+//  wins — a defect that looks like "the panel didn't open" rather than like two panels fighting.
 //
 //  ⚠️ Enforced by a `didSet` pair on the view model, NOT at the mount site. `isCodeViewerVisible`
 //  is assigned true from four separate places; a rule spread across call sites is a rule the fifth
@@ -127,6 +127,132 @@ final class PanelExclusivityTests: XCTestCase {
         vm.showBackgroundTasks(focus: "bg_1")
 
         XCTAssertFalse(vm.isCodeViewerVisible)
+    }
+
+    // MARK: - Three-way exclusion (Git Changes joined the slot)
+
+    private enum Panel: CaseIterable { case codeViewer, backgroundTasks, gitChanges }
+
+    private func open(_ panel: Panel, on vm: ChatHistoryViewModel) {
+        switch panel {
+        case .codeViewer: vm.isCodeViewerVisible = true
+        case .backgroundTasks: vm.showBackgroundTasks()
+        case .gitChanges: vm.showGitChanges()
+        }
+    }
+
+    private func visible(_ vm: ChatHistoryViewModel) -> Set<Panel> {
+        var result: Set<Panel> = []
+        if vm.isCodeViewerVisible { result.insert(.codeViewer) }
+        if vm.isBackgroundTasksVisible { result.insert(.backgroundTasks) }
+        if vm.isGitChangesVisible { result.insert(.gitChanges) }
+        return result
+    }
+
+    /// Every ordered pair: with `first` open, opening `second` leaves ONLY `second`. Six transitions —
+    /// a `didSet` that closed one sibling but forgot the other fails exactly one of them.
+    func testEveryPanelClosesEveryOtherPanel() {
+        for first in Panel.allCases {
+            for second in Panel.allCases where second != first {
+                let vm = makeViewModel()
+                open(first, on: vm)
+                open(second, on: vm)
+                XCTAssertEqual(visible(vm), [second], "\(first) → \(second)")
+            }
+        }
+    }
+
+    /// With three `didSet`s closing each other, the guards must still make every chain SETTLE.
+    func testThreeWayExclusionSettles() {
+        let vm = makeViewModel()
+        for panel in [Panel.gitChanges, .codeViewer, .gitChanges, .backgroundTasks, .gitChanges, .codeViewer] {
+            open(panel, on: vm)
+            XCTAssertEqual(visible(vm), [panel])
+        }
+    }
+
+    func testClosingGitChangesLeavesTheOthersClosed() {
+        let vm = makeViewModel()
+        vm.showGitChanges()
+        vm.hideGitChanges()
+        XCTAssertEqual(visible(vm), [], "closing the Git panel opened another")
+    }
+
+    /// "Working tree clean" and "not a git repository" are answers — the panel opens without content.
+    func testTheGitPanelPresentsWithoutContent() {
+        let vm = makeViewModel()
+        vm.showGitChanges()
+        XCTAssertTrue(vm.isGitChangesPanelPresented)
+    }
+
+    /// Opening the Git panel minimizes the Code Viewer rather than discarding its tabs — the same
+    /// contract Background Tasks has.
+    func testOpeningGitChangesDoesNotTouchCodeViewerState() {
+        let vm = makeViewModel()
+        vm.isCodeViewerVisible = true
+        let tabsBefore = vm.codeViewerTabs.count
+        vm.showGitChanges()
+        XCTAssertEqual(vm.codeViewerTabs.count, tabsBefore)
+    }
+
+    // MARK: - Git Changes presentation
+
+    func testGitPresentationDefaultsToSplit() {
+        XCTAssertEqual(makeViewModel().gitChangesPresentation, .split)
+    }
+
+    /// Full-width remembers where it came from: split → full → back to split; overlay → full → overlay.
+    func testGitExpansionReturnsToThePriorMode() {
+        let vm = makeViewModel()
+        vm.toggleGitChangesExpansion()
+        XCTAssertEqual(vm.gitChangesPresentation, .full)
+        vm.toggleGitChangesExpansion()
+        XCTAssertEqual(vm.gitChangesPresentation, .split)
+
+        vm.toggleGitChangesSplit()
+        XCTAssertEqual(vm.gitChangesPresentation, .overlay)
+        vm.toggleGitChangesExpansion()
+        vm.toggleGitChangesExpansion()
+        XCTAssertEqual(vm.gitChangesPresentation, .overlay)
+    }
+
+    /// The mode can be ASSIGNED (it is a settable var — a restore path would do exactly this), not
+    /// only toggled. Full-width must remember an assigned mode too, not just one the split toggle
+    /// recorded. (A mutant dropping the expansion toggle's own bookkeeping survived every
+    /// toggle-only test, because the split toggle records the same value.)
+    func testGitExpansionRemembersAnAssignedMode() {
+        let vm = makeViewModel()
+        vm.gitChangesPresentation = .overlay
+        vm.toggleGitChangesExpansion()
+        vm.toggleGitChangesExpansion()
+        XCTAssertEqual(vm.gitChangesPresentation, .overlay)
+    }
+
+    /// From full-width, the split toggle goes straight to split.
+    func testGitSplitFromFullGoesToSplit() {
+        let vm = makeViewModel()
+        vm.toggleGitChangesSplit()           // overlay
+        vm.toggleGitChangesExpansion()       // full
+        vm.toggleGitChangesSplit()
+        XCTAssertEqual(vm.gitChangesPresentation, .split)
+    }
+
+    /// Git's presentation is its own — toggling it must not move the other panels'.
+    func testGitPresentationIsIndependent() {
+        let vm = makeViewModel()
+        vm.toggleGitChangesExpansion()
+        XCTAssertEqual(vm.codeViewerPresentation, .split)
+        XCTAssertEqual(vm.backgroundTasksPresentation, .split)
+    }
+
+    func testGitFilterSurvivesCloseAndReopen() {
+        let vm = makeViewModel()
+        XCTAssertEqual(vm.gitChangesFilter, .all)
+        vm.showGitChanges()
+        vm.gitChangesFilter = .unstaged
+        vm.hideGitChanges()
+        vm.showGitChanges()
+        XCTAssertEqual(vm.gitChangesFilter, .unstaged)
     }
 
     /// The Code Viewer keeps its own rule: visible AND has tabs.

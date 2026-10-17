@@ -99,6 +99,21 @@ struct DevgenticApp: App {
                     // .cancelled with "Interrupted" so the history list doesn't
                     // show a phantom spinning record forever.
                     WorkflowRunHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)
+                    // Conversation memory whose conversation is gone — a crash between the two
+                    // deletes, or a write that raced a delete before tombstones existed (RAG-5).
+                    // Destructive, so it lives behind this gate; the listing THROWS rather than
+                    // answering empty, and the sweep itself refuses an empty list.
+                    do {
+                        let liveConversations = try ChatPersistenceStore.shared.liveConversationIDs()
+                        Task.detached(priority: .utility) {
+                            VectorStoreService.shared.removeOrphanedConversations(liveConversationIDs: liveConversations)
+                        }
+                        // [CR-65] Same listing, same refusal of an empty list: generated images of
+                        // conversations deleted before eviction existed, or whose eviction a crash cut.
+                        MediaStore.sweepOrphansInBackground(liveConversationIDs: liveConversations)
+                    } catch {
+                        startupLogger.error("[STARTUP] Conversation list unavailable for the memory orphan sweep: \(error.localizedDescription). CONSEQUENCE: memory of deleted conversations, if any, is not collected this launch.")
+                    }
                     // The Code Viewer purge that used to run here is gone: `CodeViewerSessionSD`
                     // was retired 2026-08-04, so lightweight migration drops the whole table on
                     // the first launch after the update — no row-by-row sweep needed.
@@ -593,6 +608,9 @@ struct DevgenticApp: App {
     @State private var backendProfileService: BackendProfileService
     @State private var toastManager = ToastManager()
     @State private var codeSessionManager = CodeSessionManager()
+    /// The Code interface's Git Changes panel state. Inert until `GitChangesWiringModifier` hands it a
+    /// project (Code mode only) — constructing it runs nothing.
+    @State private var gitChangesStore = GitChangesStore()
     /// Owns long-lived destination view models (Ollama/MLX stores) so their
     /// state survives the re-creation cascade caused by
     /// `MainApplicationView`'s `if !router.isShowingChat { destinationView }` gate.
@@ -731,7 +749,12 @@ struct DevgenticApp: App {
         WindowGroup {
             Group {
                 if !isOnboardingComplete {
-                    OnboardingContainerView(onComplete: {
+                    OnboardingContainerView(onComplete: { createdProfileID in
+                        OnboardingCompletion.apply(
+                            createdProfileID: createdProfileID,
+                            profileService: backendProfileService,
+                            backendConfiguration: mainApplicationViewModel.backendConfiguration
+                        )
                         withAnimation(.easeInOut(duration: 0.35)) {
                             isOnboardingComplete = true
                         }
@@ -752,6 +775,7 @@ struct DevgenticApp: App {
                 .environment(toastManager)
                 .modifier(LeftoverDownloadNoticeModifier(toastManager: toastManager))
                 .environment(codeSessionManager)
+                .environment(gitChangesStore)
                 // Binds the SAME instance the environment hands the views. See the note in
                 // `init()` for why this cannot be done there.
                 .task { mainApplicationViewModel.configureCodeSession(codeSessionManager) }
@@ -1031,6 +1055,10 @@ struct DevgenticApp: App {
                 }
                 .disabled(!softwareUpdater.canCheckForUpdates)
 
+                if let supportLink = GlobalConstants.supportLink {
+                    Button("Support Development ♥") { NSWorkspace.shared.open(supportLink) }
+                }
+
                 Divider()
 
                 Button("Settings...") {
@@ -1084,6 +1112,24 @@ struct DevgenticApp: App {
                         isOnboardingComplete = false
                     }
                 }
+
+                Divider()
+
+                // Public GitHub issue forms, pre-filled with version / macOS / Mac — no bundle needed.
+                Button("Report a Bug…") { GitHubIssueLink.open(.bug) }
+                Button("Request a Feature…") { GitHubIssueLink.open(.feature) }
+
+                Divider()
+
+                Button("Privacy Policy") {
+                    openWindow(id: BundledDocument.windowGroupID, value: BundledDocument.privacyPolicy)
+                }
+                Button("License") {
+                    openWindow(id: BundledDocument.windowGroupID, value: BundledDocument.license)
+                }
+                Button("Third-Party Notices") {
+                    openWindow(id: BundledDocument.windowGroupID, value: BundledDocument.thirdPartyNotices)
+                }
             }
         }
 
@@ -1128,6 +1174,22 @@ struct DevgenticApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
+
+        // MARK: - Bundled Documents Window (Privacy Policy, License, Third-Party Notices)
+        // The bundled copies of the repo-root PRIVACY.md, LICENSE and THIRD_PARTY_NOTICES.md (see
+        // `BundledDocument`). One window per document: opening one that is already open brings it
+        // to the front.
+        WindowGroup("Document", id: BundledDocument.windowGroupID, for: BundledDocument.self) { $document in
+            BundledDocumentView(document: document ?? .privacyPolicy)
+                .environment(themeManager)
+                .environment(\.appTheme, themeManager.currentTheme)
+                .environment(\.surfaceStyle, themeManager.surfaceStyle)
+                .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
+                .frame(minWidth: 560, idealWidth: 720, minHeight: 480, idealHeight: 720)
+                .tint(themeManager.currentTheme.accentColor)
+        }
+        // Opened only from the Help menu and the setup assistant — no "New Document Window" item.
+        .commandsRemoved()
     }
 
     // DELETED 2026-08-04: `cleanupLegacyCoreDataStore()`.

@@ -42,8 +42,8 @@ enum SSELineDirective {
 enum SSEStreamParser {
 
     /// Max seconds to wait for the *next* line before failing the stream. Guards the
-    /// gaps between chunks only — the initial connection is bounded by the request's
-    /// `timeoutInterval`. 60s between tokens is already pathological, so this will not
+    /// gaps between lines only — opening the request (rate-limiter wait, connect, headers) is
+    /// bounded by the request's `timeoutInterval`, and the watchdog is paused for it. 60s between tokens is already pathological, so this will not
     /// false-trip on a slow-but-alive stream.
     static let defaultStallTimeout: TimeInterval = 60
 
@@ -51,6 +51,14 @@ enum SSEStreamParser {
     ///
     /// - Parameters:
     ///   - stallTimeout: bound on the wait between lines (see ``defaultStallTimeout``).
+    ///   - beforeOpen: an admission wait that must finish before the request is sent (the local
+    ///     inference coordinator's lock). ⚠️ The stall watchdog is PAUSED for its whole duration: a
+    ///     generation waiting its turn behind another run is not a silent connection, and a wait longer
+    ///     than `stallTimeout` used to fail the stream with a time-out before it ever started.
+    ///   - onClose: called exactly ONCE when the stream's reader ends, whatever ended it — the last
+    ///     line, an error, the stall watchdog, or the consumer going away. Lets a caller pair an
+    ///     acquisition made in `beforeOpen` with its release (the local inference coordinator counts a
+    ///     generation in flight until it ends).
     ///   - openBytes: builds the request and returns the validated byte stream. Runs
     ///     inside the managed task so request-build and connect errors flow through the
     ///     same teardown path as mid-stream errors.
@@ -58,6 +66,8 @@ enum SSEStreamParser {
     ///     SSE `event:` value; for NDJSON providers it is always "".
     static func stream(
         stallTimeout: TimeInterval = defaultStallTimeout,
+        beforeOpen: (@Sendable () async throws -> Void)? = nil,
+        onClose: (@Sendable () -> Void)? = nil,
         openBytes: @escaping @Sendable () async throws -> URLSession.AsyncBytes,
         onUsage: (@Sendable (TokenUsage) -> Void)? = nil,
         extractUsage: (@Sendable (_ line: String, _ event: String) -> TokenUsage?)? = nil,
@@ -67,9 +77,21 @@ enum SSEStreamParser {
             let heartbeat = StreamHeartbeat()
 
             let reader = Task {
+                defer { onClose?() }
                 do {
+                    if let beforeOpen {
+                        await heartbeat.pause()
+                        try await beforeOpen()
+                        await heartbeat.resume()
+                    }
+                    // ⚠️ READINESS CR-25 (2026-10-11): paused while the request is OPENED too. `openBytes`
+                    // covers the rate limiter's wait and the wait for response headers — an Ollama
+                    // cold-load of a large model, or a limiter queue, is longer than `stallTimeout`
+                    // and failed with a time-out at 60 s although nothing was connected yet to stall.
+                    // That phase is bounded by the request's own `timeoutInterval`.
+                    await heartbeat.pause()
                     let bytes = try await openBytes()
-                    await heartbeat.tick()
+                    await heartbeat.resume()
 
                     var currentEvent = ""
                     var accumulatedUsage: TokenUsage?
@@ -161,11 +183,25 @@ private actor StreamHeartbeat {
         last = clock.now
     }
 
+    /// True while the stream waits for its turn (`beforeOpen`): nothing is connected, so nothing
+    /// can stall.
+    private var paused = false
+
     func tick() {
         last = clock.now
     }
 
+    func pause() {
+        paused = true
+    }
+
+    /// The stall clock starts again from now.
+    func resume() {
+        paused = false
+        last = clock.now
+    }
+
     func isStalled(threshold: Duration) -> Bool {
-        clock.now - last >= threshold
+        !paused && clock.now - last >= threshold
     }
 }

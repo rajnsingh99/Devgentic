@@ -104,12 +104,12 @@ final class LegacyMultimodalTests: XCTestCase {
     }
 
     func testHistoryPresentButNoCurrentUserTurn_StillEndsOnAFreshUserTurn() {
-        // REGRESSION: the agent query lives in the system <task> layer, so an
-        // image-only current turn produces NO trailing current user message from
-        // compileMessages. With history present, the old "merge into the last user
-        // turn" landed on a prior HISTORY turn and left the request ending on an
-        // assistant turn (a malformed Ollama prefill). It must instead append a fresh
-        // current user turn.
+        // REGRESSION: the old "merge into the last user turn" landed on a prior
+        // HISTORY turn whenever compileMessages emitted no current user message (the
+        // query then lived in the system <task> layer; since layout B it rides the
+        // user message, but the builder must not depend on that). It left the request
+        // ending on an assistant turn (a malformed Ollama prefill). It must instead
+        // append a fresh current user turn.
         let payload = gen.buildMultimodalMessages(
             from: context(historyTurns: historyTurnWithImage("old.png"), userImages: [imageBlock("new.png")]),
             iteration: 1

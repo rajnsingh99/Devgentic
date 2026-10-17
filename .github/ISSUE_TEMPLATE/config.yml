@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright © 2025-2026 Raj Singh
+#
+# ⚠️ Blank issues stay ENABLED on purpose: the app's diagnostic-bundle export opens
+# `issues/new?title=…&body=…`, and GitHub discards that pre-filled text when blank issues are off.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/rajnsingh99/devgentic/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue (see SECURITY.md).

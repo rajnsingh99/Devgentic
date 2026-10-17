@@ -288,11 +288,14 @@ struct ConversationExporter {
                 for file in files {
                     // [mm-7] List item for the same reason as `attachedImageLine` — consecutive
                     // quoted lines collapse into one paragraph.
-                    lines.append("> - Attached: `\(file.name)`")
+                    // The delivery note says when the model got less than this file (cut to the
+                    // injection budget, omitted, or path-only) — the content below is the FILE.
+                    lines.append("> - Attached: `\(file.name)`" + (file.delivery?.note.map { " — \($0)" } ?? ""))
                 }
                 lines.append("")
 
-                // [mm-5] The text the model actually received, folded so it does not drown the
+                // [mm-5] The attached file's text (see the delivery note above for how much of it
+                // the model received), folded so it does not drown the
                 // conversation. Bounded per file because `AttachedTextFile.content` holds up to
                 // 500 KB and a turn can carry several — the cap and its counter are what keep a
                 // .md export from silently becoming multiple megabytes.

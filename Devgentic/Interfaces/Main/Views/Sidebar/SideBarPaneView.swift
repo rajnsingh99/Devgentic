@@ -61,6 +61,15 @@ enum SidebarTab: String, CaseIterable, Identifiable, Codable {
         case .explorer:        return "Explorer"
         }
     }
+
+    /// Whether this sidebar tab is available in the given interface mode.
+    /// In Code mode, Profiles and Scheduler are hidden.
+    func isVisible(in mode: MainApplicationViewModel.InterfaceMode) -> Bool {
+        if mode == .code {
+            return self != .backendProfiles && self != .scheduler
+        }
+        return true
+    }
 }
 
 

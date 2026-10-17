@@ -37,7 +37,7 @@ struct ChatInputAreaView: View {
     let onToggleContext: () -> Void
 
     @Environment(ExplorerViewModel.self) private var explorerViewModel
-    @Environment(MainApplicationViewModel.self) private var mainViewModel // retained only for delegate wiring & APIKeyInputPopup sheet
+    @Environment(MainApplicationViewModel.self) private var mainViewModel // retained only for delegate wiring
     @Environment(CodeSessionManager.self) private var codeSessionManager
     // [Context gauge] Source of the conversation's messages (history size = the gauge's
     // numerator) and the newest turn's real token usage. App-scoped, injected at the app
@@ -59,6 +59,11 @@ struct ChatInputAreaView: View {
     @State private var showingBackendSelectorPopup: Bool = false
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
     @State private var selectedProfile: BackendProfileModel?
+    /// The draft key the composer's CONTENT belongs to — moved only by the swap below. Save-as-
+    /// you-type writes under THIS, not `draftKey`: on a switch both change in one pass and SwiftUI
+    /// does not order the two handlers, so keying on `draftKey` could file the old conversation's
+    /// text under the new one.
+    @State private var liveDraftKey: ComposerDraftStore.Key?
     @State private var showingSchedulePopover = false
     @State private var isDropTargeted: Bool = false
     /// [Context gauge] Occupancy of the selected model's window for THIS conversation
@@ -66,14 +71,16 @@ struct ChatInputAreaView: View {
     /// attachment changes — never per keystroke — so it stays cheap on long transcripts.
     @State private var contextUsage: ContextWindowUsage?
 
-    /// The skills a `/` command can reach on the selected profile.
+    /// What a `/` command can offer and expand on the selected profile.
     ///
-    /// ⚠️ Read by BOTH the picker's filter and the send-path rewrite, so the two cannot drift. They
-    /// previously computed this separately and disagreed: the picker offered the whole library and
-    /// the rewrite accepted only linked names, so an offered-but-unlinked skill sent raw `/name`
-    /// text to the model.
-    private var reachableSkillNames: Set<String> {
-        SkillCommandReachability.reachableNames(in: selectedProfile?.details)
+    /// ⚠️ Read by BOTH the picker and the send-path rewrite, so the two cannot drift. They previously
+    /// computed this separately and disagreed: the picker offered the whole library and the rewrite
+    /// accepted only linked names, so an offered-but-unlinked skill sent raw `/name` text to the model.
+    ///
+    /// ⚠️ Computed, not stored, and read only on a trigger change or a send — never from `body` — so
+    /// it costs one library read per keystroke inside `/`, not one per render.
+    private var skillCommandOffer: SkillCommandOffer {
+        SkillCommandReachability.offer(in: selectedProfile?.details)
     }
 
     // MARK: - Layout Constants
@@ -177,6 +184,7 @@ struct ChatInputAreaView: View {
                SkillCommandReachability.pickerApplies(to: selectedProfile?.details) {
                 SkillCommandSuggestionView(
                     items: inputViewModel.skillSuggestionState.filteredItems,
+                    collisionNotes: inputViewModel.skillSuggestionState.collisionNotes,
                     query: inputViewModel.skillSuggestionState.query,
                     selectedItemID: $inputViewModel.skillSuggestionState.selectedID,
                     onSelect: { inputViewModel.selectSkillCommand($0) }
@@ -190,11 +198,19 @@ struct ChatInputAreaView: View {
                 FileSuggestionView(
                     files: inputViewModel.fileSuggestionState.filteredItems,
                     suggestionQuery: inputViewModel.fileSuggestionState.query,
+                    source: inputViewModel.fileSuggestionState.source,
+                    hasResults: inputViewModel.fileSuggestionState.hasResults,
                     selectedItemID: $inputViewModel.fileSuggestionState.selectedID,
                     multiSelectedFileIDs: $inputViewModel.fileSuggestionState.multiSelectedIDs
                 )
                 .padding(.horizontal, 15)
                 .padding(.bottom, 6)
+            }
+
+            if !inputViewModel.deliveryWarnings.isEmpty {
+                DeliveryWarningPanel(warnings: inputViewModel.deliveryWarnings)
+                    .padding(.horizontal, 15)
+                    .padding(.bottom, 6)
             }
 
             AttachedFilesDisplayView(
@@ -243,6 +259,16 @@ struct ChatInputAreaView: View {
             updateSelectedProfile(profileID: backendConfiguration.selectedProfileID)
             recomputeContextGauge()
 
+            // Drafts persist across launches: restore this mode's draft into an empty composer.
+            liveDraftKey = draftKey
+            if inputViewModel.userInput.isEmpty && mainViewModel.attachedFiles.isEmpty {
+                let saved = ComposerDraftStore.shared.draft(for: draftKey)
+                if !saved.isEmpty {
+                    inputViewModel.userInput = saved.text
+                    mainViewModel.attachedFiles = saved.attachments
+                }
+            }
+
             // Wire delegate so ChatInputViewModel can mediate MainApplicationViewModel
             inputViewModel.mainDelegate = mainViewModel
             inputViewModel.setupMainDelegateObservers()
@@ -251,7 +277,7 @@ struct ChatInputAreaView: View {
             inputViewModel.onFileSearchRequest = { [weak explorerViewModel, weak inputViewModel] query in
                 let candidates = explorerViewModel?.suggestableFiles(query: query) ?? []
                 let attached = inputViewModel?.attachedFiles ?? []
-                return (candidates, attached)
+                return (candidates, attached, explorerViewModel.map { FileSuggestionSource.of($0) } ?? .noFolder)
             }
         }
         .onChange(of: backendConfiguration.selectedProfileID) { _, newID in
@@ -280,25 +306,40 @@ struct ChatInputAreaView: View {
         // mounted, even on the welcome screen — so it catches every change to the
         // selection, including the ones the ChatOps bridges make, without having to patch
         // each write site.
-        .onChange(of: mainViewModel.selectedConversationID) { oldID, newID in
-            guard oldID != newID else { return }
+        //
+        // ⚠️ Keyed on MODE + conversation (`draftKey`), not the conversation alone: every mode's
+        // Home is conversation `nil`, so a mode switch between Homes changed nothing this could
+        // see and the draft rode into the other mode. A switch that changes both at once (resume
+        // a conversation in the other mode) is ONE key change, so it saves and restores once.
+        .onChange(of: draftKey) { oldKey, newKey in
+            guard oldKey != newKey else { return }
             ComposerDraftStore.shared.save(
                 .init(text: inputViewModel.userInput, attachments: mainViewModel.attachedFiles),
-                for: oldID
+                for: oldKey
             )
-            let incoming = ComposerDraftStore.shared.draft(for: newID)
+            let incoming = ComposerDraftStore.shared.draft(for: newKey)
             inputViewModel.userInput = incoming.text
             // Write the SOURCE of truth: `ChatInputViewModel.attachedFiles` is a
             // `private(set)` mirror that its observation stream keeps in sync from here.
             mainViewModel.attachedFiles = incoming.attachments
+            liveDraftKey = newKey
             // New conversation → different history size, so recompute occupancy. The
             // message-count change fires too, but only AFTER the load completes; this
             // clears the outgoing chat's number immediately on switch.
             recomputeContextGauge()
         }
 
-        // Refresh files if Explorer/Context changes (Lazy refresh)
-        .onChange(of: explorerViewModel.rootItems.count) { _, _ in
+        // Save as you type (the store coalesces writes), so a quit or crash keeps the draft.
+        .onChange(of: draftContentSignature) { _, _ in
+            ComposerDraftStore.shared.save(
+                .init(text: inputViewModel.userInput, attachments: mainViewModel.attachedFiles),
+                for: liveDraftKey ?? draftKey)
+        }
+
+        // Re-search an OPEN `@` picker when the folder, its index or the indexing state changes.
+        // Keyed on the tree's item count alone, it missed a folder switch (counts can match) and
+        // an index finishing — the picker kept the old folder's files until the query changed.
+        .onChange(of: fileIndexKey) { _, _ in
             if inputViewModel.fileSuggestionState.isShowing {
                 inputViewModel.refreshFileSuggestions(using: explorerViewModel)
             }
@@ -314,14 +355,16 @@ struct ChatInputAreaView: View {
         // body. Four separate onChanges tipped this already-large body over the SwiftUI
         // type-checker's complexity budget; one keeps it under.
         .onChange(of: contextGaugeTriggerKey) { _, _ in recomputeContextGauge() }
-        
-        .sheet(isPresented: $inputViewModel.showAPIKeyInputPopup, onDismiss: {
-            inputViewModel.resetAPIKeyPopupState()
-        }) {
-            APIKeyInputPopup()
-                .environment(mainViewModel)
-                .environment(inputViewModel)
+        // Re-check attachments whenever the profile a send would use changes, or the set
+        // changes underneath intake (a restored draft writes `attachedFiles` directly).
+        .onChange(of: attachmentRecheckKey) { _, _ in
+            let profile = activeProfile()
+            let mode = profile.map { AttachmentDeliveryMode.resolve(for: $0) }
+            reportRefusedAttachments(inputViewModel.recheckAttachments(deliveryMode: mode), removed: true)
+            // Same trigger: what survives intake may still be CUT — say so before the send.
+            inputViewModel.refreshDeliveryWarnings(mode: mode, profileType: profile?.profileType)
         }
+        
         .animation(.spring(), value: inputViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
         // The suggestion panels declare move+opacity transitions, but insertion/removal
@@ -361,13 +404,13 @@ struct ChatInputAreaView: View {
         )
     }
 
-    /// [Context gauge] Size of Code mode's injected project context (`.devgentic/context.md`),
-    /// 0 outside Code mode. Code adds it to the system prompt on every message — a real, fixed
-    /// cost the generic history/attachment estimate can't see. A plain Int so `onChange(of:)`
+    /// [Context gauge] Size of Code mode's per-run project knowledge (`AGENTS.md` + the memory
+    /// listing), 0 outside Code mode. Code adds it to the system prompt on every message — a real,
+    /// fixed cost the generic history/attachment estimate can't see. A plain Int so `onChange(of:)`
     /// keeps the large body's type-checker under budget; shared by the recompute so they can't drift.
     private var codeProjectContextChars: Int {
         guard mainViewModel.interfaceMode == .code else { return 0 }
-        return codeSessionManager.projectMemoryContent?.count ?? 0
+        return codeSessionManager.projectKnowledgeContent?.count ?? 0
     }
 
     /// In-flight gauge resolution, cancelled on each recompute so bursty triggers cannot
@@ -379,8 +422,30 @@ struct ChatInputAreaView: View {
     /// covers them all — keeping the large body under the type-checker's budget. Reading
     /// each value here establishes the SwiftUI observation dependency just as separate
     /// `onChange`s would.
+    /// The composer's content, for save-as-you-type.
+    private var draftContentSignature: String {
+        inputViewModel.userInput + "\u{1}" + mainViewModel.attachedFiles.map(\.url.path).joined(separator: "\u{2}")
+    }
+
+    /// Everything that changes what the `@` picker would list.
+    private var fileIndexKey: String {
+        "\(explorerViewModel.selectedRootURL?.path ?? "-")|\(explorerViewModel.allSuggestableFiles.count)|\(explorerViewModel.isIndexing)|\(explorerViewModel.rootItems.count)"
+    }
+
+    /// Which draft the composer holds — see `ComposerDraftStore.Key`.
+    private var draftKey: ComposerDraftStore.Key {
+        .init(mainViewModel.interfaceMode, mainViewModel.selectedConversationID)
+    }
+
+    /// Changes when the ACTIVE profile could have changed — chat selection, interface mode,
+    /// code profile — or when the attachment set did. One combined key, one `onChange`, for
+    /// the same type-checker-budget reason as `contextGaugeTriggerKey`.
+    private var attachmentRecheckKey: String {
+        "\(backendConfiguration.selectedProfileID?.uuidString ?? "-")|\(mainViewModel.interfaceMode)|\(codeSessionManager.codeProfileID?.uuidString ?? "-")|\(inputViewModel.attachedFiles.count)"
+    }
+
     private var contextGaugeTriggerKey: String {
-        "\(chatHistoryViewModel.currentChatMessages.count)|\(inputViewModel.isStreaming)|\(mainViewModel.interfaceMode)|\(codeProjectContextChars)"
+        "\(chatHistoryViewModel.contextGaugeTurnKey)|\(inputViewModel.isStreaming)|\(mainViewModel.interfaceMode)|\(codeProjectContextChars)"
     }
 
     /// [Context gauge] Resolves the history the NEXT request would carry and sizes THAT.
@@ -417,6 +482,11 @@ struct ChatInputAreaView: View {
             // IS the history and a store round-trip would be pure cost.
             let history: [ChatMessage]
             if let conversationID {
+                // RAG-6: wait out the burst. Cancelling the previous task never stopped its resolve
+                // (nothing in it checks), so a send's 3–4 triggers each paid a full 300-message
+                // resolve; now only the last one in the window gets past this line.
+                try? await Task.sleep(for: ChatHistoryViewModel.contextGaugeSettle)
+                guard !Task.isCancelled else { return }
                 history = await chatHistoryViewModel.resolveContextHistory(for: conversationID)
             } else {
                 history = chatHistoryViewModel.currentChatMessages.sorted { $0.timestamp < $1.timestamp }
@@ -559,7 +629,7 @@ struct ChatInputAreaView: View {
                     // The latter runs before trigger analysis, so this read a query one keystroke
                     // stale and saw `isShowing == false` on the very first `/` — which made a full
                     // library render as "No skills in the library yet".
-                    inputViewModel.refreshSkillSuggestions(reachableNames: reachableSkillNames)
+                    inputViewModel.refreshSkillSuggestions(offer: skillCommandOffer)
                 }
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
@@ -840,7 +910,7 @@ struct ChatInputAreaView: View {
 
         // ⚠️ The SAME set the picker was filtered by — see `SkillCommandReachability`. Computing it
         // here independently is exactly how the two came to disagree.
-        let rendered = SkillCommandParser.render(command, availableNames: reachableSkillNames)
+        let rendered = SkillCommandParser.render(command, availableNames: skillCommandOffer.names)
         guard rendered != attributed.string else { return attributed }
 
         logger.log("[SKILLS] Expanded /\(command.skillName) into a directive for '\(profile.displayName)'.")
@@ -890,13 +960,13 @@ struct ChatInputAreaView: View {
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
         return FileAttachmentPicker.handleDrop(providers) { item in
-            inputViewModel.addAttachedFile(fileItem: item)
+            attach([item])
         }
     }
 
     private func openFilePicker() {
         FileAttachmentPicker.presentOpenPanel(prompt: "Attach Files or Folders") { items in
-            inputViewModel.addAttachedFiles(fileItems: items)
+            attach(items)
         }
     }
     
@@ -918,7 +988,7 @@ struct ChatInputAreaView: View {
     }
 
     /// Applies a project folder selection — whether from NSOpenPanel or the Recent list.
-    /// Updates the Explorer sidebar and triggers context.md bootstrap + recents tracking.
+    /// Updates the Explorer sidebar, refreshes the project's knowledge and tracks recents.
     @MainActor
     private func applyCodeFolderSelection(_ url: URL) {
         // Through the coordinator: a session already bound to another folder keeps it, and the
@@ -955,7 +1025,7 @@ struct ChatInputAreaView: View {
             }
             if !fileItems.isEmpty {
                 DispatchQueue.main.async {
-                    inputViewModel.addAttachedFiles(fileItems: fileItems)
+                    attach(fileItems)
                 }
             }
         }
@@ -987,6 +1057,38 @@ struct ChatInputAreaView: View {
         return types.filter { seen.insert($0.identifier).inserted }
     }()
 
+    /// Every composer attach route lands here: intake runs against the ACTIVE profile's
+    /// delivery mode (a folder is refused where the profile injects contents — ATT-3), and
+    /// refusals are reported.
+    private func attach(_ items: [FileSystemItem]) {
+        reportRefusedAttachments(inputViewModel.addAttachedFiles(fileItems: items, deliveryMode: activeDeliveryMode()))
+    }
+
+    /// The delivery mode of the profile a send would use NOW; nil when none resolves.
+    ///
+    /// ⚠️ In Code mode that is the code profile, not `selectedProfile` — same resolution as
+    /// `evaluatePreSendFit`. ⚠️ Read from `selectedProfileID`, NOT the `selectedProfile`
+    /// @State: that is refreshed by a sibling `onChange`, and SwiftUI does not order sibling
+    /// handlers, so on a profile switch the re-check could judge against the OLD profile.
+    private func activeDeliveryMode() -> AttachmentDeliveryMode? {
+        activeProfile().map { AttachmentDeliveryMode.resolve(for: $0) }
+    }
+
+    private func activeProfile() -> BackendProfileModel? {
+        let id = mainViewModel.interfaceMode == .code
+            ? codeSessionManager.codeProfileID
+            : backendConfiguration.selectedProfileID
+        guard let id else { return nil }
+        return try? BackendProfileStore.shared.fetchProfile(byId: id)
+    }
+
+    /// Tells the user which files `AttachmentIntake` refused — without this the refusal is
+    /// as invisible as the send-time drop it replaces.
+    private func reportRefusedAttachments(_ refused: [AttachmentIntake.Refusal], removed: Bool = false) {
+        guard let message = AttachmentIntake.summary(refused, removed: removed) else { return }
+        toastManager.show(message, style: .warning)
+    }
+
     private func confirmSuggestionSelection() {
         if inputViewModel.fileSuggestionState.isShowing {
             let multiSelected = inputViewModel.fileSuggestionState.multiSelectedIDs
@@ -995,14 +1097,14 @@ struct ChatInputAreaView: View {
                 let filesToAttach = inputViewModel.fileSuggestionState.filteredItems.filter { multiSelected.contains($0.id) }
                 if !filesToAttach.isEmpty {
                     logger.log("Attaching \(filesToAttach.count) files from multi-selection.")
-                    inputViewModel.addAttachedFiles(fileItems: filesToAttach)
+                    attach(filesToAttach)
                     inputViewModel.selectMultipleFiles(filesToAttach)
                 }
             }
             else if let selectedID = inputViewModel.fileSuggestionState.selectedID,
                     let selectedFile = inputViewModel.fileSuggestionState.filteredItems.first(where: { $0.id == selectedID }) {
                 logger.log("Attaching single focused file: \(selectedFile.name)")
-                inputViewModel.addAttachedFile(fileItem: selectedFile)
+                attach([selectedFile])
                 _ = inputViewModel.selectFile(selectedFile)
             }
         }

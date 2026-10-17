@@ -3683,11 +3683,13 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
                       "the cloud node must still overlap real work — the MLX split is a per-model lane, NOT a level-wide lock. Cloud \(c.start)…\(c.end), Deep \(d.start)…\(d.end), Fast \(f.start)…\(f.end)")
     }
 
-    /// ⚠️ Two siblings on the SAME MLX model must STILL overlap. `loadModel` early-returns for the
-    /// resident directory and coalesces concurrent loads of it, so they share one container and
-    /// evict nothing — serializing them would cost parallelism for zero benefit. This is the
-    /// integration-level twin of `WorkflowMLXDispatchLaneTests.testOneMLXModel_SingleLane`.
-    func testParallel_SameMLXModel_StillOverlaps() async throws {
+    /// ⚠️ DECISION D6 (owner, 2026-10-07, local inference coordinator) REVERSED this test. Two
+    /// siblings on the SAME MLX model used to be pinned as overlapping ("they share one container").
+    /// They now run one after another: the weights are shared, but each concurrent decode carries its
+    /// own KV cache, mlx-swift-lm has no batched generation (two decodes each run at about half speed),
+    /// and concurrent decode on one container was never verified on device. Integration-level twin of
+    /// `WorkflowMLXDispatchLaneTests.testOneMLXModel_OneLanePerNode`.
+    func testParallel_SameMLXModel_RunsSerially() async throws {
         let scenario = WorkflowTestScenario()
         let source = scenario.addBotNode(name: "Source")
         let a = scenario.addBotNode(name: "A", apiProvider: .mlx, modelName: "qwen3-8b")
@@ -3706,8 +3708,8 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let spans = mockProvider.spans
         let sa = try XCTUnwrap(spans.first(where: { $0.profileID == aPid }))
         let sb = try XCTUnwrap(spans.first(where: { $0.profileID == bPid }))
-        XCTAssertTrue(sa.start < sb.end && sb.start < sa.end,
-                      "same-model MLX siblings share ONE container and must stay parallel — A \(sa.start)…\(sa.end), B \(sb.start)…\(sb.end)")
+        XCTAssertFalse(sa.start < sb.end && sb.start < sa.end,
+                       "same-model MLX siblings must run one after another (D6) — A \(sa.start)…\(sa.end), B \(sb.start)…\(sb.end)")
     }
 
     func testParallel_ThreeBotsWithFanIn() async throws {

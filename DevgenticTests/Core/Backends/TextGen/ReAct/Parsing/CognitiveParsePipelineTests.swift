@@ -107,12 +107,12 @@ final class CognitiveParsePipelineTests: XCTestCase {
         let pipeline = CognitiveParsePipeline(expectedDialect: .mistralXML, registeredTools: [])
         let input = """
         Thought: Let me search for the file.
-        Action: fs_smart_search
+        Action: spotlight_search
         Action Input: {"search_term": "readme"}
         """
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 1)
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
     }
 
     func testDrift_NativeJSON_DriftsToFlatJSON() {
@@ -408,13 +408,13 @@ final class CognitiveParsePipelineTests: XCTestCase {
         {
           "content":<p>HTML content that breaks JSON</p>,
           "tool_calls": [
-            {"name": "fs_smart_search", "arguments": {"search_term": "test"}}
+            {"name": "spotlight_search", "arguments": {"search_term": "test"}}
           ]
         }
         """
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 1, "Pipeline should recover valid tool_calls despite malformed content field")
-        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.name, "spotlight_search")
         XCTAssertEqual(result.parseOutcome, .success, "Should be success since tools were recovered")
     }
 

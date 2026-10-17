@@ -91,6 +91,9 @@ struct MLXLLMProvider: LLMProvider {
     /// Usage is nil only when generation stops early (no completion event) — the caller
     /// then estimates exactly as before, so this never regresses those paths.
     func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
+        // The local-inference gate: holds (or waits for) the local lock and counts this generation.
+        let generation = try await LocalInferenceScope.beginGeneration(engine: .mlx, modelID: modelName)
+        defer { generation.end() }
         let nativeToolsPresent = (tools?.isEmpty == false)
         let repPenalty = effectiveRepPenalty(nativeToolsPresent: nativeToolsPresent)
         let sink = MLXUsageSink()
@@ -113,8 +116,20 @@ struct MLXLLMProvider: LLMProvider {
         for try await token in stream {
             fullText += token
         }
+        try Self.throwIfCancelled(discarding: fullText, path: "generateWithUsage")
 
         return (fullText, sink.value)
+    }
+
+    /// ⚠️ Timeout inventory D-27. `MLXService` ends its stream NORMALLY when the task is
+    /// cancelled (Stop, a node timeout, a per-node skip) — it never throws. So the loops above
+    /// simply ran out of tokens and returned half an answer as a complete one, and synthesis,
+    /// planning and reflection acted on it. A cancelled call must END as a cancellation; callers
+    /// that want the partial text catch it and label it partial themselves.
+    static func throwIfCancelled(discarding partial: String, path: String) throws {
+        guard Task.isCancelled else { return }
+        logger.notice("[MLX-GEN] \(path, privacy: .public) was cancelled after \(partial.count) chars. CONSEQUENCE: the partial text is NOT returned as an answer; the caller sees a cancellation.")
+        throw CancellationError()
     }
 
     /// Multimodal (vision) path — serves BOTH the bot flow and, since MLX/legacy
@@ -154,6 +169,8 @@ struct MLXLLMProvider: LLMProvider {
         // line means the image was lost between orchestration and the provider.
         logger.info("[VISION] MLX on-device VLM '\(modelName)': routing \(imageData.count) image(s) through streamVisionChat")
 
+        let generation = try await LocalInferenceScope.beginGeneration(engine: .mlx, modelID: modelName)
+        defer { generation.end() }
         var fullText = ""
         let stream = await MLXService.shared.streamVisionChat(
             expectedModelDirectory: modelDirectory,
@@ -169,6 +186,7 @@ struct MLXLLMProvider: LLMProvider {
         for try await token in stream {
             fullText += token
         }
+        try Self.throwIfCancelled(discarding: fullText, path: "generate(payload:)")
         return fullText
     }
 
@@ -195,8 +213,12 @@ struct MLXLLMProvider: LLMProvider {
             // MLXService's producer and the vendored evaluator. Discarding it here would
             // leave the GPU decoding after Stop even though MLXService now cancels
             // correctly — this is the outermost link in that chain.
+            // ⚠️ Created inside the caller's task, so it inherits `LocalInferenceScope.runID` — the gate
+            // below reads it.
             let producer = Task {
                 do {
+                    let generation = try await LocalInferenceScope.beginGeneration(engine: .mlx, modelID: modelName)
+                    defer { generation.end() }
                     let tokenStream = await MLXService.shared.streamChat(
                         expectedModelDirectory: modelDirectory,
                         messages: messages,

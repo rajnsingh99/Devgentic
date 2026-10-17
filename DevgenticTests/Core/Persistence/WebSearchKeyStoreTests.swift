@@ -73,22 +73,14 @@ final class WebSearchKeyStoreTests: XCTestCase {
         XCTAssertEqual(stub.store[WebSearchKeyStore.account], "k", "left in place, as the log line says")
     }
 
-    // MARK: - Wiring (the coordinator needs a full MainApplicationViewModel, so these pin the source)
+    // MARK: - Wiring (the coordinator needs a full MainApplicationViewModel, so this pins the source)
 
     /// ⚠️ THE DEFECT, STATED AS AN ABSENCE. `SettingsCoordinator` wrote the key with
-    /// `UserDefaults.standard.set(apiKey, …)`. Every path must now go through the store.
+    /// `UserDefaults.standard.set(apiKey, …)`. The credential must never come back through there;
+    /// the only writer is now the Web Search settings pane, via the store.
     func testTheSettingsCoordinatorNoLongerWritesTheKeyToUserDefaults() throws {
         let source = try TestRepositorySource.read("Devgentic/Interfaces/Main/SettingsCoordinator.swift")
         XCTAssertFalse(source.contains("UserDefaults.standard.set(apiKey"), "the plaintext write is back")
-        XCTAssertFalse(source.contains("webSearchAPIKeyDefaultsKey"), "the coordinator owns no UserDefaults key for the credential any more")
-        XCTAssertTrue(source.contains("WebSearchKeyStore.save(apiKey)"))
-        XCTAssertTrue(source.contains("WebSearchKeyStore.read()"))
-        XCTAssertTrue(source.contains("WebSearchKeyStore.delete()"))
-    }
-
-    /// The popup must not dismiss over a failed save.
-    func testThePopupRefusesToDismissWhenTheSaveFails() throws {
-        let source = try TestRepositorySource.read("Devgentic/Interfaces/Shared/ChatInput/APIKeyInputPopup.swift")
-        XCTAssertTrue(source.contains("guard mainViewModel.saveAndEnableWebSearch(apiKey: inputViewModel.apiKeyInput) else"))
+        XCTAssertFalse(source.contains("webSearchAPIKeyDefaultsKey"))
     }
 }

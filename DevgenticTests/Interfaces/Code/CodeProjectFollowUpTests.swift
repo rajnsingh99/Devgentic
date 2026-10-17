@@ -38,7 +38,7 @@ final class CodeRunProjectBindingTests: XCTestCase {
         for dir in [projectA!, projectB!] {
             try FileManager.default.createDirectory(at: dir.appendingPathComponent(".devgentic"), withIntermediateDirectories: true)
         }
-        try "B-PROJECT-CONTEXT".write(to: projectB.appendingPathComponent(".devgentic/context.md"), atomically: true, encoding: .utf8)
+        try "B-PROJECT-CONTEXT".write(to: projectB.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
     }
 
     override func tearDownWithError() throws {
@@ -75,7 +75,9 @@ final class CodeRunProjectBindingTests: XCTestCase {
         XCTAssertTrue(config.instructions?.contains(projectB.standardizedFileURL.path) ?? false,
                       "the prompt still names the open project's folder")
         XCTAssertFalse(config.instructions?.contains("PROMPT FOR A") ?? true)
-        XCTAssertTrue(config.instructions?.contains("B-PROJECT-CONTEXT") ?? false, "B's context.md was not injected")
+        // The project's own knowledge is appended when the run starts, from the bound folder.
+        let knowledge = AgentConnect.codeProjectKnowledge(config, traceTag: "test")
+        XCTAssertTrue(knowledge?.contains("B-PROJECT-CONTEXT") ?? false, "B's AGENTS.md did not reach the run's prompt")
     }
 
     func testARunForAnotherProjectGetsThatProjectsToolsLimitsAndModel() throws {
@@ -120,36 +122,14 @@ final class CodeRunProjectBindingTests: XCTestCase {
     }
 }
 
-// MARK: - #3 Unload by model in Code
-
-final class CodeModelUnloadDecisionTests: XCTestCase {
-
-    func testTwoCodeSessionsOnDifferentModelsUnload() {
-        XCTAssertTrue(ConversationSwitchCoordinator.shouldUnloadModels(
-            codeModelBefore: "MLX/qwen", codeModelAfter: "MLX/llama", newProfileID: UUID(), currentProfileID: nil))
-    }
-
-    /// ⚠️ Seen on device: same profile id, so the old rule kept both models resident.
-    func testSameProfileButDifferentModelStillUnloads() {
-        let shared = UUID()
-        XCTAssertTrue(ConversationSwitchCoordinator.shouldUnloadModels(
-            codeModelBefore: "MLX/qwen", codeModelAfter: "MLX/llama", newProfileID: shared, currentProfileID: shared))
-    }
-
-    /// ⚠️ Seen on device: a fresh session has no profile yet, and the old rule unloaded the model
-    /// the next send was about to use.
-    func testANewEmptySessionOnTheSameModelKeepsItLoaded() {
-        XCTAssertFalse(ConversationSwitchCoordinator.shouldUnloadModels(
-            codeModelBefore: "Ollama/gemma4", codeModelAfter: "Ollama/gemma4", newProfileID: nil, currentProfileID: UUID()))
-    }
-
-    func testOutsideCodeTheProfileRuleIsUnchanged() {
-        let id = UUID()
-        XCTAssertFalse(ConversationSwitchCoordinator.shouldUnloadModels(codeModelBefore: nil, codeModelAfter: nil, newProfileID: id, currentProfileID: id))
-        XCTAssertTrue(ConversationSwitchCoordinator.shouldUnloadModels(codeModelBefore: nil, codeModelAfter: nil, newProfileID: UUID(), currentProfileID: id))
-        XCTAssertTrue(ConversationSwitchCoordinator.shouldUnloadModels(codeModelBefore: nil, codeModelAfter: nil, newProfileID: nil, currentProfileID: id))
-    }
-}
+// MARK: - #3 Unload by model in Code — SUPERSEDED
+//
+// The model-aware switch-unload rule (`ConversationSwitchCoordinator.shouldUnloadModels`) is gone: a
+// conversation switch unloads nothing (local inference coordinator, decision D10). The on-device
+// complaints it answered — two Code projects on different models both staying resident, and a fresh
+// session unloading the model its next send needed — are answered by residency at lock handover:
+// the next run to take the local lock unloads what it does not use, and only then. Pinned by
+// `LocalResidencyWiringTests.testAConversationSwitchUnloadsNothing`.
 
 // MARK: - #4 No write when nothing changed
 

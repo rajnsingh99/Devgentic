@@ -317,6 +317,21 @@ final class PauseDuringCodeBlockBeatTests: XCTestCase {
     override func setUp() async throws { service.stop() }
     override func tearDown() async throws { service.stop() }
 
+    /// The test host never speaks: these transport tests once crashed the host mid-suite through
+    /// a speech-service XPC callback (2026-10-11), and speaking out loud has no test value. The
+    /// synthesizer is still CREATED, so the [V5] lifetime pins keep their meaning.
+    func testTheTestHostIsSilentButStillHoldsASynthesizer() throws {
+        service.speak("Alpha segment.", messageID: UUID(), canPresentCodeViewer: false)
+        XCTAssertTrue(service.isSynthesizerLoaded, "the lifetime seams need a real synthesizer")
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Devgentic/Interfaces/Shared/Chat/Utils/SpeechService.swift"), encoding: .utf8)
+        let guardRange = try XCTUnwrap(source.range(of: "if TestHost.isRunning {"), "the silent-test-host guard is gone")
+        let speak = try XCTUnwrap(source.range(of: "synth.speak(utterance)"))
+        XCTAssertLessThan(guardRange.upperBound, speak.lowerBound, "the utterance must be handed over only in the else-branch")
+        XCTAssertEqual(source.components(separatedBy: ".speak(utterance)").count - 1, 1, "a second, unguarded speak call appeared")
+    }
+
     /// THE pin: Pause during the beat parks the playlist on the NEXT segment without speaking
     /// it, and cancels the beat that would have spoken it.
     func testPauseDuringTheBeatParksWithoutSpeaking() {

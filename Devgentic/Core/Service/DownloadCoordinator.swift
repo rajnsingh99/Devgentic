@@ -135,11 +135,15 @@ enum DownloadCoordinator {
         // toasted "Downloading B…" while nothing happened at all. The in-flight check above
         // is scoped to the SAME identifier, so pulling B during A sails past it. Check the
         // service's actual state here.
-        if ollama.isPullingModel {
-            return .failed("\(ollama.modelToPull) is still downloading — Ollama pulls one model at a time.")
-        }
         if ollama.isRemovingModel {
             return .failed("Can't start a download while another model is being removed.")
+        }
+        // CR-34: the slot is claimed HERE, before the support lookup's await — checking
+        // `isPullingModel` and claiming later let two quick clicks both start a pull.
+        guard let reservation = ollama.reservePull() else {
+            return .failed(ollama.isPullingModel
+                ? "\(ollama.modelToPull) is still downloading — Ollama pulls one model at a time."
+                : "Another Ollama download is starting — Ollama pulls one model at a time.")
         }
 
         // ⚠️ Authoritative "can we run this at all" check — only possible for `hf.co/<owner>/<repo>`
@@ -149,12 +153,13 @@ enum DownloadCoordinator {
         // caller shares (store pill, Downloads sidebar retry, Download Manager, onboarding).
         if let repoId = ModelSupportPolicy.huggingFaceRepoId(fromOllamaName: trimmed),
            let reason = await MLXModelService.shared.unsupportedReason(forRepo: repoId) {
+            ollama.releasePullReservation(reservation)
             return .failed("Not supported. \(reason)")
         }
 
         // OllamaService.pullModel is async; fire-and-forget so callers get
         // the outcome synchronously. Progress flows via @Observable state.
-        Task { await ollama.pullModel(name: trimmed, baseURL: ollama.ollamaBaseURL) }
+        Task { await ollama.pullModel(name: trimmed, baseURL: ollama.ollamaBaseURL, reservation: reservation) }
         return outcomeForHistory
     }
 

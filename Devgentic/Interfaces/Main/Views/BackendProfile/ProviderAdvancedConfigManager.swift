@@ -91,7 +91,7 @@ final class ProviderAdvancedConfigManager {
                 as: MLXAdvancedConfig.self
             ) ?? {
                 if let metadata = providerConfig.modelMetadata {
-                    return .recommended(for: metadata)
+                    return .recommended(for: metadata, profile: defaultProfile)
                 }
                 return .default()
             }()
@@ -282,7 +282,8 @@ struct ProviderAdvancedSettingsView: View {
             MLXSettingsView(
                 config: $configManager.localMlxConfig,
                 modelMetadata: modelMetadata,
-                modelName: modelName
+                modelName: modelName,
+                defaultProfile: defaultProfile
             )
         }
     }

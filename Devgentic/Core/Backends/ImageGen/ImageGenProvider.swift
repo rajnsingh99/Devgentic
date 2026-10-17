@@ -56,7 +56,7 @@ enum ImageGenError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .imageToImageNotSupported(let model):
-            return "The model '\(model)' does not support Image-to-Image generation. Please select a model with I2I capability (e.g., Gemini or MLX Flux2)."
+            return "The model '\(model)' does not support Image-to-Image generation. Please select a model with I2I capability (e.g., Gemini)."
         case .textToImageNotSupported(let model):
             return "The model '\(model)' does not support Text-to-Image generation."
         case .invalidAspectRatio(let requested, let supported):

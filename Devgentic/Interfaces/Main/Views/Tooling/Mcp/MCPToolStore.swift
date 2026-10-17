@@ -282,12 +282,15 @@ final class MCPToolStore {
             }
 
             // Cascade-delete child tool defs and rebuild from `newTools`.
+            // CR-64: read what must survive BEFORE the children are deleted.
+            let previousByName = Dictionary(item.tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+            let preserved = newTools.map { previousByName[$0.name]?.blobsToPreserve(whenRebuiltFrom: $0) }
             for existingTool in item.tools {
                 context.delete(existingTool)
             }
             item.tools.removeAll()
-            for tool in newTools {
-                let child = createToolDefinitionModel(from: tool)
+            for (tool, keep) in zip(newTools, preserved) {
+                let child = createToolDefinitionModel(from: tool, preserving: keep)
                 item.tools.append(child)
             }
 
@@ -407,13 +410,16 @@ final class MCPToolStore {
                 return
             }
 
+            // CR-64: read what must survive BEFORE the children are deleted.
+            let previousByName = Dictionary(item.tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+            let preserved = newTools.map { previousByName[$0.name]?.blobsToPreserve(whenRebuiltFrom: $0) }
             for existingTool in item.tools {
                 context.delete(existingTool)
             }
             item.tools.removeAll()
 
-            for tool in newTools {
-                let child = createToolDefinitionModel(from: tool)
+            for (tool, keep) in zip(newTools, preserved) {
+                let child = createToolDefinitionModel(from: tool, preserving: keep)
                 item.tools.append(child)
             }
 
@@ -545,16 +551,25 @@ final class MCPToolStore {
 
     // MARK: - Private Helper Methods
 
-    private func createToolDefinitionModel(from tool: ToolDefinition) -> MCPToolDefinitionModel {
-        MCPToolDefinitionModel(
+    /// - Parameter preserving: stored blobs that could not be read and are being handed back as
+    ///   placeholders (`blobsToPreserve`, CR-64). Each non-nil one is written back byte-for-byte
+    ///   instead of encoding the placeholder over it.
+    private func createToolDefinitionModel(
+        from tool: ToolDefinition,
+        preserving keep: (parameters: Data?, icons: Data?, annotations: Data?)? = nil
+    ) -> MCPToolDefinitionModel {
+        if let keep, keep.parameters != nil || keep.icons != nil || keep.annotations != nil {
+            logger.notice("[PERSISTENCE] MCP tool '\(tool.name)': keeping \([keep.parameters != nil ? "parameters" : nil, keep.icons != nil ? "icons" : nil, keep.annotations != nil ? "annotations" : nil].compactMap { $0 }.joined(separator: ", ")) stored bytes this build cannot read, instead of overwriting them with the empty placeholder it loaded. CONSEQUENCE: the tool keeps working as it did on this build, and the original schema survives for a build that can read it.")
+        }
+        return MCPToolDefinitionModel(
             name: tool.name,
             toolDescription: tool.description,
             requiresConfirmation: tool.requiresConfirmation,
-            parametersData: (try? JSONEncoder().encode(tool.parameters))
+            parametersData: keep?.parameters ?? (try? JSONEncoder().encode(tool.parameters))
                 .map { BlobVersioning.stamped($0, version: MCPToolDefinitionModel.parametersBlobVersion) },
             title: tool.title,
-            iconsData: tool.icons.flatMap { try? JSONEncoder().encode($0) },
-            annotationsData: tool.annotations.flatMap { try? JSONEncoder().encode($0) }
+            iconsData: keep?.icons ?? tool.icons.flatMap { try? JSONEncoder().encode($0) },
+            annotationsData: keep?.annotations ?? tool.annotations.flatMap { try? JSONEncoder().encode($0) }
         )
     }
 
@@ -577,7 +592,7 @@ final class MCPToolStore {
     private func saveContext() {
         guard let context = requireContext("saveContext", consequence: "pending MCP changes were NOT written to disk and are lost when the app quits.") else { return }
         do {
-            try context.save()
+            try SharedContextSave.save(context, "MCP tools")
         } catch {
             logger.error("Failed to save SwiftData context: \(error.localizedDescription)")
         }

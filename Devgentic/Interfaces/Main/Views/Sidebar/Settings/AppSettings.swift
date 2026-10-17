@@ -14,6 +14,10 @@ struct AppSettings {
     /// Key for the boolean value that determines if LLM responses should be streamed.
     static let useStreamingResponseKey = "useStreamingResponse"
 
+    /// The global ceiling on any one run's COMPUTE time, in seconds (local inference coordinator,
+    /// phase 5). 0 = off. Absent = `LocalInferenceCoordinator.defaultGlobalCeiling`.
+    static let maximumRunTimeKey = "maximumRunTimeSeconds"
+
     // Speech Recognition
     static let speechModelKey = "speechModel"
     static let speechLanguageKey = "speechLanguage"

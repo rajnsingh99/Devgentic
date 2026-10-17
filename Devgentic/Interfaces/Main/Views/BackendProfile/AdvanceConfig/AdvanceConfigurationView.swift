@@ -800,12 +800,13 @@ struct AnthropicSettingsView: View {
                 .foregroundColor(theme.primaryText)
                 .padding(.top, 8)
 
-            // ⚠️ HIDDEN, not disabled, on models where thinking is always on (Fable 5 / Mythos 5).
+            // ⚠️ HIDDEN, not disabled, on models where thinking is always on (Fable 5 / Mythos 5 /
+            // Opus 5.5). Sonnet 5.5 keeps the toggle: its "off" is sent as `between_tools`.
             // A greyed-out switch still implies the value is stored and honoured somewhere, and
             // here it is neither: the request ignores it, and the "off" shape the provider used to
             // send — `{"type": "disabled"}` — is rejected with a 400 by those models at every
             // effort level. Same rule as the ImageGen Quality gate (register A56).
-            if generation.acceptsDisabledThinking {
+            if generation.canTurnThinkingOff {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Enable Thinking")
@@ -835,7 +836,7 @@ struct AnthropicSettingsView: View {
 
             // Effort is the only depth control on an always-on model, so it must stay reachable
             // there even though the toggle above is gone.
-            if config.extendedThinking || !generation.acceptsDisabledThinking {
+            if config.extendedThinking || !generation.canTurnThinkingOff {
                 Divider()
 
                 // ⚠️ Two different controls for the same concept, because the API contract
@@ -856,7 +857,7 @@ struct AnthropicSettingsView: View {
                         }
                         Spacer(minLength: 16)
                         Picker("", selection: $config.thinkingEffort.toNonOptional(defaultValue: "")) {
-                            Text("Default (high)").tag("")
+                            Text("Default (\(AnthropicModelGeneration.defaultEffort(for: modelName ?? "")))").tag("")
                             ForEach(generation.supportedEffortLevels, id: \.self) { level in
                                 Text(level.capitalized).tag(level)
                             }
@@ -864,7 +865,8 @@ struct AnthropicSettingsView: View {
                         .labelsHidden()
                         .frame(width: 160)
                         .accessibilityLabel("Thinking effort")
-                        .accessibilityValue(config.thinkingEffort?.capitalized ?? "Default, high")
+                        .accessibilityValue(config.thinkingEffort?.capitalized
+                                            ?? "Default, \(AnthropicModelGeneration.defaultEffort(for: modelName ?? ""))")
                     }
                 } else {
                     HStack(alignment: .center) {

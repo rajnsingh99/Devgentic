@@ -13,11 +13,11 @@
 //  Two things it did not model:
 //
 //   1. `assembleKnowledgeSourceContent` caps each file at a SHRINKING `remainingBudget` —
-//      `min(perFile, total - assembled)` — so a later source that is comfortably under the
-//      per-file cap is still refused once earlier sources have eaten the total. The estimate
-//      counted every such file in full.
-//   2. The reader THROWS `.tooLarge` rather than truncating, so a refused file contributes
-//      nothing at all — the same drop-don't-clip rule attachments already follow.
+//      `min(perFile, total - assembled)`. The estimate counted every file in full.
+//   2. Past that budget a source is CUT to what fits (it was dropped whole until 2026-10-05,
+//      when knowledge moved onto the attachments' `DirectInjectionPlan`).
+//
+//  The estimate now runs that same plan, so it cannot drift from the assembler.
 //
 //  Both errors push the same way: the gauge charges for text that never ships, which raises an
 //  overflow warning the user cannot clear by any action that would actually help.
@@ -95,53 +95,47 @@ final class KnowledgeSourceSizingTests: XCTestCase {
         XCTAssertEqual(PromptFitCheck.estimatedKnowledgeSourceChars(for: profile([])), 0)
     }
 
-    // MARK: - Drop, don't clip
+    // MARK: - Cut, don't drop (2026-10-05)
+    //
+    // Knowledge sources follow the attachments' rule: past the per-file budget a source is CUT
+    // to what fits, with a marker — it used to be refused whole. The gauge must price the slice.
 
-    func testASourceOverThePerFileBudgetContributesNothing() throws {
-        let oversized = try makeSource("huge.txt", bytes: DirectInjectionBudget.perFile + 1)
-        XCTAssertEqual(
-            PromptFitCheck.estimatedKnowledgeSourceChars(for: profile([oversized])), 0,
-            "the reader throws .tooLarge — this file never reaches the prompt"
-        )
-    }
-
-    func testAnOversizedSourceDoesNotSuppressItsNeighbours() throws {
-        let small = try makeSource("small.txt", bytes: 500)
-        let huge = try makeSource("huge.txt", bytes: DirectInjectionBudget.perFile + 1)
-        let other = try makeSource("other.txt", bytes: 700)
-
-        XCTAssertEqual(
-            PromptFitCheck.estimatedKnowledgeSourceChars(for: profile([small, huge, other])),
-            500 + wrapper("small.txt") + 700 + wrapper("other.txt"),
-            "the assembler records the failure and keeps going"
-        )
-    }
-
-    // MARK: - The shrinking budget
-
-    /// THE case the flat estimate could not express. Every file here is under the per-file cap,
-    /// so a per-file-only model counts all of them — but the assembler measures each against
-    /// what is LEFT of the total, and refuses the last one outright.
-    func testALaterSourceIsRefusedOnceEarlierOnesHaveEatenTheTotal() throws {
+    /// THE invariant: the gauge equals what the knowledge assembler emits (ASCII, so stat'd
+    /// bytes == chars). Pinned against the plan, not arithmetic, so a policy change moves both.
+    func testGaugeEqualsTheKnowledgeAssemblersOutput() throws {
         let perFile = DirectInjectionBudget.perFile
-        let sources = [
-            try makeSource("a.txt", bytes: perFile),
-            try makeSource("b.txt", bytes: perFile),
-            try makeSource("c.txt", bytes: perFile),
-            try makeSource("d.txt", bytes: perFile - 10_000),
-            try makeSource("e.txt", bytes: 30_000)
+        let cases: [[Int]] = [
+            [500, 700],
+            [perFile + 1],
+            [500, perFile + 1, 700],
+            [perFile, perFile, perFile, perFile - 10_000, 30_000],   // the shrinking total
+            [perFile, perFile, perFile, 49_500, 5_000],              // room under minimumSlice
         ]
+        for (index, lengths) in cases.enumerated() {
+            let sources = try lengths.enumerated().map { try makeSource("c\(index)-\($0.offset).txt", bytes: $0.element) }
+            let files = try sources.map {
+                DirectInjectionPlan.File(name: $0.fileName, path: $0.location, content: try String(contentsOf: $0.url, encoding: .utf8))
+            }
+            XCTAssertEqual(
+                PromptFitCheck.estimatedKnowledgeSourceChars(for: profile(sources)),
+                DirectInjectionPlan.assemble(files, layout: .knowledge).text.count,
+                "lengths \(lengths)")
+        }
+    }
 
-        let charged = PromptFitCheck.estimatedKnowledgeSourceChars(for: profile(sources))
+    func testAnOverBudgetSourceIsPricedAsTheSliceThatShips() throws {
+        let total = DirectInjectionBudget.perFile + 1
+        let oversized = try makeSource("huge.txt", bytes: total)
+        XCTAssertEqual(
+            PromptFitCheck.estimatedKnowledgeSourceChars(for: profile([oversized])),
+            wrapper("huge.txt") + DirectInjectionBudget.perFile
+                + DirectInjectionPlan.truncationMarker(sent: DirectInjectionBudget.perFile, total: total).count)
+    }
 
-        let expected = perFile * 3 + (perFile - 10_000)
-            + wrapper("a.txt") + wrapper("b.txt") + wrapper("c.txt") + wrapper("d.txt")
-        XCTAssertEqual(charged, expected,
-                       "e.txt is under the per-file cap but over what remains of the total")
-
-        let naivePerFileOnly = perFile * 3 + (perFile - 10_000) + 30_000
-        XCTAssertLessThan(charged, naivePerFileOnly,
-                          "a per-file-only model over-charges by e.txt's whole size")
+    func testASourcePastTheReadCapCostsNothing() throws {
+        let unread = try makeSource("giant.txt", bytes: DirectInjectionBudget.readCap + 1)
+        XCTAssertEqual(PromptFitCheck.estimatedKnowledgeSourceChars(for: profile([unread])), 0,
+                       "the reader throws .tooLarge before the plan sees it")
     }
 
     /// The running total is bounded by the same ceiling the assembler is, give or take the

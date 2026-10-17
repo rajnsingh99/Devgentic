@@ -89,16 +89,28 @@ final class AttachedTextFileSD {
     var fileExtension: String
     var content: String
     var size: Int64
+    /// `AttachmentDelivery`, flattened — see its `storage` / `init(kind:sent:total:)`, the only
+    /// codec. Optional columns: a lightweight addition; rows written before it read as nil.
+    var deliveryKind: String?
+    var deliverySentChars: Int?
+    var deliveryTotalChars: Int?
 
     func toStruct() -> AttachedTextFile {
         AttachedTextFile(id: id, name: name,
                          url: resolvePersistedURL(url, rowID: id, kind: "AttachedTextFile"),
-                         fileExtension: fileExtension, content: content, size: size)
+                         fileExtension: fileExtension, content: content, size: size,
+                         delivery: AttachmentDelivery(kind: deliveryKind, sent: deliverySentChars, total: deliveryTotalChars))
     }
 
     static func from(_ file: AttachedTextFile) -> AttachedTextFileSD {
-        AttachedTextFileSD(id: file.id, name: file.name, url: file.url.absoluteString,
-                           fileExtension: file.fileExtension, content: file.content, size: file.size)
+        let row = AttachedTextFileSD(id: file.id, name: file.name, url: file.url.absoluteString,
+                                     fileExtension: file.fileExtension, content: file.content, size: file.size)
+        if let stored = file.delivery?.storage {
+            row.deliveryKind = stored.kind
+            row.deliverySentChars = stored.sent
+            row.deliveryTotalChars = stored.total
+        }
+        return row
     }
 
     init(id: UUID, name: String, url: String, fileExtension: String, content: String, size: Int64) {

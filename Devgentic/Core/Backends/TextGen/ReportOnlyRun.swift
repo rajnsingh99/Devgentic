@@ -62,7 +62,46 @@ enum ReportOnlyRun {
         // a report-only run from an ordinary one, and the woken run's whole safety argument rests on
         // this having happened — the task output it is reading is untrusted text. Without this line
         // "was that run actually report-only?" is unanswerable from a device log.
-        logger.notice("[REPORTONLY] Stripped all \(tools.count) profile tool(s) from this run's loadout. CONSEQUENCE: the run can call only the injected control-plane tools (final_answer, ask_user, get_conversation_history), so it can report on the task's output but cannot act on it — which matters because that output is whatever a command chose to print.")
+        logger.notice("[REPORTONLY] Stripped all \(tools.count) profile tool(s) from this run's loadout. CONSEQUENCE: the run can call only injected tools that change nothing (final_answer, ask_user, get_conversation_history, load_skill, recall), so it can report on the task's output but cannot act on it — which matters because that output is whatever a command chose to print.")
         return []
+    }
+
+    // MARK: - Injected tools
+
+    /// Injected tools that change state OUTLIVING the run, and so are withheld from a report-only run.
+    ///
+    /// ⚠️⚠️ WHY (readiness CR-17, 2026-10-10). Stripping the PROFILE's tools was the whole of
+    /// report-only, but `remember` and `forget` are INJECTED — appended by `AgentConnect` after the
+    /// profile is trimmed — and need no confirmation. So a woken run reading untrusted background-task
+    /// output (a test or build log, verbatim) could be steered to `remember` injected text, which
+    /// `codeProjectKnowledge` then puts into the system prompt of EVERY future Code run in that
+    /// project — or to `forget` real entries. A one-turn prompt injection became a persistent one.
+    ///
+    /// Names come from the tools themselves, never typed here.
+    static let stateChangingInjectedToolNames: Set<String> = [
+        RememberTool(projectPath: "", conversationID: nil).name,
+        ForgetTool(projectPath: "").name,
+    ]
+
+    /// Injected tools a report-only run keeps: they answer, ask, or read — nothing persists.
+    ///
+    /// ⚠️ Together with `stateChangingInjectedToolNames` this must cover EVERY injected tool —
+    /// `ReportOnlyRunTests` fails when a new one is added without being put in one set or the other,
+    /// so the decision "may an unwatched run call this?" cannot be skipped.
+    static let readOnlyInjectedToolNames: Set<String> = [
+        FinalAnswerTool().name,
+        AskUserTool(richFields: true).name,
+        ConversationHistoryTool(chatHistory: [], correlation: "").name,
+        LoadSkillTool(manifests: []).name,
+        RecallTool(projectPath: "").name,
+    ]
+
+    /// The injected tools a run is allowed, given what kind of run it is.
+    static func allowedInjectedTools(_ tools: [AgentTool]) -> [AgentTool] {
+        guard isActive else { return tools }
+        let withheld = tools.filter { stateChangingInjectedToolNames.contains($0.name) }.map(\.name)
+        guard !withheld.isEmpty else { return tools }
+        logger.notice("[REPORTONLY] Withheld \(withheld.sorted().joined(separator: ", ")) from this run. CONSEQUENCE: an unwatched run reading untrusted task output cannot write or delete project memory — what it saved would reach the system prompt of every later Code run in this project. The user's next attended turn has them again.")
+        return tools.filter { !stateChangingInjectedToolNames.contains($0.name) }
     }
 }

@@ -17,6 +17,8 @@ private let logger = DGLogger(category: "GeminiLLMProvider")
 /// Handles the official Google Gemini API via REST.
 /// Adapts Devgentic's standard message payloads to Gemini's unique `contents` and `parts` architecture.
 struct GeminiLLMProvider: LLMProvider {
+    /// The model this provider's calls are priced as (`ModelPriceList`).
+    var pricingKey: PricingKey { PricingKey(provider: .gemini, model: config.modelName) }
 
     let config: LLMProviderConfig
     var modelName: String { config.modelName }
@@ -86,6 +88,48 @@ struct GeminiLLMProvider: LLMProvider {
         return generationConfig.isEmpty ? nil : generationConfig
     }
 
+    // MARK: - Thinking (readiness CR-28)
+
+    /// Asks a thinking model for its thought summaries — `generationConfig.thinkingConfig.includeThoughts`.
+    ///
+    /// ⚠️⚠️ READINESS CR-28 (2026-10-11). This was sent as a TOP-LEVEL `thinking_config` — not a field
+    /// of the request (the API's is `generationConfig.thinkingConfig`) — so no request ever asked for
+    /// thoughts, and the "thinking" trace this provider decodes was never filled. Sent only to model
+    /// families that think (Gemini 2.5 and later, and the `-latest` aliases that point at them): an
+    /// older or unrecognised model gets no thinking config at all, which every model accepts.
+    static func requestThoughtSummaries(in body: inout [String: Any], modelName: String) {
+        guard modelThinks(modelName) else { return }
+        var generationConfig = body["generationConfig"] as? [String: Any] ?? [:]
+        var thinkingConfig = generationConfig["thinkingConfig"] as? [String: Any] ?? [:]
+        thinkingConfig["includeThoughts"] = true
+        generationConfig["thinkingConfig"] = thinkingConfig
+        body["generationConfig"] = generationConfig
+    }
+
+    /// Whether `modelName` is a Gemini family that supports thinking: `gemini-X.Y…` with X.Y ≥ 2.5,
+    /// or a `gemini-…-latest` alias (those point at thinking models). Vendor and `models/` prefixes
+    /// are stripped first.
+    static func modelThinks(_ modelName: String) -> Bool {
+        let id = modelName.lowercased().split(separator: "/").last.map(String.init) ?? ""
+        guard id.hasPrefix("gemini-") else { return false }
+        if id.hasSuffix("-latest") { return true }
+        let version = id.dropFirst("gemini-".count).prefix { $0 != "-" }
+        let parts = version.split(separator: ".").compactMap { Int($0) }
+        guard let major = parts.first else { return false }
+        let minor = parts.count > 1 ? parts[1] : 0
+        return major > 2 || (major == 2 && minor >= 5)
+    }
+
+    /// The text of a thought part (`{"text": …, "thought": true}`), or nil for any other part.
+    ///
+    /// ⚠️ CR-28: thought parts carry their text in `text`, flagged by a BOOLEAN `thought`. The decoders
+    /// tested `text` first and read `thought` as a String, so a thought summary was appended to the
+    /// ANSWER and the trace stayed empty. Checked before the text branch.
+    static func thoughtText(of part: [String: Any]) -> String? {
+        guard (part["thought"] as? Bool) == true else { return nil }
+        return part["text"] as? String ?? ""
+    }
+
     /// Applies `generationConfig` and `safetySettings` to a request body.
     ///
     /// ⚠️ Exists so the two cannot drift apart again. Safety Settings shipped as four pickers that
@@ -146,6 +190,9 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
+        // which would otherwise report it as a malformed response.
+        if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
             throw LLMProviderError.invalidResponse("Missing candidates in Gemini response.")
@@ -154,7 +201,7 @@ struct GeminiLLMProvider: LLMProvider {
         // Handle Safety Blockages and truncation
         if let finishReason = firstCandidate["finishReason"] as? String {
             if finishReason == "SAFETY" {
-                throw LLMProviderError.invalidResponse("Generation blocked by Gemini Safety Settings.")
+                throw LLMProviderError.refused(provider: "Gemini", detail: "blocked by Safety Settings")
             }
             if finishReason == "MAX_TOKENS" {
                 let limitDesc = maxOutputTokens.map { String($0) } ?? "model default"
@@ -172,7 +219,7 @@ struct GeminiLLMProvider: LLMProvider {
 
         // Parse parts for both Text and Function Calls
         for part in parts {
-            if let text = part["text"] as? String {
+            if Self.thoughtText(of: part) == nil, let text = part["text"] as? String {
                 textResponse += text
             }
 
@@ -191,7 +238,7 @@ struct GeminiLLMProvider: LLMProvider {
         }
 
         // If the model called a tool, intercept and return the synthesized LeanCognitiveStep JSON string
-        let usage = json.flatMap { TokenUsage.fromGemini($0) }
+        let usage = json.flatMap { TokenUsage.fromGemini($0, pricing: pricingKey) }
         if let syntheticStep = syntheticStep {
             let syntheticData = try JSONSerialization.data(withJSONObject: syntheticStep)
             return (String(data: syntheticData, encoding: .utf8) ?? "{}", usage)
@@ -247,17 +294,20 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
+        // which would otherwise report it as a malformed response.
+        if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]], let firstCandidate = candidates.first else {
             throw LLMProviderError.invalidResponse("Missing candidates in Gemini response.")
         }
         if let finishReason = firstCandidate["finishReason"] as? String, finishReason == "SAFETY" {
-            throw LLMProviderError.invalidResponse("Generation blocked by Gemini Safety Settings.")
+            throw LLMProviderError.refused(provider: "Gemini", detail: "blocked by Safety Settings")
         }
         guard let content = firstCandidate["content"] as? [String: Any], let parts = content["parts"] as? [[String: Any]] else {
             throw LLMProviderError.invalidResponse("Missing content parts in Gemini response.")
         }
         var textResponse = ""
-        for part in parts { if let text = part["text"] as? String { textResponse += text } }
+        for part in parts where Self.thoughtText(of: part) == nil { if let text = part["text"] as? String { textResponse += text } }
         return textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -275,10 +325,7 @@ struct GeminiLLMProvider: LLMProvider {
         }
 
         applyGenerationSettings(to: &body)
-
-        // --- NATIVE THINKING CONFIGURATION ---
-        // Enabled for models that support internal reasoning traces (e.g. Gemini 2.0 Thinking)
-        body["thinking_config"] = ["include_thoughts": true]
+        Self.requestThoughtSummaries(in: &body, modelName: config.modelName)
 
         let url = try buildURL(endpoint: ":generateContent")
 
@@ -288,6 +335,9 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
+        // which would otherwise report it as a malformed response.
+        if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
             throw LLMProviderError.invalidResponse("Missing candidates in Gemini response.")
@@ -295,7 +345,7 @@ struct GeminiLLMProvider: LLMProvider {
 
         if let finishReason = firstCandidate["finishReason"] as? String {
             if finishReason == "SAFETY" {
-                throw LLMProviderError.invalidResponse("Generation blocked by Gemini Safety Settings.")
+                throw LLMProviderError.refused(provider: "Gemini", detail: "blocked by Safety Settings")
             }
             if finishReason == "MAX_TOKENS" {
                 let limitDesc = maxOutputTokens.map { String($0) } ?? "model default"
@@ -313,10 +363,10 @@ struct GeminiLLMProvider: LLMProvider {
         var pendingTools: [PendingToolCall] = []
 
         for part in parts {
-            if let text = part["text"] as? String {
-                textResponse += text
-            } else if let thought = part["thought"] as? String {
+            if let thought = Self.thoughtText(of: part) {
                 thinkingTrace += thought
+            } else if let text = part["text"] as? String {
+                textResponse += text
             } else if let functionCall = part["functionCall"] as? [String: Any],
                       let name = functionCall["name"] as? String {
 
@@ -329,12 +379,13 @@ struct GeminiLLMProvider: LLMProvider {
         let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
 
         // Extract token usage from Gemini API response
-        let usage = json.flatMap { TokenUsage.fromGemini($0) }
+        let usage = json.flatMap { TokenUsage.fromGemini($0, pricing: pricingKey) }
 
         // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
         // .toolCall events, not from this field. A placeholder here would pollute any
         // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
-        return ModernCognitiveStep(reasoning: textResponse, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
+        return ModernCognitiveStep(reasoning: textResponse, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage,
+                                   reasoningReplay: pendingTools.isEmpty ? nil : Self.thoughtSignatureReplay(in: parts))
     }
 
     // MARK: - Native-Turn Cognitive Step (G12)
@@ -371,8 +422,7 @@ struct GeminiLLMProvider: LLMProvider {
         }
 
         applyGenerationSettings(to: &body)
-
-        body["thinking_config"] = ["include_thoughts": true]
+        Self.requestThoughtSummaries(in: &body, modelName: config.modelName)
 
         let url = try buildURL(endpoint: ":generateContent")
         var request = makeRequest(url: url)
@@ -381,6 +431,9 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
+        // which would otherwise report it as a malformed response.
+        if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
             throw LLMProviderError.invalidResponse("Missing candidates in Gemini response.")
@@ -388,7 +441,7 @@ struct GeminiLLMProvider: LLMProvider {
 
         if let finishReason = firstCandidate["finishReason"] as? String {
             if finishReason == "SAFETY" {
-                throw LLMProviderError.invalidResponse("Generation blocked by Gemini Safety Settings.")
+                throw LLMProviderError.refused(provider: "Gemini", detail: "blocked by Safety Settings")
             }
             if finishReason == "MAX_TOKENS" {
                 let limitDesc = maxOutputTokens.map { String($0) } ?? "model default"
@@ -406,10 +459,10 @@ struct GeminiLLMProvider: LLMProvider {
         var pendingTools: [PendingToolCall] = []
 
         for part in parts {
-            if let text = part["text"] as? String {
-                textResponse += text
-            } else if let thought = part["thought"] as? String {
+            if let thought = Self.thoughtText(of: part) {
                 thinkingTrace += thought
+            } else if let text = part["text"] as? String {
+                textResponse += text
             } else if let functionCall = part["functionCall"] as? [String: Any],
                       let name = functionCall["name"] as? String {
                 let args = functionCall["args"] as? [String: Any] ?? [:]
@@ -419,9 +472,10 @@ struct GeminiLLMProvider: LLMProvider {
         }
 
         let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
-        let usage = json.flatMap { TokenUsage.fromGemini($0) }
+        let usage = json.flatMap { TokenUsage.fromGemini($0, pricing: pricingKey) }
 
-        return ModernCognitiveStep(reasoning: textResponse, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
+        return ModernCognitiveStep(reasoning: textResponse, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage,
+                                   reasoningReplay: pendingTools.isEmpty ? nil : Self.thoughtSignatureReplay(in: parts))
     }
 
     // MARK: - Bot Flow (Streaming)
@@ -456,27 +510,71 @@ struct GeminiLLMProvider: LLMProvider {
                 // usageMetadata is cumulative; count only the final chunk (the one carrying
                 // a finishReason) so earlier chunks don't double-count.
                 let hasFinish = (json["candidates"] as? [[String: Any]])?.first?["finishReason"] != nil
-                return hasFinish ? TokenUsage.fromGemini(json) : nil
+                return hasFinish ? TokenUsage.fromGemini(json, pricing: self.pricingKey) : nil
             },
-            handleLine: { line, _ in
-                guard line.hasPrefix("data: ") else { return .skip }
-                let payload = String(line.dropFirst(6))
-
-                if payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .skip }
-
-                guard let data = payload.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let candidates = json["candidates"] as? [[String: Any]],
-                      let firstCandidate = candidates.first,
-                      let content = firstCandidate["content"] as? [String: Any],
-                      let parts = content["parts"] as? [[String: Any]],
-                      let firstPart = parts.first,
-                      let text = firstPart["text"] as? String else {
-                    return .skip
-                }
-                return .emit(text)
-            }
+            // ⚠️ The decoder itself, not a closure around it, so tests run exactly this.
+            handleLine: Self.geminiStreamLine
         )
+    }
+
+    // MARK: - Stream decode and blocking (static so they are testable without a network)
+
+    /// Each function-call part's `thoughtSignature`, in call order (null where a part had none), or nil
+    /// when no part carried one.
+    ///
+    /// ⚠️ CR-23: Gemini thinking models attach an opaque `thoughtSignature` to function-call parts and
+    /// require it back on the replayed model turn; it was never read, so a tool loop on such a model
+    /// lost its reasoning context or was rejected. Positional, because the adapter rebuilds the parts
+    /// in the same order the calls were decoded.
+    static func thoughtSignatureReplay(in parts: [[String: Any]]) -> JSONValue? {
+        let signatures: [JSONValue] = parts.compactMap { part in
+            guard part["functionCall"] != nil else { return nil }
+            return (part["thoughtSignature"] as? String).map(JSONValue.string) ?? .null
+        }
+        guard signatures.contains(where: { $0 != .null }) else { return nil }
+        return .object(["functionCallThoughtSignatures": .array(signatures)])
+    }
+
+    /// Finish reasons that mean Gemini's safety or policy systems stopped the answer.
+    static let blockingFinishReasons: Set<String> = [
+        "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY",
+    ]
+
+    /// The block in a Gemini response or stream chunk, or nil.
+    ///
+    /// ⚠️ CR-16: `promptFeedback.blockReason` (the PROMPT was refused — there are no candidates at all)
+    /// and a blocking `finishReason` mid-stream were never checked on the stream path; the user got an
+    /// empty or partial answer with no explanation. The non-streaming paths only knew `SAFETY`.
+    static func blockError(in json: [String: Any]?) -> LLMProviderError? {
+        if let reason = (json?["promptFeedback"] as? [String: Any])?["blockReason"] as? String {
+            return .refused(provider: "Gemini", detail: "prompt blocked: \(reason)")
+        }
+        if let finish = ((json?["candidates"] as? [[String: Any]])?.first)?["finishReason"] as? String,
+           blockingFinishReasons.contains(finish) {
+            return .refused(provider: "Gemini", detail: "stopped: \(finish)")
+        }
+        return nil
+    }
+
+    /// One SSE line of a Gemini `streamGenerateContent` stream.
+    static func geminiStreamLine(_ line: String, _ event: String) -> SSELineDirective {
+        guard line.hasPrefix("data: ") else { return .skip }
+        let payload = String(line.dropFirst(6))
+        if payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .skip }
+        guard let data = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .skip }
+
+        if let blocked = blockError(in: json) {
+            logger.notice("[GEMINI] Stream blocked (\(blocked.localizedDescription)). CONSEQUENCE: the turn fails with that reason instead of ending as a silent empty or partial answer; not retried.")
+            return .fail(blocked)
+        }
+        guard let candidates = json["candidates"] as? [[String: Any]],
+              let content = candidates.first?["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]] else { return .skip }
+        // ⚠️ EVERY text part, not `parts.first` — a chunk carrying several parts dropped the rest
+        // (readiness CR-30). Thought parts (`"thought": true`) are not the answer and are left out.
+        let text = parts.filter { ($0["thought"] as? Bool) != true }.compactMap { $0["text"] as? String }.joined()
+        return text.isEmpty ? .skip : .emit(text)
     }
 
     // MARK: - Private Helpers

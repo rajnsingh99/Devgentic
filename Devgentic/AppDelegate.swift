@@ -92,6 +92,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Ensure modern overlay scrollers with hidden tracks across the app
         ScrollerCustomizer.install()
 
+        // Whether this launch got SWIFT_DETERMINISTIC_HASHING (Info.plist LSEnvironment / the
+        // scheme). Without it every MLX prompt re-renders its tool list in a new order each turn.
+        DeterministicHashing.logLaunchStatus()
+
         // Captured before any trace can begin this session, so the orphan reconciliation
         // below can never touch a trace created by the current process (it only reconciles
         // traces that started earlier).
@@ -753,7 +757,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Unload local models cleanly (App RAM + Ollama VRAM).
         let stats = await MLXService.shared.unloadModel()
         Self.logger.info("Termination MLX cleanup stats: \(stats)")
-        await OllamaService.shared.unloadModel()
+        // Only the Ollama models THIS app used (U10): the server may be serving other apps.
+        await LocalInferenceCoordinator.shared.unloadOllamaModelsWeUsed()
         tracker.step = "done"
     }
 
@@ -766,6 +771,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // admin `killall coreaudiod`. Crashes and force-quits cannot be covered; Repair Audio in
         // Settings is the remedy for those.
         OrbDuplexAudio.shared.release(reason: "application terminating")
+
+        // Flush the composer drafts NOW — writes are coalesced half a second behind typing, and
+        // the last keystrokes before Quit would otherwise be lost.
+        MainActor.assumeIsolated { ComposerDraftStore.shared.writeNow() }
 
         // Mark this session cleanly exited (§12.1) — async teardown already ran via
         // applicationShouldTerminate. Crashes and force-quits never get here; the next

@@ -202,7 +202,7 @@ struct AddBackendProfileView: View {
     
     /// Creates the appropriate default `BackendProfileModel` with the correct `ProfileDetails` case.
     private func createDefaultProfile() -> BackendProfileModel {
-        // baseURL stays nil = "use the provider default" — runtime, model pickers, and the
+        // baseURL stays nil = "use the provider default" — runtime, model catalog, and the
         // endpoint field all resolve nil via ProviderDefaults. Baking the literal URL in
         // here is what used to leak localhost:11434 into profiles later switched to cloud.
         let defaultLLMConfig = ProviderConfig(apiProvider: .ollama, modelName: "")

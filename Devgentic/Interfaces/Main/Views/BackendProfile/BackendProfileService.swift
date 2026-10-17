@@ -165,8 +165,13 @@ final class BackendProfileService {
     ///   place to show these. Forcing the rest to write `_ =` would be noise, and forcing them to
     ///   render something would put the same warning on screen from four directions.
     @discardableResult
-    func saveProfile(_ profile: BackendProfileModel) throws -> [ProfileValidationError] {
-        let advisories = try profileStore.saveProfile(profile)
+    func saveProfile(_ profile: BackendProfileModel,
+                     file: String = #fileID,
+                     function: String = #function,
+                     line: Int = #line) throws -> [ProfileValidationError] {
+        // ⚠️ Forward the CALLER's location. Without it every editor save logged this line, so two
+        // saves from one click named the same place and the trigger could not be told apart.
+        let advisories = try profileStore.saveProfile(profile, callerFile: file, callerFunction: function, callerLine: line)
 
         // Update in-place to preserve sidebar ordering
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
@@ -587,7 +592,7 @@ final class BackendProfileService {
             return "\(config.cognitiveCapability.rawValue) (stored when the model was picked; not in the detection cache yet — the next run re-detects)"
         }
         guard detected.cognitiveCapability == config.cognitiveCapability else {
-            return "\(detected.cognitiveCapability.rawValue) (detected now; the profile still stores \(config.cognitiveCapability.rawValue) until its next save — runs use the detected value)"
+            return "\(detected.cognitiveCapability.rawValue) (detected now; the profile still stores \(config.cognitiveCapability.rawValue) until the model is next picked from the catalog and the profile saved — runs use the detected value)"
         }
         return "\(detected.cognitiveCapability.rawValue) (detected)"
     }

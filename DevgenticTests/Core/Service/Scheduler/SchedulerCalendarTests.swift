@@ -60,12 +60,14 @@ final class SchedulerCalendarTests: XCTestCase {
     }
 
     func testAStarDayFieldKeepsTheOtherAlone() throws {
-        // `*/2` counts as unrestricted (Vixie), so the fields are ANDed: an even day that is a Monday.
+        // `*/2` counts as unrestricted (Vixie), so the fields are ANDed: a 1st/3rd/5th… day that is a
+        // Monday. ⚠️ This used to assert an EVEN day, which pinned CR-31 itself: Vixie counts a
+        // day-of-month step from the 1st, so `*/2` is days 1, 3, 5, … 31.
         let expr = try cron("0 9 */2 * 1")
         let next = try XCTUnwrap(expr.nextFireDate(after: date(2026, 10, 1), calendar: calendar))
         let comps = calendar.dateComponents([.day, .weekday], from: next)
         XCTAssertEqual(comps.weekday, 2, "must be a Monday")
-        XCTAssertEqual((comps.day ?? 1) % 2, 0, "and an even day")
+        XCTAssertEqual((comps.day ?? 0) % 2, 1, "and an odd day (1, 3, 5…)")
         // Weekday only.
         XCTAssertEqual(try cron("0 9 * * 1").nextFireDate(after: date(2026, 10, 1), calendar: calendar),
                        date(2026, 10, 5, 9, 0))

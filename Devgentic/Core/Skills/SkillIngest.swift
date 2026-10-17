@@ -398,15 +398,32 @@ enum SkillIngest {
         var fileCount = 0
 
         func walk(_ dir: URL, prefix: String) throws {
-            guard let entries = try? fm.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey]
-            ) else { return }
+            // ⚠️ READINESS CR-60 (2026-10-12). Both reads below were `try? … else { return/continue }`:
+            // a subfolder that could not be listed (permissions, a cloud placeholder not yet
+            // downloaded) was skipped and the skill was stored WITHOUT it, looking complete, against
+            // this module's own rule that half a skill is refused, never imported. They throw now,
+            // like the path and size refusals below, and `readTree` reports the skill by name.
+            let folder = prefix.isEmpty ? "the skill folder" : "'\(prefix)'"
+            let entries: [URL]
+            do {
+                entries = try fm.contentsOfDirectory(
+                    at: dir, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey])
+            } catch {
+                logger.error("[SKILL_INGEST] REFUSED: \(folder) could not be read — \(error.localizedDescription). CONSEQUENCE: the WHOLE skill is refused and reported, rather than imported without that folder's files.")
+                throw SkillIngestError.unreadable("\(folder.prefix(1).uppercased() + folder.dropFirst()) could not be read (\(error.localizedDescription)), so the skill was not imported. Check its permissions, or download it if it lives in cloud storage, and import again.")
+            }
 
             for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 let component = entry.lastPathComponent
                 guard !component.hasPrefix("."), !ignoredFileNames.contains(component) else { continue }
-                guard let values = try? entry.resourceValues(
-                    forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey]) else { continue }
+                let values: URLResourceValues
+                do {
+                    values = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey])
+                } catch {
+                    let path = prefix.isEmpty ? component : "\(prefix)/\(component)"
+                    logger.error("[SKILL_INGEST] REFUSED: '\(path)' could not be inspected — \(error.localizedDescription). CONSEQUENCE: the WHOLE skill is refused and reported, rather than imported without it.")
+                    throw SkillIngestError.unreadable("'\(path)' could not be read (\(error.localizedDescription)), so the skill was not imported.")
+                }
 
                 // ⚠️ Symlinks are neither followed nor captured — but this branch is NOT what
                 // achieves that, and saying otherwise would be the second time this codebase made

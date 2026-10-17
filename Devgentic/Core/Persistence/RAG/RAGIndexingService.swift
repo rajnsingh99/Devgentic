@@ -32,10 +32,13 @@ final class RAGIndexingService: @unchecked Sendable {
     
     /// Processes a single message for RAG vectorization.
     /// This should be called asynchronously as a fire-and-forget task when a message finishes streaming.
-    func indexSingleMessage(_ message: ChatMessage) async {
+    ///
+    /// Takes a SNAPSHOT, never the live `ChatMessage` — see `IndexableMessage` (RAG-16). Build it
+    /// where the message lives, before detaching.
+    func indexSingleMessage(_ message: IndexableMessage) async {
         // Filter out noise: Do not index error messages
-        if case .error = message.content {
-            logger.debug("Skipping vectorization: message is an error.")
+        if message.isError {
+            logger.debug("[RAG] Not indexing message \(message.id.uuidString.prefix(8)): it is an error row.")
             return
         }
 
@@ -44,13 +47,13 @@ final class RAGIndexingService: @unchecked Sendable {
         // run's "*Operation was stopped…*" was embedded and stored, observed
         // on-device 2026-07-19). Exact-match gate: a message that merely quotes the
         // phrase is real content and still indexes.
-        if let text = message.content.textContent, ChatMessage.isSyntheticPlaceholder(text) {
+        if let text = message.textContent, ChatMessage.isSyntheticPlaceholder(text) {
             logger.debug("[RAG] Skipping vectorization for message \(message.id.uuidString.prefix(8)): synthetic stopped-run placeholder, nothing retrievable.")
             return
         }
         
-        // Extract the markdown blocks pre-parsed by the UI model
-        let blocks = message.getBlocksForIndexing()
+        // Parse the snapshot's text into blocks (off the main actor — a pure function of the copy).
+        let blocks = message.blocksForIndexing()
 
         // Calibrated per block kind: prose at 512, fenced code blocks at 384 so
         // their embeddings stay fully inside the ~128-token embedder window.
@@ -58,13 +61,13 @@ final class RAGIndexingService: @unchecked Sendable {
         let chunks = chunker.chunk(blocks: blocks)
         
         guard !chunks.isEmpty else {
-            logger.debug("Skipping vectorization: no text content found (e.g. pure image message).")
+            logger.debug("[RAG] Not indexing message \(message.id.uuidString.prefix(8)): no text to index (e.g. an image-only message).")
             return
         }
         
         // Strip think blocks from the full text to prevent internal model reasoning
         // from polluting the semantic index. Only user-facing content should be searchable.
-        let rawFullText = message.content.textContent ?? chunks.joined(separator: "\n\n")
+        let rawFullText = message.textContent ?? chunks.joined(separator: "\n\n")
         let fullText = OutputSanitizer.stripThinkBlocksAndTokens(rawFullText)
         
         let parentDoc = ParentDocumentEntity(
@@ -76,6 +79,7 @@ final class RAGIndexingService: @unchecked Sendable {
         )
 
         var childEntities: [ChildChunkEntity] = []
+        var failedEmbeds = 0
 
         // Await EmbeddingService.generateEmbedding() for each chunk
         for (index, rawChunkText) in chunks.enumerated() {
@@ -90,18 +94,46 @@ final class RAGIndexingService: @unchecked Sendable {
                     conversationID: message.conversationId.uuidString
                 )
                 childEntities.append(child)
+            } else {
+                failedEmbeds += 1
             }
+        }
+        // RAG-38: a failed embed used to vanish without a word.
+        if failedEmbeds > 0, !childEntities.isEmpty {
+            logger.warning("[RAG] Message \(message.id.uuidString.prefix(8)) (conv \(message.conversationId.uuidString.prefix(8))): \(failedEmbeds) of \(chunks.count) chunk(s) could not be embedded. CONSEQUENCE: those passages are not retrievable; the rest of the message is.")
         }
 
         // Save the ParentDocumentEntity and its associated ChildChunkEntitys to ObjectBox
         if !childEntities.isEmpty {
             // Replace-on-reindex: a re-finalized message (e.g. a resumed run) replaces
-            // its prior vectors instead of appending a duplicate copy.
-            vectorStoreService.removeDocuments(sourceIdentifier: message.id.uuidString, conversationID: message.conversationId)
-            vectorStoreService.addSemanticDocument(parent: parentDoc, children: childEntities)
-            logger.info("Successfully indexed message \(message.id.uuidString) into \(childEntities.count) semantic child chunks.")
+            // its prior vectors instead of appending a duplicate copy — one transaction,
+            // so a failed write keeps the previous copy (the store logs why).
+            if vectorStoreService.replaceSemanticDocument(parent: parentDoc, children: childEntities) == .written {
+                logger.info("[RAG] Indexed message \(message.id.uuidString.prefix(8)) (conv \(message.conversationId.uuidString.prefix(8))) into \(childEntities.count) chunk(s).")
+            }
         } else {
-            logger.warning("Failed to generate any embeddings for message \(message.id.uuidString). Vector ingestion failed.")
+            logger.warning("[RAG] No chunk of message \(message.id.uuidString.prefix(8)) (conv \(message.conversationId.uuidString.prefix(8))) could be embedded (\(chunks.count) tried). CONSEQUENCE: this message is NOT in conversation memory — later turns cannot recall it once it leaves the prompt.")
+        }
+    }
+
+    /// Re-indexes an agent message as the response VERSION the user selected.
+    ///
+    /// The index holds whatever `content` was when the reply finalized — the newest variant. The
+    /// version picker only moves `selectedVariantIndex`, so after choosing an older answer the
+    /// conversation's memory still described the one the user had just rejected. Replace-on-
+    /// reindex keys on the message id, so this swaps the copy rather than adding one.
+    ///
+    /// Snapshot taken HERE, on the main actor; the work is detached. Returns the task so a test can
+    /// await it; callers ignore it.
+    @MainActor @discardableResult
+    static func reindexSelectedVariant(of message: ChatMessage) -> Task<Void, Never>? {
+        guard let selected = message.currentAgentContent else {
+            shared.logger.debug("[RAG] Variant re-index skipped for \(message.id.uuidString.prefix(8)): no selectable variant.")
+            return nil
+        }
+        let snapshot = IndexableMessage(message, content: selected)
+        return Task.detached(priority: .utility) {
+            await RAGIndexingService.shared.indexSingleMessage(snapshot)
         }
     }
 
@@ -147,27 +179,39 @@ final class RAGIndexingService: @unchecked Sendable {
     /// extension-less files (Makefile, LICENSE, .env) that the model DID see on
     /// turn 1 were unfindable by turn-2+ retrieval. Readability is decided by
     /// the read probe at index time, not by the extension.
+    ///
+    /// Kind comes from `AttachmentClassifier`, shared with the transcript and the backend:
+    /// only content the model received as TEXT is indexed — never images, folders, or
+    /// binaries (whose text read fails, so there is nothing to chunk).
     static func isRAGEligible(_ file: FileSystemItem, fileProcessor: FileProcessorService) -> Bool {
-        guard !file.isDirectory else { return false }
-        let mime = fileProcessor.getFileMimeType(for: file.url)
-        return !fileProcessor.isImageFile(mimeType: mime, url: file.url)
+        switch AttachmentClassifier.classify(file) {
+        case .text, .document:                  return true
+        case .image, .folder, .video, .binary:  return false
+        }
     }
 
+    /// - Parameters:
+    ///   - messageID: The user message that carried the files — NOT a fresh UUID, so a file's
+    ///     vectors can be traced to (and excluded with) the turn that delivered them.
+    ///   - messageTimestamp: That message's timestamp. The parent is dated to its TURN, not to
+    ///     when indexing finished: a Redo's cutoff (`RetrievalExclusion.indexedAtOrAfter`) must
+    ///     see a file as belonging to the turn it arrived in.
     func indexAttachedFiles(
         files: [FileSystemItem],
         conversationID: UUID,
-        messageID: UUID
+        messageID: UUID,
+        messageTimestamp: Date
     ) async {
         let fileProcessor = FileProcessorService()
 
         for file in files {
             guard Self.isRAGEligible(file, fileProcessor: fileProcessor) else {
-                logger.info("Skipping RAG indexing for '\(file.name)' — image or folder, not text-indexable.")
+                logger.info("[RAG] Not indexing '\(file.name)' (conv \(conversationID.uuidString.prefix(8))): an image or folder has no text to index.")
                 continue
             }
 
-            guard let text = await fileProcessor.readFileContent(for: file.url) else {
-                logger.warning("Failed to extract text from \(file.name) for RAG indexing")
+            guard let text = await fileProcessor.readFileContent(for: file.url, truncatingOversizeText: true) else {
+                logger.warning("[RAG] Could not read '\(file.name)' for conversation memory (conv \(conversationID.uuidString.prefix(8)), msg \(messageID.uuidString.prefix(8))). CONSEQUENCE: this attachment is NOT indexed — later turns cannot recall it; the turn that carried it still delivered it as usual.")
                 continue
             }
 
@@ -184,6 +228,7 @@ final class RAGIndexingService: @unchecked Sendable {
 
             // Generate embeddings for each chunk
             var childEntities: [ChildChunkEntity] = []
+            var failedEmbeds = 0
             for (index, chunkText) in chunks.enumerated() {
                 guard !chunkText.isEmpty else { continue }
                 if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
@@ -193,7 +238,13 @@ final class RAGIndexingService: @unchecked Sendable {
                         chunkIndex: index,
                         conversationID: conversationID.uuidString
                     ))
+                } else {
+                    failedEmbeds += 1
                 }
+            }
+            // RAG-38: a failed embed used to vanish without a word.
+            if failedEmbeds > 0 {
+                logger.warning("[RAG] '\(file.name)': \(failedEmbeds) of \(chunks.count) chunk(s) could not be embedded (conv \(conversationID.uuidString.prefix(8))). CONSEQUENCE: \(childEntities.isEmpty ? "the file is NOT indexed at all" : "those passages are not retrievable; the rest of the file is").")
             }
 
             guard !childEntities.isEmpty else { continue }
@@ -203,16 +254,16 @@ final class RAGIndexingService: @unchecked Sendable {
                 sourceMessageID: messageID,
                 conversationID: conversationID,
                 fullTextContent: "[File: \(file.name)]\n\(sanitizedText)",
-                timestamp: Date(),
+                timestamp: messageTimestamp,
                 sourceIdentifier: file.url.path
             )
 
             // Replace-on-reindex: re-attaching the same file in this conversation
             // replaces its prior vectors instead of appending a duplicate copy that
-            // would crowd the limit-3 retrieval slots.
-            vectorStoreService.removeDocuments(sourceIdentifier: file.url.path, conversationID: conversationID)
-            vectorStoreService.addSemanticDocument(parent: parentDoc, children: childEntities)
-            logger.info("RAG-indexed attachment: \(file.name) → \(childEntities.count) chunks")
+            // would crowd the limit-3 retrieval slots — one transaction (see the store).
+            if vectorStoreService.replaceSemanticDocument(parent: parentDoc, children: childEntities) == .written {
+                logger.info("[RAG] Indexed attachment '\(file.name)' (conv \(conversationID.uuidString.prefix(8)), msg \(messageID.uuidString.prefix(8))) → \(childEntities.count) chunk(s).")
+            }
         }
     }
 

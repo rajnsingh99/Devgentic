@@ -108,18 +108,19 @@ final class OrbConfigManagerTests: XCTestCase {
 
     func testDefaultsPreserveExistingBehaviourEverywhereElse() {
         let config = OrbConfigManager.shared
-        XCTAssertTrue(config.isEnabled)
         XCTAssertEqual(config.endpointing, .normal)
         XCTAssertTrue(config.usesReadAloudVoice, "an unset voice must follow the chat Read Aloud voice, as it did before this pane existed")
         XCTAssertEqual(config.narratorRate, 0, "0 is the sentinel for 'same rate as Read Aloud'")
         XCTAssertNil(config.profileID)
     }
 
-    func testUnsetBooleanDefaultsToTrueRatherThanFalse() {
-        // `defaults.bool(forKey:)` cannot distinguish unset from false, which is why the manager
-        // uses `object(forKey:) as? Bool ?? true`. Pin it: a fresh install must have Orb on.
+    func testOrbIsOptInOffWhenUnsetAndAnExplicitOnSurvives() {
+        // Owner, 2026-10-09: Orb is experimental and needs the microphone, so a fresh install has it
+        // OFF until the user switches it on — which is also where the microphone prompt is asked.
         XCTAssertNil(TestHost.defaults.object(forKey: AppSettings.orbEnabledKey))
-        XCTAssertTrue(OrbConfigManager.shared.isEnabled)
+        XCTAssertFalse(OrbConfigManager.shared.isEnabled)
+        OrbConfigManager.shared.isEnabled = true
+        XCTAssertTrue(OrbConfigManager.shared.isEnabled, "a user who switched Orb on must keep it on")
     }
 
     // MARK: The wake word reaches the matcher
@@ -297,5 +298,45 @@ final class OrbPreferenceExportTests: XCTestCase {
         let allowlist = Set(BundleExporter.exportablePreferenceKeys)
         XCTAssertFalse(allowlist.contains(AppSettings.orbShortcutCodeKey))
         XCTAssertFalse(allowlist.contains(AppSettings.orbProfileIDKey))
+    }
+}
+
+// MARK: - Microphone asked when Orb is switched on
+
+/// Source scan: no test hook exists for a SwiftUI binding, so this pins the wiring. It fails if the
+/// enable switch stops asking, or the ask stops reaching macOS.
+final class OrbEnableAsksForMicrophoneWiringTests: XCTestCase {
+
+    private func settingsSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let file = root.appendingPathComponent("Devgentic/Interfaces/Main/Views/Sidebar/Settings/OrbSettingsView.swift")
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("OrbSettingsView.swift not reachable from \(root.path) — running outside a checkout")
+        }
+        return try String(contentsOf: file, encoding: .utf8)
+    }
+
+    /// The text of the declaration that starts at `marker`, up to the next `private var`/`private func`.
+    private func body(of marker: String, in source: String) throws -> String {
+        let start = try XCTUnwrap(source.range(of: marker), "\(marker) not found")
+        let rest = source[start.upperBound...]
+        let end = [rest.range(of: "private var ")?.lowerBound, rest.range(of: "private func ")?.lowerBound,
+                   rest.range(of: "private static ")?.lowerBound]
+            .compactMap { $0 }.min() ?? rest.endIndex
+        return String(rest[..<end])
+    }
+
+    func testTheEnableSwitchAsksForTheMicrophoneWhenTurnedOn() throws {
+        let binding = try body(of: "private var enabledBinding", in: try settingsSource())
+        XCTAssertTrue(binding.contains("if newValue { requestMicrophoneOnEnable() }"),
+                      "switching Orb ON must ask for the microphone, and switching it off must not")
+    }
+
+    func testTheAskReachesMacOSAndRefreshesTheMicrophoneRow() throws {
+        let ask = try body(of: "private func requestMicrophoneOnEnable", in: try settingsSource())
+        XCTAssertTrue(ask.contains("AVAudioApplication.requestRecordPermission()"))
+        XCTAssertTrue(ask.contains("micPermission = AVAudioApplication.shared.recordPermission"),
+                      "the Status card's Microphone row must show the answer without reopening the pane")
     }
 }

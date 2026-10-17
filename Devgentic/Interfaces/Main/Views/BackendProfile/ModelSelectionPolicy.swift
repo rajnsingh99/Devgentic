@@ -7,7 +7,8 @@
 //  Created on 08/08/26.
 //
 //  The one rule every model picker follows when a fetched list arrives: **never rewrite a model the
-//  user already chose.**
+//  user already chose.** (2026-10-09: the profile editor's per-provider pickers named below are
+//  deleted — the model catalog replaced them — so the live caller is the ImageGen Flux2 selection.)
 //
 //  ⚠️ This rule has now been broken and re-fixed four separate times in this codebase — OpenRouter
 //  (register G95), the cloud pickers (MP-01), and the Ollama picker (A37) — because each picker
@@ -20,9 +21,9 @@
 //  because the fetch itself half-failed. The run reports the failure honestly if it really is gone,
 //  which is a far better outcome than a profile that quietly changed model.
 //
-//  The deliberate exception is `MLXModelPickerView`, which checks the local disk: an MLX model that
-//  is not installed genuinely cannot run, so it replaces the selection — but it now says so in the
-//  log rather than doing it silently.
+//  There is no exception. The former `MLXModelPickerView` carried one (an MLX model missing from
+//  the local disk was replaced); register B13 deleted it after proving its premise false, and the
+//  view itself was deleted on 2026-10-09 — nothing constructed it once the model catalog took over.
 //
 
 import Foundation

@@ -327,7 +327,7 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                         continuation.yield(.reflectionEvaluating(trial: trial))
 
-                        await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                        await GlobalRateLimiter.shared.waitForCapacity(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         try Task.checkCancellation()  // [G7] Catch cancellation before reflection LLM call
 
                         let (evaluation, reflectionUsage) = try await reflectionEvaluator.evaluate(
@@ -376,7 +376,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                         accumulatedConstraints.insert("Trial \(trial) failed: \(reflection.critique)")
 
                         // [G6] Backpressure before starting the next trial to avoid 429s
-                        await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                        await GlobalRateLimiter.shared.waitForCapacity(forKey: input.rateLimitKey, category: input.rateLimitCategory)
 
                     } // End trial loop
 

@@ -85,4 +85,36 @@ final class ReportOnlyRunTests: XCTestCase {
         XCTAssertEqual(guarded, 2, "a pipeline assembles its loadout without the constraint")
         XCTAssertEqual(raw, 0, "an unconstrained `profileTools: rawTools` came back")
     }
+
+    // MARK: - CR-17: injected tools that persist are withheld too
+
+    private var codeProfile: ProfileDetails {
+        .code(AgentConfig(llmConfig: ProviderConfig(apiProvider: .anthropic, modelName: "claude-opus-5"),
+                          tools: [], projectPath: "/tmp/project"))
+    }
+
+    private func memoryToolNames() -> [String] {
+        AgentConnect.codeMemoryTools(for: codeProfile, conversationID: UUID(), messageID: nil).map(\.name).sorted()
+    }
+
+    /// ⚠️⚠️ THE CR-17 DEFECT. An unwatched run reading untrusted task output kept `remember` and
+    /// `forget` — injected, unconfirmed, and persistent: what it saved reached the system prompt of
+    /// every later Code run in the project. Through the REAL builder, not the filter alone.
+    func testAReportOnlyCodeRunCannotWriteProjectMemory() {
+        let names = ReportOnlyRun.$isActive.withValue(true) { memoryToolNames() }
+        XCTAssertEqual(names, ["recall"], "an unwatched run must not be able to persist injected text")
+    }
+
+    /// The control: an attended Code run keeps all three.
+    func testAnAttendedCodeRunKeepsAllMemoryTools() {
+        XCTAssertEqual(memoryToolNames(), ["forget", "recall", "remember"])
+    }
+
+    /// ⚠️ DRIFT GUARD, from the invariant "every injected tool has been judged for unwatched runs".
+    /// Adding an injected tool without putting it in one set or the other fails here.
+    func testEveryInjectedToolIsClassifiedForReportOnlyRuns() {
+        let classified = ReportOnlyRun.stateChangingInjectedToolNames.union(ReportOnlyRun.readOnlyInjectedToolNames)
+        XCTAssertEqual(NativeToolCatalog.injectedToolNames, classified)
+        XCTAssertTrue(ReportOnlyRun.stateChangingInjectedToolNames.isDisjoint(with: ReportOnlyRun.readOnlyInjectedToolNames))
+    }
 }

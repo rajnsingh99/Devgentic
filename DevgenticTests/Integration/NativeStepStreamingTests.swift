@@ -74,7 +74,7 @@ final class OpenAIStreamAccumulatorTests: XCTestCase {
         let usageChunk = try XCTUnwrap(acc.lastUsageChunk)
         XCTAssertEqual(usageChunk["id"] as? String, "gen-9")
         XCTAssertNotNil(OpenAILLMProvider.routerMetadataSummary(usageChunk)?.contains("upstream: Nvidia"))
-        XCTAssertEqual(TokenUsage.fromOpenAI(usageChunk)?.inputTokens, 10)
+        XCTAssertEqual(TokenUsage.fromOpenAI(usageChunk, pricing: PricingKey(provider: .openRouter, model: "n/m:free"))?.inputTokens, 10)
     }
 
     func testRawChunkDirective() {

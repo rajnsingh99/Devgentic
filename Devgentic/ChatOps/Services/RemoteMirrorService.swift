@@ -160,6 +160,32 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
         mirroringConversations.remove(message.conversationId)
     }
 
+    /// Tells the remote chat its run is waiting for the local model, so a slow answer reads as
+    /// "second in line" rather than as a dead bridge. Same consent gate as `didStartStream`: only a
+    /// run this session's own source started is reported to it.
+    func activeStreamManager(_ manager: ActiveStreamManager, didQueueForLocalModel message: ChatMessage,
+                             notice: String, startedBy: MessageSource, for conversationID: UUID) {
+        guard let session = remoteSessions[conversationID] else { return }   // not a remote conversation
+        guard startedBy == session.source else {
+            logger.info("[Mirror] Run \(message.id.uuidString.prefix(8)) is waiting for the local model, but it was started by \(startedBy.rawValue), not this conversation's \(session.source.rawValue) session. CONSEQUENCE: the remote chat is not told — the same consent gate as mirroring.")
+            return
+        }
+        guard let provider = session.source.remoteProvider else {
+            logger.error("[Mirror] Run \(message.id.uuidString.prefix(8)): session source \(session.source.rawValue) has no remote provider. CONSEQUENCE: the local-model queue notice is not sent; the remote user sees no reply until the run starts.")
+            return
+        }
+        Task { [weak self] in
+            do {
+                _ = try await session.transport.render(
+                    .notice(Notice(tone: .info, icon: "⏳", body: notice)),
+                    to: .channel(RemoteChannel(provider: provider, channelID: session.chatID)))
+                self?.logger.info("[Mirror] Told \(session.source.rawValue) that run \(message.id.uuidString.prefix(8)) is waiting for the local model.")
+            } catch {
+                self?.logger.error("[Mirror] The local-model queue notice for run \(message.id.uuidString.prefix(8)) could not be sent to \(session.source.rawValue): \(error.localizedDescription). CONSEQUENCE: the remote user sees no reply until the run starts; the run itself is unaffected.")
+            }
+        }
+    }
+
     /// Says out loud that a run in a session-bearing conversation was NOT mirrored.
     ///
     /// ⚠️ A REFUSAL IS A DECISION THE REMOTE USER CANNOT SEE. Without this line the only evidence is
@@ -366,7 +392,7 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             // ⚠️ CANCELLING IS THE RIGHT CALL — leaving the gate parked forever is worse — but it is
             // a DECISION THE USER DID NOT MAKE, taken because the button they tapped no longer
             // matches the options in flight. It happened with no log at all.
-            logger.error("[CHATOPS] A remote gate tap for operation \(operationID) named option index \(optionIndex), which no longer matches a live gate. CONSEQUENCE: the gate is resolved as CANCELLED rather than with the option the user tapped — a workflow may take its error branch — because the button outlived the options it was posted for.")
+            logger.error("[CHATOPS] A remote gate tap for operation \(operationID) named option index \(optionIndex), which no longer matches a live gate. CONSEQUENCE: the gate is DISMISSED rather than resolved with the option the user tapped (the Gate node settles as cancelled: no option branch and no error branch runs), because the button outlived the options it was posted for.")
             await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: nil, resolvedBy: source)
             return
         }
@@ -562,7 +588,10 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
             // the user cannot see the error card the Mac shows, and with no other signal that the
             // answer was never coming. Naming every case means a `MessageContent` case added later
             // fails to COMPILE here instead of silently inheriting a success message.
-            let responseText: String
+            var responseText: String
+            // Error cards already say how the run ended; checkpoints are not replies. Everything else
+            // is annotated with the run's outcome below.
+            var annotatesOutcome = true
             switch message.content {
             case .plainText(let text), .markdownText(let text):
                 responseText = text
@@ -595,6 +624,7 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                     lines.append("Suggestion: " + TelemetrySanitizer.sanitize(suggestion))
                 }
                 responseText = lines.joined(separator: "\n\n")
+                annotatesOutcome = false
                 logger.error("[Mirror] Mirroring a FAILED run to \(session.source.rawValue) for conversation \(conversationID) — category \(category?.rawValue ?? "unspecified"). CONSEQUENCE: the remote user is now told the run failed and why; before this they were told \"Response complete.\" and had no way to learn the answer was never coming.")
 
             case .mediaArtifact(let artifact):
@@ -611,12 +641,22 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                 // checkpoints are written by `HistoryCompactionService` outside any stream — but it
                 // is named rather than defaulted so it cannot become a spurious remote message.
                 responseText = ""
+                annotatesOutcome = false
                 logger.info("[Mirror] A compaction checkpoint reached the mirror for conversation \(conversationID) and was NOT sent. CONSEQUENCE: nothing is posted remotely, which is correct — a checkpoint is not a reply. If this line ever appears, the reachability note beside it is wrong.")
 
             case .unknown(let type, _):
                 // Readable JSON this build cannot model — see `MessageContent.unknown`.
                 responseText = "The agent replied with content this version of Devgentic cannot display (\(type))."
                 logger.error("[Mirror] Unmodellable content of type \(type) reached the mirror for conversation \(conversationID). CONSEQUENCE: the remote user is told the reply cannot be shown rather than being told the run completed normally.")
+            }
+
+            if annotatesOutcome {
+                let annotated = Self.finalResponse(body: responseText, outcome: message.terminalOutcome,
+                                                   reason: message.terminalReason)
+                if annotated != responseText {
+                    logger.notice("[Mirror] Mirroring a run that ended \(message.terminalOutcome?.rawValue ?? "?") to \(session.source.rawValue) for conversation \(conversationID) — its outcome is stated with the reply. CONSEQUENCE: the remote user is told the run did not finish normally; before this a timed-out or stopped run arrived as its partial text, read as a complete answer.")
+                }
+                responseText = annotated
             }
 
             // ⚠️ EMPTINESS IS CHECKED BEFORE THE CLAIM, and it used to be checked after. `content`
@@ -647,6 +687,49 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                 logger.error("[Mirror] Failed to send response for conversation \(conversationID) to \(session.source.rawValue): \(error.localizedDescription). CONSEQUENCE: the agent's answer has NOT reached the remote chat. The send-once claim is released so the next observation pass retries — but if the stream has already ended no further pass occurs, and the answer is lost to the remote user with only this line to say so.")
             }
         }
+    }
+
+    /// The text a finished run is mirrored with, given what its content renders to (`body`) and how it
+    /// ended.
+    ///
+    /// ⚠️⚠️ THE OUTCOME LIVES OUTSIDE THE CONTENT. A run stopped by a time limit (the global ceiling,
+    /// the scheduler's deadline) or by Stop is stamped `.timedOut` / `.cancelled` and then cancelled —
+    /// no error card is written, so the content is just whatever text it had produced. This mirror read
+    /// only the content, so the remote user received that partial text as if it were the whole answer,
+    /// or "Response complete." when there was none. The Mac showed "Timed out"; the remote chat never did.
+    ///
+    /// - A time-out or stop: the reason (sanitised — it leaves the Mac) follows the partial text, or
+    ///   stands alone when there was none.
+    /// - A failure with prose: a failure line follows it. A failure with NO prose returns "" — the error
+    ///   card arrives in a later pass and says more than the reason does.
+    /// - Anything else: `body` unchanged.
+    ///
+    /// Pure, for tests.
+    nonisolated static func finalResponse(body: String, outcome: ExecutionOutcome?, reason: String?) -> String {
+        let trimmed = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A sentence of its own, whatever the reason's source: "Cancelled by user" and most error
+        // descriptions carry no full stop, and the line continues after them.
+        let why = (trimmed?.isEmpty == false) ? Self.sentence(TelemetrySanitizer.sanitize(trimmed!)) : nil
+        let notice: String
+        switch outcome {
+        case .timedOut:
+            notice = "⏱ " + (why ?? "The run timed out before it finished.")
+        case .cancelled:
+            notice = "⏹ " + (why ?? "The run was stopped before it finished.")
+        case .failed:
+            guard !body.isEmpty else { return "" }
+            notice = "⚠️ The run failed before it finished" + (why.map { ": \($0)" } ?? ".")
+        case .completed, .completedWithWarnings, nil:
+            return body
+        }
+        guard !body.isEmpty else { return notice }
+        return body + "\n\n" + notice + " The text above is what it had written so far."
+    }
+
+    /// `text` ending in sentence punctuation — a full stop added when it has none.
+    private nonisolated static func sentence(_ text: String) -> String {
+        guard let last = text.last, !".!?…)\"'”’".contains(last) else { return text }
+        return text + "."
     }
 
     // MARK: - Cross-Surface HITL Resolution

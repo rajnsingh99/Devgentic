@@ -26,8 +26,15 @@ enum WebSearchKeyStore {
     /// Keychain service identifier. ⚠️ Changing this orphans the stored key — nothing migrates it.
     static let service = "com.devgentic.websearch"
 
-    /// One key per user, not per profile.
+    /// One key per user, not per profile. This is the GOOGLE account: it predates multiple
+    /// providers, and keeping it means an already-stored Google key stays readable.
     static let account = "apiKey"
+
+    /// The Keychain account for a provider. Google keeps the legacy `apiKey`; the others are
+    /// named after themselves so no two providers can ever read each other's secret.
+    static func keychainAccount(for provider: WebSearchProvider) -> String {
+        provider == .google ? account : provider.rawValue
+    }
 
     /// ⚠️ TEST SEAM, same shape as `ProviderKeyStore.storage`. Mutated only by
     /// `setStorageForTesting`; production never reassigns it.
@@ -44,11 +51,11 @@ enum WebSearchKeyStore {
     /// - Returns: whether the Keychain now holds it. `false` means the key is stored NOWHERE — this
     ///   store never falls back to plaintext, which is the whole point of its existence.
     @discardableResult
-    static func save(_ key: String) -> Bool {
+    static func save(_ key: String, for provider: WebSearchProvider = .google) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return delete() }
+        guard !trimmed.isEmpty else { return delete(for: provider) }
 
-        let status = storage.save(value: trimmed, service: service, account: account)
+        let status = storage.save(value: trimmed, service: service, account: keychainAccount(for: provider))
         guard status == errSecSuccess else {
             logger.error(
                 "[SECRETS] Failed to write the web-search API key to the Keychain (OSStatus \(status)). "
@@ -66,14 +73,14 @@ enum WebSearchKeyStore {
     ///
     /// ⚠️ Only for callers that merely need a value to send. Anything that WRITES based on the
     /// answer must use `read()` — register B2.
-    static func load() -> String? {
-        guard case .found(let key) = storage.read(service: service, account: account) else { return nil }
+    static func load(for provider: WebSearchProvider = .google) -> String? {
+        guard case .found(let key) = storage.read(service: service, account: keychainAccount(for: provider)) else { return nil }
         return key
     }
 
     /// Reads the key, distinguishing "none stored" from "the read failed".
-    static func read() -> KeychainReadOutcome {
-        let outcome = storage.read(service: service, account: account)
+    static func read(for provider: WebSearchProvider = .google) -> KeychainReadOutcome {
+        let outcome = storage.read(service: service, account: keychainAccount(for: provider))
         if case .failed(let status) = outcome {
             logger.error(
                 "[SECRETS] Could not read the web-search API key from the Keychain (OSStatus \(status)) "
@@ -89,8 +96,8 @@ enum WebSearchKeyStore {
     /// - Returns: whether the Keychain no longer holds it (`errSecItemNotFound` counts as success —
     ///   the desired end state is "gone", not "we did the deleting").
     @discardableResult
-    static func delete() -> Bool {
-        let status = storage.delete(service: service, account: account)
+    static func delete(for provider: WebSearchProvider = .google) -> Bool {
+        let status = storage.delete(service: service, account: keychainAccount(for: provider))
         guard status != errSecSuccess && status != errSecItemNotFound else { return true }
         logger.error(
             "[SECRETS] Failed to remove the web-search API key from the Keychain (OSStatus \(status)). "

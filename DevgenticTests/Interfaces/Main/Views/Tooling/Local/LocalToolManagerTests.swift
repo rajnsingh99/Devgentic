@@ -29,7 +29,7 @@ final class LocalToolManagerTests: XCTestCase {
         XCTAssertFalse(wrapper.requiresConfirmation)
     }
 
-    func testWhitelist_FsSmartSearch_NoConfirmation() {
+    func testWhitelist_SpotlightSearch_NoConfirmation() {
         let wrapper = NativeToolWrapper(nativeTool: SmartSearchTool())
         XCTAssertFalse(wrapper.requiresConfirmation)
     }

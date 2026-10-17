@@ -47,6 +47,13 @@ enum LiveModelDetection {
         // ⚠️ Never in the test host: loading would read the DEVELOPER's real Ollama server and MLX
         // folder, and a test's profile would then resolve against whatever happens to be installed.
         // Tests see only the caches they set.
+        // ⚠️ CR-8: the Ollama model cache holds ONE server's models — `OllamaService.ollamaBaseURL`.
+        // A profile pointed at another server must not be resolved against them: a same-named model
+        // there can be a different build with a different template.
+        if stored.apiProvider == .ollama, !ollamaCacheServes(stored) {
+            logger.notice("[MODEL_DETECT] Profile '\(profile.displayName)': its Ollama server \(InferenceEngine.normalizedOllamaURL(stored.baseURL)) is not the one live detection reads (\(InferenceEngine.normalizedOllamaURL(OllamaService.shared.ollamaBaseURL))). CONSEQUENCE: this run uses the values stored on the profile rather than another server's model data.")
+            return profile
+        }
         if !TestHost.isRunning {
             if stored.apiProvider == .ollama { await loadOllamaModelsIfNeeded() }
             if stored.apiProvider == .mlx { await MLXModelService.shared.ensureLoaded() }
@@ -55,12 +62,35 @@ enum LiveModelDetection {
             logger.notice("[MODEL_DETECT] Profile '\(profile.displayName)': no live detection for \(stored.apiProvider.rawValue) model '\(stored.modelName)'. CONSEQUENCE: this run uses the values stored on the profile (capability \(stored.cognitiveCapability.rawValue)); they may be stale if the model changed since it was picked.")
             return profile
         }
-        if detected != stored {
-            logger.notice("[MODEL_DETECT] Profile '\(profile.displayName)', model '\(stored.modelName)': stored capability \(stored.cognitiveCapability.rawValue) / dialect \(stored.modelDialect.rawValue), detected \(detected.cognitiveCapability.rawValue) / \(detected.modelDialect.rawValue). CONSEQUENCE: this run uses the DETECTED values; the profile's stored copy is updated the next time it is saved from the editor.")
+        // ⚠️ Names every field that differs. This line used to print only capability and dialect,
+        // so a profile whose stored METADATA was stale logged "stored Parallel Actions … detected
+        // Parallel Actions" — a difference report showing two identical values.
+        let differences = differingMeasurements(stored: stored, detected: detected)
+        if !differences.isEmpty {
+            logger.notice("[MODEL_DETECT] Profile '\(profile.displayName)' (\(profile.id.uuidString.prefix(8))), model '\(stored.modelName)': stored copy differs from detection — \(differences.joined(separator: "; ")). CONSEQUENCE: this run uses the DETECTED values; the stored copy is refreshed when the model is next picked from the catalog and the profile saved.")
         }
         var resolved = profile
         resolved.details = profile.details.settingLLMProviderConfig(detected)
         return resolved
+    }
+
+    /// Each measured field whose stored value differs from detection, as "field stored → detected".
+    nonisolated static func differingMeasurements(stored: ProviderConfig, detected: ProviderConfig) -> [String] {
+        func meta(_ m: ModelMetadata?) -> String {
+            guard let m else { return "none" }
+            return "\(m.tier.rawValue) tier, \(m.quantization ?? "no quant"), \(m.parameterCount ?? "no param count"), window \(m.contextWindow.map(String.init) ?? "unknown")"
+        }
+        var out: [String] = []
+        func note<T: Equatable>(_ name: String, _ a: T, _ b: T, _ text: (T) -> String) {
+            if a != b { out.append("\(name) \(text(a)) → \(text(b))") }
+        }
+        note("capability", stored.cognitiveCapability, detected.cognitiveCapability) { $0.rawValue }
+        note("dialect", stored.modelDialect, detected.modelDialect) { $0.rawValue }
+        note("metadata", stored.modelMetadata, detected.modelMetadata, meta)
+        note("modalities", stored.supportedModalities, detected.supportedModalities) { "\($0)" }
+        note("template", stored.chatTemplateSource, detected.chatTemplateSource) { $0.description }
+        note("stop sequences", stored.stopSequences, detected.stopSequences) { "\($0.count)" }
+        return out
     }
 
     // MARK: - Synchronous, cache-only
@@ -71,7 +101,7 @@ enum LiveModelDetection {
         var out = config
         switch config.apiProvider {
         case .ollama:
-            guard let model = ollamaModel(named: config.modelName) else { return nil }
+            guard ollamaCacheServes(config), let model = ollamaModel(named: config.modelName) else { return nil }
             out.cognitiveCapability = model.cognitiveCapability
             out.modelDialect = model.modelDialect
             if let metadata = model.cognitiveProfile.metadata { out.modelMetadata = metadata }
@@ -103,13 +133,53 @@ enum LiveModelDetection {
         return models.first(where: { $0.name == withTag })
     }
 
+    /// Whether the in-memory Ollama model list belongs to the server `config` talks to.
+    static func ollamaCacheServes(_ config: ProviderConfig) -> Bool {
+        InferenceEngine.normalizedOllamaURL(config.baseURL)
+            == InferenceEngine.normalizedOllamaURL(OllamaService.shared.ollamaBaseURL)
+    }
+
+    enum OllamaLoadAction: Equatable {
+        /// The list is loaded, or the throttle says not yet.
+        case none
+        /// The server has never been probed (or was down): probe it, and load the list if it answers.
+        case probeAndLoad
+        /// The server is known to be up; load the list.
+        case loadOnly
+    }
+
+    /// What a run should do to get the Ollama model list.
+    ///
+    /// ⚠️⚠️ READINESS CR-8 (2026-10-10). This used to call `loadLocalModels()` unconditionally, which
+    /// returns at once unless `serverStatus == .connected` — and `.connected` is set only by
+    /// `checkServerStatusAndUpdateModels`, whose only caller is the Ollama store sheet. So after a cold
+    /// launch, until the user happened to open that sheet, live detection NEVER ran: scheduled, ChatOps
+    /// and composer runs all fell back to the stored capability and dialect — the four cases this file
+    /// exists to fix — and the 60 s throttle was armed regardless.
+    nonisolated static func ollamaLoadAction(serverConnected: Bool, hasModels: Bool,
+                                             lastAttempt: Date?, now: Date) -> OllamaLoadAction {
+        guard !hasModels else { return .none }
+        if let lastAttempt, now.timeIntervalSince(lastAttempt) < ollamaReloadInterval { return .none }
+        return serverConnected ? .loadOnly : .probeAndLoad
+    }
+
     /// Loads the Ollama model list when it has never been loaded this run (nothing has opened a
     /// picker yet), throttled so an offline server is asked at most once a minute.
     private static func loadOllamaModelsIfNeeded() async {
-        guard OllamaService.shared.localModels.isEmpty else { return }
-        if let last = lastOllamaLoadAttempt, Date().timeIntervalSince(last) < ollamaReloadInterval { return }
+        let service = OllamaService.shared
+        let action = ollamaLoadAction(serverConnected: service.serverStatus == .connected,
+                                      hasModels: !service.localModels.isEmpty,
+                                      lastAttempt: lastOllamaLoadAttempt, now: Date())
+        guard action != .none else { return }
         lastOllamaLoadAttempt = Date()
-        await OllamaService.shared.loadLocalModels()
+        switch action {
+        case .probeAndLoad: await service.checkServerStatusAndUpdateModels()
+        case .loadOnly: await service.loadLocalModels()
+        case .none: break
+        }
+        if service.localModels.isEmpty {
+            logger.notice("[MODEL_DETECT] Ollama model list still empty after \(action == .probeAndLoad ? "probing" : "loading") \(service.ollamaBaseURL) (status \(String(describing: service.serverStatus))). CONSEQUENCE: runs use stored model values; retried in \(Int(ollamaReloadInterval)) s.")
+        }
     }
 
     /// Test seam: forget the throttle.

@@ -15,6 +15,7 @@
 //
 
 import XCTest
+import CoreAudio
 @testable import devgentic
 
 // MARK: - Wake-word matching and command extraction
@@ -569,5 +570,108 @@ final class OrbAnnouncementTests: XCTestCase {
         for outcome in ExecutionOutcome.allCases {
             XCTAssertFalse(OrbSessionController.announcement(for: outcome, reason: nil).isEmpty)
         }
+    }
+}
+
+// MARK: - Device test 2026-10-10: a deaf microphone after speech (Bluetooth earbuds)
+
+@MainActor
+final class OrbDeadMicrophoneRecoveryTests: XCTestCase {
+
+    // MARK: Fix 1 — a dead session is ended, not waited out
+
+    func testADeafSessionIsEndedOnceTheWarningDelayPasses() {
+        let limit = OrbSessionController.deadAudioWarningDelay
+        XCTAssertTrue(OrbSessionController.endsDeadSession(receivedAudio: false, sessionAge: limit + 0.3, narrationListener: false),
+                      "the device log waited 13–19 s on a deaf session the first retry fixed")
+        XCTAssertFalse(OrbSessionController.endsDeadSession(receivedAudio: false, sessionAge: limit - 0.5, narrationListener: false),
+                       "a session still starting up is not dead yet")
+    }
+
+    func testAHealthySessionIsNeverEnded() {
+        XCTAssertFalse(OrbSessionController.endsDeadSession(receivedAudio: true, sessionAge: 60, narrationListener: false))
+    }
+
+    func testANarrationListenerIsLeftToCloseWithTheAnswer() {
+        XCTAssertFalse(OrbSessionController.endsDeadSession(receivedAudio: false, sessionAge: 60, narrationListener: true))
+    }
+
+    // MARK: Fix 2 — a longer settle for a Bluetooth microphone right after speech
+
+    func testBluetoothRightAfterSpeechWaitsForTheHeadsetToSwitch() {
+        XCTAssertEqual(OrbSessionController.settleDelay(bluetoothInput: true, secondsSinceSpeech: 0.1, afterDeadSession: false),
+                       OrbSessionController.bluetoothAudioSettleDelay)
+        XCTAssertGreaterThan(OrbSessionController.bluetoothAudioSettleDelay, 1.0)
+    }
+
+    func testBluetoothAfterADeadSessionAlsoWaitsLonger() {
+        XCTAssertEqual(OrbSessionController.settleDelay(bluetoothInput: true, secondsSinceSpeech: nil, afterDeadSession: true),
+                       OrbSessionController.bluetoothAudioSettleDelay)
+    }
+
+    func testAQuietRecycleOnBluetoothKeepsTheShortSettle() {
+        // A longer settle with nothing said is just a longer gap in which the wake word is lost.
+        XCTAssertEqual(OrbSessionController.settleDelay(bluetoothInput: true, secondsSinceSpeech: nil, afterDeadSession: false), 1.0)
+        XCTAssertEqual(OrbSessionController.settleDelay(bluetoothInput: true, secondsSinceSpeech: 40, afterDeadSession: false), 1.0)
+    }
+
+    func testABuiltInMicrophoneNeverWaitsLonger() {
+        XCTAssertEqual(OrbSessionController.settleDelay(bluetoothInput: false, secondsSinceSpeech: 0.1, afterDeadSession: true), 1.0)
+    }
+
+    func testBluetoothTransportsAreRecognised() {
+        XCTAssertTrue(MicrophoneCatalog.isBluetooth(transportType: kAudioDeviceTransportTypeBluetooth))
+        XCTAssertTrue(MicrophoneCatalog.isBluetooth(transportType: kAudioDeviceTransportTypeBluetoothLE))
+        XCTAssertFalse(MicrophoneCatalog.isBluetooth(transportType: kAudioDeviceTransportTypeBuiltIn))
+        XCTAssertFalse(MicrophoneCatalog.isBluetooth(transportType: kAudioDeviceTransportTypeUSB))
+    }
+}
+
+/// Source pins: no test hook reaches the watchdog, the settle, or a SwiftUI hover. Each fails if
+/// its wiring is cut.
+final class OrbDeadMicrophoneWiringTests: XCTestCase {
+
+    private func source(_ relative: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let file = root.appendingPathComponent(relative)
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("\(relative) not reachable from \(root.path) — running outside a checkout")
+        }
+        return try String(contentsOf: file, encoding: .utf8)
+    }
+
+    private func count(_ needle: String, in haystack: String) -> Int {
+        haystack.components(separatedBy: needle).count - 1
+    }
+
+    func testTheWatchdogEndsDeadSessions() throws {
+        let controller = try source("Devgentic/Orb/OrbSessionController.swift")
+        XCTAssertEqual(count("if Self.endsDeadSession(", in: controller), 1)
+    }
+
+    func testTheSettleAsksWhetherTheMicrophoneIsBluetooth() throws {
+        let controller = try source("Devgentic/Orb/OrbSessionController.swift")
+        XCTAssertEqual(count("Self.settleDelay(bluetoothInput: MicrophoneSelection.shared.sessionInputIsBluetooth", in: controller), 1)
+        XCTAssertTrue(controller.contains("try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))"),
+                      "the settle must sleep for the computed delay, not the fixed one")
+    }
+
+    func testBothSpeechOutputsRecordWhenTheyLetGoOfAudio() throws {
+        for file in ["Devgentic/Orb/OrbVoiceOutput.swift", "Devgentic/Orb/OrbStreamingSpeaker.swift"] {
+            XCTAssertEqual(count("if synthesizer != nil { lastAudioReleasedAt = Date() }", in: try source(file)), 1, file)
+        }
+    }
+
+    func testTheOrbOffersCloseNotSwitchProfileAndOnlyOnHover() throws {
+        let view = try source("Devgentic/Orb/OrbFloatingView.swift")
+        XCTAssertEqual(count("OrbBubbleButton(", in: view), 1, "one bubble: Close")
+        XCTAssertTrue(view.contains("systemName: \"xmark\""))
+        XCTAssertTrue(view.contains("action: onClose"))
+        XCTAssertFalse(view.contains("systemName: \"person.crop.circle\""), "the profile bubble is gone")
+        XCTAssertTrue(view.contains("Button(\"Switch Profile…\") { controller.requestProfileSwitch() }"),
+                      "switching profile stays reachable from the right-click menu")
+        XCTAssertTrue(view.contains(".allowsHitTesting(isPanelHovered)"), "a hidden close button must not take clicks")
+        XCTAssertTrue(view.contains(".opacity(isPanelHovered ? 1 : 0)"))
     }
 }

@@ -71,6 +71,22 @@
 	<key>SUEnableSystemProfiling</key>
 	<false/>
 
+	<!-- ⚠️ SWIFT_DETERMINISTIC_HASHING — stable MLX prompts. swift-jinja's `tojson` re-encodes every
+	     object through a Swift dictionary, whose order is random per instance, so the chat
+	     template's <tools> block rendered differently on every turn (20 of 20 renders distinct,
+	     measured 2026-10-06) and no prompt prefix could be reused. With this set the order is fixed.
+	     LSEnvironment covers LaunchServices launches only (Finder, Dock, `open`, Sparkle); Xcode's
+	     Run sets the same variable in the shared scheme's Launch action; its Test action sets it to
+	     "0" on purpose (the test host also launches via LaunchServices). Costs hash-flooding
+	     protection app-wide (accepted). See DeterministicHashing.swift; the launch log says
+	     `[HASHING] … OFF` when a launch missed it. ⚠️ LaunchServices caches this dictionary — after
+	     changing it, a stale registration may need `lsregister -f` on the bundle. -->
+	<key>LSEnvironment</key>
+	<dict>
+		<key>SWIFT_DETERMINISTIC_HASHING</key>
+		<string>1</string>
+	</dict>
+
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict/>

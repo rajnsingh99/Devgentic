@@ -23,7 +23,7 @@
 	     In particular MLX is built in Metal-JIT mode and compiles kernels from source strings at
 	     runtime, but it does so through the system Metal compiler — that produces GPU code, not
 	     CPU-executable pages, so it needs no JIT entitlement. Each cs.* key weakens the runtime
-	     process-wide and draws notarization scrutiny. See Planout/Keychain_Production_Readiness.md §3.
+	     process-wide and draws notarization scrutiny.
 
 	     ⚠️ NOT sandboxed, deliberately. The App Sandbox is a separate mechanism from the hardened
 	     runtime; sandbox-only keys (files.user-selected.*, network.client, keychain-access-groups)
