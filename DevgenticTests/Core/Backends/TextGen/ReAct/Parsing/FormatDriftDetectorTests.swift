@@ -4,8 +4,7 @@
 //  FormatDriftDetectorTests.swift
 //  DevgenticTests
 //
-//  Tests for FormatDriftDetector — Stage 2 of the Dialect-Anchored Cascade.
-//  Validates all 10 probe types and dialect exclusion logic.
+//  Created by Raj Singh.
 //
 
 import XCTest

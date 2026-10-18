@@ -4,19 +4,7 @@
 //  MessageAttachmentBuilderTests.swift
 //  DevgenticTests
 //
-//  ATT-1 (chat hardening round 3, 2026-07-19): the transcript and the backend
-//  disagreed about attachments. `createUserMessage` persisted a file only if it
-//  classified as text or image — both checks are keyed entirely off the path
-//  extension — while the backend's direct-injection path reads every non-image
-//  attachment. An extension-less file (Makefile, LICENSE, Dockerfile, .env) was
-//  therefore SENT TO THE MODEL but recorded nowhere: no chip, no persisted row,
-//  no export entry, no warning. `MessageAttachmentBuilder` (extracted from the
-//  coordinator so this contract is testable) must mirror the backend: anything
-//  that isn't an image is persisted as a text attachment if it reads as UTF-8.
-//
-//  `RAGEligibilityTests` pins the same contract at the second divergent site:
-//  `RAGIndexingService.indexAttachedFiles` skipped the same files from turn-2+
-//  retrieval while the model had seen them on turn 1.
+//  Created by Raj Singh.
 //
 
 import XCTest

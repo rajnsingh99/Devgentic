@@ -4,18 +4,7 @@
 //  ForegroundAdoptionTests.swift
 //  DevgenticTests
 //
-//  2026-09-24: foreground runs now write their log LIVE through the registry, exactly as background
-//  tasks do — see the tests below `testAForegroundRunReachesATerminalStatus`.
-//
-//  A foreground `batch_command` used to be invisible and unreachable while it ran:
-//
-//    - no card, so a 15-minute build showed nothing
-//    - not stoppable — `Stop` cancels the Swift Task, but `ProcessRunner.run` is synchronous on a
-//      GCD queue and never notices
-//    - ORPHANED at quit, because `terminateAll()` walks registry entries and this path had none
-//
-//  That last one is the same launchd-orphan defect the background path was fixed for on
-//  2026-09-21; it was simply still live on the other branch.
+//  Created by Raj Singh.
 //
 
 import XCTest

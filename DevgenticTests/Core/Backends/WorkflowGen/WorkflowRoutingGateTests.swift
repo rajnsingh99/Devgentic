@@ -4,17 +4,7 @@
 //  WorkflowRoutingGateTests.swift
 //  DevgenticTests
 //
-//  Pins the routing model after the 2026-08-12 simplification (user's design decision).
-//
-//  There is no per-node failure policy. Failure routing is expressed on the CANVAS:
-//
-//    • error port unwired → the branch stops
-//    • error port wired   → the downstream runs and receives the failure
-//    • a failure NEVER cancels a parallel branch — those are independent by construction
-//
-//  The invariant these tests exist to protect: the ROUTING gate (`shouldExecuteNode`) and the
-//  DATA gate (`upstreamResultEnvelopes`) are both pure port checks with no exemptions, so they
-//  agree by construction. Every historical disagreement between them was a bug (WF13).
+//  Created by Raj Singh.
 //
 
 import XCTest

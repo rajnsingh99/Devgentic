@@ -4,19 +4,7 @@
 //  ResumeExecutorIntegrationTests.swift
 //  DevgenticTests
 //
-//  G1 Piece 2 — end-to-end integration of the RESUME path, the in-process proxy for manual
-//  force-quit → relaunch → Resume verification. Drives `ReActAgentExecutor.execute` with a real
-//  `TimelineReconstruction` as `input.resumeState`, a scripted `MockLLMProvider` for the post-resume
-//  steps, and CALL-TRACKING tools, then resolves the re-raised HITL in-process.
-//
-//  Covers the four behavioural guarantees:
-//    1. Replay-not-rerun — a tool that completed before the crash is NOT executed again (headline).
-//    2. The parked HITL genuinely re-raises and resolves (real CheckedContinuation).
-//    3. The run continues and completes cleanly (not .failed).
-//    4. Streaming resume drops the dangling tool (never re-run) and continues from completed work.
-//
-//  Out of scope (stays manual / UI): real OS process kill, SwiftUI chip/banner rendering, and real
-//  native-model cache-prefix replay (the default MockCognitiveGenerator drives the legacy branch).
+//  Created by Raj Singh.
 //
 
 import XCTest

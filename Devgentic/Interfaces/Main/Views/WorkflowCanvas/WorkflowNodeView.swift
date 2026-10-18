@@ -4,14 +4,12 @@
 //  WorkflowNodeView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  Individual draggable node card on the workflow canvas.
-//  Renders a compact profile card with input/output ports.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A draggable node card on the workflow canvas: a compact profile card with input and output ports.
 struct WorkflowNodeView: View {
     let node: WorkflowNode
     let isSelected: Bool
@@ -31,13 +29,8 @@ struct WorkflowNodeView: View {
 
     // MARK: - Run status badge
 
-    /// The node's outcome on the displayed run, drawn into the corner slot that sat empty until
-    /// 2026-08-15 — the canvas showed no execution state at all, so a user watching a workflow
-    /// could not tell a running node from a finished one from one that never ran.
-    ///
-    /// Colour and icon come from `NodeStatus`, the same vocabulary the timeline uses, so the two
-    /// views cannot disagree about the same node. Reduce-motion is honoured: the pulse is the only
-    /// animation, and a static ring reads the same.
+    /// The node's outcome on the displayed run, drawn in the card's corner slot.
+    /// Colour and icon come from `NodeStatus`, shared with the timeline; reduce-motion swaps the pulse for a static ring.
     @ViewBuilder
     private var runStatusBadge: some View {
         if let runStatus {
@@ -52,23 +45,8 @@ struct WorkflowNodeView: View {
                 .scaleEffect(shouldPulse && runPulse ? 1.18 : 1.0)
                 .offset(x: -6, y: -6)
                 .animation(.easeInOut(duration: 0.15), value: runStatus)
-                // [CVV-4] Arm AND disarm on the DECISION changing, not on the badge appearing.
-                //
-                // ⚠️ `.onAppear` could never work here. `WorkflowRunDisplayData.buildNodesFromLayout`
-                // pre-populates a `.pending` placeholder for every layout node, so this `Image` is
-                // inserted the moment the canvas is — long before the node starts. `onAppear` fired
-                // once, with `shouldPulse == false`, the guard dropped the arming, and the later
-                // `.pending → .running` transition only UPDATED the same view, so nothing re-ran it.
-                // The result: the pulse effectively never started during a live run.
-                //
-                // The unconditional reset is load-bearing twice — it ends the in-flight
-                // `repeatForever` when the node settles, and it guarantees the arming write is a
-                // real `false → true` change. Without it a RETRIED node (a `.failed` row reopened
-                // as `.running`) would find `runPulse` already true, so SwiftUI would coalesce the
-                // write, animate nothing, and leave the badge statically enlarged.
-                //
-                // `initial: true` preserves the one case `.onAppear` got right: entering the canvas
-                // mid-run on a node that is already `.running`.
+                // Why: not `.onAppear`: the badge exists as `.pending` long before the run; the reset also lets a retried node re-arm
+                // Arms and disarms the pulse when the decision changes; `initial: true` covers entering the canvas mid-run.
                 .onChange(of: shouldPulse, initial: true) { _, pulsing in
                     runPulse = false
                     guard pulsing else { return }
@@ -76,20 +54,13 @@ struct WorkflowNodeView: View {
                         runPulse = true
                     }
                 }
-                // ⚠️ Hidden, NOT unlabelled. The node card below is an accessibility element with
-                // `children: .ignore`, which swallows this one — so the run status is folded into
-                // `accessibilityDescription` instead. Re-adding a label here would be dead code that
-                // looks like coverage.
+                // Hidden because the card's `children: .ignore` swallows it; run status is folded into `accessibilityDescription`.
                 .accessibilityHidden(true)
         }
     }
 
-    /// Only the node executing RIGHT NOW pulses. A historical run's `.running` node is a node that
-    /// never settled — animating it would claim work is still happening in a run that has ended.
-    ///
-    /// ⚠️ Delegates to `WorkflowCanvasRunOverlay.badgeShouldPulse` so the rule is truth-tableable
-    /// (WF-UI5) — a `View`'s private computed property is unreachable from a test, and this rule is
-    /// exactly what CVV-4 got wrong.
+    /// Only the node executing right now pulses; a historical run's `.running` node never settled and must not animate.
+    /// Delegates to `WorkflowCanvasRunOverlay.badgeShouldPulse` so the rule can be tested outside the view.
     private var shouldPulse: Bool {
         WorkflowCanvasRunOverlay.badgeShouldPulse(status: runStatus, isLive: runIsLive)
     }
@@ -132,9 +103,7 @@ struct WorkflowNodeView: View {
                         if let targetID = canvasState.findInputPortTarget(near: endPoint, excluding: node.id) {
                             _ = canvasState.addEdge(sourceNodeID: node.id, targetNodeID: targetID, sourcePortLabel: portLabel)
                         } else {
-                            // CVV-2: the miss was the one silent non-event left on this path —
-                            // no edge, no banner, no log. The state decides whether it was a
-                            // real miss or an aborted drag (release near the source port).
+                            // A missed drop is recorded; the state decides whether it was a real miss or an aborted drag near the source port.
                             canvasState.recordMissedEdgeDrop(from: node.id, sourcePortLabel: portLabel, at: endPoint)
                         }
                         canvasState.edgeDragState = nil
@@ -144,9 +113,8 @@ struct WorkflowNodeView: View {
                     // Label badge hangs strictly to the RIGHT of the port circle with a 6pt gap.
                     // Background capsule protects text from wire-clipping and background dots.
                     if !entry.label.isEmpty {
-                        // [CVV-3] The badge text is CAPPED; `entry.label` stays raw everywhere it
-                        // is used as a routing identity above. A Gate option has no length cap at
-                        // any layer, and `.fixedSize()` below defeats any view-level truncation.
+                        // Why: a Gate option has no length cap and `.fixedSize()` below defeats view-level truncation
+                        // The badge text is capped while `entry.label` stays raw as the routing identity.
                         Text(WorkflowCanvasState.portBadgeText(entry.label))
                             .font(.system(size: 9, weight: .semibold, design: .rounded))
                             .lineLimit(1)
@@ -193,9 +161,7 @@ struct WorkflowNodeView: View {
 
     // MARK: - Node Card Dispatch
 
-    // ⚠️ Split from `nodeCard` because the switch PLUS the ~15-modifier chain in one expression
-    // exceeds the type-checker's budget ("unable to type-check this expression in reasonable
-    // time"). Two named halves check independently and instantly.
+    // Split from `nodeCard` so the switch plus the long modifier chain stay within the type-checker's budget.
     @ViewBuilder
     private var nodeCardContent: some View {
         Group {
@@ -250,9 +216,8 @@ struct WorkflowNodeView: View {
                     isSelected: isSelected
                 )
             case .unsupported:
-                // [WF-PE4] Preserved-but-unknown node. Profile-card chrome (same footprint), the
-                // colourless identity and a dashed-question icon make it read as "not one of
-                // ours"; the subtitle says why it cannot run.
+                // A preserved-but-unknown node: profile-card chrome, colourless identity and a dashed-question icon;
+                // the subtitle says why it cannot run.
                 ProfileNodeCard(
                     title: node.displayName,
                     subtitle: nodeKindLabel,
@@ -268,9 +233,7 @@ struct WorkflowNodeView: View {
     private var nodeCard: some View {
         nodeCardContent
         .frame(width: nodeSize.width, height: nodeSize.height)
-        // A node that did NOT run recedes rather than shouting. This is the whole point of the
-        // typed skip model reaching the canvas: an unchosen branch should look quiet and obviously
-        // inactive, not like something went wrong.
+        // A node that did not run recedes, so an unchosen branch looks quiet and inactive rather than failed.
         .opacity(runStatus == .skipped ? 0.45 : 1.0)
         .overlay(alignment: .topLeading) {
             runStatusBadge
@@ -292,18 +255,8 @@ struct WorkflowNodeView: View {
         // Set a square content shape to capture hover and clicks easily
         .contentShape(Rectangle())
         // MARK: Accessibility
-        //
-        // ⚠️ The canvas had NO node-level accessibility at all: a VoiceOver user got the node's
-        // `Text` runs as loose, untraited strings with no indication that they formed a control,
-        // no selection state, and no way to act on them — while the very mode switch that reveals
-        // the canvas is properly labeled. Selection, inspection and deletion existed ONLY as
-        // pointer gestures (tap, double-tap, drag) with no context menu anywhere in the directory.
-        //
-        // The three actions below are wired to the same handlers the gestures use, so this is a
-        // second route to existing behaviour rather than a new interaction model. Keyboard
-        // traversal (arrow-key focus over the node set, keyboard connect, nudge-to-move) is
-        // deliberately NOT here — that is a real interaction design for a node-graph editor and it
-        // competes with three live gesture recognizers.
+        // Node-level accessibility: the actions below call the same handlers as the pointer gestures.
+        // Keyboard traversal and nudge-to-move are not provided; they compete with three live gesture recognizers.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityValue(isSelected ? Text("Selected") : Text(""))
@@ -311,11 +264,8 @@ struct WorkflowNodeView: View {
         .accessibilityAction(named: Text("Select")) {
             canvasState.select(nodeID: node.id)
         }
-        // [WF-PE4] Gated the same way the double-tap gesture below is gated — found on
-        // adversarial audit that this VoiceOver twin had no such guard, so a screen-reader user
-        // invoking "Configure" on a `.trigger` or `.unsupported` node opened a borderless,
-        // effectively blank inspector panel (`.unsupported`'s config is opaque preserved JSON;
-        // there is nothing this build could show or edit — see the gesture's own comment).
+        // Gated like the double-tap gesture: `.trigger` and `.unsupported` nodes have nothing to configure.
+        // Without the gate VoiceOver opens a blank inspector panel.
         .accessibilityAction(named: Text("Configure")) {
             switch node.kind {
             case .trigger, .unsupported: break
@@ -328,13 +278,9 @@ struct WorkflowNodeView: View {
         .onTapGesture(count: 2) {
             switch node.kind {
             case .condition, .code, .gate, .action, .profile:
-                // ⚠️ `.profile` is unconditional on purpose. Excluding workflow-backed profiles
-                // here left them with NO way to reach an inspector — `targetConfigNode` is
-                // written only from this handler — while the validator still demanded a task
-                // description and told the user to double-click. `ProfileNodeInspectorView`
-                // has always rendered every profile type (`WorkflowCanvasView` routes plain
-                // `case .profile:`); only the gesture refused, so a sub-workflow node could
-                // never have its failure policy, retries or join mode configured either.
+                // Why: excluding them leaves a sub-workflow node with no way to set failure policy, retries or join mode
+                // `.profile` is unconditional: `targetConfigNode` is written only from this handler,
+                // and workflow-backed profiles need an inspector.
                 canvasState.targetConfigNode = node
             case .trigger, .unsupported:
                 // `.unsupported`: there is nothing this build could show or edit — the node's
@@ -363,10 +309,8 @@ struct WorkflowNodeView: View {
                 canvasState.activeNodeDrag = (nodeID: node.id, offset: value.translation)
             }
             .onEnded { value in
-                // ⚠️ Goes through `committedDragPosition` even though it is now plain addition:
-                // it is the ONE place a bound would go, and the preview reads the same rule. Doing
-                // the arithmetic inline here is how the preview and the commit drifted apart for
-                // months (register CVC-10).
+                // Why: inline arithmetic here lets the preview and the commit drift apart
+                // Goes through `committedDragPosition`, the one place a bound would go, which the preview also reads.
                 let newPosition = WorkflowCanvasState.committedDragPosition(
                     origin: node.position,
                     translation: value.translation
@@ -390,9 +334,7 @@ struct WorkflowNodeView: View {
         }
     }
 
-    /// ⚠️ Single source (WF-CU10). This switch used to be open-coded here AND verbatim in
-    /// `WorkflowCanvasState.nodeColor(for:)`, which fed the edge gradient — so the two had to agree
-    /// for an edge to match the node it leaves. Both are now `WorkflowNodeKind.identityColor(in:)`.
+    /// Single source for node identity colour via `WorkflowNodeKind.identityColor(in:)`, shared with the edge gradient.
     private var profileColor: Color { node.kind.identityColor(in: theme) }
 
     /// Composed by `WorkflowCanvasState` so the wording and the edge counts are testable.
@@ -400,17 +342,9 @@ struct WorkflowNodeView: View {
         canvasState.accessibilityDescription(for: node, runStatusLabel: runStatus?.label)
     }
 
-    /// The card's VISIBLE subtitle.
-    ///
-    /// ⚠️ Deliberately separate from `WorkflowCanvasState.accessibilityKindLabel`: an Action node's
-    /// subtitle is its configured TOOL name, which is data and must NOT be translated.
-    ///
-    /// ⚠️ `String(localized:)` on every literal (WF-CU8, widened). This feeds `subtitle:`, rendered
-    /// by `Text(subtitle)` — the non-localizing `StringProtocol` overload — so "Router" / "Gate" /
-    /// "Trigger" / "Bot" were printed untranslated on every node card inside otherwise translated
-    /// chrome. Same defect as the accessibility labels, and higher user impact because it is on
-    /// screen rather than spoken. `pType.rawValue` was doubly wrong here: a persistence token used
-    /// as a display string.
+    // Why: `Text(subtitle)` does not localize, so every literal needs `String(localized:)`
+    /// The card's visible subtitle, separate from `WorkflowCanvasState.accessibilityKindLabel`.
+    /// An Action node's subtitle is its configured tool name, which is data and not translated.
     private var nodeKindLabel: String {
         switch node.kind {
         case .profile(_, let pType): return pType.localizedTitleString
@@ -442,12 +376,8 @@ struct WorkflowNodeView: View {
         }
     }
 
-    /// Whether this node is a valid drop target for the current edge drag.
-    /// ⚠️ Asks the SAME predicate `addEdge` will use, rather than only excluding the source node.
-    /// This highlight used to be the FULL "drop here" treatment for every valid node on the
-    /// canvas — while the drop itself only lands within `inputPortHitRadius` of a port. It now
-    /// drives the WEAK tier (visible port, colored ring — "you could connect here"); the full
-    /// pulse belongs to `isPrimaryDropTarget`.
+    /// Whether this node is a valid drop target for the current edge drag, using the same predicate `addEdge` uses.
+    /// Drives the weak highlight tier (visible port, coloured ring); the full pulse belongs to `isPrimaryDropTarget`.
     private var isCompatibleDropTarget: Bool {
         guard let drag = canvasState.edgeDragState else { return false }
         return canvasState.edgeRefusalReason(
@@ -457,11 +387,8 @@ struct WorkflowNodeView: View {
         ) == nil
     }
 
-    /// The ONE node the drop would actually land on right now (register CVV-2): valid AND the
-    /// nearest input port within the accept radius of the live drag point. This is what earns
-    /// the full pulse/scale/glow — the same test `onDragEnded` runs at release, so the pulse can
-    /// no longer promise a connection the 20pt radius will refuse. Tracks the pointer live:
-    /// `edgeDragState.currentPoint` is written on every drag tick and the state is `@Observable`.
+    /// The one node the drop would land on right now: valid, with the nearest input port within the accept radius.
+    /// Same test as `onDragEnded`; tracks the pointer live via `edgeDragState.currentPoint`.
     private var isPrimaryDropTarget: Bool {
         guard let drag = canvasState.edgeDragState, isCompatibleDropTarget else { return false }
         return canvasState.findInputPortTarget(near: drag.currentPoint, excluding: drag.sourceNodeID) == node.id
@@ -589,9 +516,8 @@ struct CodeNodeCard: View {
         VStack(spacing: 0) {
             // Header
             HStack(spacing: 6) {
-                // ⚠️ Decorative traffic lights, NOT identity (WF-CU10). Two were raw `.red` and
-                // `.yellow` — the same literals the Gate and Router kinds used — so every Code node
-                // carried a 6pt Gate-red dot that read as a status signal.
+                // Why: raw red/yellow would read as a Gate-red status signal on every Code node
+                // Decorative traffic lights from theme tokens, not identity colours.
                 Image(systemName: "circle.fill").foregroundColor(theme.errorColor).font(.system(size: 6))
                 Image(systemName: "circle.fill").foregroundColor(theme.warningColor).font(.system(size: 6))
                 Image(systemName: "circle.fill").foregroundColor(theme.successColor).font(.system(size: 6))
@@ -622,9 +548,8 @@ struct CodeNodeCard: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .frame(maxHeight: .infinity)
-            // ⚠️ ORDER SWAPPED (WF-CU10). Chained `.background` calls stack progressively FURTHER
-            // BACK, and `theme.controlBackground` is opaque in every theme — so the tint, declared
-            // second, was painted behind an opaque fill and never rendered at all.
+            // Why: `theme.controlBackground` is opaque, so a tint declared after it never renders
+            // Order matters: chained `.background` calls stack further back, so the tint must be declared first.
             .background(color.opacity(isSelected ? 0.08 : 0.04))
             .background(theme.controlBackground)
         }

@@ -4,23 +4,7 @@
 //  WorkflowNodeStatsCancelledTests.swift
 //  DevgenticTests
 //
-//  [WF-OB6] A Stop is not a node failure.
-//
-//  Until 2026-08-27 a user-cancelled node closed its span `.error`, and
-//  `workflowNodeStats` counts `status = 'error'` as `failedCount`. So a user who stopped a
-//  workflow three times while iterating on a prompt permanently docked those nodes' success
-//  rate in the Workflow Activity panel — precisely the signal that panel exists to surface.
-//
-//  ⚠️ WHY THE DENOMINATOR ASSERTIONS BELOW ARE THE POINT. Re-tagging the span alone is a
-//  HALF-FIX that still reads wrong: `totalRuns` is `COUNT(*)`, so moving a run out of
-//  `failedCount` while leaving it in the denominator STILL pushes the rate down. A test that
-//  asserted only on `Span.status` would pass against that half-fix. Every test here therefore
-//  asserts `successRate`, not just the buckets.
-//
-//  These run against an in-memory `TraceStore` rather than the shared singleton on purpose:
-//  `workflowNodeStats` rolls up `GROUP BY name` over a time window across the WHOLE store, so a
-//  singleton-backed test is contaminated by any other test in the bundle that writes a
-//  `workflowNode` span.
+//  Created by Raj Singh.
 //
 
 import XCTest

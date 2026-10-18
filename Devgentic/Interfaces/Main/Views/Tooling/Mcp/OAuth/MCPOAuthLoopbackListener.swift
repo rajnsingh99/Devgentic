@@ -4,18 +4,7 @@
 //  MCPOAuthLoopbackListener.swift
 //  Devgentic
 //
-//  Loopback OAuth redirect listener (RFC 8252 §7.3).
-//
-//  At authorize-time we bind a fresh TCP socket on `127.0.0.1:<random-port>`,
-//  hand the resulting URL (e.g. `http://127.0.0.1:53017/callback`) to the
-//  authorization server as `redirect_uri`, and wait for the user-agent to
-//  redirect there with `?code=…&state=…` after the user signs in. The server
-//  shuts down as soon as we capture the first valid callback or hit the timeout.
-//
-//  Why we don't use ASWebAuthenticationSession's callbackURLScheme: it only
-//  matches custom schemes (e.g. `devgentic://`), not loopback http URLs.
-//  Loopback is the spec's preferred desktop redirect (no Info.plist plumbing,
-//  works in dev and production identically), so we serve it ourselves.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,6 +13,9 @@ import os
 
 private let logger = DGLogger(category: "MCPOAuthLoopback")
 
+/// Loopback OAuth redirect listener (RFC 8252 section 7.3): binds a fresh socket on
+/// `127.0.0.1:<random-port>` and waits for the redirect. Serves the callback itself because
+/// ASWebAuthenticationSession matches only custom schemes, not loopback http URLs.
 enum MCPOAuthLoopbackError: LocalizedError {
     case listenerFailed(String)
     case timedOut
@@ -42,9 +34,9 @@ enum MCPOAuthLoopbackError: LocalizedError {
     }
 }
 
-/// One-shot loopback listener. Construct, start, await one callback, listener
-/// is then closed. Re-use is intentionally not supported — every flow gets a
-/// fresh port to avoid stale `redirect_uri` registrations leaking between flows.
+/// One-shot loopback listener: construct, start, await one callback, then it is closed.
+/// Not reusable; every flow gets a fresh port so stale `redirect_uri` registrations cannot leak between
+/// flows.
 final class MCPOAuthLoopbackListener: Sendable {
 
     /// Path the AS will redirect to. Hardcoded so we can match GET requests
@@ -81,17 +73,8 @@ final class MCPOAuthLoopbackListener: Sendable {
     init() throws {
         let parameters = NWParameters.tcp
 
-        // Confine the socket to loopback.
-        //
-        // `NWParameters.tcp` with no required local endpoint binds EVERY interface, so
-        // the OAuth callback listener was reachable from anything on the same network —
-        // an ephemeral port on the user's LAN accepting `/callback?code=…`. The `state`
-        // check and PKCE meant a stranger could not actually complete a flow, but the
-        // socket had no business being off-machine in the first place, and RFC 8252 §7.3
-        // specifies the loopback interface for exactly this redirect.
-        //
-        // (`on: .any` below is the PORT — "pick any free one" — not an address. It was
-        // never the thing binding all interfaces.)
+        // Confines the socket to loopback: `NWParameters.tcp` with no required local endpoint binds every
+        // interface, exposing the callback to the LAN (RFC 8252 section 7.3 specifies loopback).
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
 
         let listener: NWListener
@@ -102,9 +85,8 @@ final class MCPOAuthLoopbackListener: Sendable {
         }
         self.listener = listener
 
-        // Bind synchronously by starting and waiting for `.ready` before
-        // returning the redirect URL. Runs on a private queue so we don't
-        // block the main actor.
+        // Binds synchronously by waiting for `.ready` before returning the redirect URL, on a private queue
+        // off the main actor.
         let semaphore = DispatchSemaphore(value: 0)
         var assignedPort: NWEndpoint.Port?
         var bindError: Error?

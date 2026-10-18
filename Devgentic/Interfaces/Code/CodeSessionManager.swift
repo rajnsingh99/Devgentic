@@ -4,19 +4,7 @@
 //  CodeSessionManager.swift
 //  Devgentic
 //
-//  Manages the Code interface's singleton profile persisted in SwiftData.
-//  Handles model + project selection, cognitive profile capture, project
-//  folder coordination with the Explorer sidebar. The project's own knowledge
-//  (`AGENTS.md`, `.devgentic/memory/`) is read per run — see `CodeSystemPrompt.projectKnowledge`;
-//  this type only caches a copy for the Context gauge and the inspector.
-//
-//  ⚠️ ONE PERMANENT PROFILE, SETTINGS PER PROJECT (2026-09-24). The row is created once and never
-//  deleted — Home resets it to the preset instead. Everything the user can change (limits,
-//  Ask/Auto, the model, the tools) belongs to the project folder and lives in
-//  `CodeQuickSettingsStore`; the row only ever holds the CURRENT project's copy. Opening a folder
-//  loads its copy onto the row (`updateProjectPath`), and leaving it — another folder, Home, or a
-//  send — captures the row back. Before this, Home deleted the row, and every per-tool setting and
-//  enabled MCP tool went with it.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "CodeSessionManager")
 
+/// Manages the Code interface's singleton profile persisted in SwiftData: model, project selection and project folder.
+/// Per-project settings live in `CodeQuickSettingsStore`; the row holds only the current project's copy, never deleted.
+/// Project knowledge (`AGENTS.md`, memory) is read per run; this type only caches a copy for the Context gauge.
 @Observable @MainActor
 final class CodeSessionManager {
 
@@ -98,10 +89,8 @@ final class CodeSessionManager {
 
     // MARK: - Project knowledge (cached for display)
 
-    /// What the next run will append to the prompt for this project — `AGENTS.md` and the memory
-    /// listing — or nil when the project has neither. A DISPLAY copy for the Context gauge and the
-    /// inspector, refreshed when a folder opens and on every send; runs read the disk themselves,
-    /// so a stale copy here can never reach a model.
+    /// What the next run will append to the prompt for this project (`AGENTS.md` and the memory listing), or nil if none.
+    /// A display copy for the Context gauge and inspector; runs read the disk themselves.
     var projectKnowledgeContent: String?
 
     /// How many memory entries the open project has, for the inspector button.
@@ -117,21 +106,13 @@ final class CodeSessionManager {
     private static let quickSettingsKey = CodeQuickSettingsStore.defaultsKey
     private static let recentPathsKey = "devgentic.codeRecentProjectPaths"
 
-    /// Set when `init()` kept the stored handle but could not READ the row, because the store threw
-    /// rather than reporting the row absent. The first `ensureCodeProfile()` that manages to read
-    /// it fills the caches.
-    ///
-    /// ⚠️ An explicit flag, NOT `modelName.isEmpty`. `resetSession()` deliberately empties the
-    /// caches while the row can still carry a model, so keying the re-hydrate off emptiness would
-    /// repopulate the session the user just reset — restoring a model they had explicitly cleared.
+    // Why: an explicit flag, not `modelName.isEmpty`: `resetSession()` empties the caches on purpose and must not be undone.
+    /// Set when `init()` kept the stored handle but could not read the row because the store threw.
+    /// The first `ensureCodeProfile()` that can read it fills the caches.
     @ObservationIgnored private var needsHydrationFromStore = false
 
-    /// Where the profile handle and recent-paths cache live.
-    ///
-    /// ⚠️ Injectable for ONE reason: the handle is the thing whose loss creates duplicate code
-    /// profiles, so a test has to be able to clear it — and `UserDefaults.standard` under the test
-    /// host IS the shipping app's domain, so a test that cleared it there would delete the
-    /// developer's own `devgentic.codeProfileID` and hand them the very defect under test.
+    // Why: tests must not clear `UserDefaults.standard`: under the test host it is the shipping app's domain.
+    /// Where the profile handle and recent-paths cache live; injectable so a test can clear the handle.
     @ObservationIgnored private let defaults: UserDefaults
 
     // MARK: - Init
@@ -145,24 +126,15 @@ final class CodeSessionManager {
         // Restore profile ID
         if let uuidString = self.defaults.string(forKey: Self.profileIDKey),
            let uuid = UUID(uuidString: uuidString) {
-            // ⚠️ A THROWN fetch is not a deleted row, and the difference is a duplicate profile.
-            // `try?` collapsed both into `nil`, and the else-branch below deletes the handle — so a
-            // transient `containerNotConfigured` (this type is constructed from a stored-property
-            // default, i.e. before `DevgenticApp.init()`'s body, and only declaration order puts the
-            // container first) permanently orphaned the row: the store kept it, nothing referenced
-            // it, and the next `ensureCodeProfile()` minted a rival "Code Session". Keep the two
-            // cases apart — only a genuine `nil` may clear the key.
+            // A thrown fetch is not a deleted row: only a genuine nil may clear the key, otherwise a transient store error
+            // orphans the row and the next `ensureCodeProfile()` creates a duplicate profile.
             do {
                 if let profile = try BackendProfileStore.shared.fetchProfile(byId: uuid) {
                     self.codeProfileID = uuid
                     hydrateFromProfile(profile)
                     logger.info("[CODE_PROFILE] Restored profile \(uuid.uuidString) — provider: \(self.provider.rawValue), model: \(self.modelName)")
-                    // ⚠️ Reconcile even on a SUCCESSFUL restore. Adoption only collapses duplicates
-                    // when the handle was lost, and a machine that already accumulated them has a
-                    // perfectly valid handle pointing at the newest one — so without this pass the
-                    // existing orphans are permanent. Once per launch, not per action: the rows
-                    // cannot multiply mid-session, and `ensureCodeProfile()` runs on every Tools
-                    // click and model change.
+                    // Reconcile even after a successful restore: adoption only collapses duplicates when the handle was lost.
+                    // Once per launch, not per action; the rows cannot multiply mid-session.
                     collapseDuplicateCodeProfiles(keeping: uuid, from: sharedCodeProfilesOnDisk())
                 } else {
                     // Genuinely absent — deleted out from under us. Clearing is correct here.
@@ -204,18 +176,9 @@ final class CodeSessionManager {
 
     // MARK: - Profile Lifecycle
 
-    /// Returns the singleton code profile — adopting the one already on disk before creating a new
-    /// one.
-    ///
-    /// ⚠️ THE STORE IS AUTHORITATIVE; the UserDefaults handle is only a cache. It has been lost
-    /// three distinct ways in practice: a bundle-identifier change (`com.dev.devgentic` →
-    /// `app.devgentic.macos`) wiped the whole defaults domain while `DevgenticSD.store` — whose
-    /// path is not bundle-scoped — kept every row; a thrown fetch in `init()` was read as
-    /// "deleted"; and `resetSession()` cleared the handle on a delete that had silently failed.
-    /// Each loss used to mint a SECOND "Code Session" and orphan the first forever — nothing GCs
-    /// profiles, and the orphan stays selectable in the Tool Library under the identical name, so
-    /// tool enablement saved against it is read by nobody. Adopting makes every one of those
-    /// losses self-healing instead of duplicating.
+    // Why: a lost handle must adopt, never create: a duplicate profile has no removal path and splits tool enablement.
+    /// Returns the singleton code profile's ID, adopting the one already on disk before creating a new one.
+    /// The store is authoritative; the UserDefaults handle is only a cache, so a lost handle self-heals.
     @discardableResult
     func ensureCodeProfile() -> UUID {
         // 1. Fast path: the handle still resolves to a row.
@@ -230,9 +193,8 @@ final class CodeSessionManager {
                     return id
                 }
             } catch {
-                // ⚠️ Return, do NOT fall through to create. Falling through on an unreadable store
-                // is precisely how a duplicate is born: the adopt scan below would fail for the
-                // same reason and a rival row would be written the moment the store recovered.
+                // Return, do not fall through to create: on an unreadable store the adopt scan fails too,
+                // and a rival row would be written the moment the store recovered.
                 logger.error("[CODE_PROFILE] Could not verify profile \(id.uuidString): \(error.localizedDescription). CONSEQUENCE: the existing handle is returned unverified instead of creating a second 'Code Session'; a save against it fails loudly if the row really is gone.")
                 return id
             }
@@ -294,31 +256,21 @@ final class CodeSessionManager {
 
     // MARK: - Quick Settings (per project)
 
-    /// Execution overrides for the CURRENT project folder, or the preset defaults when the folder
-    /// has none (or when no folder is open).
-    ///
-    /// ⚠️ Reads through to UserDefaults on every access rather than caching. The store is the
-    /// single source of truth, and a cache here would have to be invalidated on project switch —
-    /// exactly the kind of staleness that makes a settings panel show one thing while the run
-    /// uses another.
+    // Why: reads through to UserDefaults on every access: a cache would go stale on project switch.
+    /// Execution overrides for the current project folder, or the preset defaults when it has none or no folder is open.
     var quickSettings: CodeQuickSettings {
         CodeQuickSettingsStore.settings(for: projectPath?.path, defaults: defaults)
     }
 
     /// Persists quick settings for the current project and pushes them onto the live profile.
-    ///
-    /// The profile write is what makes a change take effect for a run already configured; the
-    /// per-send `refreshInstructionsOnProfile()` re-applies them anyway, so this is belt-and-braces
-    /// for the case where the user changes a setting between sends.
+    /// The profile write applies a change made between sends; the per-send refresh re-applies them anyway.
     func updateQuickSettings(_ settings: CodeQuickSettings) {
         guard let path = projectPath?.path else {
             logger.warning("[CODE_SETTINGS] Quick settings changed with no project selected. CONSEQUENCE: the change is dropped — settings are scoped per project and there is nothing to attach them to.")
             return
         }
 
-        // ⚠️ The popover commits on appear-hydration and again on dismiss, so most calls carry the
-        // values already stored. Seen on device 2026-09-24 as a `[PROFILE_SAVE] ⚠️ REDUNDANT` write
-        // on every open and close.
+        // The popover commits on appear and again on dismiss, so most calls carry values already stored; skip those writes.
         guard settings != CodeQuickSettingsStore.settings(for: path, defaults: defaults) else {
             logger.debug("[CODE_SETTINGS] Quick settings for '\(URL(fileURLWithPath: path).lastPathComponent)' unchanged — nothing saved.")
             return
@@ -330,11 +282,8 @@ final class CodeSessionManager {
         applyQuickSettingsToProfile(settings)
     }
 
+    // Why: tool confirmations go through `mergePresetTools`: a direct write could resurrect a tool the preset dropped.
     /// Writes the execution-shaped fields of `settings` onto the persisted `.code` profile.
-    ///
-    /// ⚠️ Tool CONFIRMATIONS go through `mergePresetTools` rather than being written directly:
-    /// the preset is the authority on which tools exist, and a direct write here would let a
-    /// stale override resurrect a tool the preset had dropped.
     private func applyQuickSettingsToProfile(_ settings: CodeQuickSettings) {
         guard let profileID = codeProfileID,
               var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
@@ -352,49 +301,23 @@ final class CodeSessionManager {
         }
     }
 
-    /// The one place quick settings become `AgentConfig` fields.
-    ///
-    /// ⚠️ Static and pure so the settings→config mapping is testable without a store, a profile or
-    /// a MainActor hop. Both callers — `applyQuickSettingsToProfile` and the per-send
-    /// `refreshInstructionsOnProfile` — go through here, so the two cannot drift.
-    /// Preset values an untouched project runs with. Named constants rather than literals at the
-    /// two sites that need them — the same drift `AgentExecutionDefaults` exists to stop.
-    ///
-    /// ⚠️ NO CAP by default since 2026-09-25 (user decision; was 20). The iteration cap is opt-in
-    /// per project, typed in the quick settings. A run without one is still bounded by
-    /// `presetExecutionTimeout`. The circuit breaker does NOT stop a Code run: `.fallbackPrompt`
-    /// downgrades every trigger to a warning and a nudge (owner decision 2026-09-27, D-15).
+    // Why: the circuit breaker does not stop a Code run: `.fallbackPrompt` downgrades every trigger to a warning and a nudge.
+    /// The preset iteration cap an untouched project runs with: none (`AgentExecutionDefaults.uncapped`).
+    /// The cap is opt-in per project; a run without one is still bounded by `presetExecutionTimeout`.
     static let presetMaxIterations = AgentExecutionDefaults.uncapped
 
-    /// What the quick settings accept for a typed cap (user decision 2026-09-25). A stored value
-    /// outside it — from before the range existed — is clamped at `apply`, never trusted as-is.
+    /// The range the quick settings accept for a typed iteration cap; a stored value outside it is clamped at `apply`.
     static let iterationCapRange = 10...1000
 
-    /// Bounds the COMPUTE of a whole turn — every iteration and every tool call together, with
-    /// time parked awaiting a human excluded (`ComputeTimeoutSentinel`).
-    ///
-    /// ⚠️ 60 minutes since 2026-09-26 (HITL Waiting Contract, decision D: every limit lives inside
-    /// the one above it, and the terminal ceiling rose to 30 min). Raised 300 → 1800 on 2026-09-21,
-    /// and it is NOT an independent choice. It must stay
-    /// comfortably above `BatchCommandTool.maxTimeoutSeconds` (1800): a turn that spends the
-    /// command's full ceiling on one build still has to read the output, fix the error and
-    /// re-run. At 300 s the two bounds contradicted each other — the tool advertised a timeout
-    /// the run could never reach, and the sentinel got there first and aborted the whole turn
-    /// WITHOUT the partial output the tool's own timeout would have returned.
-    ///
-    /// ⚠️ With no iteration cap by default (2026-09-25), this is the ONLY automatic stop for a Code
-    /// run — the circuit breaker only warns there (D-15).
+    // Why: keep above `BatchCommandTool.maxTimeoutSeconds` (1800): else the turn aborts before the tool returns partial output.
+    /// Bounds the compute of a whole turn: every iteration and tool call, excluding time parked awaiting a human.
+    /// With no iteration cap by default, this is the only automatic stop for a Code run.
     static let presetExecutionTimeout: TimeInterval = 3600
 
-    /// Code's default context window: the model's own, capped here. KV-cache memory grows with the
-    /// window, so the cap is what keeps a 128K-trained model from claiming many GB by default;
-    /// the per-project "Context size" goes past it deliberately.
-    ///
-    /// ⚠️ Why Code needs its own default at all (2026-09-24). With no override, an Ollama model ran
-    /// under the agent preset's 8,192 — and Code's fixed prompt plus 23 tool definitions is ~5.5K
-    /// tokens of that, before the task. A five-step run overflowed; Ollama silently dropped the
-    /// START of the prompt (the instructions and `final_answer` contract) and the run ended with no
-    /// answer.
+    // Why: the agent preset's 8,192 is too small for Code's prompt plus tools; Ollama silently drops the start of the prompt.
+    /// Code's default context window: the model's own, capped here.
+    /// KV-cache memory grows with the window, so the cap stops a 128K-trained model claiming many GB by default;
+    /// the per-project Context size can exceed it.
     static let presetContextCap = 32_768
 
     /// The window a Code run on `llm` should use — nil leaves Ollama's usual ladder in charge.
@@ -404,14 +327,10 @@ final class CodeSessionManager {
         return EffectiveContextWindow.trainedWindow(for: llm).map { min($0, presetContextCap) }
     }
 
+    /// Writes a `CodeQuickSettings` onto an `AgentConfig`: the one place quick settings become config fields.
     static func apply(_ settings: CodeQuickSettings, to agentConfig: inout AgentConfig) {
-        // ⚠️⚠️ ALWAYS ASSIGN — never "skip when nil". These used to be `if let`, which made the
-        // mapping a ONE-WAY DOOR: pressing Remove in the limits panel stored 0, `apply` turned
-        // that into `nil` (unbounded) on the profile, and afterwards resetting the setting back to
-        // "inherit" wrote nothing at all, so the preset's 300 s could never come back. A run
-        // observed 2026-09-20 logged "[EXEC_LIMITS] No execution timeout configured" for exactly
-        // this reason. An unset override must RESTORE the preset, not leave the last value in
-        // place — that is what makes "Reset to defaults" mean anything.
+        // Always assign, never skip when nil: an unset override must restore the preset, not leave the last value in place,
+        // or Remove followed by Reset to defaults could never bring the preset back.
         agentConfig.maxIterations = settings.maxIterations.map {
             min(max($0, iterationCapRange.lowerBound), iterationCapRange.upperBound)
         } ?? presetMaxIterations
@@ -478,10 +397,8 @@ final class CodeSessionManager {
         // next send, so the gauge prices the model the user just picked.
         agentConfig.llmConfig.numCtxOverride = Self.contextTokens(quickSettings, for: agentConfig.llmConfig)
 
-        // The key goes to the provider's Keychain slot so another project's model on this
-        // provider — or this one, after a detour — finds it again. ⚠️ BEFORE the profile save: for a
-        // shared-key provider the slot is the shared key, and the profile keeps the shared key rather
-        // than one it carries — so the save must find the new key already there.
+        // The key goes to the provider's Keychain slot so another project's model on this provider finds it again.
+        // Saved before the profile: a shared-key provider's profile keeps the shared key, so the new key must already be there.
         CodeProviderKeys.remember(apiKey, for: provider)
 
         profile.details = .code(agentConfig)
@@ -517,9 +434,8 @@ final class CodeSessionManager {
         self.projectPath = url
         logger.info("[CODE_PROJECT] Open '\(url.lastPathComponent)' (\(url.path)) — from: \(previous.map { "'\($0.lastPathComponent)'" } ?? "no folder"), \(isSwitch ? "switching projects" : (previous == nil ? "no folder was open" : "same folder re-opened")).")
 
-        // Publish as an MCP root so filesystem-shaped servers get a workspace boundary
-        // instead of an empty `roots/list`. Connected servers are notified immediately, so
-        // switching project re-scopes them without a reconnect.
+        // Publishes the folder as an MCP root so filesystem-style servers get a workspace boundary; connected servers are
+        // notified immediately, so switching project re-scopes them without a reconnect.
         Task { await MCPRootsProvider.setCodeProjectRoot(url) }
 
         let profileID = ensureCodeProfile()
@@ -551,11 +467,8 @@ final class CodeSessionManager {
         refreshProjectKnowledge()
     }
 
-    /// Puts a Code conversation's own folder back when it is selected.
-    ///
-    /// ⚠️ Before conversations recorded their folder, reopening an old session ran it against
-    /// whichever folder happened to be open — a session begun in project A would read and write
-    /// project B's files.
+    // Why: without the restore, a session would read and write whichever project folder happens to be open.
+    /// The result of putting a Code conversation's own folder back when it is selected.
     enum ConversationProjectOutcome: Equatable {
         case restored, alreadyOpen, noRecordedFolder, folderMissing
     }
@@ -583,11 +496,8 @@ final class CodeSessionManager {
     // MARK: - Per-Project State
 
     /// Loads `path`'s remembered model, tools and limits onto `agentConfig`.
-    ///
-    /// A project never captured before gets the PRESET tools when another project is being left —
-    /// otherwise it would inherit that project's MCP tools and settings. When no project was open
-    /// (the welcome screen), it adopts what is on the row instead, so tools enabled before picking
-    /// a folder are not thrown away.
+    /// A never-captured project gets the preset tools when another project is being left, so it inherits none of its tools.
+    /// With no project open it adopts what is on the row, so tools enabled before picking a folder are kept.
     private func loadProject(_ path: String, into agentConfig: inout AgentConfig, leavingAnotherProject: Bool) {
         let name = URL(fileURLWithPath: path).lastPathComponent
         if let state = CodeQuickSettingsStore.projectState(for: path, defaults: defaults) {
@@ -628,17 +538,9 @@ final class CodeSessionManager {
         )
     }
 
-    /// The Code profile as a run in `conversationProjectPath` must see it.
-    ///
-    /// ⚠️⚠️ WHY (2026-09-24). There is ONE Code profile and it holds whichever project is OPEN. A run
-    /// the composer starts is always for the open project, but a background-task wake, a scheduled
-    /// run or a resume after approval starts for ITS conversation — possibly while another project
-    /// is open. Taken from the row as-is, such a run got the other project's folder, prompt,
-    /// tools and limits. This builds the conversation's own, in memory; the row is not
-    /// touched.
-    ///
-    /// Returns `profile` unchanged when it is not Code, the conversation has no folder, or the folder
-    /// is already the one on the row (every composer send).
+    // Why: one profile holds the open project; a wake, scheduled run or resume for another conversation needs its own.
+    /// The Code profile as a run in `conversationProjectPath` must see it, built in memory without touching the row.
+    /// Returns `profile` unchanged when it is not Code, the conversation has no folder, or its folder is already on the row.
     static func profile(_ profile: BackendProfileSnapshot, forConversationProject conversationProjectPath: String?,
                         defaults: UserDefaults = .standard) -> BackendProfileSnapshot {
         guard case .code(let base) = profile.details,
@@ -734,16 +636,11 @@ final class CodeSessionManager {
     /// capping the list. Persists to UserDefaults.
     private func rememberRecentPath(_ url: URL) {
         let standardized = url.standardizedFileURL
-        // `sameLocation`, not `!=`. **Hardening, not a fixed bug**: today both sides are
-        // directory-flavoured (`NSOpenPanel` hands back a directory URL, and reloaded entries
-        // go through `URL(fileURLWithPath:)`, which stats the path), so `!=` compared correctly.
-        // It is worth the change anyway — a symlinked project folder DOES diverge here, since
-        // `standardizedFileURL` never resolves symlinks, and the failure is a silent duplicate
-        // row in Recent Projects. This loop already stats every entry below, so resolution
-        // costs nothing extra.
+        // Compares with `sameLocation`, not `!=`: a symlinked project folder diverges under `standardizedFileURL`,
+        // which never resolves symlinks, and would add a duplicate row to Recent Projects.
         var updated = recentProjectPaths.filter { !$0.sameLocation(as: standardized) }
         updated.insert(standardized, at: 0)
-        // Drop entries whose folders no longer exist on disk (user moved/deleted them).
+        // Drops entries whose folders are gone from disk.
         updated = updated.filter { FileManager.default.fileExists(atPath: $0.path) }
         if updated.count > Self.maxRecentPaths {
             updated = Array(updated.prefix(Self.maxRecentPaths))
@@ -785,34 +682,19 @@ final class CodeSessionManager {
         agentConfig.instructions = instructions
         agentConfig.projectPath = projectPathStr
 
-        // ⚠️ Quick settings are re-applied on EVERY send, not just when the user changes them —
-        // the row is shared by every project, so this is what guarantees a run uses THIS
-        // project's limits. `apply` also performs the tool merge, so the preset's guarantees still
-        // hold. The capture below then records anything the Tool Library changed on the row.
+        // Quick settings are re-applied on every send: the row is shared by every project, so this guarantees the run uses
+        // this project's limits. `apply` also performs the tool merge; the capture below records Tool Library changes.
         let settings = CodeQuickSettingsStore.settings(for: projectPathStr, defaults: defaults)
         Self.apply(settings, to: &agentConfig)
-        // ⚠️ Logged on EVERY send, not only when the user has overridden something. This was
-        // gated on `!settings.isDefault`, so a run at the preset limits said nothing about what
-        // they were — and "Reached maximum iterations (N)" is only diagnosable against the cap
-        // that was in force. `apply` runs either way; only the line was conditional.
+        // Logged on every send, not only for overrides: a maximum-iterations stop is diagnosable only against the cap in force.
         if let path = projectPath?.path { captureProject(path, from: agentConfig, reason: "send") }
         let limitSource = settings.isDefault ? "preset" : "per-project override"
         logger.info("[CODE_SETTINGS] '\(projectName)' runs with maxIterations: \(AgentExecutionDefaults.describe(agentConfig.maxIterations)), timeout: \(agentConfig.executionTimeout.map { "\(Int($0))s" } ?? "none"), context: \(agentConfig.llmConfig.numCtxOverride.map { "\($0) tokens (\(settings.contextTokens == nil ? "Code default" : "chosen"))" } ?? "provider default") — source: \(limitSource). CONSEQUENCE: an iteration-cap or timeout termination in this run is against these exact values.")
 
         profile.details = .code(agentConfig)
 
-        // ⚠️⚠️ F10. This runs on EVERY send and rebuilds the same 7,567-char instruction block
-        // from the same inputs, so an unchanged session wrote an identical row per message —
-        // each one a real SwiftData write, a WAL entry, and a `lastSelected` bump that reordered
-        // "recently used" for a profile the user had not selected. The store logs that as
-        // `[PROFILE_SAVE] ⚠️ REDUNDANT`, which is how this was found.
-        //
-        // ⚠️ The guard lives HERE rather than in the store, deliberately. `BackendProfile.details`
-        // has a setter that moves the API key to the Keychain, refuses to overwrite an
-        // undecodable blob and rewrites every denormalized column — skipping it centrally would
-        // also skip those, and would strand a row whose cached value diverged from its persisted
-        // blob after an encode failure. This caller knows exactly what it recomputed, so it is
-        // the one place that can answer "nothing changed" without giving anything up.
+        // Skips the write when nothing changed (this runs on every send). The guard lives here, not in the store: the `details`
+        // setter also moves the API key and rewrites denormalized columns, which a central skip would bypass.
         guard profile.details != detailsBeforeRefresh else {
             logger.debug("[CODE] Instructions unchanged for '\(projectName)' — skipping the profile write. CONSEQUENCE: no SwiftData write and no lastSelected bump this send; the row already holds these exact instructions, project path and quick settings.")
             return
@@ -822,32 +704,22 @@ final class CodeSessionManager {
             try BackendProfileStore.shared.saveProfile(profile)
             logger.info("[CODE] Instructions refreshed — project: '\(projectName)', instructions: \(instructions.count) chars, wording: \(CodeSystemPrompt.Wording.forTier(tier).rawValue) (model tier \(tier?.rawValue ?? "unknown")). CONSEQUENCE: tiny and small models get the compact wording of the same rules.")
         } catch {
-            // ⚠️ Store validation rejects a profile with no model, so this fires for a session
-            // that has a folder but no model yet. Harmless in practice — `attemptSend` refuses to
-            // send without a model, and the next refresh re-applies everything — but it means the
-            // write silently did nothing, so say what was lost.
+            // Store validation rejects a profile with no model, so this fires for a folder with no model yet; harmless since
+            // `attemptSend` refuses to send without one, but the write did nothing, so the log says what was lost.
             logger.error("[CODE] Failed to refresh instructions: \(error.localizedDescription). CONSEQUENCE: the profile keeps its previous instructions, project path and quick settings for now; all of them are re-applied on the next successful refresh, so nothing is permanently lost.")
         }
     }
 
-    /// Home: the session goes back to "no folder", and the ROW goes back to the preset.
-    ///
-    /// ⚠️⚠️ The row is RESET, never deleted (2026-09-24). Deleting it was how every per-tool
-    /// setting and every MCP tool enabled for Code vanished on each Home press — they lived on the
-    /// row and nowhere else. Now the project being left is captured first, so everything it had
-    /// comes back when its folder is opened again.
-    ///
-    /// The model is kept: it is the "last used" fallback a project with no remembered model starts
-    /// with.
+    // Why: the row is reset, never deleted: per-tool settings and enabled MCP tools live on it.
+    /// Home: the session goes back to no folder and the row goes back to the preset.
+    /// The project being left is captured first so its settings return when reopened; the model is kept as the fallback.
     func resetSession() {
         projectKnowledgeContent = nil
         projectMemoryEntryCount = 0
 
         let leaving = projectPath
-        // ⚠️ `ensureCodeProfile()`, not `codeProfileID`. The handle is resolved lazily, so a Home
-        // pressed before any Code action this launch found NO handle, reset nothing — and the
-        // adoption that followed re-hydrated the row's stale folder, undoing the Home (seen on
-        // device 2026-09-24: "Home with no readable Code profile (handle: none)").
+        // Uses `ensureCodeProfile()`, not `codeProfileID`: the handle resolves lazily, so Home pressed before any Code action
+        // would reset nothing and the adoption that follows would re-hydrate the stale folder.
         let profileID = ensureCodeProfile()
         if var profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID),
            case .code(var agentConfig) = profile.details {
@@ -871,14 +743,9 @@ final class CodeSessionManager {
 
     // MARK: - Duplicate Collapse
 
-    /// Every `.code` row in the shared library — the candidates for adoption and for collapse.
-    ///
-    /// ⚠️ `!isNodeOwned` matches `fetchSharedProfiles()`'s rule. A workflow node's private code row
-    /// belongs to that node's graph: adopting one would hand the Code interface a configuration it
-    /// does not own, and collapsing one would delete part of a workflow.
-    ///
-    /// (`fetchProfiles()` is capped at 500 rows by `lastSelected`. Past that cap this simply misses
-    /// and the caller creates instead — it degrades to the pre-fix behaviour, never worse.)
+    // Why: `!isNodeOwned` matches `fetchSharedProfiles()`: a workflow node's private code row is neither adopted nor deleted.
+    /// Every `.code` row in the shared library: the candidates for adoption and for collapse.
+    /// Capped at 500 rows by `lastSelected`; past that the caller creates instead of adopting.
     private func sharedCodeProfilesOnDisk() -> [BackendProfileSnapshot] {
         do {
             return try BackendProfileStore.shared.fetchProfiles()
@@ -889,13 +756,8 @@ final class CodeSessionManager {
         }
     }
 
-    /// Ordering for `ensureCodeProfile()`'s adoption: a row with a model configured outranks a bare
-    /// skeleton, then most-recently-selected wins.
-    ///
-    /// ⚠️ The skeleton tie-break is the part that matters. `ensureCodeProfile()` creates with an
-    /// EMPTY model, so "opened Code mode once, never picked a model" leaves a bare row behind —
-    /// exactly the shape of the orphans this whole change exists to stop. Adopting one of those
-    /// over a configured row would read to the user as their model being silently forgotten.
+    // Why: a bare skeleton (created with an empty model) must lose, or the user's configured model seems silently forgotten.
+    /// Ordering for adoption: a row with a model configured outranks a bare skeleton, then most recently selected wins.
     private static func adoptionPreference(_ lhs: BackendProfileSnapshot, _ rhs: BackendProfileSnapshot) -> Bool {
         let lhsConfigured = !(lhs.details.agentConfig?.llmConfig.modelName.isEmpty ?? true)
         let rhsConfigured = !(rhs.details.agentConfig?.llmConfig.modelName.isEmpty ?? true)
@@ -903,16 +765,9 @@ final class CodeSessionManager {
         return (lhs.lastSelected ?? .distantPast) > (rhs.lastSelected ?? .distantPast)
     }
 
+    // Why: duplicates must go: the Profiles sidebar hides `.code`, so users cannot remove them and their tool settings idle.
     /// Deletes the code rows that lost the adoption race.
-    ///
-    /// ⚠️ Leaving them is not the neutral option. The code profile is a singleton by design: the
-    /// user cannot create a second one, and the Profiles sidebar filters `.code` out entirely, so a
-    /// duplicate has NO hand-removal path. It is not inert either — the Tool Library lists every
-    /// tool-capable profile, so duplicates appear there as several identically-named "Code Session"
-    /// entries, and tool enablement saved against the wrong one is a silent no-op.
-    ///
-    /// Deliberately narrow: it only ever deletes from the rows `ensureCodeProfile()` just scanned,
-    /// which are already filtered to shared `.code` rows.
+    /// Only deletes from the rows `ensureCodeProfile()` just scanned, already filtered to shared `.code` rows.
     private func collapseDuplicateCodeProfiles(keeping keptID: UUID, from scanned: [BackendProfileSnapshot]) {
         let duplicates = scanned.filter { $0.id != keptID }
         guard !duplicates.isEmpty else { return }
@@ -950,15 +805,8 @@ final class CodeSessionManager {
     }
 
     // MARK: - Tool Merge
-    //
-    // The Code profile's tools list is rewritten on every send via
-    // `refreshInstructionsOnProfile()`. Naively replacing it with
-    // `CodeToolPreset.defaultTools` would nuke two kinds of user choices:
-    //   1. Auto/Ask toggles the user set on preset tools via the Tool Library.
-    //   2. Additional tools the user added (non-preset built-ins, MCP servers).
-    // The merge preserves both: preset tools stay in the list (user can't disable
-    // them), carrying over the user's requiresConfirmation / favorite / timeout
-    // fields; user-added tools outside the preset are appended unchanged.
+    // The tools list is rewritten on every send; merging, not replacing it with the preset, keeps the user's Auto/Ask
+    // toggles and added non-preset tools. Preset tools cannot be disabled; user-added tools are appended unchanged.
 
     /// A tool's identity in the merge: the same name from two sources is two tools.
     static func toolKey(_ tool: Tool) -> String { "\(tool.sourceId)-\(tool.name)" }

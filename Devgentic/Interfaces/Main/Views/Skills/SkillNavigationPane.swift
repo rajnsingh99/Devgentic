@@ -4,20 +4,15 @@
 //  SkillNavigationPane.swift
 //  Devgentic
 //
-//  The Skills tab's sidebar: the library itself, plus the two ways to add to it.
-//
-//  ⚠️ REWRITTEN FOR V6. This used to list skill SOURCES — folders on disk, with per-source Rescan,
-//  Reveal in Finder and Remove. None of those exist any more: Devgentic owns skill content, so
-//  there is no folder to rescan, reveal or lose. What the pane lists now is skills.
-//
-//  ⚠️ Reads the library, never a profile. Skills are global; which profile links which is the
-//  content area's job, and putting it here is what made five profiles keep five copies.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Category Filter Enum
 
+/// The Skills tab's sidebar: the skill library plus the two ways to add to it.
+/// Reads the global library, never a profile; profile linking belongs to the content area.
 enum SkillCategoryFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case created = "Created"
@@ -54,9 +49,8 @@ struct SkillNavigationPane: View {
         return nil
     }
 
-    /// ⚠️ Observes the STORE's revision as well as the local one. A mutation made in the content
-    /// area has to invalidate this pane's read too — each view keeping only its own counter is why
-    /// adding a skill in one place left the other showing a stale list.
+    /// Observes the store's revision as well as the local one, so a mutation made in the content area
+    /// invalidates this read too.
     private var skillsResult: Result<[SkillSD], SkillStoreError> {
         _ = revision
         _ = SkillStore.shared.revision
@@ -89,9 +83,8 @@ struct SkillNavigationPane: View {
         }
     }
 
-    /// ⚠️ "Storage is down" and "you have no skills yet" are DIFFERENT states with opposite
-    /// remedies, and collapsing them is what makes a user re-create everything they already had.
-    /// The store returns a `Result` precisely so this distinction survives to the UI.
+    /// "Storage is down" and "no skills yet" are different states with opposite remedies.
+    /// The store returns a `Result` so the distinction reaches the UI.
     private var storeFailure: String? {
         if case .failure(let error) = skillsResult { return error.localizedDescription }
         return nil

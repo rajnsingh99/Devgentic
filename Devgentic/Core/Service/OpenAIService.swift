@@ -4,9 +4,8 @@
 //  OpenAIService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 28/02/26.
+//  Created by Raj Singh.
 //
-
 
 import Foundation
 import OSLog
@@ -24,13 +23,10 @@ struct OpenAIService {
         let id: String
     }
     
+    // Why: a user on a corporate or self-hosted gateway pastes a gateway-scoped key; the call must honor the endpoint
+    // instead of sending that key to the vendor's public API.
     /// Fetches the available models from the OpenAI /v1/models endpoint using the provided API key.
-    /// - Parameter baseURL: the profile's configured API Endpoint. ⚠️ Defaulted, never hardcoded:
-    ///   a user on a corporate or self-hosted gateway sets that endpoint and pastes a
-    ///   GATEWAY-SCOPED key. This call used to ignore it and transmit that key to the vendor's
-    ///   public API on every keystroke-debounced fetch — a host they had deliberately routed
-    ///   around, and one their policy may forbid. Same `?? ProviderDefaults.x` shape `AgentConnect`
-    ///   already uses, so listing and chat can never disagree about where a profile talks.
+    /// - Parameter baseURL: the profile's configured API endpoint; nil falls back to `ProviderDefaults.openAIBaseURL`.
     func verifyAndFetchModels(apiKey: String, baseURL: URL? = nil) async throws -> [String] {
         let url = (baseURL ?? ProviderDefaults.openAIBaseURL).appendingPathComponent("models")
         

@@ -4,30 +4,15 @@
 //  MediaArtifact.swift
 //  Devgentic
 //
-//  Multimodal Pipeline Migration — Phase 1A
-//  Represents a completed media artifact produced by tool execution.
-//  Carried through ToolExecutionResult, streamed via AgentStreamEvent,
-//  stored in MemoryAction, and rendered by ChatBubbleView.
-//
-//  Created by Raj Singh on 15/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - Media Kind
 
-/// Classification of media artifacts.
-/// ⚠️ Hand-written `RawRepresentable` so an unrecognised kind is PRESERVED, not rejected.
-///
-/// `MediaKind` rides two persisted blobs, and the second one is why this matters most:
-/// `MediaArtifact` reaches `ChatMessageSD.contentData` through `MessageContent.mediaArtifact`, and
-/// **that path has no `.unknown` catch-all** — unlike the timeline blob. Before this, one
-/// unrecognised kind threw, the whole message decoded to a "Decode Error" card, and the next save
-/// re-encoded that card over the original bytes. Permanent loss, from a single new enum case.
-///
-/// The stdlib's `RawRepresentable where RawValue == String` conformances win over
-/// enum-with-associated-value synthesis, so `Codable` is byte-identical to the previous `: String`
-/// form, and `Equatable`/`Hashable` still compare `rawValue`. No call site changes.
+// Why: `MediaArtifact` persists in a blob with no `.unknown` catch-all; a throwing decode loses the message on the next save.
+/// Classification of media artifacts; an unrecognised raw value is preserved, not rejected.
 public enum MediaKind: RawRepresentable, Sendable, Codable, Hashable {
     case image
     case audio

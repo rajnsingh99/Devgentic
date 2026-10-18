@@ -2,20 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsLoggingHygieneTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  OBS-1. ChatOps wrote 119 CONSEQUENCE-bearing log lines through Apple's `os.Logger`, which does
-//  two things the subsystem's own logging standard forbids: os_log redacts every interpolated
-//  dynamic value as `<private>` in a release build (so the chat id, the close code and the command
-//  name — the entire diagnostic payload — are unreadable in the field), and a raw `os.Logger` never
-//  enters `LogRecorder`'s ring, so not one of those lines reaches an exported diagnostic bundle.
-//
-//  ⚠️ THE MIGRATION IS ONLY HALF THE FIX, AND THE OTHER HALF IS THE LOG LEVEL. `DGLogger` routes
-//  `.warning` and above into the ring and drops everything below it (`shouldPersist`, floor set
-//  deliberately in 2026-08-23 after measurement: info/notice was 95.1% of 1,060,962 rows and nothing
-//  read it). So converting a dead-end drop from `Logger.info` to `DGLogger.info` makes it readable
-//  on the developer's own Mac and changes NOTHING about the bug report — which is the only place a
-//  remote-control failure can be observed, because the machine that reproduces it is the user's.
+//  Created by Raj Singh.
 //
 
 import XCTest

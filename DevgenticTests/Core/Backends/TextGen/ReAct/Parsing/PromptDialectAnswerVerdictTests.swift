@@ -4,11 +4,7 @@
 //  PromptDialectAnswerVerdictTests.swift
 //  DevgenticTests
 //
-//  Invariant (prompt-based dialects, i.e. CognitiveParsePipeline WITH a registry):
-//  a reply in which recovery finds no call, and which declares no attempted call,
-//  is the final answer — on every dialect. Brackets decide nothing.
-//
-//  Probe 2026-10-05: before the fix, 12 of 18 dialects rejected each answer below.
+//  Created by Raj Singh.
 //
 
 import XCTest

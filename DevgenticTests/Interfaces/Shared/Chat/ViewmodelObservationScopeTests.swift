@@ -4,17 +4,7 @@
 //  ViewmodelObservationScopeTests.swift
 //  DevgenticTests
 //
-//  [CF-14] WHICH bodies a Code Viewer keystroke wakes up.
-//
-//  `updateCodeViewerDraft` write-throughs every character into
-//  `codeViewerTabs[i].editedCode`. Under `@Observable` that mutation notifies every reader
-//  of the ARRAY — and `isCodeViewerPanelPresented` / `isCodeViewerMinimized` used to derive
-//  their answer from `codeViewerTabs.isEmpty`, so `MainApplicationView.body` (the root
-//  window: aura layers, sidebar, mode picker, the whole chat area) re-ran on every keypress
-//  to re-learn something that only changes when a tab opens or closes.
-//
-//  These pin both halves of the fix: the flags no longer wake on a draft write, and the
-//  mirror they read instead cannot drift from the array it mirrors.
+//  Created by Raj Singh.
 //
 
 import XCTest

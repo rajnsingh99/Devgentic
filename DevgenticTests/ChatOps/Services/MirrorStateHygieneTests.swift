@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MirrorStateHygieneTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  B7 — MIR-4, MIR-5, MIR-6 and OBS-6.
-//
-//  ⚠️ MIR-5 AND OBS-6 ARE ONE ROOT CAUSE: operation-keyed prompt state (`hitlMessageIDs`,
-//  `mirroredOperations`) with session-keyed release paths that never touched it. Landing OBS-6 alone
-//  would make every ordinary bridge stop emit one warning per abandoned prompt instead of one teardown
-//  line with a count; landing MIR-5 alone leaves the resolution path unable to say what happened.
+//  Created by Raj Singh.
 //
 
 import XCTest

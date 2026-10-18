@@ -4,17 +4,7 @@
 //  MarkdownTableView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 10/08/25.
-//
-//  REWRITTEN (2026-07-16) from `Grid` to measured fixed-width columns. Grid sized
-//  cells at a different width than it laid them out (unlimited proposal inside the
-//  horizontal ScrollView vs the 400pt cap), and the cells' `fixedSize(vertical:)`
-//  text then drew at its true height anyway — bleeding across neighbouring rows in
-//  both directions (center-anchored overflow). Column widths are now measured
-//  up-front (single-line NSAttributedString measurement, clamped to [min, max]),
-//  so wrap heights are deterministic and each row is simply a top-aligned HStack
-//  that grows to its tallest cell. Row backgrounds/hover are per-ROW, so stripes
-//  always cover every wrapped line.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -22,17 +12,13 @@ import os
 
 private let logger = DGLogger(category: "MarkdownTableView")
 
-/// The strings VoiceOver speaks for a table.
-///
-/// Pulled out of the views because it's pure logic with real edge cases (empty cells,
-/// unnamed columns, pluralisation) and because a SwiftUI accessibility label cannot be
-/// read back from a hosted view in a test — the a11y tree is built lazily when a real
-/// assistive client attaches. Testing these functions is the only way to pin the contract.
-/// [mc-13] One table's last width measurement, keyed by a hash of the cells it measured.
+/// One table's last width measurement, keyed by a hash of the cells it measured.
 private final class ColumnWidthCache {
     var entry: (key: Int, widths: [CGFloat])?
 }
 
+/// The strings VoiceOver speaks for a table.
+/// Kept as pure logic so empty cells, unnamed columns and pluralisation can be tested without a hosted view.
 enum TableSpeech {
 
     /// Spoken on landing, before navigating in. Without it a table was indistinguishable
@@ -49,11 +35,8 @@ enum TableSpeech {
         return summary
     }
 
-    /// A data cell. The column name comes first because the value alone means nothing —
-    /// "42" or "failed" only says something once you know which column it sits in.
-    ///
-    /// `value` must be the RENDERED text, not the markdown source: VoiceOver should read
-    /// "done", not "asterisk asterisk done".
+    /// A data cell label. The column name comes first because the value alone means nothing.
+    /// `value` must be the rendered text, not the markdown source, so VoiceOver reads "done" rather than the asterisks.
     static func cellLabel(value: String, header: String) -> String {
         let spoken = value.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty cell must SAY it's empty — silence is indistinguishable from a bug.
@@ -71,29 +54,18 @@ enum TableSpeech {
         String(localized: "Row \(index + 1) of \(total)")
     }
 
-    /// [mc-10] What a CELL speaks, header or data. The one entry point the table's two
-    /// `accessibilityLabel`s call, so "what production speaks" and "what the tests pin" are
-    /// the same function rather than two implementations that drifted (the private twin this
-    /// replaced did not trim the header before testing it for emptiness, so a whitespace-only
-    /// header spoke "   , 42" on screen and "42" in the suite).
+    /// Returns what a cell speaks, header or data. The single entry point both `accessibilityLabel`s call,
+    /// so production speech and the tests exercise the same function.
     static func label(value: String, header: String, isHeader: Bool) -> String {
         isHeader ? headerCellLabel(value: value) : cellLabel(value: value, header: header)
     }
 
-    /// The header row's own label. Deliberately its own constant rather than a case of
-    /// `rowLabel(index:of:)` — "Column headers" is a different sentence, not row zero, and
-    /// `rowLabel` cannot express it. [mc-10] It was an inline literal at the call site, which
-    /// is precisely how the view and this enum drifted apart in the first place.
+    /// The header row's own label; a separate constant because "Column headers" is a different sentence, not row zero.
     static let headerRowLabel = String(localized: "Column headers")
 }
 
-/// Serialises a parsed table back to GitHub-Flavored Markdown.
-///
-/// The previous inline version produced markdown that didn't re-parse as the same table:
-/// it never escaped `|` (so one pipe in a cell silently split it into two), it sized the
-/// separator row from `headers.count` while data rows used their own length (ragged input
-/// → mismatched separator → not a table at all downstream), and it dropped column
-/// alignment. Extracted so the round trip can actually be tested.
+/// Serialises a parsed table back to GitHub-Flavored Markdown that re-parses as the same table.
+/// Escapes `|` in cells, sizes the separator to the widest row, and keeps column alignment.
 enum TableMarkdown {
 
     static func serialize(
@@ -101,9 +73,8 @@ enum TableMarkdown {
         rows: [[String]],
         alignments: [ContentBlock.ColumnAlignment] = []
     ) -> String {
-        // ONE column count for every row including the separator. GFM requires the
-        // separator to match the header exactly, and a row that's longer than the header
-        // is otherwise emitted with cells no separator accounts for.
+        // One column count for every row including the separator: GFM requires the separator to match the header,
+        // and a longer row would otherwise emit cells no separator accounts for.
         let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
         guard columnCount > 0 else { return "" }
 
@@ -162,24 +133,16 @@ struct MarkdownTableView: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    // NB: row hover state deliberately does NOT live here. It used to (`hoveredRowIndex`),
-    // which meant every mouse move between rows re-ran THIS view's `body` — and `body`
-    // measures every visible cell (see `columnWidths`). Each row now owns its own hover
-    // flag, so hovering re-renders one row instead of re-measuring the whole table.
-    // Fixing the spurious invalidation beats caching around it — and [mc-13] the cache that
-    // replaced it is keyed on the CONTENT it measures, not on first appearance, which is the
-    // difference between the two: the 2026-07-16 crash came from a key that could not notice
-    // the table had grown.
+    // Row hover state lives in each row, not here: hover on this view re-ran `body`, which measures every visible cell.
+    // Each row owns its hover flag, so hovering re-renders one row.
 
     /// Maximum rows rendered before showing "Show all" button.
     /// Prevents rendering 100+ rows on initial layout.
     private static let initialRowLimit = 50
     @State private var isExpanded: Bool = false
 
-    /// [mc-13] Content-keyed memo for `columnWidths`. A CLASS so that writing it from `body`
-    /// publishes nothing (a `@State` value write during a view update is the mutation SwiftUI
-    /// warns about); `@State` so that it lives and dies with this view rather than accumulating
-    /// in a process-lifetime static across a session full of tables.
+    /// Content-keyed memo for `columnWidths`. A class so writing it from `body` publishes nothing;
+    /// `@State` so it lives and dies with this view.
     @State private var widthCache = ColumnWidthCache()
 
     private static let minColumnWidth: CGFloat = 60
@@ -202,28 +165,10 @@ struct MarkdownTableView: View {
         max(headers.count, visibleRows.map(\.count).max() ?? 0)
     }
 
-    /// Single-line ideal width per column over the VISIBLE cells, clamped to
-    /// [min, max] + padding. Measuring the raw markdown source slightly
-    /// over-estimates rendered width (syntax characters) — the safe direction.
-    ///
-    /// [mc-13] Memoized on a hash of everything it reads — the visible cells, the headers, the
-    /// column count and the font size — so a `body` pass that changes none of them reuses the
-    /// answer instead of rebuilding an `NSAttributedString` per cell. The previous comment here
-    /// claimed the opposite twice over: that a cache "goes stale under a streaming table's
-    /// stable identity" (true only of the 2026-07-16 cache, which was keyed at first APPEARANCE
-    /// — a content-keyed one cannot go stale, because the key changes with the content), and
-    /// that `body` "only re-runs when the content actually changes", which is not a guarantee
-    /// SwiftUI makes: an ancestor invalidation, a theme change or a font-size change re-runs it
-    /// with identical cells, and each of those paid a full re-measure.
-    ///
-    /// The cache lives in a REFERENCE box held by `@State`, not in `@State` directly: `body`
-    /// reads this, and publishing a `@State` write during a view update is the mutation SwiftUI
-    /// warns about. The box dies with the view, so nothing accumulates across a session.
-    ///
-    /// ⚠️ The 2026-07-16 crash is separately defended now — `TableRowView` reads
-    /// `column < widths.count ? widths[column] : 60` — so a short array renders a fallback
-    /// width rather than trapping. That guard, not this cache's shape, is what makes the
-    /// failure mode survivable; do not remove it on the strength of this comment.
+    // Why: `TableRowView` falls back to a default width for a missing column; keep that guard, the memo does not replace it.
+    /// Single-line ideal width per column over the visible cells, clamped to [min, max] plus padding.
+    /// Memoized on a hash of the visible cells, headers, column count and font size, so repeated passes do not re-measure.
+    /// Measures the raw markdown source, which slightly over-estimates rendered width (the safe direction).
     private var columnWidths: [CGFloat] {
         let count = columnCount
         guard count > 0 else { return [] }
@@ -257,10 +202,8 @@ struct MarkdownTableView: View {
         return widths
     }
 
-    /// [mc-13] Everything `columnWidths` reads, hashed. THE property that makes the memo safe:
-    /// the 2026-07-16 cache keyed on first appearance, so a streaming table that grew kept the
-    /// widths it was measured at — and the row array outgrew them. Anything that can change a
-    /// measured width must be in here.
+    /// Hashes everything `columnWidths` reads: the visible cells, headers, column count and font size.
+    /// Anything that can change a measured width must be in the key, or a growing streaming table keeps stale widths.
     nonisolated static func widthKey(fontSize: CGFloat, columnCount: Int, headers: [String],
                                      rows: some Sequence<[String]>) -> Int {
         var hasher = Hasher()
@@ -275,12 +218,8 @@ struct MarkdownTableView: View {
         let widths = columnWidths
 
         ScrollView(.horizontal, showsIndicators: true) {
-            // Lazy so an expanded 500-row table materialises its rows on demand rather than
-            // all at once. NB the dominant cost is `columnWidths`, which measures the row DATA
-            // (not the views) and so isn't affected by laziness — [mc-13] it is memoized on the
-            // content it measures instead, which is what keeps a re-run that changed nothing
-            // (an ancestor invalidation, a hover elsewhere, a theme change) from re-measuring
-            // every cell. A real content change still re-measures, which is correct.
+            // Lazy so an expanded long table materialises rows on demand. The dominant cost is `columnWidths`, which measures
+            // row data and is memoized on its content, so a re-run that changed nothing does not re-measure.
             LazyVStack(alignment: .leading, spacing: 0) {
                 // MARK: - Header Row
                 TableRowView(
@@ -318,8 +257,6 @@ struct MarkdownTableView: View {
                 }
 
                 // MARK: - Expand / Collapse Row
-                // Expanding used to be one-way: a 500-row table you opened by accident
-                // stayed 500 rows tall for the rest of the conversation, with no way back.
                 if rows.count > Self.initialRowLimit {
                     Divider()
                     Button {
@@ -345,9 +282,8 @@ struct MarkdownTableView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusSmall))
             .padding(.bottom, theme.spacingMedium)
-            // A container, NOT `.combine`: combining would flatten the whole table into one
-            // run-on utterance. `.contain` keeps rows and cells individually navigable and
-            // gives VoiceOver the shape of the thing before you walk into it.
+            // A container, not `.combine`: combining would flatten the table into one utterance;
+            // `.contain` keeps rows and cells individually navigable.
             .accessibilityElement(children: .contain)
             .accessibilityLabel(tableSummary)
         }
@@ -385,12 +321,8 @@ struct MarkdownTableView: View {
     }
 }
 
-/// One table row: top-aligned fixed-width cells. Row height = tallest cell, by plain
-/// HStack layout — no grid sizing pass to disagree with.
-///
-/// Owns its OWN hover state. That's the point: hover used to live on `MarkdownTableView`,
-/// so moving the mouse between rows re-ran the parent's `body` — which re-measures every
-/// visible cell. Now a hover repaints one row and the parent never hears about it.
+/// One table row: top-aligned fixed-width cells; row height is the tallest cell, by plain HStack layout.
+/// Owns its own hover state, so hovering repaints one row without re-running the parent's `body`.
 private struct TableRowView: View {
     let cells: [String]
     /// The column headers, so each cell can say which column it belongs to. A cell value
@@ -446,10 +378,8 @@ private struct TableRowView: View {
     }
 }
 
-/// Equatable so `.equatable()` at the call sites skips re-invoking `body` (and the
-/// markdown parse inside it) for cells whose content hasn't changed. Deliberately
-/// STATELESS: cell caches derived from init parameters go stale when a streaming
-/// table grows under a stable identity.
+/// Equatable so `.equatable()` at the call sites skips `body` (and the markdown parse) for unchanged cells.
+/// Stateless on purpose: caches derived from init parameters go stale when a streaming table grows in place.
 private struct TableCellView: View, Equatable {
     let content: String
     /// This cell's column name, "" for a header cell (which IS the name).
@@ -536,9 +466,4 @@ private struct TableCellView: View, Equatable {
         .accessibilityLabel(TableSpeech.label(value: "Image, \(url.lastPathComponent)", header: header, isHeader: isHeader))
     }
 
-    // [mc-10] The spoken label is `TableSpeech.label(value:header:isHeader:)`, called directly
-    // at both `accessibilityLabel` sites above. There used to be a private re-implementation
-    // here — four English literals and a subtly different empty-header test — which is what
-    // production actually spoke while every assertion in `ChatAccessibilitySemanticsTests`
-    // pinned the unused `TableSpeech` copy, localized entries and all.
 }

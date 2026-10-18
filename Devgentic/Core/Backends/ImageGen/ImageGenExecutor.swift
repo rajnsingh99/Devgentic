@@ -4,11 +4,7 @@
 //  ImageGenExecutor.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Lightweight, stateless executor for image generation.
-//  Unlike ReAct/Plan&Execute executors, this has no iteration loops —
-//  it performs a single feasibility check → generate → yield result flow.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,13 +20,8 @@ private let logger = DGLogger(category: "ImageGenExecutor")
 /// 3. Streaming progress and result events via `AgentStreamEvent`
 struct ImageGenExecutor: Sendable {
 
-    /// Whether `error` ended the generation because the user stopped it.
-    ///
-    /// ⚠️ Timeout inventory D-27. Only `CancellationError` used to count, but a cloud provider's
-    /// Stop surfaces as `URLError(.cancelled)` from URLSession — or wrapped by the provider in an
-    /// `ImageGenError.providerError` string — so a deliberate Stop drew an error card and was
-    /// recorded `.failed`. The task's own cancellation flag is checked first because it is the
-    /// one signal no provider can rewrap.
+    /// Whether `error` ended the generation because the user stopped it. The task's own cancellation flag is checked first,
+    /// since a cloud provider's Stop can surface as `URLError(.cancelled)` or wrapped in `ImageGenError.providerError`.
     static func isStop(_ error: Error) -> Bool {
         if Task.isCancelled { return true }
         if error is CancellationError { return true }
@@ -58,16 +49,13 @@ struct ImageGenExecutor: Sendable {
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
-                // Per-generation span — ImageGen previously recorded ZERO telemetry (Gap #7).
+                // Per-generation span for telemetry.
                 let genSpan = traceContext.newSpan()
                 await TraceRecorder.shared.beginSpan(context: genSpan, name: "imageGen", kind: .llmCall)
                 let genStart = Date()
                 do {
-                    // ⚠️⚠️ NO FEASIBILITY GATE (readiness CR-13, 2026-10-10). `capability` is GUESSED from
-                    // the model's name, and it used to refuse requests outright — gemini-2.5-flash-image,
-                    // which can edit, got an error card instead of an edit. Capability metadata may LABEL,
-                    // never GATE (standing rule): the provider attempts the request, and a provider that
-                    // genuinely cannot do it throws its own `imageToImageNotSupported`, handled below.
+                    // No feasibility gate: `capability` is guessed from the model's name, so it may label but never refuse. The provider
+                    // attempts the request, and one that cannot do it throws its own `imageToImageNotSupported`, handled below.
                     let modelName = extractModelName(from: profile)
                     logCapabilityDisagreement(intent: intent, capability: capability, modelName: modelName)
                     await TraceRecorder.shared.emitLLMRequest(span: genSpan, model: modelName, messageCount: 1)
@@ -111,9 +99,8 @@ struct ImageGenExecutor: Sendable {
                                 progressHandler: progressHandler
                             )
                         } catch ImageGenError.imageToImageNotSupported where inferred {
-                            // The edit was only INFERRED from the wording — nobody attached an image —
-                            // and this provider cannot edit. Drawing the prompt fresh is the useful
-                            // answer; an error card for a request the user never explicitly made is not.
+                            // The edit was only inferred from the wording (no image attached) and this provider cannot edit, so the prompt is
+                            // drawn fresh rather than raising an error for a request the user never explicitly made.
                             logger.notice("[IMAGEGEN] '\(modelName)' cannot edit images, and this edit was inferred (no image attached). CONSEQUENCE: generating a NEW image from the prompt instead of showing an error.")
                             continuation.yield(.thought("\(modelName) can't edit the previous image, so this is a new image from your prompt.", id: UUID()))
                             artifact = try await provider.generateImage(
@@ -132,9 +119,8 @@ struct ImageGenExecutor: Sendable {
 
                     let genMs = Int(Date().timeIntervalSince(genStart) * 1000)
                     await TraceRecorder.shared.emitLLMResponse(span: genSpan, durationMs: genMs, preview: "image \(artifact.id)")
-                    // Declared so the Model lane counts generation time (see
-                    // RunReportProjection.declaredModelMs). The span itself also brackets the
-                    // feasibility check, so its wall-clock must not be used.
+                    // Declared so the Model lane counts generation time (see `RunReportProjection.declaredModelMs`); the span also
+                    // brackets the feasibility check, so its wall-clock is not used.
                     await TraceRecorder.shared.endSpan(
                         spanID: genSpan.spanID, status: .completed,
                         metadata: ["model": modelName, "duration_ms": "\(genMs)"])
@@ -173,8 +159,8 @@ struct ImageGenExecutor: Sendable {
 
     // MARK: - Private Helpers
 
-    /// Says so when the GUESSED capability disagrees with what is about to be attempted — and changes
-    /// nothing. The label is a hint for diagnosis, never a reason to refuse (CR-13).
+    /// Logs when the guessed capability disagrees with what is about to be attempted, and changes nothing;
+    /// the label is a hint for diagnosis, never a reason to refuse.
     private func logCapabilityDisagreement(intent: ImageIntent, capability: ImageModalitySupport, modelName: String) {
         switch intent {
         case .imageToImage where !capability.supportsImageToImage:

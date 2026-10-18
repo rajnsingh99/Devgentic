@@ -4,26 +4,7 @@
 //  SpeechStaleCompletionTests.swift
 //  DevgenticTests
 //
-//  A broken invariant the CF audit surfaced, not a register row.
-//
-//  `SpeechService` was written on the premise that `stopSpeaking(at:)` reports `didCancel` for
-//  the utterance it cancels — `speechSynthesizer(_:didCancel:)` was an explicit no-op "for
-//  exactly that reason", and `restartCurrentUtterance` said so in a comment. MEASURED false on
-//  macOS 26 with a real `AVSpeechSynthesizer`: an immediate stop, a stop-at-word, a stop while
-//  paused, and a stop immediately followed by `speak(next)` all delivered `didFinish` and never
-//  once `didCancel`.
-//
-//  So every site that stops the synthesizer and then decides what plays next itself —
-//  `skipForward`, `skipBackward`, `restartCurrentUtterance` — got a completion for the utterance
-//  it had just thrown away, a few milliseconds after the replacement had started. One Skip
-//  Forward press played TWO segments back to back and the island jumped two positions; the same
-//  completion also wiped the in-flight tracking of the segment that had just started, so a
-//  later speed change could no longer restart it.
-//
-//  Utterances now carry a generation stamp (`StampedUtterance`) and `handleUtteranceFinished`
-//  ignores a completion that is not the one in flight. The race itself lands milliseconds after
-//  the skip that causes it and needs audio output, so the stale completion is replayed here
-//  through `deliverUtteranceCompletionForTesting`, which is the production handler.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,11 +4,7 @@
 //  ToolLibraryView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 25/09/25.
-//
-//  Redesigned on 19/03/26 for single-window stack navigation.
-//  Uses a custom split layout with themed sidebar + scrollable
-//  tool rows instead of NavigationSplitView + Table.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -17,6 +13,8 @@ private let logger = DGLogger(category: "ToolLibraryView")
 
 // MARK: - Navigation State
 
+/// Which item is selected in the tool library sidebar: all tools, favorites, a local category, an MCP server
+/// or the registry.
 enum SidebarSelection: Hashable {
     case all
     case favorites
@@ -36,15 +34,7 @@ struct BuiltInToolCategory: Identifiable {
     let rawCategories: Set<String>
 
     /// Sidebar groups, and the tool `category` values each one gathers.
-    ///
-    /// Four names were removed on 2026-08-01 — "Advanced Finder & File Management",
-    /// "Device & Peripheral Control", "Deep Context Awareness" and "Communication & Mail" — left
-    /// behind by tool files deleted in the 2026-07-31 catalogue cleanup. They were inert (a group
-    /// with no tools is dropped by `compactMap`) but they described a shape the app no longer has,
-    /// which is the kind of thing a reader trusts. `ToolCategoryGroupingTests` now pins BOTH
-    /// directions: every name here gathers at least one real tool, and every tool's category is
-    /// gathered by some group — the second being the one that matters, since a tool whose category
-    /// belongs to no group gets no sidebar row.
+    /// A group with no tools is dropped; a tool whose category belongs to no group gets no sidebar row.
     static let allGroups: [BuiltInToolCategory] = [
         .init(name: "File System", icon: "folder.fill", rawCategories: ["File System"]),
         .init(name: "System & Shell", icon: "terminal.fill", rawCategories: ["System & Shell", "System Toggles", "System State", "System Automation"]),
@@ -134,9 +124,8 @@ struct ToolLibraryView: View {
 
 
     var body: some View {
-        // Navigation (categories, MCP servers, Installed/Discover, Discover facets) lives in
-        // the SIDEBAR PANE now — see `ToolNavigationPane`. This view is purely the content
-        // column. Previously both were on screen at once, each listing MCP servers.
+        // Navigation (categories, MCP servers, Installed/Discover, Discover facets) lives in the sidebar pane
+        // (`ToolNavigationPane`); this view is only the content column.
         Group {
             // Driven by the SELECTION, not a separate mode: Marketplace is a row in the pane
             // like any other, so one value decides what both halves show.
@@ -180,12 +169,8 @@ struct ToolLibraryView: View {
     // MARK: - Registry adds
 
     /// Creates a server from a reviewed registry plan, then connects it.
-    ///
-    /// The tool list is intentionally EMPTY at save time: we have not talked to the server
-    /// yet, and inventing tools from registry metadata would put entries in the library that
-    /// may not exist. The connect that follows discovers the real list and persists it — and
-    /// if it fails, the server is still saved, visible, and editable rather than silently
-    /// discarded along with the credentials the user just typed.
+    /// The tool list is empty at save time, since tools invented from registry metadata may not exist; the connect that
+    /// follows discovers and persists the real list. If it fails, the server and the typed credentials are still saved.
     private func addFromRegistry(plan: MCPRegistryInstallPlan, values: [String: String]) {
         guard let definition = plan.makeServerDefinition() else {
             logger.error("""
@@ -227,9 +212,8 @@ struct ToolLibraryView: View {
             \(values.count) value(s) stored in Keychain. Connecting now to discover its tools.
             """)
 
-        // Mark connecting BEFORE switching views. `performConnect` sets this too, but only
-        // after an actor hop — so without it the freshly-selected server renders for a frame
-        // as "Not connected", which reads as a failure rather than work in progress.
+        // Mark connecting BEFORE switching views: `performConnect` sets this only after an actor hop, so the freshly-selected
+        // server would render as "Not connected" for a frame.
         MCPClientService.shared.connectionStates[sourceID] = .connecting
 
         nav.section = .mcp
@@ -249,11 +233,8 @@ struct ToolLibraryView: View {
     @ViewBuilder
     private var toolDetailView: some View {
         if displayedRows.isEmpty {
-            // An MCP server with no rows is almost never "nothing here" — it is connecting,
-            // or it failed, or the user disabled it. Falling through to the library's generic
-            // empty state showed "No Tools Found / Add MCP Server" for a server that was
-            // mid-handshake, so adding a server looked like it had done nothing until the
-            // user navigated away and back.
+            // An MCP server with no rows is usually connecting, failed or disabled, not empty; the generic empty state would
+            // show "No Tools Found" for a server mid-handshake.
             if case .mcp(let sourceID) = selectedSidebar,
                let source = toolStore.sources.first(where: { $0.id == sourceID }) {
                 mcpServerStateView(source)
@@ -274,9 +255,8 @@ struct ToolLibraryView: View {
 
                             Spacer()
 
-                            // Which profile these toggles write to. Permanent, so it also
-                            // serves as the profile SWITCHER — the common case when pointing
-                            // several agents at one newly-added MCP server.
+                            // Which profile these toggles write to; always visible, so it doubles as the profile switcher (e.g. when pointing
+                            // several agents at one newly-added MCP server).
                             if let profileSelector {
                                 profileSelector()
                             }
@@ -649,8 +629,8 @@ struct ToolLibraryView: View {
         tool.description.localizedCaseInsensitiveContains(searchText)
     }
 
-    /// Explains WHY a selected MCP server is showing no tools, rather than implying there is
-    /// nothing to show. Each state names its own next action.
+    /// Explains why a selected MCP server is showing no tools, rather than implying there is nothing to show;
+    /// each state names its own next action.
     @ViewBuilder
     private func mcpServerStateView(_ source: ToolSource) -> some View {
         let state = MCPClientService.shared.connectionStates[source.id] ?? .disconnected

@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
+//
+//  MultimodalTranslator.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
 
 import Foundation
 
-/// Shared multimodal-translation helpers for the cloud providers (audit #14).
-///
-/// Each provider used to hand-roll the same loop: walk a message's `MessageBlock`s,
-/// resolve image bytes to base64, and project unsupported blocks to text — differing
-/// only in the JSON shape of a text/image part. That shared skeleton lives here; the
-/// providers supply only the per-part formatting.
+/// Shared multimodal-translation helpers for the cloud providers: walk a message's `MessageBlock`s, resolve image
+/// bytes to base64 and project unsupported blocks to text. Providers supply only the per-part JSON formatting.
 enum MultimodalTranslator {
 
     /// Resolves an image block's bytes and returns its `(mimeType, base64)`.
@@ -19,11 +21,9 @@ enum MultimodalTranslator {
         return (image.mimeType, data.base64EncodedString())
     }
 
-    /// Walks a message's content blocks into provider-shaped JSON parts.
-    ///
-    /// Shares the block iteration, image resolution, empty-text skipping, and the
-    /// text-projection of non-text/non-image blocks (`textFallback`). The provider
-    /// supplies only the JSON shape of a text part and a resolved-image part.
+    /// Walks a message's content blocks into provider-shaped JSON parts, sharing block iteration, image resolution,
+    /// empty-text skipping and the text projection of other blocks (`textFallback`). The provider supplies the JSON shape
+    /// of a text part and a resolved-image part.
     static func translateBlocks(
         _ content: [MessageBlock],
         text makeText: (String) -> [String: Any],

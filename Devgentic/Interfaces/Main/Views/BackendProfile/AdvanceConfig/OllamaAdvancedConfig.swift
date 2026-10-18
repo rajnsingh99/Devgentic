@@ -4,17 +4,14 @@
 //  OllamaAdvancedConfig.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 22/08/25.
-//
-//  Fixed on 27/08/25 to add robust decoding for legacy boolean values.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
-/// Distinguishes between agent-tuned defaults (low temp, fixed seed, tight sampling
-/// for structured tool calls) and chat-tuned defaults (warmer temp, no fixed seed,
-/// looser sampling for conversational use). Passed into `OllamaSettingsView` so the
-/// "Apply Optimal" menu produces the right preset for the host profile.
+/// Distinguishes agent-tuned defaults (low temperature, fixed seed, tight sampling) from chat-tuned defaults (warmer,
+/// no fixed seed, looser sampling). Passed into `OllamaSettingsView` so "Apply Optimal" produces the right preset for
+/// the host profile.
 enum OllamaConfigDefaultProfile {
     case agent
     case chat
@@ -22,17 +19,9 @@ enum OllamaConfigDefaultProfile {
 
 extension OllamaConfigDefaultProfile {
 
-    /// Which preset ladder a profile type is on.
-    ///
-    /// ⚠️ ONE mapping, because it is now read from two sides that must agree: the request
-    /// factory (which ladder to materialise) and `EffectiveContextWindow` (which ladder's
-    /// `numCtx` to price budgets against). They disagreed about the window for five weeks
-    /// precisely because the factory's choice was invisible to everyone else; a second copy
-    /// of this `if` would reopen that seam in a new place.
-    ///
-    /// `.bot` is the only conversational type. `.agent`, `.code` and `.workflow` all run the
-    /// tool loop and want the deterministic agent ladder — `.code` especially, since a Code
-    /// session on a chat ladder would sample at temperature 0.7 with no fixed seed.
+    /// Which preset ladder a profile type is on: `.bot` is the only conversational type, while `.agent`, `.code` and
+    /// `.workflow` run the tool loop and use the agent ladder. One mapping shared by the request factory and
+    /// `EffectiveContextWindow`, so they agree on the window.
     static func forProfileType(_ type: ProfileType) -> OllamaConfigDefaultProfile {
         type == .bot ? .chat : .agent
     }
@@ -114,19 +103,9 @@ struct OllamaAdvancedConfig: Codable, Hashable {
         }
     }
     
-    /// Returns the recommended config for this model + host profile combination.
-    /// Maps the codebase-wide 5-tier `ModelTier` (from `CognitiveProfile.swift`,
-    /// captured by `OllamaConnect.buildMetadata` from `/api/show.details.parameter_size`)
-    /// into Ollama's 3-tier preset vocabulary, then dispatches to either the
-    /// agent-tuned `preset(for:)` or chat-tuned `botPreset(for:)` based on
-    /// the host profile. Mirrors `MLXAdvancedConfig.recommended(for:)` shape
-    /// with the agent-vs-chat dispatch added.
-    ///
-    /// The 3-tier preset vocabulary predates the 5-tier system; tier mapping is
-    /// inlined here (rather than a helper) so the switch's pattern-match resolves
-    /// against the global `ModelTier` cleanly without colliding with the nested
-    /// `OllamaAdvancedConfig.ModelTier`. small/medium collapse into smallMedium;
-    /// large/ultra collapse into large.
+    /// Returns the recommended config for this model and host profile, mapping the 5-tier `ModelTier` into Ollama's
+    /// 3-tier preset vocabulary and dispatching to the agent or chat preset. The tier mapping is inlined to avoid
+    /// colliding with the nested `OllamaAdvancedConfig.ModelTier`.
     static func recommended(for metadata: ModelMetadata, profile: OllamaConfigDefaultProfile) -> OllamaAdvancedConfig {
         let presetTier: ModelTier   // resolves to OllamaAdvancedConfig.ModelTier (inner)
         switch metadata.tier {       // metadata.tier is the GLOBAL ModelTier (outer)

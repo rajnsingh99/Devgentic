@@ -4,10 +4,7 @@
 //  ConversationSDTests.swift
 //  DevgenticTests
 //
-//  Created on 03/04/26.
-//
-//  Tests ConversationSD @Model — schema integrity, relationship cascade,
-//  toStruct() mapping, and SwiftData-specific behaviors.
+//  Created by Raj Singh.
 //
 
 import XCTest

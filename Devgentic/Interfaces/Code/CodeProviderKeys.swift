@@ -4,22 +4,7 @@
 //  CodeProviderKeys.swift
 //  Devgentic
 //
-//  The Code interface's API key per PROVIDER, so a project's remembered cloud model still has its
-//  key when the user comes back to it (2026-09-24).
-//
-//  ⚠️ WHY THIS EXISTS. There is one permanent Code profile, and a profile holds ONE key — the one
-//  for its current provider. With models remembered per project, opening an OpenAI project after an
-//  Anthropic one replaces the profile's provider, and the Anthropic key would go with it: returning
-//  to the first project would restore its model with no key, and its first send would fail on auth.
-//  Keeping a Keychain slot per provider lets each project's model find its key again.
-//
-//  Keys go through the Keychain, never UserDefaults — `CodeProjectState` strips them for exactly
-//  that reason.
-//
-//  ⚠️ ONE KEY PER PROVIDER (2026-10-03). For OpenAI, Anthropic, Google and OpenRouter the slot IS
-//  the app-wide shared key (`GlobalProviderKeys`) — the same one the model catalog sets and every
-//  profile reads. It used to be a separate `C0DE…` item, i.e. a third copy of the same credential.
-//  Only `.openAICompatible` (no shared key) still uses a Code slot.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -27,6 +12,9 @@ import Security
 
 private let logger = DGLogger(category: "CodeProviderKeys")
 
+/// The Code interface's API key per provider, so a project's remembered cloud model keeps its key after another
+/// project switches the permanent Code profile's provider. Keys live in the Keychain, never UserDefaults.
+/// OpenAI, Anthropic, Google and OpenRouter use the shared key (`GlobalProviderKeys`); `.openAICompatible` has a slot.
 enum CodeProviderKeys {
 
     /// A fixed, recognisable Keychain account per provider. The prefix is not a profile id and can

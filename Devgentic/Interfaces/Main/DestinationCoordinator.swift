@@ -4,35 +4,20 @@
 //  DestinationCoordinator.swift
 //  Devgentic
 //
-//  Owns long-lived view models for destination routes so their state survives
-//  view recreation. Rationale:
-//
-//  `MainApplicationView` wraps Layer 2 (destination container views) in an
-//  `if !router.isShowingChat { destinationView }` gate. Each time `isShowingChat`
-//  toggles, SwiftUI tears the subtree down and next render materializes fresh
-//  container views — which means fresh `@State` view models on every visit.
-//  For Ollama/MLX that meant: refetching all local models, firing `/api/show`
-//  per model, losing the user's search text, scroll position, selected sort,
-//  and selected category every time they glanced back at chat.
-//
-//  The coordinator holds the VMs outside the view hierarchy so they persist
-//  for the app's lifetime. Container views read the VM from environment via
-//  `@Environment(DestinationCoordinator.self)` and bind to it with `@Bindable`.
-//
-//  Instantiation is lazy — VMs are only created on first access, so users who
-//  never open a model store never pay the observation-tracking setup cost.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Owns long-lived view models for destination routes so their state (search text, scroll position, sort, category)
+/// survives view recreation. Created lazily on first access; container views read them via
+/// `@Environment(DestinationCoordinator.self)` and bind with `@Bindable`.
 @Observable @MainActor
 final class DestinationCoordinator {
 
     // MARK: - Lazy-created view models
-    //
-    // The backing stores are `@ObservationIgnored` because the coordinator
-    // itself doesn't need SwiftUI observation — the VMs returned from these
-    // getters are individually `@Observable` and drive view updates directly.
+    // The backing stores are `@ObservationIgnored` because the VMs returned from the getters are individually
+    // `@Observable` and drive view updates themselves.
 
     @ObservationIgnored private var _ollamaStore: OllamaModelStoreViewModel?
 
@@ -70,18 +55,8 @@ final class DestinationCoordinator {
         }
     }
 
-    /// Prompt-library browse VM (search / category / sort / pin / tag / selection)
-    /// owned here so sidebar state survives tab switches. The sidebar lives
-    /// inside a `switch selectedTab` in `SidebarPaneView` — selecting any other
-    /// tab destroys `PromptLibrarySidebarView`, and previously the `@State` VM
-    /// died with it, resetting filters on every return visit.
-    ///
-    /// The edit-buffer fields used to live on this same VM, but that forced
-    /// every edit site (detail view, AdvancedPromptEditor, AgentConfigDetailView,
-    /// create popover) to either reuse the sidebar's buffer (leaking drafts
-    /// across contexts) or instantiate its own full-blown `PromptLibraryViewModel`
-    /// just to get the buffer — both ugly. Edit state now lives on
-    /// `PromptEditViewModel`, one instance per edit surface.
+    /// Prompt-library browse VM (search, category, sort, pin, tag, selection) owned here so sidebar state survives tab
+    /// switches. Edit state lives on `PromptEditViewModel`, one instance per edit surface.
     var promptBrowse: PromptBrowseViewModel {
         if let existing = _promptBrowse { return existing }
         let vm = PromptBrowseViewModel()

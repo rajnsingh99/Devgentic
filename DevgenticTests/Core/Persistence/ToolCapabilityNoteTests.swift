@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ToolCapabilityNoteTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Covers G95: four model pickers had four different policies for one rule, because the helper that
-//  was supposed to be the single source of truth was never adopted — and would have been the wrong
-//  thing to adopt anyway, since `isModelDisabled` made a row "visible but not selectable", i.e. a
-//  gate.
-//
-//  `toolCapabilityNote` replaces it. It can only ever produce a STRING, so a capability verdict can
-//  no longer reach a picker as anything but text — the type signature is the guarantee, and these
-//  tests pin the wording contract that makes the text worth reading.
+//  Created by Raj Singh.
 //
 
 import XCTest

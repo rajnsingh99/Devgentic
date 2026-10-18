@@ -4,13 +4,13 @@
 //  KnownModelContextWindows.swift
 //  Devgentic
 //
-//  Static lookup table for known model context window sizes.
-//  Used for system instruction length warnings in the prompt editor.
-//  For local models (MLX/Ollama), the context window is read from ModelMetadata instead.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Static lookup table of context window sizes for known cloud models, used for system-instruction length warnings.
+/// Local models (MLX/Ollama) read their window from `ModelMetadata` instead.
 enum KnownModelContextWindows {
 
     /// Returns the context window size (in tokens) for a known cloud model.

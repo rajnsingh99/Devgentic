@@ -4,14 +4,7 @@
 //  ConversationDeletionTests.swift
 //  DevgenticTests
 //
-//  Code Viewer tabs are in-memory for the app session only, so deleting a conversation can
-//  no longer leave a persisted session behind — the orphan row this file was originally
-//  written for (field-observed 2026-07-25, 3795 + 19585 bytes) is structurally impossible
-//  now. See `Docs/codeviewer-rescope-design.md` §6.
-//
-//  What still needs pinning is the in-memory contract that bug rode on: a switch stashes
-//  the OUTGOING conversation, an emptied viewer clears its entry rather than leaving a
-//  stale one to be restored, and a non-owning view model (QuickAccess) keeps nothing.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  HybridRetrievalRankingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 13/07/26.
-//
-//  Pins the BM25+RRF hybrid ranking that replaced the flat lexical boost:
-//  1. Tokenizer: camelCase/snake_case sub-splitting with the intact identifier kept.
-//  2. BM25 ingredients — IDF (rare > common), TF saturation, length normalization.
-//  3. Fusion router: dense-only when the query has no distinctive lexical signal.
-//  4. RRF fusion: a symbol chunk ranked poorly by the dense engine is rescued
-//     into the injected top-k (the run-1 manual-test failure shape).
-//  5. Injection gate: past-threshold chunks stay excluded without an exact
-//     identifier hit (the exception lane stays narrow).
+//  Created by Raj Singh.
 //
 
 import XCTest

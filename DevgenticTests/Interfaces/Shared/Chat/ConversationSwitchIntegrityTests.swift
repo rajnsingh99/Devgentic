@@ -4,15 +4,7 @@
 //  ConversationSwitchIntegrityTests.swift
 //  DevgenticTests
 //
-//  The 2026-09-12 state-integrity batch: everything that must stay correct when the user
-//  switches conversation while something is still in flight.
-//
-//  vm-1  a live agent write must not plant a tab mid-load (it suppresses the restore, and the
-//        next switch then overwrites that conversation's stash)
-//  cv-2  a live-write completion must settle its tab wherever it lives — live OR stashed
-//  vm-4  the search page-in walk must abandon when a load starts, not page the new conversation
-//
-//  Each test fails if its fix is reverted; the mutation is named in each doc comment.
+//  Created by Raj Singh.
 //
 
 import XCTest

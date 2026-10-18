@@ -4,11 +4,7 @@
 //  ImageExport.swift
 //  Devgentic
 //
-//  One place to save or copy a chat image. The two image renderers each grew their own
-//  copy of this and each got it wrong in a different direction: ImageView wrote the raw
-//  payload under a hardcoded ".png" name (so a JPEG landed as a .png that no longer
-//  matched its bytes), while MediaArtifactImageView always re-encoded to PNG and ignored
-//  the artifact's mimeType. Both swallowed failures with `try?` and told the user nothing.
+//  Created by Raj Singh.
 //
 
 import AppKit
@@ -17,6 +13,8 @@ import os
 
 private let logger = DGLogger(category: "ImageExport")
 
+/// One place to save or copy a chat image, shared by the image renderers.
+/// Names files from the payload's real image type, sniffed from its bytes.
 enum ImageExport {
 
     enum SaveError: LocalizedError {
@@ -33,10 +31,8 @@ enum ImageExport {
         }
     }
 
-    /// The type of an image payload, read from the bytes themselves.
-    ///
-    /// A declared mimeType is a claim; the bytes are the fact. Sniffing keeps the file
-    /// extension honest even when a provider mislabels what it returned.
+    /// The type of an image payload, read from the bytes themselves rather than the declared mimeType,
+    /// which a provider may mislabel.
     static func fileExtension(for data: Data, declaredMimeType: String? = nil) -> String {
         if let sniffed = sniffExtension(data) { return sniffed }
         if let mime = declaredMimeType,
@@ -113,14 +109,9 @@ enum ImageExport {
         return panel
     }
 
+    // Why: `writeObjects` can fail after `clearContents()` emptied the clipboard, so success must not be assumed.
     /// Puts an image on the general pasteboard. Returns whether it actually landed.
-    ///
-    /// ⚠️ `writeObjects` returns a Bool and this used to DISCARD it, then log "✅ Image copied to
-    /// clipboard" unconditionally — so on the one path that can fail, the log asserted success
-    /// while `clearContents()` had already emptied the clipboard, leaving the user with neither
-    /// the new image nor what they had before. Narrow, but it is a lying log over a destructive
-    /// step, which is the combination worth closing. Callers that show a "Copied ✓" affordance
-    /// should key it off the result rather than off having called this.
+    /// Callers showing a "Copied" affordance should key it off the result.
     @discardableResult
     static func copyToPasteboard(_ image: NSImage) -> Bool {
         let pasteboard = NSPasteboard.general

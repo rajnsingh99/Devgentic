@@ -4,8 +4,7 @@
 //  GitPorcelainParser.swift
 //  Devgentic
 //
-//  Pure parser for `git status --porcelain=v2 --branch -z` — the Git Changes panel's status
-//  source. No process, no I/O: stdout bytes in, a report out.
+//  Created by Raj Singh.
 //
 
 import Foundation

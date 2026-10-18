@@ -4,13 +4,7 @@
 //  FileNameInferenceTests.swift
 //  DevgenticTests
 //
-//  Covers CodeFileNameInference — heuristic filename detection for code blocks with no
-//  `--- Start of file ---` marker — and its wiring through the parser into ContentBlock,
-//  the extractor, and Code Viewer tab titles.
-//
-//  The motivating shape is real LLM output (2026-07-24 screenshot): a heading, prose, an
-//  inline-code filename (`DijkstraSolver.java`), then the fence. Only the injected marker
-//  used to populate `fileName`, so those blocks rendered "Java Snippet" and tabs "Java".
+//  Created by Raj Singh.
 //
 
 import XCTest

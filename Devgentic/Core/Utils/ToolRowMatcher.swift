@@ -4,24 +4,16 @@
 //  ToolRowMatcher.swift
 //  Devgentic
 //
-//  Which executing timeline row a finished tool call belongs to.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+// Why: no name-only fallback: a result whose row was never created would complete another same-name row still running,
+// and parallel same-name calls finish in either order.
 /// Finds the executing `.toolExecution` row a tool result completes.
-///
-/// ⚠️⚠️ READINESS CR-41 (2026-10-12). Every completion site took the LAST executing row with the
-/// tool's NAME. Autonomous calls run in parallel, so two same-name calls (two `read_file`s) finish
-/// in either order: A's output landed on B's row, B's result then found no executing row and
-/// vanished, and a stale row could show both succeeded and cancelled.
-///
-/// A row is matched by name AND params: identical calls are de-duplicated before they run, so
-/// within one step the params pick out exactly one row. Where a run changes a call's params
-/// between its row and its result (a banner edit), the output carries the row's params as
-/// `ToolOutput.rowParams`. There is deliberately NO name-only fallback: a result whose row was
-/// never created (a call refused before it started) would otherwise complete the one OTHER
-/// same-name row still running.
+/// A row is matched by name AND params: identical calls are de-duplicated before they run, so params pick out one row.
+/// If params change between row and result (a banner edit), the output carries them as `ToolOutput.rowParams`.
 enum ToolRowMatcher {
 
     static func index(in events: [TimelineEvent], toolName: String, params: String) -> Int? {

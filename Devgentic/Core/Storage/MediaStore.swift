@@ -4,22 +4,7 @@
 //  MediaStore.swift
 //  Devgentic
 //
-//  Multimodal Pipeline Migration — Phase 2
-//  Disk-backed binary media storage to prevent RAM leaks in long sessions.
-//  All binary data flows through this actor — MessageBlock and MediaArtifact
-//  hold MediaReference.diskPath, never raw Data in long-lived structures.
-//
-//  Created by Raj Singh on 15/03/26.
-//
-//  ⚠️ READINESS CR-65 (2026-10-12). `evict` and `pruneIfNeeded` had ZERO callers and the manifest
-//  they read lived in memory only, so every generated image stayed on disk forever, including after
-//  its conversation was deleted. The fix is NOT to wire the prune: these files are the images IN
-//  saved conversations (messages reference them by path), so an oldest-first size cap would delete
-//  pictures out of chats the user kept, with no warning. The prune and the in-memory manifest are
-//  DELETED. A folder now lives exactly as long as its conversation: `evict` runs after a delete has
-//  committed (`ChatPersistenceStore.deleteConversation`), and the launch sweep
-//  (`removeOrphanedConversations`) collects the folders of conversations deleted before this fix,
-//  or whose eviction a crash interrupted.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -29,9 +14,8 @@ private let logger = DGLogger(category: "MediaStore")
 
 /// Manages binary media lifecycle: write-to-disk, resolve, evict.
 public actor MediaStore {
-    /// ⚠️ Redirected to a temporary folder under XCTest. The test host IS the real app, and the
-    /// chat store is already redirected to a test database there, so a launch sweep against the
-    /// REAL folder would treat every real conversation's images as orphans and delete them.
+    /// Redirected to a temporary folder under XCTest: the test host is the real app, and a launch sweep against the real
+    /// folder would treat every real conversation's images as orphans and delete them.
     public static let shared = MediaStore(baseDirectory: MediaStore.defaultBaseDirectory())
 
     let baseDirectory: URL
@@ -79,10 +63,8 @@ public actor MediaStore {
 
     // MARK: - Evict
 
-    /// Deletes all media of a conversation whose delete has COMMITTED. Returns the files removed.
-    ///
-    /// ⚠️ Call only after the conversation's delete is on disk: a delete that failed to save brings
-    /// the conversation back on the next launch, and its images must still be there.
+    /// Deletes all media of a conversation whose delete has committed. Returns the files removed.
+    /// Call only after the delete is on disk: a delete that failed to save brings the conversation back with its images.
     @discardableResult
     public func evict(conversationID: UUID) -> Int {
         let conversationDir = directory(for: conversationID)
@@ -100,11 +82,8 @@ public actor MediaStore {
 
     // MARK: - Orphan sweep
 
-    /// Removes the media folder of every conversation that no longer exists. Returns the folders removed.
-    ///
-    /// ⚠️ Only folders named by a conversation UUID are considered; anything else is left alone.
-    /// An EMPTY live set is refused, like the memory sweep's: a listing that came back empty by
-    /// mistake would otherwise read as "delete every conversation's images".
+    /// Removes the media folder of every conversation absent from the live set; returns the folders removed.
+    /// Only UUID-named folders are considered; an empty live set is refused (an empty listing may be a mistake).
     @discardableResult
     public func removeOrphanedConversations(liveConversationIDs: Set<UUID>) -> Int {
         guard !liveConversationIDs.isEmpty else {

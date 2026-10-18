@@ -4,23 +4,14 @@
 //  ToolRecoveryHints.swift
 //  Devgentic
 //
-//  Static registry that maps (built-in tool name, error pattern) to a list of recovery
-//  tool suggestions. Used by ToolExecutionMediator to enrich failed-tool outputs with
-//  actionable next-step hints — but only when the suggested tools are actually present
-//  in the current request's available tool set.
-//
-//  Design principles:
-//  - Applies ONLY to built-in local tools. MCP tools are opaque to us — the registry
-//    lookup fails silently for unknown tool names, returning the original error unchanged.
-//  - Substring match on error output (not regex) — fast and predictable.
-//  - First matching hint per tool wins. Order rows most-specific-first when patterns overlap.
-//  - Self-exclusion: the failed tool is stripped from its own suggestion list at render time.
-//  - Available-intersection: only suggests tools that are enabled in the current request.
-//  - Caps rendered output at 3 suggestions to avoid menu-paralysis.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Static registry mapping (built-in tool name, error pattern) to recovery tool suggestions for failed tool outputs.
+/// Applies only to built-in tools and suggests only tools present in the request; first matching hint per tool wins,
+/// the failed tool is excluded from its own list, and at most 3 suggestions are rendered.
 enum ToolRecoveryHints {
 
     // MARK: - Registry
@@ -38,8 +29,7 @@ enum ToolRecoveryHints {
         Hint(toolName: "read_file",      errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "project_tree", "code_search_text"]),
         Hint(toolName: "read_file",      errorSubstring: "Error extracting document",   suggestions: ["file_overview", "preview_file"]),
 
-        // edit_code_single / edit_code_batch — three distinct failure modes, each needs a different
-        // recovery. (`edit_code`, which these split, was removed 2026-09-24.)
+        // edit_code_single / edit_code_batch: three distinct failure modes, each needing a different recovery.
         Hint(toolName: "edit_code_single", errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "project_tree"]),
         Hint(toolName: "edit_code_single", errorSubstring: "matches",                  suggestions: ["read_file"]),
         Hint(toolName: "edit_code_single", errorSubstring: "old_string not found",     suggestions: ["read_file", "code_search_text"]),
@@ -82,15 +72,12 @@ enum ToolRecoveryHints {
         // manage_finder_tags — file-level metadata tool; recovery via filename discovery.
         Hint(toolName: "manage_finder_tags", errorSubstring: "File not found",          suggestions: ["list_directory", "glob_files"]),
 
-        // list_directory — generally a top-level call; when it fails (bad path, permission)
-        // the useful recoveries are broader views (project_tree) or pattern search (glob_files).
-        // Kept intentionally minimal since list_directory is usually the first step, not a
-        // fallback target, so a short suggestion list keeps the model's next move obvious.
+        // list_directory: usually the first step, not a fallback target; on failure broader views (project_tree) or
+        // pattern search (glob_files) help, and a short list keeps the model's next move obvious.
         Hint(toolName: "list_directory", errorSubstring: "Error listing directory",     suggestions: ["project_tree", "glob_files"]),
 
-        // read_file_metadata — metadata read failures usually mean the path is wrong or
-        // the file is unreadable. Fall back to content-level reads that may bypass the
-        // metadata quirk, or list the parent dir to verify the path.
+        // read_file_metadata: failures usually mean a wrong path or an unreadable file; fall back to content-level reads
+        // or list the parent directory to verify the path.
         Hint(toolName: "read_file_metadata", errorSubstring: "Error reading metadata",  suggestions: ["read_file", "file_overview", "list_directory"]),
 
         // diff_files — when diffing fails, read each file independently so the model
@@ -105,10 +92,8 @@ enum ToolRecoveryHints {
         // explicitly via create_folder first is the clean recovery path.
         Hint(toolName: "batch_move_files", errorSubstring: "Could not create destination folder", suggestions: ["create_folder"]),
 
-        // spotlight_search — both path-missing and permission-denied land on the same
-        // substring; recovery via broader exploration works for the path-missing case
-        // and is harmless for permission (model sees bare error + suggestion that won't
-        // itself error if tools exist).
+        // spotlight_search: path-missing and permission-denied share a substring; broader exploration helps the
+        // first and is harmless for the second.
         Hint(toolName: "spotlight_search", errorSubstring: "does not exist",             suggestions: ["list_directory", "project_tree"]),
     ]
 
@@ -130,17 +115,9 @@ enum ToolRecoveryHints {
 
     // MARK: - Enrichment
 
-    /// Returns an enriched version of the error string if a matching hint exists AND at least
-    /// one suggested tool is present in the request's available tool set. Otherwise returns
-    /// the original error unchanged.
-    ///
-    /// Enrichment is safe to call on every failed tool — non-registered tools (e.g., MCP) and
-    /// unrecognized error patterns produce no output change.
-    ///
-    /// - Parameters:
-    ///   - toolName: the tool whose call just failed
-    ///   - originalError: the raw error string returned by the tool's `call(arguments:)`
-    ///   - availableToolNames: names of all tools enabled for the current request
+    /// Returns the error enriched with recovery suggestions when a hint matches and a suggested tool is available;
+    /// otherwise the original error. Safe on every failed tool: unregistered tools (e.g. MCP) are unchanged.
+    /// - Parameters: toolName is the failed tool; availableToolNames lists the tools enabled for the request.
     static func enrich(
         toolName: String,
         originalError: String,
@@ -160,9 +137,8 @@ enum ToolRecoveryHints {
             .prefix(3)
 
         guard !pickable.isEmpty else {
-            // Model doesn't have access to any of the mapped recovery tools — return the
-            // original error. Inventing a suggestion for a tool the model can't call would
-            // cause hallucination (the exact failure mode we're trying to prevent).
+            // No mapped recovery tool is available: return the original error, since suggesting a tool the model
+            // cannot call invites hallucination.
             return originalError
         }
 

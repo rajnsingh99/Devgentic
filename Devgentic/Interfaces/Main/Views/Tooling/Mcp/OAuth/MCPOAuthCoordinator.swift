@@ -4,15 +4,7 @@
 //  MCPOAuthCoordinator.swift
 //  Devgentic
 //
-//  Top-level OAuth orchestrator — ties discovery, registration, PKCE, the
-//  authorize-URL build, and token exchange together. The actual browser
-//  redirect flow (ASWebAuthenticationSession + loopback listener) lands in
-//  Phase 3; this coordinator exposes everything *except* "open the browser
-//  and wait for a code" so the UI layer can plug in its own callback.
-//
-//  Bundle persistence to/from Keychain is centralized here so callers don't
-//  reach into MCPSecretStore directly for OAuth — only this type knows the
-//  JSON shape of the bundle.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -20,10 +12,9 @@ import os
 
 private let logger = DGLogger(category: "MCPOAuthCoordinator")
 
-/// Receives the auth-code redirect from the system browser. Phase 3 will
-/// implement this on top of ASWebAuthenticationSession + a loopback
-/// HTTP listener; defining it as a protocol here keeps Phase 2 testable
-/// without UI dependencies.
+/// Receives the auth-code redirect from the system browser.
+/// A protocol so the OAuth flow is testable without UI dependencies; production uses `ASWebAuthenticationSession`
+/// with a loopback listener.
 protocol MCPOAuthRedirectHandler: Sendable {
 
     /// Open the authorize URL in the system browser, watch for the redirect
@@ -39,9 +30,8 @@ protocol MCPOAuthRedirectHandler: Sendable {
 enum MCPOAuthCoordinatorError: LocalizedError {
     case cannotPersist(String)
     case bundleNotFound
-    /// Register KC-4. The provider rotated the refresh token and the replacement could not be
-    /// stored, so the grant is dead: the previous refresh token is already invalid at the provider
-    /// and the new one existed only in memory.
+    /// The provider rotated the refresh token and the replacement could not be stored, so the grant is dead.
+    /// The previous refresh token is already invalid at the provider and the new one existed only in memory.
     case rotatedRefreshTokenLost(sourceID: UUID, underlying: String)
 
     var errorDescription: String? {
@@ -63,8 +53,8 @@ private func ms(since start: Date) -> Int {
 @MainActor
 struct MCPOAuthCoordinator {
 
-    /// Opaque value the AS echoes back on redirect — used to defeat redirect-
-    /// confusion attacks. 32 random bytes base64url'd, fresh per flow.
+    /// Generates the opaque `state` value the AS echoes back on redirect to defeat redirect-confusion attacks: 32
+    /// random bytes, base64url, fresh per flow.
     static func generateState() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
@@ -97,12 +87,8 @@ struct MCPOAuthCoordinator {
         if !scopes.isEmpty {
             existing.append(URLQueryItem(name: "scope", value: scopes.joined(separator: " ")))
         }
-        // RFC 8707 resource indicator — binds the issued token's audience to THIS MCP
-        // server. Without it the AS mints a general-purpose token, so a malicious or
-        // compromised MCP server could replay a token obtained for it against any other
-        // resource that trusts the same issuer (the token-passthrough problem the MCP
-        // auth spec calls out). Servers that do not implement RFC 8707 ignore the
-        // parameter, so sending it is safe with older ASes.
+        // RFC 8707 resource indicator: binds the token's audience to this MCP server so it cannot be replayed elsewhere;
+        // servers without RFC 8707 ignore it.
         if let resource {
             existing.append(URLQueryItem(name: "resource", value: resource.absoluteString))
         }
@@ -112,26 +98,9 @@ struct MCPOAuthCoordinator {
 
     // MARK: - End-to-end flow
 
-    /// Run the full first-time OAuth flow and return the resulting bundle.
-    /// **Does not persist** — caller is responsible for `persist(_:sourceID:)`
-    /// when ready (the Add MCP form, for example, defers persistence until
-    /// the user clicks Add to Library).
-    ///
-    /// Steps:
-    ///   1. Discover metadata at `issuer/.well-known/oauth-authorization-server`
-    ///   2. Dynamically register the client (RFC 7591)
-    ///   3. Generate PKCE + state
-    ///   4. Hand the authorize URL to the redirect handler, await `code`
-    ///   5. Exchange the code for tokens
-    /// - Parameter resource: the MCP server URL these tokens are for (RFC 8707). Binds the
-    ///   issued token's audience to that one server, so it cannot be replayed against
-    ///   another resource trusting the same issuer. Nil only when the caller genuinely has
-    ///   no resource URL (a stdio server), in which case no binding is requested.
-    /// - Parameter serverURL: the MCP server URL the sign-in was performed FOR, recorded on
-    ///   the bundle for the LOCAL binding check (`MCPOAuthBinding`, register KC-14). Kept a
-    ///   separate parameter from `resource` on purpose: `resource` is the protocol-level
-    ///   audience request, `serverURL` is our own record and is never sent anywhere. Pass
-    ///   the same URL the form holds at sign-in time.
+    /// Runs the full first-time OAuth flow (discovery, registration, PKCE, authorization, token exchange).
+    /// Does not persist; the caller calls `persist(_:sourceID:)`. `resource` is the RFC 8707 audience (nil for stdio).
+    /// `serverURL` is recorded for the local binding check, never sent.
     static func performInitialAuthorization(
         issuer: URL,
         scopes: [String],
@@ -277,24 +246,15 @@ struct MCPOAuthCoordinator {
 
     // MARK: - Refresh
 
-    /// Refreshes in flight, keyed on source. Register KC-3.
-    ///
-    /// ⚠️⚠️ `@MainActor` DOES NOT SERIALIZE `refresh`. It suspends at two awaits — the metadata
-    /// fetch and the token POST — and the actor is free in between. Two tool calls in one turn both
-    /// reached `loadBundle` before either persisted, both read the same refresh token, and both
-    /// POSTed it. The first exchange rotated it; the second presented a token the provider had just
-    /// retired, and any AS implementing RFC 6819 §5.2.2.3 reuse detection (Auth0, Okta, Entra —
-    /// OAuth 2.1 recommends rotation by default) treats a replayed refresh token as theft and
-    /// REVOKES THE WHOLE GRANT FAMILY. A permanent lockout from an ordinary two-tool-call turn.
-    ///
-    /// Same shape as `MCPClientService.connectionTasks`: a second caller joins the in-flight task
-    /// instead of starting a second exchange. The task is unstructured on purpose — a rotation must
-    /// run to completion even when the caller that started it is cancelled, because abandoning it
-    /// after the POST leaves the new token unpersisted (KC-4's failure by another route).
+    // Why: `@MainActor` does not serialize `refresh` across awaits; a reused refresh token makes some providers revoke the
+    // grant.
+    /// Refreshes in flight, keyed on source; a second caller joins the in-flight task instead of starting another
+    /// exchange.
+    /// The task is unstructured so a rotation runs to completion even if the caller is cancelled.
     private static var inFlightRefreshes: [UUID: Task<MCPOAuthCredentialBundle, Error>] = [:]
 
-    /// The collaborators `refresh` needs, so the single-flight and the rotation-safe persist are
-    /// testable without a network or a Keychain. ⚠️ TEST SEAM — production never reassigns these.
+    /// The collaborators `refresh` needs, so single-flight and rotation-safe persistence are testable; production never
+    /// reassigns them.
     struct RefreshDependencies {
         var loadBundle: @MainActor (UUID) -> MCPOAuthCredentialBundle?
         var fetchMetadata: @MainActor (URL) async throws -> MCPOAuthMetadata
@@ -327,15 +287,9 @@ struct MCPOAuthCoordinator {
         inFlightRefreshes = [:]
     }
 
-    /// Refresh a stored bundle's access token. Used reactively (on 401) and
-    /// proactively (on launch when within 5 min of expiry). Returns the
-    /// updated bundle; persists it before returning so callers don't have
-    /// to remember to write back.
-    ///
-    /// Concurrent calls for one source coalesce onto a single exchange — see
-    /// `inFlightRefreshes`. A persist failure after the provider rotated the
-    /// refresh token throws `rotatedRefreshTokenLost`, which says what actually
-    /// happened rather than "refresh failed".
+    /// Refreshes a stored bundle's access token, on a 401 or proactively near expiry; persists it before returning.
+    /// Concurrent calls for one source coalesce (see `inFlightRefreshes`); a persist failure after rotation throws
+    /// `rotatedRefreshTokenLost`.
     @discardableResult
     static func refresh(sourceID: UUID) async throws -> MCPOAuthCredentialBundle {
         if let inFlight = inFlightRefreshes[sourceID] {
@@ -367,14 +321,8 @@ struct MCPOAuthCoordinator {
         let metadata = try await deps.fetchMetadata(bundle.issuer)
         let tokens = try await deps.exchange(bundle, metadata)
 
-        // MUTATE the fields the refresh actually changed. This branch used to REBUILD the
-        // bundle from scratch whenever the server rotated the refresh token — and a rebuild
-        // is a full re-listing of every field, so `resource` (the RFC 8707 audience binding)
-        // was silently dropped. Rotation is not an edge case: OAuth 2.1 recommends it and
-        // most modern providers do it, so the binding disappeared on the FIRST refresh and
-        // every token minted afterwards widened back to a general-purpose audience — exactly
-        // the token-passthrough problem the resource indicator was threaded end-to-end to
-        // prevent, and invisible because the tokens keep working.
+        // Mutates only the fields the refresh changed; rebuilding the bundle would drop `resource` and widen the token
+        // audience.
         bundle.accessToken = tokens.accessToken
         bundle.accessTokenExpiresAt = tokens.expiresAt
         bundle.grantedScopes = tokens.grantedScopes
@@ -386,13 +334,8 @@ struct MCPOAuthCoordinator {
             bundle.refreshToken = newRefresh
         }
 
-        // ⚠️ Register KC-4. The rotation used to be logged as persisted ONE LINE BEFORE the write
-        // that can fail, and when it failed the new refresh token unwound with this frame while the
-        // previous one was already dead at the provider: every later refresh returned
-        // `invalid_grant`, forever, and the log said the opposite. The write is retried once (the
-        // ordinary causes — a Keychain prompt mid-answer, a transient lock — are brief), the
-        // rotation line now FOLLOWS the successful write, and a final failure names the real
-        // consequence instead of "refresh failed".
+        // The write is retried once (Keychain prompts and locks are brief) and the rotation is logged only after it
+        // succeeds; a final failure names the consequence.
         do {
             try persistWithOneRetry(bundle, sourceID: sourceID, persist: deps.persist)
         } catch {
@@ -435,9 +378,8 @@ struct MCPOAuthCoordinator {
         return bundle
     }
 
-    /// One immediate retry. ⚠️ Not a loop: a locked Keychain stays locked, and a second failure
-    /// should reach the caller quickly with the real consequence rather than stall a tool call
-    /// behind more attempts.
+    /// One immediate retry, not a loop: a locked Keychain stays locked, and a second failure should reach the caller
+    /// quickly.
     private static func persistWithOneRetry(
         _ bundle: MCPOAuthCredentialBundle,
         sourceID: UUID,
@@ -456,25 +398,12 @@ struct MCPOAuthCoordinator {
 
     // MARK: - Bundle persistence
 
-    /// Read the stored bundle for a source. Returns nil when absent or when
-    /// the stored blob can't be decoded (e.g. shape changed across versions).
-    /// Best-effort RFC 7009 revocation of a source's tokens, for use just before its
-    /// secrets are purged.
-    ///
-    /// Deleting a server used to only make Devgentic FORGET the tokens — they stayed
-    /// valid at the provider until natural expiry, so a user removing a server they no
-    /// longer trusted had not actually withdrawn its access. Revoke the refresh token
-    /// first (revoking it invalidates the whole grant at most providers), then the access
-    /// token. Never throws: removing a server must succeed even when the provider is
-    /// unreachable or does not implement revocation.
-    /// - Parameter bundle: captured by the CALLER before purging Keychain. Re-reading it
-    ///   here would race `MCPSecretStore.purgeAll`, which runs synchronously on the delete
-    ///   path and would leave this with nothing to revoke.
+    /// Best-effort RFC 7009 revocation of a source's tokens, just before its secrets are purged; never throws.
+    /// Revokes the refresh token first, then the access token. `bundle` is captured by the caller before purging, which
+    /// would race a re-read.
     static func revokeTokens(sourceID: UUID, bundle: MCPOAuthCredentialBundle) async {
-        // Register KC-64: delete the DYNAMIC CLIENT REGISTRATION first (RFC 7592), not just the
-        // tokens. The registration access token used to be persisted and never read — the client
-        // registration lived on at the provider forever. Best-effort and non-throwing, like the
-        // token revocation below; an AS without RFC 7592 answers 405 and we log and move on.
+        // Deletes the dynamic client registration first (RFC 7592), best-effort and non-throwing; an AS without RFC 7592
+        // answers 405.
         if let rat = bundle.registrationAccessToken, let uri = bundle.registrationClientUri {
             _ = await MCPOAuthTokenExchange.deleteRegistration(
                 registrationClientUri: uri,

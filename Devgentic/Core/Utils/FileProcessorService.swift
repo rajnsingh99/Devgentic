@@ -4,7 +4,7 @@
 //  FileProcessorService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/05/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,18 +17,9 @@ private let logger = DGLogger(category: "FileProcessorService")
 
 struct FileProcessorService {
 
-    /// Reads the content of a file at the given URL.
-    /// This function now supports text extraction from PDF files.
-    /// - Parameters:
-    ///   - url: The URL of the file to read.
-    ///   - maxSize: The maximum number of characters to read. If the file is larger, `nil` is returned.
-    ///              Defaults to 500,000 characters.
-    /// - Returns: The content of the file as a String, or `nil` if reading fails, the file exceeds `maxSize`,
-    ///            or security-scoped access cannot be obtained.
-    ///   - truncatingOversizeText: return the first `maxSize` characters of an oversized PLAIN-TEXT
-    ///     file instead of nil — what rich documents already get from their extractors. The
-    ///     conversation-memory indexer sets it (RAG-30): a 600K-char log used to be indexed as
-    ///     NOTHING while a 600K-char PDF was indexed up to the cap.
+    /// Reads the text content of a file, including text extraction from PDFs. Returns nil if reading fails, the file
+    /// exceeds `maxSize` characters, or security-scoped access is denied. `truncatingOversizeText` returns the first
+    /// `maxSize` characters of an oversized plain-text file instead of nil.
     func readFileContent(for url: URL, maxSize: Int = 500_000, truncatingOversizeText: Bool = false) async -> String? {
         logger.debug("Attempting to read content for file: \(url.path)")
 
@@ -66,9 +57,8 @@ struct FileProcessorService {
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             if let fileSize = attributes[.size] as? NSNumber {
-                // ⚠️ Overflow-safe: `maxSize * 4` TRAPS for a caller passing `Int.max` to mean
-                // "unbounded" (the workflow document path does exactly that since 2026-08-15).
-                // An overflowing cap means no real file can exceed it, so the check is skipped.
+                // Overflow-safe: `maxSize * 4` traps for `Int.max` (meaning unbounded); an overflowing cap means no file can
+                // exceed it.
                 let byteCap = maxSize.multipliedReportingOverflow(by: 4)
                 if !byteCap.overflow, fileSize.intValue > byteCap.partialValue {
                     logger.warning("File \(url.lastPathComponent) is potentially too large (size: \(fileSize.intValue) bytes) to inline, exceeding estimated limit for \(maxSize) chars.")
@@ -92,12 +82,9 @@ struct FileProcessorService {
         }
     }
 
-    /// Strict variant of `readFileContent` that **throws a typed `FileRetrievalError`**
-    /// instead of swallowing every failure to `nil`. Use this on paths that must
-    /// report retrieval failures to the user (Round 2). Distinguishes missing /
-    /// access-denied / too-large / read-failed / document-extraction causes, and
-    /// surfaces the underlying `DocumentExtractionError` (which the nil variant
-    /// silently catches and discards).
+    /// Strict variant of `readFileContent` that throws a typed `FileRetrievalError` instead of returning nil.
+    /// Distinguishes missing, access-denied, too-large, read-failed and document-extraction causes, and surfaces the
+    /// underlying `DocumentExtractionError`.
     func readFileContentOrThrow(for url: URL, maxSize: Int = 500_000) async throws -> String {
         let didStartAccess = url.startAccessingSecurityScopedResource()
         defer { if didStartAccess { url.stopAccessingSecurityScopedResource() } }
@@ -120,9 +107,8 @@ struct FileProcessorService {
 
         // Plain text.
         do {
-            // ⚠️ Overflow-safe — same rule as `readFileContent` above, and the two must not drift:
-            // `maxSize * 4` traps on `Int.max`, which the workflow document path passes to mean
-            // "unbounded" (user decision 2026-08-15). An overflowing cap admits every file size.
+            // Overflow-safe, same rule as `readFileContent`: `maxSize * 4` traps for `Int.max`; an overflowing cap admits
+            // every file size.
             let byteCap = maxSize.multipliedReportingOverflow(by: 4)
             if let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber,
                !byteCap.overflow, size.intValue > byteCap.partialValue {
@@ -150,11 +136,8 @@ struct FileProcessorService {
         }
     }
 
-    /// Determines the MIME type of a file. It prioritizes specific UTType preferred MIME types
-    /// and falls back to "text/plain" for known source code extensions if a more specific
-    /// text-based MIME type isn't available.
-    /// - Parameter url: The URL of the file.
-    /// - Returns: A string representing the MIME type.
+    /// Determines the MIME type of a file, preferring the UTType's MIME type and falling back to "text/plain" for known
+    /// source-code extensions.
     func getFileMimeType(for url: URL) -> String {
         let fileExtension = url.pathExtension.lowercased()
 
@@ -197,12 +180,8 @@ struct FileProcessorService {
         return knownSourceExtensions.contains(fileExtension.lowercased())
     }
 
-    /// Checks if a given MIME type or file URL represents a text-based format,
-    /// giving strong consideration to source code and now PDFs.
-    /// - Parameters:
-    ///   - mimeType: The MIME type string.
-    ///   - url: The URL of the file, used for extension checking as a fallback.
-    /// - Returns: `true` if the MIME type or file extension suggests a text-based format, `false` otherwise.
+    /// Whether a MIME type or file URL represents a text-based format, including source code and PDFs. `url` is used
+    /// for the extension fallback.
     func isTextFile(mimeType: String, url: URL) -> Bool {
         let lowercasedMimeType = mimeType.lowercased()
         
@@ -251,11 +230,7 @@ struct FileProcessorService {
         return false
     }
 
-    /// Checks if a given MIME type or file URL represents an image format.
-    /// - Parameters:
-    ///   - mimeType: The MIME type string.
-    ///   - url: The URL of the file, used for extension checking.
-    /// - Returns: `true` if the MIME type or file extension suggests an image, `false` otherwise.
+    /// Whether a MIME type or file URL represents an image format; `url` is used for the extension fallback.
     func isImageFile(mimeType: String, url: URL) -> Bool {
         let lowercasedMimeType = mimeType.lowercased()
 

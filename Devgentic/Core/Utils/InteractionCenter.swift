@@ -4,23 +4,7 @@
 //  InteractionCenter.swift
 //  Devgentic
 //
-//  [HITL Standardization — P1]
-//  Single source of truth for pending Human-in-the-Loop requests across ALL interfaces
-//  (chat, code, workflow, scheduled). Replaces the two divergent containers
-//  (`ChatMessage.pendingInteraction` single-optional + `WorkflowExecutionState.pendingInteractions`)
-//  with one insertion-ordered, operationID-keyed queue.
-//
-//  Presentation contract (locked decisions):
-//   - D1: `current(for:)` exposes a strict-FIFO single item so the shared banner shows
-//         exactly one request at a time; the next slides in once the current resolves.
-//   - D2: `items(for:)` exposes every pending request so the workflow canvas can badge
-//         each waiting node while the banner shows only the current one.
-//
-//  Wiring (P2 shipped): ActiveStreamManager's HITL bridge calls `enqueue` for every
-//  park kind; the `.hitl*Resolved` notification handlers drive `resolve`, and
-//  conversation teardown drives `resolveAll`. This class also owns the stale-park
-//  watchdog: a local notification fires if a request sits unanswered past the
-//  threshold (parks are deadline-free by design — the watchdog is the signal).
+//  Created by Raj Singh.
 //
 
 import Foundation

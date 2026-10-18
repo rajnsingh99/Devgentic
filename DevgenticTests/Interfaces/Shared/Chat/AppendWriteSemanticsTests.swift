@@ -4,14 +4,7 @@
 //  AppendWriteSemanticsTests.swift
 //  DevgenticTests
 //
-//  Regression family for the append-mode blindspot (2026-07-25): `write_file` with
-//  `append: true` carries only the appended FRAGMENT in `content`. Both viewer surfaces
-//  treated it as the full post-write file, rendering a diff that claimed the whole file
-//  was deleted and one line added — the inverse of an append.
-//
-//  Covers: the timeline row's resolver (fragment → snapshot + fragment reconstruction,
-//  no-affordance without a snapshot, the tool's append alias/coercion matrix) and
-//  FileChange.parse (append flag threaded to the HITL preview).
+//  Created by Raj Singh.
 //
 
 import XCTest

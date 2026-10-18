@@ -4,7 +4,7 @@
 //  EpisodicHistoryFormatterTests.swift
 //  DevgenticTests
 //
-//  Tests for XML-based episodic memory generation.
+//  Created by Raj Singh.
 //
 
 import XCTest

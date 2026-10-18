@@ -4,10 +4,7 @@
 //  AddBackendProfileView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 22/08/25.
-//
-//  Refactored on 26/08/25 to support unified BackendProfileModel.
-//  Updated on 05/02/26 for Modern Dashboard UI (Interactive Polish).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -29,14 +26,8 @@ struct AddBackendProfileView: View {
     /// Existing profile names used for duplicate detection.
     var existingProfileNames: [String] = []
 
-    /// Creates the profile, THROWING if it is refused.
-    ///
-    /// ⚠️ Register A64: this used to be non-throwing, and the sheet dismissed unconditionally right
-    /// after calling it — so a save rejected by `ProfileValidator` (an over-length name is the easy
-    /// one) surfaced as a toast over a sheet that had already gone, taking the name and type the
-    /// user chose with it. There was nothing to correct and nothing to return to; the only way
-    /// forward was to type it all again and guess what was wrong. Throwing lets the sheet stay open
-    /// and show the reason next to the field that caused it.
+    /// Creates the profile, throwing if it is refused.
+    /// The sheet stays open on a throw and shows the reason next to the field that caused it.
     var onContinue: (BackendProfileModel) throws -> Void
 
     private var trimmedName: String {
@@ -188,7 +179,7 @@ struct AddBackendProfileView: View {
         let newProfile = createDefaultProfile()
         do {
             try onContinue(newProfile)
-            // ⚠️ Only on success. Dismissing first is what made a rejected create unrecoverable.
+            // Dismisses only on success, so a rejected create leaves the sheet open for correction.
             dismiss()
         } catch {
             logger.warning(
@@ -202,9 +193,8 @@ struct AddBackendProfileView: View {
     
     /// Creates the appropriate default `BackendProfileModel` with the correct `ProfileDetails` case.
     private func createDefaultProfile() -> BackendProfileModel {
-        // baseURL stays nil = "use the provider default" — runtime, model catalog, and the
-        // endpoint field all resolve nil via ProviderDefaults. Baking the literal URL in
-        // here is what used to leak localhost:11434 into profiles later switched to cloud.
+        // baseURL stays nil, meaning "use the provider default"; the runtime, model catalog and endpoint field resolve it
+        // via ProviderDefaults.
         let defaultLLMConfig = ProviderConfig(apiProvider: .ollama, modelName: "")
         
         let details: ProfileDetails
@@ -233,12 +223,7 @@ struct AddBackendProfileView: View {
             details = .agent(AgentConfig(llmConfig: defaultLLMConfig, tools: []))
         }
         
-        // ⚠️ Register A76: this saved the RAW `displayName` while every check around it —
-        // `isDuplicateName`, `isContinueButtonDisabled`, the validator's emptiness and length rules
-        // — compares `trimmedName`. So " Research " passed the duplicate check against an existing
-        // "Research", saved as a distinct profile, and the warning never fired again for either of
-        // them: the sidebar showed two entries that read identically and could not be told apart.
-        // Persist what was validated.
+        // Persists the trimmed name, the same value the duplicate and validator checks compare.
         return BackendProfileModel(displayName: trimmedName, details: details)
     }
     

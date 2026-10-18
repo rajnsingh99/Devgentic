@@ -4,31 +4,14 @@
 //  SkillLibraryContainerView.swift
 //  Devgentic
 //
-//  The Skills tab's content area: every skill in the library, and which ones this profile links.
-//
-//  ## Copied wholesale from `ToolLibraryContainerView`, on purpose
-//
-//  That view already solved this exact problem for tools, and its solution is load-bearing in ways
-//  that are not obvious from the outside:
-//
-//    - **Route > remembered > none.** An explicit route profile always wins over the remembered one,
-//      because arriving from a profile's own config is a statement about WHICH profile you are
-//      configuring; silently writing to whatever was last picked here would edit a profile the user
-//      did not open.
-//    - **Hide, never disable.** Every mutating control is absent when there is nowhere to write —
-//      "a control that appears functional with nowhere to write is worse than an absent one".
-//    - **`.id(profileID)`.** Resets view state on a profile switch, so search text and scroll
-//      position cannot leak across targets inside one destination.
-//
-//  ⚠️ Filtered to `.agent` only. `.code` reuses `AgentConfig` and persists `skillSelections`, but
-//  `AgentConnect` deliberately does not load skills for it (the S0 hygiene pass made that
-//  disagreement explicit rather than silent). Offering Code profiles here would let a user link
-//  skills that provably never run.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// The Skills tab's content area: every skill in the library, and which ones the selected profile links. Only
+/// `.agent` profiles are offered, since `AgentConnect` does not load skills for `.code`.
 struct SkillLibraryContainerView: View {
 
     /// Profile supplied by the route, if any. Nil when opened from the Skills rail tab.
@@ -49,12 +32,8 @@ struct SkillLibraryContainerView: View {
     /// The skill a delete has been requested for, held while the user confirms.
     @State private var pendingDeletion: SkillSD?
 
-    /// A write that failed, shown to the user rather than only logged.
-    ///
-    /// ⚠️⚠️ ADDED BECAUSE EVERY WRITE IN THIS VIEW FAILED SILENTLY. Link, unlink, delete and the
-    /// shell grant each logged their error and returned, so a failed save left the toggle switched
-    /// ON, the profile summary claiming the skill was linked, and the link simply gone after the
-    /// next launch. The log line said exactly that — to a file nobody watching this screen reads.
+    /// A write that failed, shown to the user rather than only logged, so a failed link, unlink, delete or shell grant
+    /// is visible.
     @State private var actionError: String?
 
     /// Precedence: route > remembered > none.
@@ -68,9 +47,8 @@ struct SkillLibraryContainerView: View {
     /// True when there is a profile to write links into. Everything that mutates hides when false.
     private var canConfigureSkills: Bool { profileID != nil }
 
-    /// ⚠️ `sharedProfiles`, not `profiles` — the latter includes every workflow node's private
-    /// configuration, and offering those for editing here is how a picker fills with rows the user
-    /// never created.
+    /// Shared profiles only: `profiles` includes every workflow node's private configuration, which must not be offered
+    /// for editing here.
     private var linkableProfiles: [BackendProfileModel] {
         profileService.sharedProfiles.filter {
             if case .agent = $0.details { return true }
@@ -78,9 +56,8 @@ struct SkillLibraryContainerView: View {
         }
     }
 
-    /// ⚠️ Observes the STORE's revision as well as this view's own. A skill added or deleted in the
-    /// sidebar pane mutates the library but not this view's `@State`, so without the store's counter the
-    /// new skills never appeared while the library was open.
+    /// Observes the store's revision as well as this view's own, so a skill added or deleted from the sidebar pane
+    /// appears while the library is open.
     private var skillsResult: Result<[SkillSD], SkillStoreError> {
         _ = revision
         _ = SkillStore.shared.revision
@@ -506,21 +483,16 @@ struct SkillLibraryContainerView: View {
         return message
     }
 
-    /// Opens the skill the route named, if it is still in the library.
-    ///
-    /// ⚠️ Silent when the id is unknown rather than showing an error: the only way to hold a stale
-    /// id here is to click a row for a skill deleted in the same moment, and an alert for that would
-    /// be noise about something the user just did.
+    /// Deletes the pending skill after confirmation. The profile's links are left in place on purpose; resolution
+    /// reports the dangling selection as a named, removable row.
 
     private func confirmDeletion() {
         guard let skill = pendingDeletion else { return }
         let name = skill.displayName
         defer { pendingDeletion = nil }
 
-        // ⚠️ The profile's LINK is deliberately left in place. `SkillResolution` reports an
-        // unresolved selection as a NAMED, removable row; silently stripping links here would make
-        // a skill disappear from a profile with no trace of what it used to have — which is the
-        // orphan-reference failure the tools path is the cautionary tale for.
+        // The profile's link is deliberately left in place: `SkillResolution` reports an unresolved selection as a named,
+        // removable row.
         if case .failure(let error) = SkillStore.shared.deleteSkill(id: skill.id) {
             DGLogger(category: "SkillLibrary").error("[SKILLS] Failed to delete '\(name)': \(error.localizedDescription). CONSEQUENCE: the skill is still in the library and still linked; nothing was lost.")
             actionError = "'\(name)' was not deleted: \(error.localizedDescription) It is still in the library and still linked — nothing was lost."
@@ -531,9 +503,8 @@ struct SkillLibraryContainerView: View {
 
 
 
-    /// ⚠️ Rewrites the selection IN PLACE rather than removing and re-adding it, so `isEnabled`
-    /// survives. Re-adding would silently re-enable a skill the user had switched off — a pin change
-    /// reading as a settings reset.
+    /// Pins a skill version by rewriting the selection in place so `isEnabled` survives; re-adding would re-enable a
+    /// skill the user switched off.
     private func setPin(_ versionID: String?, for skillID: String) {
         mutateSelections { SkillLinkEditing.pinning($0, skillID: skillID, toVersionID: versionID) }
     }
@@ -548,23 +519,14 @@ struct SkillLibraryContainerView: View {
         if enabled { offerShellToolIfNeeded(for: skill) }
     }
 
-    /// Notices that the skill just linked needs a shell this profile does not have — and says so.
-    ///
-    /// ⚠️ THIS IS THE LINK SITE `SkillCapabilityHints` WAS EXTRACTED FOR, and until now nothing
-    /// called it: the whole offer was dead code with passing tests. Importing is global (a skill
-    /// belongs to the library, not a profile) while the shell tool is per-profile, so linking is the
-    /// only moment both facts are in hand.
-    ///
-    /// ⚠️ It OFFERS. It must never append the tool itself — that auto-grant was removed because
-    /// unreviewed content was deciding a capability, and a frontmatter declaration is weaker
-    /// evidence than the directory listing that was already rejected as insufficient.
+    /// Notices that the skill just linked needs a shell this profile lacks, and offers it. It only offers: it must
+    /// never append the tool itself, because unreviewed content would then decide a capability.
     private func offerShellToolIfNeeded(for skill: SkillSD) {
         guard let profileID,
               let profile = profileService.profiles.first(where: { $0.id == profileID }),
               case .agent(let config) = profile.details else {
-            // ⚠️ A silent early return here means a skill that bundles scripts is linked and the
-            // user is never offered the tool that runs them — indistinguishable, from the outside,
-            // from the offer logic deciding against it.
+            // Log the early return: otherwise a linked script skill with no shell offer looks the same as the offer logic
+            // declining.
             DGLogger(category: "SkillLibrary").notice("[SKILLS] No shell-tool offer evaluated for '\(skill.name)' [skill \(skill.id)]: no AGENT profile is in scope. CONSEQUENCE: if this skill bundles scripts, nothing will prompt for run_command — the user must add it from the Tool Library themselves.")
             return
         }
@@ -573,9 +535,8 @@ struct SkillLibraryContainerView: View {
         let hasScripts = skill.latestVersion?.hasScripts ?? false
         let alreadyHas = config.tools.contains { $0.name == SkillCapabilityHints.shellToolName }
 
-        // ⚠️ The decision is logged HERE rather than inside `SkillCapabilityHints`, which stays a
-        // pure predicate — it is unit-tested directly, and a logger inside it would fire on every
-        // assertion in that suite for no benefit.
+        // The decision is logged here rather than in `SkillCapabilityHints`, which stays a pure, directly tested
+        // predicate.
         guard SkillCapabilityHints.shouldOfferShellTool(
             declaredTools: declared,
             hasScripts: hasScripts,
@@ -593,12 +554,8 @@ struct SkillLibraryContainerView: View {
     /// Adds `run_command` because the USER asked, from the offer row.
     private func acceptShellToolOffer() {
         defer { shellToolOffer = nil }
-        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. Out-of-band writers (the MLX context
-        // healer, for one) write `details` on the SwiftData row directly, and the service's array is
-        // a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
-        // `saveProfile` writes the whole stale `details` back — `BackendProfileStore.saveProfile`
-        // does `existing.details = snapshot.details` — silently reverting their writes.
-        // `activateEditBuffer` already learned this; `freshProfile` is that rule with a name.
+        // Read the row fresh, never `profiles[index]`: out-of-band writers update `details` on the row directly, and
+        // saving the stale snapshot would revert them.
         guard let profileID,
               let index = profileService.profiles.firstIndex(where: { $0.id == profileID }),
               let current = profileService.freshProfile(id: profileID),
@@ -614,10 +571,8 @@ struct SkillLibraryContainerView: View {
         config.tools.append(SkillCapabilityHints.shellTool())
         DGLogger(category: "SkillLibrary").notice("[SKILLS] GRANTED run_command to '\(profileService.profiles[index].displayName)' [profile \(profileID)] from the skills offer. CONSEQUENCE: this profile can now run shell commands in every conversation, not just for the skill that prompted it — each call still requires per-call confirmation, and the tool can be removed from the Tool Library.")
 
-        // ⚠️ Same three steps as `mutateSelections`, and for the same reasons: sync the open edit
-        // buffer FACET-ONLY so an editor showing this profile does not overwrite the new tool on its
-        // next save, write through the service, and rebase only on success — rebasing after a failed
-        // save would baseline the editor against bytes that were never written.
+        // Same steps as `mutateSelections`: sync the open edit buffer facet-only, write through the service, and rebase
+        // only after a successful save.
         if let buffer = profileService.editBuffer,
            buffer.draft.id == profileID,
            case .agent(var draftConfig) = buffer.draft.details {
@@ -625,8 +580,7 @@ struct SkillLibraryContainerView: View {
             buffer.draft.details = .agent(draftConfig)
         }
 
-        // ⚠️ From the FRESH row, for the same reason as `mutateSelections`: starting from the stale
-        // snapshot would revert out-of-band writes as a side effect of granting a tool.
+        // Start from the fresh row, as in `mutateSelections`, so granting a tool does not revert out-of-band writes.
         var profile = current
         profile.details = .agent(config)
         profileService.profiles[index] = profile
@@ -635,8 +589,7 @@ struct SkillLibraryContainerView: View {
             profileService.rebaseEditBuffer(to: profile)
         } catch {
             DGLogger(category: "SkillLibrary").error("[SKILLS] Failed to add run_command for '\(profile.displayName)': \(error.localizedDescription). CONSEQUENCE: the tool was NOT granted and the offer is dismissed — the user must add it from the Tool Library instead.")
-            // ⚠️ The offer row is dismissed by the `defer` either way, so without this the click
-            // simply appears to have worked and the skill's scripts then fail at run time.
+            // The `defer` dismisses the offer row either way, so surface the failure or the click looks like it worked.
             actionError = "run_command was not granted to '\(profile.displayName)': \(error.localizedDescription) Add it from the Tool Library instead."
         }
         revision += 1
@@ -646,42 +599,17 @@ struct SkillLibraryContainerView: View {
         mutateSelections { SkillLinkEditing.unlinking($0, skillID: skillID) }
     }
 
-    /// ⚠️ Writes `skillSelections` AND leaves the legacy `skillConfig` alone.
-    ///
-    /// During the dual-read window `SkillResolution` prefers `skillSelections`, so writing only
-    /// here is correct — this surface is the new writer. The profile editor's binding merges both,
-    /// because it is still writing the legacy shape.
-    ///
-    /// ## The three-part commit, and why each part is load-bearing
-    ///
-    /// This is an OUT-OF-BAND write: it persists a profile the user may have open in the editor.
-    /// `ToolLibraryContainerView` solved the same problem and this mirrors it, because skipping any
-    /// part has a specific, silent failure:
-    ///
-    ///  1. **Sync the open edit buffer.** Without it the buffer's draft still holds the old
-    ///     selections, and the editor's next Save writes that whole stale draft back over this —
-    ///     the link disappears with no error. Four routes reach `.profileDetail` WITHOUT
-    ///     reactivating the buffer (the composer's profile button and gauge, the advisory banner,
-    ///     the QuickAccess deep link), so "they will get a fresh buffer" is not true.
-    ///  2. **Write the service array**, or the in-memory list disagrees with disk.
-    ///  3. **Rebase after a successful save**, or `original` describes bytes that are no longer on
-    ///     disk and the editor's Revert lies about what it would restore.
-    ///
-    /// ⚠️ The buffer sync writes only the `skillSelections` FACET, never the whole `details` — the
-    /// user's other pending edits in that draft must survive.
+    /// Writes `skillSelections` as an out-of-band profile write: sync the open edit buffer's selections facet only,
+    /// write the service array, and rebase the buffer only after a successful save. Skipping any step leaves a stale
+    /// editor draft that overwrites the link on its next Save, or a Revert that lies about what is on disk.
     private func mutateSelections(_ transform: ([SkillSelection]) -> [SkillSelection]) {
-        // ⚠️⚠️ READ THE ROW FRESH, NEVER `profiles[index]`. Out-of-band writers (the MLX context
-        // healer, for one) write `details` on the SwiftData row directly, and the service's array is
-        // a snapshot of VALUE TYPES taken before that. Mutating the stale copy and calling
-        // `saveProfile` writes the whole stale `details` back — `BackendProfileStore.saveProfile`
-        // does `existing.details = snapshot.details` — silently reverting their writes.
-        // `activateEditBuffer` already learned this; `freshProfile` is that rule with a name.
+        // Read the row fresh, never `profiles[index]`: out-of-band writers update `details` on the row directly, and
+        // saving the stale snapshot would revert them.
         guard let profileID,
               let index = profileService.profiles.firstIndex(where: { $0.id == profileID }),
               let current = profileService.freshProfile(id: profileID),
               case .agent(var config) = current.details else {
-            // ⚠️ A silent return here is the shape that hides a dead toggle: the switch animates,
-            // nothing is written, and the user finds out on relaunch.
+            // Log the early return: a silent one hides a dead toggle that animates but writes nothing.
             DGLogger(category: "SkillLibrary").error("[SKILLS] A skill link change was requested for profile \(profileID?.uuidString ?? "nil") but it is not an AGENT profile in the loaded list. CONSEQUENCE: NOTHING was changed and no error is shown — if a toggle appeared to move, it is lying and will revert on relaunch.")
             return
         }
@@ -710,10 +638,8 @@ struct SkillLibraryContainerView: View {
             //    editor against bytes that were never written.
             profileService.rebaseEditBuffer(to: profile)
 
-            // ⚠️ THE SUCCESS PATH IS LOGGED TOO, and it used not to be. Only failures were, which
-            // makes "I linked a skill — did it take?" unanswerable from the log: an unchanged
-            // profile and a saved one looked identical. The before/after counts and the pin state
-            // are what distinguish a real link from a no-op transform.
+            // Log the success path too, with before/after link and pin counts, so a real link is distinguishable from a no-op
+            // transform.
             let linked = after.filter(\.isEnabled).count
             let pinned = after.filter { $0.pinnedVersionID != nil }.count
             DGLogger(category: "SkillLibrary").notice("[SKILLS] SAVED skill links for '\(profile.displayName)' [profile \(profile.id)]: \(before.count) selection(s) -> \(after.count), \(linked) enabled, \(pinned) pinned. CONSEQUENCE: this is what the NEXT run of this profile resolves — an enabled selection reaches <available_skills>, a pinned one reads that exact version, and a disabled one is stored but never offered.")
@@ -725,8 +651,8 @@ struct SkillLibraryContainerView: View {
             }
         } catch {
             DGLogger(category: "SkillLibrary").error("[SKILLS] Failed to save skill links for '\(profile.displayName)': \(error.localizedDescription). CONSEQUENCE: the toggle shows the new state but it was NOT written to disk — it reverts on relaunch, and the edit buffer was NOT rebased so the editor still describes the previous state.")
-            // ⚠️ The toggle is already showing the new state, so silence here is worse than a bad
-            // write: the user leaves believing the link exists and finds it gone after a relaunch.
+            // The toggle already shows the new state, so surface the failed save rather than let the link silently vanish on
+            // relaunch.
             actionError = "The skill links for '\(profile.displayName)' were not saved: \(error.localizedDescription) The switch shows the new state but it was not written — it reverts when you relaunch."
         }
         revision += 1

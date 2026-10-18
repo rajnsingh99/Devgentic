@@ -4,29 +4,17 @@
 //  ChatOpsFarewell.swift
 //  Devgentic
 //
-//  The last message a provider sends before its credentials are wiped.
-//
-//  ⚠️⚠️ SHARED BECAUSE THE BUG WAS THE SHAPE, NOT THE PLATFORM. All three `disconnect()` bodies sent
-//  the same sentence; Telegram wrapped it in `do/catch` and named its consequence, while Discord and
-//  Slack wrote `_ = try? await client.sendMessage(...)` and swallowed the failure. That is this
-//  subsystem's signature defect — one platform fixed, two left — and it survived a silent-drop test
-//  suite that only ever scanned the three BRIDGES, never the pairing services.
-//
-//  ⚠️ THE FAILURE GENUINELY MATTERS HERE, which is why it is not an allowed silence. This is the only
-//  notice the remote user gets that the disconnection was deliberate; lose it and the bot simply stops
-//  answering, leaving them unable to tell "unpaired on purpose" from "crashed". Nothing can retry,
-//  either — the token is deleted a moment later.
-//
-//  ⚠️ IT STILL DOES NOT THROW. Disconnecting must not be blockable by a network failure: the
-//  credentials are wiped whatever happens here. The fix is to make the drop VISIBLE, not to make it
-//  fatal.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The last message a provider sends before its credentials are wiped.
+/// Shared by all three platforms so a failed send is made visible (logged with its consequence) rather than swallowed;
+/// it never throws, since disconnecting must not be blockable by a network failure.
 enum ChatOpsFarewell {
 
-    /// ⚠️ One literal, so three platforms cannot drift into three goodbyes.
+    /// One literal, so three platforms cannot drift into three goodbyes.
     static let message = "Devgentic ChatOps disconnected. Goodbye!"
 
     /// Runs `send`, and logs a failure with the consequence that follows from it.

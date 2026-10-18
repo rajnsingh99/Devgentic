@@ -4,7 +4,7 @@
 //  QueryRewritingService.swift
 //  Devgentic
 //
-//  Created by Antigravity on 12/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -33,8 +33,7 @@ actor QueryRewritingService {
             logger.debug("[RAG Rewrite] Skipped — no conversation history to contextualize against.")
             return currentQuery // Nothing to contextualize against
         }
-        // RAG-20: a long query is self-contained by construction — and the rewrite's 100-token
-        // output cap would CUT it, which the topic guard only sometimes catches.
+        // A long query is self-contained, and the rewrite's 100-token output cap would cut it.
         guard currentQuery.count <= Self.maxRewritableQueryChars else {
             logger.info("[RAG Rewrite] Skipped — query is \(currentQuery.count) chars (> \(Self.maxRewritableQueryChars)). CONSEQUENCE: retrieval uses the query as typed; a long query carries its own context, and rewriting it would truncate it to the 100-token output cap.")
             return currentQuery
@@ -78,11 +77,8 @@ actor QueryRewritingService {
         let rewriteStart = CFAbsoluteTimeGetCurrent()
 
         do {
-            // RAG-20: BOUNDED. The rewrite sits in front of the first token of every send with
-            // history, and a cold Intelligence Core load alone can take seconds. Past the deadline
-            // the original query is used; the abandoned call drains in the background (and leaves
-            // the IC model warm for the next send). The hold is released by the call itself,
-            // whichever way it ends, so an abandoned call cannot leak it.
+            // Bounded: the rewrite sits before the first token and a cold Intelligence Core load can take seconds.
+            // Past the deadline the original query is used; the abandoned call drains in the background.
             let wrapped = UnsafeSendable(messages)
             let rewritten = try await Self.withDeadline(Self.rewriteDeadline) {
                 defer { Task { await IntelligenceCoreService.shared.releaseHold(caller: .ragRewriting) } }
@@ -108,13 +104,8 @@ actor QueryRewritingService {
                 return currentQuery
             }
 
-            // [Rewrite guard] The rewriter's contract is to EXPAND a query (resolve
-            // references by ADDING history context), never to replace its topic.
-            // Small IC models sometimes hallucinate replacements — observed:
-            // "Write an essay on Fire" → "…impact of wildfires on biodiversity",
-            // "Write an essay on technology" → "Explain attached file in composer
-            // application" — and retrieval then searches the wrong topic entirely.
-            // Falling back to the original is always safe (pre-rewrite behavior).
+            // The rewriter must expand a query, never replace its topic; small models sometimes hallucinate
+            // replacements. Falling back to the original is always safe.
             if !Self.rewriteRetainsOriginalTopic(original: currentQuery, rewrite: cleaned) {
                 fallbackCount += 1
                 logger.warning("[RAG Rewrite #\(rewriteNum)] FALLBACK — rewrite dropped the original query's content words (\(String(format: "%.2f", rewriteDuration))s). Using original query. Total fallbacks: \(self.fallbackCount)/\(self.totalRewriteCount)")
@@ -145,7 +136,7 @@ actor QueryRewritingService {
         }
     }
 
-    // MARK: - Bounds (RAG-20)
+    // MARK: - Bounds
 
     /// Longest query worth rewriting. Rewriting resolves "it"/"that" in a short follow-up.
     static let maxRewritableQueryChars = 600
@@ -161,10 +152,9 @@ actor QueryRewritingService {
 
     struct RewriteDeadlineExceeded: Error {}
 
-    /// Runs `operation`, returning its result — or throwing `RewriteDeadlineExceeded` after
-    /// `deadline` WITHOUT waiting for it. A task group could not do this: it awaits every child
-    /// before returning, so a model load that ignores cancellation would hold the caller anyway.
-    /// Two unstructured tasks race through one continuation instead; the loser is cancelled.
+    /// Runs `operation`, returning its result or throwing `RewriteDeadlineExceeded` after `deadline`
+    /// without waiting for it. Two unstructured tasks race through one continuation, since a task group
+    /// awaits every child.
     static func withDeadline<T: Sendable>(
         _ deadline: Duration,
         _ operation: @escaping @Sendable () async throws -> T
@@ -182,11 +172,9 @@ actor QueryRewritingService {
         }
     }
 
-    /// The last `maxMessages` turns, each reduced to head + tail with reasoning stripped.
-    ///
-    /// ⚠️ Was every message WHOLE (RAG-20): one long reply or pasted document became the
-    /// rewriter's prompt — prefill time in front of the first token — and `<think>` blocks went in
-    /// with it. A follow-up's referent is in a turn's opening or closing lines.
+    /// The last `maxMessages` turns, each reduced to head and tail with reasoning stripped.
+    /// A follow-up's referent is in a turn's opening or closing lines; whole messages would bloat the
+    /// prompt.
     static func formatRecentHistory(_ history: [ChatMessage], maxMessages: Int = 4) -> String {
         var formatted = ""
         for msg in history.suffix(maxMessages) {
@@ -203,18 +191,15 @@ actor QueryRewritingService {
         return formatted
     }
 
-    /// RAG-34: a query with no letter or digit (empty, punctuation, emoji-only) has nothing to
-    /// embed meaningfully or to match lexically — retrieval on it returns noise, so it is skipped.
+    /// A query with no letter or digit (empty, punctuation, emoji-only) has nothing to match, so it is
+    /// skipped.
     static func isRetrievable(_ query: String) -> Bool {
         query.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 
-    /// True when every content word of the original query survives (as a whole
-    /// word, case-insensitive) into the rewrite. Expansion is legal — adding
-    /// history context around the original words — topic replacement is not.
-    /// Whole-word matching matters: substring containment would let "wildfires"
-    /// satisfy "fire" and wave the observed hallucination through.
-    /// `static` (nonisolated on the actor) so tests exercise it directly.
+    /// True when every content word of the original query survives as a whole word (case-insensitive) in
+    /// the rewrite. Expansion is legal, topic replacement is not; substring matching would let "wildfires"
+    /// satisfy "fire".
     static func rewriteRetainsOriginalTopic(original: String, rewrite: String) -> Bool {
         let stopwords: Set<String> = [
             "what", "tell", "about", "this", "that", "explain", "write", "please",

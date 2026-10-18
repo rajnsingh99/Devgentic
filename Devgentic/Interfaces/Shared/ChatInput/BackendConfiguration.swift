@@ -4,7 +4,7 @@
 //  BackendConfiguration.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 05/07/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -17,18 +17,15 @@ struct BackendRequestConfig {
     let profile: BackendProfileModel
 }
 
-/// Why a send could not be configured. The three cases used to collapse into one nil and one log
-/// line reading "Profile ID is nil or profile not found in store", which is three different
-/// problems with three different remedies — and the caller could not tell them apart to say
-/// anything useful, or to decide whether the stale selection should be cleared.
+/// Why a send could not be configured: no profile selected, profile not found, or the store failed.
+/// Each has a different remedy, and the caller uses the case to decide whether to clear a stale selection.
 enum BackendConfigUnavailability: Error, Equatable {
     /// Nothing is selected. The composer's own gate normally prevents this.
     case noProfileSelected
     /// A profile IS selected and the store answered cleanly that it is gone — deleted, most likely
     /// from the sidebar, while the composer kept pointing at it.
     case profileDeleted(UUID)
-    /// The store threw. ⚠️ The profile may be perfectly fine; the read failed. Never treat this as
-    /// deletion — clearing the selection here would destroy a valid choice over a transient fault.
+    /// The store threw; the profile may be fine. Never treat this as deletion or clear the selection over a transient fault.
     case storeUnavailable(UUID, String)
 
     var isTransient: Bool {
@@ -47,10 +44,8 @@ final class BackendConfiguration {
         try? resolveRequestConfig().get()
     }
 
-    /// The same resolution as `getRequestConfig()`, but saying *why* it failed.
-    ///
-    /// Use this wherever the failure is user-visible; `getRequestConfig()` remains for callers that
-    /// genuinely only need "config or nothing" (background/scheduled paths).
+    /// The same resolution as `getRequestConfig()`, but reporting why it failed.
+    /// Use it where the failure is user-visible; `getRequestConfig()` is for callers that only need config or nothing.
     func resolveRequestConfig() -> Result<BackendRequestConfig, BackendConfigUnavailability> {
         guard let profileID = selectedProfileID else {
             logger.warning(
@@ -72,9 +67,8 @@ final class BackendConfiguration {
             }
             return .success(BackendRequestConfig(profile: profile))
         } catch {
-            // ⚠️ This arm was `try?`, so a store failure was reported — and treated — as "profile
-            // not found". They are opposites: one means the profile is gone, the other means we
-            // could not look. Acting on the wrong one discards a valid selection.
+            // A store failure is not "profile not found": one means the profile is gone, the other that the read failed,
+            // and acting on the wrong one discards a valid selection.
             logger.error(
                 "[PERSISTENCE] Cannot build a request config: the store failed to read profile "
                 + "\(profileID): \(error.localizedDescription). CONSEQUENCE: the send is refused "

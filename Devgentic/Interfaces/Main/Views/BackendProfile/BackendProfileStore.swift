@@ -4,9 +4,7 @@
 //  BackendProfileStore.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 22/08/25.
-//
-//  Migrated to SwiftData on 26/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -48,12 +46,9 @@ protocol BackendProfileStoreProtocol {
     /// Fetches all stored backend profiles as snapshot value types.
     func fetchProfiles() throws -> [BackendProfileSnapshot]
 
-    /// The shared library — every profile a picker may offer. See the extension default's doc.
-    ///
-    /// ⚠️ A protocol REQUIREMENT, not just an extension convenience, and the difference is the
-    /// whole fix. `BackendProfileService.profileStore` is protocol-typed; an extension method not
-    /// listed here is STATICALLY dispatched, so the production store's query-level override would
-    /// be silently bypassed in favour of the capped in-memory filter for every call that matters.
+    // Why: declared as a protocol requirement, not just an extension method: extension methods dispatch statically, so the
+    // store's query-level override would be bypassed.
+    /// The shared library: every profile a picker may offer. See the extension default's doc.
     func fetchSharedProfiles() throws -> [BackendProfileSnapshot]
 
     /// One workflow's node-owned rows. Same requirement rationale as `fetchSharedProfiles`.
@@ -65,14 +60,9 @@ protocol BackendProfileStoreProtocol {
     /// Fetches a single profile by ID, or nil if not found.
     func fetchProfile(byId id: UUID) throws -> BackendProfileSnapshot?
 
-    /// Saves or updates a profile from a snapshot.
-    /// Runs `ProfileValidator` before persisting — throws `ProfileStoreError.validationFailed` on failure.
-    ///
-    /// - Returns: the ADVISORY findings for the saved profile. ⚠️ Register A34: these were computed
-    ///   on every save and then dropped on the floor — the only trace was a log line, so an advisory
-    ///   rule could never reach the user without someone hand-building a bespoke view for it.
-    ///   Returning them gives the severity a product surface by virtue of being an advisory.
-    ///   `@discardableResult` because most callers legitimately do not care.
+    /// Saves or updates a profile from a snapshot, running `ProfileValidator` first (throws
+    /// `ProfileStoreError.validationFailed` on failure). - Returns: the advisory findings for the saved profile, so
+    /// callers can surface them; `@discardableResult` because most callers ignore them.
     @discardableResult
     func saveProfile(_ snapshot: BackendProfileSnapshot, callerFile: String, callerFunction: String, callerLine: Int) throws -> [ProfileValidationError]
 
@@ -82,22 +72,11 @@ protocol BackendProfileStoreProtocol {
 
 extension BackendProfileStoreProtocol {
 
-    /// The profiles a user may CHOOSE — everything except workflow-node-owned rows.
-    ///
-    /// ⚠️ The store-level twin of `BackendProfileService.sharedProfiles`, and it exists because
-    /// several pickers bypass the service entirely and call `fetchProfiles()` directly (QuickAccess,
-    /// the ChatOps bridges, the composer popover). Without it each of those would have to re-derive
-    /// the rule, which is exactly how `.code` profiles leaked into pickers one call site at a time.
-    ///
-    /// Offering an owned row here would let a workflow node's private configuration be run in chat
-    /// and edited outside the workflow that owns it.
-    /// ⚠️ DEFAULTS FOR TEST DOUBLES ONLY. Each of these filters the result of `fetchProfiles()`,
-    /// which in the PRODUCTION store is capped at 500 rows sorted by `lastSelected` — so a default
-    /// running against the real store inherits that window. That was the defect: owned node rows
-    /// and shared profiles competed for the same 500 slots, and past the cap the reconcile stopped
-    /// collecting, workflow deletion orphaned rows, and the executor's profile map went short —
-    /// blocking runs over rows that exist on disk. `BackendProfileStore` overrides all three with
-    /// query-level predicates; these bodies survive so in-memory doubles keep working unmodified.
+    // Why: the defaults filter `fetchProfiles()`, which the production store caps at 500 rows, so owned rows and shared
+    // profiles would compete for the same window.
+    /// The profiles a user may choose: everything except workflow-node-owned rows. The store-level twin of
+    /// `BackendProfileService.sharedProfiles`, for pickers that call `fetchProfiles()` directly. These defaults are for
+    /// test doubles only; `BackendProfileStore` overrides them with query-level predicates.
     func fetchSharedProfiles() throws -> [BackendProfileSnapshot] {
         try fetchProfiles().filter { !$0.isNodeOwned }
     }
@@ -106,20 +85,14 @@ extension BackendProfileStoreProtocol {
         try fetchProfiles().filter { ids.contains($0.id) }
     }
 
-    /// The private profile rows belonging to one workflow's nodes.
-    ///
-    /// ⚠️ Keyed on `ownerWorkflowID` so this never has to load or decode a layout blob — which is
-    /// the whole reason that id is stored alongside `ownerNodeID`. The delete cascade and the
-    /// save-time reconcile both run at moments where decoding every workflow's graph would be
-    /// wasteful, and the reconcile in particular runs on every canvas save.
+    /// The private profile rows belonging to one workflow's nodes. Keyed on `ownerWorkflowID` so it never decodes a
+    /// layout blob; the delete cascade and the save-time reconcile both rely on that.
     func fetchOwnedProfiles(forWorkflow workflowID: UUID) throws -> [BackendProfileSnapshot] {
         try fetchProfiles().filter { $0.ownerWorkflowID == workflowID && $0.isNodeOwned }
     }
 
-    /// Call this — the four-argument requirement exists only so the compiler can fill in the
-    /// caller. Defaults live here rather than on the requirement because a Swift protocol cannot
-    /// carry default parameter values, and every call site spelling out `#fileID` would defeat
-    /// the point.
+    /// Call this variant; the four-argument requirement exists only so the compiler fills in the caller. Defaults live
+    /// here because a Swift protocol cannot carry default parameter values.
     @discardableResult
     func saveProfile(_ snapshot: BackendProfileSnapshot,
                      file: String = #fileID,
@@ -131,12 +104,9 @@ extension BackendProfileStoreProtocol {
 
 // MARK: - SwiftData Backend Profile Store
 
-/// The persistence layer for backend profiles, backed by SwiftData.
-///
-/// ⚠️ API keys are NOT in the blob. They live in the Keychain via `ProviderKeyStore`, keyed on
-/// profile id; `BackendProfileSD` strips them on write and re-injects on read. This comment
-/// previously stated the opposite and was accurate at the time — the blob held every cloud key in
-/// cleartext, recoverable with `strings` from an unsandboxed Application Support directory.
+/// The persistence layer for backend profiles, backed by SwiftData. API keys are not in the blob: they live in the
+/// Keychain via `ProviderKeyStore`, keyed on profile id; `BackendProfileSD` strips them on write and re-injects on
+/// read.
 @MainActor
 final class BackendProfileStore: BackendProfileStoreProtocol {
 
@@ -180,14 +150,9 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
-    /// Query-level shared-library fetch: the predicate excludes node-owned rows BEFORE the 500-row
-    /// window is applied.
-    ///
-    /// ⚠️ The cap stays — 500 is a genuine UI bound for a picker — but it now counts only SHARED
-    /// profiles. Filtering after the fetch made owned rows compete for the same window: every
-    /// workflow node adds a row, `saveProfile` stamps `lastSelected` on each, and a few busy
-    /// workflows pushed the user's real library out of the most-recently-touched 500 — profiles
-    /// vanishing from pickers while plainly existing on disk.
+    // Why: filtering after the fetch would let owned rows push real library profiles out of the window.
+    /// Query-level shared-library fetch: the predicate excludes node-owned rows before the 500-row window is applied. The
+    /// cap stays as a picker bound but counts only shared profiles.
     func fetchSharedProfiles() throws -> [BackendProfileSnapshot] {
         guard let context = mainContext else { throw ProfileStoreError.containerNotConfigured }
         do {
@@ -203,14 +168,9 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
-    /// Query-level owned-row fetch, UNCAPPED — deliberately.
-    ///
-    /// ⚠️ No `fetchLimit`, and that is the fix, not an oversight. The result is bounded by ONE
-    /// workflow's node count (a canvas holds dozens of nodes, not thousands), so a cap protects
-    /// nothing — while the old shape (filtering the capped, `lastSelected`-sorted global fetch)
-    /// meant an owned row older than the 500 most-recently-touched rows was INVISIBLE to the
-    /// save-time reconcile (its node's config never collected) and to the workflow-delete cascade
-    /// (the row and its Keychain credential orphaned forever).
+    // Why: a cap would hide older owned rows from the save-time reconcile and the workflow-delete cascade, orphaning the row
+    // and its Keychain credential.
+    /// Query-level owned-row fetch, deliberately uncapped: the result is bounded by one workflow's node count.
     func fetchOwnedProfiles(forWorkflow workflowID: UUID) throws -> [BackendProfileSnapshot] {
         guard let context = mainContext else { throw ProfileStoreError.containerNotConfigured }
         do {
@@ -224,12 +184,8 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
-    /// Query-level by-ids fetch, UNCAPPED — bounded by the caller's id set.
-    ///
-    /// ⚠️ This is what `WorkflowExecutor` resolves a run's profile map through. It used to filter
-    /// the capped global fetch, so a workflow whose node rows had aged past the 500-row window had
-    /// those nodes reported as "Profile not found — it may have been deleted" and the ENTIRE run
-    /// refused at pre-flight — for rows sitting on disk the whole time.
+    /// Query-level by-ids fetch, uncapped and bounded by the caller's id set. `WorkflowExecutor` resolves a run's profile
+    /// map through it, so profiles older than the 500-row window are still found.
     func fetchProfiles(ids: Set<UUID>) throws -> [BackendProfileSnapshot] {
         guard let context = mainContext else { throw ProfileStoreError.containerNotConfigured }
         do {
@@ -245,24 +201,20 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
-    /// What a profile row still knows about itself when its `configData` blob cannot be decoded.
-    ///
-    /// These come from real, denormalized COLUMNS — untouched by a failed decode, because only the
-    /// `details` setter writes them. So the app can tell the user exactly what they had
-    /// ("Agent · anthropic · claude-sonnet-4") with no new persistence and no guessing.
+    /// What a profile row still knows about itself when its `configData` blob cannot be decoded. The values come from
+    /// denormalized columns that a failed decode leaves untouched, so the app can tell the user what they had ("Agent ·
+    /// anthropic · claude-sonnet-4").
     struct UnreadableProfileInfo: Equatable, Identifiable {
         let id: UUID
         let displayName: String
-        /// From `profileTypeRaw`, NOT from `details`. ⚠️ This is the whole point: the placeholder
-        /// issued after a failed decode is a `.bot`, so `BackendProfileSnapshot.profileType` — which
-        /// derives from `details` — reports a corrupted Agent as a Bot everywhere in the UI.
+        /// Taken from `profileTypeRaw`, not `details`: the placeholder after a failed decode is a `.bot`, so
+        /// `BackendProfileSnapshot.profileType` would report a corrupted Agent as a Bot.
         let storedType: ProfileType?
         let storedProvider: String
         let storedModel: String
 
-        /// ⚠️ Load-bearing for what the UI is allowed to offer. `.writtenByNewerBuild` means the bytes
-        /// are INTACT — the only correct action is to change nothing and update the app — so the
-        /// destructive "Discard and Reconfigure" path must not lead there (register G18).
+        /// Decides what the UI may offer: `.writtenByNewerBuild` means the bytes are intact, so the destructive "Discard and
+        /// Reconfigure" path must not lead there.
         let reason: ConfigurationUnreadableReason
 
         /// "Agent · anthropic · claude-sonnet-4", omitting whatever is blank.
@@ -277,26 +229,13 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
-    /// Profiles whose stored configuration could not be decoded on this launch.
-    ///
-    /// ⚠️ A store-level QUERY, deliberately — not a field on `BackendProfileSnapshot`. The snapshot is
-    /// `Hashable` and drives `ProfileEditBuffer.isDirty` (`draft != original`), so a stored property
-    /// carrying a transient, this-launch decode flag could pin a corrupted profile permanently dirty
-    /// or permanently clean. Same reasoning that produced `WorkflowLayoutStore.isLayoutUnreadable(for:)`.
-    ///
-    /// (This argument used to have a second leg — the snapshot was also the profile EXPORT format, so
-    /// the flag would have leaked into every exported file. Profile import/export was removed on
-    /// 2026-08-06 as an unwanted feature, register G93/G97; the `Hashable`/`isDirty` leg stands on its
-    /// own and is why this is still a query.)
-    ///
-    /// ⚠️ Call this from a load/refresh point, never from a SwiftUI `body`: it primes a JSON decode
-    /// per profile.
+    // Why: call it from a load/refresh point, never a SwiftUI `body`; it primes a JSON decode per profile.
+    /// Profiles whose stored configuration could not be decoded on this launch. A store-level query rather than a
+    /// snapshot field: the snapshot is `Hashable` and drives `ProfileEditBuffer.isDirty`, so a transient decode flag
+    /// could pin a profile dirty or clean.
     func unreadableProfiles() -> [UnreadableProfileInfo] {
-        // ⚠️ Both early returns below FAIL OPEN — they answer "no profile is unreadable", which is
-        // indistinguishable from a healthy store. That is the wrong direction for a corruption
-        // warning: `BackendProfileDetailView` drives the entire "your configuration could not be
-        // read" banner off this result, so a failure here silently RETIRES the warning and the
-        // user is invited to keep editing a profile whose blob is not being read.
+        // Both early returns fail open, answering "no profile is unreadable"; `BackendProfileDetailView` drives its
+        // corruption banner from this, so a failure here silently retires the warning.
         guard let context = mainContext else {
             logger.error(
                 "[PERSISTENCE] unreadableProfiles() could not run: the SwiftData container is not "
@@ -337,8 +276,8 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
     /// Whether this specific profile's configuration is unreadable — the single-row form, for the
     /// editor and the send path where fetching all 500 would be wasteful.
     func isConfigurationUnreadable(for id: UUID) -> Bool {
-        // ⚠️ Fails open the same way, and on the SEND path as well as the editor — answering
-        // "this profile is fine" is what lets a request go out built from a placeholder config.
+        // Fails open the same way, on the send path as well as the editor: answering "this profile is fine" lets a request
+        // go out built from a placeholder config.
         guard let context = mainContext else {
             logger.error(
                 "[PERSISTENCE] isConfigurationUnreadable(\(id)) could not run: the SwiftData "
@@ -370,18 +309,12 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
-    /// Deliberately discards a profile's unreadable configuration, replacing it with a fresh one of
-    /// the type the row still claims to be.
-    ///
-    /// ⚠️ DESTRUCTIVE and irreversible. Callers must confirm with the user first, quoting
-    /// `UnreadableProfileInfo.wasSummary` so they know what they are giving up.
+    /// Discards a profile's unreadable configuration, replacing it with a fresh one of the type the row still claims to
+    /// be. Destructive and irreversible: callers must confirm first, quoting `UnreadableProfileInfo.wasSummary`.
     @discardableResult
     func discardUnreadableConfiguration(for id: UUID, reason: String) -> Bool {
-        // ⚠️ Both early returns below used to be bare `return false` with NO log, while the caller
-        // (`BackendProfileDetailView.discardUnreadableConfiguration`) does
-        // `guard didDiscard else { return }  // store logged it` — a comment that was factually
-        // wrong for exactly these paths. The user accepted a destructive confirmation, the banner
-        // stayed up, no toast appeared, and nothing anywhere recorded that the click did nothing.
+        // Both early returns log, since the caller returns silently on `false` and a destructive confirmation that did
+        // nothing would otherwise leave no trace.
         guard let context = mainContext else {
             logger.error(
                 "[PERSISTENCE] Discard REFUSED for profile \(id): the SwiftData container is not "
@@ -425,9 +358,8 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             return false
         }
 
-        // Rebuild as the type the ROW says it was, not the `.bot` placeholder the failed decode
-        // produced — otherwise "reconfigure" silently demotes the user's Agent to a Bot, which is the
-        // very mislabelling this whole change exists to stop.
+        // Rebuilds as the type the row says it was, not the `.bot` placeholder, so reconfiguring does not demote an Agent to
+        // a Bot.
         let provider = ApiProvider(rawValue: model.providerRaw) ?? .ollama
         let llm = ProviderConfig(apiProvider: provider, modelName: model.modelNameRaw)
         let replacement: ProfileDetails
@@ -453,17 +385,14 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         }
     }
 
-    /// Whether this profile's API key is stored but unreadable right now. Register KC-22.
-    ///
-    /// ⚠️ Fails CLOSED to `false` (no banner) when the row cannot be fetched: the banner is advice,
-    /// and a false "your key is unreadable" would send the user to Keychain Access for nothing.
+    /// Whether this profile's API key is stored but unreadable right now. Returns `false` (no banner) when the row cannot
+    /// be fetched, since a false "unreadable" would send the user to Keychain Access for nothing.
     func isProviderKeyUnreadable(for id: UUID) -> Bool {
         providerKeyModel(for: id)?.hasUnreadableProviderKey ?? false
     }
 
-    /// Re-reads this profile's API key from the Keychain now, bypassing the automatic re-read
-    /// throttle. Register KC-20.
-    /// - Returns: whether the key is readable afterwards.
+    /// Re-reads this profile's API key from the Keychain now, bypassing the automatic re-read throttle. - Returns:
+    /// whether the key is readable afterwards.
     func retryProviderKeyRead(for id: UUID) -> Bool {
         guard let model = providerKeyModel(for: id) else { return false }
         return model.retryProviderKeyRead()
@@ -509,9 +438,7 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
         callerFunction: String,
         callerLine: Int
     ) throws -> [ProfileValidationError] {
-        // Compiler-supplied caller attribution. Every save previously logged an identical line
-        // whoever called it, so a burst of them named neither the trigger nor the reason — the
-        // one thing needed to tell "the user saved" from "a binding is firing in a loop".
+        // Compiler-supplied caller attribution, so a burst of saves identifies the trigger.
         let caller = "\(callerFile):\(callerLine) \(callerFunction)"
 
         guard let context = mainContext else {
@@ -532,10 +459,7 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             let isUpdate = existing != nil
             let validationErrors = ProfileValidator.validate(snapshot, strict: isUpdate)
 
-            // ⚠️ Gate on `.blocking` ONLY — never on `isEmpty` (G92). This used to refuse the save
-            // whenever ANY finding came back, which handed an explicitly advisory sentence the
-            // force of a hard error and made a local agent profile creatable but not editable.
-            // A new advisory rule must never silently become a gate by being added to this array.
+            // Gates on `.blocking` only, never on `isEmpty`: an advisory finding must not gain the force of a hard error.
             let blockers = validationErrors.blocking
             let advisories = validationErrors.advisories
             if !advisories.isEmpty {
@@ -556,45 +480,22 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             }
 
             if let existing = existing {
-                // Is anything actually different? `lastSelected` is deliberately excluded — it is
-                // bumped on EVERY call, so it can never be equal and would mask a no-op.
-                //
-                // ⚠️ A no-op save is not free. Assigning to a SwiftData model dirties it whether
-                // or not the value changed, so a redundant call still costs a write, a
-                // `lastSelected` bump that reorders "recently used", and a WAL entry. An
-                // on-device run on 2026-07-31 emitted this line ~18× per profile back-to-back
-                // with no indication of caller or cause; the caller attribution below exists to
-                // make that answerable from a log instead of by reading every call site.
+                // Whether anything actually differs; `lastSelected` is excluded because it changes on every call. A no-op save still
+                // costs a write, a `lastSelected` bump and a WAL entry, since assigning dirties the model.
                 let unchanged = existing.displayName == snapshot.displayName
                     && existing.details == snapshot.details
                     && existing.fileContextStrategy == snapshot.fileContextStrategy
                     && existing.ownerWorkflowID == snapshot.ownerWorkflowID
                     && existing.ownerNodeID == snapshot.ownerNodeID
 
-                // ⚠️⚠️ THE NO-OP IS NOT SKIPPED HERE, and that is deliberate — a store-level
-                // early return was written and REVERTED on 2026-09-20. Assigning `details` is not
-                // a plain field write: its setter moves the API key to the Keychain, refuses to
-                // overwrite an undecodable blob, suppresses a Keychain clear after a failed read,
-                // and rewrites every denormalized column. Returning before it runs skips all of
-                // that.
-                //
-                // The case that killed the idea: if `encodeDetails` ever fails, `_cachedDetails`
-                // holds the NEW value while `configData` still holds the OLD one. `unchanged`
-                // compares through the getter, so the next identical save looks like a no-op —
-                // and the blob would never be repaired. Today that save repairs it.
-                //
-                // Redundant saves are therefore fixed at the CALLER, where the knowledge of what
-                // changed actually lives (see `CodeSessionManager.refreshInstructionsOnProfile`).
-                // This warning stays because it is how such a caller gets found.
+                // The no-op is not skipped here: assigning `details` runs a setter that moves the API key to the Keychain, guards
+                // undecodable blobs and rewrites denormalized columns. Redundant saves are fixed at the caller.
                 existing.displayName = snapshot.displayName
                 existing.lastSelected = now
                 existing.details = snapshot.details
                 existing.fileContextStrategy = snapshot.fileContextStrategy
-                // ⚠️ Carried on UPDATE, not just on insert. Omitting these here would silently
-                // orphan an owned row the first time the node inspector saved it: the row would
-                // keep working but stop being reconcilable or cascade-deletable, and would
-                // reappear in the shared picker. Included in `unchanged` above for the same reason
-                // every other assigned field is — so a re-stamp is not reported as a no-op.
+                // Carried on update as well as insert, so the node inspector's save does not orphan an owned row (reconcile, cascade
+                // delete, shared picker).
                 existing.ownerWorkflowID = snapshot.ownerWorkflowID
                 existing.ownerNodeID = snapshot.ownerNodeID
 
@@ -622,10 +523,7 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             }
 
             try SharedContextSave.save(context, "profiles: save '\(snapshot.displayName)'")
-            // ⚠️ Register A34. Returned, not just logged. An advisory that only reaches the log can
-            // never reach the person who can act on it, and the two rules that exist today both had
-            // to hand-build their own bespoke UI to be seen at all. Handing them back means the next
-            // advisory rule is visible by virtue of being an advisory.
+            // Returned, not just logged: an advisory that only reaches the log cannot reach the person who can act on it.
             return advisories
         } catch let storeError as ProfileStoreError {
             throw storeError  // Re-throw validation errors as-is
@@ -649,13 +547,8 @@ final class BackendProfileStore: BackendProfileStoreProtocol {
             if let toDelete = try context.fetch(descriptor).first {
                 context.delete(toDelete)
                 try SharedContextSave.save(context, "profiles: delete \(id)")
-                // ⚠️ After the row is gone, not before: a failed save would otherwise leave a
-                // profile whose credential had already been destroyed. A key must never outlive
-                // the profile that owned it — that was one of the two distinct harms in the
-                // UserDefaults side-effect finding too.
-                // ⚠️ Register KC-34: the Bool used to be discarded and the line below claimed the
-                // key was deleted either way. The profile IS gone, so this does not throw — but the
-                // log must not record a credential as destroyed when it survived.
+                // Deleted after the row is gone, so a failed save never leaves a profile whose credential was already destroyed. The
+                // result is checked so the log never records a surviving credential as deleted.
                 if ProviderKeyStore.delete(for: id) {
                     logger.info("Deleted profile with ID \(id.uuidString) and its stored API key.")
                 } else {

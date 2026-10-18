@@ -4,20 +4,18 @@
 //  StructuredError.swift
 //  Devgentic
 //
-//  The single structured error value carried by `AgentStreamEvent.error`.
-//  Replaces the prior bare `String` so every terminal error has a machine
-//  category (for telemetry + UI affordance), an optional related path, and an
-//  optional remediation suggestion — while staying source-compatible with the
-//  many legacy `.error("message")` producers via string-literal/interpolation
-//  conformance (those default to `.executionFailed`).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The structured error value carried by `AgentStreamEvent.error`: a machine category (for telemetry and UI), an
+/// optional related path and an optional remediation. String-literal and interpolation conformance lets legacy
+/// `.error("message")` producers compile unchanged, defaulting to `.executionFailed`.
 struct StructuredError: Error, Sendable, Hashable, Codable {
     /// Machine classification (drives severity, telemetry grouping, UI icon).
     var category: AgentErrorCategory
-    /// Human-readable message (what `.error(String)` used to carry).
+    /// Human-readable message.
     var message: String
     /// The file/resource path this error relates to, when applicable.
     var relatedPath: String?
@@ -49,19 +47,16 @@ struct StructuredError: Error, Sendable, Hashable, Codable {
     var title: String { category.displayName }
 }
 
-// `\(structuredError)` interpolates to the message text (not a struct dump), so
-// legacy log lines and re-emitting producers (`.error("[\(name)] \(err)")`) stay
-// behaviour-neutral.
+// `\(structuredError)` interpolates to the message text, not a struct dump, so log lines and re-emitting producers
+// stay unchanged.
 extension StructuredError: CustomStringConvertible {
     var description: String { message }
 }
 
 // MARK: - Source compatibility with legacy `.error("…")` producers
 
-// String literals and interpolations construct a `StructuredError` with the
-// generic `.executionFailed` category, so existing `.error("msg")` /
-// `.error("… \(x) …")` call sites compile unchanged. Bare `String` *variables*
-// still need an explicit `.init(...)` (they are not literals).
+// String literals and interpolations construct a `StructuredError` with the generic `.executionFailed` category.
+// Bare `String` variables need an explicit `.init(...)`.
 extension StructuredError: ExpressibleByStringInterpolation {
     init(stringLiteral value: String) {
         self.init(message: value)

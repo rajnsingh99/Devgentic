@@ -4,24 +4,7 @@
 //  ContextWindowGauge.swift
 //  Devgentic
 //
-//  A composer-side "how full is the context window" indicator (occupancy, NOT
-//  cumulative billing). A small ring in the toolbar shows what fraction of the
-//  SELECTED model's window this conversation currently fills; tapping it opens a
-//  breakdown with the real last-turn token counts, and — when the effective window is
-//  capped below the model's trained max (Ollama num_ctx) — a direct action to raise it.
-//
-//  Design decisions (see the feasibility discussion):
-//    • Occupancy is measured with the SAME estimator the orchestrator uses at
-//      send-time (`PromptFitCheck`) against the SAME denominator every budget in
-//      the app uses (`EffectiveContextWindow.resolve`). So the ring agrees with the
-//      engine's own fit / truncation / compaction decision instead of inventing a
-//      second, divergent number.
-//    • The ring is an ESTIMATE (chars→tokens heuristic), flagged with a "~". The
-//      breakdown also surfaces the REAL provider-reported usage of the last turn,
-//      so the exact counts the app already captures aren't wasted.
-//    • Recomputed on turn / model / attachment changes — never per keystroke — so
-//      it stays cheap on long transcripts. The unsent draft is deliberately
-//      excluded from the ring (PreSendFitHint already warns on draft overflow).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -32,14 +15,7 @@ private let logger = DGLogger(category: "ContextWindowGauge")
 
 // MARK: - Occupancy Model
 
-/// A snapshot of how full the selected model's context window is for the current
-/// conversation. Pure value type — the display math (`fraction`, `level`,
-/// formatting) is unit-testable without a view or a store.
-/// What the next send's estimate is MADE OF — the "what's using it" rows in the breakdown.
-///
-/// ⚠️ Added 2026-09-24 because the total alone hid the biggest lever: on an 8K Code session the
-/// TOOL DEFINITIONS were ~half the window before a word was typed, and nothing on screen said so.
-/// Same numbers `estimatedOccupancy` already computed for its debug log, now kept.
+/// What the next send's estimate is made of: the tool, history, knowledge and attachment rows in the breakdown.
 struct ContextOccupancy: Equatable, Sendable {
     var toolChars = 0
     var historyChars = 0
@@ -78,13 +54,8 @@ struct ContextWindowUsage: Equatable, Sendable {
     /// chosen by the query, so the composer cannot size it — the breakdown says so instead of
     /// letting the send-time banner appear from nowhere.
     let usesRetrieval: Bool
-    /// True when ONE user turn can produce SEVERAL model calls — an agent re-sends the whole
-    /// prompt on every tool step, and `TokenUsage.accumulate` sums them.
-    ///
-    /// This is why the breakdown showed two numbers that looked like a contradiction:
-    /// `usedTokens` estimates a SINGLE next send, while `lastTurn.inputTokens` is the SUM
-    /// over an entire multi-step turn. "~12K / 128K" above "Last turn 40K in" is not an error
-    /// — they answer different questions, and nothing said so.
+    /// True when one user turn can produce several model calls, since an agent re-sends the prompt on every tool step.
+    /// `usedTokens` estimates a single next send, while `lastTurn.inputTokens` sums an entire multi-step turn.
     let turnSpansMultipleCalls: Bool
     /// What the estimate above is made of. Nil for an empty conversation (nothing to break down).
     var breakdown: ContextOccupancy? = nil
@@ -105,12 +76,8 @@ struct ContextWindowUsage: Equatable, Sendable {
     /// Distinct from `.over`, which now means "past the limit the engine enforces".
     var exceedsWindow: Bool { fraction >= 1.0 }
 
-    /// Bands derived from `responseHeadroom` rather than hard-coded, so the ring turns red at
-    /// exactly the point `PromptFitCheck.exceeds` posts its banner.
-    ///
-    /// They used to disagree: red at 100%, banner at 75%. Between those the user saw an amber
-    /// ring beside a red "content will be cut off" advisory — the gauge implying headroom the
-    /// engine had already decided was gone.
+    /// Bands derived from `responseHeadroom` rather than hard-coded, so the ring turns red exactly where
+    /// `PromptFitCheck.exceeds` posts its banner.
     var level: ContextGaugeLevel {
         let limit = Self.usableFraction
         switch fraction {
@@ -125,10 +92,9 @@ struct ContextWindowUsage: Equatable, Sendable {
     var usedDisplay: String { usedTokens == 0 ? "0" : "~" + PromptFitCheck.roundedK(usedTokens) }
     var windowDisplay: String { PromptFitCheck.roundedK(windowTokens) }
 
-    /// The trained max when it EXCEEDS the effective window (Ollama num_ctx capping) — the
-    /// "supported but not allocated" ceiling, surfaced so the user understands why a 131K
-    /// model reads as 8K and can raise it. Nil when effective == trained (cloud / MLX) or
-    /// the trained size is unknown.
+    /// The trained max when it exceeds the effective window (Ollama `num_ctx` capping), so the user can see why a large
+    /// model reads small.
+    /// Nil when effective equals trained (cloud, MLX) or the trained size is unknown.
     var cappedBelowTrained: Int? {
         guard let trained = trainedTokens, trained > windowTokens else { return nil }
         return trained
@@ -145,9 +111,8 @@ struct ContextWindowUsage: Equatable, Sendable {
     /// Past this share of the window, the fixed part alone crowds out the work.
     static let fixedCostWarningFraction = 0.5
 
-    /// ⚠️ Why (2026-09-24): an 8K Code session spent ~5.5K on its prompt and tools before a word
-    /// was typed. The ring read an unremarkable amber; a five-step run then overflowed and Ollama
-    /// silently dropped the instructions. This is the "before you send" half of that warning.
+    /// True when the fixed prompt and tool cost alone consumes a large share of the window, warning before the user
+    /// sends.
     var fixedCostIsHigh: Bool {
         guard let fixed = fixedTokens, windowTokens > 0 else { return false }
         return Double(fixed) / Double(windowTokens) >= Self.fixedCostWarningFraction
@@ -158,16 +123,12 @@ struct ContextWindowUsage: Equatable, Sendable {
 /// thresholds reads as noise. `normal` uses the accent (Claude's blue-donut cue);
 /// `high`/`over` escalate to the warning/error roles.
 enum ContextGaugeLevel {
-    // The thresholds are fractions of `ContextWindowUsage.usableFraction` (= 1 −
-    // PromptFitCheck.responseHeadroom), not of the whole window. The window percentages in
-    // brackets are what today's 25% headroom works out to; they move if the headroom does.
+    // Thresholds are fractions of `ContextWindowUsage.usableFraction` (1 minus `PromptFitCheck.responseHeadroom`); the
+    // percentages track the headroom.
     case normal   // below 80% of the usable share (< 60% of the window)
     case high     // 80–100% of the usable share (60–75% of the window)
     case over     // the usable share is gone (≥ 75% of the window): the prompt is now eating
-                  // the room reserved for the reply, which is exactly where
-                  // `PromptFitCheck.exceeds` posts its "content will be cut" banner. This does
-                  // NOT mean the conversation outgrew the window — that is `exceedsWindow`,
-                  // a separate property that needs the full 100%.
+                  // the room reserved for the reply, where `PromptFitCheck.exceeds` warns; not the same as `exceedsWindow`.
 
     func color(_ theme: any Theme) -> Color {
         switch self {
@@ -182,18 +143,9 @@ enum ContextGaugeLevel {
 
 extension ContextWindowUsage {
 
-    /// Builds the occupancy snapshot from live composer state, or `nil` when the gauge
-    /// should hide (non-chat profile / no resolvable model). `@MainActor` because it
-    /// reads the profile store for the cross-model comparison.
-    /// - Parameter extraKnowledgeChars: characters of KNOWN, always-injected context the
-    ///   generic history/attachment estimate can't see from the composer — today, Code
-    ///   mode's project knowledge (`AGENTS.md` + memory listing), added into the system
-    ///   prompt on every message. 0 for ordinary chat.
-    /// - Parameter messages: the history the NEXT request would carry, **OLDEST-FIRST** —
-    ///   from `ChatHistoryViewModel.resolveContextHistory(for:)`, NOT `currentChatMessages`.
-    ///   Passing the render window is the bug this signature exists to prevent: the window is
-    ///   a pagination artefact (20 on open, +10 per scroll) and sizing a request from it made
-    ///   the ring move when the user scrolled.
+    /// Builds the occupancy snapshot from live composer state, or `nil` when the gauge should hide.
+    /// `extraKnowledgeChars` is always-injected context (Code project knowledge); `messages` is the next request's
+    /// history, oldest first.
     @MainActor
     static func resolve(
         profile: BackendProfileModel?,
@@ -202,9 +154,8 @@ extension ContextWindowUsage {
         conversationID: UUID?,
         extraKnowledgeChars: Int = 0
     ) -> ContextWindowUsage? {
-        // Only chat-shaped profiles have a SINGLE context window. Workflow resolves a
-        // model per node and imageGen has none, so a window gauge would be meaningless —
-        // hide it rather than show a misleading number. (Matches PreSendFitHint's gate.)
+        // Only chat-shaped profiles have a single context window; workflow resolves a model per node and imageGen has
+        // none, so the gauge hides.
         guard let profile,
               profile.profileType == .bot || profile.profileType == .agent || profile.profileType == .code,
               let config = profile.resolvedLLMConfig
@@ -219,11 +170,8 @@ extension ContextWindowUsage {
             flavour: .forProfileType(profile.profileType))
         let windowIsFallback = (trained == nil)
 
-        // `resolvedHistoryStrategy` is nil for bot / code profiles; the estimator resolves
-        // that to `.recentHistory`, matching AgentConnect's own non-agent fallback. All
-        // three profile types the gauge shows for DO receive episodic memory
-        // (`PromptLayerConfig.bot/.agent/.code` all set `includeEpisodicMemory`), so none of
-        // them is being charged for payload it never sees.
+        // `resolvedHistoryStrategy` is nil for bot and code profiles; the estimator resolves it to `.recentHistory`, as
+        // `AgentConnect` does.
         let occupancy = estimatedOccupancy(
             config: config,
             profile: profile,
@@ -235,10 +183,8 @@ extension ContextWindowUsage {
         )
         let used = occupancy?.totalTokens ?? 0
 
-        // Ground truth for the breakdown: the newest completed agent turn's REAL usage.
-        // The resolved history is ASCENDING (oldest first), so the LAST agent message
-        // carrying usage is the most recent one. This read `.first` while being handed the
-        // descending render window; both changed together and must stay in step.
+        // Ground truth: the newest completed agent turn's real usage; the history is oldest first, so the last message
+        // with usage is the newest.
         let lastTurn = messages.last(where: { $0.sender == .agent && $0.tokenUsage != nil })?.tokenUsage
 
         logger.debug("[CTXGAUGE] \(config.modelName) — ~\(used)/\(window) tok (\(window > 0 ? Int((Double(used) / Double(window)) * 100) : 0)%), fallbackWindow=\(windowIsFallback), lastTurnReal=\(lastTurn.map { "\($0.inputTokens)in/\($0.outputTokens)out" } ?? "none"), conv=\(conversationID?.uuidString.prefix(8).description ?? "none")")
@@ -261,21 +207,16 @@ extension ContextWindowUsage {
         )
     }
 
-    /// Resolves the (effective, trained) window pair for a config, healing stale MLX
-    /// metadata along the way. `effective` = what the request actually runs under (the
-    /// gauge denominator); `trained` = the model's max. They diverge only for Ollama
-    /// (num_ctx caps below trained) and match for cloud / MLX.
+    /// Resolves the (effective, trained) window pair for a config, healing stale MLX metadata.
+    /// `effective` is what the request runs under (the gauge denominator); `trained` is the model's max. They diverge
+    /// only for Ollama.
     @MainActor
-    /// ⚠️ `flavour` reaches the Ollama branch of `EffectiveContextWindow.resolve` and decides
-    /// which preset ladder's `numCtx` the ring is priced against. Before it existed the ring
-    /// read the profile's STORED advanced configuration, which is nil for any profile whose
-    /// Advanced panel was never opened — so it showed the auto-default window while the
-    /// request ran under the preset's smaller one, and reported 24% at 48% occupancy.
+    /// `flavour` decides which preset ladder's `numCtx` the ring is priced against; the stored advanced config is nil
+    /// if the panel was never opened.
     static func windows(for config: ProviderConfig, profileID: UUID?, flavour: OllamaConfigDefaultProfile) -> (effective: Int, trained: Int?) {
         var trained = EffectiveContextWindow.trainedWindow(for: config)
-        // MLX profiles saved before the config.json window read carry nil metadata → the
-        // shared resolver would return the 8K fallback. Recover the real window (and heal
-        // the stored profile) so both the gauge and the budgets stop guessing.
+        // MLX profiles saved with nil metadata would get the 8K fallback; recover the real window and heal the stored
+        // profile.
         if trained == nil, config.apiProvider == .mlx {
             trained = MLXContextWindowHealer.trainedWindow(for: config, profileID: profileID)
         }
@@ -290,30 +231,9 @@ extension ContextWindowUsage {
         return (effective, trained)
     }
 
-    /// Occupancy = the assembled prompt size the NEXT send will produce, via the same
-    /// `PromptFitCheck` heuristic the orchestrator applies at send-time. Includes the
-    /// conversation history (the whole point of this gauge, and exactly what PreSendFitHint
-    /// omits) + current text/code attachments + the fixed layer overhead. Images are
-    /// counted only when the model can see them.
-    ///
-    /// `extraKnowledgeChars` is caller-supplied KNOWN context (Code mode's project
-    /// context) that IS counted — it's a fixed per-message injection, not a send-time
-    /// unknown.
-    ///
-    /// Episodic memory IS counted (since 2026-07-28). It used to be invisible here:
-    /// `textContent` is nil for tool params, outcomes and `<effect>` diffs, so a
-    /// conversation full of file edits — the case most likely to overflow — read as almost
-    /// empty. The blob is rendered for real rather than approximated, which is affordable
-    /// because this recomputes on turn boundaries, not keystrokes.
-    ///
-    /// Documented, deliberate under-counts that keep this a STABLE, conservative gauge:
-    ///   • the unsent draft (excluded so the ring doesn't jump per keystroke),
-    ///   • per-conversation RAG (chosen by the query; surfaced as a note instead).
-    ///
-    /// Profile knowledge sources and prior-turn images ARE counted now. The images were
-    /// excluded because "the recency window needs ascending order and this array is
-    /// descending" — no longer true since the gauge began resolving history the way the
-    /// request does.
+    /// Estimates the prompt size the next send will produce, using the same `PromptFitCheck` heuristic as send time.
+    /// Counts history, episodic memory, attachments, knowledge, visible images and layer overhead; excludes the unsent
+    /// draft and per-conversation RAG.
     @MainActor
     static func estimatedOccupancyTokens(
         config: ProviderConfig,
@@ -340,25 +260,19 @@ extension ContextWindowUsage {
         contextWindow: Int,
         extraKnowledgeChars: Int = 0
     ) -> (totalTokens: Int, breakdown: ContextOccupancy)? {
-        // A brand-new chat with nothing attached reads as empty, not as the ~0.7K the
-        // fixed layer overhead alone would imply. Code mode's always-injected project
-        // knowledge counts as real content, so a fresh code session with a large AGENTS.md
-        // correctly reads as already partly full.
+        // A brand-new chat with nothing attached reads as empty; Code mode's always-injected project knowledge counts as
+        // real content.
         guard !messages.isEmpty || !attachedFiles.isEmpty || extraKnowledgeChars > 0 else { return nil }
 
-        // The request strips error turns before building the prompt
-        // (`BackendOrchestrationService`, "Sanitize History"), so charging for them here
-        // reports payload that is never sent.
+        // The request strips error turns before building the prompt, so charging for them would report payload that is
+        // never sent.
         let messages = messages.filter {
             if case .error = $0.content { return false }
             return true
         }
 
-        // No reversal: `messages` is already oldest-first, which is what `pairTurns` needs.
-        // It previously had to be reversed because the caller passed the descending render
-        // window — the reversal and the wrong source were the same bug.
-        // Warmed here because the composer always renders before a send, so the orchestrator's
-        // (non-MainActor) fit check finds a populated snapshot.
+        // `messages` is already oldest-first, as `pairTurns` needs; the tool-schema cache is warmed so the send-time fit
+        // check finds a snapshot.
         ToolSchemaSizes.refreshFromRegistry()
         let toolSchemaChars = PromptFitCheck.estimatedToolSchemaChars(for: profile)
         let knowledgeSourceChars = PromptFitCheck.estimatedKnowledgeSourceChars(for: profile)
@@ -368,19 +282,14 @@ extension ContextWindowUsage {
             strategy: historyStrategy,
             contextWindow: contextWindow,
             toolsAvailable: profile.profileType != .bot,
-            // Same expression the request uses (`AgentConnect`), not the local
-            // `supportedModalities` check below it: the two disagree for `.code` profiles, and
-            // the ring's whole claim is that it measures what actually ships. Omitting it
-            // defaulted to false and left every `<attached_images>` line in the blob
-            // unmeasured — an under-count, i.e. the direction that fails to warn.
+            // Uses the same expression as the request (`AgentConnect`), not the local `supportedModalities` check; the two
+            // disagree for `.code`.
             includeImageNames: profile.supportsVisionInput,
             // Same flag the request path uses to drop `<outcome>` clips the native turns duplicate.
             carriesProse: profile.carriesHistoryProse
         )
-        // Measured, not summed. The raw `textContent` sum over every message ignored the
-        // per-strategy turn limit AND the char budget's trimming AND whether the provider
-        // receives prose at all — on MLX it charged a full transcript that never ships,
-        // reading 248% of an 8K window where the truth was 24%.
+        // Measured, not summed: the estimator applies the per-strategy turn limit, the char budget and whether the
+        // provider receives prose at all.
         let proseChars = PromptFitCheck.estimatedHistoryProseChars(
             in: messages,
             carriesProse: profile.carriesHistoryProse,
@@ -389,23 +298,18 @@ extension ContextWindowUsage {
             toolsAvailable: profile.profileType != .bot
         )
         let historyChars = proseChars + episodicChars
-        // Strategy-aware: a `.stateless` profile ships a path manifest, not the files, so
-        // charging their bytes over-warned by orders of magnitude on a large attachment.
-        // Also drops files the reader will refuse rather than clipping them to the budget.
+        // Strategy-aware: a `.stateless` profile ships a path manifest, not file bytes; files the reader will refuse are
+        // dropped.
         let attachmentChars = PromptFitCheck.estimatedAttachmentChars(
             for: attachedFiles, profile: profile
         )
 
-        // Priced only when the model accepts vision — a non-vision model has its images
-        // stripped before the wire, so charging for them would inflate the gauge for
-        // payload that never ships.
+        // Priced only when the model accepts vision; a non-vision model has its images stripped before the wire.
         let supportsVision = config.supportedModalities.contains(.visionInput)
         let currentImageTokens = supportsVision
             ? PromptFitCheck.estimatedImageTokens(forImageURLs: PreSendFitHint.imageURLs(of: attachedFiles), provider: config.apiProvider)
             : 0
-        // Prior-turn images, on the same gate and the same 20-message lookback the send-time
-        // check uses — so a vision conversation with several screenshots no longer reads
-        // ~10K tokens lighter here than it does at send.
+        // Prior-turn images, on the same gate and 20-message lookback the send-time check uses.
         let historyImageTokens = PromptFitCheck.estimatedHistoryImageTokens(
             in: messages,
             provider: config.apiProvider,
@@ -413,9 +317,8 @@ extension ContextWindowUsage {
         )
         let imageTokens = currentImageTokens + historyImageTokens
 
-        // Without the breakdown, "the ring says 80% on a short chat" is undiagnosable — the
-        // total alone can't distinguish a big attachment from an edit-heavy history whose
-        // cost is entirely invisible in the transcript.
+        // The breakdown makes a high reading diagnosable: the total alone cannot separate a big attachment from an
+        // edit-heavy history.
         logger.debug("[CTXGAUGE] Breakdown — episodic \(episodicChars) chars (strategy=\(historyStrategy?.rawValue ?? "recentHistory/non-agent default"), \(messages.count) msg), prose \(proseChars) chars (carried=\(profile.carriesHistoryProse)), attachments \(attachmentChars) chars, knowledge \(extraKnowledgeChars) chars, tools \(toolSchemaChars) chars, kb \(knowledgeSourceChars) chars, images \(currentImageTokens)+\(historyImageTokens) tok.")
 
         let total = PromptFitCheck.estimatedTokens(
@@ -971,9 +874,8 @@ struct ContextWindowBreakdown: View {
 
     @ViewBuilder
     private var notes: some View {
-        // The "why is my 131K model showing 8K?" answer: Ollama only allocates num_ctx
-        // KV cache and truncates beyond it, so the effective window is the honest ceiling —
-        // but the model supports more, and it's raisable.
+        // Ollama allocates only `num_ctx` of KV cache and truncates beyond it, so the effective window is the honest
+        // ceiling; it can be raised.
         if let trained = usage.cappedBelowTrained {
             cappedNote(trained: trained)
         }
@@ -990,9 +892,7 @@ struct ContextWindowBreakdown: View {
                 text: "Past the \(Int(ContextWindowUsage.usableFraction * 100))% the prompt can use — the rest of the window is reserved for the reply, so content will be cut before sending."
             )
         }
-        // Retrieval is chosen by the query and cannot be known before you send, so it is not
-        // in the figure above. Saying so beats letting the send-time banner look like a
-        // contradiction.
+        // Retrieval is chosen by the query and unknown before sending, so it is not in the figure above.
         if usage.usesRetrieval {
             noteRow(
                 icon: "magnifyingglass",

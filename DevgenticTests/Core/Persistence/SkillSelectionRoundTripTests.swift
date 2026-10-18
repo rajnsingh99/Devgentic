@@ -4,7 +4,7 @@
 //  SkillSelectionRoundTripTests.swift
 //  DevgenticTests
 //
-//  A profile's skill links survive the profile blob, on BOTH arms that carry them.
+//  Created by Raj Singh.
 //
 
 import XCTest

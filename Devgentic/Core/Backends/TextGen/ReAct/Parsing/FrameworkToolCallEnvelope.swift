@@ -4,43 +4,23 @@
 //  FrameworkToolCallEnvelope.swift
 //  Devgentic
 //
-//  How a tool call that MLXLMCommon ALREADY decoded travels through the text stream to the parse
-//  pipeline — the one definition both ends use.
-//
-//  WHY IT EXISTS (device run 2026-10-06). mlx-swift-lm parses tool calls itself (`ToolCallProcessor`,
-//  9 formats, always on) and emits them as structured `.toolCall` events. `MLXService` used to turn
-//  each one back into a bare JSON object — `{"arguments":…,"content":"Executing tool X...",
-//  "tool_name":"X"}` — appended to the text with no wrapper, and every dialect parser then had to
-//  rediscover it by shape. Their bare-JSON fallbacks take the FIRST object only: a turn where the
-//  framework reported `toolCalls=3` ran ONE call (`b.py` was never read), and the prose before the
-//  calls was dropped as "no reasoning" because there was no `<tool_call>` tag to split on.
-//
-//  The envelope is a declared grammar, not a shape: exact tags the app writes, one JSON payload per
-//  call, decoded once at the top of `CognitiveParsePipeline` before any dialect parser runs. A model
-//  that wrote these tags itself would get its call run — the same as writing any call — so the tags
-//  are not a security boundary, only an unambiguous one.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "FrameworkToolCallEnvelope")
 
+/// How a tool call that MLXLMCommon already decoded travels through the text stream to the parse pipeline.
+/// A declared grammar of exact tags with one JSON payload per call, decoded once at the top of `CognitiveParsePipeline`.
+/// The tags are unambiguous, not a security boundary.
 enum FrameworkToolCallEnvelope {
 
     static let openTag = "<devgentic:framework_tool_call>"
     static let closeTag = "</devgentic:framework_tool_call>"
 
-    /// Written INSTEAD of output when the framework generated tokens and passed none of them on.
-    /// The only thing in the stream that withholds text is `ToolCallProcessor`, which buffers from
-    /// the call opener and drops the buffer when the call fails to decode — so this is a call the
-    /// model wrote and the runtime could not read. Measured 2026-10-06: the same 76 tokens were
-    /// discarded on all three blind retries of a byte-identical prompt; only telling the model
-    /// changes the next attempt.
-    ///
-    /// ⚠️ NOW A FALLBACK. From mlx-swift-lm 3.32 the framework reports such a call as
-    /// `.rejectedToolCall` with its raw text, which `MLXService` forwards as ordinary output for the
-    /// dialect parsers to repair or correct specifically. This marker fires only if tokens still
-    /// vanish with no rejection reported, i.e. a framework regression.
+    /// Written instead of output when the framework generated tokens and passed none of them on, meaning the model wrote
+    /// a call the runtime could not read. A fallback: the framework normally reports such a call as `.rejectedToolCall`.
     static let discardedPrefix = "<devgentic:framework_discarded_tool_call tokens=\""
     static let discardedSuffix = "\"/>"
 

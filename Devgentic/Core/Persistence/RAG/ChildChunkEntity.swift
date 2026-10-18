@@ -4,7 +4,7 @@
 //  ChildChunkEntity.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -21,43 +21,21 @@ final class ChildChunkEntity {
     /// The actual text content of this specific chunk.
     var chunkText: String = ""
 
-    /// The vector embedding for the `chunkText`, indexed with a native ObjectBox HNSW graph.
-    ///
-    /// Hyperparameter rationale (per HNSW analysis for All-MiniLM-L6-v2, 384-dim, mixed text+code):
-    /// - dimensions=384:            Matches the All-MiniLM-L6-v2 output dimensionality exactly.
-    /// - neighborsPerNode=48:       Fortified M value to create long-range escape edges out of hyper-dense
-    ///                              code clusters, neutralising the structural hubness problem.
-    /// - indexingSearchCount=200:   Elevated efConstruction ensures optimal edge selection during background
-    ///                              ingestion, maximising recall at query time.
-    /// - distanceType="cosine":     Aligns with the contrastive-loss training objective of sentence-transformers.
-    ///                              Mathematically equivalent to dotProduct on L2-normalised vectors (as
-    ///                              produced by EmbeddingService), but maps efficiently to Apple Silicon SIMD.
-    /// - vectorCacheHintSizeKB=524288: Caps the in-RAM HNSW graph at 512 MB, protecting against iOS Jetsam
-    ///                              terminations on standard (non-Pro) devices with constrained unified memory.
+    /// The vector embedding for `chunkText`, indexed with a native ObjectBox HNSW graph (384-dim All-MiniLM-L6-v2, cosine,
+    /// 48 neighbors per node, 200 indexing search count). The in-RAM graph is capped at 512 MB (`vectorCacheHintSizeKB`).
     // objectbox:hnswIndex: dimensions=384, neighborsPerNode=48, indexingSearchCount=200, distanceType="cosine", vectorCacheHintSizeKB=524288
     var embedding: [Float]?
 
     /// The sequential order of this chunk within the parent document.
     var chunkIndex: Int = 0
 
-    /// Denormalised conversation ID (mirrors ParentDocumentEntity.conversationID as a String).
-    /// The scoped retrieval scan filters on this key, so an EMPTY value makes a chunk
-    /// invisible to every conversation. Required at construction (convenience init) and
-    /// re-stamped from the parent in `VectorStoreService.replaceSemanticDocument` (the parent
-    /// is the authority) — the "" default exists only for ObjectBox's parameterless `init()`.
-    ///
-    /// INDEXED (RAG-9): every retrieval, delete and replace selects by this key. Unindexed, each
-    /// of those scanned every chunk of every conversation.
+    /// Denormalised conversation ID (mirrors `ParentDocumentEntity.conversationID`), indexed because every retrieval,
+    /// delete and replace selects by it. Empty makes a chunk invisible to scoped retrieval; the parent is the authority.
     // objectbox: index
     var conversationID: String = ""
 
-    /// This chunk's BM25 tokens (`VectorStoreService.bm25Tokens`), space-delimited WITH a leading
-    /// and trailing space, so a whole-token match is a byte search for `" term "`.
-    ///
-    /// Stored once, at construction (RAG-40): retrieval used to re-tokenise EVERY chunk of the
-    /// conversation on EVERY send (~58 µs/chunk: 786 ms at 13.6k chunks), when BM25 only ever
-    /// needs the query terms' counts. "" for a row written before the field — ranked by
-    /// tokenising `chunkText` on the fly, so it is slower but never wrong.
+    /// This chunk's BM25 tokens (`VectorStoreService.bm25Tokens`), space-delimited with leading and trailing spaces so a
+    /// whole-token match is a byte search for `" term "`. Stored once; "" ranks by tokenising `chunkText` on the fly.
     var bm25Terms: String = ""
 
     /// Token count of `bm25Terms` — BM25's document length.
@@ -69,10 +47,8 @@ final class ChildChunkEntity {
     /// The default initializer required by ObjectBox.
     init() {}
 
-    /// A convenience initializer for creating new ChildChunkEntity instances.
-    /// `conversationID` is REQUIRED (no default): a writer that forgets it would produce
-    /// chunks silently invisible to scoped retrieval. Pass "" only when scoping is
-    /// genuinely irrelevant (entity-level tests) — explicitly, never by omission.
+    /// A convenience initializer for new chunks. `conversationID` is required: a chunk without it is invisible to scoped
+    /// retrieval. Pass "" only when scoping is irrelevant (entity-level tests).
     init(chunkText: String, embedding: [Float], chunkIndex: Int, conversationID: String) {
         self.chunkText = chunkText
         self.embedding = embedding

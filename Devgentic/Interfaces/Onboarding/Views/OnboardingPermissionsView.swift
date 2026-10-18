@@ -4,12 +4,13 @@
 //  OnboardingPermissionsView.swift
 //  Devgentic
 //
-//  The macOS permissions the user's choices need — and only those. Every one is optional: Continue
-//  never waits on a permission, and anything skipped is asked again the first time it's needed.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The macOS permissions the user's choices need, and only those.
+/// Every one is optional: Continue never waits, and a skipped permission is asked again when first needed.
 struct OnboardingPermissionsView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(\.appTheme) private var theme

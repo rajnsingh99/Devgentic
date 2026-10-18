@@ -4,18 +4,7 @@
 //  WorkflowRunScopedDrainTests.swift
 //  DevgenticTests
 //
-//  Register EXC-2 — a root run's Stop must drain ITS OWN parks, not a concurrent run's.
-//
-//  ⚠️ The two-live-executor-runs shape was rejected as unmutatable by WorkflowParkAccountingTests
-//  (the scheduler decides what interleaves), so these tests go at the service state directly:
-//  parks are hand-planted under explicit `WorkflowRunScope.$token` bindings — the same TaskLocal
-//  the real suspend* stamping reads — and the drains are called with the tokens the executor
-//  would hold. The executor's cancel ARM is pinned separately by
-//  `WorkflowExecutorIntegrationTests.testStop_DoesNotDrainAForeignRunsPark`.
-//
-//  ⚠️ ISOLATION: `ExecutionSuspensionService.shared` is process-wide (`private init()`, no
-//  reset). Fresh UUIDs per test are the isolation; every count assertion is BASELINE-RELATIVE
-//  (SuspensionAccountingFixTests' discipline), never a global total.
+//  Created by Raj Singh.
 //
 
 import XCTest

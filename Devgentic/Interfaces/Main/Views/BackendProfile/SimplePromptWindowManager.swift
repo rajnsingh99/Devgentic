@@ -1,17 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  SimplePromptEditor.swift
+//  SimplePromptWindowManager.swift
 //  Devgentic
 //
-//  Floating, detached NSWindow editor for simple prompt text (used by Bots
-//  and the scheduler when the selected profile isn't an agent).
-//
-//  Owned per-call-site as `@State`, NOT a singleton — multiple consumers
-//  can keep their own editor open simultaneously and don't trample each
-//  other's window state. Theme updates flow live via the injected
-//  ThemeManager, so changing the app theme while the window is open
-//  re-renders the editor without losing focus.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -22,25 +15,16 @@ private let logger = DGLogger(category: "SimplePromptWindow")
 
 // MARK: - Window Manager
 
-/// Manages a single floating NSWindow for the simple prompt editor. One
-/// instance per consuming view. The class is `@MainActor` because every
-/// AppKit touch must happen on the main thread.
-///
-/// ⚠️ An `NSObject` subclass and its own `NSWindowDelegate` (register A71). Closing the window with
-/// the red button does NOT route through `closeWindow()`, and `isReleasedWhenClosed` is false, so
-/// `window` stayed pointing at a closed `NSWindow` — which retains its `NSHostingView`, which
-/// retains the text binding and the `ThemeManager`. Worse, the next `showEditor` found a non-nil
-/// but not-visible window, fell through to the "create a new one" path, and abandoned the old one:
-/// a leak per red-button close, for the lifetime of the profile editor.
+// Why: its own `NSWindowDelegate`: the red button bypasses `closeWindow()`, so a stale `window` would leak the
+// closed NSWindow and its hosting view, and the next `showEditor` would abandon it.
+/// Manages a single floating NSWindow for the simple prompt editor; one instance per consuming view.
+/// `@MainActor` because every AppKit touch must happen on the main thread.
 @MainActor
 final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
     private var window: NSWindow?
 
     /// Spawns or brings the editor window to the front.
-    /// ⚠️ `botName` is a BINDING, not a `String` (register A75). The editor lives inside an
-    /// `NSHostingView` whose root view is built once, so a plain `String` is frozen at open time —
-    /// an `.onChange` on it could never fire. A binding into the `@Observable` draft re-renders the
-    /// hosted view exactly the way the existing `text` binding already does.
+    /// `botName` is a binding, not a `String`: the hosting view's root is built once, so a plain value would stay frozen.
     func showEditor(
         text: Binding<String>,
         botName: Binding<String>,
@@ -49,9 +33,8 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
     ) {
         let theme = themeManager.currentTheme
 
-        // ⚠️ register B7 — `isVisible` is FALSE while miniaturized, so minimizing this editor
-        // and re-opening it orphaned the old window. A71 fixed the red-button leak here and left
-        // the minimize one; the identity guard in `windowWillClose` is what makes it safe.
+        // `isVisible` is false while miniaturized, so reuse the existing window regardless of visibility;
+        // the identity guard in `windowWillClose` keeps that safe.
         if let existingWindow = window {
             existingWindow.styleMask.insert(.fullSizeContentView)
             existingWindow.titleVisibility = .hidden
@@ -113,11 +96,7 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
             botName: botName,
             contextWindow: contextWindow,
             onClose: { [weak self] in self?.closeWindow() },
-            // ⚠️ Register A75. `updateTitle` was never wrong — it was never CALLED from the bot
-            // editor, so renaming a bot left the detached window advertising the old name. (The
-            // scheduler does call it, correctly, which is why this only ever broke in one of the
-            // two places.) Driving it from the host's own re-render removes the call site that can
-            // be forgotten: keeping the title current stops being the caller's job.
+            // Driving the title from the host's own re-render means keeping it current is not the caller's job.
             onTitleChange: { [weak self] newName in self?.updateTitle(botName: newName) }
         )
     }
@@ -128,14 +107,11 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
         window = nil
     }
 
-    /// Updates the floating window's title without rebuilding the content view (so the editor
-    /// keeps focus). No-op when the window isn't open — callers can fire it on every keystroke.
-    ///
-    /// Still `internal`: `CreateScheduledTaskView` drives it explicitly because its title is a
-    /// derived string (with an "unnamed task" fallback), not a plain binding into the draft.
+    /// Updates the floating window's title without rebuilding the content view (so the editor keeps focus).
+    /// No-op when the window isn't open, so callers can fire it on every keystroke.
+    /// `internal`: `CreateScheduledTaskView` drives it explicitly because its title is derived, not a plain binding.
     func updateTitle(botName: String) {
-        // ⚠️ register B7 — `isVisible` is false while miniaturized; a rename during that time
-        // was dropped and the window resurfaced with a stale title.
+        // Update even while miniaturized (`isVisible` is false then), or a rename would leave a stale title.
         guard let window else { return }
         window.title = Self.title(for: botName)
     }
@@ -146,14 +122,12 @@ final class SimplePromptWindowManager: NSObject, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
-    /// ⚠️ The whole point of A71. Fires for EVERY close — the red button, ⌘W, the Done button, and
-    /// a window closed as the app terminates — so the manager stops retaining a dead window and its
-    /// hosting view in all of them.
+    /// Fires for every close (red button, ⌘W, the Done button, app termination), so the manager
+    /// never retains a dead window and its hosting view.
     nonisolated func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {
-            // ⚠️ register B7 — identity check. Clearing unconditionally meant a close from ANY
-            // window this object had been the delegate of dropped the LIVE window's reference,
-            // after which its own close went untracked and it leaked for good.
+            // Identity check: clearing unconditionally would let a close from any window this object delegated for drop the live
+            // window's reference, after which its own close goes untracked and leaks.
             guard let closing = notification.object as? NSWindow, closing === window else {
                 logger.error(
                     "[PROFILE] A prompt-editor window closed that is NOT the one currently tracked. "

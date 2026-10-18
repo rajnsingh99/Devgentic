@@ -4,18 +4,7 @@
 //  SnippetIdentityTests.swift
 //  DevgenticTests
 //
-//  Pins the contract that makes "click a code block, open THAT code block" work.
-//
-//  `openMessageInCodeViewer` locates the clicked snippet with `firstIndex(of:)`, and
-//  CodeSnippet's `==` compares CONTENT (never `id` — that's a fresh UUID per extraction,
-//  so it could never match). The snippet therefore has to be built identically on both
-//  sides: at the click site (ContentBlockView / AgentBubbleContentView) and inside
-//  CodeSnippetExtractor.
-//
-//  They weren't. cmark terminates a code block's content with "\n"; the click sites passed
-//  it through raw while the extractor trimmed. Every lookup returned nil, so every click
-//  fell back to `initialIndex = 0` and opened the FIRST snippet. Both sides now go through
-//  `CodeSnippet(codeBlock:content:)`.
+//  Created by Raj Singh.
 //
 
 import XCTest

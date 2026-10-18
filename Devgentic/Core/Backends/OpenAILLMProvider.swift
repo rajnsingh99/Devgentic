@@ -4,9 +4,7 @@
 //  OpenAILLMProvider.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 09/03/26.
-//  Updated on 27/03/26: Config-driven parameters, CloudRequestPipeline integration,
-//  and removed duplicated HTTP validation code.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -67,17 +65,9 @@ struct OpenAILLMProvider: LLMProvider {
     /// The request contract this model accepts (register A55).
     private var modelFamily: OpenAIModelFamily { OpenAIModelFamily.classify(modelName: config.modelName) }
 
-    /// Applies common generation parameters to the request body, in the shape the selected model
-    /// actually accepts.
-    ///
-    /// ⚠️ Register A55: this used to send one shape to everything — `max_tokens`, `temperature`,
-    /// `top_p`, plus `reasoning_effort` whenever the picker had been touched. A reasoning model
-    /// rejects `max_tokens` and a non-default `temperature`; a normal model rejects
-    /// `reasoning_effort`. So the panel's own defaults 400'd on o-series, and setting Reasoning
-    /// Effort 400'd everywhere else.
-    ///
-    /// ⚠️ Every parameter dropped here is LOGGED. Silently omitting a value the user set in the
-    /// panel is how a knob becomes decorative without anyone noticing (registers A19/A24/A25).
+    /// Applies common generation parameters to the request body, in the shape the selected model actually accepts.
+    /// Reasoning models reject `max_tokens` and a non-default `temperature`; normal models reject `reasoning_effort`.
+    /// Every parameter dropped here is logged, so a value the user set never becomes silently decorative.
     // Internal (not private) so tests can inspect the exact body shape without a network mock.
     func applyGenerationParams(to body: inout [String: Any]) {
         let family = modelFamily
@@ -118,9 +108,8 @@ struct OpenAILLMProvider: LLMProvider {
             body["usage"] = ["include": true]
         }
 
-        // OpenRouter provider routing. Only ever sent to OpenRouter: OpenAI and compatible
-        // gateways share this config type, and an unknown top-level `provider` key is a 400 on
-        // some of them.
+        // OpenRouter provider routing, only ever sent to OpenRouter: other gateways sharing this config type may answer an
+        // unknown top-level `provider` key with a 400.
         if denyDataCollection {
             if isOpenRouter {
                 body["provider"] = ["data_collection": "deny"]
@@ -145,11 +134,9 @@ struct OpenAILLMProvider: LLMProvider {
         return PricingKey(provider: provider, model: config.modelName)
     }
 
-    /// Logs which upstream served an OpenRouter request, its generation id and its cost.
-    ///
-    /// ⚠️ Without these a slow, failed or oddly-behaving OpenRouter call cannot be traced: the same
-    /// model slug is served by several upstream providers, and the generation id is the only handle
-    /// OpenRouter's own dashboard and `/api/v1/generation?id=` lookups accept.
+    /// Logs which upstream served an OpenRouter request, its generation id and its cost: the same model slug is served by
+    /// several upstreams, and the generation id is the only handle OpenRouter's dashboard and `/api/v1/generation?id=`
+    /// accept.
     private func logRouterMetadata(_ json: [String: Any]?) {
         guard isOpenRouter, let json, let summary = Self.routerMetadataSummary(json) else { return }
         logger.info("[OPENROUTER] \(summary)")
@@ -175,14 +162,9 @@ struct OpenAILLMProvider: LLMProvider {
         return parts.joined(separator: ", ")
     }
 
-    /// An error object carried INSIDE a successful (HTTP 200) body or stream chunk, as a
-    /// `CloudProviderError` so `ProviderErrorClassifier` treats it like the status it names.
-    ///
-    /// ⚠️ OpenRouter (and some gateways) report failures that happen after the response has started
-    /// this way — `{"error": {"code": 502, "message": "..."}}`, sometimes beside a partial `choices`.
-    /// Parsed as a normal response it became "Missing message object" (an invalid-response parse
-    /// failure, retried as if the model had emitted bad JSON) or, streaming, a silent truncation.
-    /// A code outside 4xx/5xx is treated as 502: the upstream failed, the request was fine.
+    /// An error object carried inside a successful (HTTP 200) body or stream chunk, as a `CloudProviderError` so
+    /// `ProviderErrorClassifier` treats it like the status it names (OpenRouter and gateways report late failures so).
+    /// A code outside 4xx/5xx is treated as 502, since the upstream failed and the request was fine.
     static func embeddedError(in json: [String: Any], provider: RateLimitCategory) -> CloudProviderError? {
         guard let error = json["error"] as? [String: Any] else { return nil }
         let rawCode = (error["code"] as? Int) ?? (error["code"] as? String).flatMap(Int.init)
@@ -206,9 +188,8 @@ struct OpenAILLMProvider: LLMProvider {
             return .skip
         }
 
-        // A failure after the 200 was sent arrives as an in-band error chunk (OpenRouter does this
-        // when the upstream dies mid-generation). Skipping it — which this did — ended the stream
-        // "cleanly" with a truncated answer that looked complete.
+        // A failure after the 200 was sent arrives as an in-band error chunk (OpenRouter does this when the upstream dies
+        // mid-generation); skipping it would end the stream cleanly with a truncated answer that looks complete.
         if let embedded = embeddedError(in: chunk, provider: provider) {
             return .fail(embedded)
         }
@@ -221,10 +202,8 @@ struct OpenAILLMProvider: LLMProvider {
         return .emit(content)
     }
 
-    /// The model's thinking trace. DeepSeek (and OpenAI-compatible servers copying it) use
-    /// `reasoning_content`; OpenRouter normalises every upstream to `reasoning`. Only the first was
-    /// read, so on OpenRouter the trace was silently dropped — the log showed "Model Reasoning:
-    /// (none)" on every step of a reasoning model.
+    /// The model's thinking trace: DeepSeek (and OpenAI-compatible servers copying it) use `reasoning_content`;
+    /// OpenRouter normalises every upstream to `reasoning`. Both keys are read.
     static func reasoningTrace(in message: [String: Any]) -> String? {
         for key in ["reasoning_content", "reasoning"] {
             if let text = message[key] as? String, !text.isEmpty { return text }
@@ -316,7 +295,7 @@ struct OpenAILLMProvider: LLMProvider {
         return (content, json.flatMap { TokenUsage.fromOpenAI($0, pricing: pricingKey) })
     }
 
-    // MARK: - Multimodal (Phase 3 — native image input)
+    // MARK: - Multimodal (native image input)
 
     /// Translates `[ProviderMessage]` into OpenAI chat messages, emitting a content
     /// array (`{"type":"text"…}` + `{"type":"image_url","image_url":{"url":"data:…;base64,…"}}`)
@@ -429,10 +408,8 @@ struct OpenAILLMProvider: LLMProvider {
             }
         }
 
-        // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
-        // .toolCall events, not from this field. A placeholder here would pollute any
-        // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
-        // Extract token usage from OpenAI API response
+        // Empty reasoning stays empty: the UI derives "Executing <tool>..." labels from .toolCall events, not from this field.
+        // Extract token usage from the OpenAI API response.
         let usage = json.flatMap { TokenUsage.fromOpenAI($0, pricing: pricingKey) }
 
         return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage,
@@ -441,10 +418,9 @@ struct OpenAILLMProvider: LLMProvider {
 
     // MARK: - Native-Turn Cognitive Step (G12)
 
-    /// Native-turn overload. Accepts provider-shape messages carrying structural
-    /// `tool_calls` / `tool` role entries produced by `OpenAIToolTurnAdapter`.
-    /// OpenAI's message format is already the canonical shape, so the body is
-    /// built identically to the legacy path — only the messages' Swift type differs.
+    /// Native-turn overload: accepts provider-shape messages carrying structural `tool_calls` / `tool` role entries
+    /// produced by `OpenAIToolTurnAdapter`. OpenAI's format is already canonical, so the body is built identically to the
+    /// legacy path.
     func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         var body: [String: Any] = [
             "model": config.modelName,
@@ -480,15 +456,9 @@ struct OpenAILLMProvider: LLMProvider {
         return Self.step(fromMessage: message, usage: json.flatMap { TokenUsage.fromOpenAI($0, pricing: pricingKey) })
     }
 
-    /// Decodes one tool call's `arguments` — a JSON string on the wire (an object from some
-    /// compatible servers).
-    ///
-    /// ⚠️ READINESS CR-26 (2026-10-11). An `arguments` string that wasn't valid JSON became `[:]` with
-    /// no log and the raw text dropped: the tool then ran with NO arguments (a tool without required
-    /// parameters runs on its defaults; one with them fails with a misleading "missing property"),
-    /// and nothing recorded why. Now the string gets the same structural repair the prompted parsers
-    /// use (raw control characters, trailing commas, …); only what still won't decode becomes `[:]`,
-    /// and that is logged with its size and consequence — never its content (file bodies, CR-57).
+    /// Decodes one tool call's `arguments`: a JSON string on the wire (an object from some compatible servers). An
+    /// invalid string gets the same structural repair the prompted parsers use; only what still won't decode becomes
+    /// `[:]`, which is logged with its size and consequence, never its content.
     static func toolArguments(_ raw: Any?, toolName: String, callID: String) -> [String: JSONValue] {
         if let object = raw as? [String: Any] {
             return object.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
@@ -523,13 +493,9 @@ struct OpenAILLMProvider: LLMProvider {
                                    tokenUsage: usage, reasoningReplay: reasoningReplay(in: message))
     }
 
-    /// The native-turn step with the visible text streamed through `onTextDelta` (see the protocol).
-    ///
-    /// Same request as `generateCognitiveStep(nativeMessages:tools:)` plus `stream: true`; the
-    /// chunks are reassembled by `OpenAIStreamAccumulator` into the message the non-streaming path
-    /// would have received, and parsed by the same `step(fromMessage:usage:)`. Transport, Stop and
-    /// the between-chunk stall watchdog come from `SSEStreamParser`; each `data:` payload is passed
-    /// through verbatim and decoded here, and an in-band error chunk fails the step.
+    /// The native-turn step with visible text streamed through `onTextDelta` (see the protocol).
+    /// Same request as `generateCognitiveStep(nativeMessages:tools:)` plus `stream: true`, reassembled by
+    /// `OpenAIStreamAccumulator`; an in-band error chunk fails the step.
     func generateCognitiveStepStreaming(
         nativeMessages: [[String: Any]],
         tools: [[String: Any]]?,
@@ -583,9 +549,8 @@ struct OpenAILLMProvider: LLMProvider {
             let limitDesc = maxTokens.map { String($0) } ?? "model default"
             logger.warning("⚠️ OpenAI streamed cognitive step truncated (finish_reason: length). Configured max_tokens: \(limitDesc).")
         }
-        // ⚠️ CR-26: a stream that closes cleanly WITHOUT a finish_reason was cut off upstream (a proxy
-        // or gateway dropped it) — every complete chat/completions stream carries one. It used to be
-        // returned as a finished step: a half-written answer, or tool calls with truncated arguments.
+        // A stream that closes cleanly without a `finish_reason` was cut off upstream (every complete chat/completions
+        // stream carries one), so it is an error, not a finished step.
         if let incomplete = Self.incompleteStreamError(finishReason: accumulator.finishReason, chunkCount: chunkCount, model: config.modelName) {
             throw incomplete
         }
@@ -632,9 +597,8 @@ struct OpenAILLMProvider: LLMProvider {
                     "stream_options": ["include_usage": true]
                 ]
                 self.applyGenerationParams(to: &body)
-                // `tools` are ignored on the bot stream (strictly conversational, like
-                // Claude/Gemini) — tool-calling is the agent path, and the stream decode
-                // only surfaces text deltas anyway.
+                // `tools` are ignored on the bot stream (strictly conversational, like Claude/Gemini): tool-calling is the agent
+                // path, and the stream decode only surfaces text deltas.
 
                 var request = self.makeRequest()
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)

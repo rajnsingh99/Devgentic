@@ -4,8 +4,7 @@
 //  FilePathResolverTests.swift
 //  DevgenticTests
 //
-//  Covers the relative-path bug fix: a model's bare path must anchor to HOME,
-//  not the read-only volume root; write_file must create its missing parent.
+//  Created by Raj Singh.
 //
 
 import XCTest

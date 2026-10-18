@@ -4,32 +4,7 @@
 //  ChatOpsVerbTable.swift
 //  Devgentic
 //
-//  One alias table for the five ChatOps verbs — C4.5 of the ChatOps remote-interface plan.
-//
-//  WHAT C4.5 TURNED OUT TO BE. The plan's graft assumed the refactor would introduce a SECOND
-//  parser, leaving un-migrated platforms on the old one so the new parser's tests would be
-//  policy-only until C7. That does not apply here: `ChatOpsCommand` was deliberately reused, and
-//  `parseDiscord` / `parseSlack` already delegate their TEXT path to `parse` and their button path
-//  to `parseCallbackData`. There is one parser and there always was.
-//
-//  What is NOT shared is the alias set. Three hand-written slash switches had drifted apart:
-//
-//    | | Telegram | Discord | Slack |
-//    | case      | `text.lowercased()` | raw name          | raw name          |
-//    | whitespace| trimmed             | not trimmed       | not trimmed       |
-//    | leading / | required            | absent (platform) | stripped if present|
-//    | help      | `/help`, `/start`   | `help`            | `help`            |
-//
-//  ⚠️ TWO ENTRY POINTS, AND THE DIFFERENCE IS LOAD-BEARING. Typed text REQUIRES the leading slash;
-//  a platform-delivered command name does not. Collapsing them into one lenient lookup would make
-//  a user who types the word "conversations" as a message get the conversation list instead of
-//  talking to the agent — the alias table's most obvious simplification is a bug.
-//
-//  ⚠️ DELIBERATE, LATENT-ONLY BEHAVIOUR CHANGES. Discord and Slack slash names are now trimmed and
-//  matched case-insensitively, and accept `start` as an alias of `help`. Neither is reachable
-//  today: both platforms deliver the lowercase name they registered, and neither registers `start`
-//  (which the TEXT path already accepted on all three anyway, since that path is shared). Recorded
-//  because "unreachable" is a claim about today's registration, not a guarantee.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -49,9 +24,7 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
     case history
 
     /// The name to register with a platform's command menu, without a leading slash.
-    ///
-    /// ⚠️ These five strings are what Telegram's `setMyCommands` and Discord's
-    /// `registerSlashCommands` already publish; they are not free to rename.
+    /// These match what Telegram's `setMyCommands` and Discord's `registerSlashCommands` publish.
     var canonicalName: String {
         switch self {
         case .conversations:   return "conversations"
@@ -67,15 +40,11 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
     }
 
     /// Whether the rest of the line is an argument rather than part of the verb.
-    ///
-    /// ⚠️ FALSE FOR EVERY SHIPPED VERB, deliberately. Today `/status extra` does not match `/status`
-    /// — it falls through to `.freeText` and reaches the agent. Making every verb argument-taking
-    /// would silently swallow those messages as commands.
+    /// A verb without an argument does not match when text follows it: `/status extra` falls through to `.freeText`.
     var takesArgument: Bool {
         switch self {
-        // ⚠️ `.history` takes an OPTIONAL count. `takesArgument` means "a trailing remainder
-        // belongs to this verb", not "one is required" — `/history` alone is answered with a
-        // default, exactly as `/use` alone is answered with a usage hint.
+        // `.history` takes an optional count; `takesArgument` means a trailing remainder belongs
+        // to the verb, not that one is required.
         case .use, .search, .history: return true
         case .conversations, .newConversation, .status, .cancel, .help, .profiles: return false
         }
@@ -93,7 +62,7 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
         case .help:            return ["help", "start"]
         case .profiles:        return ["profiles"]
         case .use:             return ["use"]
-        // ⚠️ `find` is an alias real users reach for before `search`.
+        // `find` is an alias users reach for before `search`.
         case .search:          return ["search", "find"]
         case .history:         return ["history"]
         }
@@ -102,9 +71,7 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
     /// How the verb is written when offered to a user, argument placeholder included.
     var usage: String {
         guard takesArgument else { return "/\(canonicalName)" }
-        // ⚠️ ANGLE BRACKETS MEAN REQUIRED, SQUARE MEAN OPTIONAL — the shell convention users already
-        // read. `/history` alone is answered with a default, and advertising it as `/history <n>`
-        // would tell them a number is mandatory when it is not.
+        // Angle brackets mean required, square brackets optional, so `/history` is not advertised as needing a number.
         return argumentIsOptional
             ? "/\(canonicalName) [\(argumentName)]"
             : "/\(canonicalName) <\(argumentName)>"
@@ -130,11 +97,7 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
     }
 
     /// One line of `/help`.
-    ///
-    /// ⚠️ LIVES ON THE TABLE, because `/help` used to hand-write its own list and had already
-    /// drifted: it advertised seven verbs against a table of eight, so a shipped command was
-    /// undiscoverable. The table's whole purpose is that the parser, `/help` and the platform
-    /// registrations read ONE catalogue.
+    /// Lives on the table so the parser, `/help` and the platform registrations read one catalogue.
     var helpDescription: String {
         switch self {
         case .conversations:   return "List your conversations"
@@ -150,25 +113,14 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
     }
 
     /// The order `/help` and the platform menus present the verbs in.
-    ///
-    /// ⚠️ EXPLICIT, not `allCases`. `allCases` follows declaration order, which is an accident of
-    /// how the enum grew; this is the order a user reads.
+    /// Explicit rather than `allCases`, which follows declaration order.
     static var presentationOrder: [ChatOpsVerb] {
         [.conversations, .search, .history, .profiles, .use, .newConversation, .status, .cancel, .help]
     }
 
     /// The command this verb produces, carrying whatever followed it on the line.
-    ///
-    /// ⚠️ THIS WAS A ZERO-PARAMETER PROPERTY AND THAT WAS A REAL BLOCKER, not a style wart. Because
-    /// it could not express an argument, `ChatOpsCommand.parse` hard-coded
-    /// `verb.takesArgument ? .useProfile(argument) : verb.command` — so `.use` was not merely the
-    /// only argument-taking verb, it was the only one that COULD exist. A second such verb added to
-    /// this table would have parsed its argument correctly and then been dispatched as a profile
-    /// name, silently, with the table looking entirely correct.
-    ///
-    /// ⚠️ Argument-free verbs ignore the argument rather than rejecting it, because they never
-    /// receive one: `ChatOpsVerbTable.parse` refuses a trailing remainder for a verb that does not
-    /// declare `takesArgument`, so `/status extra` still falls through to `.freeText`.
+    /// Argument-free verbs ignore the argument; `ChatOpsVerbTable.parse` refuses a remainder for
+    /// verbs that do not declare `takesArgument`.
     func command(argument: String) -> ChatOpsCommand {
         switch self {
         case .conversations:   return .conversations
@@ -177,8 +129,7 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
         case .cancel:          return .cancel
         case .help:            return .help
         case .profiles:        return .profiles
-        // ⚠️ An EMPTY argument is passed through, not rejected here: `/use` and `/search` alone are
-        // answered by the service with a usage hint, which is a better reply than "unknown command".
+        // An empty argument is passed through: the service answers `/use` and `/search` alone with a usage hint.
         case .use:             return .useProfile(argument)
         case .search:          return .searchConversations(argument)
         case .history:         return .conversationHistory(argument)
@@ -189,25 +140,19 @@ enum ChatOpsVerb: String, CaseIterable, Sendable {
 enum ChatOpsVerbTable {
 
     /// A verb typed as text into a chat.
-    ///
-    /// ⚠️ THE LEADING SLASH IS REQUIRED. Without it, "status" or "new" typed as an ordinary message
-    /// would be swallowed as a command instead of reaching the agent.
+    /// The leading slash is required so "status" or "new" typed as an ordinary message reaches the agent.
     nonisolated static func verb(forSlashPrefixedText text: String) -> ChatOpsVerb? {
         parse(slashPrefixedText: text)?.verb
     }
 
     /// A verb plus whatever followed it on the line.
-    ///
-    /// ⚠️ THE ARGUMENT IS ONLY TAKEN FOR VERBS THAT DECLARE ONE. `/status extra` must keep falling
-    /// through to `.freeText` exactly as it does today — a verb that greedily consumed the rest of
-    /// the line would swallow real messages as commands.
+    /// The argument is taken only for verbs that declare one, so `/status extra` still falls through to `.freeText`.
     nonisolated static func parse(slashPrefixedText text: String) -> (verb: ChatOpsVerb, argument: String)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("/") else { return nil }
         let body = String(trimmed.dropFirst())
 
-        // ⚠️ Split on the FIRST run of whitespace only; the argument keeps its own spaces, because a
-        // profile name is routinely several words.
+        // Splits on the first run of whitespace only; the argument keeps its own spaces (profile names are often several words).
         guard let space = body.firstIndex(where: { $0.isWhitespace }) else {
             return match(body.lowercased()).map { ($0, "") }
         }

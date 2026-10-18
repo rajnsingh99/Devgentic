@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillRuntimeFilesTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  A skill's bundled files reaching a path its instructions can actually name.
-//
-//  ⚠️⚠️ THE DEFECT: since V6 a skill's files live in the database as blobs. A skill could bundle
-//  `scripts/run.py`, instruct the model to execute it, and have no file anywhere on disk — while the
-//  presence of `scripts/` is one of the two triggers that offers the user a shell tool. The app was
-//  asking for shell access to run scripts it had never written down.
+//  Created by Raj Singh.
 //
 
 import XCTest

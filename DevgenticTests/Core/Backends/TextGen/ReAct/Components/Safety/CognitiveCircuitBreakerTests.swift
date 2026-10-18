@@ -4,17 +4,7 @@
 //  CognitiveCircuitBreakerTests.swift
 //  DevgenticTests
 //
-//  Tests for CognitiveCircuitBreaker. Contract under test (post G2/G3 + audit #3):
-//  - Iteration-level fingerprint: warn (.proceedWithWarning) on the 2nd identical
-//    iteration, abort on the 3rd.
-//  - Global per-tool frequency: 3× same tool+args+output across ANY iterations
-//    aborts — catches alternating-combo evasion; checked BEFORE the warning tier
-//    so aborts outrank warnings.
-//  - primeReplayedIteration: G1-resume priming counts toward caps without emitting actions.
-//    (evaluateAskUser/idle counters were REMOVED — clarification loops are governed by
-//    RunInteractionMemory replay + the repetition fingerprint, not a dedicated counter.)
-//  - Hooks without production callers (evaluateToolAttempt, evaluateMemoryHydration,
-//    recordClarificationResponse) were removed in the audit-#3 cleanup.
+//  Created by Raj Singh.
 //
 
 import XCTest

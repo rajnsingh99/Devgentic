@@ -4,9 +4,7 @@
 //  ToolTimeoutContractTests.swift
 //  DevgenticTests
 //
-//  HITL Waiting Contract — slice 1 (tool dispatcher + terminal tools). These are the Timeout
-//  inventory's probes P1, P2, P7 and P9, kept as tests asserting the NEW behaviour, against the
-//  REAL `ToolExecutionMediator`, `RunCommandTool` and `BackgroundProcessRegistry`.
+//  Created by Raj Singh.
 //
 
 import XCTest

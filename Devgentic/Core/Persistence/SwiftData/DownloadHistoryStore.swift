@@ -4,28 +4,7 @@
 //  DownloadHistoryStore.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//
-//  Persistence layer for the new `DownloadRecord` model. Singleton + injected
-//  `ModelContainer`, matching `PromptStore` / `ChatPersistenceStore`.
-//
-//  Write path (from DownloadManager bridges):
-//    startDownload(...)         → inserts a fresh `.queued` record
-//    updateProgress(...)        → 1%-throttled writes during the pull
-//    markCompleted / Failed /   → terminal transitions
-//      Cancelled
-//
-//  Read path (from UI):
-//    fetchMostRecent(backend:modelIdentifier:)  — "is this model in history?"
-//    fetchActive()                              — in-flight records for sidebar
-//    fetchHistory(limit:)                       — completed/failed/cancelled
-//
-//  Recovery:
-//    reconcileOrphans()  — called on app launch. Any record still in
-//    `.queued` or `.downloading` must be a leftover from a crashed session;
-//    flip to `.interrupted` with a helpful `errorMessage`. Service-level
-//    state rebuilds itself on next interaction, so the user can just click
-//    re-download.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -34,6 +13,9 @@ import os
 
 private let logger = DGLogger(category: "DownloadHistoryStore")
 
+/// Persistence layer for `DownloadRecord`: records download lifecycle from the download bridges and
+/// serves history to the UI. Records still `.queued` or `.downloading` at launch are reconciled to
+/// `.interrupted`.
 enum DownloadHistoryError: LocalizedError, Equatable {
     case containerUnavailable
     case fetchFailed(String)
@@ -70,13 +52,9 @@ final class DownloadHistoryStore {
 
     // MARK: - Start / update / terminal writes
 
-    /// Insert a new record for a freshly-triggered download. Caller (typically
-    /// a `DownloadManager` bridge) supplies the UUID so service-side tracking
-    /// (e.g. OllamaService's active task) matches the record for later updates.
-    ///
-    /// `fileSizeBytes` is optional — MLX pre-fetches size from HuggingFace
-    /// before starting so we can seed it here, while Ollama / Whisper discover
-    /// it on the first progress callback and update it via `updateProgress`.
+    /// Inserts a new record for a freshly triggered download; the caller supplies the UUID so service-side
+    /// tracking matches it. `fileSizeBytes` is optional: MLX seeds it up front, while Ollama and Whisper
+    /// set it via `updateProgress`.
     @discardableResult
     func startDownload(
         id: UUID,
@@ -108,10 +86,8 @@ final class DownloadHistoryStore {
         return save().map { record }
     }
 
-    /// Persist a progress tick. `fileSizeBytes` is honored only if the
-    /// record doesn't already have one — avoids replacing a pre-seeded
-    /// authoritative size (MLX) with a chunk-transfer estimate, but still
-    /// lets Ollama / Whisper populate the field the first time they see it.
+    /// Persists a progress tick. `fileSizeBytes` is honored only if the record has no size yet, so a seeded
+    /// size is kept.
     @discardableResult
     func updateProgress(id: UUID, progress: Double, fileSizeBytes: Int64? = nil) -> Result<Void, DownloadHistoryError> {
         guard let record = fetch(id: id) else { return notFound(id) }
@@ -289,10 +265,7 @@ final class DownloadHistoryStore {
     }
 
     /// Row count without materializing the rows.
-    ///
-    /// Exists for the launch-sweep pre-flight log: the retention sweep is destructive, so the
-    /// support log records how many rows were at stake BEFORE it runs, not only how many it removed
-    /// (which is lost if the app dies mid-sweep).
+    /// Lets the launch sweep log how many rows were at stake before the destructive retention sweep runs.
     func totalRecordCount() -> Int {
         guard let context = requireContext("totalRecordCount") else { return 0 }
         do {
@@ -315,10 +288,8 @@ final class DownloadHistoryStore {
     static let retentionMaxRecords = 500
 
     /// The retention decision, free of SwiftData so it can be tested directly.
-    ///
-    /// `index` is the record's position in a newest-first list. A record goes if it is beyond
-    /// the count cap **or** older than the age cap — "whichever is looser" in the sense that
-    /// either condition alone is enough.
+    /// `index` is the record's position in a newest-first list; a record goes if it is beyond the count cap
+    /// or older than the age cap.
     nonisolated static func shouldPrune(
         index: Int,
         updatedAt: Date,
@@ -330,26 +301,9 @@ final class DownloadHistoryStore {
         return index >= keep || updatedAt < cutoff
     }
 
-    /// Prunes old download history.
-    ///
-    /// Growth is slow — one row per download attempt — but strictly monotonic for the life of
-    /// the install, and every row is scanned on each bridge reconcile and each sidebar render.
-    ///
-    /// ⚠️ Never prunes a `.paused` record. Pause is an explicit "I'll come back to this", and
-    /// the partial bytes are deliberately still on disk; removing the row would take away the
-    /// only Resume affordance pointing at them. Active records are excluded for the obvious
-    /// reason. Everything else — completed, cancelled, failed, interrupted — ages out.
-    ///
-    /// (Pruning a resumable `.failed`/`.interrupted` row does not lose its bytes: they remain
-    /// on disk and `MLXModelService.findOrphanedPartialDownloads()` still reports them.)
-    /// The statuses the retention sweep may delete. **The single source of truth** — the
-    /// predicate below is derived from it, and the test asserts against it rather than
-    /// restating the list, so the two cannot drift. Adding a `DownloadRecordStatus` without
-    /// classifying it here fails that test.
-    ///
-    /// ⚠️ `.paused` is deliberately absent: pause is an explicit "I'll come back to this" and
-    /// the partial bytes are still on disk, so pruning the row removes the only Resume
-    /// affordance pointing at them.
+    /// The statuses the retention sweep may delete; the pruning predicate is derived from this list.
+    /// `.paused` is absent: its partial bytes stay on disk and the row is the only Resume affordance
+    /// pointing at them.
     static let prunableStatuses: [DownloadRecordStatus] = [
         .completed, .cancelled, .failed, .interrupted
     ]
@@ -398,17 +352,8 @@ final class DownloadHistoryStore {
 
     // MARK: - Orphan reconcile
 
-    /// Any record still in `.queued` or `.downloading` when the app launches
-    /// is by definition a leftover from a previous session (no download task
-    /// survives app termination). Flip to `.interrupted` with an explanatory
-    /// error so the user can decide whether to re-trigger.
-    ///
-    /// Safe to call repeatedly — only touches records matching the active
-    /// predicate, and writes the terminal transition exactly once per row.
-    /// - Parameter startedBefore: only rows started before this instant are orphans. ⚠️ D-25: the
-    ///   launch sweep runs AFTER the skill-import sweep, which can take as long as a volume's mount
-    ///   timeout; a download the user started in that window is live, and flipping it to
-    ///   `.interrupted` stranded it. The launch passes the instant captured before that sweep.
+    /// Flips every record still `.queued` or `.downloading` at launch to `.interrupted`; safe to repeat.
+    /// - Parameter startedBefore: only rows started before this instant are orphans.
     func reconcileOrphans(startedBefore cutoff: Date = .distantFuture) {
         let active = fetchActive()
         let stillActive = active.filter { $0.startedAt < cutoff }
@@ -426,12 +371,8 @@ final class DownloadHistoryStore {
     }
 
     // MARK: - Diagnostics
-    //
-    // Every read used to collapse "container not configured" and "fetch threw" into an empty
-    // result with no log, and every caller discards the mutators' `Result` with `_ =`. A
-    // store that failed to open was therefore indistinguishable from a user who had never
-    // downloaded anything — with nothing in the log to say so. `configureContainer` runs
-    // from an async Task at launch, so `.containerUnavailable` is genuinely reachable.
+    // Logs a missing container and a failed fetch separately, so a store that failed to open is visible.
+    // The container is configured from an async Task at launch, so it can be unavailable.
 
     private func requireContext(_ operation: String) -> ModelContext? {
         guard let context = mainContext else {

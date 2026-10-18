@@ -4,35 +4,22 @@
 //  MCPResourcePromptTools.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — agent-facing access to MCP resources and prompts.
-//
-//  Resources and prompts are the two largest MCP server surfaces after tools, and neither
-//  was reachable: a database-schema browser, a docs/wiki connector or a Drive-style server
-//  appeared in Devgentic as an empty server with zero tools, looking broken.
-//
-//  Rather than inventing a new UI, these are surfaced as SYNTHETIC TOOLS appended to the
-//  server's own tool list. That buys the whole existing pipeline for free — they persist
-//  like any other tool, appear in the Tool Library, honour per-tool `requiresConfirmation`,
-//  resolve by `sourceId`, and are counted by the context-window gauge. The agent discovers
-//  them the same way it discovers everything else.
-//
-//  ⚠️ These names are RESERVED. `AgentConnect.resolveMCPTool` routes them to this file
-//  instead of `DynamicMCPTool`, because there is no server-side tool behind them.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import MCP
 
+/// Agent-facing access to MCP resources and prompts, surfaced as synthetic tools appended to a server's own tool list.
+/// The names are reserved: `AgentConnect.resolveMCPTool` routes them here, since no server-side tool backs them.
 enum MCPSyntheticTool: String, CaseIterable {
     case listResources = "mcp_list_resources"
     case readResource  = "mcp_read_resource"
     case listPrompts   = "mcp_list_prompts"
     case getPrompt     = "mcp_get_prompt"
 
-    /// Per-server tool name. Servers choose their own tool names and a user may connect
-    /// several servers at once, so these are qualified — two connected servers would
-    /// otherwise both want `mcp_list_resources` and the duplicate-name guard in
-    /// `AgentConnect` would drop one of them.
+    /// Per-server tool name, qualified because several servers may be connected and `AgentConnect`'s duplicate-name
+    /// guard would otherwise drop one of two `mcp_list_resources`.
     func qualifiedName(serverName: String) -> String {
         "\(rawValue)__\(Self.slug(serverName))"
     }
@@ -207,9 +194,8 @@ struct MCPResourcePromptTool: DevgenticTool {
                     detail: "Missing required argument 'name'. Call \(MCPSyntheticTool.listPrompts.qualifiedName(serverName: source.serverName)) first to discover valid prompt names."
                 )
             }
-            // `prompts/get` takes string-valued arguments only (MCP spec). Non-string
-            // values are stringified rather than dropped — the prompt's own schema decides
-            // what is acceptable, not this layer.
+            // `prompts/get` takes string-valued arguments only (MCP spec); non-string values are stringified rather than dropped,
+            // since the prompt's own schema decides what is acceptable.
             let mcpArguments: [String: String]? = arguments.arguments.map { raw in
                 raw.compactMapValues { jsonValue -> String? in
                     if case .string(let text) = jsonValue { return text }

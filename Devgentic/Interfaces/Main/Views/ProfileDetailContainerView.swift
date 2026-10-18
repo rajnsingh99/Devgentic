@@ -4,15 +4,13 @@
 //  ProfileDetailContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  Wraps BackendProfileDetailView for display in the main content area.
-//  Looks up the profile from the shared BackendProfileService by ID
-//  and provides it as a Binding.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Wraps `BackendProfileDetailView` for the main content area, looking the profile up by ID from the shared
+/// `BackendProfileService` and providing it as a Binding.
 struct ProfileDetailContainerView: View {
 
     let profileID: UUID
@@ -43,9 +41,8 @@ struct ProfileDetailContainerView: View {
                     )
                 }
             } else {
-                // First render: eagerly activate the buffer.
-                // Keep the island visible during load so back nav stays reachable
-                // even if activation hangs (e.g. disk I/O, state restoration).
+                // First render: eagerly activate the buffer, keeping the island visible during load so back navigation stays reachable
+                // even if activation hangs.
                 VStack(spacing: 0) {
                     DynamicIslandBar(title: "Loading", icon: "hourglass")
                     ProgressView()

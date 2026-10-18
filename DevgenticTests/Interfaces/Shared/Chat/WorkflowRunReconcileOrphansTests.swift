@@ -4,28 +4,7 @@
 //  WorkflowRunReconcileOrphansTests.swift
 //  DevgenticTests
 //
-//  Register WF-PE6 — `reconcileOrphans()`, the zombie-run recovery path, had ZERO coverage.
-//
-//  A run is persisted as a `.running` stub at start and finalized at the end; a crash, force-quit
-//  or failed finalize leaves the stub `.running` on disk forever. `reconcileOrphans()` is the
-//  launch sweep that settles those rows — and it is what `WorkflowRunBootstrap`'s failure paths
-//  explicitly defer to ("the record stays `.running` on disk and will be reconciled at the next
-//  launch"). The two similarly-named suites (Settling, Resurrection) exercise DIFFERENT layers —
-//  live-state settling and upsert-resurrection — so a regression here shipped green.
-//
-//  ⚠️ Hermetic by ID: the sweep settles EVERY `.running` row in the store, and the test host's
-//  container is shared across suites, so every assertion is scoped to rows these tests created.
-//  (Launch-time gating — the schema-change and test-env skips — lives at the call site in the app
-//  and is not reachable from a unit test; what is pinned here is the store-level contract.)
-//
-//  [WF-RU2] That store-level contract is exactly what makes it SAFE for `DevgenticApp.swift` to
-//  call this method on a `.deferSchemaChanged` launch too, unlike the download-history sweep next
-//  to it in that switch: `testSettledRowsAreUntouched` pins that only exact-`.running` rows are
-//  touched, and only `statusRaw`/`errorMessage` are rewritten — no lightweight migration can
-//  PRODUCE a `.running` row (that only happens while a run is genuinely executing), so there is
-//  nothing here for a botched migration to have silently degraded. Left un-reconciled, an orphan
-//  from a force-quit or crash rendered as a LIVE run — ticking elapsed timer, "Running" pill — for
-//  every session between the crash and the next launch that happens to take the `.run` branch.
+//  Created by Raj Singh.
 //
 
 import XCTest

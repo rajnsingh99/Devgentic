@@ -4,21 +4,7 @@
 //  ChatOpsCredentialWriteTests.swift
 //  DevgenticTests
 //
-//  Registers KC-11 + KC-12. The four credential SETTERS used to discard the `OSStatus` from
-//  every keychain save and delete (`_ = keychain.save(…)` — a property setter cannot return
-//  one), so a locked Keychain reported pairing success over a credential that was never stored,
-//  and Disconnect logged "credentials cleared" over a bot token still sitting in the Keychain.
-//
-//  The fix gives every credential an explicit status-returning store/clear pair that the
-//  property setter delegates to, and the reset functions return a
-//  `ChatOpsCredentialClearSummary` that drives the connection state: a delete that failed
-//  leaves the bridge in `.error`, never `.disconnected`.
-//
-//  ⚠️ EVERY failing branch here is driven by an injected `ProgrammableKeychain` override, NOT
-//  by `.notFound` — a dev machine only ever produces `errSecItemNotFound`, which is why the
-//  original defect survived. `errSecItemNotFound` on a CLEAR is deliberately NOT a failure
-//  (the goal is "nothing stored", and it already was) — the test that pins that asymmetry is
-//  the one a lazy mutation is most likely to flip.
+//  Created by Raj Singh.
 //
 
 import XCTest

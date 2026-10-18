@@ -4,38 +4,7 @@
 //  SkillIngest.swift
 //  Devgentic
 //
-//  Turning something the user pointed at into skills the library can hold.
-//
-//  ## What this replaces
-//
-//  V4/V5 never read a skill's files — it INDEXED them and re-read on demand, and even then only
-//  from five hardcoded subdirectories (`reference`, `references`, `templates`, `scripts`, `assets`)
-//  and only when they decoded as UTF-8. A skill with a `data/` directory contributed nothing; a
-//  skill shipping a PNG or a PDF lost it silently.
-//
-//  Content lives in the store now, so those two behaviours change from "a little lossy at read
-//  time" to "the user permanently loses files they imported". This reads EVERY regular file under
-//  the skill directory, at any depth, as bytes.
-//
-//  ## Everything here is a boundary
-//
-//  The input is an archive, a folder, or a file the user chose — none of it authored by this app.
-//  The rules below are the ones that must hold before anything reaches the database, because a
-//  stored row is already past the point where refusing helps:
-//
-//    - The skill NAME is validated for shape BEFORE it is used to build any path.
-//    - A file's relative path is DERIVED from the walk, then re-validated to contain no `..`
-//      component and no leading separator, so an export that materializes these paths cannot write
-//      outside its destination.
-//    - Symlinks are never followed and never captured.
-//    - Total bytes and file count are capped, and hitting a cap REJECTS the skill rather than
-//      importing a truncated one — half a skill is worse than a refusal, because it looks complete.
-//
-//  ## Partial success is the normal case
-//
-//  A folder of twenty skills where one has broken frontmatter imports nineteen and REPORTS the
-//  twentieth. Refusing the batch would punish the user for someone else's file, and silently
-//  dropping it is how V4/V5's importer made a repo look like it contained fewer skills than it did.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -101,9 +70,8 @@ enum SkillIngestError: LocalizedError, Equatable {
         case .tooManyFiles(let count):
             return "This skill bundles \(count) files; the limit is \(SkillLibraryLimits.maxFilesPerVersion)"
         case .tooLarge(let path):
-            // ⚠️ Names the FILE rather than printing a byte total. The walk now refuses on the first
-            // breach, so any total it could print would be a partial sum — a number that looks
-            // authoritative and is not.
+            // Names the file rather than a byte total: the walk refuses on the first breach, so any total would be
+            // partial.
             return "'\(path)' would push this skill past the \(SkillLibraryLimits.maxSkillBytes / 1024 / 1024) MB limit"
         case .unusablePath(let path):
             return "'\(path)' cannot be stored as a skill file path. Rename it and import again."
@@ -117,9 +85,7 @@ enum SkillIngestError: LocalizedError, Equatable {
 enum SkillIngest {
 
     /// Filenames that are never part of a skill.
-    ///
-    /// ⚠️ Extensionless matches too (`.DS_Store` is caught by the hidden-file rule). These are the
-    /// ones that are NOT hidden and would otherwise be captured, stored, and re-exported forever.
+    /// Matched by extension-less name; hidden files such as `.DS_Store` are caught by the hidden-file rule.
     static let ignoredFileNames: Set<String> = ["Icon\r", "Thumbs.db", "desktop.ini"]
 
     /// Directory names never descended into when collecting a skill's files.
@@ -134,14 +100,8 @@ enum SkillIngest {
         let skillFile = directory.appendingPathComponent("SKILL.md")
         guard fm.fileExists(atPath: skillFile.path) else { throw SkillIngestError.noSkillFile(label) }
 
-        // ⚠️⚠️ THE BODY IS COUNTED, AND IT USED NOT TO BE — the larger half of this bound. The walk
-        // deliberately SKIPS SKILL.md, `checkLimits` summed only `files`, and `readBareMarkdown`
-        // never called it at all, so the body was unbounded on every import path. That matters more
-        // than a bundled blob: `SkillVersionSD.body` is a plain `String` with no `.externalStorage`,
-        // so it lands in the SQLite file itself rather than the blob sibling every other large
-        // payload uses. One dropped file could bloat the store with nothing reporting it —
-        // `IngestedSkill.totalBytes` excludes the body too, so the import sheet would cheerfully
-        // say "no bundled files".
+        // The body is counted against the size bound: `SkillVersionSD.body` is a plain `String` stored in
+        // SQLite itself, and the walk skips SKILL.md, so an uncounted body would bloat the store unreported.
         let raw: String
         do {
             raw = try SkillBoundedRead.text(at: skillFile, limit: SkillLibraryLimits.maxSkillBytes)
@@ -154,10 +114,8 @@ enum SkillIngest {
 
         let (name, description, allowedTools, body) = try parse(raw, label: label)
 
-        // ⚠️ ONE 30 MB ENVELOPE FOR THE WHOLE VERSION. `maxSkillBytes` documents itself as "Total
-        // uncompressed bytes per skill version", so the body's bytes are spent from the same budget
-        // the walk then draws on — and the cap is reached DURING the walk rather than after it, so
-        // the process never holds more than the cap plus one file.
+        // One envelope for the whole version: `maxSkillBytes` is per version, so the body's bytes are spent
+        // from the same budget the walk draws on, and the cap is reached during the walk.
         let files = try collectFiles(under: directory, excluding: skillFile,
                                      alreadyUsedBytes: raw.utf8.count)
 
@@ -168,15 +126,10 @@ enum SkillIngest {
     // MARK: A bare .md
 
     /// Reads a single `.md` file as a skill with no bundled files.
-    ///
-    /// ⚠️ The name comes from the FRONTMATTER, not the filename — a bare file has no directory to
-    /// agree with, so the directory-match rule cannot apply and the frontmatter is the only claim.
-    /// This is the one import shape where a skill's name is not visible in the path the user picked,
-    /// so the name is reported back to them.
+    /// The name comes from the frontmatter, not the filename, and is reported back to the user.
     static func readBareMarkdown(at file: URL) throws -> IngestedSkill {
         let label = file.lastPathComponent
-        // ⚠️ Bounded too. This path never called `checkLimits` at all, so a bare .md was the one
-        // import shape with no size bound anywhere.
+        // Bounded too: a bare `.md` is held to the same size limit as every other import shape.
         let raw: String
         do {
             raw = try SkillBoundedRead.text(at: file, limit: SkillLibraryLimits.maxSkillBytes)
@@ -194,10 +147,7 @@ enum SkillIngest {
     // MARK: A tree that may hold many skills
 
     /// Reads every skill under a root the user chose, reporting what it could not take.
-    ///
-    /// Uses the scanner's bounded recursive walk to LOCATE skills — the layout rules (a directory
-    /// that is a skill is never descended into, depth and count caps, noise denylist) are already
-    /// settled there and must not be re-derived here and drift.
+    /// Uses the scanner's bounded recursive walk to locate skills, so layout rules are not re-derived here.
     static func readTree(at root: URL) -> SkillIngestOutcome {
         var outcome = SkillIngestOutcome()
 
@@ -231,14 +181,9 @@ enum SkillIngest {
         return outcome
     }
 
-    /// A top-level folder that simply is not a skill is not worth reporting as a failure.
-    ///
-    /// ⚠️ Only `.noSkillFile` is filtered. A `.parseError` means the user DID intend a skill and it
-    /// did not load — exactly the case V4/V5 swallowed, making a repo look emptier than it was.
-    ///
-    /// ⚠️ A NAME COLLISION is not a skip any more. It used to be reported here as
-    /// `.duplicateName(keptFrom:)` and silently resolved; the user now CHOOSES — see
-    /// `SkillImportPlan`, which offers add-a-version / import-as-new / skip per colliding skill.
+    /// A top-level folder that is simply not a skill is not reported as a failure.
+    /// Only `.noSkillFile` is filtered; a `.parseError` means the user intended a skill and it did not
+    /// load.
     private static func isNoise(_ entry: SkippedSkillEntry) -> Bool {
         if case .noSkillFile = entry.reason { return true }
         return false
@@ -247,16 +192,8 @@ enum SkillIngest {
     // MARK: An archive
 
     /// Reads every skill out of a `.zip` / `.skill` archive, then discards the extraction.
-    ///
-    /// ⚠️ Nothing is promoted to Application Support. The bytes go into the store and the staging
-    /// directory is deleted — which is the whole point of V6: there is no folder left behind to
-    /// dangle, move, or disagree with the database.
-    ///
-    /// ⚠️ Extraction goes through `SkillArchiveStaging.stageValidated`, which is the SINGLE
-    /// validated path: table-of-contents pre-flight, a size budget measured on what actually landed
-    /// (never on the sizes the archive declares — an attacker controls those), and a refusal of
-    /// symlinks and escaping paths. Re-implementing any of that here would give this codebase two
-    /// copies of a check to keep in sync.
+    /// Extraction goes through `SkillArchiveStaging.stageValidated`, the single validated path: size budget measured
+    /// on what landed, and refusal of symlinks and escaping paths. Nothing is promoted to Application Support.
     static func readArchive(at url: URL) throws -> SkillIngestOutcome {
         let fm = FileManager.default
         let staging = fm.temporaryDirectory
@@ -272,9 +209,7 @@ enum SkillIngest {
 
         let contentRoot = try SkillArchiveStaging.stageValidated(zipAt: url, into: staging)
 
-        // ⚠️ `readTree`, not "find the one skill root". An archive holding several skills is
-        // ordinary — it is what exporting a folder produces — and taking only the first would
-        // import one skill from a bundle of ten with nothing said about the rest.
+        // `readTree`, not "find the one skill root": an archive holding several skills is ordinary.
         var outcome = readTree(at: contentRoot)
 
         // The archive's own name is what the user recognises; a staging UUID is not.
@@ -289,10 +224,8 @@ enum SkillIngest {
     // MARK: Whatever the user dropped
 
     /// Reads any of the three shapes the import panel accepts, dispatching on what it is.
-    ///
-    /// ⚠️ Dispatches on the EXTENSION for archives and markdown, and on being a directory otherwise
-    /// — not on a guessed content type. `.skill` is just a renamed zip, so both extensions take the
-    /// archive path; anything else that is a directory is walked.
+    /// Archives and markdown are chosen by extension (`.skill` is a renamed zip); any other directory is
+    /// walked.
     static func read(contentsOf url: URL) -> SkillIngestOutcome {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
@@ -333,23 +266,11 @@ enum SkillIngest {
         }
     }
 
-    /// The off-caller-actor form of `read(contentsOf:)` — and the ONLY form a UI or launch path
-    /// should call.
-    ///
-    /// ⚠️⚠️ WHY THIS IS A NAMED FUNCTION AND NOT A `Task.detached` AT EACH CALL SITE. This read walks
-    /// every file of every skill and reads each as bytes; on an unmounted volume or a network share
-    /// even the first `fileExists` blocks for the mount timeout. Wrapping it per call site made "off
-    /// the main actor" a property of one call site rather than of one NAME: a caller that forgot to
-    /// wrap it blocked the main actor, and a launch-time caller did exactly that.
-    ///
-    /// ⚠️ `Task.detached`, NOT a `nonisolated async func`. Whether a nonisolated async function
-    /// leaves its caller's actor is a LANGUAGE-MODE behaviour: it does under Swift 5, and under
-    /// Swift 6 with `NonisolatedNonsendingByDefault` it runs back on the caller. The hop would then
-    /// evaporate on a build-setting change with every test still green.
-    ///
-    /// ⚠️ It does not inherit cancellation, deliberately: nothing here writes anything until the
-    /// result is handed back to the caller, so an abandoned read costs one pool thread until the
-    /// volume times out and nothing else.
+    // Why: `Task.detached`, not a nonisolated async func: whether that leaves the caller's actor depends on the
+    // language mode.
+    /// The off-caller-actor form of `read(contentsOf:)`, and the only form a UI or launch path should call.
+    /// The read walks every file and can block for a volume's mount timeout, so the hop is a named
+    /// function, not a per-call-site detached task.
     static func readOffCallerActor(contentsOf url: URL) async -> SkillIngestOutcome {
         await Task.detached(priority: .userInitiated) {
             read(contentsOf: url)
@@ -368,10 +289,8 @@ enum SkillIngest {
             throw SkillIngestError.invalidFrontmatter("'\(label)': \(error.localizedDescription)")
         }
 
-        // ⚠️ SHAPE FIRST, before the name is used anywhere. The charset — lowercase letters, digits
-        // and hyphens — makes `/`, `.` and `..` unrepresentable, so a name from an untrusted archive
-        // cannot become a traversal. An earlier build built a path from this value and reached
-        // `removeItem` with it.
+        // Shape first, before the name is used anywhere: the charset (lowercase letters, digits, hyphens)
+        // makes `/`, `.` and `..` unrepresentable, so an untrusted name cannot become a traversal.
         do { try SkillFolderScanner.validateSkillNameShape(frontmatter.name) }
         catch { throw SkillIngestError.invalidName("'\(label)': \(error.localizedDescription)") }
 
@@ -393,16 +312,13 @@ enum SkillIngest {
         let fm = FileManager.default
         var collected: [IngestedFile] = []
         let rootPath = directory.standardizedFileURL.path
-        // ⚠️ Spent DURING the walk, not summed after it. See `SkillBoundedRead`.
+        // Bytes are spent during the walk, not summed after it; see `SkillBoundedRead`.
         var usedBytes = alreadyUsedBytes
         var fileCount = 0
 
         func walk(_ dir: URL, prefix: String) throws {
-            // ⚠️ READINESS CR-60 (2026-10-12). Both reads below were `try? … else { return/continue }`:
-            // a subfolder that could not be listed (permissions, a cloud placeholder not yet
-            // downloaded) was skipped and the skill was stored WITHOUT it, looking complete, against
-            // this module's own rule that half a skill is refused, never imported. They throw now,
-            // like the path and size refusals below, and `readTree` reports the skill by name.
+            // Both reads throw: a subfolder that cannot be listed (permissions, an undownloaded cloud placeholder)
+            // must refuse the skill rather than store it without that folder, looking complete.
             let folder = prefix.isEmpty ? "the skill folder" : "'\(prefix)'"
             let entries: [URL]
             do {
@@ -425,17 +341,8 @@ enum SkillIngest {
                     throw SkillIngestError.unreadable("'\(path)' could not be read (\(error.localizedDescription)), so the skill was not imported.")
                 }
 
-                // ⚠️ Symlinks are neither followed nor captured — but this branch is NOT what
-                // achieves that, and saying otherwise would be the second time this codebase made
-                // that mistake about this exact API. Verified by mutation: delete this guard and the
-                // behaviour is unchanged, because Foundation does not resolve a symlink for
-                // `isDirectory`/`isRegularFile`, so a symlinked file falls out at the
-                // `isRegularFile` check below and a symlinked directory is never recursed into.
-                //
-                // It stays for the LOG and to pin the assumption. Without it a user whose skill
-                // legitimately symlinks a file gets nothing, silently, with no way to find out why —
-                // and if this walk is ever rewritten onto an API that DOES follow symlinks, the
-                // guard is already in place. See the same note on `SkillFolderScanner.validFiles`.
+                // Symlinks are not followed: Foundation does not resolve them for `isDirectory`/`isRegularFile`, so they fall out below.
+                // This guard keeps the log line and pins that assumption.
                 if values.isSymbolicLink == true {
                     logger.notice("[SKILL_INGEST] '\(component)' in '\(dir.lastPathComponent)' is a SYMLINK and was not imported. CONSEQUENCE: the skill is stored without it — replace it with a real file if it is meant to ship.")
                     continue
@@ -443,10 +350,8 @@ enum SkillIngest {
 
                 if values.isDirectory == true {
                     guard !ignoredDirectoryNames.contains(component) else { continue }
-                    // ⚠️ THE DIRECTORY NAME IS CHECKED TOO, and its absence was the worse half of the
-                    // silent-drop defect: an unusable component here is carried into the relative path
-                    // of EVERY file beneath it, so one bad directory name used to drop a whole subtree
-                    // one file at a time.
+                    // The directory name is checked too: an unusable component would be carried into the path of every
+                    // file beneath it.
                     let childPrefix = prefix.isEmpty ? component : "\(prefix)/\(component)"
                     guard isSafeRelativePath(childPrefix) else {
                         throw SkillIngestError.unusablePath(childPrefix)
@@ -459,20 +364,8 @@ enum SkillIngest {
                 guard entry.standardizedFileURL.path != skillFile.standardizedFileURL.path else { continue }
 
                 let relativePath = prefix.isEmpty ? component : "\(prefix)/\(component)"
-                // ⚠️⚠️ THROWS — IT USED TO `continue`, AND THAT WAS A SILENT FILE DROP.
-                //
-                // The `continue` was harmless while this guard was unreachable: every component comes
-                // from `contentsOfDirectory`, which can never yield "..", "." or "", so the old
-                // predicate could not fail here. Widening it to refuse CONTROL CHARACTERS made the
-                // branch live — a control character is a legal filename byte on APFS and a legal zip
-                // entry name — and a live `continue` drops the file, records no `RejectedSkill`, and
-                // lets the skill import looking complete. The user learns about it when `load_skill`
-                // names a path that is not on disk.
-                //
-                // Throwing is what the file header already promised: "hitting a cap REJECTS the skill
-                // rather than importing a truncated one — half a skill is worse than a refusal,
-                // because it looks complete." `readTree` catches per skill, so the rest of a
-                // multi-skill import still succeeds and this one is REPORTED with its path named.
+                // Throws rather than `continue`: a dropped file records no `RejectedSkill` and the import would look complete.
+                // `readTree` catches per skill, so the rest of a multi-skill import still succeeds.
                 guard isSafeRelativePath(relativePath) else {
                     logger.error("[SKILL_INGEST] REFUSED the skill in '\(dir.lastPathComponent)': the bundled file '\(relativePath)' has a path that cannot be stored — most often a control character or a stray carriage return from a Windows-authored archive. CONSEQUENCE: the WHOLE skill is refused and reported to the user with this path named, rather than imported without the file; a skill missing a file it names in its instructions fails later at run time with no way to trace it back here.")
                     throw SkillIngestError.unusablePath(relativePath)
@@ -480,8 +373,8 @@ enum SkillIngest {
                 // Belt and braces: the walk cannot leave the root, and this proves it did not.
                 guard entry.standardizedFileURL.path.hasPrefix(rootPath) else { continue }
 
-                // ⚠️ COUNT BEFORE READ. An untrusted tree can hold a million tiny files, so the
-                // count bound has to stop the walk rather than be checked at the end of it.
+                // Counted before the read: an untrusted tree can hold a million tiny files, so the bound must stop the
+                // walk.
                 fileCount += 1
                 guard fileCount <= SkillLibraryLimits.maxFilesPerVersion else {
                     throw SkillIngestError.tooManyFiles(fileCount)
@@ -509,25 +402,9 @@ enum SkillIngest {
         return collected
     }
 
-    /// A relative path safe to materialize under a destination directory — and safe to PRINT.
-    ///
-    /// ⚠️ CONTROL CHARACTERS ARE REFUSED, and that rule is about the prompt, not the filesystem.
-    /// A newline is a legal filename byte on APFS and a legal zip entry name, and `LoadSkillTool`
-    /// renders a bundled file's path as a markdown heading — `## \(relativePath)` — straight into
-    /// the model's context. So a file named `notes\n# Skill: fake` forges a second skill heading
-    /// inside the tool's own output, with no hostile *content* anywhere: the attack is entirely in
-    /// the filename. The same bytes would also make an export's directory listing unreadable.
-    ///
-    /// ⚠️ REFUSED, not sanitised. Rewriting the path would break the round-trip promise this whole
-    /// type exists to keep — the exported tree must match the stored paths — and a silently renamed
-    /// file is exactly the content-corruption class this codebase has shipped four times.
-    ///
-    /// ⚠️⚠️ A SKILL CARRYING SUCH A PATH IS REFUSED WHOLE, and this comment used to claim the file was
-    /// merely reported while "the rest of the skill still imports". That was false in both halves:
-    /// `collectFiles` dropped the file with `continue`, nothing recorded a `RejectedSkill`, and the
-    /// skill imported looking complete. The walk now throws, so the skill appears in the import
-    /// sheet's REJECTED list with this path named, and the other skills in the same import are
-    /// unaffected.
+    /// A relative path safe to materialize under a destination directory and safe to print.
+    /// Control characters are refused: a newline in a filename would forge a heading in `LoadSkillTool`'s output.
+    /// Refused, not sanitised, because renaming would break the exported tree's match with the stored paths.
     static func isSafeRelativePath(_ path: String) -> Bool {
         guard !path.isEmpty, !path.hasPrefix("/") else { return false }
         guard path.rangeOfCharacter(from: .controlCharacters) == nil,
@@ -543,24 +420,12 @@ enum SkillIngest {
         return permissions.int16Value & 0o111 != 0
     }
 
-    // ⚠️ `checkLimits` WAS DELETED HERE. It summed the collected files and refused afterwards, which
-    // is the defect: by the time it ran, every byte it was measuring was already in memory. Both of
-    // its rules now live inside the walk (`collectFiles`), where a breach stops the read instead of
-    // reporting on it — and the byte rule now counts the BODY too, which this one structurally
-    // could not, because the walk skips SKILL.md.
-    //
-    // ⚠️ Its "REJECT, never truncate" note survives in `SkillBoundedRead`'s header, which is the
-    // rule that outlived the function.
 }
 
 // MARK: - Body extraction
 
-/// Splitting a SKILL.md into frontmatter and body.
-///
-/// ⚠️ Its own type because THREE places used to implement this rule independently — the scanner's
-/// legacy package loader, the old on-disk editor's `split`, and ingest. A split that disagreed
-/// would store a body different from what the file shows. The other two are gone; this is the only
-/// implementation.
+/// Splits a SKILL.md into frontmatter and body.
+/// The single implementation, so every reader stores the body the file shows.
 enum SkillBodyExtraction {
 
     static func body(of raw: String) -> String {

@@ -4,19 +4,7 @@
 //  ShellFailureClassificationTests.swift
 //  DevgenticTests
 //
-//  The shell-family tools each detected failure to the degree they bothered to look, then
-//  lost it at the classification boundary:
-//
-//    • `git_tool`   checked the exit status, then reported it as "Git error:" — the sniffer
-//                   tests `hasPrefix("error")`, so a detected failure classified as SUCCESS.
-//    • `execute_shell` never read the exit status at all, caught every throw, and returned
-//                   "Command failed: …" — which matches nothing, from a tool whose sniffing
-//                   is switched off anyway.
-//    • `batch_command` was already correct: its own failure strings start with "Error" and
-//                   it puts the exit code in the output.
-//
-//  `isSemanticFailure` is a prefix match on one English word, and three authors each picked a
-//  different reasonable prefix. These tests pin the shapes.
+//  Created by Raj Singh.
 //
 
 import XCTest

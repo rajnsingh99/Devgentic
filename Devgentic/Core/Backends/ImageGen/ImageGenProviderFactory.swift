@@ -4,9 +4,7 @@
 //  ImageGenProviderFactory.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Factory for creating ImageGenProvider instances based on the provider configuration.
+//  Created by Raj Singh.
 //
 
 import Foundation

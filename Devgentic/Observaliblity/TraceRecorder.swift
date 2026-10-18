@@ -4,18 +4,16 @@
 //  TraceRecorder.swift
 //  Devgentic
 //
-//  Created by Antigravity on 19/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import GRDB
 import os
 
-/// A global, background trace recording service.
-/// Replaces `TraceLogAggregator` with persistent, structured storage via `TraceStore`.
-///
-/// All `emit*` methods are fire-and-forget — they buffer events in memory
-/// and flush to disk in batches to minimize I/O overhead during agent loops.
+/// A global, background trace recording service backed by persistent, structured storage via `TraceStore`.
+/// All `emit*` methods are fire-and-forget: they buffer events in memory and flush to disk in batches to minimize I/O
+/// overhead during agent loops.
 actor TraceRecorder {
     
     static let shared = TraceRecorder()
@@ -33,14 +31,11 @@ actor TraceRecorder {
     
     // MARK: - Initialization
     
-    /// `store` is injectable so tests can drive a REAL recorder against a hermetic
-    /// `TraceStore(inMemory:)` — before this seam the recorder was hard-bound to
-    /// `TraceStore.shared` and had zero tests. Production uses the default:
-    /// `.shared` keeps the one-pool/one-migration topology described below.
+    /// `store` is injectable so tests can drive a real recorder against a hermetic `TraceStore(inMemory:)`;
+    /// production uses the default `.shared`, which keeps the one-pool/one-migration topology.
     init(store: TraceStore? = TraceStore.shared) {
-        // Use the shared TraceStore singleton so LogRecorder, MetricsAggregator, and
-        // future observability actors share one connection pool + one migration run.
-        // Previously each created its own TraceStore, which would race on migrations.
+        // Use the shared TraceStore singleton so LogRecorder, MetricsAggregator and other observability actors share one
+        // connection pool and one migration run; separate stores would race on migrations.
         self.store = store
         if self.store != nil {
             logger.info("TraceRecorder initialized with shared persistent store.")
@@ -79,8 +74,7 @@ actor TraceRecorder {
     ) {
         guard let store else { return }
 
-        // §12.3 — stamp the build on every trace (config snapshots are chat-path-only),
-        // so the 30-day DB can be split by version after an update.
+        // Stamp the build on every trace (config snapshots are chat-path-only) so the 30-day DB can be split by version.
         let info = Bundle.main.infoDictionary
 
         let record = TraceRecord(
@@ -120,19 +114,11 @@ actor TraceRecorder {
         }
     }
     
-    /// Idempotently guarantees the span row for `context.spanID` exists — and
-    /// carries the caller's descriptive `name`/`kind` — so child spans emitted
-    /// against this context have a meaningful parent row in `spans`.
-    ///
-    /// Two flows reach executors with a root-level context:
-    /// - Chat pipeline: `beginTrace` already auto-created the root span as a
-    ///   generic "root" — this renames it to the caller's name (e.g.
-    ///   `workflow:<id8>`) while preserving its startedAt/status/endedAt.
-    /// - Headless flows (tests, nested sub-workflows, direct executor invocations):
-    ///   `beginTrace` never ran — this inserts the row.
-    /// Callers must use this, NOT `beginSpan`, for a context they did not create
-    /// via `newSpan()`: an unconditional insert collides with `beginTrace`'s row
-    /// (UNIQUE constraint on `spans.spanID`).
+    // Why: use this, not `beginSpan`, for a context not created via `newSpan()`: an unconditional insert collides with
+    // `beginTrace`'s row (UNIQUE constraint on `spans.spanID`).
+    /// Idempotently guarantees the span row for `context.spanID` exists, carrying the caller's `name`/`kind`.
+    /// Chat pipeline: renames the root span `beginTrace` created, keeping its startedAt/status/endedAt.
+    /// Headless flows (tests, nested sub-workflows, direct executor calls): `beginTrace` never ran, so this inserts the row.
     func ensureRootSpan(context: TraceContext, name: String, kind: SpanKind) {
         guard let store else { return }
 
@@ -155,11 +141,8 @@ actor TraceRecorder {
     }
 
     /// Records the start of a new span within a trace.
-    ///
-    /// `at` defaults to `Date()` — and Swift evaluates default arguments AT THE CALL SITE,
-    /// so the stamp is the moment the caller reached this line, not the (later, load-varying)
-    /// moment this actor got around to running. Callers hopping through an unstructured
-    /// `Task {}` must capture the date BEFORE the hop and pass it explicitly.
+    /// `at` defaults to `Date()`, evaluated at the call site, so callers hopping through an unstructured `Task {}` must
+    /// capture the date before the hop and pass it explicitly.
     func beginSpan(context: TraceContext, name: String, kind: SpanKind, at: Date = Date(), metadata: [String: String]? = nil) {
         guard let store else { return }
 
@@ -182,10 +165,8 @@ actor TraceRecorder {
         }
     }
 
-    /// Marks a span as completed or errored. `at` is call-site-stamped (see `beginSpan`);
-    /// the `defer { Task { … } }` sites capture it before the hop so the persisted end is
-    /// the real end even when the write lands after `endTrace`'s clamp (earliest-wins in
-    /// `TraceStore.updateSpan`).
+    /// Marks a span as completed or errored. `at` is call-site-stamped (see `beginSpan`); `defer { Task { … } }` sites
+    /// capture it before the hop so the persisted end is the real end (earliest wins in `TraceStore.updateSpan`).
     func endSpan(spanID: String, status: SpanStatus, at: Date = Date(), metadata: [String: String]? = nil) {
         guard let store else { return }
 
@@ -220,11 +201,8 @@ actor TraceRecorder {
         do {
             let endedAt = Date()
             try store.updateTrace(traceID: traceID, endedAt: endedAt, status: status, errorSummary: sanitizedError)
-            // Close any spans still open for this trace — notably the root span, which no
-            // executor ends on the chat path, plus any span leaked by an abnormal exit.
-            // Honest clamp mapping (Phase 5): degraded success is still success at span
-            // level (the failed step already carries its own .error span/event), and a
-            // user Stop clamps open spans as .cancelled, not .error — nothing went wrong.
+            // Close any spans still open for this trace (notably the root span, plus any leaked by an abnormal exit).
+            // Degraded success is still success at span level, and a user Stop clamps open spans as .cancelled, not .error.
             let spanStatus: SpanStatus = switch status {
             case .completed, .completedWithWarnings: .completed
             case .cancelled: .cancelled
@@ -243,13 +221,8 @@ actor TraceRecorder {
         }
     }
 
-    /// Records the run's accumulated token usage + cost on the trace (D1). No-op for zero usage.
-    /// Call once at trace end.
-    ///
-    /// The cost is `usage.costUSD` — each call priced when its usage was read, at its own model
-    /// (`ModelPriceList`), then summed. It used to be the run's TOTAL priced once at the trace's
-    /// model, which charged a call to another model at the wrong rate and could never apply a
-    /// per-call rate such as the long-context tier.
+    /// Records the run's accumulated token usage and cost on the trace; no-op for zero usage. Call once at trace end.
+    /// The cost is `usage.costUSD`: each call priced at its own model when read (`ModelPriceList`), then summed.
     func recordTokenUsage(traceID: String, usage: TokenUsage) {
         guard let store, usage.totalTokens > 0 else { return }
         let modelName = (try? store.fetchTrace(traceID: traceID))?.modelName
@@ -257,9 +230,8 @@ actor TraceRecorder {
         if usage.costIsPartial, let cost {
             logger.notice("[PRICING] trace \(traceID): cost $\(String(format: "%.6f", cost)) covers only the calls that could be priced. CONSEQUENCE: the run's real cost is higher — a call ran on a model with no known price (a local model, a custom endpoint, or one missing from ModelPrices.json).")
         }
-        // The run-level evidence of a provider prompt cache, for every provider at once (Claude
-        // also logs `[ANTHROPIC-CACHE]` per request). The split itself is not stored: the trace
-        // keeps the prompt total, and the cost already prices it.
+        // Run-level evidence of a provider prompt cache, for every provider at once (Claude also logs `[ANTHROPIC-CACHE]`
+        // per request). The split is not stored: the trace keeps the prompt total, and the cost already prices it.
         if usage.cacheReadTokens > 0 || usage.cacheWriteTokens > 0 {
             logger.info("[TOKENS] trace \(traceID): \(usage.inputTokens) prompt tokens, \(usage.cacheReadTokens) read from the provider's cache, \(usage.cacheWriteTokens) written to it; \(usage.outputTokens) out; model '\(modelName ?? "?")'.")
         }
@@ -281,9 +253,8 @@ actor TraceRecorder {
     /// Appends an event to the buffer. Auto-flushes when batch size is reached.
     /// Events for already-closed traces are silently dropped.
     func emit(_ event: SpanEvent) {
-        // [HITL/C1] A userInteraction event can arrive just after its trace closes (a HITL resolved on
-        // Stop/cancel ends the run + fires endTrace before the deferred emit). The root span row still
-        // exists, so let these through rather than silently dropping the decision span.
+        // A userInteraction event can arrive just after its trace closes (a HITL resolved on Stop/cancel ends the run first);
+        // the root span row still exists, so let these through rather than dropping the decision span.
         guard !closedTraceIDs.contains(event.traceID) || event.eventType == .userInteraction else { return }
 
         pendingEvents.append(event)
@@ -319,17 +290,9 @@ actor TraceRecorder {
         ))
     }
     
-    /// Records a tool execution result.
-    ///
-    /// Populates the indexed `durationMs` column (Phase A) directly, so Phase E
-    /// aggregation queries can compute p50/p95 latency without parsing `detailJSON`
-    /// blobs. For tool FAILURES, also tags the event with a best-effort
-    /// `AgentErrorCategory` (e.g. `.toolSemanticFail` when the tool returned
-    /// error-shaped output) — this drives the per-tool failure-breakdown chart
-    /// in the Trends dashboard.
-    /// - Parameter failureCategory: the failure's real category when the caller knows it (a timeout
-    ///   is `.toolTimeout`). Nil keeps the old inference, `.toolSemanticFail` — which used to file
-    ///   EVERY failure, timeouts included, under one bucket (Timeout inventory D-16).
+    /// Records a tool execution result, populating the indexed `durationMs` column so aggregation can compute latency.
+    /// Failures also get a best-effort `AgentErrorCategory` (`.toolSemanticFail` for error-shaped output).
+    /// `failureCategory` is the real category when the caller knows it (e.g. `.toolTimeout`); nil keeps the inference.
     func emitToolResult(span: TraceContext, name: String, success: Bool, output: String, durationMs: Int, at: Date = Date(),
                         failureCategory: AgentErrorCategory? = nil) {
         let detail: [String: Any] = [
@@ -338,13 +301,8 @@ actor TraceRecorder {
             "duration_ms": durationMs,
             "output_preview": String(TelemetrySanitizer.sanitize(output).prefix(500))
         ]
-        // Dev-mode-gated v2 column population. Non-dev-mode users get the legacy
-        // detailJSON representation; dev-mode users additionally get indexed columns
-        // for fast dashboard aggregation. Failures without an explicit category
-        // default to `.toolSemanticFail` (matches ToolExecutionMediator's
-        // `isSemanticFailure` detection — empty output or error-shaped strings).
-        // v2 analytics columns are sanitized + non-PII (enums/ints), so record them whenever
-        // diagnostics are enabled (default-on), not just in developer mode (Gap #4).
+        // v2 analytics columns are sanitized and non-PII (enums/ints), so they are recorded whenever diagnostics are enabled,
+        // not just in developer mode; failures without an explicit category default to `.toolSemanticFail`.
         let recordV2 = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey) || AppSettings.diagnosticsRecordingEnabled
         let inferredCategory: AgentErrorCategory? = success ? nil : (failureCategory ?? .toolSemanticFail)
 
@@ -475,13 +433,11 @@ actor TraceRecorder {
         }
     }
 
-    /// [HITL/C2] Stamp the durable audit row with the resolution outcome + time. Keyed by operationID.
-    ///
-    /// The raise INSERT and this resolve are independent Tasks; the raise is created first but, on the
-    /// rare occasion this resolve reaches the store before the raise lands, the UPDATE matches 0 rows.
-    /// Retry briefly — the `await Task.sleep` yields this actor so the in-flight raise can complete —
-    /// rather than stranding the outcome, which the launch reconcile would otherwise mislabel
-    /// "interrupted". A 0-row result on an already-resolved row (late duplicate) just retries harmlessly.
+    // Why: the raise and resolve are independent Tasks; stranding the outcome would make the launch reconcile mislabel the
+    // row as interrupted.
+    /// Stamps the durable audit row with the resolution outcome and time, keyed by operationID.
+    /// Retries briefly when the raise INSERT has not landed yet (UPDATE matches 0 rows), yielding via `Task.sleep`.
+    /// A 0-row result on an already-resolved row (late duplicate) just retries harmlessly.
     func recordHITLResolved(operationID: String, outcome: String, resolvedAt: Date) async {
         guard let store else { return }
         let safeOutcome = TelemetrySanitizer.sanitize(outcome)
@@ -530,13 +486,9 @@ actor TraceRecorder {
         ))
     }
     
-    /// Records ONE prompt-context injection — a system-prompt layer (instructions,
-    /// knowledge base, episodic memory, retrieval, …) that shipped in this run's
-    /// request, with its provenance (Run-Report Phase 3). Rides the pre-existing
-    /// `.memoryOp` event type (a case since schema v1 with zero producers until now)
-    /// rather than a new case, so OLD builds reading NEW rows keep decoding.
-    /// `preview` should arrive pre-truncated and is sanitized here at `.minimal`,
-    /// matching the store's posture for tool args/output.
+    /// Records one prompt-context injection: a system-prompt layer that shipped in this run's request, with its provenance.
+    /// Rides the existing `.memoryOp` event type rather than a new case, so old builds reading new rows keep decoding.
+    /// `preview` should arrive pre-truncated and is sanitized here at `.minimal`.
     func emitContextInjection(span: TraceContext, source: String, chars: Int, preview: String, at: Date = Date()) {
         let detail: [String: Any] = [
             "source": source,
@@ -568,25 +520,15 @@ actor TraceRecorder {
         ))
     }
 
-    /// Captures the full request configuration snapshot for a trace. Called once
-    /// per trace, immediately after `beginTrace(...)`. Safe to call before or after
-    /// the trace row is persisted — FK constraint is satisfied because both writes
-    /// happen in sequence on the same actor.
-    ///
-    /// On any serialization or persistence error, logs and swallows — observability
-    /// must never break the stream. The trace still exists without a config snapshot;
-    /// ReportInspector handles the nil case gracefully.
-    ///
-    /// - Parameters:
-    ///   - snapshot: pre-built `TraceConfigSnapshot` (call `TraceConfigSnapshot.capture(...)`)
+    /// Captures the full request configuration snapshot for a trace; call once per trace, right after `beginTrace(...)`.
+    /// Safe before or after the trace row is persisted (both writes are sequential on this actor).
+    /// On any serialization or persistence error it logs and swallows; the trace then exists without a snapshot.
     func captureConfigSnapshot(_ snapshot: TraceConfigSnapshot) {
         guard let store else { return }
 
         do {
-            // Serialize the full snapshot, then pass through the sanitizer one more
-            // time at the JSON level. This catches anything the struct-level
-            // capture missed (secret-looking patterns in free-text fields like
-            // instructions, tool params, etc.).
+            // Serialize the full snapshot, then sanitize again at the JSON level to catch secret-looking patterns the
+            // struct-level capture missed in free-text fields (instructions, tool params).
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
@@ -628,19 +570,9 @@ actor TraceRecorder {
         return try? store.fetchConfigSnapshot(traceID: traceID)
     }
 
-    /// Records a classified `ClassifiedAgentError`. This is the canonical entry point
-    /// for structured error telemetry — every failure site catching a raw `Error`
-    /// should `error.classify(...)` first, then route the result here.
-    ///
-    /// The v2 observability columns (`errorCategory`, `errorChainID`, `phase`,
-    /// `iterationNumber`, `causedByEventID`) are populated only when developer mode
-    /// is on. In production builds they stay nil — legacy row layout, zero overhead.
-    ///
-    /// - Parameters:
-    ///   - span: span context where the error surfaced
-    ///   - error: the classified error
-    ///   - iteration: optional ReAct iteration number (for tooling/llm/capability phases)
-    ///   - causedBy: optional ID of a previously-emitted SpanEvent that triggered this one
+    /// Records a classified `ClassifiedAgentError`: the canonical entry point for structured error telemetry.
+    /// Failure sites should `error.classify(...)` first, then route the result here. v2 columns need developer mode.
+    /// `iteration` is the optional ReAct iteration; `causedBy` the optional id of an earlier SpanEvent that triggered this.
     func emitAgentError(
         span: TraceContext,
         error: ClassifiedAgentError,
@@ -653,9 +585,8 @@ actor TraceRecorder {
         // heavier stack-signature diagnostics below stay developer-mode-only (Gap #4).
         let recordV2 = devModeOn || AppSettings.diagnosticsRecordingEnabled
 
-        // Message + context always sanitized at the strictest level that's compatible
-        // with debug readability — redacts API keys/tokens but preserves paths' tails
-        // so the developer can still see "read_file failed on [USER_PATH]/foo.swift".
+        // Message and context are sanitized at the strictest level compatible with debug readability: API keys/tokens are
+        // redacted but paths' tails survive (e.g. read_file failed on [USER_PATH]/foo.swift).
         let sanitizedMessage = TelemetrySanitizer.sanitizeFull(error.message, level: .standard)
 
         var detail: [String: Any] = [
@@ -696,10 +627,8 @@ actor TraceRecorder {
         case .fatal:         severity = .error
         }
 
-        // Dev-mode gate: populate the v2 columns only when enabled. Production builds
-        // still get the structured detailJSON (readable in exported traces), they just
-        // don't fill the indexed analytics columns. Keeps production tables compact
-        // and avoids skewing dashboards for users who aren't opted into telemetry.
+        // Populate the v2 columns only when enabled; otherwise the structured detailJSON is still written (readable in
+        // exported traces) but the indexed analytics columns stay empty, keeping tables compact.
         let event = SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,

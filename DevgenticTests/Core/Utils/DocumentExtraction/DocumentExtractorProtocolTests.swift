@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  DocumentExtractorProtocolTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1: Protocol conformance, canExtract routing, error types.
+//  Created by Raj Singh.
 //
 
 import XCTest

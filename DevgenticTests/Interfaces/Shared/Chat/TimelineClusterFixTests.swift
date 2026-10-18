@@ -4,8 +4,7 @@
 //  TimelineClusterFixTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the timeline/capability-card fixes of 2026-08-10
-//  (Chat_Production_Readiness.md rows CH25, CH26, CH50; audit rows AD5/AD6 + timeline-2).
+//  Created by Raj Singh.
 //
 
 import XCTest

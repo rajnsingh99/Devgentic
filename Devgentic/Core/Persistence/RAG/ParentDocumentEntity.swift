@@ -4,7 +4,7 @@
 //  ParentDocumentEntity.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,7 +19,6 @@ final class ParentDocumentEntity {
     var id: Id = 0
     
     /// A reference to the original ChatMessage this document belongs to.
-    /// Note: Relies on `UUIDConverter` defined in your project (currently in ChunkEntity.swift).
     // objectbox: convert = { "dbType": "String", "converter": "UUIDConverter" }
     var sourceMessageID: UUID = UUID()
     
@@ -34,13 +33,9 @@ final class ParentDocumentEntity {
     /// The timestamp when this document was ingested.
     var timestamp: Date = Date()
 
-    /// Stable identity of the indexed source within its conversation — a file path
-    /// for attachments, the message UUID string for chat turns. Enables
-    /// replace-on-reindex (delete prior copies before re-adding) so re-attached
-    /// files and re-finalized messages don't accumulate duplicate vectors.
-    /// Empty for rows written before this field existed.
-    ///
-    /// INDEXED (RAG-9): replace-on-reindex selects prior copies by this key.
+    /// Stable identity of the indexed source within its conversation: a file path for attachments, the message UUID
+    /// string for chat turns. Replace-on-reindex selects prior copies by this key, so re-attached files and
+    /// re-finalized messages don't accumulate duplicate vectors.
     // objectbox: index
     var sourceIdentifier: String = ""
 

@@ -4,10 +4,8 @@
 //  PermissionManager.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 26/02/26.
+//  Created by Raj Singh.
 //
-//
-
 
 import Foundation
 @preconcurrency import ApplicationServices // Required for Accessibility checks

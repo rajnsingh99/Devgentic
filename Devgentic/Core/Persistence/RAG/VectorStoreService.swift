@@ -4,7 +4,7 @@
 //  VectorStoreService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/07/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -13,14 +13,10 @@ import os
 
 // MARK: - Retrieval Result
 
-/// A retrieval hit: the parent document plus the best-matching chunk that surfaced
-/// it. Callers window the injected text AROUND the matched chunk instead of blindly
-/// taking the document head — a whole-file parent clamped to its first 8K chars
-/// loses any match past that point (the exact failure seen in manual testing:
-/// symbols in a file's first ~8K chars answered fine, later ones "not found").
-///
-/// ⚠️ A VALUE, copied out of the entity: retrieval runs off the main actor (CR-29), and
-/// `ParentDocumentEntity` is an ObjectBox class — not Sendable, and lazily backed by the store.
+// Why: A value copied out of the entity: retrieval runs off the main actor, and `ParentDocumentEntity` is a non-Sendable
+// ObjectBox class.
+/// A retrieval hit: the parent document plus the best-matching chunk that surfaced it, so callers can window text
+/// around the match.
 struct RetrievedDocument: Sendable {
     let parentID: Id
     let sourceMessageID: UUID
@@ -46,27 +42,17 @@ struct RetrievedDocument: Sendable {
 
 // MARK: - Vector Store Service
 
-/// A service for managing the vector database using ObjectBox with a native HNSW index.
-///
-/// Search complexity is reduced from O(N) brute-force cosine similarity to O(log N) via ObjectBox's
-/// probabilistic Hierarchical Navigable Small World graph, configured for the 384-dimensional
-/// All-MiniLM-L6-v2 embedding space.  See `ChildChunkEntity` for index hyperparameter rationale.
+/// Manages the vector database using ObjectBox with a native HNSW index, configured for the 384-dimensional
+/// All-MiniLM-L6-v2 space.
+/// See `ChildChunkEntity` for the index hyperparameters.
 final class VectorStoreService: @unchecked Sendable {
 
     // MARK: - Singleton Instance
     static let shared = VectorStoreService()
 
     // MARK: - Private Properties
-    /// The three ObjectBox handles, held together so availability is ONE decision.
-    ///
-    /// ⚠️ Optional on purpose. `init` used to end in `fatalError("Could not initialize ObjectBox
-    /// store")`, on the same cold launch path as the SwiftData container — so a corrupt or
-    /// unwritable vector-db KILLED THE APP with no message, no path and no dialog, for a store the
-    /// app does not actually need to function.
-    ///
-    /// The vector index is semantic-memory retrieval. Without it chats, profiles, tools and
-    /// workflows all work; RAG recall degrades. That is a feature outage, not a reason to refuse to
-    /// launch — so a failure now disables retrieval and says so, loudly, once.
+    /// The three ObjectBox handles, held together so availability is one decision.
+    /// Optional on purpose: a corrupt or unwritable vector-db disables retrieval (logged once) instead of refusing to launch.
     private struct Backing {
         let store: Store
         let parentBox: Box<ParentDocumentEntity>
@@ -74,37 +60,19 @@ final class VectorStoreService: @unchecked Sendable {
     }
     private let backing: Backing?
 
-    /// ⚠️⚠️ EVERY write to the store goes through this lock.
-    ///
-    /// Concurrent explicit write transactions (`runInTransaction`) on one ObjectBox `Store`
-    /// DEADLOCK, nondeterministically, when they run on Swift-concurrency threads: probed
-    /// 2026-10-11 with 4 concurrent writers × 10 rounds. A bare `put` survived; `put` inside a
-    /// transaction, findIds+put, put+query-remove, and even find+put (on a rerun) all hung
-    /// forever in `obx_txn_write` with no thread holding the transaction. The same shape behind
-    /// this lock passed every run. ObjectBox admits one writer at a time anyway, so serialising
-    /// here costs no throughput — it only makes the wait deterministic. Writers (the detached
-    /// indexers, conversation delete) all run off the main thread.
+    // Why: Concurrent `runInTransaction` calls on one ObjectBox `Store` deadlock nondeterministically on Swift-concurrency
+    // threads.
+    /// Serialises every write to the store; ObjectBox admits one writer at a time anyway, so this costs no throughput.
     private let writeLock = NSLock()
 
+    // Why: A write that hits the cap takes ~13 s inside ObjectBox while holding `writeLock`; latching makes later writes refuse
+    // instantly.
     /// Latched by a `dbFull` write; cleared by a delete that frees space. Guarded by `writeLock`.
-    ///
-    /// ⚠️ A write that hits the cap takes ~13 s inside ObjectBox before it throws (measured
-    /// 2026-10-11, independent of the write's size) — while holding `writeLock`. Unlatched, every
-    /// later message and attachment would pay that again, and the deletes the store-full notice
-    /// asks the user for would queue behind them. Latched, they refuse instantly.
     private var storeIsFull = false
 
-    /// Conversations deleted this session. Guarded by `writeLock`, and checked INSIDE it by every
-    /// write — so no write can land after its conversation's delete (RAG-5).
-    ///
-    /// ⚠️ The delete used to race the fire-and-forget indexers: the user-message path checked
-    /// nothing, the assistant path checked "does the conversation exist?" once and then awaited N
-    /// embeddings before writing, and attachments (the longest window, ~1k serial embeds) checked
-    /// nothing. Any of them could write a deleted conversation's text back AFTER its vectors were
-    /// removed — permanently, since nothing collected orphans. With cross-conversation search on
-    /// the roadmap, that is deleted content resurfacing. In memory is enough: a deleted
-    /// conversation can produce no new writes after relaunch, and orphans from a crash between
-    /// the two deletes are collected by `removeOrphanedConversations` at launch.
+    /// Conversations deleted this session, guarded by `writeLock` and checked inside it by every write,
+    /// so no write can land after its conversation's delete. Orphans from a crash are collected by
+    /// `removeOrphanedConversations`.
     private var deletedConversations: Set<String> = []
 
     /// False when the vector store could not be opened. Retrieval is disabled; everything else works.
@@ -118,26 +86,19 @@ final class VectorStoreService: @unchecked Sendable {
     /// Equivalent to the previous similarity threshold of 0.3 (distance ≤ 0.7 → similarity ≥ 0.3).
     private let maximumCosineDistance: Double = 0.7
 
-    /// On-disk ceiling for the vector store, in KB. ObjectBox's default is 1 GiB and at the cap
-    /// every write throws `dbFull` — so it is set explicitly, sized for years of memory (~4 KB per
-    /// chunk incl. the HNSW graph ⇒ ~1M chunks), and hitting it is handled loudly (RAG-13). LMDB
-    /// maps this much ADDRESS SPACE, not memory; the file only grows as data is written.
+    /// On-disk ceiling for the vector store, in KB; ObjectBox's 1 GiB default makes every write throw `dbFull` at the cap.
+    /// Sized for ~1M chunks (~4 KB each including the HNSW graph); LMDB maps address space, not memory.
     static let maxDatabaseSizeKB: UInt64 = 4 * 1024 * 1024
 
     // MARK: - Schema Versioning
 
-    /// Current on-disk schema generation. Bump ONLY for representational changes
-    /// ObjectBox cannot auto-migrate (additive property changes need no bump).
-    /// 1 = native [Float] embedding + HNSW index (history reset 2026-10-03, pre-release).
+    /// Current on-disk schema generation. Bump only for representational changes ObjectBox cannot auto-migrate.
+    /// 1 = native [Float] embedding with an HNSW index.
     static let currentSchemaVersion = 1
 
-    /// Marker file INSIDE the vector-db directory. The wipe decision keys on this,
-    /// not on preferences: a UserDefaults flag lives beside the data and can
-    /// desynchronize from it (defaults reset, partial backup restore) — a lost
-    /// flag silently WIPED a healthy database. Tolerable when this store was a
-    /// disposable cache; not now that it holds every conversation's memory.
-    /// ⚠️ INTERNAL, not private, so `VectorStoreBundleRenameTests` can assert against the SAME
-    /// filename the migration and the schema gate both key on rather than a copy of it.
+    // Why: A UserDefaults flag lives beside the data and can desynchronize from it, silently wiping a healthy database.
+    /// Marker file inside the vector-db directory; the wipe decision keys on it, not on preferences.
+    /// Internal so tests can assert against the same filename the migration and schema gate use.
     static let schemaMarkerFilename = "schema-version"
 
     /// What init should do about the on-disk schema. Pure — extracted for tests.
@@ -149,12 +110,8 @@ final class VectorStoreService: @unchecked Sendable {
         /// Unreadable OLDER (or unmarked) schema: set aside and rebuild — the only lossy path, and
         /// it's loud.
         case wipeAndStamp
-        /// A NEWER build's store: open nothing and touch nothing; retrieval is off for this launch.
-        ///
-        /// ⚠️ It used to take `wipeAndStamp` (RAG-31). A downgrade then moved the newer store to the
-        /// one `-superseded` slot and stamped an empty v1; going back to the newer build quarantined
-        /// THAT into the same slot — replacing the original store, permanently. Running an older
-        /// build must never cost the newer build its memory.
+        // Why: Never wipe a newer store on downgrade: quarantining it into the single superseded slot would replace the original.
+        /// A newer build's store: open nothing and touch nothing; retrieval is off for this launch.
         case leaveNewerUntouched
     }
 
@@ -163,7 +120,7 @@ final class VectorStoreService: @unchecked Sendable {
     static func schemaGateAction(markerVersion: Int?, databaseExists: Bool, storedEmbeddingModel: String? = nil) -> SchemaGateAction {
         if let markerVersion, markerVersion > currentSchemaVersion { return .leaveNewerUntouched }
         if markerVersion == currentSchemaVersion {
-            // RAG-32: same schema, different model → incomparable vectors. Set aside, never mix.
+            // Same schema, different embedding model means incomparable vectors: set aside, never mix.
             if databaseExists, let stored = storedEmbeddingModel, stored != EmbeddingService.modelIdentifier {
                 return .wipeAndStamp
             }
@@ -172,7 +129,7 @@ final class VectorStoreService: @unchecked Sendable {
         return databaseExists ? .wipeAndStamp : .stampOnly
     }
 
-    /// Records `EmbeddingService.modelIdentifier` beside the schema marker (RAG-32).
+    /// Records `EmbeddingService.modelIdentifier` beside the schema marker.
     static let embeddingModelFilename = "embedding-model"
 
     /// Thrown out of `init` for `.leaveNewerUntouched`, so the ordinary degrade path runs.
@@ -186,24 +143,12 @@ final class VectorStoreService: @unchecked Sendable {
     // MARK: - Initialization
 
     /// The on-disk vector-db directory.
-    ///
-    /// ⚠️ STATIC on purpose: the failure path needs to name this path precisely when `init` did NOT
-    /// complete, so it cannot be an instance property. Also drops the previous
-    /// `Bundle.main.bundleIdentifier!` force-unwrap — a nil bundle id would have crashed the app on
-    /// the cold launch path, which is the exact class of failure this service was hardened to stop.
+    /// Static because the failure path must name this path when `init` did not complete.
     static func storeDirectoryURL() throws -> URL {
         #if DEBUG
-        // ⚠️⚠️ REDIRECTED, NOT REFUSED — the one place in this pass where that is the right answer.
-        // RAG tests legitimately open a store, so refusing would break them; what must never happen
-        // is a test host opening the USER'S store. That store is an LMDB database holding a 28 MB
-        // index which has no reindex-from-transcripts path — it can only be moved back, never
-        // rebuilt — and a second process taking its lock during an ordinary
-        // `test-without-building` run is a risk with no upside whatsoever.
-        //
-        // ⚠️ This is the convention `TraceStore.resolveStoreDirectoryAndPath` already set, and the
-        // gap the 2026-09-11 survey named explicitly as the one place not following it.
-        // ⚠️ Keyed per PROCESS so two stores in one test run share a path, matching production
-        // topology; and inside `#if DEBUG`, so a shipped app cannot be pointed elsewhere.
+        // Why: The user's LMDB store has no reindex-from-transcripts path, so a second process taking its lock is unacceptable.
+        // Redirected, not refused: RAG tests open a store, but a test host must never open the user's store.
+        // Keyed per process so two stores in one test run share a path; DEBUG-only so a shipped app cannot be pointed elsewhere.
         if TestHost.isRunning {
             return FileManager.default.temporaryDirectory
                 .appendingPathComponent("devgentic-vectorstore-testhost", isDirectory: true)
@@ -225,20 +170,14 @@ final class VectorStoreService: @unchecked Sendable {
     /// for a Reveal-in-Finder affordance, where an empty path simply reveals nothing.
     static var storeDirectoryPath: String { (try? storeDirectoryURL())?.path ?? "" }
 
-    /// Private initializer to set up the ObjectBox store and entity box.
-    ///
-    /// ⚠️ HNSW migration note: If migrating a large pre-existing dataset, the ObjectBox engine
-    /// compiles the full HNSW graph on first open (O(N·log N) complexity). For >100k vectors this
-    /// should be moved to a background Task with a "Optimizing database…" UI gate to avoid an
-    /// iOS Jetsam watchdog kill. For fresh installs (and after the Phase 3 wipe below) the DB
-    /// is empty so graph compilation is instantaneous.
+    /// Private initializer that sets up the ObjectBox store and entity box.
+    /// A large pre-existing dataset compiles the full HNSW graph on first open (O(N log N)); for >100k vectors move it to a
+    /// background task.
     private init() {
         do {
             let appSupport = try Self.storeDirectoryURL()
 
-            // --- SCHEMA GATE (in-directory marker, not preferences) ---
-            // The destroy decision keys on a version marker stored WITH the data, so it physically
-            // cannot disagree with it.
+            // Schema gate: the destroy decision keys on a version marker stored with the data, so it cannot disagree with it.
             let markerURL = appSupport.appendingPathComponent(Self.schemaMarkerFilename)
             let existingContents = (try? FileManager.default.contentsOfDirectory(atPath: appSupport.path)) ?? []
             let modelURL = appSupport.appendingPathComponent(Self.embeddingModelFilename)
@@ -290,10 +229,8 @@ final class VectorStoreService: @unchecked Sendable {
 
             logger.info("[RAG] Vector store open (HNSW). DB path: \(appSupport.path)")
         } catch {
-            // ⚠️ DEGRADE, do not trap. This runs on the cold launch path; a `fatalError` here took
-            // the whole app down — with no message, no path and no dialog — because a SECONDARY
-            // cache could not open. The SwiftData container earns that treatment (it holds every
-            // conversation); this does not.
+            // Degrade, do not trap: this runs on the cold launch path, and the vector index is a secondary store
+            // whose failure must not take the whole app down.
             self.backing = nil
             logger.critical(
                 "[STARTUP] VectorStoreService FAILED to initialize — \(error). CONSEQUENCE: semantic "
@@ -306,8 +243,8 @@ final class VectorStoreService: @unchecked Sendable {
     }
 
     #if DEBUG
-    /// Test-only: a private store at `directory` with its own size cap — so the store-full path
-    /// (RAG-13) can be driven without filling the shared store. No schema gate, no marker.
+    /// Test-only: a private store at `directory` with its own size cap, so the store-full path can be driven without
+    /// filling the shared store. No schema gate, no marker.
     init(testDirectory directory: URL, maxDatabaseSizeKB: UInt64) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let store = try Store(directoryPath: directory.path, maxDbSizeInKByte: maxDatabaseSizeKB)
@@ -330,19 +267,10 @@ final class VectorStoreService: @unchecked Sendable {
     }
     #endif
 
-    /// Moves a superseded vector-db aside instead of deleting it.
-    ///
-    /// ⚠️ This used to be `removeItem` — an irreversible delete of semantic memory that CANNOT be
-    /// rebuilt (there is no reindex-from-transcripts mechanism), performed silently at launch with
-    /// no consent. That is exactly what the SwiftData failure path refuses to do, and this store
-    /// deserves the same rule.
-    ///
-    /// Exactly ONE superseded generation is kept, under a fixed `-superseded` name replaced on each
-    /// schema bump, so disk usage stays bounded at one copy. A timestamped name would accumulate
-    /// forever, which is its own kind of bug.
-    ///
-    /// Static and side-effect-explicit so it is testable without constructing the singleton —
-    /// matching `schemaGateAction`, which is pure for the same reason.
+    // Why: Never `removeItem` here: the store's semantic memory cannot be rebuilt and a silent launch-time delete is
+    // irreversible.
+    /// Moves a superseded vector-db aside instead of deleting it; static so it is testable without the singleton.
+    /// Exactly one superseded generation is kept under a fixed `-superseded` name, bounding disk usage.
     static func quarantineSupersededStore(at storeURL: URL, previousVersion: Int?, logger: DGLogger, reason: String? = nil) {
         let fileManager = FileManager.default
         let supersededURL = storeURL.deletingLastPathComponent()
@@ -365,9 +293,8 @@ final class VectorStoreService: @unchecked Sendable {
                 + "deleted, and one superseded generation is retained."
             )
         } catch {
-            // Falling back to a delete would reintroduce the exact irreversibility this exists to
-            // remove, so refuse and leave the old index in place instead. Opening it under the new
-            // schema may then fail — which now degrades rather than trapping.
+            // Falling back to a delete would give up the irreversibility guarantee, so refuse and leave the old index in place.
+            // Opening it under the new schema may then fail, which degrades rather than traps.
             logger.error(
                 "[RAG] Could not move the superseded vector-db aside (\(error)). CONSEQUENCE: the old "
                 + "index is left in place and NOT deleted; opening it under the new schema may fail, "
@@ -402,17 +329,10 @@ final class VectorStoreService: @unchecked Sendable {
         case failed
     }
 
-    /// Writes one source's vectors (a message, or an attached file), REPLACING any earlier copy of
-    /// the same source in the same conversation — in ONE write transaction.
-    ///
-    /// ⚠️ Add first, then remove. The old order (remove, then add, in separate transactions) meant
-    /// a full store deleted the source's previous vectors and stored nothing — memory loss on the
-    /// very write that failed (RAG-13). And two concurrent re-indexes of one source could both
-    /// remove, then both add, leaving duplicate parents that crowd the limit-3 slots (RAG-17).
-    /// ObjectBox serialises write transactions, so each replace now sees the other's result.
-    ///
-    /// The prior copies are found by ID ONLY (`findIds` + the indexed relation), never by loading
-    /// parents — a file parent's `fullTextContent` is the whole file.
+    // Why: Add first, then remove: the reverse order loses the previous vectors when a full store fails the write.
+    /// Writes one source's vectors (a message or attached file), replacing any earlier copy in the same conversation, in
+    /// one transaction.
+    /// Prior copies are found by id only (`findIds` plus the indexed relation), never by loading parents.
     @discardableResult
     func replaceSemanticDocument(parent: ParentDocumentEntity, children: [ChildChunkEntity]) -> WriteOutcome {
         let conversationKey = parent.conversationID.uuidString
@@ -523,31 +443,12 @@ final class VectorStoreService: @unchecked Sendable {
         }
     }
 
-    /// Finds the most semantically relevant parent documents using the native ObjectBox HNSW index.
-    ///
-    /// The HNSW graph reduces search from O(N) linear scan to O(log N) graph traversal.
-    /// Results are returned in ascending distance order (ObjectBox guarantee); the first result
-    /// is the closest match.  The search is optionally scoped to a single conversation via
-    /// post-filtering on the denormalised `conversationID` field.
-    ///
-    /// - Parameters:
-    ///   - queryEmbedding: L2-normalised 384-D vector from `EmbeddingService`.
-    ///   - limit: Maximum number of unique parent documents to return.
-    ///   - conversationID: If set, only chunks belonging to this conversation are considered.
-    ///   - exclusion: Parents skipped DURING collection — they must not occupy limit
-    ///     slots. Post-filtering after the cap starved a real turn to zero injected
-    ///     documents while an injectable file chunk sat at rank 4: history ranks high
-    ///     precisely because BM25 loves the query's own recent phrasing.
-    /// - Returns: Relevant `ParentDocumentEntity` objects, ordered by semantic proximity.
+    /// Finds the most relevant parent documents via the native HNSW index, closest first.
+    /// `exclusion` parents are skipped during collection so they never occupy limit slots.
+    /// Returns at most `limit` unique parents, scoped to `conversationID` when set.
     func findNearest(to queryEmbedding: [Float], queryText: String? = nil, limit: Int, conversationID: UUID?, exclusion: RetrievalExclusion = .none) -> [RetrievedDocument] {
-        // Conversation-scoped retrieval (the only production path) uses an EXACT scan
-        // over the conversation's own chunks, NOT the HNSW index. ObjectBox applies
-        // property conditions AFTER `nearestNeighbors` selects its maxCount candidates
-        // (pinned by VectorStoreHygieneTests), so a combined query inherits the same
-        // crowd-out as the old Swift post-filter — foreign conversations' closer chunks
-        // can push in-scope chunks out of the window entirely. A conversation's chunk
-        // count is small (hundreds to low thousands), so the exact scan is fast, immune
-        // to crowding by construction, and skips HNSW's approximation error.
+        // Conversation-scoped retrieval is an exact scan, not the HNSW index: ObjectBox applies property
+        // conditions after `nearestNeighbors` picks candidates, so foreign chunks could crowd them out.
         if let convID = conversationID {
             return findNearestInConversation(queryEmbedding: queryEmbedding, queryText: queryText, limit: limit, conversationID: convID, exclusion: exclusion)
         }
@@ -622,9 +523,8 @@ final class VectorStoreService: @unchecked Sendable {
                 ChildChunkEntity.conversationID == conversationID.uuidString
             }.build().find()
 
-            // ⚠️ CR-29: this scan (fetch + dense + BM25 + RRF) is synchronous and grows with the
-            // conversation — measured at 1.6 s for one large attachment. On the main thread it
-            // freezes the UI for every send; the send path calls it from a nonisolated context.
+            // This scan (fetch, dense, BM25, RRF) is synchronous and grows with the conversation, so it must not run on the main
+            // thread.
             let onMainThread = Thread.isMainThread
             if onMainThread {
                 logger.warning("[RAG] Conversation-memory scan ran on the MAIN thread — conv \(conversationID.uuidString.prefix(8)), \(chunks.count) chunk(s). CONSEQUENCE: the UI is frozen for the whole scan. Call `findNearest` from a nonisolated context.")
@@ -662,8 +562,8 @@ final class VectorStoreService: @unchecked Sendable {
         return (try backing.parentBox.count(), try backing.childBox.count())
     }
 
-    /// Test hook: called with `Thread.isMainThread` for every conversation-scoped scan, so a test
-    /// can prove the send path keeps the scan off the main thread (CR-29).
+    /// Test hook: called with `Thread.isMainThread` for every conversation-scoped scan, to prove the send path keeps it off
+    /// the main thread.
     nonisolated(unsafe) static var scanThreadObserver: (@Sendable (_ onMainThread: Bool) -> Void)?
     #endif
 
@@ -681,24 +581,9 @@ final class VectorStoreService: @unchecked Sendable {
 
     private static let rankingLogger = DGLogger(category: "VectorStoreService")
 
-    /// Ranks a conversation's chunks with HYBRID retrieval: cosine distance (dense
-    /// engine) fused with BM25 (lexical engine) via Reciprocal Rank Fusion. Ranks —
-    /// not raw scores — are fused: cosine distance ([0,2]) and BM25 ([0,∞)) are
-    /// incomparable units, and rank-mixing needs none of the calibration that
-    /// score-mixing would.
-    ///
-    /// The fusion router keeps the dense-only path when the query carries no
-    /// distinctive lexical signal (no query word is rare or identifier-like within
-    /// this conversation): BM25 over exclusively-common words is IDF-muted noise,
-    /// and skipping fusion removes even the residual perturbation.
-    ///
-    /// The distance threshold stays the injection sanity gate, with one exception
-    /// lane: a verbatim hit on an identifier-like query token admits a chunk past
-    /// the threshold — symbol lookups are exact-match problems where the embedding
-    /// is systematically wrong (MiniLM puts NL-question-vs-code pairs at sim 0.1–0.3).
-    ///
-    /// Pure ranking logic — static so tests can exercise it against a temp store's
-    /// chunks directly. distance = 1 − dot product (embeddings are L2-normalised).
+    /// Ranks a conversation's chunks with hybrid retrieval: cosine distance fused with BM25 via Reciprocal Rank Fusion.
+    /// Ranks, not raw scores, are fused; the router stays dense-only when the query has no distinctive lexical signal.
+    /// The distance threshold stays the sanity gate, except a verbatim identifier-token hit admits a chunk past it.
     static func rankConversationChunks(
         _ chunks: [ChildChunkEntity],
         against queryEmbedding: [Float],
@@ -740,11 +625,8 @@ final class VectorStoreService: @unchecked Sendable {
         let identifierWords = lexical.distinctive ? lexicalTokens(from: query).filter(isIdentifierLike) : []
 
         var hits: [RetrievedDocument] = []
-        // Every parent is DECIDED once — accepted or rejected — and keyed by id. Resolving
-        // `parentDocument.target` decodes the parent's whole `fullTextContent` (a file parent is
-        // the entire file), and each chunk holds its own `ToOne`, so the old resolve-then-check
-        // decoded the same multi-MB parent once per candidate: 1.3 s of a 1.6 s send with one
-        // large attachment, because history exclusion kept the loop from ever filling `limit`.
+        // Every parent is decided once, keyed by id: resolving `parentDocument.target` decodes the whole
+        // `fullTextContent`, so a per-candidate resolve would re-decode a large attachment.
         var decidedParentIDs: Set<Id> = []
         for entry in ordered {
             guard hits.count < limit else { break }
@@ -760,11 +642,8 @@ final class VectorStoreService: @unchecked Sendable {
             guard let parentID = candidate.chunk.parentDocument.targetId?.value,
                   decidedParentIDs.insert(parentID).inserted,
                   let parent = resolveParent(candidate.chunk) else { continue }
-            // Excluded parents (carried in full / this turn's files / after a Redo
-            // boundary) are skipped HERE, before they can claim a limit slot —
-            // post-filtering after the cap let the query's own echo + prior turns
-            // fill all three slots while the injectable file chunk sat at rank 4
-            // (2026-07-13 comparison log).
+            // Excluded parents (carried in full, this turn's files, or after a Redo boundary) are skipped here, before they can
+            // claim a limit slot.
             guard !exclusion.excludes(parent) else { continue }
             hits.append(RetrievedDocument(parent: parent, bestChunkText: candidate.chunk.chunkText, distance: candidate.distance))
         }
@@ -791,23 +670,15 @@ final class VectorStoreService: @unchecked Sendable {
         return BM25Document(terms: chunk.bm25Terms, length: chunk.bm25Length)
     }
 
-    /// BM25 scores for each chunk against the query, plus the fusion-router
-    /// verdict. Document frequencies are computed over the SAME candidate set
-    /// being ranked, so no corpus statistics are persisted.
-    ///
-    /// Router: the query has distinctive lexical signal when at least one query
-    /// word actually occurs in the corpus AND is either identifier-like or rare
-    /// (in ≤ 25% of chunks). "Rare" covers the chat case — proper nouns and
-    /// codenames — that isIdentifierLike's shape rules can't see.
+    /// BM25 scores for each chunk against the query, plus the fusion-router verdict.
+    /// Document frequencies come from the ranked set. A distinctive lexical signal means a query word occurs in the
+    /// corpus and is identifier-like or rare (in at most 25% of chunks).
     static func bm25Analysis(queryText: String, chunkTexts: [String]) -> (scores: [Double], distinctive: Bool) {
         bm25Analysis(queryText: queryText, documents: chunkTexts.map(bm25Document(for:)))
     }
 
-    /// ⚠️ Counts only the QUERY's terms in each chunk (RAG-40). BM25 needs nothing else: a query
-    /// term's frequency per chunk, its document frequency, and chunk lengths. Building a full
-    /// term-frequency map of every chunk on every send cost ~58 µs/chunk; a few byte searches
-    /// over pre-tokenised text cost a fraction of that. Scores are IDENTICAL to the tokenising
-    /// version (pinned by `testStoredTermsScoreExactlyLikeTokenisingEveryChunk`).
+    /// Counts only the query's terms in each chunk: BM25 needs only per-chunk term frequency, document frequency and lengths,
+    /// so scores equal the full-tokenising version at a fraction of the cost.
     static func bm25Analysis(queryText: String, documents: [BM25Document]) -> (scores: [Double], distinctive: Bool) {
         var scores = [Double](repeating: 0, count: documents.count)
         guard !documents.isEmpty else { return (scores, false) }
@@ -865,9 +736,8 @@ final class VectorStoreService: @unchecked Sendable {
         return (scores, distinctive)
     }
 
-    /// Fewest chunks for which "in ≤ 25% of them" means anything (RAG-34). Below this, EVERY word
-    /// in one chunk was "rare" (`max(4, n)` made df = 1 qualify), so filler words switched fusion
-    /// on in small conversations. Identifier-like tokens still fuse at any size.
+    /// Fewest chunks for which 'in at most 25% of them' means anything; below it every word in one chunk would count as rare.
+    /// Identifier-like tokens still fuse at any size.
     static let minimumCorpusForRarity = 8
 
     static func isRare(documentFrequency df: Int, corpusSize: Int) -> Bool {
@@ -894,11 +764,8 @@ final class VectorStoreService: @unchecked Sendable {
         }
     }
 
-    /// Lowercased BM25 token stream: whole words (split on non-identifier chars)
-    /// PLUS camelCase/snake_case sub-parts — "addAttachedFiles" emits itself and
-    /// add/attached/files, so partial-term queries still match while the intact
-    /// identifier keeps its high-IDF dominance. No stopword list: IDF is the
-    /// principled stopword filter (a term present in most chunks scores ≈ 0).
+    /// Lowercased BM25 token stream: whole words plus camelCase/snake_case sub-parts, so partial-term queries still match.
+    /// No stopword list: IDF is the stopword filter.
     static func bm25Tokens(from text: String) -> [String] {
         var tokens: [String] = []
         for word in text.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }) {
@@ -937,10 +804,9 @@ final class VectorStoreService: @unchecked Sendable {
         return parts
     }
 
-    /// Reciprocal Rank Fusion: score(chunk) = Σ over engines of 1/(rrfK + rank).
-    /// A chunk absent from the lexical list (BM25 = 0) simply contributes one term.
-    /// Perfectly crossed pairs tie by construction — ties break toward lexical
-    /// strength (exact-match queries are why fusion exists), then semantic distance.
+    /// Reciprocal Rank Fusion: score(chunk) = sum over engines of 1/(rrfK + rank); a chunk absent from the lexical list
+    /// adds one term.
+    /// Ties break toward lexical strength, then semantic distance.
     static func fuseByRRF(distances: [Double], bm25: [Double]) -> [(index: Int, distance: Double, bm25: Double)] {
         var denseRank: [Int: Int] = [:]
         for (rank, index) in distances.indices.sorted(by: { distances[$0] < distances[$1] }).enumerated() {
@@ -991,11 +857,9 @@ final class VectorStoreService: @unchecked Sendable {
             || token.contains(where: \.isNumber)
     }
 
-    /// Strongest single-token containment signal in 0...1: identifier-like tokens
-    /// score 1.0 (0.7 case-insensitive), plain words 0.35. Since the BM25 fusion
-    /// replaced score-blending, this serves the threshold EXCEPTION LANE only:
-    /// rankConversationChunks admits a past-threshold chunk when an identifier
-    /// token registers ≥ 0.7 here.
+    /// Strongest single-token containment signal in 0...1: identifier-like tokens score 1.0 (0.7 case-insensitive), plain
+    /// words 0.35.
+    /// Serves the threshold exception lane: `rankConversationChunks` admits a past-threshold chunk at 0.7 or more.
     static func lexicalBoost(tokens: [String], chunkText: String) -> Double {
         var best = 0.0
         var chunkLower: String?
@@ -1020,28 +884,22 @@ final class VectorStoreService: @unchecked Sendable {
     private static func removeRows(ofConversation key: String, childBox: Box<ChildChunkEntity>,
                                    parentBox: Box<ParentDocumentEntity>) throws -> (chunks: UInt64, parents: UInt64) {
         let childQuery = try childBox.query { ChildChunkEntity.conversationID == key }.build()
-        // Derive parents from the denormalised children — parent.conversationID is a converted
-        // UUID (stored as String), so going through the plain-String child key avoids querying
-        // across the converter.
+        // Derive parents from the denormalised children: `parent.conversationID` is a converted UUID (stored as String),
+        // so querying the plain-String child key avoids the converter.
         let children = try childQuery.find()
         guard !children.isEmpty else { return (0, 0) }
-        // Parent IDS, never parents: `target` decodes each parent's whole text, once per chunk —
-        // 32 s for a conversation holding three large files (RAG-8).
+        // Parent ids, never parents: `target` decodes each parent's whole text once per chunk.
         let parentIDs = Set(children.compactMap { $0.parentDocument.targetId?.value })
         let removedChildren = try childQuery.remove()
         let removedParents = try parentBox.remove(Array(parentIDs))
         return (removedChildren, removedParents)
     }
 
-    /// Removes conversation memory whose conversation no longer exists — left by a crash between
-    /// the SwiftData delete and this store's, or by a write that raced a delete before tombstones
-    /// existed (RAG-5). Destructive: the launch sweep runs it only when the schema is unchanged.
-    ///
-    /// ⚠️ An EMPTY `liveConversationIDs` is refused, not obeyed: "no conversations exist" is far
-    /// more likely to be a store that did not load than a user who deleted everything — and obeying
-    /// it would erase every conversation's memory. (Deletes clean up after themselves; this sweep
-    /// only collects strays.)
-    /// - Returns: the number of orphaned conversations removed.
+    // Why: An empty `liveConversationIDs` is refused: it more likely means a store that did not load than a user who deleted
+    // everything.
+    /// Removes conversation memory whose conversation is gone (crash between the two deletes, or a write that raced a
+    /// delete).
+    /// Destructive: the launch sweep runs it only when the schema is unchanged. Returns the number of conversations removed.
     @discardableResult
     func removeOrphanedConversations(liveConversationIDs: Set<UUID>) -> Int {
         guard let backing else { return 0 }
@@ -1078,10 +936,8 @@ final class VectorStoreService: @unchecked Sendable {
         }
     }
 
-    /// Deletes ALL vector data belonging to a conversation — child chunks and their
-    /// parent documents. Called when the conversation itself is deleted, so its
-    /// memory dies with it. (Before this API the store was append-only: orphaned
-    /// vectors survived conversation deletion forever, inflating every HNSW search.)
+    /// Deletes all vector data belonging to a conversation (child chunks and parent documents), called when the
+    /// conversation is deleted.
     func deleteDocuments(forConversation conversationID: UUID) {
         guard let backing else {
             logger.warning(
@@ -1099,7 +955,7 @@ final class VectorStoreService: @unchecked Sendable {
             // One transaction, behind the write lock (see `writeLock`): a delete racing an
             // indexer is exactly the concurrent-writer shape that deadlocked.
             let removed: (chunks: UInt64, parents: UInt64) = try writeLock.withLock {
-                // Tombstone FIRST, under the same lock every write checks (RAG-5).
+                // Tombstone first, under the same lock every write checks.
                 deletedConversations.insert(convIDString)
                 return try backing.store.runInTransaction {
                     try Self.removeRows(ofConversation: convIDString, childBox: childBox, parentBox: parentBox)

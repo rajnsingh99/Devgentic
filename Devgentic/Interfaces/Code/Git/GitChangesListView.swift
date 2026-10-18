@@ -4,8 +4,7 @@
 //  GitChangesListView.swift
 //  Devgentic
 //
-//  The Git Changes panel's body: filter, banners, one row per changed file, and an explainer for
-//  every state that is not a list — never a silent blank.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -13,6 +12,8 @@ import AppKit
 
 private let logger = DGLogger(category: "GitUI")
 
+/// The Git Changes panel's body: filter, banners, one row per changed file, and an explainer for every state that is not
+/// a list, never a silent blank.
 struct GitChangesListView: View {
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel

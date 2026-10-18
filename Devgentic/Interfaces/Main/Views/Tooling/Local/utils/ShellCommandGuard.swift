@@ -4,28 +4,14 @@
 //  ShellCommandGuard.swift
 //  Devgentic
 //
-//  The refusal rules shared by every tool that runs a caller-supplied shell command.
-//
-//  There were TWO such tools, not one. `execute_shell` (`TerminalTool` → `ShellSessionManager`,
-//  both removed 2026-09-24 as a duplicate of `run_command`) enforced these rules; `batch_command` is an equally complete `/bin/zsh -c` runner that
-//  enforced NONE of them, so every refusal below was reachable simply by naming the other
-//  tool. A profile that hardened `execute_shell` — or an operator who read its blocks and
-//  believed them — got none of it.
-//
-//  That is the general shape worth naming: a guard attached to ONE tool is a guard on a NAME,
-//  not on a capability. These rules live here so both shells consult the same list and a third
-//  shell runner has something to call rather than something to reinvent.
-//
-//  ⚠️ What this is NOT. These are usability and footgun rules — they stop the agent hanging
-//  the run on an interactive program, and stop it opening an interactive sudo session it
-//  cannot answer. They are NOT a security boundary, and no denylist over a shell can be one:
-//  the argument to `zsh -c` is a complete programming language, so any command can be spelled
-//  a way a list does not recognise. Both tools remain arbitrary code execution BY DESIGN. The
-//  boundary is whether the profile grants them at all.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The refusal rules shared by every tool that runs a caller-supplied shell command, so each shell tool consults
+/// one list. Usability rules (no interactive REPLs or interactive sudo), not a security boundary: a denylist over a
+/// shell cannot be one.
 enum ShellCommandGuard {
 
     /// Programs that take over the terminal no matter how they are invoked. Neither tool
@@ -33,20 +19,15 @@ enum ShellCommandGuard {
     /// nothing useful.
     static let alwaysInteractive: Set<String> = ["nano", "vim", "vi", "emacs", "top", "htop", "less", "more"]
 
-    /// Interpreters that drop into a REPL when given no arguments. Blocked ONLY in that form:
-    /// `python3 script.py` and `python3 -c "…"` are ordinary non-interactive commands, and
-    /// token-matching rather than substring-matching is what keeps `topology` from tripping
-    /// the `top` rule.
+    /// Interpreters that drop into a REPL when given no arguments, blocked only in that form. Token matching, not
+    /// substring matching, keeps `topology` from tripping the `top` rule.
     static let replCommands: Set<String> = ["python", "python3", "node", "irb", "ruby", "swift"]
 
     /// Interactive sudo sessions: there is no way to answer the password prompt.
     static let blockedPrefixes: [String] = ["sudo -s", "sudo su", "sudo -i"]
 
-    /// The reason this command must be refused before any process is launched, or nil to run it.
-    ///
-    /// Returns a REASON rather than a Bool so both call sites report the same sentence — a
-    /// refusal the model can act on ("use cat instead of less") is worth more than a generic
-    /// denial, and two hand-written copies of that sentence would drift.
+    /// Returns the reason this command must be refused before any process is launched, or nil to run it. A reason
+    /// rather than a Bool so every call site reports the same actionable sentence.
     static func refusalReason(for command: String) -> String? {
         let trimmed = command.trimmingCharacters(in: .whitespaces)
         let tokens = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }

@@ -4,21 +4,7 @@
 //  UserMessageTruncationTests.swift
 //  DevgenticTests
 //
-//  CF-1 (Chat_Production_Readiness_Fresh.md): a newline-dense user message under ~850
-//  characters was clipped at 10 lines with NO expand chevron. `UserMessageView`'s
-//  truncation fast path reasoned purely about character count — `text.count <
-//  lineLimit * max(40, width / 7)` — and never looked at newlines, so a 12-line,
-//  300-character paste skipped the NSHostingView measurement, was set
-//  `isTruncatable = false`, and `.lineLimit(10)` clipped it with no affordance.
-//
-//  The decision now lives in `UserMessageView.needsMeasurement(text:availableWidth:fontSize:lineLimit:)`
-//  (nonisolated static, pure) so it can be pinned here without a view host. It may only
-//  answer `false` ("definitely fits, skip measuring") when BOTH the character budget AND
-//  the hard-line-break count agree. These tests fail against the old character-only rule:
-//  the 12-line string is 300 characters, comfortably under any width's character budget.
-//
-//  Not covered here (SwiftUI plumbing, needs an on-device check): the `.onChange` re-measure
-//  on width / `chatFontSize` changes that replaced the `onAppear`-only trigger.
+//  Created by Raj Singh.
 //
 
 import XCTest

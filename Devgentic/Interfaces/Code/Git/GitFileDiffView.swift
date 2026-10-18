@@ -4,12 +4,13 @@
 //  GitFileDiffView.swift
 //  Devgentic
 //
-//  One expanded row's diff. Loaded lazily on expand, reloaded on every published snapshot, and
-//  folded to the changed lines plus context.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// One expanded row's diff: loaded lazily on expand, reloaded on every published snapshot, and folded to the
+/// changed lines plus context.
 struct GitFileDiffView: View {
     let file: GitFileChange
     let filter: GitChangesFilter

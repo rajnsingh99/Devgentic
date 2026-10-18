@@ -4,17 +4,7 @@
 //  NestedBlockParsingTests.swift
 //  DevgenticTests
 //
-//  Pins the 2026-07-16 recursive-block-model fix.
-//
-//  Before: ContentBlock was FLAT — `listItem` held a String and there was no
-//  blockquote case — so the parser dumped an item's children into that string as raw
-//  markdown via format(). ContentBlockView then fed it to AttributedString(markdown:),
-//  which consumed the -/>/fence markers AND the newlines into block-level
-//  presentationIntent that the renderer never read. Measured on real LLM output:
-//    "1. Install dependenciesRun npm installVerify with npm -v"
-//
-//  These tests assert the structure now survives parsing, so the renderer can never
-//  be handed pre-corrupted text again.
+//  Created by Raj Singh.
 //
 
 import XCTest

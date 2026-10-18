@@ -4,15 +4,7 @@
 //  PerProfileKeyCacheTests.swift
 //  DevgenticTests
 //
-//  Two Keychain follow-ups from the one-key-per-provider work (2026-10-03):
-//
-//  1. Per-profile keys (OpenAI-compatible profiles, Code slots) are cached for the process, like the
-//     shared provider keys. SwiftData hands out a NEW `BackendProfile` on every fetch and the
-//     profile list refetches on most changes, so each such profile was read from the Keychain again
-//     on every refetch — under a changed signature, a fresh access prompt each time.
-//  2. The Hugging Face token lives ONLY in `HuggingFaceTokenStore`. The catalog used to write a
-//     second copy under the shared provider service: two items for one token, and clearing it left
-//     the copy for a fallback read to resurrect.
+//  Created by Raj Singh.
 //
 
 import SwiftData

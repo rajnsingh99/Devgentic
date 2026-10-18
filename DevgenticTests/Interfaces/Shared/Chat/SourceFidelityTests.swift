@@ -4,17 +4,7 @@
 //  SourceFidelityTests.swift
 //  DevgenticTests
 //
-//  Two fixes with the same theme — report what actually happened, verbatim.
-//
-//  1. Smart punctuation: cmark (on by default in swift-markdown) rewrote prose as it
-//     parsed — `"` → `“”`, `--` → `—`, `...` → `…`. Models put code and shell commands
-//     in prose constantly, so `print("hi")` rendered AND RAG-indexed as `print(“hi”)`,
-//     and exact-match retrieval on quoted code missed. Parsing now passes
-//     `.disableSmartOpts` at all three `Document(parsing:)` sites.
-//
-//  2. The span summary's Outcome label downgraded every zero-tool `.completed` run to
-//     "PARTIAL ⚠️". Zero tool calls is the normal state for every bot/chat profile, so
-//     the label fired on every clean reply and meant nothing.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,14 +4,7 @@
 //  WithdrawnToolSweepTests.swift
 //  DevgenticTests
 //
-//  Measured on device 2026-09-23, after `batch_command` was withdrawn from the catalogue:
-//
-//    [TOOLRESOLVE] ⚠️ 'batch_command' NOT RESOLVED — the agent will run WITHOUT this capability.
-//    [TOOLSCHEMA] 1 tool(s) absent from the snapshot, priced at 0 … Absent: batch_command.
-//
-//  on EVERY send, forever. The second is the real cost — the context gauge and the pre-send fit
-//  check both over-report headroom. And the user cannot fix it: the Tool Library renders from
-//  `UnifiedToolStore`, so a name with no matching source has no row to un-tick.
+//  Created by Raj Singh.
 //
 
 import XCTest

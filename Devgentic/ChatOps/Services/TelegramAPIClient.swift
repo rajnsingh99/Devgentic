@@ -4,7 +4,7 @@
 //  TelegramAPIClient.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -32,11 +32,9 @@ actor TelegramAPIClient {
 
     // MARK: - Polling
 
-    /// Long-polls for new updates from Telegram.
-    /// - Parameters:
-    ///   - offset: The update ID to start from (previous + 1 to acknowledge).
-    ///   - timeout: Server-side long-poll timeout in seconds (max 60).
-    /// - Returns: Array of new updates (may be empty if timeout expires with no messages).
+    /// Long-polls for new updates from Telegram; the array is empty if the timeout expires with no messages.
+    /// - Parameter offset: the update ID to start from (previous + 1 acknowledges earlier updates).
+    /// - Parameter timeout: server-side long-poll timeout in seconds (max 60).
     func getUpdates(offset: Int, timeout: Int = 60) async throws -> [TelegramUpdate] {
         var components = URLComponents(string: "\(baseURL)/getUpdates")!
         components.queryItems = [
@@ -82,9 +80,8 @@ actor TelegramAPIClient {
         text: String,
         parseMode: String? = "Markdown"
     ) async throws {
-        // ⚠️ 4000 rather than Telegram's 4096: Markdown escaping adds a backslash per metacharacter
-        // AFTER this budget is applied, so the margin absorbs it. Measured in UTF-16 by
-        // `RemoteTextBudget.chunk` — see its header for the unit bug this replaced.
+        // 4000 rather than Telegram's 4096: Markdown escaping adds a backslash per metacharacter after this budget is
+        // applied, so the margin absorbs it. Measured in UTF-16 by `RemoteTextBudget.chunk`.
         let chunks = TelegramAPIClient.chunkText(text, maxLength: 4000)
         try await RemoteChunkedSend.send(chunks) { chunk in
             try await sendMessage(chatID: chatID, text: chunk, parseMode: parseMode)
@@ -182,10 +179,7 @@ actor TelegramAPIClient {
         let (data, httpResponse) = try await session.data(for: request)
 
         if let http = httpResponse as? HTTPURLResponse, http.statusCode == 429 {
-            // ⚠️ THE COMMENT HERE USED TO PROMISE THIS AND THE CODE DID NOT DO IT: it read "extract
-            // retry_after if available" above a valueless `throw .rateLimited`, so the one number
-            // Telegram sends to make a retry work was discarded at the moment it arrived. Telegram
-            // puts it in `parameters.retry_after`, not in a header.
+            // Telegram sends the retry delay in `parameters.retry_after`, not in a header; keep it so the retry can honor it.
             let retryAfter = (try? JSONDecoder().decode(TelegramErrorEnvelope.self, from: data))?
                 .parameters?.retry_after
             logger.warning("Telegram rate limited (429); retry_after=\(retryAfter.map(String.init) ?? "absent").")
@@ -205,12 +199,8 @@ actor TelegramAPIClient {
 
     // MARK: - Text Chunking
 
-    /// Splits text to this platform's message budget.
-    ///
-    /// ⚠️ A FORWARDER, NOT AN IMPLEMENTATION. The real one is `RemoteTextBudget.chunk`, shared by all
-    /// three clients — see its header for the UTF-16 unit bug that three separate copies of this
-    /// function each carried. It stays as a named entry point so this client's own tests exercise
-    /// the same call production takes, rather than the shared helper in isolation.
+    /// Splits text to this platform's message budget by forwarding to the shared `RemoteTextBudget.chunk`.
+    /// Kept as a named entry point so this client's tests exercise the same call production takes.
     static func chunkText(_ text: String, maxLength: Int = 4000) -> [String] {
         RemoteTextBudget.chunk(text, limit: maxLength)
     }
@@ -244,9 +234,8 @@ enum TelegramAPIError: LocalizedError {
 // MARK: - Rate-limit reporting
 
 extension TelegramAPIError: RemoteRateLimitedError {
-    /// ⚠️ Telegram reports the wait in `parameters.retry_after` (seconds), not in a header. A 429
-    /// with no number still answers with a value — `nil` here means "not a rate limit at all", and
-    /// `RemoteChunkedSend` relies on that distinction to decide whether a retry can help.
+    /// The wait Telegram reports in `parameters.retry_after` (seconds), not in a header; a 429 with no number
+    /// still has a value. Nil means "not a rate limit at all"; `RemoteChunkedSend` relies on that to decide if a retry helps.
     var retryAfterSeconds: TimeInterval? {
         guard case .rateLimited(let retryAfter) = self else { return nil }
         return retryAfter ?? 1

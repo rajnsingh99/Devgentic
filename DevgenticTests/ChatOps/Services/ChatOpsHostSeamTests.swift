@@ -4,25 +4,7 @@
 //  ChatOpsHostSeamTests.swift
 //  DevgenticTests
 //
-//  C0 of the ChatOps remote-interface plan: the host seam, before any command uses it.
-//
-//  ⚠️ WHAT CAN AND CANNOT BE TESTED HERE, STATED PLAINLY. Constructing a `MainApplicationViewModel`
-//  runs `ChatOpsCoordinator.bootstrap()` and opens real network listeners, so no test may build
-//  one — which means the real conformance's BEHAVIOUR is unreachable from a unit test by
-//  construction. Three things are still checkable, and they are the three that would actually
-//  regress:
-//
-//    1. That the real view model still satisfies both protocols — a compile-time fact, asserted
-//       without instantiating anything.
-//    2. That the protocols are satisfiable by something that is NOT the view model. This is the
-//       entire purpose of the seam; if a future member can only be answered by the god object,
-//       the fake below stops compiling and the seam has quietly stopped being one.
-//    3. That `cancelRun`'s [WF-SE10] step ordering survives, by reading the source. The ordering
-//       is the only real logic in the conformance and it is exactly the kind a later edit
-//       "tidies" into a bug.
-//
-//  ⚠️ The source scans below regex over the JOINED body, never line by line. A line-filtered scan
-//  in this repo has already let a multi-line mutation walk straight past it.
+//  Created by Raj Singh.
 //
 
 import XCTest

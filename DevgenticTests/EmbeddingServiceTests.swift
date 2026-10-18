@@ -2,13 +2,10 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  EmbeddingServiceTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
-//  Integration tests for the EmbeddingService.
-//  These tests require the CoreML model (All_MiniLM_L6_v2) and tokenizer files
-//  to be available in the app bundle (test host is the app itself).
 
 import XCTest
 @testable import devgentic

@@ -4,16 +4,7 @@
 //  StoreOpenDiagnosticsTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Proves the launch path can say WHY the database failed to open.
-//
-//  Before this, every distinct cause reached the app as `SwiftDataError` code 1 with empty
-//  `userInfo` and empty `underlyingErrors`, so the alert, the log line and the support clipboard
-//  all carried the same content-free string (G39). The one message that identifies the bug is
-//  printed by Core Data to stderr, which a Finder-launched `.app` discards (G40).
-//
-//  These tests cover both replacement channels: metadata-based classification, and stderr capture.
+//  Created by Raj Singh.
 //
 
 import XCTest

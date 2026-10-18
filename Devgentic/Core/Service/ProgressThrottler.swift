@@ -4,23 +4,13 @@
 //  ProgressThrottler.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//
-//  Tiny value-type helper used by the DownloadManager bridges to throttle
-//  how often progress snapshots are written to the SwiftData history store.
-//  Ollama's pull stream can fire progress callbacks dozens of times per
-//  second; writing every single update to disk would thrash the store and
-//  trigger excess SwiftUI invalidation for no user-visible gain.
-//
-//  Rule: write only when `abs(progress - lastWritten) >= minimumDelta`.
-//  Bookends (0.0 and 1.0) are always allowed through so the first and
-//  last states are never dropped — that guarantees "just started" and
-//  "just finished" UI transitions remain snappy even if the delta window
-//  hasn't elapsed yet.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Value-type helper that throttles how often download progress snapshots are written to the history store.
+/// Writes only when `abs(progress - lastWritten) >= minimumDelta`; 0.0 and 1.0 always pass so first and last states land.
 struct ProgressThrottler {
 
     /// Minimum absolute change required before a new write is allowed.

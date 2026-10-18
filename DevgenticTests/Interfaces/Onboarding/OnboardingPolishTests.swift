@@ -4,9 +4,7 @@
 //  OnboardingPolishTests.swift
 //  DevgenticTests
 //
-//  The Setup Assistant's P2 contract: the window is sized once and given back, a re-run can be
-//  cancelled without side effects, the accent stays readable on every theme, and the copy is
-//  localizable and accurate.
+//  Created by Raj Singh.
 //
 
 import XCTest

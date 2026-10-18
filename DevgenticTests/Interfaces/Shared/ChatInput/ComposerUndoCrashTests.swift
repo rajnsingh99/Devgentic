@@ -4,27 +4,7 @@
 //  ComposerUndoCrashTests.swift
 //  DevgenticTests
 //
-//  Regression guard for audit finding #3 (2026-07-18): the composer crashed on ⌘Z
-//  after sending a message.
-//
-//  Root cause: the composer's programmatic clear (send / query-history nav / draft
-//  restore) replaced the whole field via a direct `textStorage.replaceCharacters`,
-//  bypassing NSTextView's undo registration. The coalesced `NSUndoTyping` group from
-//  the user's typing kept a range into the OLD text; after the clear the field is
-//  empty, so a subsequent ⌘Z applied that stale range and aborted the process:
-//    NSRangeException — Range {0, N} out of bounds; string length 0
-//    -[NSTextStorage(NSUndo) _undoRedoAttributedSubstringFromRange:]
-//    -[NSUndoTyping undoRedo:]
-//  (Reproduced standalone, exit 134; `breakUndoCoalescing()` alone did NOT fix it —
-//  the stale action is already registered, so it must be discarded, not merely closed.)
-//
-//  Fix: `CustomNSTextView.replaceEntireContents(with:selecting:)` drops the undo
-//  history after the external replacement.
-//
-//  NB the *real* NSUndoTyping group only registers through live key events, which the
-//  headless test host can't drive (no window-server session) — so the full-fidelity
-//  repro below XCTSkips there and the standalone binary is the RED→GREEN proof. The
-//  deterministic test pins the fix's contract (clear ⇒ empty undo stack) and always runs.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,19 +4,7 @@
 //  WorkflowValidatorRulesTests.swift
 //  DevgenticTests
 //
-//  Register WF-VA6 — the run-blocking half of the validator was untested — plus regression cover
-//  for the 2026-08-15 fixes: sub-workflow nesting (WF-VA1 ≡ WF-NS5 ≡ WF-SE4, originally found via
-//  the since-retired Loop node's bodies), empty sub-workflow targets (WF-VA3), and the
-//  variable-rule lints (WF-VA4, WF-VA5).
-//
-//  ⚠️ Why error-severity coverage matters more than warning coverage: an error BLOCKS the run at
-//  the executor's pre-flight before any node executes. A refactor that makes an error rule fire
-//  wrongly bricks every affected workflow, silently, with CI green — the inverse failure (a rule
-//  that stops firing) is merely a run-time surprise. Each error rule therefore gets a positive AND
-//  a negative case: the positive proves it fires, the negative proves it does not fire on a valid
-//  graph (a rule that flags everything passes every positive-only test).
-//
-//  Pure sync — direct WorkflowNode/WorkflowLayout construction, no ML loads, no store.
+//  Created by Raj Singh.
 //
 
 import XCTest

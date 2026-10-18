@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  MorningBriefSource.swift
+//  BriefingSource.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
 
-// MARK: - Morning Brief Source Protocol
+// MARK: - Briefing Source Protocol
 
-/// Any data source that can contribute fragments to the Morning Brief.
+/// Any data source that can contribute fragments to the Briefing.
 ///
 /// To add a new source:
-/// 1. Create a class conforming to `MorningBriefSource`.
-/// 2. Register it in `MorningBriefService.sourceRegistry`.
+/// 1. Create a class conforming to `BriefingSource`.
+/// 2. Register it in `BriefingService.sourceRegistry`.
 ///
 /// Sources are collected in parallel — keep `gather()` fast (<2 seconds).
-protocol MorningBriefSource: Identifiable where ID == String {
+protocol BriefingSource: Identifiable where ID == String {
     /// Unique identifier for this source (e.g. "recent_conversations").
     var id: String { get }
 

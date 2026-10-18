@@ -4,10 +4,7 @@
 //  OllamaImageGenService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Ollama image generation for experimental diffusion models.
-//  T2I only — I2I is not supported via standard Ollama API endpoints.
+//  Created by Raj Singh.
 //
 
 import Foundation

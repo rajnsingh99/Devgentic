@@ -4,8 +4,7 @@
 //  ScrollerCustomizerTests.swift
 //  DevgenticTests
 //
-//  Tests for ScrollerCustomizer: verifying that scrollers are forced to overlay style
-//  and scroller track / path drawing is suppressed across the application.
+//  Created by Raj Singh.
 //
 
 import XCTest

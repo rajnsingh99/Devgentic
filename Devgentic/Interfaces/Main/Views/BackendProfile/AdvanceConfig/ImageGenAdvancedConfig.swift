@@ -4,16 +4,15 @@
 //  ImageGenAdvancedConfig.swift
 //  Devgentic
 //
-//  Created on 30/03/26.
-//
-//  Provider-agnostic advanced configuration for image generation profiles.
-//  Quality applies to all providers; steps and guidance are MLX-specific.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Config Model
 
+/// Provider-agnostic advanced configuration for image generation profiles.
+/// Quality applies to all providers; steps and guidance are MLX-specific.
 struct ImageGenAdvancedConfig: Codable, Equatable {
     var quality: ImageQuality
     var steps: Int?
@@ -36,17 +35,8 @@ struct ImageGenAdvancedConfig: Codable, Equatable {
         self.guidance = guidance
     }
 
-    /// Tolerant decoding — this was the only one of the six advanced-config structs with NO custom
-    /// decoder at all, and the synthesized one threw on two reachable inputs.
-    ///
-    /// ⚠️ Both failures cost the user their WHOLE panel, not one field: a throw here becomes nil in
-    /// `BackendProfileService.decodeConfig` and then `?? .default()` in the load path.
-    ///   1. `quality` is non-optional, so any blob written before it existed failed outright.
-    ///   2. An unrecognised `ImageQuality` raw value — a blob written by a NEWER build that added a
-    ///      quality tier — took the whole config down. The app is unsandboxed and its store sits in
-    ///      a shared directory, so running an earlier build against a newer store is reachable; the
-    ///      profile blob's own `tooNew` refusal exists for exactly that case, and these inner
-    ///      structs carry no version stamp of their own to lean on.
+    // Why: a throw loses the user's whole panel (nil in `decodeConfig`, then the default), not one field.
+    /// Tolerant decoding: a missing `quality` (an older blob) or an unrecognised `ImageQuality` raw value must not throw.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         quality = (try? container.decode(ImageQuality.self, forKey: .quality)) ?? .standard
@@ -67,20 +57,9 @@ struct ImageGenSettingsView: View {
     let provider: ApiProvider
     @Environment(\.appTheme) private var theme
 
-    /// Whether the selected provider's service actually READS `options.quality`.
-    ///
-    /// ⚠️ Verified by consumption, not by intent — the two that honour it are the only two that
-    /// reference the field: `OpenAIImageGenService` sends it as the `quality` body parameter, and
-    /// `MLXImageGenService` selects a different Flux2 pipeline from it.
-    /// `GeminiImageGenService` and `OllamaImageGenService` accept `options` and never read a single
-    /// field of it, so the picker was decorative for half the supported providers: a user switching
-    /// to HD on a Gemini profile got byte-identical output while the caption promised "higher
-    /// detail at the cost of speed".
-    ///
-    /// ⚠️ Gated rather than MAPPED on purpose. Inventing a mapping (sample count, a model variant)
-    /// would be guessing at behaviour those APIs do not document — a control that does the wrong
-    /// thing is not an improvement on one that does nothing. If Gemini or Ollama later expose a
-    /// real quality knob, add the case here and to its service in the same change.
+    // Why: gated, not mapped: inventing a quality mapping for APIs that document none would guess at behaviour.
+    /// Whether the selected provider's service actually reads `options.quality`.
+    /// Only OpenAI (the `quality` body parameter) and MLX (selects a Flux2 pipeline) consume it; Gemini and Ollama ignore it.
     private var providerHonoursQuality: Bool {
         provider == .openAI || provider == .mlx
     }

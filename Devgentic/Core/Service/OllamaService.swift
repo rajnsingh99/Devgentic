@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
-// Services/OllamaService.swift
+//
+//  OllamaService.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
+
 import SwiftUI
 import os
 
@@ -43,19 +49,15 @@ struct LocalModel: Identifiable, Hashable {
         self.name = name
         self.digest = digest
         self.details = response.details
-        // Use the method form so reasoning-only detection can check against `name`
-        // itself — some distilled fine-tunes (e.g. deepseek-r1:14b) report a
-        // tool-capable base family (qwen2) but the model name preserves the
-        // reasoning-only identity.
+        // Uses the method form so reasoning-only detection can check `name` itself: distilled fine-tunes (e.g.
+        // deepseek-r1:14b) report a tool-capable base family but keep the reasoning-only identity in the name.
         self.cognitiveProfile = response.cognitiveProfile(modelName: name)
         self.supportsThinking = response.supportsThinking
         self.tags = Self.generateTags(from: response, profile: self.cognitiveProfile)
     }
 
-    /// Generates tags from the NAME-AWARE profile (reasoning-only detection needs the
-    /// model name — `response.cognitiveCapability` alone misses distilled fine-tunes
-    /// like deepseek-r1 whose family reports the tool-capable base architecture).
-    /// Vision/Thinking come from the same authoritative detection the pickers bind to.
+    /// Generates tags from the name-aware profile, since reasoning-only detection needs the model name.
+    /// Vision and Thinking come from the same detection the pickers bind to.
     private static func generateTags(from response: OllamaShowResponse, profile: CognitiveProfile) -> [ModelTag] {
         var generatedTags: [ModelTag] = []
 
@@ -97,13 +99,9 @@ struct LocalModel: Identifiable, Hashable {
 
 // MARK: - Digest-Aware Model Refresh
 
-/// Digest-aware local-model refresh shared by `OllamaService` (model manager) and
-/// `ModelCatalogService` (the profile editor's model catalog). One cheap `/api/tags` + `/api/version`
-/// probe decides which models actually need the expensive per-model `/api/show`
-/// detection fan-out: unchanged digests reuse the cached `LocalModel`. External
-/// `ollama pull`s become visible on the next refresh without re-detecting the whole
-/// library, and a daemon upgrade (which can change what `/api/show` reports for the
-/// same blob) invalidates the cache wholesale.
+/// Digest-aware local-model refresh shared by `OllamaService` and `ModelCatalogService`.
+/// One `/api/tags` plus `/api/version` probe decides which models need the expensive `/api/show`
+/// detection; unchanged digests reuse the cache and a daemon version change invalidates it wholesale.
 enum LocalModelRefresher {
 
     struct RefreshPlan: Equatable {
@@ -112,10 +110,8 @@ enum LocalModelRefresher {
     }
 
     /// Pure diff between cached models and a fresh `/api/tags` listing.
-    /// - Daemon version change ⇒ everything re-detects.
-    /// - Nil digest on either side ⇒ that model re-detects (legacy cache entries and
-    ///   failed detail fetches heal on the next pass).
-    /// - Cached models absent from `fresh` are dropped (deleted out-of-band).
+    /// A version change re-detects everything; a nil digest on either side re-detects that model; cached
+    /// models absent from `fresh` are dropped.
     static func planRefresh(
         cached: [LocalModel],
         fresh: [OllamaConnect.OllamaTagEntry],
@@ -140,10 +136,7 @@ enum LocalModelRefresher {
     }
 
     /// `/api/tags` entries with each name once, first occurrence kept.
-    ///
-    /// ⚠️ READINESS CR-38 (2026-10-12). The list was keyed with `Dictionary(uniqueKeysWithValues:)`,
-    /// which TRAPS on a repeated key — and a proxy or gateway in front of Ollama that lists a model
-    /// twice crashed the app on every refresh, i.e. on every appearance of a model picker.
+    /// Keyed without `Dictionary(uniqueKeysWithValues:)`, which traps when a proxy lists a model twice.
     static func uniqueByName(_ entries: [OllamaConnect.OllamaTagEntry]) -> [OllamaConnect.OllamaTagEntry] {
         var seen = Set<String>()
         let unique = entries.filter { seen.insert($0.name).inserted }
@@ -214,25 +207,13 @@ class OllamaService {
     var isPullingModel: Bool = false
     var pullStatusMessage: String = ""
 
-    /// The pull narration that only changes at a LIFECYCLE boundary — start, success, cancel,
-    /// failure — never per progress line.
-    ///
-    /// ⚠️ EXISTS SO AN OBSERVER CAN TRACK IT SAFELY. `pullStatusMessage` is rewritten once per
-    /// NDJSON line for the whole of a multi-GB pull, and Observation's `withMutation` fires on
-    /// every assignment regardless of equality — so a view model that tracks it runs its full
-    /// re-filter and re-sort per progress line. That is the exact regression `pullProgress` is
-    /// excluded from the store observer to avoid; this property is the version that is safe to
-    /// mirror. Live progress belongs to `DownloadManager`, which the cards read directly.
+    /// The pull narration that changes only at a lifecycle boundary (start, success, cancel, failure),
+    /// never per progress line. Safe for an observer to track; `pullStatusMessage` is rewritten per NDJSON
+    /// line and Observation fires on every assignment.
     var pullTerminalState: PullTerminalState?
 
-    /// How the most recent pull ended, carried as a VALUE rather than as prose.
-    ///
-    /// ⚠️ THE OUTCOME AND ITS SENTENCE TRAVEL TOGETHER ON PURPOSE. The first version of this was a
-    /// bare `String`, and the banner picked its icon from `isPullingModel` — a PHASE, not an
-    /// OUTCOME — so "Download cancelled." and "Failed to pull X." both rendered under a green
-    /// success tick the moment the pull stopped being in flight. A free-text status cannot answer
-    /// "did this succeed?", and any second property holding the answer can drift from the text it
-    /// describes. One value, one answer.
+    /// How the most recent pull ended, carried as a value so the outcome and its sentence cannot drift
+    /// apart. A phase (`isPullingModel`) cannot tell success from cancel or failure.
     enum PullTerminalState: Equatable {
         case started(model: String)
         case succeeded(model: String)
@@ -254,8 +235,8 @@ class OllamaService {
             return true
         }
 
-        /// ⚠️ `.cancelled` is NOT a success. It is not an error either — the user asked for it —
-        /// so it gets neither a green tick nor a red triangle.
+        /// `.cancelled` is not a success and not an error either (the user asked for it), so it gets neither
+        /// tick nor triangle.
         var isSuccess: Bool {
             if case .succeeded = self { return true }
             return false
@@ -328,14 +309,9 @@ class OllamaService {
         }
     }
 
-    /// Forces a server check regardless of cooldown. The `UserAction` parameter
-    /// is a proof-of-intent token: this method MUST only be called from explicit
-    /// user-interaction sites (refresh button, ⌘R shortcut). See `UserAction`.
-    ///
-    /// History: previously took no argument, which made it trivially misuseable
-    /// from VM `init()` — and was in fact misused, hammering the server on every
-    /// view recreation. Requiring a `UserAction` surfaces the intent at the
-    /// signature and logs the trigger string for traceability.
+    /// Forces a server check regardless of cooldown.
+    /// The `UserAction` parameter is a proof-of-intent token: call only from explicit user-interaction
+    /// sites (refresh button, Cmd-R). The trigger string is logged for traceability.
     func forceCheckServerStatus(triggeredBy action: UserAction) async {
         logger.info("forceCheckServerStatus triggered by \(action)")
         lastFailedCheckTime = nil
@@ -349,34 +325,17 @@ class OllamaService {
         await performLocalModelRefresh()
     }
 
-    /// The refresh itself, WITHOUT the "is anything else in flight?" guard.
-    ///
-    /// ⚠️ EXISTS BECAUSE `pullModel` MUST REFRESH FROM INSIDE ITS OWN WINDOW. `loadLocalModels`'s
-    /// guard is there to stop a view appearance racing a pull or a delete — but a pull's own
-    /// completion is the one caller that has to refresh while `isPullingModel` is still true, and
-    /// it was calling the GUARDED entry point, which returned immediately having fetched nothing.
-    ///
-    /// Two things depended on that refresh actually happening:
-    ///   · the model the user just pulled never appeared in the store grid — the observer fired on
-    ///     the `isPullingModel` transition and re-filtered a STALE `localModels`, so it took a
-    ///     manual Refresh or a navigate-away-and-back to show up;
-    ///   · `DownloadManager` classifies the terminal state by reading
-    ///     `OllamaService.shared.localModels` on that same transition, under a comment asserting
-    ///     the list is fresh by then. It was not, so `isInstalledNow` was always false and the
-    ///     classification fell through to the `progress >= 0.99` heuristic.
-    ///
-    /// ⚠️ Do NOT "simplify" the call in `pullModel` back to `loadLocalModels()`, and do not clear
-    /// `isPullingModel` early to get past the guard instead: the bridge would then observe the
-    /// pull finishing BEFORE the list was refreshed, which is the same race from the other side.
+    // Why: calling the guarded `loadLocalModels()` there fetches nothing and leaves a stale list for the
+    // observer and `DownloadManager`.
+    /// The refresh itself, without the "is anything else in flight?" guard.
+    /// `pullModel` must refresh from inside its own window, where `isPullingModel` is still true.
     private func performLocalModelRefresh() async {
         isLoadingModels = true
         modelLoadingError = nil
         
         do {
-            // Digest-aware refresh: one cheap /api/tags + /api/version probe; the
-            // /api/show detection fan-out runs only for new/changed models, so calling
-            // this on every view appearance is safe (and is what keeps external
-            // `ollama pull`s visible without a manual refresh).
+            // Digest-aware refresh: the `/api/show` fan-out runs only for new or changed models,
+            // so calling this on every view appearance is safe.
             let result = try await LocalModelRefresher.refresh(
                 baseURL: ollamaBaseURL,
                 cached: localModels,
@@ -388,11 +347,8 @@ class OllamaService {
         } catch {
             let errorMessage = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: .ollama)
             self.modelLoadingError = "Failed to load models: \(errorMessage)"
-            // ⚠️ READINESS CR-37 (2026-10-12). Every refresh error wiped `localModels` while the status
-            // stayed `.connected`, so one timeout or one bad `/api/tags` body made model detection and
-            // the download coordinator treat every INSTALLED model as missing (a "not installed" pill,
-            // a needless re-pull). The list is cleared only when the server is actually gone — and
-            // then the status says so; otherwise the last good list stands.
+            // The list is cleared only when the server is actually gone; otherwise the last good list stands,
+            // so one timeout does not make every installed model look missing.
             if Self.refreshErrorMeansServerGone(error) {
                 self.localModels = []
                 self.serverStatus = .disconnected
@@ -404,15 +360,10 @@ class OllamaService {
         isLoadingModels = false
     }
 
-    // MARK: - Pull reservation (readiness CR-34)
+    // MARK: - Pull reservation
 
     /// The pull that has claimed the one Ollama pull slot but may not have started yet.
-    ///
-    /// ⚠️ READINESS CR-34 (2026-10-12). Both `DownloadCoordinator` and `pullModel` checked
-    /// `isPullingModel` and then AWAITED (a support lookup; a 5 s server probe) before it was set, so
-    /// two quick clicks both passed: two pulls ran, `pullTask` was overwritten so the first could no
-    /// longer be cancelled, and the first one's completion cleared the second's state. The slot is
-    /// now claimed SYNCHRONOUSLY, before any await, by whoever asks first.
+    /// Claimed synchronously before any await, so two quick clicks cannot both start a pull.
     private(set) var pullReservation: UUID?
 
     /// Whether the pull slot is taken — pulling, or claimed by a pull about to start.
@@ -444,17 +395,14 @@ class OllamaService {
             if let reservation { releasePullReservation(reservation) }
             return
         }
-        // Silent return: the caller (DownloadCoordinator) computes its outcome BEFORE
-        // dispatching this, so a refusal here surfaced to the user as "Downloading …"
-        // with no pull, no record, no sidebar row and no log line. `DownloadCoordinator`
-        // now pre-checks `isPullingModel`, but log it here too — this is reachable from
-        // any caller.
+        // Refusal is logged here, since this is reachable from any caller and a silent return would show
+        // "Downloading" with no pull.
         guard !isPullingModel, pullReservation == nil || pullReservation == reservation else {
             logger.error("[DOWNLOAD] Ollama pull of '\(trimmedModelName)' REFUSED — \(self.isPullingModel ? "'\(self.modelToPull)' is already pulling" : "another pull has claimed the slot and is starting"). CONSEQUENCE: the request is dropped; only one Ollama pull runs at a time.")
             if let reservation { releasePullReservation(reservation) }
             return
         }
-        // Claimed BEFORE the first await below (CR-34); released when this call ends, however it ends.
+        // Claimed before the first await below; released when this call ends, however it ends.
         let slot = reservation ?? UUID()
         pullReservation = slot
         defer { releasePullReservation(slot) }
@@ -469,27 +417,11 @@ class OllamaService {
         }
         self.ollamaBaseURL = baseURL
 
-        // ⚠️ THIS SINGLE MISSING ASSIGNMENT WAS THE WHOLE DEFECT. `DownloadManager.bindOllama`
-        // tracks both this and `isPullingModel`, and opens a record only on
-        // `isPulling && !modelName.isEmpty`; with no assignment site anywhere in the repo that
-        // predicate was permanently false, so an Ollama pull produced no DownloadRecord, no
-        // sidebar row, no progress bar, no ETA and no Cancel button. Trimmed, because the trimmed
-        // form is what the record's `modelIdentifier` must match in `activeRecordMatches`.
-        //
-        // ⚠️ THE INVARIANT IS "BEFORE THE NEXT SUSPENSION POINT", NOT "BEFORE `isPullingModel`".
-        // `ObservationStream`'s onChange schedules `Task { @MainActor … }`, which cannot run until
-        // this synchronous block yields — so the bridge's first observation sees the block's FINAL
-        // state and never an intermediate one. Swapping these two lines is observationally
-        // identical. What is load-bearing is only that `modelToPull` is non-empty by the time this
-        // function next awaits.
-        // (An earlier version of this comment claimed the relative order mattered. It does not;
-        // do not reintroduce a test that pins it, or a `defer`-based cleanup — which would be
-        // strictly better, since it also covers a future early return — fails the build.)
+        // Set trimmed and non-empty before the next await: `DownloadManager.bindOllama` opens a record from it
+        // at the next suspension point and matches it against `modelIdentifier`.
         modelToPull = trimmedModelName
-        // ⚠️ These two ARE order-sensitive, unlike the pair above, and for a real reason: the
-        // observer task scheduled by this block runs at the NEXT suspension point and reads them.
-        // Counters left from the PREVIOUS pull would be baked into the new record's size, giving a
-        // wrong percentage and ETA. Nothing else clears them on this path.
+        // Order-sensitive: the observer runs at the next suspension point, and counters left from the previous
+        // pull would be baked into the new record's size, giving a wrong percentage and ETA.
         pullTotalBytes = nil
         pullCompletedBytes = nil
         isPullingModel = true
@@ -523,9 +455,8 @@ class OllamaService {
             try await pullTask?.value
             pullStatusMessage = "Successfully pulled \(trimmedModelName)."
             pullTerminalState = .succeeded(model: trimmedModelName)
-            // ⚠️ The UNGUARDED refresh, and it must stay that way — see
-            // `performLocalModelRefresh`. `isPullingModel` is still true here, which is precisely
-            // what `loadLocalModels`'s own guard rejects, so that call fetched nothing.
+            // The unguarded refresh, which must stay so: `isPullingModel` is still true here, and
+            // `loadLocalModels`'s guard would fetch nothing.
             await performLocalModelRefresh()
         } catch is CancellationError {
             pullStatusMessage = "Download cancelled."
@@ -544,15 +475,8 @@ class OllamaService {
         }
         
         isPullingModel = false
-        // ⚠️ MUST BE CLEARED IN THIS SAME SYNCHRONOUS BLOCK, so the bridge's next observation sees
-        // a finished pull rather than one whose name has outlived it — `DownloadCoordinator` builds
-        // its "already pulling" refusal message from `modelToPull`.
-        //
-        // The ORDER relative to `isPullingModel = false` does not matter: no suspension point
-        // separates them, so the observer task cannot run in between and can never see an
-        // intermediate pair. (This comment previously claimed clearing first would close the record
-        // as CANCELLED — it would not, and the sentence that followed already said why. The real
-        // rule is "same block", not "after".)
+        // Cleared in this same synchronous block so the bridge's next observation sees a finished pull;
+        // `DownloadCoordinator` builds its "already pulling" message from `modelToPull`.
         modelToPull = ""
         pullTask = nil
     }
@@ -622,12 +546,8 @@ class OllamaService {
     }
     
     // MARK: - Resource Management
-    //
-    // ⚠️ The "unload every model in /api/ps" function that lived here is GONE (local inference
-    // coordinator, U1/U10/U11). It evicted the server's whole working set — models a parked run or
-    // ANOTHER APP was using — on every conversation switch and at quit. Ollama models are now unloaded
-    // by name, and only the ones this app used: `LocalInferenceCoordinator.unloadOllamaModelsWeUsed()`
-    // and the residency step when a run takes the local lock.
+    // Models are unloaded by name, only those this app used (`unloadOllamaModelsWeUsed()`);
+    // unloading all of `/api/ps` would evict another app's models.
 
     func clearPullActionStatus() {
         pullStatusMessage = ""

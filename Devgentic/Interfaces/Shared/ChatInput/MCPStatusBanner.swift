@@ -4,20 +4,13 @@
 //  MCPStatusBanner.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — MCP connection summary above the composer.
-//
-//  Server health lived entirely inside the Tool Library, on 8×8pt dots the user had to go
-//  looking for. So the failure mode was: send a message, watch the agent behave as if a
-//  capability does not exist, and have no idea a server had failed to connect. The
-//  information has to be where the user is about to act.
-//
-//  Deliberately quiet: when everything is connected this is a single muted line, and when
-//  no MCP servers are configured at all it renders nothing. It only raises its voice —
-//  colour and an explicit count — when something is actually down.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Summarises MCP server connections above the composer; renders nothing when no servers are configured.
+/// Stays a single muted line while everything is connected and adds colour and a count only when a server is down.
 struct MCPStatusBanner: View {
 
     /// Opens the Tool Library so the user can act on what the banner reports.
@@ -129,10 +122,8 @@ struct MCPStatusBanner: View {
     }
 
     // MARK: - Refresh
-    //
-    // Driven off an observation-derived key rather than a timer: `connectionStates` and
-    // `sources` are both @Observable, so reading them here re-runs `.task(id:)` whenever
-    // they actually change. No polling, and no wakeups while idle.
+    // Keyed on observed state, not a timer: `connectionStates` and `sources` are @Observable, so `.task(id:)`
+    // re-runs only when they change.
 
     private var pollKey: String {
         let states = MCPClientService.shared.connectionStates

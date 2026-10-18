@@ -4,23 +4,7 @@
 //  BackgroundTailDrainTests.swift
 //  DevgenticTests
 //
-//  The incremental tail — what replaced reading the whole log file on a 1 Hz timer.
-//
-//  ── The defect these pin ────────────────────────────────────────────────────────────────
-//
-//  `BackgroundTaskObserver` refreshed a live task's row by calling `String(contentsOf:)` on its
-//  log, on the MainActor, once a SECOND, per live task — then took `String.count` (an O(n)
-//  grapheme walk) of the result twice. `BackgroundTasksListView` did the same read inside a
-//  `@ViewBuilder`, so it ran on every body evaluation.
-//
-//  For a short build that is invisible. For the workload `start_background_task`'s own description
-//  recommends — "something you will not wait for, such as a dev server" — the log reaches tens of
-//  MB and the main thread stalls on every tick. The feature broke on precisely its advertised case.
-//
-//  ⚠️ The assertions that matter here are about what is NOT re-read. A test that only checks the
-//  tail's CONTENT passes just as happily against a whole-file read, which is why nearly every test
-//  below also pins `logCharacterCount` — an accumulator that double-counts the instant a drain
-//  re-reads ground it already covered.
+//  Created by Raj Singh.
 //
 
 import XCTest

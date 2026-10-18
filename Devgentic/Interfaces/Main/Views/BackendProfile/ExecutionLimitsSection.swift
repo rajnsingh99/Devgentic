@@ -4,12 +4,12 @@
 //  ExecutionLimitsSection.swift
 //  Devgentic
 //
-//  Created for Agent Capabilities Migration (Phase 0).
-//  Exposes execution limits and error recovery to the user.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Settings section exposing an agent's execution limits and error recovery to the user.
 struct ExecutionLimitsSection: View {
     @Binding var maxIterations: Int?
     @Binding var executionTimeout: TimeInterval?
@@ -36,15 +36,11 @@ struct ExecutionLimitsSection: View {
                     "\(maxIterations ?? AgentExecutionDefaults.maxIterations)",
                     value: Binding(
                         get: { maxIterations ?? AgentExecutionDefaults.maxIterations },
-                        // ⚠️ `AgentExecutionDefaults.maxIterations`, NOT a bare 15 — that literal
-                        // is register A38's exact drift class, and it survived here. If the default
-                        // ever moves, a hardcoded 15 would store `.some(15)` as though the user had
-                        // chosen it and silently change their cap.
+                        // Uses `AgentExecutionDefaults.maxIterations`, not a bare 15: if the default moves, a hardcoded literal
+                        // would store `.some(15)` as though the user had chosen it and silently change their cap.
                         set: { maxIterations = $0 == AgentExecutionDefaults.maxIterations ? nil : $0 }
                     ),
-                    // Ceiling raised from 30: multi-file refactors on smaller models need more
-                    // steps, and the Code interface no longer applies a parameter-size floor that
-                    // kept those models out.
+                    // Ceiling of 100 steps: multi-file refactors on smaller models need more steps.
                     in: 3...100
                 )
                 .fixedSize()
@@ -56,9 +52,8 @@ struct ExecutionLimitsSection: View {
                     Text("Execution Timeout")
                         .font(theme.fontFootnote.weight(.semibold))
                         .foregroundColor(theme.primaryText)
-                    // ⚠️ Says COMPUTE deliberately. `ComputeTimeoutSentinel` excludes time parked
-                    // awaiting a human, so approval banners no longer eat the budget. Describing
-                    // this as wall-clock would understate the limit users actually get.
+                    // Says compute deliberately: `ComputeTimeoutSentinel` excludes time parked awaiting a human, so describing
+                    // this as wall-clock would understate the limit users get.
                     Text("Maximum compute time for a single execution — time spent awaiting your approval doesn't count")
                         .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
@@ -103,13 +98,12 @@ struct ExecutionLimitsSection: View {
 }
 
 struct ErrorRecoverySection: View {
-    /// Per-tier resilience cap overrides. `nil`/all-Auto = inherit the resolved
-    /// defaults; transport-tier (HTTP retry/backoff) budgets are auto-derived from
-    /// the provider and intentionally not exposed here.
+    /// Per-tier resilience cap overrides: nil or all-Auto inherits the resolved defaults; transport-tier (HTTP
+    /// retry/backoff) budgets are auto-derived from the provider and not exposed here.
     @Binding var resilienceOverrides: ResilienceOverrides?
     @Binding var errorRecovery: ErrorRecovery?
-    /// The profile's legacy single retry knob. ⚠️ Register A70: `Auto` does NOT mean 3 — it means
-    /// this. Passed in rather than assumed so the label cannot drift from the resolver.
+    /// The profile's legacy single retry knob; `Auto` means this policy, not 3. Passed in rather than assumed so
+    /// the label cannot drift from the resolver.
     var legacyRetryPolicy: RetryPolicy?
     @Environment(\.appTheme) private var theme
 
@@ -162,9 +156,8 @@ struct ErrorRecoverySection: View {
                 .fixedSize()
             }
 
-            // Tool Failure Tolerance (loop tier) — how many consecutive tool failures
-            // the circuit breaker tolerates before aborting. Distinct from the policy
-            // below, which decides what to DO once tolerance is exhausted.
+            // Tool Failure Tolerance (loop tier): how many consecutive tool failures the circuit breaker tolerates
+            // before aborting, distinct from the policy below that decides what to do once tolerance is exhausted.
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tool Failure Tolerance")
@@ -301,11 +294,9 @@ struct ErrorRecoverySection: View {
     }
 }
 
-/// Loop Safety — circuit-breaker caps. These live on the AGENT profile, so they apply both in
-/// chat and when a workflow node executes this agent (same AgentConnect resolution seam). If the
-/// agent stops early but has a usable answer, the run completes with warnings instead of failing
-/// (degraded success). Rendered as its own titled group in AgentConfigDetailView, sibling to
-/// "Error Recovery".
+/// Loop Safety: circuit-breaker caps that live on the agent profile, so they apply in chat and when a
+/// workflow node executes this agent. If the agent stops early with a usable answer, the run completes with
+/// warnings instead of failing (degraded success).
 struct LoopSafetySection: View {
     @Binding var resilienceOverrides: ResilienceOverrides?
     /// See `ErrorRecoverySection.legacyRetryPolicy` — the repetition cap falls back to this (A70).
@@ -330,9 +321,8 @@ struct LoopSafetySection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
 
-            // Repetition Tolerance (loop tier) — ONE knob for both repetition checks:
-            // identical-iteration fingerprints AND per-tool global repeats. The model is
-            // warned one identical call before the cap fires.
+            // Repetition Tolerance (loop tier): one knob for both repetition checks, identical-iteration fingerprints
+            // and per-tool global repeats; the model is warned one identical call before the cap fires.
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Repetition Tolerance")

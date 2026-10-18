@@ -4,23 +4,14 @@
 //  RunInteractionMemory.swift
 //  Devgentic
 //
-//  [Loop Safety] Per-run memory of human interactions — the PREVENTION half of loop safety.
-//  Created fresh for each executor run (same lifetime as the circuit breaker) and consulted
-//  before raising HITL banners:
-//
-//    • Clarifications: an identical re-ask replays the user's earlier response instead of
-//      re-raising the banner. The replayed observation is byte-identical to the original, so
-//      a stuck ask-loop becomes deterministic and the repetition fingerprint's normal
-//      warn → stop ladder governs it. Distinct questions always reach the user.
-//    • Denied confirmations: an identical previously-denied request is auto-denied without a
-//      banner; the consecutive-denial cap then ends persistent hammering quickly.
-//
-//  On a G1 resume the maps are re-primed from the reconstructed timeline (question/answer and
-//  denial facts are all in the persisted observations), so prevention survives a park → resume.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Per-run memory of human interactions: the prevention half of loop safety, created fresh for each executor run.
+/// An identical re-asked clarification replays the earlier answer; an identical denied confirmation is auto-denied.
+/// On resume the maps are re-primed from the reconstructed timeline.
 actor RunInteractionMemory {
 
     /// Stored user response per normalized question. Inner `nil` = the user skipped —

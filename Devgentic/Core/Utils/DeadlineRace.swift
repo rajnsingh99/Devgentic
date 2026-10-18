@@ -4,35 +4,16 @@
 //  DeadlineRace.swift
 //  Devgentic
 //
-//  The one race that RETURNS AT ITS LIMIT (HITL Waiting Contract §6.3).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
-/// Runs work against a time limit and returns when the limit passes — whether or not the work
-/// has noticed.
-///
-/// ⚠️⚠️ WHY THIS EXISTS. Every timeout in the app used to be
-/// `withThrowingTaskGroup { work; sleep; throw }`. A task group cannot return until EVERY child
-/// has returned, so when the work ignores cancellation — a process wait, a blocking syscall, an
-/// MCP request, an AppleScript — the "timeout" fires and then waits for the work anyway, and
-/// reports a timeout for work that finished (proven 2026-09-26: a 1 s bound returned after
-/// 4.01 s and discarded a build that exited 0 — Timeout inventory P1, P5, P10).
-///
-/// This race holds the work in an UNSTRUCTURED task and settles a single continuation with
-/// whichever comes first: the work's result or the clock (the settle-once shape
-/// `MCPClientService.withTimeout` already used).
-///
-/// At the limit the work is CANCELLED — which is what fires stop hooks such as the shell's
-/// process kill — and given `stopGrace` to hand back what it had. Work that is still running
-/// after that is abandoned and reported as such (`afterStop == nil`), never waited for.
-///
-/// Clock: `SuspendingClock` — time the Mac spends asleep does not count, because the work was not
-/// running either (Contract §6.5).
-///
-/// With a `parkScope`, the limit is COMPUTE: the work runs inside that `ParkScope`, and time any
-/// park in its chain stays open — a human answering an MCP question mid-call, say — is not counted
-/// (Contract decision 1: a human is never timed).
+// Why: a task-group timeout cannot return until every child does, so work ignoring cancellation delays it;
+// this race settles one continuation from an unstructured task instead.
+/// Runs work against a time limit and returns when it passes, whether or not the work has noticed.
+/// At the limit the work is cancelled and given `stopGrace` to hand back what it had; if still running it is abandoned
+/// (`afterStop == nil`), never awaited. `SuspendingClock` time; with a `parkScope`, parked time is not counted.
 enum DeadlineRace {
 
     enum Outcome<T: Sendable>: Sendable {
@@ -148,8 +129,7 @@ enum DeadlineRace {
         }
     }
 
-    /// Finite and non-negative, and short of what `Duration` can hold. A limit is validated before
-    /// it gets here (Contract §5 "No limit"); this only keeps a bad value from trapping.
+    /// Clamps `seconds` to a finite, non-negative value short of what `Duration` can hold, so a bad value cannot trap.
     private static func sanitized(_ seconds: TimeInterval) -> TimeInterval {
         guard seconds.isFinite else { return 365 * 24 * 3600 }
         return min(max(seconds, 0), 365 * 24 * 3600)

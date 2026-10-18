@@ -4,23 +4,7 @@
 //  ConversationalExitContractTests.swift
 //  DevgenticTests
 //
-//  ONE contract, asserted across the whole parser matrix: a parser that finds no tool call must
-//  hand back the model's TEXT.
-//
-//  ⚠️ WHY THIS FILE EXISTS. `NativeJSONParser` returned `reasoning: ""` on a fast-path miss — the
-//  only one of fourteen parsers that did; every sibling returns
-//  `rawResponse.trimmingCharacters(in: .whitespacesAndNewlines)` under a "Treating as
-//  conversational exit" log. The damage was not confined to parsing: plain prose reaches
-//  `classifyConfidence`, which correctly finds no tool signals and returns `.confident`, and
-//  `resolveAndFinalize` then emits `.genuineCompletion` carrying that empty string. So on the
-//  `.nativeJSON` prompted path (Ollama content-fallback, MLX JSON mode) a model that answered in
-//  prose — a refusal, a clarifying question, a direct answer — produced an EMPTY final answer.
-//
-//  ⚠️ It survived because the tests that covered the path asserted the VERDICT and not the TEXT.
-//  `testParseOutcome_PlainTextExit_GenuineCompletion` even stated the contract in its comment
-//  ("Stage 1 returns text as reasoning") and checked only `toolCalls.count` and `parseOutcome`.
-//  A per-parser test would have had the same blind spot for any parser nobody thought to add, so
-//  the contract is asserted here across the matrix instead of one parser at a time.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -2,21 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MCPSecretStoreClearTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Registers KC-1 and KC-17 — the MCP edit round-trip that deleted a live credential.
-//
-//  ⚠️⚠️ THE FAILURE THESE PIN. `MCPSecretStore` exposed only `retrieve`, which collapses "no secret
-//  stored" and "the Keychain read FAILED" into one nil. The edit sheet hydrated its field with
-//  `retrieve(...) ?? ""`, so on a locked Keychain — or a denied ACL prompt after an update changed
-//  the app's code signature — a live bearer token rendered as an EMPTY field. Pressing Save then ran
-//  `persistSecrets`, which deleted both auth scopes unconditionally BEFORE the
-//  `guard let header = ... else { return }` that returns when no secret was supplied. The token was
-//  gone from the Keychain, which was the only copy, and the user had never touched the field.
-//
-//  ⚠️ EVERY TEST HERE DRIVES `.failed`, NOT `.notFound`. That is the whole point: a dev machine only
-//  ever produces `errSecItemNotFound`, which is why this survived. If a test in this file passes
-//  against a stub that cannot produce a FAILED read, it is testing nothing.
+//  Created by Raj Singh.
 //
 
 import XCTest

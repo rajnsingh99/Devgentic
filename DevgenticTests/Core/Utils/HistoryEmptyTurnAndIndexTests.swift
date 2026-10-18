@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  HistoryEmptyTurnAndIndexTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-10 and CR-11 — two ways the conversation history broke a run.
-//
-//  CR-10: native history sent EMPTY text turns (an image-gen reply, a reply left empty by a
-//         force-quit, an image-only user message). Anthropic and Gemini reject those with HTTP 400,
-//         so every request in the conversation failed until the turn aged out.
-//  CR-11: after a compaction the pointer skeleton numbered turns after the checkpoint from 0, while
-//         `get_conversation_history` numbered from the start of the conversation — (0) returned the
-//         oldest COMPACTED turn, diffs included.
-//
-//  ⚠️ The two interact: CR-10 must not DROP a turn, or every later index moves (CR-11).
+//  Created by Raj Singh.
 //
 
 import XCTest

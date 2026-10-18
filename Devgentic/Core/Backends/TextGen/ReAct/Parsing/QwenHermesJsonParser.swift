@@ -4,26 +4,7 @@
 //  QwenHermesJsonParser.swift
 //  Devgentic
 //
-//  Phase 2 — Dialect taxonomy expansion (2026-04-22).
-//  Primary parser for the `.qwenHermesToolCall` dialect.
-//  Handles the native output shape of Qwen2.5/3 Instruct, Qwen3 base, Hermes-2-Pro,
-//  Hermes-3, and structurally identical fine-tunes:
-//
-//      <tool_call>
-//      {"name": "search", "arguments": {"q": "Paris"}}
-//      </tool_call>
-//
-//  Multiple consecutive `<tool_call>` blocks are parallel calls.
-//  Reasoning/commentary text outside the wrappers becomes the step's reasoning.
-//
-//  Recovery budget — handles common Q4 quantization drift:
-//   - Missing closing `</tool_call>` (balanced-brace JSON extraction)
-//   - Reversed key order (`{"arguments":..., "name":...}`)
-//   - `"parameters"` instead of `"arguments"` (Llama-3 key leakage)
-//   - `"tool_name"` instead of `"name"` (Mistral/hybrid key leakage — small-model drift)
-//   - Bare JSON object with a name key but no `<tool_call>` wrapper
-//   - Optional `"content"` field inside the bare JSON (hybrid flat shape from Qwen2.5-3B-Q4)
-//   - Whitespace/newline variance between tag and JSON body
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -31,12 +12,13 @@ import OSLog
 
 private let logger = DGLogger(category: "QwenHermesJsonParser")
 
+/// Primary parser for the `.qwenHermesToolCall` dialect (Qwen2.5/3, Hermes-2-Pro/3 and similar): JSON inside
+/// `<tool_call>` tags, with parallel blocks. Recovers common Q4 drift: missing closer, reversed keys,
+/// `parameters`/`tool_name` aliases and bare JSON.
 struct QwenHermesJsonParser: CognitiveParserProtocol {
 
-    /// Canonical decoded shape, tolerant of small-model key-name drift.
-    /// - `name` is the canonical key; `tool_name` is accepted as an alias (Mistral/hybrid leakage).
-    /// - `arguments` is canonical; `parameters` is accepted as an alias (Llama-3 key leakage).
-    /// - `content` is ignored here; reasoning is extracted separately at the step level.
+    /// Canonical decoded shape, tolerant of small-model key-name drift: `tool_name` is accepted as an alias of `name`,
+    /// `parameters` of `arguments`, and `content` is ignored here.
     private struct ToolCallObject: Decodable {
         let name: String?
         let tool_name: String?
@@ -105,9 +87,8 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
             }
         }
 
-        // Style 2: Unclosed wrapper drift — <tool_call> followed by balanced {JSON} with no closer.
-        //   Common with Q4 small models that drop trailing tokens. Scan each `<tool_call>` occurrence
-        //   and try to extract a balanced JSON object starting after it.
+        // Style 2, unclosed wrapper drift: `<tool_call>` followed by a balanced JSON object with no closer (common with Q4
+        // small models). Scan each occurrence and extract a balanced object after it.
         if results.isEmpty {
             results.append(contentsOf: extractFromUnclosedWrappers(text))
         }
@@ -137,12 +118,8 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
                 }
                 searchStart = jsonRange.upperBound
             } else {
-                // No balanced object after the tag. One OBSERVED reason: the doubled-brace
-                // corruption truncated at EOS — `{{"name": …, "arguments": {…}}` — is unbalanced
-                // as a whole (depth never returns to 0), so the scanner cannot find it and the
-                // repair in `decodeToolCall` would never see it. Hand the remainder through,
-                // gated on the `{{` prefix so this stays the targeted repair path and not a
-                // general re-parse of arbitrary trailing text.
+                // No balanced object after the tag. A doubled-brace truncation (`{{"name": …}`) is unbalanced as a whole, so hand
+                // the remainder through, gated on the `{{` prefix so only the targeted repair path runs.
                 let remainder = String(text[afterTag...]).trimmingCharacters(in: .whitespacesAndNewlines)
                 if remainder.hasPrefix("{{"), let call = decodeToolCall(from: remainder) {
                     results.append(call)
@@ -179,31 +156,8 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
             return call
         }
 
-        // ⚠️ DOUBLED-BRACE REPAIR (observed 2026-08-21). `mlx-community/Qwen2.5-3B-Instruct-4bit`
-        // ships a chat template whose tool-call example reads `{{\"name\": ...}}` — an upstream
-        // f-string escaping artifact — and the model copies it faithfully:
-        //
-        //     <tool_call>
-        //     {{"name": "execute_shell", "arguments": {"command": "/Users/alice/Desktop"}}
-        //     }}
-        //     </tool_call>
-        //
-        // The render path repairs that template (`ChatTemplateRepair`), so on MLX this branch
-        // should never fire — it is DEFENSE IN DEPTH for output that reaches this parser from a
-        // route the repair does not cover: another provider serving the same corrupt artifact, or
-        // a sibling model trained/templated the same way.
-        //
-        // Discipline (the recovery-budget rules this file already lives by):
-        //   • STRUCTURAL POSITION ONLY. `{{` at the very start of a candidate is never valid
-        //     JSON — an object's first non-whitespace child cannot be another bare `{` — so the
-        //     trigger cannot be content. A `{{` INSIDE a string value (a sed script, a template
-        //     file) is protected twice over: it cannot be at position zero, and the re-scan below
-        //     is string/escape-aware, so it never counts quoted braces.
-        //   • The mutation is exactly: drop ONE leading brace, then keep the first balanced
-        //     object and discard trailing garbage (the model's orphaned `}}`). No byte inside any
-        //     string value is touched.
-        //   • Logged on every firing — a silent repair of model output would be the same sin as
-        //     the silent framework discard this whole incident started from.
+        // Doubled-brace repair: `{{` at the start of a candidate is never valid JSON, so drop one leading brace and keep the
+        // first balanced object. No string content is touched and every firing is logged.
         if trimmed.hasPrefix("{{") {
             let stripped = String(trimmed.dropFirst())
             let candidate = BalancedJSONScanner.firstObject(in: stripped).map(String.init) ?? stripped
@@ -250,28 +204,17 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
         return nil
     }
 
-    /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    /// Repairs trailing commas and Python literals in the model's JSON, outside string values only, via the shared
+    /// sanitizer (see `JSONStructuralSanitizer`).
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }
 
     // MARK: - Reasoning extraction
 
-    /// Reasoning priority:
-    ///   1. Prose text before the first `<tool_call>` wrapper (wrapped path).
-    ///   2. `content` field from a bare JSON object (flat-shape Q4 drift path).
-    ///   3. Empty (no reasoning produced).
-    ///
-    /// Both extraction paths are routed through `ReasoningQualityFilter`.
-    /// Qwen2.5/3 and Hermes-2/3-Pro at Q4 routinely fill the `content` slot
-    /// with stock phrases like "Executing tool spotlight_search..." that look
-    /// like reasoning but carry no signal beyond the tool name.
+    /// Reasoning priority: prose before the first `<tool_call>` wrapper, else the `content` field of a bare JSON object,
+    /// else empty. Both paths go through `ReasoningQualityFilter`, since Q4 models fill `content` with stock phrases that
+    /// carry no signal.
     private func extractReasoning(from text: String, extractedCount: Int) -> String {
         guard extractedCount > 0 else {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)

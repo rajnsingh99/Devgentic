@@ -4,15 +4,13 @@
 //  PromptSD.swift
 //  Devgentic
 //
-//  Created on 26/03/26.
-//
-//  SwiftData @Model class for prompt persistence.
-//  Replaces PromptEntity. Tags stored natively as [String] — no ValueTransformer needed.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import SwiftData
 
+/// SwiftData `@Model` for prompt persistence; tags are stored natively as `[String]` with no value transformer.
 @Model
 final class PromptModel {
 

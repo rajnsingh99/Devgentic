@@ -4,11 +4,7 @@
 //  MCPServerAddFlowTests.swift
 //  DevgenticTests
 //
-//  Register KC-5: a completed OAuth sign-in must never be discarded by a `try?`.
-//
-//  ⚠️ THE ORDERING IS THE FIX. The bundle is persisted BEFORE the row exists, under the id the row
-//  will get, so the one step that can fail happens before anything irreversible — and its failure
-//  reaches the form as an outcome instead of vanishing.
+//  Created by Raj Singh.
 //
 
 import XCTest
@@ -191,6 +187,7 @@ final class MCPServerAddFlowTests: XCTestCase {
         let form = try TestRepositorySource.read("Devgentic/Interfaces/Main/Views/Tooling/Mcp/AddMCPServerView.swift")
         XCTAssertFalse(form.contains("try? MCPOAuthCoordinator.persist"))
         XCTAssertTrue(form.contains("MCPServerAddFlow.persistIfChanged("))
-        XCTAssertTrue(form.contains("case .failed(let error):\n                // Register KC-5"), "a failed add must reach the form's error state")
+        XCTAssertTrue(form.contains("case .failed(let error):\n"), "a failed add must reach the form's error state")
+        XCTAssertTrue(form.contains("activeError = error"), "a failed add must reach the form's error state")
     }
 }

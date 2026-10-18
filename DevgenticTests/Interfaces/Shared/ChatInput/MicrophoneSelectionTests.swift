@@ -4,8 +4,7 @@
 //  MicrophoneSelectionTests.swift
 //  DevgenticTests
 //
-//  Choosing the dictation microphone (2026-09-27). Every session used to open macOS's default
-//  input: WhisperKit's streaming transcriber never passes a device to its recorder.
+//  Created by Raj Singh.
 //
 
 import XCTest

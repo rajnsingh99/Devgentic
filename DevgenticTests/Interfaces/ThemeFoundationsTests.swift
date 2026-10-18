@@ -4,7 +4,7 @@
 //  ThemeFoundationsTests.swift
 //  DevgenticTests
 //
-//  Created on 03/09/26.
+//  Created by Raj Singh.
 //
 
 import XCTest
@@ -39,6 +39,18 @@ final class ThemeFoundationsTests: XCTestCase {
         XCTAssertEqual(solarizedLightTheme.colorScheme, .light)
         XCTAssertFalse(solarizedLightTheme.isDark)
         XCTAssertEqual(solarizedLightTheme.codeHighlightThemeName, "solarized-light")
+    }
+
+    func testMaterialThemeTextColorsMatchCosmicDark() {
+        let material = AppThemes.MaterialTheme()
+        let cosmic = AppThemes.CosmicDarkTheme()
+
+        XCTAssertEqual(material.primaryText, cosmic.primaryText, "Material Darker primary text should be crisp white matching Cosmic Dark")
+        XCTAssertEqual(material.secondaryText, cosmic.secondaryText, "Material Darker secondary text should match Cosmic Dark neutral gray")
+        XCTAssertEqual(material.tertiaryText, cosmic.tertiaryText, "Material Darker tertiary text should match Cosmic Dark muted text")
+        XCTAssertEqual(material.placeholderText, cosmic.placeholderText, "Material Darker placeholder text should match Cosmic Dark")
+        XCTAssertEqual(material.syntaxTheme.text, cosmic.syntaxTheme.text, "Material Darker syntax text should match Cosmic Dark")
+        XCTAssertEqual(material.syntaxTheme.variables, cosmic.syntaxTheme.variables, "Material Darker syntax variables should match Cosmic Dark")
     }
 
     func testSyntaxThemePatchedPreservesKeywords() {

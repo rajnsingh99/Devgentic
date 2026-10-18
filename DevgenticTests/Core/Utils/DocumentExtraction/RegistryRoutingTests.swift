@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RegistryRoutingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1 + 2: Registry dispatches to correct extractor, error handling.
+//  Created by Raj Singh.
 //
 
 import XCTest

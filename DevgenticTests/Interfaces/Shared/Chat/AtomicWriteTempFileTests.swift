@@ -4,8 +4,7 @@
 //  AtomicWriteTempFileTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the atomic-write temp-file fix of 2026-08-11
-//  (Chat_Production_Readiness.md row CH44).
+//  Created by Raj Singh.
 //
 
 import XCTest

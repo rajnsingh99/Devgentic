@@ -4,21 +4,7 @@
 //  ShellInterpolationGuardTests.swift
 //  DevgenticTests
 //
-//  Five tools built `zsh -c` command strings with model-supplied values interpolated into
-//  them: `glob_files`, `git_tool`, `get_file_hash`, and `xcode_orchestrator` (build/test and
-//  open_file). All five are now argv. This file stops a sixth appearing.
-//
-//  Two tests, doing different jobs:
-//
-//   1. A behavioural canary for `get_file_hash` — it had NO validation at all, not even an
-//      existence check, so it is the cleanest demonstration that the class is really closed.
-//   2. A SOURCE guard, because the per-tool behavioural tests only cover tools that exist
-//      today. The invariant "no tool interpolates into a shell command string" is statically
-//      checkable, and a new tool copying the old idiom is exactly how this recurs.
-//
-//  Note the contrast with the stderr regression, where a source-level test was rejected: there
-//  the property was historical ("the pre-migration code merged the streams") and unknowable
-//  from current source. This one is a property OF the current source, so it is checkable.
+//  Created by Raj Singh.
 //
 
 import XCTest

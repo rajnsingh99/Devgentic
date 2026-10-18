@@ -4,22 +4,14 @@
 //  LargeRequestGate.swift
 //  Devgentic
 //
-//  Asks the user before a cloud model is sent an unusually large request.
-//
-//  ⚠️ WHY THIS EXISTS (2026-09-27). Tool results are deliberately NOT cut below what fits
-//  (`ToolResultBudget`, the user's 2026-09-24 rule), and cloud windows are huge — a 1M-token
-//  OpenRouter model gives a native payload budget of ~2.25M chars. So "summarize these four log
-//  files" sent 75,290 input tokens in one request with nothing on screen until it came back. That
-//  is the right behaviour for a local model (free) and the wrong SURPRISE for a paid one. The user
-//  chose a confirmation over a cap: nothing is cut, the user just sees the size first.
-//
-//  Scope: native (turn-array) runs against a remote endpoint. `AgentConnect` decides "remote" and
-//  passes the threshold in `AgentInput.largeRequestConfirmChars`; 0 disables the gate, which is
-//  what every local provider and every minimal/test constructor gets.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Asks the user before a cloud model is sent an unusually large request: nothing is cut, but the user sees the size
+/// first, since tool results are not truncated below what fits. Applies to native (turn-array) runs against a remote
+/// endpoint; `AgentConnect` passes the threshold in `AgentInput.largeRequestConfirmChars`, and 0 disables the gate.
 enum LargeRequestGate {
 
     /// The size the user asked to be warned at.
@@ -31,12 +23,9 @@ enum LargeRequestGate {
         Int(Double(thresholdTokens) * PromptFitCheck.charsPerToken)
     }
 
-    /// The `AgentInput.largeRequestConfirmChars` value for a run: the threshold for a remote
-    /// endpoint, 0 (gate off) for one that never leaves this machine.
-    ///
-    /// ⚠️ `ProviderClass` alone is not enough: it files every `.openAICompatible` profile under
-    /// `.cloud`, but most of those are LM Studio / vLLM / llama.cpp on localhost, where a big
-    /// request costs nothing and a banner would just be in the way.
+    /// The `AgentInput.largeRequestConfirmChars` value for a run: the threshold for a remote endpoint, 0 (gate off) for
+    /// one that never leaves this machine. `ProviderClass` alone is not enough, since `.openAICompatible` is often a
+    /// local server where a big request costs nothing.
     static func confirmChars(provider: ApiProvider, baseURL: String?) -> Int {
         guard ProviderClass(apiProvider: provider) == .cloud else { return 0 }
         if provider == .openAICompatible,
@@ -52,16 +41,9 @@ enum LargeRequestGate {
     /// "Allow for this chat" grant on it means "stop asking about request size in this chat".
     static let bannerToolName = "large_cloud_request"
 
-    /// Whether this request needs a confirmation.
-    ///
-    /// Asked once per threshold-sized step of growth, not every iteration: after the user approves
-    /// a 60K-token request, the next ask comes when the payload passes 60K + 50K. A run that stays
-    /// over the line would otherwise re-prompt on every tool call.
-    ///
-    /// - Parameters:
-    ///   - payloadChars: estimated size of the request about to be sent.
-    ///   - thresholdChars: `AgentInput.largeRequestConfirmChars`; 0 or less disables the gate.
-    ///   - approvedThroughChars: the largest payload the user has already approved in this run (0 if none).
+    /// Whether this request needs a confirmation, asked once per threshold-sized step of growth rather than on every
+    /// iteration. `payloadChars` is the estimated size, `thresholdChars` of 0 or less disables the gate, and
+    /// `approvedThroughChars` is the largest payload already approved in this run.
     static func needsConfirmation(payloadChars: Int, thresholdChars: Int, approvedThroughChars: Int) -> Bool {
         guard thresholdChars > 0 else { return false }
         let nextAsk = approvedThroughChars > 0 ? approvedThroughChars + thresholdChars : thresholdChars

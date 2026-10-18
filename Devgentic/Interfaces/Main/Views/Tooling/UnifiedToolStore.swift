@@ -4,10 +4,7 @@
 //  UnifiedToolStore.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 28/09/25.
-//
-//  Refactored on 10/10/25 to fix local tool parameter mapping.
-//  Updated for Phase 5: Map categories for UI hierarchical grouping.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -38,15 +35,8 @@ final class UnifiedToolStore {
         observeMCPStore()
     }
 
-    /// Watches `MCPToolStore.sources` and rebuilds on change.
-    ///
-    /// `withObservationTracking` fires its `onChange` exactly once, so it has to be
-    /// re-armed after every change. This used to be done by re-registering inside a
-    /// `while !Task.isCancelled` loop with a 50 ms sleep — a 20 Hz poll that ran forever
-    /// on the MainActor in a singleton that is never deallocated, and that registered a
-    /// fresh one-shot observer on every tick regardless of whether anything had changed.
-    /// Re-arming from within `onChange` gives the same liveness with no timer, no wakeups
-    /// while idle, and exactly one live observer at a time.
+    /// Watches `MCPToolStore.sources` and rebuilds on change. `withObservationTracking` fires `onChange` once, so it is
+    /// re-armed from within `onChange`: no timer, no wakeups while idle, and exactly one live observer.
     private func observeMCPStore() {
         withObservationTracking {
             _ = mcpStore.sources
@@ -92,10 +82,8 @@ final class UnifiedToolStore {
             )
         }
         
-        // 2. Get all available built-in tools and map them to ToolDefinition.
-        // FIXED: This now correctly includes the 'parameters' from the local ExecutableTool,
-        // ensuring local tools have their argument schemas available to the agent.
-        // NEW: Maps the logical category tag for hierarchical UI grouping.
+        // Maps the available built-in tools to `ToolDefinition`, including each tool's `parameters` schema and its logical
+        // category tag for hierarchical UI grouping.
         let localTools = localManager.availableTools().map {
             ToolDefinition(
                 name: $0.name,
@@ -119,14 +107,8 @@ final class UnifiedToolStore {
         // 4. Combine the lists, ensuring "Built-in Tools" always appears first,
         // and publish the result to the UI.
         self.sources = [localSource] + mcpSources
-        // [INS-12] Bumped on every rebuild, so a surface that CACHES a decision derived from the
-        // catalogue can tell the catalogue moved. The workflow canvas's validator reads
-        // `sources` for its tool-availability arm but runs only on graph edits, undo and load —
-        // so disabling an MCP server with a canvas open left "Workflow Ready" standing over a run
-        // that would now fail. A monotonic counter rather than notifications, for the same reason
-        // `WorkflowLayoutStore.writeGeneration` is one: a redundant bump is harmless, a missed one
-        // is not. This is the single funnel — add/update/delete/setEnabled and the MCP observation
-        // tracker all land here.
+        // Bumped on every rebuild so a surface that caches a decision derived from the catalogue (such as the workflow
+        // canvas validator) can tell it changed. A monotonic counter, since a missed bump is worse than a redundant one.
         catalogGeneration &+= 1
     }
     

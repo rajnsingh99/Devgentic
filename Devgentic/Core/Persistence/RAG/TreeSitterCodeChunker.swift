@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
+//
+//  TreeSitterCodeChunker.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
 
 import Foundation
 import SwiftTreeSitter
@@ -53,9 +59,8 @@ struct TreeSitterCodeChunker {
         return splitByAST(rootNode: rootNode, code: code, languageName: languageName)
     }
     
-    /// Lines exactly as tree-sitter counts rows: `\r\n` is ONE break. `components(separatedBy:
-    /// .newlines)` split it into two, so every line index after the first CRLF drifted from the AST
-    /// rows the split points are looked up by (RAG-36).
+    /// Lines exactly as tree-sitter counts rows: `\r\n` is one break.
+    /// Splitting on `.newlines` would count it twice and drift line indices from the AST rows.
     private static func lines(of code: String) -> [String] {
         code.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
     }
@@ -68,11 +73,8 @@ struct TreeSitterCodeChunker {
         // A lower depth means it's structurally closer to the top level (e.g., class end vs internal statement end).
         var lineDepths: [Int: Int] = [:]
         
-        // ⚠️ ITERATIVE, with an explicit stack (RAG-36). The recursive walk used one stack frame per
-        // nesting level, and indexing runs on a background thread (512 KB stack): a deeply nested
-        // file — a minified bundle, generated JSON thousands of levels deep — crashed the app. Visit
-        // order does not matter: each row keeps the MINIMUM depth seen.
-        // Root starts at depth 0, top-level declarations are depth 1.
+        // Iterative with an explicit stack: deep nesting would overflow recursion on the 512 KB indexing
+        // thread. Each row keeps the minimum depth seen; root is depth 0.
         var stack: [(node: Node, depth: Int)] = [(rootNode, 0)]
         while let (node, depth) = stack.popLast() {
             let endRow = Int(node.pointRange.upperBound.row)
@@ -93,14 +95,9 @@ struct TreeSitterCodeChunker {
         pack(lines: Self.lines(of: code), lineDepths: [:], languageName: language)
     }
 
-    /// Packs lines into chunks of at most `maxChunkSize` (prefix included), splitting at the
-    /// shallowest AST boundary in the latter half of a full chunk and carrying 2 lines of overlap.
-    ///
-    /// ⚠️ INVARIANT: no chunk exceeds `maxChunkSize`. Two ways the old packers broke it:
-    /// - A single line longer than a chunk was appended WHOLE — minified JS, one-line JSON, a log
-    ///   line became one chunk of up to 500K chars with ~128 tokens embedded (RAG-23).
-    /// - The 2-line overlap was carried forward without checking it still fit, so long lines were
-    ///   emitted again as their own chunk, and chunks ran over by up to a line.
+    /// Packs lines into chunks of at most `maxChunkSize` (prefix included), splitting at the shallowest AST
+    /// boundary in the latter half of a full chunk, with 2 lines of overlap. No chunk exceeds
+    /// `maxChunkSize`: an over-long single line and the carried overlap must each be split to fit.
     private func pack(lines: [String], lineDepths: [Int: Int], languageName: String) -> [String] {
         let langName = languageName.isEmpty ? "Code" : languageName
         let prefix = "[\(langName) Context]:\n"

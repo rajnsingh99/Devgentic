@@ -4,13 +4,7 @@
 //  PanelExclusivityTests.swift
 //  DevgenticTests
 //
-//  The Code Viewer, the Background Tasks list and the Git Changes panel occupy the SAME trailing
-//  slot. If two are marked visible they overlap, and whichever has the higher zIndex silently
-//  wins — a defect that looks like "the panel didn't open" rather than like two panels fighting.
-//
-//  ⚠️ Enforced by a `didSet` pair on the view model, NOT at the mount site. `isCodeViewerVisible`
-//  is assigned true from four separate places; a rule spread across call sites is a rule the fifth
-//  one misses.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  FileProcessorServiceExtractionTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 2: Integration tests for FileProcessorService document extraction support.
+//  Created by Raj Singh.
 //
 
 import XCTest

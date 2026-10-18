@@ -4,7 +4,7 @@
 //  FileAttachmentCardView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 08/08/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -24,8 +24,8 @@ private enum FileTypeColor {
 /// A stylish, premium glass card for displaying user-attached files in user prompts.
 struct FileAttachmentCardView: View {
     let fileName: String
-    /// `AttachmentDelivery.note` — set when the model received less than the whole file.
-    /// Replaces the type description, in the warning colour, so a cut is visible at a glance.
+    /// `AttachmentDelivery.note`, set when the model received less than the whole file.
+    /// Shown in place of the type description, in the warning color, so a cut is visible at a glance.
     var deliveryNote: String? = nil
     let action: () -> Void
 

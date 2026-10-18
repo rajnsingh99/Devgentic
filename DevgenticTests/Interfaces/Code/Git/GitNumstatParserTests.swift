@@ -4,8 +4,7 @@
 //  GitNumstatParserTests.swift
 //  DevgenticTests
 //
-//  Fixtures are VERBATIM `git diff [--cached] --numstat -z -M` output from git 2.54
-//  (Apple Git-157), same scratch repo as GitPorcelainParserTests.
+//  Created by Raj Singh.
 //
 
 import XCTest

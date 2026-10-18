@@ -4,14 +4,13 @@
 //  OrbIcon.swift
 //  Devgentic
 //
-//  Orb Voice Orb icon matching the HUD screenshot:
-//  - Resting (non-hovered): Clean gray waveform glyph matching the other toolbar icons.
-//  - Hovered: Blooms into the vibrant cyan-indigo-purple radial gradient Voice Orb with specular rim.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// The Voice Orb toolbar icon: a gray waveform glyph at rest that blooms into a cyan-indigo-purple radial orb on hover.
 struct OrbIcon: View {
     var size: CGFloat = 18
     var isHovered: Bool = false

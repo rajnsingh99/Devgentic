@@ -4,16 +4,7 @@
 //  MCPOAuthRefreshTests.swift
 //  DevgenticTests
 //
-//  Registers KC-3 and KC-4 — the refresh-token pair.
-//
-//  ⚠️ KC-3. `MCPOAuthCoordinator.refresh` is a Keychain read-modify-write spanning two awaits, and
-//  `@MainActor` does not serialize it. Two tool calls in one turn both read the same refresh token
-//  and both POSTed it; a provider with reuse detection revokes the whole grant for the replay.
-//  ⚠️ KC-4. The rotation was logged as persisted one line BEFORE the write that can fail; when it
-//  failed, the new refresh token unwound with the frame while the old one was already dead.
-//
-//  Driven through `refresh(sourceID:)` itself — the function the two production callers invoke —
-//  with the network and the Keychain replaced by the injected dependencies.
+//  Created by Raj Singh.
 //
 
 import XCTest

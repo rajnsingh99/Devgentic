@@ -4,17 +4,7 @@
 //  BackgroundTaskHistory.swift
 //  Devgentic
 //
-//  A conversation's task list = the tasks this launch is running or ran (the registry, in memory)
-//  + every task card saved in the conversation's timeline (2026-09-26).
-//
-//  ⚠️ Why. The list and its pill read ONLY `BackgroundProcessRegistry`, which lives in memory — so
-//  after a relaunch a conversation that had run twenty builds showed an empty list, and the pill
-//  hid itself, while every one of those runs was sitting in the saved timeline cards with its
-//  status, exit code, output tail and log path. The cards are the durable record; this derives the
-//  list from them rather than keeping a second copy that would have to be kept in sync.
-//
-//  ⚠️ Keyed by LOG FILE, not task id. `bg_1` restarts at 1 every launch, so two different runs in
-//  one conversation can share it; each run's log file is new (timestamped, `O_EXCL`).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -50,10 +40,9 @@ enum BackgroundTaskHistory {
         URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
-    /// Live tasks win over their own saved card. A saved card still `running` that is NOT live is
-    /// a task that died with an earlier launch (quit kills every task) — shown as `interrupted`,
-    /// with no invented finish time. Finished rows at or before `clearedBefore` are hidden; a
-    /// running task never is. Oldest first.
+    /// Live tasks win over their own saved card. A saved card still `running` that is not live died with an earlier
+    /// launch and is shown as `interrupted` with no invented finish time. Finished rows at or before `clearedBefore` are
+    /// hidden; a running task never is. Oldest first.
     static func items(live: [BackgroundProcessRegistry.Snapshot],
                       saved: [BackgroundTaskData],
                       clearedBefore: Date?) -> [BackgroundTaskListItem] {
@@ -97,9 +86,8 @@ enum BackgroundTaskHistory {
 
     // MARK: - "Clear finished"
 
-    /// ⚠️ Clearing HIDES; it deletes nothing. The cards stay in the conversation (they are its
-    /// history) and the logs stay until the retention sweep. Without a remembered cutoff, cleared
-    /// rows would come straight back from the saved cards on the next reload.
+    /// Clearing hides and deletes nothing: the cards stay in the conversation and the logs stay until the retention sweep.
+    /// The remembered cutoff keeps cleared rows from coming back from the saved cards on reload.
     private static let clearedBeforeKey = "backgroundTaskHistory.clearedBefore"
 
     static func clearedBefore(_ conversationID: UUID, defaults: UserDefaults = .standard) -> Date? {

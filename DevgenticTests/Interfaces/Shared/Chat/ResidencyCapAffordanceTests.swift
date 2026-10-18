@@ -4,12 +4,7 @@
 //  ResidencyCapAffordanceTests.swift
 //  DevgenticTests
 //
-//  Register CF-36 — what the top-of-transcript pagination slot shows, as a pure static on
-//  `ChatHistoryView` (the WF-UI5 shape). The pill used to render on `canLoadMorePages`
-//  alone, which deliberately stays TRUE at the residency cap, so at the cap it stayed
-//  enabled and inert under a tooltip promising auto-load. The rendering half (button vs
-//  caption) is a ViewBuilder switch and is not reachable from a unit test; these pin the
-//  decision it consumes.
+//  Created by Raj Singh.
 //
 
 import XCTest

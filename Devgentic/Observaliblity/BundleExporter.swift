@@ -4,22 +4,15 @@
 //  BundleExporter.swift
 //  Devgentic
 //
-//  Produces the Phase F diagnostic export — a zip archive with structured
-//  contents assembled from Trace, Config, Logs, Metrics, Environment, and
-//  Preferences surfaces. All text fields pass through `TelemetrySanitizer`
-//  at the caller-specified level before being written to disk.
-//
-//  Entry point: `BundleExporter.export(scope:includes:feedback:sanitizationLevel:)`
-//  → returns `DiagnosticBundle.Result` with the zip URL + manifest.
-//
-//  Zip assembly uses `/usr/bin/ditto` (native, always present on macOS) to avoid
-//  a third-party compression dependency. Staging directory is always cleaned up,
-//  even on error.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Produces the diagnostic export: a zip archive assembled from trace, config, logs, metrics, environment and
+/// preference surfaces. All text passes through `TelemetrySanitizer` at the caller-specified level; the zip is built
+/// with `/usr/bin/ditto` and the staging directory is always cleaned up, even on error.
 enum BundleExporter {
 
     // MARK: - Errors
@@ -37,15 +30,9 @@ enum BundleExporter {
 
     // MARK: - Public entry point
 
-    /// Assembles a diagnostic bundle for the given scope + includes. The result
-    /// is a zip at a stable location in the system temp directory; callers should
-    /// reveal it in Finder or move it to user-chosen destination immediately
-    /// (the temp dir is cleaned up on system reboot).
-    ///
-    /// All text content is sanitized before writing. Even with `.minimal`, home
-    /// paths, IPs, and emails are redacted. `.standard` adds API keys, bearer
-    /// tokens, and common secret JSON keys. `.strict` further redacts hostnames
-    /// and usernames.
+    /// Assembles a diagnostic bundle as a zip in the system temp directory; callers should reveal or move it immediately.
+    /// All text is sanitized: `.minimal` redacts home paths, IPs and emails; `.standard` adds API keys, bearer tokens and
+    /// common secret JSON keys; `.strict` also redacts hostnames and usernames.
     static func export(
         scope: DiagnosticBundle.Scope,
         includes: DiagnosticBundle.Includes,
@@ -78,9 +65,8 @@ enum BundleExporter {
         )
         try writeJSON(manifest, to: stagingDir.appendingPathComponent("manifest.json"), sanitize: false)
 
-        // For a single-trace scope, anchor the logs/metrics lookback to when the run
-        // actually started (not export time), so a report filed hours later still
-        // contains the run's logs (Gap #18). nil for conversation/recent scopes.
+        // For a single-trace scope, anchor the logs/metrics lookback to when the run started (not export time), so a
+        // report filed hours later still has the run's logs. Nil for conversation/recent scopes.
         let traceWindowAnchor = resolveTraceAnchor(for: scope)
 
         // --- Each section is gated on the Includes set ---
@@ -185,11 +171,7 @@ enum BundleExporter {
         try writeJSON(payload, to: dir.appendingPathComponent("trace.json"), sanitize: true, level: level)
     }
 
-    /// Internal (not private) so the hydration contract is testable: EVERY scope must
-    /// return traces with their span/event tree attached. The conversation and recent
-    /// arms used to return the row-only fetches — so those bundles shipped a trace.json
-    /// with `"rootSpans": []` on every trace, silently reintroducing the hollow-export
-    /// defect (Gap #2) that `TraceExportDTO` was written to fix.
+    /// Internal so the hydration contract is testable: every scope must return traces with their span/event tree attached.
     static func fetchTraces(for scope: DiagnosticBundle.Scope) async throws -> [TraceRecord] {
         switch scope {
         case .trace(let traceID):
@@ -229,9 +211,7 @@ enum BundleExporter {
         let traces: [TraceExportDTO]
 
         init(traces: [TraceRecord]) {
-            // Bumped to "2": the payload now carries the full rootSpans → spans → events
-            // tree via `TraceExportDTO`, instead of a hollow row-only `TraceRecord` whose
-            // CodingKeys dropped every span/event at encode time (Gap #2).
+            // Schema "2": the payload carries the full rootSpans -> spans -> events tree via `TraceExportDTO`.
             self.schemaVersion = "2"
             self.traces = traces.map(TraceExportDTO.init)
         }
@@ -317,19 +297,14 @@ enum BundleExporter {
         return try? store.fetchTrace(traceID: traceID)?.startedAt
     }
 
+    // Why: kept generous: a quietly empty support bundle is worse than a large one, since a missing
+    // log section is found only days later.
     /// How far back to look when a `.trace` bundle's anchor cannot be resolved.
-    ///
-    /// Deliberately generous. A support bundle that is quietly EMPTY is worse than one that is large:
-    /// the user has already hit send, and a missing log section is discovered only by whoever reads
-    /// the report, days later, with no way to ask for another.
     static let unanchoredTraceLookbackDays = 7
 
-    /// Start of the export window — one definition, used by both the logs and crashes sections.
-    ///
-    /// ⚠️ The anchored path (1 h before the RUN) is correct and unchanged. The bug was the FALLBACK:
-    /// `logsSince(.trace)` is 1 h before NOW, so a bundle exported for an incident that happened days
-    /// ago pulled an empty window and produced a bundle with no logs and no crashes in it, silently
-    /// (G49). Both sections had their own copy of the same expression, so both were wrong.
+    // Why: an unanchored trace scope must not use "1 h before now": an incident from days ago
+    // would export empty logs and crashes.
+    /// Start of the export window, shared by the logs and crashes sections.
     private static func exportWindowStart(scope: DiagnosticBundle.Scope, anchor: Date?) -> Date {
         if let anchor { return anchor.addingTimeInterval(-3600) }
         if case .trace(let traceID) = scope {
@@ -476,13 +451,9 @@ enum BundleExporter {
         try writeJSON(snapshot, to: prefsDir.appendingPathComponent("app_settings.json"), sanitize: true, level: level)
     }
 
-    /// The keys that may leave the user's machine in a diagnostic bundle.
-    ///
-    /// ⚠️ ALLOWLIST, never a denylist: anything not named here does NOT appear in the bundle, so
-    /// a new UserDefaults key added anywhere in the app is private by default. Exposed `static`
-    /// (it was a local `let` inside the writer) for one reason — this is the control that decides
-    /// what leaves the machine, and it had NO TEST. A privacy boundary that cannot be asserted is
-    /// one refactor away from silently widening.
+    // Why: an allowlist, never a denylist: a key not named here is absent from the bundle,
+    // so new UserDefaults keys are private by default.
+    /// The keys that may leave the user's machine in a diagnostic bundle. Exposed `static` so tests can assert it.
     static let exportablePreferenceKeys: [String] = [
             AppSettings.developerModeKey,
             AppSettings.useStreamingResponseKey,
@@ -493,17 +464,15 @@ enum BundleExporter {
             AppSettings.coreIntelligenceModelKey,
             AppSettings.ciFeatureRAGRewritingKey,
             AppSettings.ciFeatureSuggestionKey,
-            AppSettings.ciFeatureMorningBriefKey,
+            AppSettings.ciFeatureBriefingKey,
             AppSettings.ciFeatureUserPersonalKey,
             AppSettings.ciFeatureResponseSynthesisMLXKey,
             AppSettings.ciFeatureResponseSynthesisOllamaKey,
             AppSettings.ciFeatureResponseSynthesisRemoteKey,
             AppSettings.ciFeatureHistoryCompactionKey,
             AppSettings.notificationsEnabledKey,
-            // Whether macOS system delivery is on. Absent means ON. Exported because "I stopped
-            // getting notifications" is otherwise undebuggable from a bundle: the master switch,
-            // this per-channel switch and the OS permission are three independent gates and a
-            // report that names only the first cannot distinguish them.
+            // Whether macOS system delivery is on (absent means on). Exported because the master switch, this per-channel switch
+            // and the OS permission are independent gates, and a report naming only one cannot tell them apart.
             AppSettings.localNotificationsEnabledKey,
             AppSettings.chatOpsNotificationsEnabledKey,
             AppSettings.chatFontFamilyKey,
@@ -512,7 +481,7 @@ enum BundleExporter {
             AppSettings.speechPlaybackRateKey,
             AppSettings.speechPlaybackVoiceKey,
             AppSettings.speechPauseOnCodeKey,
-        AppSettings.morningBriefIncludeAISummaryKey,
+        AppSettings.briefingIncludeAISummaryKey,
             // Orb. Exported because a voice bug report is undebuggable without knowing how the
             // user had activation and endpointing configured — none of these carry user content.
             AppSettings.orbEnabledKey,
@@ -533,10 +502,7 @@ enum BundleExporter {
     ]
 
     /// Extracts exactly the allowlisted preferences from a defaults store.
-    ///
-    /// Pure and injectable so the allowlist can be tested against a store deliberately seeded
-    /// with secrets — the only way to assert "anything not in this set does NOT appear" rather
-    /// than merely reading the list and hoping the writer honours it.
+    /// Pure and injectable, so the allowlist can be tested against a store seeded with secrets.
     static func exportablePreferenceSnapshot(from defaults: UserDefaults) -> [String: AnyCodable] {
         var snapshot: [String: AnyCodable] = [:]
         for key in exportablePreferenceKeys {
@@ -569,23 +535,18 @@ enum BundleExporter {
         let rating = EncodableRating(rating: feedback.rating?.rawValue)
         try writeJSON(rating, to: fbDir.appendingPathComponent("rating.json"), sanitize: false)
 
-        // Screenshot — raw Data from the feedback view. Written verbatim; we don't
-        // attempt to re-encode or sanitize pixel content. Users who include it accept
-        // that the screenshot may contain UI content including conversation text.
+        // Screenshot: raw data from the feedback view, written verbatim (not re-encoded or sanitized); it may contain
+        // conversation text, which users accept by including it.
         if includeScreenshot, let imgData = feedback.screenshotData {
             try imgData.write(to: fbDir.appendingPathComponent("screenshot.png"))
         }
     }
 
-    // MARK: - Crashes section (§12.1)
+    // MARK: - Crashes section
 
-    /// Folds the app's crash/hang reports into the bundle: this app's `.ips`/`.hang`
-    /// files from ~/Library/Logs/DiagnosticReports (readable because un-sandboxed) plus
-    /// persisted MetricKit payloads. Window matches the logs section (trace start − 1h
-    /// when trace-scoped). Reports are text; each passes the sanitizer before writing —
-    /// `.ips` files are full of user paths. Best-effort: an unreadable report is skipped,
-    /// never fails the export. No crashes → no crashes/ directory (predictable layout
-    /// matters less than not implying a crash where there was none).
+    /// Folds the app's crash/hang reports into the bundle: its `.ips`/`.hang` files from ~/Library/Logs/DiagnosticReports
+    /// plus persisted MetricKit payloads, in the same window as the logs section; each passes the sanitizer.
+    /// Best-effort: an unreadable report is skipped, and with no crashes there is no crashes/ directory.
     private static func writeCrashes(
         scope: DiagnosticBundle.Scope,
         anchor: Date?,
@@ -721,10 +682,8 @@ enum BundleExporter {
 }
 
 // MARK: - Encodable wrappers
-//
-// The metrics and preferences sections need Codable-compatible wrappers because
-// the source types either don't conform (tuples in CircuitBreakerStats.topOffendingTools)
-// or contain heterogenous `Any` values (UserDefaults).
+// The metrics and preferences sections need Codable wrappers because the source types either don't conform (tuples in
+// `CircuitBreakerStats.topOffendingTools`) or hold heterogeneous `Any` values (UserDefaults).
 
 private struct EncodableToolStats: Codable {
     let schemaVersion: String
@@ -867,11 +826,8 @@ private struct EncodableRating: Codable {
     let rating: String?
 }
 
-/// Type-erased wrapper for UserDefaults values. Handles Bool/Int/Double/String
-/// natively; anything else gets stringified via `String(describing:)` so the
-/// JSON encoder doesn't throw on unknown types.
-/// Internal (was `private`) so the export allowlist's extraction seam can return it and be
-/// tested. An inert Codable box — widening its visibility carries no privacy meaning.
+/// Type-erased wrapper for UserDefaults values: Bool/Int/Double/String natively, anything else stringified via
+/// `String(describing:)` so the JSON encoder never throws. Internal so the allowlist's extraction seam can return it.
 struct AnyCodable: Codable {
     let value: Any
 

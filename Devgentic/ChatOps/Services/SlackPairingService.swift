@@ -4,37 +4,22 @@
 //  SlackPairingService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
-/// Manages the pairing flow between the Devgentic app and a Slack channel.
-///
-/// Flow:
-/// 1. User enters bot token (xoxb-) and app token (xapp-) in Settings -> taps "Validate"
-/// 2. Service validates bot token via `auth.test`
-/// 3. Validates app token by opening a Socket Mode connection
-/// 4. Generates a 6-digit PIN -> displayed in Settings UI
-/// 5. User types `PAIR <pin>` in their chosen Slack channel
-/// 6. On match: stores channel_id, transitions to `.connected`
-/// 7. On timeout (5 min): transitions to `.disconnected`
+/// Manages the pairing flow between the Devgentic app and a Slack channel: validates the bot and app tokens, shows a
+/// 6-digit PIN, and completes when the user sends `PAIR <pin>` in a channel. On match it stores the channel id and
+/// becomes `.connected`; after 5 minutes it becomes `.disconnected`.
 @Observable @MainActor
 final class SlackPairingService {
 
-    /// ⚠️⚠️ SHARED, BECAUSE A PAIRING WINDOW OUTLIVES THE VIEW THAT STARTS IT. This was
-    /// `@State private var` in `ChatOpsSettingsView`, so the service died with the pane while its
-    /// `pairingTask` did not — `pollForPairing` is an instance method, so the task retains `self`
-    /// for the full 300-second window and no pairing service has a `deinit`. Clicking Chat, or any
-    /// other settings category, tore the view down (`MainApplicationView` renders the settings
-    /// container inside an `if !router.isShowingChat` gate). Coming back rebuilt a FRESH, idle
-    /// service while `connectionState` — which lives on the shared config — still said
-    /// `.awaitingPairing`, so the PIN card rendered with a Cancel button that cancelled a nil task.
-    /// Starting again then ran TWO windows against one bot token, and the user's correct PIN was
-    /// consumed by whichever poll held the connection — counted as a FAILED attempt against their
-    /// own origin by the orphan. One instance means `cancelPairing()` and `startPairing()` always
-    /// reach the window that is actually running.
+    // Why: a pairing window outlives the view that starts it (its poll task retains `self` for 300 s), so a per-view instance
+    // would orphan a window and let a second start consume the user's PIN.
+    /// The shared pairing service; one instance means `cancelPairing()` and `startPairing()` always reach the window that
+    /// is actually running.
     static let shared = SlackPairingService()
 
 
@@ -45,18 +30,9 @@ final class SlackPairingService {
 
     private var pairingTask: Task<Void, Never>?
 
-    /// A wall-clock watchdog for the pairing window.
-    ///
-    /// ⚠️⚠️ THE DEADLINE CANNOT LIVE INSIDE THE EVENT LOOP, WHICH IS WHERE IT USED TO LIVE ON TWO OF
-    /// THE THREE PLATFORMS. Discord and Slack tested `Date() < deadline` as the first statement of a
-    /// `for await` BODY, so it could only run when the stream yielded — and neither stream emits
-    /// anything periodic (heartbeats and ACKs are consumed internally and yield nothing). On a quiet
-    /// channel the loop simply parked in `next()`: hours later the PIN was still live, the WebSocket
-    /// still open, and the credentials still sitting there with no owning session. Worse, the first
-    /// message to arrive AFTER the deadline was consumed by the expiry check and discarded — so a
-    /// user returning twenty minutes later and typing the correct PIN saw it silently do nothing.
-    /// Telegram got this right by bounding the LOOP (`while … && Date() < deadline`) rather than its
-    /// body; this watchdog gives all three the same guarantee independently of traffic.
+    // Why: the deadline cannot be checked inside the event loop: the stream yields nothing periodically, so on a quiet
+    // channel the loop parks in `next()` and the PIN never expires.
+    /// A wall-clock watchdog for the pairing window, independent of channel traffic.
     private var deadlineTask: Task<Void, Never>?
     private var currentPIN: String?
     private let pairingTimeout: TimeInterval = 300
@@ -87,7 +63,7 @@ final class SlackPairingService {
         config.slackAppToken = appToken
         config.slackConnectionState = .awaitingPairing(pin: pin)
 
-        // ⚠️ THE PIN IS NOT LOGGED — see the Telegram twin.
+        // The PIN is not logged; see the Telegram twin.
         logger.info("Slack pairing window opened for \(self.pairingTimeout)s.")
 
         armDeadline(pin: pin)
@@ -110,7 +86,7 @@ final class SlackPairingService {
     func disconnect() async {
         cancelPairing()
 
-        // ⚠️ Register KC-33, Slack folding TWO credentials: either one unreadable is an outage.
+        // Slack folds two credentials: either one unreadable is an outage.
         let botState = ChatOpsConfigManager.credentialState(
             AppSettings.chatOpsSlackBotTokenKey, keychain: config.keychain, logger: logger)
         let appState = ChatOpsConfigManager.credentialState(
@@ -164,9 +140,8 @@ final class SlackPairingService {
                 let attempt = PairingAttemptPolicy.classify(text, expectedPIN: pin)
                 guard attempt != .unrelated else { continue }
 
-                // ⚠️ THE SENDER, NOT THE CHANNEL — see the note in DiscordPairingService. Slack's
-                // `user` is optional on a message event, and an unattributable one must not be
-                // counted against everybody.
+                // Counts the sender, not the channel (see `DiscordPairingService`): Slack's `user` is optional on a message event,
+                // and an unattributable one must not be counted against everybody.
                 guard let origin = slackEvent.user else {
                     logger.error("[CHATOPS] A Slack pairing message arrived with no sender, so it cannot be attributed. CONSEQUENCE: it is ignored and NOT counted against any origin's attempts — counting it globally is what would let an unattributable message lock the user out.")
                     continue
@@ -187,31 +162,20 @@ final class SlackPairingService {
                     continue
                 }
 
-                // ⚠️⚠️ [NEW-5] A BARE `continue` HERE DISCARDED A CORRECT PIN. By this line
-                // `PairingAttemptPolicy.classify` has already ruled the message a MATCH — the
-                // `.wrongPIN` arm returned above — so this is the user's real PIN being dropped with
-                // no trace, three lines before the assignments that would have completed pairing.
-                // Every neighbouring refusal in this loop names its consequence; this one said
-                // nothing, so a user whose pairing silently failed had no way to tell it apart from
-                // a bot that never received the message at all.
-                //
-                // ⚠️ STILL A `continue`, NOT A FAILURE: without a channel there is no address to
-                // listen on, so pairing genuinely cannot complete — but the window stays open and the
-                // user only has to send the PIN again from a normal channel message.
+                // The message already matched the PIN, so a missing channel means pairing cannot complete; log the consequence
+                // rather than drop a correct PIN silently. The window stays open for a resend.
                 guard let channelID = slackEvent.channel else {
                     logger.error("[CHATOPS] A correct Slack PIN arrived on an event carrying NO channel, so pairing could not complete. CONSEQUENCE: nothing was paired and the window stays OPEN — send the PIN again as an ordinary channel message. Pairing needs a channel because that address is what the bridge listens on; recording the user alone would leave nowhere to receive commands.")
                     continue
                 }
 
-                // ⚠️ See the Telegram twin: `origin` (the Slack `user`) is what proved it knew the
-                //   PIN, and a Slack channel id identifies a ROOM, not a person.
+                // `origin` (the Slack `user`) proved knowledge of the PIN; a channel id identifies a room, not a person. See the
+                // Telegram twin.
                 config.slackAuthorizedUserID = origin
                 config.slackAuthorizedChannelID = channelID
                 config.isSlackEnabled = true
-                // ⚠️ THE WINDOW IS OVER THE MOMENT IT SUCCEEDS. `PairingWindowExpiry` would no-op anyway —
-                // the state no longer names this PIN — but leaving the watchdog armed keeps a task alive for
-                // the rest of the five minutes and writes a puzzling "no longer the live one" line when it
-                // fires. Disarming here says what actually happened.
+                // The window is over once it succeeds; disarm the watchdog so it does not stay alive or log a confusing line when it
+                // fires.
                 deadlineTask?.cancel()
                 deadlineTask = nil
                 config.slackConnectionState = .connected(chatID: 0) // chatID not meaningful for Slack
@@ -250,13 +214,9 @@ final class SlackPairingService {
         }
     }
 
-    /// Arms the wall-clock watchdog for this window. See `deadlineTask`.
-    ///
-    /// ⚠️ It CANCELS the polling task rather than trying to unwind it from the outside: cancellation
-    /// is what makes an `AsyncStream`'s `next()` return, which is the only way to get a loop parked
-    /// on a silent channel to move at all. Expiry is then reported here, because the cancelled loop's
-    /// own terminal arm deliberately does nothing when `Task.isCancelled` — it cannot tell a timeout
-    /// from the user pressing Cancel, and `PairingWindowExpiry` is what knows the difference.
+    /// Arms the wall-clock watchdog for this window. See `deadlineTask`. It cancels the polling task, which is what makes
+    /// a parked `AsyncStream` `next()` return; expiry is reported here because the cancelled loop cannot tell a timeout
+    /// from the user pressing Cancel.
     private func armDeadline(pin: String) {
         deadlineTask?.cancel()
         let timeout = pairingTimeout

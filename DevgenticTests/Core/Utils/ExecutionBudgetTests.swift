@@ -4,8 +4,7 @@
 //  ExecutionBudgetTests.swift
 //  DevgenticTests
 //
-//  Nesting rule (owner decision 2026-09-27, option B, 60 s reserve): an inner limit is
-//  min(own, outer remaining − reserve), so it fires first and the outer owner keeps time to respond.
+//  Created by Raj Singh.
 //
 
 import XCTest

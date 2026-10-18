@@ -4,20 +4,7 @@
 //  WorkingMemoryFeedbackLoopTests.swift
 //  DevgenticTests
 //
-//  A failed parse must not put the model's own malformed output back in front of it.
-//
-//  ⚠️ THE DEFECT THIS PINS. `ReActAgentExecutor` recorded `step.reasoning` into working memory on
-//  every iteration, before termination evaluation and without consulting `parseOutcome`. On a typed
-//  failure `step.reasoning` is not reasoning — it is the raw unparseable blob
-//  (`HeuristicCognitiveParser.swift:197` returns `reasoning: rawText`). So each failure wrote the
-//  garbage into the scratchpad, the next prompt showed it back as `[Step N thought]`, and the model
-//  copied it.
-//
-//  In the 2026-09-13 gemma:7b agent run the scratchpad reached 13 copies of one broken JSON object,
-//  and from iteration 4 onward every response contained `“arguments”...[truncated]` — the truncation
-//  marker appended by `perEntryCap`, i.e. OUR text, proving the model was transcribing its own
-//  recorded output rather than generating. Outputs went byte-identical, the scratchpad hit 176% of
-//  budget carrying nothing but that garbage, and the run died at iteration 14 after 75 seconds.
+//  Created by Raj Singh.
 //
 
 import XCTest

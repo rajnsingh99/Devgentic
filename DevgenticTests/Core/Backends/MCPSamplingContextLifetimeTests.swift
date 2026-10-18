@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MCPSamplingContextLifetimeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-18: a sampling context lives exactly as long as the run that registered it.
-//
-//  ⚠️ THE DEFECT. `unregister` had zero callers. Contexts (each with a full ProviderConfig, API key
-//  included) accumulated forever, and a server sampling outside any run was served by the newest
-//  STALE one — approval raised in an unrelated conversation, billed to a finished run's profile.
+//  Created by Raj Singh.
 //
 
 import XCTest

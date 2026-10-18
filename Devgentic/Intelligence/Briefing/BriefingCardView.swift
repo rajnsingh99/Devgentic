@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  MorningBriefCardView.swift
+//  BriefingCardView.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
-//  Redesigned — premium AI insight card with glass-morphism styling.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// Displays the Morning Brief as a premium AI-powered insight card.
+/// Displays the Briefing as a premium AI-powered insight card.
 /// Each conversation gets a summary + suggestion, tappable to navigate.
-struct MorningBriefCardView: View {
+struct BriefingCardView: View {
 
-    let brief: MorningBrief
+    let brief: Briefing
     let onNavigate: (BriefItemDestination) -> Void
     let onDismiss: () -> Void
 
@@ -115,7 +114,7 @@ struct MorningBriefCardView: View {
                 .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Morning Brief")
+                    Text("Briefing")
                         .font(.system(size: 14, weight: .semibold, design: .rounded)) // Fixed size: intentional (rounded design heading)
                         .foregroundColor(theme.primaryText)
 
@@ -126,20 +125,6 @@ struct MorningBriefCardView: View {
             }
 
             Spacer()
-
-            // AI badge
-            HStack(spacing: 4) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 9)) // Fixed size: intentional (badge/chip text)
-                    .accessibilityHidden(true)
-                Text("AI Generated")
-                    .font(.system(size: 9, weight: .semibold)) // Fixed size: intentional (badge/chip text)
-            }
-            .foregroundColor(theme.accentColor)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(theme.accentColor.opacity(0.1))
-            .clipShape(Capsule())
 
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
@@ -276,7 +261,7 @@ struct MorningBriefCardView: View {
 // MARK: - Loading State View
 
 /// Shown while the brief is being generated.
-struct MorningBriefLoadingView: View {
+struct BriefingLoadingView: View {
     @Environment(\.appTheme) private var theme
     @State private var pulseOpacity: Double = 0.4
 

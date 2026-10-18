@@ -4,8 +4,7 @@
 //  SynthesisOptInTests.swift
 //  DevgenticTests
 //
-//  Pins the per-provider-family opt-in decision.
-//  Pure — no IntelligenceCoreService, no MLX model load.
+//  Created by Raj Singh.
 //
 
 import XCTest

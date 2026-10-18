@@ -4,8 +4,7 @@
 //  TurnFileChangesTests.swift
 //  DevgenticTests
 //
-//  The "Edited N files" card under a Code turn (2026-10-04). Built from each write's persisted
-//  `ActionEffect`; the session-only snapshots only sharpen counts for a file edited twice.
+//  Created by Raj Singh.
 //
 
 import XCTest

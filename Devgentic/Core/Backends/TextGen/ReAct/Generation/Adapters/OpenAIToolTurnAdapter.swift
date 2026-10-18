@@ -4,13 +4,13 @@
 //  OpenAIToolTurnAdapter.swift
 //  Devgentic
 //
-//  Native-turn serializer for OpenAI's Chat Completions API.
-//  Differs from Ollama's shape in one place: OpenAI requires `arguments`
-//  to be a stringified JSON blob (not a dict), per the API spec.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Native-turn serializer for OpenAI's Chat Completions API.
+/// Unlike Ollama's shape, `arguments` must be a stringified JSON blob rather than a dict.
 struct OpenAIToolTurnAdapter: ToolTurnAdapter {
 
     func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?) -> [String: Any] {

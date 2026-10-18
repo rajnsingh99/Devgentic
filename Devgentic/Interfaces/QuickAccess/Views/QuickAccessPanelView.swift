@@ -4,7 +4,7 @@
 //  QuickAccessPanelView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 07/05/25.
+//  Created by Raj Singh.
 //
 
 import AppKit
@@ -33,9 +33,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     let transportHostID = UUID()
     private let logger = DGLogger(category: "QuickAccessPanelView")
 
-    /// Invoked from `windowWillClose` so the owner (AppDelegate) can drop its strong
-    /// reference on every close path (Escape / close button / hotkey toggle / replace).
-    /// [QA revival P0]
+    /// Invoked from `windowWillClose` so the owner (AppDelegate) can drop its strong reference on every close path.
     var onPanelWillClose: (() -> Void)?
 
     /// [M9] Set by the hosted content view: routes ⌘Return / Escape to a pending in-panel HITL
@@ -51,18 +49,15 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     private var frameBeforeZoom: NSRect?
     private var isProgrammaticallyResizing = false
 
-    /// [Unified card] Whether the panel is in the EXPANDED state (top bar + transcript visible).
-    /// Set from the content view's explicit resize intent — NOT inferred from frame height.
-    /// Height inference broke once the collapsed input card could grow (multi-line editor,
-    /// attachment chips): a 140pt collapsed card would read as "expanded".
+    /// Whether the panel is in the expanded state (top bar + transcript visible), set from the content view's explicit
+    /// resize intent, not inferred from frame height, since a collapsed card can grow.
     private var isExpandedState: Bool
     
     private let shouldResumeSession: Bool
     private let forceExpandVisual: Bool
 
-    // [QA revival P1a] Shared graph threaded in from AppDelegate → QuickAccessContentView,
-    // which builds its QuickAccessSessionViewModel from it. Set before super.init so
-    // setupContentView can hand them to the SwiftUI root.
+    // Shared graph threaded in from AppDelegate to QuickAccessContentView, which builds its session view model from it; set
+    // before `super.init` so `setupContentView` can hand it to the SwiftUI root.
     private let mainAppViewModel: MainApplicationViewModel
     private let themeManager: ThemeManager
 
@@ -145,25 +140,18 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         backgroundColor = .clear
         hasShadow = false
         level = .floating
-        // [drag-vs-select fix] Do NOT use isMovableByWindowBackground — it makes AppKit treat a
-        // drag ANYWHERE (including over the input field) as a window move, stealing text selection.
-        // The panel is instead moved by an explicit drag surface behind the content
-        // (QuickAccessContentView.WindowDragArea), which sits in front of the glass but behind the
-        // controls, so empty/chrome areas drag while the text field keeps its own selection.
+        // Do not use `isMovableByWindowBackground`: a drag anywhere, even over the input field, would move the window and steal
+        // text selection. The panel moves via the drag surface behind the content (`QuickAccessContentView.WindowDragArea`).
         isMovableByWindowBackground = false
         isMovable = true
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
-        // [QA revival P0] Float over the user's current app. NSPanel defaults
-        // hidesOnDeactivate=true, which orderOut()s the panel the instant the user
-        // clicks another app — defeating the whole quick-entry-over-your-work premise
-        // (and firing a hide, not windowWillClose, so session keys never get stamped).
-        // Keep it visible until an explicit dismissal (Escape / close button / hotkey).
+        // Float over the user's current app: NSPanel's default `hidesOnDeactivate` would hide the panel when another app is
+        // clicked; keep it visible until an explicit dismissal (Escape / close button / hotkey).
         hidesOnDeactivate = false
-        // [QA revival P0] AppDelegate keeps a strong `contentWindow` reference; NSPanel's
-        // default isReleasedWhenClosed=true would double-release on close (AppKit release
-        // + ARC). Matches SimplePromptWindowManager / AdvancedPromptEditor.
+        // AppDelegate keeps a strong `contentWindow` reference, so NSPanel's default `isReleasedWhenClosed = true` would
+        // double-release on close.
         isReleasedWhenClosed = false
         self.minSize = NSSize(width: initialMinWidth, height: collapsedHeight)
         self.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -197,10 +185,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         self.hostingView = hostingView
         self.contentView = hostingView
 
-        // [H3] Pin the panel's appearance to the app theme so the Liquid Glass backdrop renders
-        // in the theme's light/dark mode — otherwise a dark-theme user on a Light-Mode Mac gets
-        // light glass under the (theme-token) chrome and the input text washes out. A theme with
-        // no scheme preference (nil) follows the system, which is the intended behavior there.
+        // Pin the panel's appearance to the app theme so the Liquid Glass backdrop matches the theme's light/dark mode; a theme
+        // with no scheme preference follows the system.
         if let scheme = themeManager.currentTheme.colorScheme {
             self.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
         } else {
@@ -209,10 +195,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
 
         self.setContentSize(self.frame.size)
 
-        // [Fixed position] Every summon presents at the STANDARD spot — horizontally centered,
-        // bottom edge 30% above the screen bottom — on the screen under the pointer ([L9],
-        // multi-display). Saved X/Y is deliberately no longer consumed (Spotlight-style
-        // predictability); the expanded W/H size memory remains.
+        // Every summon presents at the standard spot (horizontally centered, bottom edge 30% above the screen bottom) on the
+        // screen under the pointer; saved X/Y is not consumed, while the expanded W/H size memory remains.
         if let screen = QuickAccessPanelView.activeScreen() {
             self.setFrameOrigin(standardOrigin(for: self.frame.size, on: screen))
         } else {
@@ -231,8 +215,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         )
     }
     
-    /// SIZE only — the position is always stamped by setupContentView via standardOrigin
-    /// ([Fixed position]: saved X/Y no longer consumed; expanded W/H size memory kept).
+    /// Size only: the position is always stamped by `setupContentView` via `standardOrigin`; the expanded W/H size memory is
+    /// kept.
     private static func calculateInitialFrame(shouldOpenExpanded: Bool, collapsedHeight: CGFloat, defaultExpandedHeight: CGFloat, minWidth: CGFloat) -> NSRect {
         let defaults = UserDefaults.standard
         var width: CGFloat
@@ -260,9 +244,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             ?? NSScreen.main
     }
 
-    /// [Unified card] `expanded` is the view's EXPLICIT state intent — previously inferred from
-    /// `newHeight > collapsedHeight`, which broke once the collapsed card could grow (multi-line
-    /// editor / chips): a tall collapsed card would jump to the saved 400pt+ expanded frame.
+    /// `expanded` is the view's explicit state intent, not inferred from `newHeight > collapsedHeight`, since a tall
+    /// collapsed card would otherwise jump to the saved expanded frame.
     func resizePanelProgrammatically(newHeight: CGFloat, expanded: Bool) {
         // [L9] Operate on the panel's current screen (multi-display), not always NSScreen.main.
         guard let screen = self.screen ?? Self.activeScreen() else { return }
@@ -366,10 +349,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        // [sa-5] Deregister this panel's transcript as a speech-transport host on the AppKit
-        // close route too. The transcript's own `.onDisappear` does the same under the SAME id,
-        // so whichever fires (or both) leaves the host set correct; without this, a close that
-        // does not deliver `onDisappear` would leave the reader speaking with no Stop on screen.
+        // Deregister this panel's transcript as a speech-transport host on the AppKit close route too (its `.onDisappear` uses
+        // the same id), so a close that does not deliver `onDisappear` cannot leave the reader speaking with no Stop on screen.
         SpeechService.shared.transportHostDidDisappear(transportHostID)
         let defaults = UserDefaults.standard
         let wasExpanded = isExpandedState && self.frameBeforeZoom == nil
@@ -381,8 +362,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             saveFrameToUserDefaults(frame: self.frame)
         }
 
-        // [QA revival P0] Let the owner drop its strong reference so the next summon
-        // builds a fresh panel instead of dereferencing a closed one.
+        // Let the owner drop its strong reference so the next summon builds a fresh panel instead of dereferencing a closed
+        // one.
         onPanelWillClose?()
     }
 
@@ -430,22 +411,14 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     // Close Logic remains the same
     func closePanel() {
         frameBeforeZoom = nil
-        // [two-panel fix] orderOut BEFORE close — a bare close() can leave a non-activating
-        // floating panel on screen (so Escape/close-button/handoff appear to "not close" it, and a
-        // subsequent open stacks a second panel). Matches AppDelegate.closeContentWindow.
+        // `orderOut` before `close`: a bare `close()` can leave a non-activating floating panel on screen and let a later open
+        // stack a second one. Matches `AppDelegate.closeContentWindow`.
         self.orderOut(nil)
         self.close()
     }
 
-    // [QA revival P2e] Hand this conversation to the main window: release panel ownership (so
-    // the next panel open starts fresh — mirrors the forward transfer clearing main selection),
-    // post the navigate notification (observed in MainApplicationView), bring the main window
-    // forward, and close the panel.
-    // [Advisory] Settings deep-link from the panel's advisory banner: activate the
-    // main window and route it to the profile editor. Mirrors continueInMainWindow's
-    // activate-first guard, but the conversation does NOT transfer — the overlay
-    // pointer stays so a later summon resumes the panel session. The panel closes so
-    // a floating always-on-top window doesn't sit over the settings it just opened.
+    // Settings deep-link from the advisory banner: activate the main window and open the profile editor. The conversation
+    // does not transfer, so a later summon resumes the panel session; the panel closes so it does not cover the settings.
     func openProfileSettings(_ profileID: UUID) {
         guard AppDelegate.shared?.activateMainWindow() == true else {
             logger.warning("Open-profile-settings aborted — no main window to receive the navigation; keeping the panel open.")
@@ -460,10 +433,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     }
 
     func continueInMainWindow(_ conversationID: UUID) {
-        // [C8] Only complete the handoff if there's a main window to receive it. The
-        // openConversationNotification observer lives in MainApplicationView, so with the main
-        // window closed the post drops the conversation — and clearing the pointer FIRST (the
-        // old order) would orphan it. Activate first; bail (keeping the panel + pointer) if none.
+        // Complete the handoff only if a main window can receive it (the observer lives in MainApplicationView): activate first
+        // and bail, keeping the panel and pointer, if none; clearing the pointer first would orphan the conversation.
         guard AppDelegate.shared?.activateMainWindow() == true else {
             logger.warning("Continue-in-main-window aborted — no main window to receive the handoff; keeping the panel conversation intact.")
             return
@@ -481,21 +452,16 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     override var canBecomeKey: Bool { return true }
     override var canBecomeMain: Bool { return true }
 
-    // [QA revival P0] Escape dismisses the panel. In collapsed mode there is no visible
-    // close button, and with hidesOnDeactivate=false a click outside no longer hides it,
-    // so Escape is the primary keyboard dismissal (matches Spotlight-style entry panels).
+    // Escape dismisses the panel: collapsed mode has no visible close button and a click outside does not hide it.
     override func cancelOperation(_ sender: Any?) {
-        // [M9] If a HITL request is pending in the panel, Escape answers it (deny/cancel) rather
-        // than dismissing the panel and leaving the run parked invisibly (only the menu-bar badge
-        // would hint at it). Falls through to close only when nothing is pending.
+        // If a HITL request is pending in the panel, Escape answers it (deny/cancel) rather than dismissing and leaving the run
+        // parked invisibly; it falls through to close only when nothing is pending.
         if hitlKeyHandler?(.cancel) == true { return }
         closePanel()
     }
 
-    // [QA revival P0] The panel is a .nonactivatingPanel and AppDelegate intentionally
-    // does not NSApp.activate on show, so the app's main-menu key equivalents are not
-    // dispatched while the app is inactive. Route the standard editing commands to the
-    // panel's first responder so Cut/Copy/Paste/Select-All/Undo/Redo work in the field.
+    // The panel is non-activating, so main-menu key equivalents do not dispatch while the app is inactive; route the
+    // standard editing commands to the panel's first responder so Cut/Copy/Paste/Select-All/Undo/Redo work.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.type == .keyDown, event.modifierFlags.contains(.command) {
             // [M9] ⌘Return confirms a pending in-panel HITL (approve tool / approve plan) without
@@ -503,9 +469,8 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
             if event.charactersIgnoringModifiers == "\r", hitlKeyHandler?(.confirm) == true {
                 return true
             }
-            // [L8] ⌘W closes the panel and ⌘Q quits the app. The app is inactive (non-activating
-            // panel), so these standard menu key-equivalents don't dispatch on their own — without
-            // this, they silently do nothing while the panel is key.
+            // Cmd-W closes the panel and Cmd-Q quits the app: the app is inactive, so these menu key-equivalents do not dispatch on
+            // their own.
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "w": closePanel(); return true
             case "q": NSApp.terminate(nil); return true

@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  XLSXExtractorTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1 + 2: XLSX extraction via CoreXLSX with real fixture file.
+//  Created by Raj Singh.
 //
 
 import XCTest

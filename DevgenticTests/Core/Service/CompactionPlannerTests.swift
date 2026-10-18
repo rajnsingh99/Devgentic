@@ -4,11 +4,7 @@
 //  CompactionPlannerTests.swift
 //  DevgenticTests
 //
-//  Trigger and batch arithmetic for history compaction — pure, no IntelligenceCore.
-//
-//  This coverage was impossible before `compactIfNeeded` was split: every path that got
-//  past the guards ended in an IC call, so exercising the math meant loading an MLX model.
-//  `planCompaction` is the decision half, with the IC context window injected.
+//  Created by Raj Singh.
 //
 
 import XCTest

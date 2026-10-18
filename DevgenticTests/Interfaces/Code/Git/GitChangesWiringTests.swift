@@ -4,8 +4,7 @@
 //  GitChangesWiringTests.swift
 //  DevgenticTests
 //
-//  How the Git Changes store is connected to the app: which project it follows, where the panel
-//  may mount, what the pill shows, and that every refresh trigger actually fires.
+//  Created by Raj Singh.
 //
 
 import XCTest

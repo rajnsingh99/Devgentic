@@ -4,11 +4,7 @@
 //  OrbCoreVisual.swift
 //  Devgentic
 //
-//  [Orb] Modern Siri / Apple Intelligence style Voice Orb.
-//  Replaces the legacy mechanical arc-reactor HUD with a fluid, multi-gradient
-//  glowing orb that breathes calmly in standby, scales reactively to microphone
-//  audio, flows with expanding ripple waves when speaking, and pulses with
-//  warm amber/gold intelligence when processing.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

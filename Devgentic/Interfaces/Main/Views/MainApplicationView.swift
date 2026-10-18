@@ -16,12 +16,9 @@ private let logger = DGLogger(category: "MainApplicationView")
 // MARK: - Localized Titles
 
 extension MainApplicationViewModel.InterfaceMode {
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-    /// invisible to the String Catalog extractor and would have shipped untranslated inside
-    /// otherwise-translated chrome. `rawValue` is a PERSISTENCE key — `SettingsCoordinator`
-    /// round-trips it through UserDefaults (`devgentic.interfaceMode`) — so it must never change.
-    /// Declared here rather than beside the enum so the view-model file stays view-layer free.
+    /// User-facing name, separate from `rawValue` so it is localized via the String Catalog; `rawValue` is a persistence key
+    /// (`devgentic.interfaceMode` in UserDefaults) and must never change. Declared here to keep the view-model file
+    /// view-layer free.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .chat:     return "Chat"
@@ -46,12 +43,9 @@ struct MainApplicationView: View {
     
     @AppStorage("sidebar.isVisible") private var isSidebarVisible: Bool = true
     @AppStorage("sidebar.paneWidth") private var currentSidebarPaneWidth: Double = 320
-    /// Same key the Code Viewer panel persists its divider width to. Read here so split
-    /// mode can inset the chat by the panel's width. Written on drag END only — a
-    /// UserDefaults write per mouse move spams the preferences daemon — so it is the
-    /// AT-REST width; the in-flight width comes from `codeViewerLiveDragWidth` instead
-    /// (see `chatSplitInset`), which is what keeps the chat column pinned to the divider
-    /// for the whole drag rather than a full drag behind it.
+    /// Same key the Code Viewer panel persists its divider width to, read so split mode can inset the chat by the panel's
+    /// width. Written on drag end only, so it is the at-rest width; the in-flight width comes from
+    /// `codeViewerLiveDragWidth`.
     @AppStorage("codeViewerPanelWidth") private var codeViewerPanelWidth: Double = 600
     @State private var showModePicker: Bool = true
     @State private var isCommandPalettePresented: Bool = false
@@ -89,22 +83,13 @@ struct MainApplicationView: View {
                                           isPresented: chatHistoryViewModel.isGitChangesPanelPresented)
     }
 
-    /// Trailing inset the chat area yields to the Code Viewer or Background Tasks in split mode.
-    /// Zero in overlay/full (overlay covers; full replaces). The desired inset is the
-    /// panel's full FOOTPRINT — content width plus its divider — plus a breathing gutter,
-    /// so chat text doesn't sit flush against the divider edge. Capped so the chat never
-    /// drops below `splitModeMinChatWidth` — past that the panel overlaps the difference,
-    /// which is the historic overlay behaviour rather than an unreadable sliver of chat.
+    /// Trailing inset the chat area yields to the Code Viewer or Background Tasks in split mode (zero in overlay/full): the
+    /// panel's footprint plus a gutter, capped so the chat never drops below `splitModeMinChatWidth`; past that the panel
+    /// overlaps.
     private var chatSplitInset: CGFloat {
         guard isAnyPanelInSplit else { return 0 }
-        // [CF-15] The IN-FLIGHT drag width when one is running, else the persisted value.
-        // `codeViewerPanelWidth` only updates on drag end (see the doc above), so without
-        // this the panel's edge moved live while this inset held still for the whole
-        // drag — the panel slid over the chat text, then the chat jumped to its new
-        // column in one animated step on release. The panel publishes the
-        // live value onto the view model per drag tick for exactly this reader — which
-        // only pins the column because `chatSplitInsetAnimation` drops the ease for the
-        // duration of the drag; an animated per-tick inset trails just as visibly.
+        // The in-flight drag width when a drag is running, else the persisted value, so the chat column stays pinned to the
+        // divider; that only works because `chatSplitInsetAnimation` drops the ease during the drag.
         let liveWidth = chatHistoryViewModel.codeViewerLiveDragWidth ?? codeViewerPanelWidth
         let trailingMargin: CGFloat = 12
         let desired = CGFloat(liveWidth)
@@ -118,7 +103,7 @@ struct MainApplicationView: View {
         return max(0, min(desired, maxInset))
     }
 
-    /// Animation for `chatSplitInset` — deliberately NONE while a divider drag is running.
+    /// Animation for `chatSplitInset`; deliberately none while a divider drag is running.
     private var chatSplitInsetAnimation: Animation? {
         guard isAnyPanelInSplit else {
             return Self.splitInsetAnimation(isDraggingDivider: false)
@@ -132,10 +117,8 @@ struct MainApplicationView: View {
         isDraggingDivider ? nil : .easeInOut(duration: 0.2)
     }
 
-    /// Leading breathing room between the sidebar edge and the chat column in split mode
-    /// (mirrors `splitModeChatGutter` on the trailing side). Only in split: a squeezed
-    /// column runs edge-to-edge, so without this the text sits flush against the activity
-    /// bar. In overlay/full the chat is wide/covered and centers its own margins.
+    /// Leading breathing room between the sidebar edge and the chat column in split mode (mirrors `splitModeChatGutter`); in
+    /// overlay/full the chat centers its own margins.
     private var chatSplitLeadingGutter: CGFloat {
         chatSplitInset > 0 ? ChatUIConstants.splitModeChatGutter : 0
     }
@@ -152,9 +135,7 @@ struct MainApplicationView: View {
     private let inputAreaCornerRadius: CGFloat = 12
     
     // MARK: - Body
-    /// ⚠️ Hoisted out of `body`. Inline, this tipped the ZStack past the type-checker's budget
-    /// ("unable to type-check this expression in reasonable time") — that body is already large
-    /// enough that one more conditional branch is not free.
+    /// Hoisted out of `body` to keep the ZStack within the type-checker's budget.
     @ViewBuilder
     private var backgroundTasksPanel: some View {
         if chatHistoryViewModel.isBackgroundTasksPanelPresented {
@@ -197,14 +178,8 @@ struct MainApplicationView: View {
         isAnyPanelInSplit ? chatSplitInset + 18 : 18
     }
 
-    /// The floating pills, STACKED so they can never overlap.
-    ///
-    /// Dynamically tracks split-mode insets so they stay inside the chat column
-    /// without overlapping side panels or each other.
-    ///
-    /// ⚠️ Mounts EXACTLY what `FloatingPillStack.visible` returns — no gate of its own here. A
-    /// shared inline gate is how Build 102.7 dropped the Background Tasks and Code Viewer pills
-    /// from Code mode; per-mode membership lives in that function and its tests.
+    /// The floating pills, stacked so they never overlap, tracking split-mode insets so they stay inside the chat column.
+    /// Mounts exactly what `FloatingPillStack.visible` returns, with no gate of its own; per-mode membership lives there.
     private var visiblePills: [FloatingPill] {
         FloatingPillStack.visible(
             interfaceMode: viewModel.interfaceMode,
@@ -292,9 +267,8 @@ struct MainApplicationView: View {
             }
             .edgesIgnoringSafeArea(.all)
             
-            // Leading-aligned on purpose: the sidebar is the only fixed-width child here,
-            // and under the default centre alignment it drifts — then slides off the window
-            // entirely once the other layers demand more width than the window has.
+            // Leading-aligned on purpose: the sidebar is the only fixed-width child, and under the default centre alignment it
+            // drifts and can slide off the window.
             ZStack(alignment: .leading) {
                 // LAYER 1: Chat — always alive, visibility toggled via opacity
                 chatArea
@@ -310,9 +284,8 @@ struct MainApplicationView: View {
                 // Floating mode switcher is an overlay on chatArea's input VStack
             }
             .padding(.leading, totalSidebarWidth + chatSplitLeadingGutter)
-            // EXPERIMENTAL split mode: the chat YIELDS layout space to the Code Viewer
-            // instead of being covered by it — a trailing inset, not a re-parent, so the
-            // panel keeps its view identity (and the editor its state) across mode flips.
+            // Split mode: the chat yields layout space to the Code Viewer via a trailing inset, not a re-parent, so the panel keeps
+            // its view identity.
             .padding(.trailing, chatSplitInset)
             .frame(maxWidth: .infinity)
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSidebarVisible)
@@ -339,18 +312,14 @@ struct MainApplicationView: View {
             if chatHistoryViewModel.isCodeViewerPanelPresented {
                 CodeViewerPanelView()
                     .environment(chatHistoryViewModel)
-                    // Full AND split cover the CHAT, never the sidebar: inset by the same
-                    // leading width the chat area uses so navigation stays reachable. This
-                    // is also what bounds the panel — it measures its own frame for the
-                    // drag cap, so excluding the sidebar keeps a wide drag off it.
-                    // Overlay alone keeps the historic un-inset trailing overlay.
+                    // Full and split cover the chat, never the sidebar: inset by the chat area's leading width so navigation stays
+                    // reachable and the panel's drag cap measures only the chat. Overlay alone keeps the un-inset trailing overlay.
                     .padding(.leading, chatHistoryViewModel.codeViewerPresentation == .overlay ? 0 : totalSidebarWidth)
                     .zIndex(2)
             }
 
-            // The task list occupies the SAME trailing slot as the Code Viewer, which is why the
-            // two flags exclude each other in `ChatHistoryViewModel` rather than here — a rule
-            // enforced at the mount site would be a rule this `if` could silently disagree with.
+            // The task list occupies the same trailing slot as the Code Viewer, so the two flags exclude each other in
+            // `ChatHistoryViewModel` rather than at this mount site.
             backgroundTasksPanel
 
             // Third occupant of the same slot — Code mode only. See `gitChangesPanel`.
@@ -417,10 +386,8 @@ struct MainApplicationView: View {
             }
         }
         .onChange(of: isAnyPanelInSplit) { wasSplit, isSplit in
-            // Entering split: auto-collapse the sidebar PANE so the chat keeps a readable
-            // column — expanded sidebar + panel + chat is one region too many. One-shot on
-            // the TRANSITION only: re-expanding afterwards is the user's call and nothing
-            // fights them for it (leaving split deliberately does not auto-restore either).
+            // Entering split auto-collapses the sidebar pane so the chat keeps a readable column; one-shot on the transition only,
+            // so re-expanding afterwards is the user's call.
             if isSplit, !wasSplit, isSidebarVisible {
                 isSidebarVisible = false
                 logger.debug("[MainApplicationView] Split enabled — sidebar pane auto-collapsed.")
@@ -437,9 +404,8 @@ struct MainApplicationView: View {
                 isInputFocused = false
             }
         }
-        // [QA revival P2e] Deep-link + QuickAccess reverse-handoff: select the conversation in
-        // the main window and flip back to chat if a non-chat destination is showing. Serves
-        // both the notification-tap flow and the panel's "continue in main window" button.
+        // Deep-link and QuickAccess reverse handoff: select the conversation in the main window and flip back to chat if a
+        // non-chat destination is showing; serves notification taps and the panel's 'continue in main window' button.
         .onReceive(NotificationCenter.default.publisher(for: GlobalConstants.openConversationNotification)) { note in
             guard let idString = note.userInfo?["conversationID"] as? String,
                   let id = UUID(uuidString: idString) else { return }
@@ -573,9 +539,8 @@ struct MainApplicationView: View {
                 ChatHistoryView()
                     .environment(chatHistoryViewModel)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    // Apply the overlay BEFORE the bottom inset so WelcomeView
-                    // is inset by the same 115pt and its footer (diagnostics
-                    // disclosure) no longer renders under the floating bar.
+                    // Apply the overlay before the bottom inset so WelcomeView is inset by the same amount and its footer does not render
+                    // under the floating bar.
                     .overlay {
                         if viewModel.selectedConversationID == nil {
                             WelcomeView()
@@ -591,19 +556,13 @@ struct MainApplicationView: View {
 
             // Input area container
             VStack(spacing: 0) {
-                // [HITL/P4] Unified banner stack — the SOLE HITL surface for every mode
-                // (chat / code / workflow). Shows InteractionCenter.current(for:) one at a time
-                // (FIFO) with source/node titles, plus a cross-conversation "needs input" chip.
-                // The legacy StreamingMessageBannerWrapper + the `interfaceMode != .workflow` gate
-                // were removed here in the P4 cutover.
+                // Unified banner stack: the sole HITL surface for every mode, showing `InteractionCenter.current(for:)` one at a time
+                // (FIFO) with source/node titles plus a cross-conversation 'needs input' chip.
                 InteractionBannerStack()
                     .environment(viewModel)
 
-                // Ambient, actionable warnings (e.g. context-overflow with a settings
-                // deep-link) — deliberately BELOW the HITL stack: the advisory is
-                // ambient state, so anchoring it next to the input keeps its position
-                // stable while transient HITL banners come and go above it.
-                // Order: HITL (top) → advisory (mid) → chat input (bottom).
+                // Ambient, actionable warnings, deliberately below the HITL stack so the advisory stays anchored next to the input
+                // while transient HITL banners come and go above it. Order: HITL (top), advisory, chat input (bottom).
                 AdvisoryBannerView()
                     .environment(viewModel)
 
@@ -650,10 +609,8 @@ struct MainApplicationView: View {
         .onChange(of: viewModel.selectedConversationID) { _, _ in
             showModePicker = true
         }
-        // Unsaved workflow-edits guard: raised by `WorkflowEditGuard.attempt` when a
-        // navigation (switch conversation / interface / execution) is attempted while the
-        // workflow canvas has unsaved changes. Save → persist then proceed; Discard →
-        // revert then proceed; Cancel → stay.
+        // Unsaved workflow-edits guard, raised by `WorkflowEditGuard.attempt` when a navigation happens with unsaved canvas
+        // changes: Save persists then proceeds, Discard reverts then proceeds, Cancel stays.
         .confirmationDialog(
             "Unsaved Workflow Changes",
             isPresented: Binding(
@@ -780,9 +737,8 @@ private struct InterfaceModePicker: View {
     }
 }
 
-/// Individual tab button within the mode picker.
-/// Extracted as a separate struct to hold its own @State for hover tracking.
-/// The active tab's background capsule is animated via `matchedGeometryEffect`.
+/// Individual tab button within the mode picker, a separate struct to hold its own @State for hover tracking; the active
+/// tab's background capsule is animated via `matchedGeometryEffect`.
 private struct ModeTabButton: View {
     let mode: MainApplicationViewModel.InterfaceMode
     var namespace: Namespace.ID
@@ -841,38 +797,23 @@ private struct ModeTabButton: View {
             // Unsaved-changes dot on the Workflow tab so the dirty state is visible even
             // when the user is looking elsewhere (sidebar, other modes).
             .overlay(alignment: .topTrailing) {
-                // ⚠️ Reads the view model's MIRROR, not `workflowEditGuard.hasUnsavedChanges`. The
-                // guard reflects only the canvas currently ON SCREEN and is cleared by
-                // `unregister()` when it goes away — so the dot vanished the moment the user
-                // navigated off, which is exactly when it was needed. The mirror is keyed by profile
-                // and outlives every view teardown, so it also lights for a workflow the user edited
-                // and then switched away from.
+                // Reads the view model's mirror, not `workflowEditGuard.hasUnsavedChanges`: the guard covers only the on-screen canvas
+                // and is cleared on teardown, while the mirror is keyed by profile and outlives every view.
                 if mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty {
                     Circle()
                         .fill(Color.orange)
                         .frame(width: 5, height: 5)
                         .offset(x: 1, y: -1)
                         .transition(.scale.combined(with: .opacity))
-                        // Purely decorative — the meaning is announced on the BUTTON below, not
-                        // here. A label on this Circle would sit inside the Button's own label
-                        // subtree and never be spoken.
+                        // Purely decorative; the meaning is announced on the button below, since a label here would sit inside the Button's
+                        // label subtree.
                         .accessibilityHidden(true)
                 }
             }
         }
         .buttonStyle(.plain)
-        // [WF-CS4] The dot had NO tooltip and NO accessibility label, so it read as an unexplained
-        // warning — and worse, as one implying the edits were at risk. They are not: the canvas
-        // cache is App-scoped, survives every view teardown, and is drained at quit (WF-LC1). What
-        // it actually means is "a run right now would not include these", which is the one
-        // consequence the user can act on. Said here rather than by adding a navigation prompt,
-        // which WF-LC1 closed by explicitly ruling out.
-        //
-        // ⚠️ WORDED FOR AN APP-WIDE SIGNAL, deliberately. This dot lights when ANY workflow canvas
-        // is dirty (`!dirtyWorkflowCanvasIDs.isEmpty` — not scoped to the selected profile), so it
-        // must NOT promise anything about the next run in particular. That per-run claim is
-        // `WorkflowRunEditDisclosure`'s job, and it is scoped to one profile precisely so it can
-        // make it truthfully.
+        // Worded for an app-wide signal: the dot lights when any workflow canvas is dirty, so it promises nothing about the
+        // next run (that per-run claim is `WorkflowRunEditDisclosure`'s job). The edits themselves are not at risk.
         .help(modeHelpText)
         .accessibilityValue(mode == .workflow && !viewModel.dirtyWorkflowCanvasIDs.isEmpty
                             ? Text("Unsaved canvas edits")

@@ -4,15 +4,7 @@
 //  EpisodicFitGaugeAlignmentTests.swift
 //  DevgenticTests
 //
-//  Both fit gauges measured history as `content.textContent`. Episodic payload — tool
-//  params, outcomes, and `<effect>` diffs — lives on timeline `ToolExecutionData`, so
-//  `textContent` is nil for all of it and an edit-heavy conversation was charged ZERO for
-//  the largest thing in its prompt. The only allowance was a flat `layerOverheadChars`
-//  of 2,000, whose own comment claimed to cover "episodic wrappers".
-//
-//  The fix measures the REAL blob through the same dispatch `AgentConnect` builds with, so
-//  gauge and request agree by construction. These tests exist to keep it that way: if
-//  anyone reintroduces a parallel estimator, the alignment test fails.
+//  Created by Raj Singh.
 //
 
 import XCTest

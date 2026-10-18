@@ -4,10 +4,7 @@
 //  CodeViewerStatusBarTests.swift
 //  DevgenticTests
 //
-//  Covers Phase 3: Editor Status Bar logic:
-//  - CodeViewerStatusBarState tracking line, column, selection length and reset.
-//  - CodeViewerTab customLanguage override and effectiveLanguage resolution.
-//  - CodeLanguage display names, common languages, and sorted collections.
+//  Created by Raj Singh.
 //
 
 import XCTest

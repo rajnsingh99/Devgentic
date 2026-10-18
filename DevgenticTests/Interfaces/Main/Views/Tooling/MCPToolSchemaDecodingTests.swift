@@ -4,10 +4,7 @@
 //  MCPToolSchemaDecodingTests.swift
 //  DevgenticTests
 //
-//  P0 #4 — MCP tools were silently dropped from a server's advertised list whenever
-//  their JSON Schema did not fit the narrow local `ToolParameters` shape. These pin
-//  the lenient decoding that replaced the strict decode, plus the local-tool shapes
-//  that must keep working unchanged.
+//  Created by Raj Singh.
 //
 
 import XCTest

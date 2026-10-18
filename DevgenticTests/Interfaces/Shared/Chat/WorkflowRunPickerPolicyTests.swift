@@ -4,11 +4,7 @@
 //  WorkflowRunPickerPolicyTests.swift
 //  DevgenticTests
 //
-//  Register XUI-3 — the run picker's state words and badge precedence, as pure statics on
-//  `WorkflowDedicatedView` (the `finalOutcomeTagLabel` shape). The wiring half — that the
-//  "Live Run" button assigns `executionState?.runRecordID` instead of nil — is a @State write
-//  inside a Menu closure and is NOT reachable from a unit test; these pin the decisions the
-//  wiring consumes.
+//  Created by Raj Singh.
 //
 
 import XCTest

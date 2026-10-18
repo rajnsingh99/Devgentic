@@ -4,26 +4,7 @@
 //  DialectCorrectiveAlertTests.swift
 //  DevgenticTests
 //
-//  The parse-failure corrective must name the format THIS RUN can actually parse.
-//
-//  ⚠️ THE DEFECT THIS PINS. `LLMRetryStrategy` had one corrective string and no reference to
-//  `dialect` anywhere in the file:
-//
-//      "Your last output failed validation (attempt n/m). You MUST output a valid JSON response
-//       containing `reasoning` and `toolCalls` (an array of tools). No prose or markdown
-//       fences (```json)."
-//
-//  That is the `.nativeJSON` shape. Sent to a Mistral-v11 model it demands JSON where the parser
-//  requires `[TOOL_CALLS]name[ARGS]{…}`; sent to a DeepSeek-V3 or Command-R model it forbids the
-//  ```json fence those two formats REQUIRE. A model that complied produced output its own parser
-//  rejected, so three compliant retries spent the parse budget and aborted the run — the corrective
-//  was steering the model away from the only shape we could read.
-//
-//  Three layers here, deliberately, because the first two can both pass over a dead feature:
-//    1. POLICY   — `correctiveAlert` says the right thing for every dialect.
-//    2. STRUCTURE— each generator parses with the dialect it declares (drift test over real source).
-//    3. WIRING   — the executor actually hands the generator's dialect to the strategy, proven by
-//                  reading what reaches the model's context on the retry.
+//  Created by Raj Singh.
 //
 
 import XCTest

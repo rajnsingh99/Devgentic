@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  Phase 7: a run with a concern is never refused outright. It is HELD and its user asked — Proceed
-//  (it then waits its turn, from the place it arrived at), Stop, or no answer (auto-denied). While it
-//  waits for the answer it blocks nobody.
+//  LocalInferenceConfirmationTests.swift
+//  DevgenticTests
 //
-//  ⚠️ Every wait is BOUNDED and every result is read from a box, never by awaiting the task.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,11 +4,7 @@
 //  TokenUsageBadgeSpeechTests.swift
 //  DevgenticTests
 //
-//  Register CF-41 — what VoiceOver is told about a token-usage badge.
-//
-//  The label was the constant-shaped "Token usage: \(inputTokens) input, \(outputTokens) output":
-//  it never consulted `isEstimated`, so a locally-guessed figure was read out as an exact one,
-//  and it read the raw integer where the badge itself shows "1.2K".
+//  Created by Raj Singh.
 //
 
 import XCTest

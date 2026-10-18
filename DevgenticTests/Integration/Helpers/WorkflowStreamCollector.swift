@@ -4,8 +4,7 @@
 //  WorkflowStreamCollector.swift
 //  DevgenticTests
 //
-//  Workflow-specific event extraction and assertion helpers.
-//  Extends the base StreamCollector with DAG orchestration event support.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -2,21 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsSingleUserAuthorizationTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  ChatOps authorizes ONE account. This is where that is enforced rather than assumed.
-//
-//  ⚠️⚠️ THE FAILURE THIS PINS. Authorization compared the CHAT — or on Discord and Slack the CHANNEL —
-//  and nothing else. A Telegram chat id in a DM happens to identify a person, so the single-user
-//  assumption held there by accident; a Telegram GROUP, a Discord channel and a Slack channel all
-//  identify a ROOM. Every member of one could send commands, answer clarifications and, at `.full`,
-//  tap Approve on a mirrored tool call. The sender was decoded on all three platforms
-//  (`DiscordMessage.author`, Slack's `user`, Telegram's `from`) and read only to skip the bot's own
-//  messages — a repo-wide grep for any per-sender authorization symbol returned zero hits.
-//
-//  ⚠️ THE POLICY IS "ENFORCE WHAT WAS INTENDED", NOT "ADD GROUP SUPPORT". ChatOps was always a
-//  single-user remote control, so the fix records the account that completes pairing and refuses
-//  every other — rather than growing an allowlist for the multi-user case that was never the design.
+//  Created by Raj Singh.
 //
 
 import XCTest

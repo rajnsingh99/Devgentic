@@ -4,24 +4,7 @@
 //  LogContext.swift
 //  Devgentic
 //
-//  Task-local context propagation for `DGLogger`. When a call runs inside
-//  `LogContext.with(traceID:spanID:phase:) { ... }`, every log call made inside
-//  the closure automatically attaches that context to its `LogEntry` without
-//  the caller having to thread parameters everywhere.
-//
-//  Swift's `@TaskLocal` values propagate through structured concurrency — async
-//  calls, child tasks, task groups. They do NOT propagate into unstructured
-//  Tasks (e.g., `Task { ... }`) unless you explicitly re-install via `with(...)`.
-//  For our use case this is intentional: the agent pipeline is structured, and
-//  detached `Task`s that shouldn't inherit context (e.g., persistence writes,
-//  metrics batching) are correctly isolated.
-//
-//  Usage:
-//
-//      await LogContext.with(traceID: trace.traceID, spanID: span.spanID) {
-//          myLogger.info("Executing step")       // auto-tagged with trace/span
-//          try await executor.execute(...)       // inherits
-//      }
+//  Created by Raj Singh.
 //
 
 import Foundation

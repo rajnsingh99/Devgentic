@@ -2,12 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RepeatedToolCallStopTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  A model that repeats one tool call must not run on to its token limit. On 2026-10-06
-//  Qwen2.5-3B wrote the same `read_file` 46 times and the same edit 17 times in single turns, each
-//  ~50s of decode to the 2,048-token cap. The text-repetition breaker never saw them: calls the
-//  framework already decoded arrive as events, not text.
+//  Created by Raj Singh.
 //
 
 import XCTest

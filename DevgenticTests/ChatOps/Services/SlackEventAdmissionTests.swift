@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SlackEventAdmissionTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  One Slack message must start exactly one agent run.
-//
-//  ⚠️⚠️ THE FAILURE THIS PINS (SL-3). Slack delivers a separate Socket Mode envelope per matching
-//  event subscription. The standard bot recipe subscribes to BOTH `app_mention` and
-//  `message.channels`, so `@Devgentic refactor the parser` arrived twice — neither copy carrying a
-//  `bot_id` or `subtype`, both carrying the same `channel` and `text` — and `handleMessage` submitted
-//  the same prompt twice. Two runs, double token spend, double tool execution. `SlackEvent.type` was
-//  decoded and read by nothing in the whole tree.
+//  Created by Raj Singh.
 //
 
 import XCTest

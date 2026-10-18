@@ -4,21 +4,7 @@
 //  WorkflowExecutionUITailTests.swift
 //  DevgenticTests
 //
-//  Register `Workflow_Production_Readiness_Fresh.md`, execution-UI cluster — the rows fixed
-//  2026-09-01: `XUI-4` (a recovery tier that could not read the current blob envelope, and crashed
-//  on a scalar element), `XUI-5` (a user-stopped run drawn as a failure), `XUI-6` (a silent trace
-//  truncation), `XUI-8` (workflow code blocks ignoring the user's font size) and `XUI-10` (the
-//  visible tag and the VoiceOver label disagreeing).
-//
-//  ⚠️ What is NOT covered here, stated so this file is not mistaken for full coverage: SwiftUI
-//  hit-testing (`XUI-10`'s pill gesture), the run card's own three-arm rendering, and the actual
-//  rendered point size (`XUI-8`) have no headless seam. Those fixes are shaped so the part that CAN
-//  be tested — the body decision, the label decision, the sizing rule — fully determines the part
-//  that cannot.
-//
-//  ⚠️ This list once omitted `XUI-4`'s element loop, the one CRASH-class behaviour in the batch, and
-//  so read as a complete disclosure of an incomplete suite. It was untested, not untestable —
-//  `decodeRecord(from: RowSnapshot)` is a headless seam — and it is covered below now.
+//  Created by Raj Singh.
 //
 
 import XCTest

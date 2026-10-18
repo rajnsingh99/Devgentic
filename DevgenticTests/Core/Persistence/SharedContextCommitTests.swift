@@ -4,23 +4,7 @@
 //  SharedContextCommitTests.swift
 //  DevgenticTests
 //
-//  RAG-27 (CR-69) — CHARACTERISATION of SwiftData's behaviour after a FAILED save (macOS 26),
-//  proven 2026-10-12. Every store shares `container.mainContext`, and the register's prescribed
-//  fix was "roll back on failure". These pin why that cannot work:
-//
-//    • After a failed save, `rollback()` does NOT remove a failed insert. It stays in the context
-//      and fails EVERY later save, while `pendingChangeCount` reads 0 (SwiftData has disowned it;
-//      the underlying context has not). Deleting it, rolling back twice, or repairing it after the
-//      rollback does not help either.
-//    • A changed value is NOT restored by that rollback.
-//    • A FRESH `ModelContext` on the same container saves normally while `mainContext` is
-//      poisoned — the poison lives in one context, not in the store.
-//
-//  If a future SDK makes `testRollbackAfterAFailedSaveDoesNotClearThePoison` fail, SwiftData's
-//  rollback started working: revisit the recovery design in the register (RAG-27).
-//
-//  A save is made to fail for real with `PoisonParentSD`, whose relationship demands at least one
-//  child: inserted with none, it fails Core Data validation on every save of its context.
+//  Created by Raj Singh.
 //
 
 import XCTest

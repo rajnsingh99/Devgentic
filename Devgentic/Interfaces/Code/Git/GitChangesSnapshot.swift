@@ -4,8 +4,7 @@
 //  GitChangesSnapshot.swift
 //  Devgentic
 //
-//  The Git Changes panel's model: one row per changed path, merged from status + both numstats +
-//  untracked file measurements. Building it is a pure function so the merge is testable alone.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -204,13 +203,9 @@ struct GitChangesSnapshot: Equatable, Sendable {
         }
     }
 
-    /// Merges the parsed sources into rows.
-    ///
-    /// - Parameters:
-    ///   - projectPrefix: the project folder relative to `repoRoot` with a trailing `/`, or `""` when
-    ///     the project IS the root. Rows outside it are marked, not dropped (§6.1: repo-wide view).
-    ///   - untrackedInfo: measurements for the untracked paths the caller chose to measure — the
-    ///     first `untrackedLimit` of them, in status order. See `untrackedPathsToMeasure`.
+    /// Merges the parsed sources into rows. `projectPrefix` is the project folder relative to `repoRoot` with a
+    /// trailing `/` (`""` for the root); rows outside it are marked, not dropped. `untrackedInfo` measures the
+    /// first `untrackedLimit` untracked paths.
     static func build(
         repoRoot: String,
         status: GitStatusReport,

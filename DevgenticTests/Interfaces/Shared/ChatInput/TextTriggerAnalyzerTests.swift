@@ -4,7 +4,7 @@
 //  TextTriggerAnalyzerTests.swift
 //  DevgenticTests
 //
-//  Tests for TextTriggerAnalyzer — pure-function text scanning logic.
+//  Created by Raj Singh.
 //
 
 import XCTest

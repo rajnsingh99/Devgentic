@@ -4,23 +4,7 @@
 //  TimelineForwardCompatibilityTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards the `.unknown` catch-all that makes `TimelineEvent` survive a shape it cannot model.
-//
-//  THE PROBLEM: `TimelineEvent`'s synthesized codec threw on any element it could not decode, and
-//  because that throw propagates out of the ARRAY decode, ONE unreadable event destroyed the whole
-//  run's timeline. The empty result was then written back over the blob, making the loss permanent.
-//
-//  ⚠️ ASSERT ON PARSED JSON, NEVER ON BYTES OR STRINGS. `JSONEncoder`'s key order comes from a
-//  `Dictionary` and varies between process runs for the SAME value, so `XCTAssertEqual(blobA, blobB)`
-//  and golden-string assertions are flaky by construction. `JSONSerialization`'s writer is separately
-//  lossy on doubles. Compare objects.
-//
-//  ⚠️ AND NEVER assert `encode(decode(x)) == x` over a WHOLE fixture: `ToolExecutionData`'s encoder
-//  is deliberately asymmetric — it omits `preWriteContent`/`postWriteContent` (~1 MB/write of
-//  session-scoped data). The always-valid form is per-element and scoped to `.unknown` elements,
-//  which is what the preservation tests below do.
+//  Created by Raj Singh.
 //
 
 import XCTest

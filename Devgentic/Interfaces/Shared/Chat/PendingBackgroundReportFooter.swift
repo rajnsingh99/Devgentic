@@ -4,41 +4,17 @@
 //  PendingBackgroundReportFooter.swift
 //  Devgentic
 //
-//  "More is coming here, and nobody has to ask for it."
-//
-//  ⚠️ THIS IS NOT THE TASKS PILL. `BackgroundTasksFloatingButton` counts every task this
-//  conversation has ever run and is the door to their output — history, mostly. This counts only
-//  the tasks that asked to REPORT (`notify_on_completion`) and have not finished, because that is
-//  a different fact with a different consequence: the transcript will grow again on its own, with
-//  no further input. A user who does not know that reads a finished-looking conversation and
-//  leaves.
-//
-//  ⚠️ CONVERSATION-SCOPED, and that is a real limitation rather than an oversight. Switch away and
-//  this disappears with the conversation it describes — which is exactly the common case, because
-//  starting a long task and going elsewhere is the entire point of background tasks. The answer to
-//  "which OTHER conversation has something cooking" is the sidebar badge
-//  (`ConversationRowView.hasPendingBackgroundReport`), which reads the same predicate below. The
-//  two surfaces answer different questions and must never drift, hence one shared source.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// The single predicate behind both the footer and the sidebar badge.
-///
-/// ⚠️ A `static func` over an injected array, not a computed property inside either view. A
-/// `private var` in a SwiftUI `View` cannot be exercised without rendering, so a test would have
-/// to TRANSCRIBE the condition — and a transcribed predicate stays green when the production one
-/// is neutered. `BackgroundTasksFloatingButton.shouldShow` was promoted out for the same reason;
-/// this follows it deliberately, so there is one pattern.
+/// The single predicate behind both the footer and the sidebar badge. A static function over an injected array so a
+/// test exercises the real condition rather than a transcription of it.
 enum PendingBackgroundReports {
 
-    /// Tasks that will speak into the conversation on their own: opted in, not yet finished.
-    ///
-    /// ⚠️ BOTH conditions are load-bearing and neither implies the other. A finished task that
-    /// opted in has already reported (or been refused by the hourly cap) and announces nothing
-    /// further; a running task that did NOT opt in will end silently, leaving its output on the
-    /// card for someone to go and read. Counting either alone promises a message that never
-    /// arrives, which is worse than staying quiet.
+    /// Tasks that will speak into the conversation on their own: opted in and not yet finished. Both conditions are
+    /// needed: a finished task has already reported, and a running task that did not opt in ends silently.
     static func count(in snapshots: [BackgroundProcessRegistry.Snapshot]) -> Int {
         snapshots.filter { $0.notifyOnCompletion && !$0.status.isTerminal }.count
     }

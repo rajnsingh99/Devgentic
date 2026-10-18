@@ -4,9 +4,7 @@
 //  GeminiLLMProvider.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/02/26.
-//  Updated on 27/03/26: Config-driven parameters from AdvancedConfig,
-//  CloudRequestPipeline integration for rate limiting and retry support.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -56,11 +54,8 @@ struct GeminiLLMProvider: LLMProvider {
         return nil
     }
 
+    // Why: top-level on the request body, a sibling of `generationConfig`, not a field inside it.
     /// The user's per-category safety thresholds, in Gemini's wire shape.
-    ///
-    /// ⚠️ These are TOP-LEVEL on the request body, a sibling of `generationConfig` — not a field
-    /// inside it. That is why they were missed: `buildGenerationConfig` copied every other advanced
-    /// setting, so the omission looked like completeness.
     private var safetySettings: [[String: String]]? {
         guard case .array(let entries)? = config.options?["safetySettings"] else { return nil }
 
@@ -88,15 +83,10 @@ struct GeminiLLMProvider: LLMProvider {
         return generationConfig.isEmpty ? nil : generationConfig
     }
 
-    // MARK: - Thinking (readiness CR-28)
+    // MARK: - Thinking
 
-    /// Asks a thinking model for its thought summaries — `generationConfig.thinkingConfig.includeThoughts`.
-    ///
-    /// ⚠️⚠️ READINESS CR-28 (2026-10-11). This was sent as a TOP-LEVEL `thinking_config` — not a field
-    /// of the request (the API's is `generationConfig.thinkingConfig`) — so no request ever asked for
-    /// thoughts, and the "thinking" trace this provider decodes was never filled. Sent only to model
-    /// families that think (Gemini 2.5 and later, and the `-latest` aliases that point at them): an
-    /// older or unrecognised model gets no thinking config at all, which every model accepts.
+    /// Asks a thinking model for its thought summaries via `generationConfig.thinkingConfig.includeThoughts`.
+    /// Sent only to families that think (Gemini 2.5+ and the `-latest` aliases); older or unknown models get none.
     static func requestThoughtSummaries(in body: inout [String: Any], modelName: String) {
         guard modelThinks(modelName) else { return }
         var generationConfig = body["generationConfig"] as? [String: Any] ?? [:]
@@ -120,25 +110,16 @@ struct GeminiLLMProvider: LLMProvider {
         return major > 2 || (major == 2 && minor >= 5)
     }
 
+    // Why: check before the text branch: a thought part also has `text` and would otherwise be appended to the answer.
     /// The text of a thought part (`{"text": …, "thought": true}`), or nil for any other part.
-    ///
-    /// ⚠️ CR-28: thought parts carry their text in `text`, flagged by a BOOLEAN `thought`. The decoders
-    /// tested `text` first and read `thought` as a String, so a thought summary was appended to the
-    /// ANSWER and the trace stayed empty. Checked before the text branch.
     static func thoughtText(of part: [String: Any]) -> String? {
         guard (part["thought"] as? Bool) == true else { return nil }
         return part["text"] as? String ?? ""
     }
 
+    // Why: calling the config builder alone drops `safetySettings`, so the user's safety choices silently do nothing.
     /// Applies `generationConfig` and `safetySettings` to a request body.
-    ///
-    /// ⚠️ Exists so the two cannot drift apart again. Safety Settings shipped as four pickers that
-    /// NO request builder read: a user who set every category to "Block None" to get past a refusal
-    /// on legitimate red-team or medical work still had the account defaults applied and still got
-    /// blocked, and the inverse failed too — tightening to "Block Low and Above" for a kids-facing
-    /// bot added no filtering whatsoever. A safety control that silently does nothing is worse than
-    /// no control, because the user believes it worked. Every builder must call this, not
-    /// `buildGenerationConfig()` directly.
+    /// Every builder must call this, not `buildGenerationConfig()` directly.
     private func applyGenerationSettings(to body: inout [String: Any]) {
         if let generationConfig = buildGenerationConfig() {
             body["generationConfig"] = generationConfig
@@ -150,9 +131,7 @@ struct GeminiLLMProvider: LLMProvider {
 
     // MARK: - Request Body Builders
 
-    // ⚠️ Shared so the shape assertions in `AdvancedConfigDeliveryTests` exercise the SAME code the
-    // shipped builders run. Safety Settings shipped dead for exactly this reason: nothing compared
-    // what the panel wrote against what a request carried.
+    // Shared so shape assertions exercise the same code the shipped builders run.
 
     /// Body for the agent/tool-calling path.
     private func generateBody(messages: [[String: String]], tools: [[String: Any]]?) -> [String: Any] {
@@ -164,7 +143,7 @@ struct GeminiLLMProvider: LLMProvider {
         return body
     }
 
-    /// Body for the bot/streaming path. `tools` are deliberately absent — see the call site.
+    /// Body for the bot/streaming path. `tools` are deliberately absent (see the call site).
     private func streamingBody(messages: [[String: String]]) -> [String: Any] {
         let (contents, systemInstruction) = translateMessages(messages)
         var body: [String: Any] = ["contents": contents]
@@ -190,8 +169,7 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
-        // which would otherwise report it as a malformed response.
+        // A blocked prompt has no candidates, so check this before the guard below, which would report it as malformed.
         if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
@@ -248,7 +226,7 @@ struct GeminiLLMProvider: LLMProvider {
         return (textResponse, usage)
     }
 
-    // MARK: - Multimodal (Phase 3 — native image input)
+    // MARK: - Multimodal (native image input)
 
     /// Translates `[ProviderMessage]` into Gemini `contents` + `systemInstruction`,
     /// emitting `parts` with `{"inlineData":{"mimeType":…,"data":<base64>}}` for any
@@ -294,8 +272,7 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
-        // which would otherwise report it as a malformed response.
+        // A blocked prompt has no candidates, so check this before the guard below, which would report it as malformed.
         if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]], let firstCandidate = candidates.first else {
             throw LLMProviderError.invalidResponse("Missing candidates in Gemini response.")
@@ -335,8 +312,7 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
-        // which would otherwise report it as a malformed response.
+        // A blocked prompt has no candidates, so check this before the guard below, which would report it as malformed.
         if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
@@ -381,19 +357,15 @@ struct GeminiLLMProvider: LLMProvider {
         // Extract token usage from Gemini API response
         let usage = json.flatMap { TokenUsage.fromGemini($0, pricing: pricingKey) }
 
-        // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
-        // .toolCall events, not from this field. A placeholder here would pollute any
-        // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
+        // Empty reasoning stays empty: the UI derives "Executing <tool>..." labels from `.toolCall` events, not this field.
         return ModernCognitiveStep(reasoning: textResponse, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage,
                                    reasoningReplay: pendingTools.isEmpty ? nil : Self.thoughtSignatureReplay(in: parts))
     }
 
     // MARK: - Native-Turn Cognitive Step (G12)
 
-    /// Native-turn overload. Accepts Gemini-shape messages from `GeminiToolTurnAdapter`
-    /// (role "model"/"user", parts with functionCall/functionResponse) plus normalized
-    /// system/user turns with `parts: [{text}]`.
-    /// Extracts role:"system" entries into Gemini's top-level `systemInstruction` field.
+    /// Native-turn overload: accepts Gemini-shape messages from `GeminiToolTurnAdapter` (functionCall/functionResponse parts)
+    /// plus normalized system/user turns with `parts: [{text}]`. Extracts `role: system` entries into `systemInstruction`.
     func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         var contents: [[String: Any]] = []
         var systemParts: [[String: Any]] = []
@@ -431,8 +403,7 @@ struct GeminiLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        // ⚠️ CR-16: a blocked prompt has NO candidates, so this must come before the guard below,
-        // which would otherwise report it as a malformed response.
+        // A blocked prompt has no candidates, so check this before the guard below, which would report it as malformed.
         if let blocked = Self.blockError(in: json) { throw blocked }
         guard let candidates = json?["candidates"] as? [[String: Any]],
               let firstCandidate = candidates.first else {
@@ -488,7 +459,7 @@ struct GeminiLLMProvider: LLMProvider {
         // Transport (read loop, cancellation, stall timeout) is owned by SSEStreamParser.
         SSEStreamParser.stream(
             openBytes: {
-                // `tools` are intentionally ignored here so the Bot flow stays strictly conversational.
+                // `tools` are ignored here so the Bot flow stays conversational.
                 let body = self.streamingBody(messages: messages)
 
                 let url = try self.buildURL(endpoint: ":streamGenerateContent", streamFormat: "sse")
@@ -512,20 +483,15 @@ struct GeminiLLMProvider: LLMProvider {
                 let hasFinish = (json["candidates"] as? [[String: Any]])?.first?["finishReason"] != nil
                 return hasFinish ? TokenUsage.fromGemini(json, pricing: self.pricingKey) : nil
             },
-            // ⚠️ The decoder itself, not a closure around it, so tests run exactly this.
+            // Pass the decoder itself, not a closure around it, so tests exercise exactly this code.
             handleLine: Self.geminiStreamLine
         )
     }
 
     // MARK: - Stream decode and blocking (static so they are testable without a network)
 
-    /// Each function-call part's `thoughtSignature`, in call order (null where a part had none), or nil
-    /// when no part carried one.
-    ///
-    /// ⚠️ CR-23: Gemini thinking models attach an opaque `thoughtSignature` to function-call parts and
-    /// require it back on the replayed model turn; it was never read, so a tool loop on such a model
-    /// lost its reasoning context or was rejected. Positional, because the adapter rebuilds the parts
-    /// in the same order the calls were decoded.
+    /// Each function-call part's `thoughtSignature`, in call order (null where a part had none), or nil if none had one.
+    /// Thinking models need it back on the replayed model turn; positional, as the adapter rebuilds parts in decode order.
     static func thoughtSignatureReplay(in parts: [[String: Any]]) -> JSONValue? {
         let signatures: [JSONValue] = parts.compactMap { part in
             guard part["functionCall"] != nil else { return nil }
@@ -540,11 +506,8 @@ struct GeminiLLMProvider: LLMProvider {
         "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY",
     ]
 
-    /// The block in a Gemini response or stream chunk, or nil.
-    ///
-    /// ⚠️ CR-16: `promptFeedback.blockReason` (the PROMPT was refused — there are no candidates at all)
-    /// and a blocking `finishReason` mid-stream were never checked on the stream path; the user got an
-    /// empty or partial answer with no explanation. The non-streaming paths only knew `SAFETY`.
+    /// The block error in a Gemini response or stream chunk, or nil.
+    /// Covers `promptFeedback.blockReason` (prompt refused, no candidates) and a blocking `finishReason`.
     static func blockError(in json: [String: Any]?) -> LLMProviderError? {
         if let reason = (json?["promptFeedback"] as? [String: Any])?["blockReason"] as? String {
             return .refused(provider: "Gemini", detail: "prompt blocked: \(reason)")
@@ -571,8 +534,8 @@ struct GeminiLLMProvider: LLMProvider {
         guard let candidates = json["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else { return .skip }
-        // ⚠️ EVERY text part, not `parts.first` — a chunk carrying several parts dropped the rest
-        // (readiness CR-30). Thought parts (`"thought": true`) are not the answer and are left out.
+        // Take every text part, not `parts.first`: a chunk can carry several.
+        // Thought parts (`"thought": true`) are not the answer and are left out.
         let text = parts.filter { ($0["thought"] as? Bool) != true }.compactMap { $0["text"] as? String }.joined()
         return text.isEmpty ? .skip : .emit(text)
     }
@@ -610,12 +573,9 @@ struct GeminiLLMProvider: LLMProvider {
         return (contents, systemInstruction)
     }
 
-    /// Constructs the final URL with necessary query parameters.
-    /// Builds the request URL. The API key is intentionally NOT placed here — it
-    /// goes in the `x-goog-api-key` header (see `makeRequest`) so the secret never
-    /// lands in the URL, where it would leak into Google/proxy access logs, OS
-    /// network logging, and failing-URL error userInfo. Only the non-secret
-    /// `alt=sse` stream marker is a query item.
+    // Why: a key in the URL leaks into access logs, OS network logging and error userInfo.
+    /// Builds the request URL; only the non-secret `alt=sse` stream marker is a query item.
+    /// The API key goes in the `x-goog-api-key` header (see `makeRequest`), never the URL.
     private func buildURL(endpoint: String, streamFormat: String? = nil) throws -> URL {
         let fullPath = config.baseURL.absoluteString + endpoint
         guard var components = URLComponents(string: fullPath) else {
@@ -633,10 +593,8 @@ struct GeminiLLMProvider: LLMProvider {
         return finalURL
     }
 
-    /// Builds a POST request with JSON content-type and the API key in the
-    /// `x-goog-api-key` header — Google's documented header alternative to `?key=`,
-    /// matching how Claude (`x-api-key`) and OpenAI (`Authorization`) pass theirs.
-    /// The caller sets `httpBody`.
+    /// Builds a POST request with JSON content type and the API key in the `x-goog-api-key` header, Google's header
+    /// alternative to `?key=`. The caller sets `httpBody`.
     private func makeRequest(url: URL) -> URLRequest {
         var request = URLRequest(url: url, timeoutInterval: config.timeout)
         request.httpMethod = "POST"
@@ -650,8 +608,7 @@ struct GeminiLLMProvider: LLMProvider {
 
 // MARK: - Test Seam
 
-// ⚠️ Thin pass-throughs with NO logic of their own — the only reason asserting on them is
-// equivalent to asserting on a live request.
+// Thin pass-throughs with no logic of their own, so asserting on them equals asserting on a live request.
 extension GeminiLLMProvider {
 
     /// Renders the agent request body without issuing a request.

@@ -4,38 +4,7 @@
 //  SchemaBaselineV1.swift
 //  DevgenticTests
 //
-//  The recorded persisted shape of schema version 1.0.0 — the shape the first shipped build will
-//  carry. Drift target of `testSchemaStructureMatchesCheckedInBaseline` and of
-//  `testV1RendersExactlyTheV1Baseline`.
-//
-//  ⚠️ RECORDED 2026-09-23 AT THE HISTORY RESET. The development history (baselines V1, V2, V3 and V6)
-//  was collapsed into this one before any build reached anyone; see `DevgenticSchemaVersions.swift`.
-//  15 entities. Amended once more before any build shipped, at the 2026-10-03 fresh start:
-//  `ConversationSD.backendType` and `ConversationSD.openAIThreadID` removed (both unread).
-//  Amended again 2026-10-11, still pre-ship (owner decision, RAG-10 / CR-66): composite indexes
-//  `ChatMessageSD (conversationId, timestamp)` and `WorkflowRunRecordSD (conversationID, timestamp)`.
-//  Index-only — attributes unchanged. Indexes are outside Core Data's version hash, so stores
-//  created before this amendment open unchanged and simply lack the two indexes.
-//
-//  ⚠️ ONCE A BUILD SHIPS, THIS FILE IS A HISTORICAL RECORD AND IS NEVER EDITED. A schema change
-//  then gets a NEW `SchemaBaselineV2`, and the drift test is pointed at it; this file keeps saying
-//  what V1 shipped, which is exactly what `testV1RendersExactlyTheV1Baseline` checks the frozen V1
-//  against. Editing it to turn a build green erases the record the guard exists to keep.
-//
-//  ⚠️ NOTE WHAT IS *NOT* HERE: `SkillVersionSD.allowedToolsJSON` is `Optional<String>`, NOT
-//  `Optional<Array<String>>`. Below macOS 26.1 SwiftData persists a native `[String]?` as Binary
-//  Data and a store written there fails to open on 26.1+ with NSCocoaErrorDomain 134140.
-//  `PromptModel.tags` is the only attribute of that shape, which
-//  `testTagsRemainsTheOnlyNonRelationshipCollectionAttribute` exists to preserve.
-//
-//  ⚠️ Regenerate with the TEST_RUNNER_-PREFIXED variable; without the prefix xcodebuild forwards
-//  nothing to the test host and the hatch prints nothing at all:
-//
-//    TEST_RUNNER_DEVGENTIC_WRITE_SCHEMA_BASELINE=1 \
-//    TEST_RUNNER_DEVGENTIC_SKIP_LAUNCH_SWEEP=1 \
-//    TEST_RUNNER_DEVGENTIC_STORE_URL="$TMPDIR/devgentic-testhost.store" \
-//    xcodebuild test-without-building -scheme devgentic -destination 'platform=macOS' \
-//      -only-testing:devgenticTests/SchemaMigrationTests/testSchemaStructureMatchesCheckedInBaseline
+//  Created by Raj Singh.
 //
 
 import Foundation

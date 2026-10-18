@@ -4,14 +4,14 @@
 //  InputToolbarView.swift
 //  Devgentic
 //
-//  Extracted from ChatInputAreaView.swift — groups the left-side toolbar
-//  buttons (attach, tools, schedule) into a single reusable view.
-//  Mode-aware: shows/hides buttons based on interfaceMode.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// The composer's left-side toolbar buttons (attach, tools, schedule) as one reusable view.
+/// Mode-aware: shows or hides buttons based on `interfaceMode`.
 struct InputToolbarView: View {
 
     let isInputEnabled: Bool
@@ -20,9 +20,8 @@ struct InputToolbarView: View {
     let promptText: String
     let interfaceMode: MainApplicationViewModel.InterfaceMode
 
-    /// [Composer P1] What this surface offers. Defaults to the main composer's set (screenshot
-    /// off — see ComposerCapabilities.mainComposer); flipping it on + providing
-    /// `onCaptureScreenshot` is all it takes to add capture here.
+    /// What this surface offers. Defaults to the main composer's set (screenshot off); enabling `screenshot` and
+    /// providing `onCaptureScreenshot` adds capture here.
     var capabilities: ComposerCapabilities = .mainComposer
     /// Screenshot-capture action; the button renders only when the capability is on AND this is set.
     var onCaptureScreenshot: (() -> Void)? = nil
@@ -66,8 +65,7 @@ struct InputToolbarView: View {
                 if capabilities.attachments {
                     filePickerButton
                 }
-                // [Composer P1] Capability-gated screenshot slot — off for the main composer
-                // today; a preset flip + callback enables it with zero view changes.
+                // Capability-gated screenshot slot, off for the main composer.
                 if capabilities.screenshot, let onCaptureScreenshot {
                     ComposerIconButton(
                         systemName: "camera.viewfinder",
@@ -85,7 +83,7 @@ struct InputToolbarView: View {
     // MARK: - File Picker
 
     private var filePickerButton: some View {
-        // [Composer P1] Shared primitive — same attach button as the QuickAccess panel.
+        // Shared primitive: the same attach button as the QuickAccess panel.
         ComposerIconButton(
             systemName: "paperclip",
             help: "Attach files (⌘O)",
@@ -112,17 +110,14 @@ struct InputToolbarView: View {
     }
 
     // MARK: - Tool Manager (Code mode)
-    //
-    // Lazily creates the code profile if needed, then routes to the same Tool Library.
-    // The library applies Code-specific locking (preset tools can toggle Ask/Auto but
-    // cannot be disabled) — handled in ToolLibraryContainerView / ToolLibraryView.
+    // Lazily creates the code profile if needed, then routes to the same Tool Library, which applies Code-specific
+    // locking: preset tools can toggle Ask/Auto but cannot be disabled.
 
     private var codeToolManagerButton: some View {
         Button(action: {
             let profileID = codeSessionManager.ensureCodeProfile()
-            // CodeSessionManager writes directly to the store; refresh the service's
-            // in-memory list so ToolLibraryContainerView's existence check finds the
-            // profile when it renders.
+            // CodeSessionManager writes directly to the store; refresh the service's in-memory list so
+            // ToolLibraryContainerView's existence check finds the profile.
             if !profileService.profiles.contains(where: { $0.id == profileID }) {
                 profileService.loadProfiles()
             }
@@ -139,12 +134,8 @@ struct InputToolbarView: View {
     }
 
     // MARK: - Quick Settings (Code mode)
-    //
-    // Third entry in the existing `interfaceMode == .code` branch, deliberately: that branch is
-    // the one place this shared composer already forks for Code, so this adds no new mode
-    // branching. The alternative home, `CodeDedicatedView.codeStatusHeader`, only renders once
-    // `isConfigured` is true — it would be invisible during exactly the setup phase where someone
-    // is configuring the session.
+    // Third entry in the `interfaceMode == .code` branch, the one place this shared composer forks for Code.
+    // Not `CodeDedicatedView.codeStatusHeader`: that renders only once `isConfigured`, after the setup phase.
 
     private var codeQuickSettingsButton: some View {
         Button(action: { codeSessionManager.showQuickSettings.toggle() }) {
@@ -166,9 +157,8 @@ struct InputToolbarView: View {
               ? "Choose a project folder to configure this session"
               : "Session settings for this project — iterations, compute budget, approvals")
         .accessibilityLabel("Session settings for this project")
-        // Settings are keyed by project folder, so there is nothing to edit without one. Disabled
-        // rather than hidden: a control that vanishes reads as a missing feature, and the help
-        // string says which step is outstanding.
+        // Settings are keyed by project folder, so there is nothing to edit without one. Disabled rather than hidden,
+        // so the control doesn't read as a missing feature; the help string names the outstanding step.
         .disabled(!isInputEnabled || codeSessionManager.projectPath == nil)
         .opacity(isInputEnabled && codeSessionManager.projectPath != nil ? 1.0 : 0.5)
         .popover(isPresented: Binding(get: { codeSessionManager.showQuickSettings },

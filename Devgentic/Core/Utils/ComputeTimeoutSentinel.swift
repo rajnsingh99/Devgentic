@@ -4,52 +4,23 @@
 //  ComputeTimeoutSentinel.swift
 //  Devgentic
 //
-//  Shared execution-timeout sentinel that bounds COMPUTE time rather than wall-clock.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "ComputeTimeoutSentinel")
 
-/// Sleeps until **compute** time exceeds a limit, then throws `.executionTimeout`.
-///
-/// ⚠️ THE POINT: the clock excludes time spent parked awaiting a human. A run that sat for ten
-/// minutes because nobody clicked a confirmation button has not misbehaved, and killing it is the
-/// wrong answer.
-///
-/// ⚠️⚠️ This was WORKFLOW-ONLY until now, and that asymmetry was the bug. `WorkflowExecutor`
-/// gained the park-aware sentinel on 2026-08-13, and its own doc comment named the profile path's
-/// plain `Task.sleep` race as "a live defect" — but only the workflow path was fixed. The profile
-/// path (`AgentConnect.streamAgentResponse`, which serves BOTH Chat and Code) kept racing a bare
-/// sleep, so every second a user spent reading a tool-confirmation banner was charged against
-/// their execution budget. Code mode feels it worst: five of its sixteen preset tools are
-/// `requiresConfirmation: true`, so a handful of unhurried approvals could exhaust a 300 s budget
-/// before the model had done 300 s of work. Both paths now share this one implementation, so a
-/// future fix cannot land on one and miss the other.
-///
-/// Self-correcting rather than a precomputed deadline: sleep to the nominal deadline, ask how much
-/// of that was parked, and if compute has not reached the limit, extend by the shortfall and sleep
-/// again. That handles parks beginning AFTER the sentinel is already asleep, which a deadline
-/// computed up front cannot.
-///
-/// ⚠️ Park time is credited per OWNER CHAIN (`ParkScope`, HITL Waiting Contract decision A) —
-/// only parks raised inside `scope`'s task tree pause it. It used to be per CONVERSATION, so an
-/// unrelated banner anywhere in the conversation froze this clock indefinitely (Timeout inventory
-/// D-18).
-///
-/// Clock: `SuspendingClock` — time the Mac spends asleep is not compute (Contract §6.5).
-///
-/// Returns `Never` — it resolves only by throwing, so it is a sentinel to race real work against.
+// Why: a run parked on a confirmation banner has not misbehaved; every path bounding a run shares this
+// park-aware implementation, not a bare sleep
+/// Sleeps until compute time exceeds a limit, then throws `.executionTimeout`; returns `Never`, so it is a
+/// sentinel to race work against. The clock excludes time parked awaiting a human, per owner chain
+/// (`ParkScope`). Self-correcting: sleeps to the nominal deadline, then extends by the unparked shortfall.
 enum ComputeTimeoutSentinel {
 
-    /// - Parameters:
-    ///   - limit: The compute budget in seconds.
-    ///   - scope: The bound's `ParkScope` id. The work being bounded must run inside it
-    ///     (`ParkScope.withScope` / `bind`), or its parks will not pause this clock.
-    ///   - logTag: Bracket tag for the emitted logs, e.g. `WF_TIMEOUT` or `EXEC_LIMITS`. Callers
-    ///     keep their own vocabulary so existing log greps still match.
-    ///   - subject: What is being bounded, e.g. `Node 'Summarise'` or `Conversation ab12cd34 (code)`.
-    ///   - consequence: What happens when the budget is exhausted, for the CONSEQUENCE clause.
+    /// - Parameters: limit: compute budget in seconds; scope: the bound's `ParkScope` id, which the bounded work
+    /// must run inside or its parks will not pause the clock; logTag: bracket tag for logs; subject: what is
+    /// bounded; consequence: what happens when the budget is exhausted.
     static func sleepUntilComputeExceeded(
         limit: TimeInterval,
         scope: UUID,
@@ -75,9 +46,8 @@ enum ComputeTimeoutSentinel {
             }
 
             remaining = limit - compute
-            // ⚠️ While a park is OPEN the shortfall can be a sliver, and re-arming for a sliver
-            // spun this loop — waking and logging "extended by 0s" — for the whole length of a long
-            // park. Nothing can be charged while it stays open, so wake at most once a second.
+            // While a park is open the shortfall can be a sliver, and re-arming for it would spin this loop; nothing is charged
+            // while it stays open, so wake at most once a second.
             if await suspension.isParked(scope: scope) { remaining = max(remaining, 1) }
             logger.debug("[\(logTag)] \(subject) timeout extended by \(Int(remaining))s — \(Int(parked))s of the elapsed \(Int(wall))s was spent awaiting a human, which does not count against the compute budget.")
         }

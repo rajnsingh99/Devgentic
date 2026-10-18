@@ -4,17 +4,13 @@
 //  AddMCPServerContainerView.swift
 //  Devgentic
 //
-//  In-window destination for adding or editing an MCP server.
-//  Replaces the previous `.sheet`-based modal so navigation matches the rest
-//  of the app (see ScheduledTaskCreateContainerView, AgentConfigDetailView).
-//
-//  The container resolves edit mode against `MCPToolStore` and bridges the
-//  form's add/update callbacks back into `router.goBack()` so successful
-//  saves and cancellations both land on the Tool Library.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// In-window destination for adding or editing an MCP server.
+/// Resolves edit mode against `MCPToolStore`; saves and cancellations both return to the Tool Library.
 struct AddMCPServerContainerView: View {
 
     enum Mode: Equatable {
@@ -26,10 +22,9 @@ struct AddMCPServerContainerView: View {
 
     @Environment(MainViewRouter.self) private var router
 
-    /// Live source lookup for edit mode. Reading `MCPToolStore.shared.sources`
-    /// here makes the container @Observable-track the store, so an external
-    /// delete (e.g. from another window) collapses to the not-found state
-    /// instead of editing a phantom record.
+    // Why: editing a cached copy would edit a phantom record after an external delete.
+    /// Live source lookup for edit mode.
+    /// Reading `MCPToolStore.shared.sources` makes the container track the store, so an external delete shows not-found.
     private var resolvedSource: ToolSource? {
         if case let .edit(sourceID) = mode {
             return MCPToolStore.shared.sources.first(where: { $0.id == sourceID })
@@ -69,11 +64,9 @@ struct AddMCPServerContainerView: View {
 
     // MARK: - Save bridges
 
-    /// `.duplicate` when a server with the same name already exists, so the
-    /// form's duplicate alert still fires; `.failed` when the save itself did not
-    /// happen. `oauthBundle` is non-nil when the user signed in via the OAuth
-    /// flow — persisted to Keychain under the new source ID BEFORE the row is
-    /// inserted (register KC-5; the ordering lives in `MCPServerAddFlow`).
+    // Why: the Keychain write must happen before the row is inserted.
+    /// Returns `.duplicate` when a server with the same name exists, `.failed` when the save did not happen.
+    /// `oauthBundle` is non-nil when the user signed in via OAuth and is persisted to Keychain under the new source ID.
     private func handleAdd(
         serverName: String,
         definition: ServerDefinition,

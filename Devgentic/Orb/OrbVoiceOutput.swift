@@ -4,44 +4,30 @@
 //  OrbVoiceOutput.swift
 //  Devgentic
 //
-//  [Orb MVP] Private text-to-speech for the HUD's short spoken phrases.
-//
-//  Deliberately NOT SpeechService.shared: the shared singleton drives chat-side UI
-//  (SpeechControlIsland appears over the chat history, spacebar/arrow shortcuts arm
-//  while it is active) and any chat "Read Aloud" would hard-cancel an Orb phrase
-//  mid-sentence. A private synthesizer keeps the overlay acoustically independent
-//  while still honoring the user's persisted voice + rate preferences.
-//
-//  ⚠️ The synthesizer is created PER UTTERANCE and released as soon as it finishes.
-//  A long-lived AVSpeechSynthesizer holds a CoreAudio output context open, and its
-//  asynchronous teardown then races the microphone's AVAudioEngine start — which the
-//  HAL rejects (`throwing -10877`, `_StartIO ... error 35`), leaving a silently dead
-//  mic. Holding it only for the duration of a phrase keeps that window as small as
-//  possible; `releaseAudio()` lets the caller force the release before recording.
+//  Created by Raj Singh.
 //
 
 import AVFoundation
 
+// Why: a long-lived AVSpeechSynthesizer holds a CoreAudio output context whose teardown races the mic start.
+/// Private text-to-speech for the Orb HUD's short spoken phrases, independent of `SpeechService.shared`.
+/// Honors the user's persisted voice and rate; one synthesizer per utterance, with `releaseAudio()` to force release.
 @MainActor
 final class OrbVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
 
     private var synthesizer: AVSpeechSynthesizer?
 
-    /// When this output last let go of a synthesizer that had been speaking. The session controller
-    /// reads it to wait longer before opening a BLUETOOTH microphone right after speech: the headset
-    /// has to switch from its playback mode to its microphone mode first (device test 2026-10-10).
+    /// When this output last let go of a synthesizer that had been speaking.
+    /// The session controller reads it to wait longer before opening a Bluetooth microphone right after speech,
+    /// since the headset must switch from playback to microphone mode first.
     private(set) var lastAudioReleasedAt: Date?
     private var completion: (() -> Void)?
-    /// [Phase 4b] Used INSTEAD of `synthesizer` while the panel-scoped duplex engine is up and
-    /// cancelling echo. ⚠️ Both short phrases and the answer narration must go through it: leave
-    /// ONE plain synthesizer in the session and its asynchronous audio-unit teardown still races
-    /// the microphone, so `audioSettleDelay` could never be removed.
+    // Why: short phrases and answer narration must both use it: one plain synthesizer leaves an async teardown racing the mic.
+    /// Used instead of `synthesizer` while the panel-scoped duplex engine is up and cancelling echo.
     private lazy var duplexSpeaker = OrbDuplexSpeaker()
 
-    /// ⚠️ Must be set by the owner. `OrbStreamingSpeaker` sets it on its speaker and this one
-    /// did not, so every duplex line for the greeting, the approval prompt, the completion phrase
-    /// and "Starting fresh" printed with an EMPTY correlation tag — unattributable to a session in
-    /// exactly the log a device test reads.
+    /// Correlation tag for the duplex log lines; the owner must set it (`OrbStreamingSpeaker` sets it on its speaker).
+    /// An empty tag leaves those lines unattributable to a session.
     var correlationTag: String = "" {
         didSet { duplexSpeaker.correlationTag = correlationTag }
     }
@@ -79,16 +65,9 @@ final class OrbVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         synthesizer.speak(utterance)
     }
 
+    // Why: an empty Orb voice falls back to the Read-Aloud voice; keep it for users who never choose an Orb voice.
     /// Applies the user's Orb voice and rate to an utterance.
-    ///
-    /// Shared with `OrbStreamingSpeaker` so the greeting, the answer and the completion phrase
-    /// cannot drift apart — a narration that changes voice halfway through an answer is worse
-    /// than one that never speaks.
-    ///
-    /// ⚠️ The Read-Aloud fallback IS the pre-settings behaviour and must stay. Orb used to read
-    /// the Read-Aloud keys directly, so picking a voice for reading a chat message silently
-    /// changed the assistant's voice too. The empty-string sentinel keeps that coupling for
-    /// anyone who never chooses an Orb voice, and breaks it the moment they do.
+    /// Shared with `OrbStreamingSpeaker` so the greeting, the answer and the completion phrase never drift apart.
     static func applyVoiceSettings(to utterance: AVSpeechUtterance) {
         let config = OrbConfigManager.shared
         let readAloudRate = TestHost.defaults.float(forKey: AppSettings.speechPlaybackRateKey)
@@ -121,9 +100,8 @@ final class OrbVoiceOutput: NSObject, AVSpeechSynthesizerDelegate {
         if synthesizer != nil { lastAudioReleasedAt = Date() }
         synthesizer?.delegate = nil
         synthesizer = nil
-        // ⚠️ Releases the duplex SYNTHESIZER only. The engine itself is panel-scoped and shared
-        // with capture — tearing it down here would rebuild voice processing before every turn,
-        // which is precisely the failure this phase removed.
+        // Releases the duplex synthesizer only: the engine is panel-scoped and shared with capture, so tearing it down here
+        // would rebuild voice processing before every turn.
         duplexSpeaker.releaseAudio()
     }
 

@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillPinAndRetryTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  ⚠️ `pinnedVersionID` once had NO production write path: resolution read it, the profile card
-//  warned about it, and both branches were permanently dead. These tests go through the real store,
-//  because the defect was that correct logic had no caller — which a policy-only test cannot see.
+//  Created by Raj Singh.
 //
 
 import XCTest

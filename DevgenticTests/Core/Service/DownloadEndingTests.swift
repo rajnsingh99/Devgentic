@@ -4,12 +4,7 @@
 //  DownloadEndingTests.swift
 //  DevgenticTests
 //
-//  The CR-35 follow-up (2026-10-13): MLX and Whisper download history is classified from the
-//  service's own recorded ending (`lastDownloadEnding`), never from `progress >= 0.99`.
-//
-//  What the percentage actually decided: a download that SUCCEEDED but that the installed scan
-//  does not list was recorded as CANCELLED. Cancel and pause only read correctly because every
-//  one of those paths happens to reset progress to 0 first.
+//  Created by Raj Singh.
 //
 
 import XCTest

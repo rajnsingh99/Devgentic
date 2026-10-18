@@ -4,7 +4,7 @@
 //  ScheduledTaskRowView.swift
 //  Devgentic
 //
-//  A row view for displaying a scheduled task in the sidebar panel.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

@@ -4,7 +4,7 @@
 //  OnboardingReadyView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/09/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

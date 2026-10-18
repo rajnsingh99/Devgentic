@@ -4,12 +4,7 @@
 //  MCPRegistryInstallPlan.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — turns a registry entry into something the user can review.
-//
-//  This is the seam where third-party metadata becomes a command we would run. It produces
-//  a PLAN, never an action: the plan is rendered for review, and only an explicit
-//  confirmation turns it into a saved server. The MCP Registry indexes; it does not vet
-//  publishers — so a listing is data, not permission.
+//  Created by Raj Singh.
 //
 
 import Foundation

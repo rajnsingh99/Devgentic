@@ -4,16 +4,7 @@
 //  ProfileEditBufferTests.swift
 //  DevgenticTests
 //
-//  Created on 27/03/26.
-//
-//  Tests ProfileEditBuffer — the single source of truth for profile
-//  edit state and dirty tracking. Validates the core contract:
-//    - isDirty is false on load
-//    - isDirty becomes true only when draft != original
-//    - revert() restores draft to original and clears isDirty
-//    - markSaved() promotes draft to original and clears isDirty
-//    - load() replaces both original and draft
-//    - Advanced config round-trips do NOT produce phantom dirty state
+//  Created by Raj Singh.
 //
 
 import XCTest

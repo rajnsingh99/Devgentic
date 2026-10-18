@@ -4,20 +4,7 @@
 //  ArgNameAliasResolver.swift
 //  Devgentic
 //
-//  Forgive-then-audit for argument key mismatches.
-//
-//  Cloud providers occasionally emit tool calls with slightly-wrong argument
-//  keys under prompt pressure (e.g. `filename` when the schema says `path`).
-//  Rejecting these wastes an iteration when a clean rename would work.
-//
-//  This resolver:
-//    1. Compares emitted argument keys against the tool's declared schema.
-//    2. Remaps known aliases (filename→path, query→search_term, etc.).
-//    3. Reports residual missing/unexpected keys as a typed mismatch.
-//
-//  The remapping is conservative — only well-attested LLM hallucination pairs
-//  are aliased. Unknown aliases are reported as unexpected args, not silently
-//  renamed to the closest match.
+//  Created by Raj Singh.
 //
 
 import Foundation

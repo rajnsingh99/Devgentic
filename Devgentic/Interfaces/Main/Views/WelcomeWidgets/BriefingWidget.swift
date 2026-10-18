@@ -1,55 +1,54 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  MorningBriefWidget.swift
+//  BriefingWidget.swift
 //  Devgentic
 //
-//  Morning Brief as a registered welcome widget.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// The AI Morning Brief recap card. Visible while a brief is generating or
+/// The AI Briefing recap card. Visible while a brief is generating or
 /// when a non-empty brief exists; triggers generation when the welcome screen
 /// appears.
-struct MorningBriefWidget: WelcomeWidget {
-    let id = "morning_brief"
+struct BriefingWidget: WelcomeWidget {
+    let id = "briefing"
     let priority = 10
 
     func isVisible() -> Bool {
         let isICEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
-        let isBriefEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureMorningBriefKey)
+        let isBriefEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureBriefingKey)
         guard isICEnabled && isBriefEnabled else { return false }
 
-        let service = MorningBriefService.shared
+        let service = BriefingService.shared
         return service.isGenerating || !(service.currentBrief?.isEmpty ?? true)
     }
 
     func makeBody() -> AnyView {
-        AnyView(MorningBriefWidgetView())
+        AnyView(BriefingWidgetView())
     }
 
     func onWelcomeAppear() {
-        let service = MorningBriefService.shared
+        let service = BriefingService.shared
         guard service.shouldShowBrief() else { return }
         Task { _ = await service.generateBrief() }
     }
 }
 
-/// Renders the loading state or the brief card and owns its navigation /
-/// dismiss callbacks (previously inline in `WelcomeView`).
-private struct MorningBriefWidgetView: View {
+/// Renders the loading state or the brief card and owns its navigation and dismiss callbacks.
+private struct BriefingWidgetView: View {
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(MainViewRouter.self) private var router
-    private var briefService = MorningBriefService.shared
+    private var briefService = BriefingService.shared
 
     var body: some View {
         Group {
             if briefService.isGenerating {
-                MorningBriefLoadingView()
+                BriefingLoadingView()
                     .transition(.opacity)
             } else if let brief = briefService.currentBrief, !brief.isEmpty {
-                MorningBriefCardView(
+                BriefingCardView(
                     brief: brief,
                     onNavigate: handleNavigation,
                     onDismiss: {

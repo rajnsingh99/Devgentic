@@ -4,11 +4,7 @@
 //  ProcessTreeTests.swift
 //  DevgenticTests
 //
-//  `zsh -c "xcodebuild …"` puts the compiler in a different process from the zsh. Signalling the
-//  zsh alone left the build running, re-parented to launchd, while `command_stop` said "stopped".
-//
-//  ⚠️ These tests spawn real processes and signal them. Every one cleans up in `tearDown`, and a
-//  leaked `sleep` would be visible as a slow suite rather than a silent cost.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,35 +4,13 @@
 //  AnthropicPromptCaching.swift
 //  Devgentic
 //
-//  Claude caches nothing unless a request marks where its reusable prefix ends — a
-//  `cache_control` breakpoint on a content block. Every other provider we use caches a shared
-//  prefix on its own (MLX through `MLXPromptCache`, Ollama, OpenAI, Gemini); layout B
-//  (`PromptBuilder`) is what makes that prefix the same from one request to the next. This marks
-//  it for Claude.
-//
-//  Anthropic caches in order tools → system → messages, so one breakpoint covers everything
-//  before it. A read needs an EARLIER request to have written an entry at that exact position, and
-//  the API looks back about 20 content blocks from each breakpoint for one. So each breakpoint here
-//  sits where the NEXT request will share the prefix:
-//
-//   1. The end of the system message — stable for the conversation (layout B). Every request of the
-//      conversation reads the tools and the system message back from here.
-//   2. The last turn BEFORE the current one — the conversation so far. The next message's request
-//      carries the same turns plus two new ones, so it reads up to here. (The current turn itself is
-//      never reused: next time it reappears as plain history, without its turn context.)
-//   3. The end of the request — ONLY when tools are offered, i.e. an agent loop that will send this
-//      request again with a tool result appended. Iteration N+1 reads all of iteration N.
-//
-//  A write costs 1.25× plain input, a read 0.1× (priced per model by `ModelPriceList`). A prefix below the model's minimum
-//  (about 1,024 tokens; more on Haiku) is simply not cached — no error, no charge.
-//
-//  ⚠️ Not applied to one-off calls (`generate(messages:)`: planning, reflection, synthesis, titles,
-//  the memory suggestion pass). Nothing sends their prompt twice, so a breakpoint would be a pure
-//  25% surcharge on it.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Marks `cache_control` breakpoints on Claude requests so the stable prefix (tools, system, earlier turns) is cached.
+/// Not applied to one-off calls, whose prompt is never sent twice.
 enum AnthropicPromptCaching {
 
     static let breakpoint: [String: Any] = ["type": "ephemeral"]

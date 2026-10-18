@@ -4,9 +4,7 @@
 //  FakeOnboardingSystemSettings.swift
 //  DevgenticTests
 //
-//  Stands in for `LiveOnboardingSystemSettings`, which would raise real macOS permission prompts,
-//  register real global hotkeys and rewrite the developer's settings from inside the test host.
-//  Every onboarding test builds its view model with this.
+//  Created by Raj Singh.
 //
 
 import Foundation

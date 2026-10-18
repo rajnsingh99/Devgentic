@@ -4,10 +4,7 @@
 //  GeminiImageGenService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Google Gemini image generation using generateContent with responseModalities.
-//  Supports T2I and I2I via inline image parts.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,14 +14,14 @@ private let logger = DGLogger(category: "GeminiImageGenService")
 
 // MARK: - Gemini Image Generation Service
 
+/// Google Gemini image generation using generateContent with responseModalities.
+/// Supports text-to-image and image-to-image via inline image parts.
 struct GeminiImageGenService: ImageGenProvider, Sendable {
     let apiKey: String
     let modelName: String
 
-    /// ⚠️ register B21 — this type had no endpoint at all: both request builders hardcoded
-    /// `ProviderDefaults.geminiBaseURL`, so an imageGen profile configured against a corporate
-    /// gateway sent its gateway-scoped key straight to Google. `OpenAIImageGenService` and
-    /// `OllamaImageGenService` both took a `baseURL`; this one was the odd one out.
+    /// Optional endpoint override; nil uses `ProviderDefaults.geminiBaseURL`.
+    /// Lets an imageGen profile target a gateway without sending its gateway-scoped key to Google.
     let baseURL: String?
 
     private var apiBaseURL: URL {
@@ -54,9 +51,8 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         var request = URLRequest(url: generateContentURL, timeoutInterval: 120)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // ⚠️ Header, never the query string — see the note in `GeminiService.verifyAndFetchModels`.
-        // A key in the URL is written to URLSession's on-disk cache and to every proxy access log
-        // on the path.
+        // Sent as a header, never in the query string: a key in the URL lands in URLSession's disk cache and
+        // proxy logs.
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
 
         let fullPrompt: String
@@ -114,9 +110,8 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         var request = URLRequest(url: generateContentURL, timeoutInterval: 120)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // ⚠️ Header, never the query string — see the note in `GeminiService.verifyAndFetchModels`.
-        // A key in the URL is written to URLSession's on-disk cache and to every proxy access log
-        // on the path.
+        // Sent as a header, never in the query string: a key in the URL lands in URLSession's disk cache and
+        // proxy logs.
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
 
         let fullPrompt: String

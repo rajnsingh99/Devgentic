@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  Shared fixtures for the local-inference coordinator tests.
+//  LocalInferenceTestSupport.swift
+//  DevgenticTests
+//
+//  Created by Raj Singh.
 //
 
 import Foundation

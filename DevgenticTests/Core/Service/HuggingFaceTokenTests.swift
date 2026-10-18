@@ -4,14 +4,7 @@
 //  HuggingFaceTokenTests.swift
 //  DevgenticTests
 //
-//  G4 — HuggingFace token support. `HubApi` was constructed with no `hfToken:`, so it fell back
-//  to `hfTokenFromEnv()` — which reads the process environment. A macOS .app launched from
-//  Finder inherits no shell environment, so that lookup is always nil in the shipped product
-//  and gated repos failed with an instruction the app gave no way to follow.
-//
-//  ⚠️ NOTHING HERE TOUCHES THE REAL KEYCHAIN. `SecureKeyStorage` can raise a modal
-//  authorisation prompt, which HANGS a headless test run — a known trap in this project. These
-//  cover the pure logic: token shape, masking, and the gated-flag decoding.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,10 +4,7 @@
 //  CognitiveGeneratorRoutingTests.swift
 //  DevgenticTests
 //
-//  Tests for generator property correctness and workflow routing.
-//  Verifies that each generator has the expected dialect rules, tool adapter,
-//  prompt wrapping, and parse dialect — and that WorkflowCognitiveGenerator
-//  correctly delegates to all inner generator types including XMLNativeStructuredGenerator.
+//  Created by Raj Singh.
 //
 
 import XCTest

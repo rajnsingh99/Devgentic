@@ -4,16 +4,7 @@
 //  RenderCostRegressionTests.swift
 //  DevgenticTests
 //
-//  Pins two 2026-07-16 self-inflicted perf regressions. Both are invisible to plain
-//  unit construction — they only appear when the view is MOUNTED and re-rendered,
-//  which is exactly how they shipped.
-//
-//  1. MarkdownTableView measured every visible cell on each `body` pass, and hover
-//     state lived on that same view — so moving the mouse between rows re-measured
-//     the whole table.
-//  2. ImageView decoded the bitmap in `init` via `State(initialValue:)`, which
-//     EVALUATES on every init (only the first is retained) — so a parent re-render
-//     re-decoded the full payload and threw it away.
+//  Created by Raj Singh.
 //
 
 import XCTest

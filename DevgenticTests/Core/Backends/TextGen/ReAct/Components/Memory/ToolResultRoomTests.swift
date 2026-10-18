@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ToolResultRoomTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-12: a tool result may use the room that is FREE — not room already promised to the
-//  recent exchanges compaction (native) or eviction (scratchpad) can never remove.
-//
-//  ⚠️ THE DEFECT. Native: the limit was budget − protected PREFIX, while compaction also keeps the
-//  newest 3 exchanges; each new result was handed all the room, so three large `read_file`s came to
-//  ~3× the budget ("CANNOT compact. Sending over budget" → cloud 400 / Ollama drops the instructions).
-//  Scratchpad: `perEntryCap == totalBudget` and eviction only touches OLD lines, same ~3×.
-//  The user's rule still holds — no limit below what fits — it is "what fits" that was miscounted.
+//  Created by Raj Singh.
 //
 
 import XCTest

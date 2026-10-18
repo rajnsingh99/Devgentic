@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillLibrarySchemaTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The V6 skill library entities: what they persist, and the invariants the shape is supposed to
-//  buy. Written against a REAL container rather than bare structs, because every property here
-//  exists to survive a save/load cycle and a test on an in-memory object proves nothing about that.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,14 +4,7 @@
 //  MessageResidencyTests.swift
 //  DevgenticTests
 //
-//  `loadMoreMessages` only ever appended — pagination deferred loading but never capped
-//  residency, so scrolling back through a long conversation made every message permanently
-//  resident along with its decoded timeline and cached markdown.
-//
-//  These pin the two bounding measures AND the invariant that makes them safe: the cap must
-//  never masquerade as "the store is exhausted", because `resolveBackendHistory` treats that
-//  as "the loaded window IS the conversation" and hands it to the model as its entire
-//  history.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,19 +4,7 @@
 //  RunningNodeSkipTests.swift
 //  DevgenticTests
 //
-//  Phase B increment 5 of per-node SKIP (`LLM_Execution_Concurrency_Design.md` §0.6 D2.1):
-//  skipping a node that is ALREADY EXECUTING. The engine is a third racer child in
-//  `executeNode`'s task group (`runningSkipSentinel`), a typed `WorkflowNodeSkipRequested`
-//  signal, and `UserSkipTeardownPolicy` classifying the ambiguous teardown.
-//
-//  ⚠️ Every mid-flight test uses the mock's `.slow` script (yields then blocks until cancelled)
-//  with `onInvoke` as the "node is genuinely running NOW" barrier — never `.workflowNodeStarted`
-//  (yielded before the provider is called) and never a sleep. `tornDownProfileIDs` is the proof
-//  that the skip actually cancelled the in-flight stream rather than waiting it out.
-//
-//  ⚠️ Deadline discipline: a broken skip's failure mode is a HANG (the `.slow` stream never
-//  finishes). Every test that could hang runs through `executeWithDeadline`, which fails in
-//  seconds instead of poisoning the runner for 400s.
+//  Created by Raj Singh.
 //
 
 import XCTest

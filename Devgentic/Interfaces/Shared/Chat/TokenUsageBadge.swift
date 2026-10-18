@@ -4,12 +4,12 @@
 //  TokenUsageBadge.swift
 //  Devgentic
 //
-//  Compact token usage indicator displayed below agent message bubbles.
-//  Shows input/output token counts with a "~" prefix for estimates.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Compact token usage indicator shown below agent message bubbles: input/output counts, with a "~" prefix for estimates.
 struct TokenUsageBadge: View {
     let usage: TokenUsage
     @Environment(\.appTheme) private var theme
@@ -30,10 +30,8 @@ struct TokenUsageBadge: View {
     private var formattedUsage: String { Self.badgeText(for: usage) }
 
     // MARK: - Pure formatting
-    //
-    // The badge string and the spoken label are two renderings of ONE decision (below), so they
-    // cannot drift: same estimate flag, same abbreviation thresholds. Only the unit's spelling
-    // differs. `nonisolated static` so both are unit-testable without hosting a view.
+    // The badge string and spoken label render one decision, so estimate flag and abbreviation thresholds cannot drift.
+    // `nonisolated static` so both are unit-testable without hosting a view.
 
     /// What the badge shows.
     nonisolated static func badgeText(for usage: TokenUsage) -> String {
@@ -41,16 +39,9 @@ struct TokenUsageBadge: View {
         return "\(prefix)\(abbreviated(usage.inputTokens)) in \u{00B7} \(prefix)\(abbreviated(usage.outputTokens)) out"
     }
 
-    /// What VoiceOver is told. Two things the old constant label dropped (CF-41):
-    ///
-    /// - the `~`. It is the ONLY signal separating a locally-guessed count from a
-    ///   provider-reported one, and reading a bare integer aloud makes a stronger claim than the
-    ///   badge ever makes. Carried once as the word "Estimated" rather than twice as a symbol
-    ///   VoiceOver does not pronounce.
-    /// - the abbreviation. The badge reads "1.2K"; a label saying "1183" describes a string that
-    ///   is not on screen, so a sighted helper and a VoiceOver user disagree about what it says.
-    ///
-    /// "thousand"/"million" instead of "K"/"M" because VoiceOver spells those letters out.
+    /// What VoiceOver is told: the badge's count, abbreviated the same way, with "Estimated" in place of the `~` symbol.
+    /// The `~` is the only signal separating a guessed count from a provider-reported one.
+    /// Uses "thousand"/"million" instead of "K"/"M" because VoiceOver spells those letters out.
     nonisolated static func spokenLabel(for usage: TokenUsage) -> String {
         let lead = usage.isEstimated
             ? String(localized: "Estimated token usage")
@@ -66,14 +57,8 @@ struct TokenUsageBadge: View {
         case millions(String)
     }
 
-    /// ⚠️ [mm-9] The bucket is chosen from the ROUNDED value, not the raw count. Choosing the
-    /// bucket from `count` and only then formatting with `%.1f` let the format round PAST the
-    /// threshold the bucket was picked by: 999,950–999,999 fell in the thousands bucket and then
-    /// printed "1000.0K", and VoiceOver said "1000.0 thousand". The same shape is why `%.1f`
-    /// cannot simply be applied after a `>=` test anywhere in this file.
-    ///
-    /// Scaling is done from the MILLIONS divisor in that branch — promoting the thousands string
-    /// would print "1000.0M". 999,950 / 1,000,000 = 0.99995, which `%.1f` renders "1.0".
+    /// Chooses the magnitude bucket from the rounded value, not the raw count, so `%.1f` cannot round past a threshold
+    /// (999,950 would otherwise print "1000.0K"). The millions branch scales from the millions divisor.
     nonisolated static func magnitude(of count: Int) -> Magnitude {
         if count < 1_000 { return .units(count) }
         // Would the thousands rendering round up to four digits? Then it is really a million.

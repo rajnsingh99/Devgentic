@@ -4,14 +4,15 @@
 //  GitChangesStore.swift
 //  Devgentic
 //
-//  Owns the Git Changes panel's snapshot for the open Code project: runs the read-only command
-//  matrix off the main actor, coalesces refresh requests, and publishes one phase.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "GitUI")
 
+/// Owns the Git Changes panel's snapshot for the open Code project: runs the read-only command matrix off the main
+/// actor, coalesces refresh requests and publishes one phase.
 @Observable @MainActor
 final class GitChangesStore {
 
@@ -47,18 +48,14 @@ final class GitChangesStore {
         )
     }
 
-    /// A pass runs after every successful tool during an agent run. An IDENTICAL result notifies no
-    /// one: Observation suppresses a whole-value write of an equal `Equatable` (measured, Swift 6.2 —
-    /// see [CF-14] on `ChatHistoryViewModel.updateCodeViewerDraft`), so `Phase` and everything it
-    /// holds must stay `Equatable` and free of per-pass values like timestamps.
-    /// `testAnIdenticalPassDoesNotRepublishThePhase` pins that.
+    /// The panel's phase. A pass runs after every successful tool, and an identical result notifies no one, since
+    /// Observation suppresses an equal `Equatable` write. `Phase` and everything it holds must stay `Equatable` and free
+    /// of per-pass values like timestamps.
     private(set) var phase: Phase = .noProject {
         didSet { hasLoadedRepository = snapshot != nil }
     }
-    /// Whether a repository is loaded — the ONE fact `MainApplicationView` needs (the pill rule).
-    /// A separate flag so that large body observes the loaded / not-loaded TRANSITION only: a pass
-    /// that changes a count re-renders the pill, not the whole window. (Same-value suppression keeps
-    /// this write silent when the answer is unchanged.)
+    /// Whether a repository is loaded: the one fact `MainApplicationView` needs. A separate flag so the large body
+    /// observes only the loaded/not-loaded transition; a count change re-renders the pill, not the window.
     private(set) var hasLoadedRepository = false
     private(set) var isRefreshing = false
     private(set) var projectPath: URL?

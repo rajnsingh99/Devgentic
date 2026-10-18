@@ -4,26 +4,17 @@
 //  WorkflowMarkdownView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 12/04/26.
-//
-//  Standalone markdown renderer for workflow output areas.
-//  Reuses the shared `parseMarkdown()` pipeline and renders ContentBlock types
-//  without requiring a ChatMessage. Supports paragraphs, headings, code blocks,
-//  lists, tables, horizontal rules, and images — matching the chat appearance.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Standalone markdown renderer for workflow output areas; reuses `parseMarkdown()` without a ChatMessage.
+/// Supports paragraphs, headings, code blocks, lists, tables, horizontal rules and images, matching the chat appearance.
 struct WorkflowMarkdownView: View {
     let text: String
-    /// Pre-parsed blocks, used when this view re-enters itself to render the children
-    /// of a list item / blockquote.
-    ///
-    /// Recursion MUST route through this nominal type rather than `renderBlock`
-    /// calling itself: a `@ViewBuilder func` returning `some View` that recurses
-    /// defines its opaque type in terms of itself, which the compiler rejects. Holding
-    /// a `WorkflowMarkdownView` as a subview is fine — the child's `body` type never
-    /// enters the parent's.
+    // Why: recursion must go through this nominal type: a recursive `@ViewBuilder` func has a self-referential opaque type.
+    /// Pre-parsed blocks, used when this view re-enters itself to render the children of a list item or blockquote.
     private var presetBlocks: [ContentBlock]?
 
     @Environment(\.appTheme) private var theme
@@ -61,10 +52,7 @@ struct WorkflowMarkdownView: View {
                 .padding(.bottom, theme.spacingSmall)
 
         case .code(let lang, let codeContent, let fileName):
-            // [XUI-8] The user's code size, not `CodeBlockView`'s 12pt default. This surface's prose
-            // and tables already scaled with `chatFontSize`; only its code blocks did not, so a
-            // reader at 20pt prose got 12pt code in a workflow node and correctly-sized code in the
-            // chat bubble two inches away.
+            // The user's code size, not `CodeBlockView`'s 12pt default, so code scales with `chatFontSize` like prose and tables.
             CodeBlockView(language: lang, content: codeContent, fileName: fileName,
                           fontSize: ChatUIConstants.codeFontSize(forChatFontSize: themeManager.chatFontSize))
                 .padding(.bottom, theme.spacingMedium)
@@ -187,19 +175,13 @@ struct WorkflowMarkdownView: View {
                     attributedString[run.range].font = font.weight(.semibold)
                     attributedString[run.range].foregroundColor = textColor
                 } else if intent.contains(.emphasized) {
-                    // Was missing entirely, so italic runs fell into the generic `else` and had
-                    // a NON-italic font assigned over them — silently destroying the emphasis.
-                    // The comment above states the contract this broke: chat and the workflow
-                    // timeline must render the same markdown identically.
+                    // Italic runs need their own branch; otherwise the generic `else` assigns a non-italic font over them.
+                    // Chat and the workflow timeline must render the same markdown identically.
                     attributedString[run.range].font = font.weight(weight).italic()
                     attributedString[run.range].foregroundColor = textColor
                 } else if run.link != nil {
-                    // Kept in step with `ContentBlockView.createStyledString`, which carries the
-                    // full reasoning: a markdown link has NO `inlinePresentationIntent`, so it
-                    // fell into the `else` below and had SwiftUI's accent tint overwritten with
-                    // body colour — leaving a workflow node's links indistinguishable from the
-                    // prose around them. The underline must be explicit; `.link` does not bring
-                    // one once the run carries its own `foregroundColor`.
+                    // Kept in step with `ContentBlockView.createStyledString`: a markdown link has no `inlinePresentationIntent`,
+                    // so it would fall into the `else` and lose its tint; the underline must be explicit.
                     attributedString[run.range].font = font.weight(weight)
                     attributedString[run.range].foregroundColor = linkColor
                     attributedString[run.range].underlineStyle = .single

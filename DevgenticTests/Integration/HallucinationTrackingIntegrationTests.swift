@@ -4,14 +4,7 @@
 //  HallucinationTrackingIntegrationTests.swift
 //  DevgenticTests
 //
-//  Regression tests for the hallucinated-tools guardrail. Only genuinely
-//  hallucinated names (ToolFailureCategory.notFound — the tool isn't in the
-//  registry) may enter the "DO NOT USE" prompt ban; ordinary failures, rejected
-//  final_answer attempts, etc. are retryable and must NOT ban the tool.
-//
-//  MockCognitiveGenerator mirrors PromptBuilder's <hallucinated_tools> section,
-//  so the ban list is observable through the messages the mock provider captures
-//  on the NEXT iteration.
+//  Created by Raj Singh.
 //
 
 import XCTest

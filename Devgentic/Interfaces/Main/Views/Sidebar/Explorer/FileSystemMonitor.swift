@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
-// FileSystemMonitor.swift
+//
+//  FileSystemMonitor.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
 
 import Foundation
 import CoreServices
 import os
 
-// The C-style callback function that FSEvents will call.
-// It must be a global function or a static method that does not capture any context.
-// It receives a pointer to the FileSystemMonitor instance via `clientCallBackInfo`
-// and calls an instance method on it to handle the logic.
+// The C-style callback FSEvents calls: a global function or static method that captures no context, receives
+// the FileSystemMonitor via `clientCallBackInfo` and calls an instance method on it.
 private func fsEventsCallback(
     stream: ConstFSEventStreamRef,
     clientCallBackInfo: UnsafeMutableRawPointer?,
@@ -48,12 +51,8 @@ class FileSystemMonitor {
     }
 
     func start(path: String, excludedPaths: [String] = []) {
-        // ⚠️⚠️ THIS IS REACHED WITHOUT ANYONE ASKING FOR IT. `ExplorerViewModel` is a STORED PROPERTY
-        // on `MainApplicationViewModel`, so it is constructed before the view model's init body runs
-        // — resolving the developer's security-scoped bookmark, recursively indexing that folder, and
-        // opening a live `FSEventStream` on it for the life of the process. It is then published as
-        // an MCP workspace root. None of that is anything a test asked for, and the folder is the
-        // developer's real last-opened project.
+        // Gated off under tests: constructing `ExplorerViewModel` alone would open a live `FSEventStream` on the
+        // developer's real folder.
         guard TestHost.permits("open an FSEventStream on the developer's real folder", logger: logger) else { return }
 
         stop()

@@ -4,16 +4,7 @@
 //  OnboardingSystemSettings.swift
 //  Devgentic
 //
-//  Everything the Setup Assistant reads or changes OUTSIDE onboarding: macOS privacy permissions,
-//  the Quick Access and Orb switches, Sparkle's update-check answer and the diagnostics opt-out.
-//
-//  ⚠️ Behind a protocol on purpose. The test host is the real app: a test that touched the live
-//  implementation would raise real macOS permission prompts, register real global hotkeys and
-//  rewrite the developer's own settings (`QuickAccessConfigManager` writes `UserDefaults.standard`).
-//  Tests inject a fake; only the app uses `LiveOnboardingSystemSettings`.
-//
-//  ⚠️ Each switch goes through the SAME path its Settings pane uses (set the flag, then ask
-//  AppDelegate to re-register the hotkey), so onboarding cannot leave a state Settings can't.
+//  Created by Raj Singh.
 //
 
 import AppKit
@@ -102,8 +93,8 @@ protocol OnboardingSystemSettings: AnyObject {
 @MainActor
 final class LiveOnboardingSystemSettings: OnboardingSystemSettings {
 
-    /// The key Sparkle writes when the user answers "check automatically?". Absent until then —
-    /// Info.plist deliberately leaves `SUEnableAutomaticChecks` out (see `SoftwareUpdater`).
+    /// The key Sparkle writes when the user answers "check automatically?"; absent until then, because Info.plist
+    /// leaves `SUEnableAutomaticChecks` out (see `SoftwareUpdater`).
     static let sparkleAutomaticChecksKey = "SUEnableAutomaticChecks"
 
     var quickAccessEnabled: Bool {
@@ -192,8 +183,8 @@ final class LiveOnboardingSystemSettings: OnboardingSystemSettings {
             // volume that matters is the folder's, not the boot volume.
             target = MLXModelsLocation.effectiveDirectory()
         case .ollama:
-            // ⚠️ An estimate. The Ollama SERVER decides where models go (`~/.ollama/models`, or
-            // `OLLAMA_MODELS` in its own environment, which this app cannot see).
+            // An estimate: the Ollama server decides where models go (`~/.ollama/models`, or `OLLAMA_MODELS` in its
+            // own environment, which this app cannot see).
             target = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ollama/models")
         default:
             target = nil

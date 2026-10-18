@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ContextInjectionTelemetryTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Run-Report Phase 3: every prompt layer that ships becomes one `.memoryOp` CONTEXT
-//  event with a provenance. Emission is tested THROUGH the real prompt builder
-//  (`PromptBuilder.buildStandardMessages`) against the real recorder — safe because
-//  the Phase-1 XCTest redirect points the shared store at a throwaway file.
-//
-//  ⚠️ These tests also stand guard on a byte-level invariant: adding telemetry to the
-//  prompt builder must NOT change the rendered prompt (KV-cache prefix stability).
+//  Created by Raj Singh.
 //
 
 import XCTest

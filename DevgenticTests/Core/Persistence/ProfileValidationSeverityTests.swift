@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ProfileValidationSeverityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Covers G92: an advisory capability warning was used as a hard gate.
-//
-//  `ProfileValidator` emitted every finding into one flat array, and both callers treated a
-//  non-empty array as fatal. So the sentence "Selected model does not support tool calling. Agent
-//  features MAY NOT work correctly" acquired the force of "A model must be selected" — a local
-//  agent profile could be created (creation validates leniently) and then never saved again, not
-//  even a rename, with an error toast whose own wording does not claim the save failed.
-//
-//  The tests below pin the distinction rather than the wording, so a future rule cannot become a
-//  gate merely by being appended to the array.
+//  Created by Raj Singh.
 //
 
 import XCTest

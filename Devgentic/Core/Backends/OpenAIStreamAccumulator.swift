@@ -4,25 +4,14 @@
 //  OpenAIStreamAccumulator.swift
 //  Devgentic
 //
-//  Reassembles a streamed `chat/completions` response (OpenAI, OpenRouter, OpenAI-compatible) into
-//  the single assistant message the non-streaming API would have returned, so both paths parse it
-//  with the same `OpenAILLMProvider.step(fromMessage:usage:)`.
-//
-//  Streamed shape, per chunk: `choices[0].delta` carries fragments —
-//    content            String, appended
-//    reasoning /
-//    reasoning_content  String, appended (OpenRouter / DeepSeek names for the thinking trace)
-//    tool_calls         [{index, id?, type?, function: {name?, arguments?}}] — fragments of each call,
-//                       keyed by `index`; `arguments` arrives as a JSON string split across chunks
-//    reasoning_details  [{index?, type, text?/summary?/data?, ...}] — OpenRouter, merged by `index`
-//  plus `finish_reason` on the last content chunk and, with `stream_options.include_usage`, a final
-//  chunk whose `usage` is set (and `choices` empty).
-//
-//  Pure value type: no I/O, fully unit-testable from recorded chunks.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Reassembles a streamed `chat/completions` response into the single assistant message the
+/// non-streaming API returns. Both paths then parse with `OpenAILLMProvider.step(fromMessage:usage:)`.
+/// Pure value type with no I/O.
 struct OpenAIStreamAccumulator {
 
     private(set) var content = ""

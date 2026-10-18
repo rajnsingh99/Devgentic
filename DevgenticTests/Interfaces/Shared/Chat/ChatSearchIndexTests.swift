@@ -4,8 +4,7 @@
 //  ChatSearchIndexTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the chat-search fixes of 2026-08-11
-//  (Chat_Production_Readiness.md rows CH28, CH29, CH31).
+//  Created by Raj Singh.
 //
 
 import XCTest

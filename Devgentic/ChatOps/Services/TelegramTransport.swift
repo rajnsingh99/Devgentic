@@ -4,20 +4,15 @@
 //  TelegramTransport.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
-/// Adapts `TelegramAPIClient` to the `ChatOpsTransport` protocol.
-///
-/// This is a thin wrapper — all actual HTTP logic stays in `TelegramAPIClient`.
-/// The transport sends plain text (no Markdown) for agent responses to avoid
-/// parse failures on code-heavy content.
-///
-/// Telegram uses numeric IDs internally — this transport converts between
-/// the protocol's String IDs and Telegram's Int64/Int at the boundary.
+/// Adapts `TelegramAPIClient` to `ChatOpsTransport`; all HTTP logic stays in the client.
+/// Sends plain text (no Markdown) to avoid parse failures on code, converting String ids to Telegram's
+/// Int64 at the boundary.
 final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
 
     let transportID = "telegram"
@@ -32,16 +27,14 @@ final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
     // MARK: - ChatOpsTransport
 
     func sendTextMessage(chatID: String, text: String) async throws {
-        // ⚠️ THE EGRESS FLOOR. Sanitised HERE rather than in the API client so it happens BEFORE
-        // chunking — a credential split across two chunks matches no pattern in either half and
-        // would walk straight through a client-side pass.
+        // The egress floor: sanitised here, before chunking, so a credential split across chunks cannot slip
+        // past a client-side pass.
         try await apiClient.sendMessage(chatID: Int64(chatID)!, text: RemoteEgressSanitizer.credentialsOnly(text), parseMode: nil)
     }
 
     func sendChunkedMessage(chatID: String, text: String) async throws {
-        // ⚠️ THE EGRESS FLOOR. Sanitised HERE rather than in the API client so it happens BEFORE
-        // chunking — a credential split across two chunks matches no pattern in either half and
-        // would walk straight through a client-side pass.
+        // The egress floor: sanitised here, before chunking, so a credential split across chunks cannot slip
+        // past a client-side pass.
         try await apiClient.sendChunkedMessage(chatID: Int64(chatID)!, text: RemoteEgressSanitizer.credentialsOnly(text), parseMode: nil)
     }
 
@@ -61,9 +54,7 @@ final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
 }
 
 // MARK: - Remote view rendering (C3)
-//
-// In this file rather than beside the other two renderers because `apiClient` is `private`, and
-// `private` in Swift is file-scoped.
+// Lives in this file because `apiClient` is `private`, which is file-scoped in Swift.
 
 extension TelegramTransport {
 
@@ -71,9 +62,8 @@ extension TelegramTransport {
 
     @discardableResult
     func render(_ view: RemoteView, to destination: RemoteDestination) async throws -> String? {
-        // ⚠️ THE VIEW, NOT THE RENDERED TEXT. Slack puts the body in BLOCKS as well as the
-        // fallback text, and every platform puts conversation titles on BUTTON LABELS — and a
-        // title is auto-set to the user's first prompt. Cleaning `draft.text` would miss both.
+        // Sanitises the view, not the rendered text: Slack puts the body in blocks and platforms put
+        // conversation titles on button labels.
         let view = view.sanitizedForEgress()
         let channel = destination.channel
         guard let draft = TelegramRemoteRenderer.draft(for: view) else {
@@ -82,22 +72,20 @@ extension TelegramTransport {
             }
             return nil
         }
-        // ⚠️ Throws instead of `Int64(chatID)!`. The force-unwraps elsewhere in this file are safe
-        // only because their sole producer builds the string from an `Int64`; new code does not
-        // inherit that assumption.
+        // Throws instead of force-unwrapping `Int64(chatID)`; the other force-unwraps are safe only because
+        // their producer builds the string from an `Int64`.
         guard let chatID = Int64(channel.channelID) else {
             logger.error("[CHATOPS/RENDER] Telegram channel id \"\(channel.channelID)\" is not numeric, so the view was NOT posted. CONSEQUENCE: the remote user receives no reply at all and the command appears to have been ignored.")
             throw RemoteRenderError.unaddressableChannel(provider: .telegram, channelID: channel.channelID)
         }
-        // ⚠️ `destination` is always a channel post: Telegram has no interaction-reply channel, so
-        // `.interactionReply` degrades to the same call rather than failing.
+        // `destination` is always a channel post: Telegram has no interaction-reply channel, so
+        // `.interactionReply` degrades to the same call.
         let message = try await apiClient.sendMessage(
             chatID: chatID,
             text: draft.text,
             parseMode: draft.parse_mode,
-            // ⚠️ WAS `draft.reply_markup.map { .inline($0) }`. That literal re-wrap was the second
-            // half of the barrier: even once the renderer could express a `ForceReply`, this line
-            // would have forced it back into an inline keyboard. The draft now names its own kind.
+            // The draft names its own reply-markup kind, so a `ForceReply` is not forced back into an inline
+            // keyboard.
             replyMarkup: draft.reply_markup
         )
         RemoteRenderLog.posted(view, channel: channel, logger: logger)

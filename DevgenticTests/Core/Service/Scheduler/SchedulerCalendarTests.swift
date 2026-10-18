@@ -4,10 +4,7 @@
 //  SchedulerCalendarTests.swift
 //  DevgenticTests
 //
-//  Timeout inventory D-22 — scheduler calendar correctness. Owner decisions 2026-09-27:
-//  - a missed run is SKIPPED and recorded, never run late;
-//  - standard cron day rule (day-of-month OR weekday when both are set);
-//  - a run interrupted by quit is Cancelled and not re-run.
+//  Created by Raj Singh.
 //
 
 import XCTest

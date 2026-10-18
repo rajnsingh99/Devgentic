@@ -4,7 +4,7 @@
 //  ChatOpsSettingsView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/03/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -19,11 +19,9 @@ private enum ChatOpsPlatform: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-    /// invisible to the String Catalog extractor and would have shipped untranslated inside
-    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
-    /// These are brand names, but non-Latin locales transliterate them, so they stay extractable.
+    /// User-facing name, kept separate from `rawValue`: `Text(x.rawValue)` uses the non-localizing `StringProtocol`
+    /// overload and is invisible to the String Catalog extractor. `rawValue` is for persistence and logging only.
+    /// Brand names stay extractable because non-Latin locales transliterate them.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .telegram: return "Telegram"
@@ -62,12 +60,9 @@ private enum ChatOpsPlatform: String, CaseIterable, Identifiable {
 // MARK: - Localized Titles
 
 extension ChatOpsSecurityTier {
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-    /// invisible to the String Catalog extractor and would have shipped untranslated inside
-    /// otherwise-translated chrome. `rawValue` is the persisted/`Codable` value — never edit it.
-    /// Declared here (not next to the enum in `ChatOpsConfig.swift`) so the model layer keeps
-    /// its `Foundation`-only imports.
+    /// User-facing name, kept separate from `rawValue`: `Text(x.rawValue)` uses the non-localizing `StringProtocol`
+    /// overload and is invisible to the String Catalog extractor. `rawValue` is the persisted `Codable` value; never edit it.
+    /// Declared here, not beside the enum in `ChatOpsConfig.swift`, so the model layer keeps its Foundation-only imports.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .readOnly: return "Read Only"
@@ -85,9 +80,8 @@ struct ChatOpsSettingsView: View {
     @Environment(\.appTheme) private var theme
 
     @State private var config = ChatOpsConfigManager.shared
-    // ⚠️ NOT `@State`. These own an in-flight pairing window that must survive this view being
-    // torn down — see `ChatOpsPairingService.shared`. Nothing here observes them; the PIN and the
-    // status both come from `ChatOpsConfigManager`, which is what the card actually renders.
+    // Not `@State`: these own an in-flight pairing window that must survive this view being torn down.
+    // Nothing here observes them; the PIN and status come from `ChatOpsConfigManager`, which the card renders.
     private let pairingService = ChatOpsPairingService.shared
     private let discordPairingService = DiscordPairingService.shared
     private let slackPairingService = SlackPairingService.shared

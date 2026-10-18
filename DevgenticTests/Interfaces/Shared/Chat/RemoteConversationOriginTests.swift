@@ -4,15 +4,7 @@
 //  RemoteConversationOriginTests.swift
 //  DevgenticTests
 //
-//  Register CF-39 — the empty-conversation placeholder's remote-origin hint.
-//
-//  The old rule was `entity.userDefinedTitle == "Telegram Chat"` under a doc comment claiming it
-//  covered "Telegram, Discord". Discord and Slack conversations therefore got the LOCAL hint, and
-//  a Telegram user was told to "reply from your phone" while a Slack user was told the same.
-//
-//  Scope: these pin the pure decision and the copy it produces. Which of the two icons renders,
-//  and that the store is hit once per body pass rather than three times, are SwiftUI-internal and
-//  not reachable from a unit test.
+//  Created by Raj Singh.
 //
 
 import XCTest

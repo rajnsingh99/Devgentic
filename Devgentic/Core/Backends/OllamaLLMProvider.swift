@@ -4,7 +4,7 @@
 //  OllamaLLMProvider.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 09/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -34,10 +34,8 @@ struct OllamaLLMProvider: LLMProvider {
         try await postChat(messages: messages.map { $0 as [String: Any] }, tools: tools, responseSchema: responseSchema)
     }
 
-    /// Multimodal (vision) bot path. Overrides the protocol default — which would
-    /// strip images via `toLegacyDict()` — to attach each message's images as
-    /// Ollama's per-message `images` array of RAW base64 strings (no `data:` prefix,
-    /// per /api/chat). Text-only payloads produce the same body as the legacy path.
+    /// Multimodal (vision) bot path: attaches each message's images as Ollama's per-message `images` array of raw base64
+    /// strings (no `data:` prefix, per /api/chat). Overrides the protocol default, which strips images.
     func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         var messages: [[String: Any]] = []
         for pm in payload {
@@ -135,10 +133,8 @@ struct OllamaLLMProvider: LLMProvider {
 
     // MARK: - Body Construction
 
-    /// Assembles the /api/chat body. Messages typed as `[[String: Any]]` preserves
-    /// nested structural content (tool_calls arrays, tool call arguments dicts)
-    /// across the Swift type system — Any-erasure through a generic parameter was
-    /// observed to stringify nested arrays on some code paths.
+    /// Assembles the /api/chat body. Messages are `[[String: Any]]` to preserve nested structure (tool_calls arrays,
+    /// argument dicts): Any-erasure through a generic parameter stringified nested arrays on some paths.
     private func buildCognitiveBody(messages: [[String: Any]], tools: [[String: Any]]?) -> [String: Any] {
         var body: [String: Any] = [
             "model": config.modelName,
@@ -146,9 +142,8 @@ struct OllamaLLMProvider: LLMProvider {
             "stream": false
         ]
 
-        // Extended thinking — driven by ProviderConfig.thinkingEnabled (seeded by detection).
-        // If enabled but the model doesn't actually support it, Ollama returns HTTP 400
-        // which we translate to `LLMProviderError.thinkingUnsupported` below for auto-heal.
+        // Extended thinking, driven by `ProviderConfig.thinkingEnabled` (seeded by detection). If the model does not support it,
+        // Ollama returns HTTP 400, translated below to `LLMProviderError.thinkingUnsupported` for auto-heal.
         if config.thinkingEnabled {
             body["think"] = true
         }
@@ -164,10 +159,8 @@ struct OllamaLLMProvider: LLMProvider {
         return body
     }
 
-    /// Sends the /api/chat POST, emits G12 instrumentation, and parses the response
-    /// into a `ModernCognitiveStep`. Shared between legacy and native-turn paths so
-    /// both benefit from the same error handling, thinking-unsupported auto-heal, and
-    /// KV-cache-miss proxy metrics.
+    /// Sends the /api/chat POST and parses the response into a `ModernCognitiveStep`.
+    /// Shared by the legacy and native-turn paths: same error handling, thinking auto-heal and KV-cache-miss proxy metrics.
     private func dispatchCognitiveRequest(body: [String: Any]) async throws -> ModernCognitiveStep {
         let generation = try await LocalInferenceScope.beginGeneration(engine: inferenceEngine, modelID: config.modelName,
                                                                        contextTokens: requestedContext)
@@ -195,10 +188,8 @@ struct OllamaLLMProvider: LLMProvider {
                 throw LLMProviderError.thinkingUnsupported(modelName: config.modelName)
             }
 
-            // Detect "does not support tools" 400. Reasoning-only models (deepseek-r1 family,
-            // o1-likes) are rejected at the Ollama server layer before the model runs.
-            // The retry strategy aborts immediately on this — no amount of format correction
-            // fixes a capability gap.
+            // Detect a "does not support tools" 400: reasoning-only models (deepseek-r1 family) are rejected before they run.
+            // The retry strategy aborts immediately; format correction cannot fix a capability gap.
             if status == 400 && bodyStr.lowercased().contains("does not support tools") {
                 throw LLMProviderError.toolsUnsupported(modelName: config.modelName)
             }
@@ -208,9 +199,8 @@ struct OllamaLLMProvider: LLMProvider {
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
-        // G12 instrumentation: KV-cache-miss proxy. If prompt_eval_count on iter 2+ is
-        // close to full prompt length, cache is being invalidated every iter; if it's
-        // close to the last-turn delta, cache is hitting the prior prefix.
+        // KV-cache-miss proxy: `prompt_eval_count` on iteration 2+ near the full prompt length means the cache is invalidated,
+        // near the last-turn delta means it hits the prior prefix.
         let promptEvalCount = json?["prompt_eval_count"] as? Int ?? 0
         let promptEvalMs = Double((json?["prompt_eval_duration"] as? Int) ?? 0) / 1_000_000.0
         let evalCount = json?["eval_count"] as? Int ?? 0
@@ -226,13 +216,8 @@ struct OllamaLLMProvider: LLMProvider {
         let thinking = message["thinking"] as? String // Capture raw thinking trace if provided separately
         var pendingTools: [PendingToolCall] = []
 
-        // --- Raw-response diagnostic logging ---
-        // Captures what Ollama actually returned so parse regressions can be diagnosed
-        // without attaching a debugger. Content preview is capped at 1KB; tool_calls
-        // are logged in full (usually small). Thinking presence only, not body.
-        // Both summary AND content are at .info level so they appear in release logs —
-        // the content body is the single most useful signal when diagnosing why a
-        // particular model's output didn't parse into a tool call.
+        // Raw-response diagnostic logging: content preview capped at 1KB, tool_calls logged in full, thinking by presence only.
+        // Summary and content log at `.info` so release logs show them; the content is the best signal for parse failures.
         let rawToolCalls = message["tool_calls"] as? [[String: Any]]
         let contentPreview = content.count > 1000 ? String(content.prefix(1000)) + "…[+\(content.count - 1000) chars]" : content
         logLLMOps.info("📥 [Ollama:raw] content=\(content.count)B | tool_calls=\(rawToolCalls?.count ?? 0) | thinking=\(thinking != nil)")
@@ -261,21 +246,9 @@ struct OllamaLLMProvider: LLMProvider {
             }
         }
 
-        // Dialect-Anchored Cascade fallback: when the model returned content but
-        // no native tool_calls, the model may have leaked tool calls into the content
-        // field (format leakage on e.g. qwen-coder whose trained format doesn't map
-        // cleanly onto Ollama's OpenAI-style wrapper). Pipe through the cascade pipeline
-        // to recover them. (G7 fix) Split prose-before-JSON from the JSON block so the
-        // agent's reasoning is preserved instead of discarded by the parser.
-        //
-        // Tool-name resolution happens one level up: this step's result is
-        // re-validated by NativeParsePipeline (ToolNameResolver with the real
-        // registry) inside NativeStructuredGenerator. The explicit empty registry
-        // is therefore CORRECT — this pipeline only parses and classifies; the
-        // provider-format tool dicts in scope would be the wrong type anyway.
-        // Its `.failed` verdict is PROVISIONAL for the same reason: with no
-        // registry it can only judge by shape, so NativeParsePipeline re-decides
-        // it (answer vs. attempted call) against the run's real tool names.
+        // Why: the empty registry is correct and its `.failed` verdict provisional: NativeParsePipeline re-decides.
+        // Content fallback: when the model returned content but no native tool_calls, calls may have leaked into the content
+        // (e.g. qwen-coder); pipe it through the cascade to recover them, splitting prose from the JSON block.
         if pendingTools.isEmpty && !content.isEmpty {
             return Self.contentFallbackStep(
                 content: content,
@@ -302,13 +275,8 @@ struct OllamaLLMProvider: LLMProvider {
         return Set(tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String })
     }
 
-    /// The content-fallback step for a reply whose `tool_calls` were empty but whose
-    /// `content` was not (see the call site in the native dispatch). `static` so the
-    /// content → step mapping can be exercised without a live Ollama server.
-    ///
-    /// `toolNames` — the tools this request offered. Not a registry (validation stays one level
-    /// up); only so the cascade can recognise a leaked call by its tool NAME — e.g. a cut-off
-    /// `{"name": "read_file", "path": "a.ja` — instead of accepting it as the final answer.
+    /// The content-fallback step for a reply whose `tool_calls` were empty but whose `content` was not.
+    /// `toolNames` are the tools offered (not a registry), so the cascade can recognise a leaked call by name, even cut off.
     static func contentFallbackStep(
         content: String,
         thinking: String?,
@@ -316,9 +284,8 @@ struct OllamaLLMProvider: LLMProvider {
         modelName: String,
         toolNames: Set<String> = []
     ) -> ModernCognitiveStep {
-        // Split the VISIBLE text. On raw `content` the first balanced block can sit inside a
-        // `<think>` block — a call the model only considered was extracted and run (2026-10-05).
-        // The cascade below strips thinking itself (`OutputSanitizer`); this split ran before it.
+        // Split the visible text: on raw `content` the first balanced block can sit inside a `<think>` block, so a call the
+        // model only considered would run. The cascade strips thinking itself, after this split.
         let visible = OutputSanitizer.stripThinkBlocks(content)
         let (prose, jsonBlock) = Self.splitProseAndJSON(visible)
         let pipeline = CognitiveParsePipeline(
@@ -329,15 +296,8 @@ struct OllamaLLMProvider: LLMProvider {
         )
         let parsed = pipeline.parse(raw: jsonBlock.isEmpty ? content : jsonBlock)
 
-        // Prefer the captured prose prefix; fall back to the parser's reasoning
-        // only if that parser found a real (non-placeholder) reasoning field.
-        // Placeholder strings like "Executing..." are filtered downstream.
-        //
-        // ⚠️ Except on a FAILED parse that recovered nothing: then hand up the
-        // WHOLE content. `NativeParsePipeline` decides whether that content is an
-        // attempted call (retry) or the answer — and if it is the answer, a
-        // prose prefix cut at the first `{`/`[` would truncate it (a reply ending
-        // in a ```json analysis block lost everything after its first sentence).
+        // Why: on a failed parse that recovered nothing, hand up the whole content: a prefix cut at the first `{` truncates answers.
+        // Prefer the captured prose prefix; fall back to the parser's reasoning only if it found a real (non-placeholder) field.
         let reasoning: String = {
             if parsed.toolCalls.isEmpty, case .failed = parsed.parseOutcome { return content }
             return prose.isEmpty ? parsed.reasoning : prose
@@ -348,47 +308,29 @@ struct OllamaLLMProvider: LLMProvider {
             toolCalls: parsed.toolCalls,
             tokenUsage: usage ?? parsed.tokenUsage,
             parseOutcome: parsed.parseOutcome,  // forward pipeline's verdict (.success / .failed / .genuineCompletion)
-            // These calls were pulled out of TEXT, not a structured channel. If none of them
-            // names a tool this run offers, `NativeParsePipeline` asks whether the text is the
-            // answer — and needs the whole of it, not the prose before the first brace.
+            // These calls were pulled out of text, not a structured channel. If none names a tool this run offers,
+            // `NativeParsePipeline` asks whether the text is the answer and needs all of it, not the prose before the first brace.
             callsRecoveredFromText: parsed.toolCalls.isEmpty ? nil : visible
         )
     }
 
-    /// Splits a content string that mixes prose and a bare tool-call JSON into
-    /// `(prose, jsonBlock)`. Walks the string once with brace-depth tracking to
-    /// find the first balanced top-level `{...}` or `[...]` block; everything
-    /// before that block is returned as prose, the block itself as jsonBlock.
-    ///
-    /// Strips orphan markdown code fences (```json opener, ``` closer) from the
-    /// returned prose — those are wrapping syntax, not reasoning text, and
-    /// leaking them into `step.reasoning` shows up in the UI as `Model
-    /// Reasoning: ```json` which is nonsense.
-    ///
-    /// If no balanced JSON block is found, returns `(content, "")` so callers
-    /// can fall back to passing the original content to the parser.
+    /// Splits content mixing prose and a bare tool-call JSON into `(prose, jsonBlock)` at the first balanced top-level block.
+    /// Strips orphan markdown fences from the prose; with no balanced block, returns `(content, "")`.
     static func splitProseAndJSON(_ content: String) -> (prose: String, jsonBlock: String) {
-        // String/escape-aware balanced-block split (#15). Replaces the old `prevChar != "\\"` scan,
-        // which mishandled `\\"` — an escaped backslash before a real closing quote.
+        // String/escape-aware balanced-block split, so an escaped backslash before a closing quote is handled correctly.
         let (proseSlice, blockSlice, tailSlice) = BalancedJSONScanner.splitProseAndBlock(in: content)
         guard let block = blockSlice else {
             return (stripOrphanFences(content.trimmingCharacters(in: .whitespacesAndNewlines)), "")
         }
 
-        // ⚠️⚠️ THE TAIL IS REJOINED, not dropped. The scanner used to return only the text BEFORE
-        // the block, so every character after it was discarded — a 474-byte answer reached the
-        // user as its first 34 bytes. The block itself is excluded on purpose: it is a leaked tool
-        // call, and echoing its JSON back as the model's reasoning is what the G7 split exists to
-        // prevent.
+        // The tail is rejoined, not dropped. The block itself is excluded: it is a leaked tool call, not the model's reasoning.
         let before = String(proseSlice).trimmingCharacters(in: .whitespacesAndNewlines)
         let after = String(tailSlice).trimmingCharacters(in: .whitespacesAndNewlines)
         let prose = [before, after].filter { !$0.isEmpty }.joined(separator: " ")
         return (stripOrphanFences(prose), String(block))
     }
-    /// Removes a leading ` ```json `/` ``` ` opener and trailing ` ``` ` closer
-    /// when they frame the string as wrapping syntax. Real reasoning that
-    /// happens to mention backticks inside the prose is preserved — the
-    /// anchored regex only matches at string boundaries.
+    /// Removes a leading ```json / ``` opener and trailing ``` closer when they frame the string; the anchored regex
+    /// matches only at string boundaries, so prose that mentions backticks is preserved.
     private static func stripOrphanFences(_ prose: String) -> String {
         var result = prose
         result = result.replacingOccurrences(
@@ -413,17 +355,12 @@ struct OllamaLLMProvider: LLMProvider {
         let model = config.modelName
         let context = requestedContext
         let generation = LocalInferenceScope.GenerationSlot()
-        // Ollama streams newline-delimited JSON (not SSE). The shared transport owns the
-        // read loop, cancellation, and stall timeout (#13); the local rate-limit gate is
-        // applied by CloudRequestPipeline.executeLocalStream (#12).
+        // Ollama streams newline-delimited JSON (not SSE). The shared transport owns the read loop, cancellation and
+        // stall timeout; the local rate-limit gate is applied by `CloudRequestPipeline.executeLocalStream`.
         return SSEStreamParser.stream(
-            // The local-inference gate, COUNTED like every other generation: begun in `beforeOpen`,
-            // ended in `onClose` when the reader ends — so a park in a sibling branch cannot release
-            // the lock while this stream is still decoding (it used to be gated but never counted).
+            // Why: gate in `beforeOpen`, never `openBytes`: only `beforeOpen` pauses the stall watchdog a long wait would trip.
+            // The local-inference gate, counted like every other generation: begun in `beforeOpen`, ended in `onClose`.
             // Runs in the transport's reader task, which inherits the run's task-locals.
-            // ⚠️ `beforeOpen`, never inside `openBytes`: the stall watchdog is paused only for
-            // `beforeOpen`, and a wait for the lock longer than 60 s otherwise failed the stream as
-            // a stalled connection.
             beforeOpen: {
                 generation.hold(try await LocalInferenceScope.beginGeneration(engine: engine, modelID: model,
                                                                               contextTokens: context))
@@ -462,7 +399,7 @@ struct OllamaLLMProvider: LLMProvider {
                       (json["done"] as? Bool) == true else { return nil }
                 return TokenUsage.fromOllama(json)
             },
-            // ⚠️ The decoder itself, not a closure around it, so tests run exactly this.
+            // Pass the decoder itself, not a closure around it, so tests exercise exactly this code.
             handleLine: Self.ollamaStreamLine
         )
     }
@@ -474,10 +411,8 @@ struct OllamaLLMProvider: LLMProvider {
               let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
             return .skip
         }
-        // ⚠️⚠️ CR-15: Ollama reports a failure MID-STREAM as `{"error": "…"}` on a 200 response (a
-        // runner crash, out of memory). It has no `message` and no `done`, so it was skipped, the
-        // connection closed, the stream finished cleanly — and a cut-off or empty answer was saved
-        // as a success.
+        // Ollama reports a mid-stream failure as `{"error": "…"}` on a 200 response (runner crash, out of memory), with no
+        // `message` or `done`; treat it as an error so a cut-off answer is not saved as a success.
         if let error = json["error"] as? String {
             logger.error("[OLLAMA] Server reported an error mid-response: \(error). CONSEQUENCE: the turn fails with that message instead of saving a truncated answer as a success.")
             return .fail(LLMProviderError.invalidResponse("Ollama reported an error mid-response: \(error)"))
@@ -491,11 +426,7 @@ struct OllamaLLMProvider: LLMProvider {
     }
 
     /// Maps this app's option keys onto Ollama's `options` object.
-    ///
-    /// ⚠️ `static` so the mapping is testable without a live provider — the same reason
-    /// `DGLogger.shouldPersist` and `serializeToolParams` are pure statics. It uses no instance
-    /// state; all three `body["options"]` sites call through here, which is what makes the `stop`
-    /// rule below impossible to bypass.
+    /// `static` and pure so the mapping is testable; every `body["options"]` site calls it, so `stop` rules apply everywhere.
     static func mapToOllamaOptions(_ options: [String: JSONValue]) -> [String: Any] {
         var mapped: [String: Any] = [:]
         for (key, value) in options {
@@ -507,38 +438,9 @@ struct OllamaLLMProvider: LLMProvider {
             case "repeatPenalty": mapped["repeat_penalty"] = rawValue
 
             case "stop":
-                // ⚠️ AN EMPTY STOP LIST IS OMITTED, NEVER FORWARDED. To Ollama an explicit
-                // `"stop": []` is not "no preference" — it is an empty stop list that REPLACES the
-                // ones the model's Modelfile declares, disabling them.
-                //
-                // Measured against Ollama 0.33.3 on 2026-09-13, using a model created
-                // `FROM gemma:7b` with `PARAMETER stop "FIVE"` and the prompt "count ONE..TEN":
-                //   • no `stop` key     → output stopped at FOUR  (9 tokens)  — Modelfile stop ACTIVE
-                //   • `"stop": []`      → output ran to TEN      (22 tokens)  — Modelfile stop GONE
-                //   • `"stop": ["SEVEN"]` → output stopped at SIX (13 tokens) — explicit list wins
-                //
-                // Every Ollama preset sets `stop: []` explicitly rather than leaving the optional
-                // nil (OllamaAdvancedConfig.swift:72, :82, :92, :130, :134, :138), and
-                // `AdvancedConfigEncoder.encode` blind-serialises whatever the config holds with no
-                // empty-filtering — so without this arm the default agent preset silently stripped
-                // the stop sequences of EVERY Ollama model on EVERY request.
-                //
-                // ⚠️ This is the guard the three cloud providers already have and this one lacked:
-                // `if let stops = stopSequences, !stops.isEmpty` at OpenAILLMProvider.swift:99,
-                // ClaudeLLMProvider.swift:111 and GeminiLLMProvider.swift:85. The rule was written
-                // three times and missed the fourth place; it belongs here for the same reason.
-                //
-                // ⚠️ Empty means "the user has no stop sequences of their own", NOT "strip the
-                // model's". Clearing the list in the Advanced panel removes the user's additions —
-                // it is not a request to disable what the model ships with.
-                //
-                // ⚠️ Only `stop` is treated this way. The empty-collection-overrides semantics was
-                // verified for this key and not assumed for the rest of Ollama's option surface.
-                //
-                // ⚠️ The `FULL REQUEST CONFIGURATION` log block prints `config.options` — the value
-                // BEFORE this mapping — so it will still show `"stop": []` on a default profile
-                // while the wire correctly carries no `stop` at all. That is not a discrepancy to
-                // "fix" by re-adding the key.
+                // Why: only `stop` is verified to override when empty; the request log prints pre-mapping config, showing `stop: []`.
+                // An empty stop list is omitted, never forwarded: an explicit `"stop": []` replaces the model's Modelfile stops.
+                // Empty means the user has no stop sequences of their own, not "strip the model's".
                 if let list = value.arrayValue, list.isEmpty { continue }
                 mapped["stop"] = rawValue
 

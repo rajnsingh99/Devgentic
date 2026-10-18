@@ -4,23 +4,7 @@
 //  CognitiveParsePipeline.swift
 //  Devgentic
 //
-//  The Dialect-Anchored Cascade orchestrator for prompt-generated text flows
-//  (MLX native-JSON, Ollama content-fallback, legacy JSON-mode, XML/markdown dialects).
-//
-//  Runs a 5-stage parse sequence:
-//
-//    Stage 0: OutputSanitizer (always)
-//    Stage 1: Primary Parser (expected dialect from CognitiveProfile)
-//    Stage 2: FormatDriftDetector (only if Stage 1 is degraded)
-//    Stage 3: Fallback Parser (routes on DetectedFormat)
-//    Stage 4: HeuristicRecovery (final catch-all)
-//    Stage 5: Tool-Name Resolver (validates extracted calls against registry)
-//
-//  Transport-native flows (Claude/OpenAI/Gemini/Ollama-native) do NOT use this
-//  pipeline — they use `NativeParsePipeline` which skips text parsing entirely
-//  and runs only the tool-name resolver step.
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -28,14 +12,9 @@ import OSLog
 
 private let logger = DGLogger(category: "CognitiveParsePipeline")
 
-/// A stateless value type that orchestrates the Dialect-Anchored Cascade.
-/// Instantiate per-call with the expected dialect and optional telemetry metadata.
-///
-/// The public API returns `ModernCognitiveStep` (never throws), with `parseOutcome`
-/// set to reflect what happened in the cascade:
-///   - `.success`           — at least one validated tool call extracted
-///   - `.genuineCompletion` — no tools AND no drift signals AND no error
-///   - `.failed(reason)`    — cascade exhausted OR validation rejected the extracted name
+/// A stateless value type that orchestrates the Dialect-Anchored Cascade; instantiate per call with the expected dialect.
+/// `parse` never throws; `parseOutcome` is `.success` (a validated tool call), `.genuineCompletion` (no tools, no drift
+/// signals, no error) or `.failed(reason)` (cascade exhausted or validation rejected the extracted name).
 struct CognitiveParsePipeline: Sendable {
 
     /// The dialect we EXPECT this model to produce (from CognitiveProfile).
@@ -47,23 +26,15 @@ struct CognitiveParsePipeline: Sendable {
     /// Optional iteration number for drift telemetry.
     let iteration: Int
 
-    /// Known tool names — the run's full loadout where the caller has it (`SemanticContext
-    /// .runToolNames`, the Ollama request's tools), else this iteration's registry.
-    /// Passed to `FormatDriftDetector` for precise dynamic-tag detection (Phase B), and read by
-    /// `AttemptedToolCallGrammar` (via `callableNames`) to recognise a call by its tool name.
+    /// Known tool names: the run's full loadout where the caller has it, else this iteration's registry.
+    /// Passed to `FormatDriftDetector` for dynamic-tag detection and read by `AttemptedToolCallGrammar` (via `callableNames`)
+    /// to recognise a call by its tool name.
     let knownToolNames: Set<String>
 
+    // Why: no default value: every call site must decide; defaulting to `[]` silently opted call sites out of validation
     /// Registered tools for tool-name resolution at the end of the cascade.
-    /// When empty, Stage-5 ToolNameResolver is SKIPPED — extracted tool names
-    /// pass through unvalidated as `.success` and a misspelled name only fails
-    /// later at dispatch (as a tool failure feeding the circuit breaker, instead
-    /// of a typed parse failure with a "did you mean" corrective retry).
-    ///
-    /// Deliberately NO default value: every call site must decide. Empty is
-    /// correct ONLY where validation is layered above (provider content-fallback
-    /// parses re-validated by `NativeParsePipeline` one level up) or where no
-    /// dispatch follows (pure-parse tests). Six call sites silently opted out
-    /// of validation for months because this parameter used to default to `[]`.
+    /// When empty, name resolution is skipped: extracted names pass through unvalidated as `.success` and a misspelling only
+    /// fails at dispatch. Empty is correct only where validation is layered above or no dispatch follows.
     let registeredTools: [AgentTool]
 
     init(
@@ -89,24 +60,19 @@ struct CognitiveParsePipeline: Sendable {
 
     // MARK: - Public API
 
-    /// Parses raw LLM output through the cascade.
-    /// Never throws — degrades gracefully to a typed `.failed` outcome on total failure.
-    ///
-    /// - Parameter raw: The unmodified text string returned by the model.
-    /// - Returns: A `ModernCognitiveStep` with zero or more validated tool calls
-    ///            and a `parseOutcome` describing what happened.
+    /// Parses raw LLM output through the cascade; never throws, degrading to a typed `.failed` outcome on total failure.
+    /// - Parameter raw: the unmodified text returned by the model.
+    /// - Returns: a `ModernCognitiveStep` with zero or more validated tool calls and a `parseOutcome`.
     func parse(raw: String) -> ModernCognitiveStep {
-        // ⚠️ CR-3: fences INSIDE a call's JSON string values are shielded from the sanitizer's strip
-        // and restored after parsing — see `CodeFenceShield`. Shielding only ever changes characters
-        // inside string literals, so the calls found are the ones the unshielded parse finds.
+        // Fences inside a call's JSON string values are shielded from the sanitizer's strip and restored after parsing (see
+        // `CodeFenceShield`); shielding only changes characters inside string literals, so the same calls are found.
         let shielded = CodeFenceShield.shield(raw)
         guard shielded.count > 0 else {
             return restoringCodeFences(in: cascade(raw: raw), raw: raw, parsedText: raw)
         }
         let step = cascade(raw: shielded.text)
         if case .failed = step.parseOutcome {
-            // A failure's diagnostics quote the parsed text back to the model; never let the
-            // placeholder reach it. The unshielded parse is exactly the pre-CR-3 behaviour.
+            // A failure's diagnostics quote the parsed text back to the model, so the shield placeholder must never reach it.
             logger.notice("[PARSE] Parse with \(shielded.count) shielded code fence(s) failed [model \(modelId) iter \(iteration)]. CONSEQUENCE: re-parsed unshielded, as before CR-3 — the corrective message quotes the reply without placeholders.")
             return restoringCodeFences(in: cascade(raw: raw), raw: raw, parsedText: raw)
         }
@@ -116,19 +82,9 @@ struct CognitiveParsePipeline: Sendable {
         return restoringCodeFences(in: CodeFenceShield.unshield(step), raw: raw, parsedText: shielded.text)
     }
 
-    /// ⚠️ A PLAIN ANSWER KEEPS ITS CODE BLOCKS (2026-10-06). The cascade parses fence-free text —
-    /// `OutputSanitizer.sanitize` strips every ``` so no parser trips on them — and the text a
-    /// parser hands back as the answer was that same fence-free text. So every plain answer with
-    /// code reached the user without its blocks: T2's JSON example and `[7, 1, 5]` arrived as bare
-    /// lines, and a ```java fence even left a stray `java` line (the stripper knows five language
-    /// names). Parsing is untouched; only the text of a `.genuineCompletion` changes, and only when
-    /// the parser's answer IS the whole sanitized reply. A parser that took PART of it (ReAct's
-    /// `Final Answer:`, a tagged final answer) keeps its own text: swapping in the whole reply would
-    /// leak the scaffolding around it.
-    ///
-    /// - Parameter parsedText: what the cascade actually read (the shielded reply, when fences inside
-    ///   string literals were shielded), so the "is this the whole reply" comparison compares like
-    ///   with like.
+    /// Restores code fences in a plain answer, which the fence-free cascade text would otherwise lose. Applies
+    /// only when the parser's answer is the whole sanitized reply; a partial answer keeps its own text.
+    /// - Parameter parsedText: what the cascade actually read (the shielded reply, if shielded).
     private func restoringCodeFences(in step: ModernCognitiveStep, raw: String, parsedText: String) -> ModernCognitiveStep {
         guard case .genuineCompletion = step.parseOutcome, raw.contains("```") else { return step }
         let fenceFree = CodeFenceShield.unshield(OutputSanitizer.sanitize(parsedText, preservingCallMarkers: true).cleaned)
@@ -151,9 +107,8 @@ struct CognitiveParsePipeline: Sendable {
         let rawPreview = raw.count > 800 ? String(raw.prefix(800)) + "…[+\(raw.count - 800) chars]" : raw
         logger.debug("Pipeline: parse(raw=\(raw.count)B, dialect=\(expectedDialect.rawValue)) — input: \(rawPreview)")
 
-        // === STAGE 0: Pre-Sanitization ===
-        // Stage 0: calls MLXLMCommon already decoded. They are structured, so they skip every
-        // dialect parser — whose bare-JSON fallbacks kept only the first call and dropped the prose.
+        // Stage 0: calls MLXLMCommon already decoded are structured, so they skip every dialect parser, whose bare-JSON
+        // fallbacks keep only the first call and drop the prose.
         if let framework = FrameworkToolCallEnvelope.extract(from: raw), framework.calls.isEmpty,
            let discarded = framework.discardedTokens {
             // A call the model wrote and the runtime could not read. Typed, so the model is told
@@ -179,10 +134,8 @@ struct CognitiveParsePipeline: Sendable {
         }
 
         let sanitized = OutputSanitizer.sanitize(raw, preservingCallMarkers: true)
-        // What `AttemptedToolCallGrammar` reads — the reply minus `<think>` blocks and NOTHING else.
-        // Not `sanitized.cleaned`: the sanitizer strips fences (```tool_code) and `<|…|>` tokens,
-        // which are evidence of a call. Not `raw`: a call the model only considered while thinking
-        // is not an attempt.
+        // What `AttemptedToolCallGrammar` reads: the reply minus `<think>` blocks only. The sanitized text would
+        // drop fences and `<|…|>` tokens, which are call evidence.
         let callEvidence = OutputSanitizer.stripThinkBlocks(raw)
 
         guard !sanitized.cleaned.isEmpty else {
@@ -203,10 +156,8 @@ struct CognitiveParsePipeline: Sendable {
         let primaryParser = ParserFactory.createParser(for: expectedDialect)
         let primaryResult = primaryParser.parse(rawResponse: sanitized.cleaned)
 
-        // Propagate extracted thought from sanitizer if parser didn't find one,
-        // and forward any typed parseOutcome the primary parser may have set
-        // (e.g. HeuristicCognitiveParser flags `.schemaKeyMismatch` when all its
-        // internal schemas reject a well-formed JSON object).
+        // Propagates the sanitizer's thought if the parser found none, and forwards any typed `parseOutcome` the
+        // parser set (e.g. `.schemaKeyMismatch` from `HeuristicCognitiveParser`).
         let primaryStepWithThought = ModernCognitiveStep(
             reasoning: primaryResult.reasoning,
             thought: primaryResult.thought ?? sanitized.thought,
@@ -215,10 +166,8 @@ struct CognitiveParsePipeline: Sendable {
             parseOutcome: primaryResult.parseOutcome
         )
 
-        // Short-circuit: primary parser explicitly flagged a typed failure.
-        // Skip drift + heuristic recovery (the parser already tried its full
-        // cascade) and return the failure. Preserves the typed reason so the
-        // terminator routes to `.suspectedFormatFailure` with specific context.
+        // Short-circuit when the primary parser flagged a typed failure: skip drift and heuristic recovery and
+        // return it, keeping the typed reason so the terminator routes to `.suspectedFormatFailure`.
         if case .failed = primaryStepWithThought.parseOutcome {
             logger.info("Pipeline: Stage 1 flagged typed failure — short-circuiting cascade.")
             return answerUnlessAttemptedCall(primaryStepWithThought, callEvidence: callEvidence, stage: "stage1-typed")
@@ -290,8 +239,7 @@ struct CognitiveParsePipeline: Sendable {
     // MARK: - Stage 5: Resolver + Finalize
 
     /// Runs the tool-name resolver on any extracted tool calls and returns the final step.
-    /// Empty `toolCalls` at this point (after a successful confident path) means the model
-    /// intentionally produced no calls — that's `.genuineCompletion`.
+    /// Empty `toolCalls` here, after a confident path, means the model intentionally produced no calls: `.genuineCompletion`.
     private func resolveAndFinalize(
         step: ModernCognitiveStep,
         sanitizedText: String,
@@ -347,16 +295,8 @@ struct CognitiveParsePipeline: Sendable {
             }
         }
 
-        // ⚠️ A JSON object in the ANSWER is not a call (bug 3, 2026-10-06). The bare-JSON
-        // fallbacks (`QwenHermesJsonParser` style 3, `HeuristicCognitiveParser` attempt 3) accept
-        // any object with a `name` key, so `{"name": "John Doe", "email": …}` — the user record
-        // T2 asked for — became a call to a tool named "John Doe" (and `{"name": "", …}` one named
-        // ""), and correct answers were retried until the run ended on a fabricated one. Fixing
-        // the extractors would break real argument-less calls; the verdict is the right place,
-        // as for `answerUnlessAttemptedCall`. Qualifies only when EVERY call is to an unknown
-        // name, and never for `stage0-framework`, whose calls the runtime decoded from a real
-        // call protocol. The grammar decides: a name key with an arguments object, a run tool's
-        // name or a call-format token (`<tool_call>` …) keeps it a call.
+        // A JSON object in the answer is not a call: bare-JSON fallbacks accept any `name`-keyed object, so a user
+        // record would become one. Only when every call names an unknown tool (never `stage0-framework`).
         if validated.isEmpty, !unknownNames.isEmpty, unknownNames.count == step.toolCalls.count,
            stageTag != "stage0-framework",
            AttemptedToolCallGrammar.attemptedCallName(
@@ -374,8 +314,7 @@ struct CognitiveParsePipeline: Sendable {
         let outcome: ParseOutcome
         if !validated.isEmpty {
             outcome = .success
-            // [CR-52] A partial batch used to drop its failed calls without a word, here and to the
-            // model. Logged now, and handed on so the loop reports each one as not run.
+            // A partial batch's failed calls are logged and handed on, so the loop reports each one as not run.
             if !rejected.isEmpty {
                 logger.warning("[PARSE_VERDICT] \(stageTag) dialect=\(expectedDialect.rawValue) model=\(modelId) iter \(iteration): \(validated.count) call(s) validated, \(rejected.count) REJECTED: \(rejected.map { "\($0.call.name) (\(String(describing: $0.reason)))" }.joined(separator: "; ")). CONSEQUENCE: the valid calls run; each rejected one is reported to the model as not run, with its reason, instead of vanishing.")
             }
@@ -398,12 +337,9 @@ struct CognitiveParsePipeline: Sendable {
 
     // MARK: - Private Helpers
 
-    /// Classifies a parse result as confident or degraded.
-    ///
-    /// A result is "degraded" if `toolCalls` is empty AND the sanitized text
-    /// contains signals that suggest tool calls were present but unparsed.
-    /// A result with zero tools AND no drift signals is genuinely a text-only
-    /// response (task termination) and is classified as "confident".
+    /// Classifies a parse result as confident or degraded. Degraded: `toolCalls` is empty AND the sanitized text carries
+    /// signals that calls were present but unparsed. Zero tools with no drift signals is a genuine text-only response (task
+    /// termination), classified confident.
     private func classifyConfidence(
         _ result: ModernCognitiveStep,
         sanitizedText: String,
@@ -414,21 +350,14 @@ struct CognitiveParsePipeline: Sendable {
             return .confident(result)
         }
 
-        // Explicit empty tool_calls array (e.g., `"tool_calls": []`) is a genuine
-        // completion signal — the model intentionally returned no tools. Don't let
-        // the drift detector classify this as "degraded" just because it finds the
-        // substring `"tool_calls"` in the text.
+        // An explicit empty tool_calls array (`"tool_calls": []`) is a genuine completion signal; the drift detector must not
+        // call it degraded just for containing the substring `"tool_calls"`.
         if containsExplicitEmptyToolCalls(in: sanitizedText) {
             return .confident(result)
         }
 
-        // When primary returned 0 tools AND the sanitized text clearly contains a
-        // JSON object (and we're on a JSON dialect), route to .degraded so Stage 4
-        // heuristic recovery gets a shot at bare shapes like `{"name": "...", "arguments": {...}}`
-        // that the strict NativeJSONParser misses.
-        // Previously this case was only rescued by `NativeJSONParser` internally
-        // delegating to the heuristic — we killed that internal delegation, so the
-        // pipeline layer has to own the route now.
+        // When primary returned 0 tools and the sanitized text contains a JSON object on a JSON dialect, route to
+        // `.degraded` so Stage 4 recovery can catch bare shapes the strict `NativeJSONParser` misses.
         if isJsonDialect(expectedDialect) && containsJSONObjectShape(in: sanitizedText) {
             return .degraded(result)
         }
@@ -439,24 +368,14 @@ struct CognitiveParsePipeline: Sendable {
             return .degraded(result)
         }
 
-        // Last-ditch signal: short output that mentions a registered tool name.
-        // Catches function-call-like prose that no drift probe recognizes — e.g.
-        // `codebase_map path: "/..."` from qwen2.5-coder:32b. If the model named
-        // a tool but didn't wrap it in any recognized structure, that's almost
-        // certainly a broken tool-call attempt, not a genuine text completion.
-        // Length gate avoids flagging long prose answers that happen to mention
-        // a tool name (e.g. "I used `codebase_map` to map the project, then...").
+        // Last-ditch signal: short output that mentions a registered tool name, catching function-call-like prose no drift probe
+        // recognizes (e.g. `codebase_map path: "/..."`). The length gate avoids flagging long prose that merely mentions a tool.
         if firstMentionedToolName(in: sanitizedText) != nil {
             return .degraded(result)
         }
 
-        // An attempted call none of the signals above can see — the declared grammar's verdict.
-        // A call CUT OFF mid-generation has no closing brace or tag, a format with no drift probe
-        // has nothing to match, and a paragraph of prose before either defeats the short-text rule.
-        // These used to be called "confident" prose and shown to the user as the answer on ~18 of
-        // 19 paths (2026-10-05 audit). Degraded routes them through recovery: a complete call is
-        // recovered there; a cut-off one ends as a typed failure that `answerUnlessAttemptedCall`
-        // keeps (same grammar, same text), so the model is corrected and retries.
+        // An attempted call none of the signals above can see (declared grammar), e.g. one cut off mid-generation.
+        // Routed through recovery: a complete call is recovered; a cut-off one ends as a typed failure.
         if let attempted = AttemptedToolCallGrammar.attemptedCallName(in: callEvidence, callableNames: callableNames) {
             logger.info("[PARSE_VERDICT] dialect=\(expectedDialect.rawValue) model=\(modelId) iter \(iteration): no call parsed and no shape signal, but the text declares an attempted call ('\(attempted)'). CONSEQUENCE: routed to recovery instead of being accepted as the final answer.")
             return .degraded(result)
@@ -496,12 +415,9 @@ struct CognitiveParsePipeline: Sendable {
         return hasObject || hasArray
     }
 
-    /// String arguments typed by the tool's DECLARED schema (CR-21).
-    ///
-    /// Only a `.string` whose schema says number/integer/boolean/array/object, and only when the text
-    /// genuinely is that type — `"5"` for an integer becomes 5, `"maybe"` for a boolean stays a string
-    /// so the tool reports a precise error. A `"string"` parameter is never touched: that is what lets
-    /// `write_file` content that happens to be JSON stay text.
+    /// String arguments typed by the tool's declared schema: only a `.string` whose schema says
+    /// number/integer/boolean/array/object, and only when the text genuinely is that type (`"5"` → 5; `"maybe"`
+    /// stays a string for a boolean). A `"string"` parameter is never touched.
     private func coercingToSchema(_ arguments: [String: JSONValue], tool name: String) -> [String: JSONValue] {
         guard let schema = registeredTools.first(where: { $0.name == name })?.parameters else { return arguments }
         return Self.coercingToSchema(arguments, schema: schema)
@@ -535,14 +451,8 @@ struct CognitiveParsePipeline: Sendable {
     }
 
     /// Returns the first registered tool name that appears in `text`, or nil.
-    ///
-    /// Intentional length gate: only scans short outputs (< 300 chars). Long prose
-    /// answers legitimately reference tools by name ("I used `codebase_map` to
-    /// understand the structure, then..."), and we don't want to misclassify those
-    /// as format failures. The failure pattern we're catching is *short*
-    /// function-call-shaped emissions that no parser recognizes — e.g.
-    /// `codebase_map path: "/..."` from qwen2.5-coder:32b — where the short length
-    /// + tool name presence together are high-signal for "broken tool call".
+    /// Only scans short outputs (< 300 chars): long prose legitimately references tools by name, while a short call-shaped
+    /// emission naming a tool (e.g. `codebase_map path: "/..."`) is a high-signal broken call.
     private func firstMentionedToolName(in text: String) -> String? {
         guard !registeredTools.isEmpty else { return nil }
         guard text.count < 300 else { return nil }
@@ -550,13 +460,11 @@ struct CognitiveParsePipeline: Sendable {
         return registeredTools.first { Self.mentionsAsACall(lower, name: $0.name.lowercased()) }?.name
     }
 
-    /// Whether `name` appears in `text` the way a broken call would write it.
-    ///
-    /// ⚠️⚠️ NOT a substring (readiness CR-20, 2026-10-10). `lower.contains(name)` made ordinary prose
-    /// a format failure: Code profiles always register `forget`/`recall`/`remember`, and `git` is a
-    /// tool, so "did you forget the extension?" and "it has 7 digits" (d-i-GIT-s) were retried as
-    /// broken calls. Now: a WHOLE identifier, and — for a name that is also an ordinary word (no `_`)
-    /// — followed by call punctuation (`(`, `{`, `:` or `=`), the shape of `codebase_map path: …`.
+    // Why: not a substring match: Code profiles register `forget`, `recall`, `remember` and `git`, so a
+    // substring turns ordinary prose ("did you forget…", "7 digits") into a format failure
+    /// Whether `name` appears in `text` the way a broken call would write it: as a whole identifier and, for a
+    /// name that is also an ordinary word (no `_`), followed by call punctuation (`(`, `{`, `:` or `=`), the
+    /// shape of `codebase_map path: …`.
     static func mentionsAsACall(_ text: String, name: String) -> Bool {
         guard !name.isEmpty else { return false }
         let escaped = NSRegularExpression.escapedPattern(for: name)
@@ -574,10 +482,8 @@ struct CognitiveParsePipeline: Sendable {
         return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
-    /// Stage 4: Falls through to the battle-tested `HeuristicCognitiveParser`.
-    /// If heuristic finds tools → resolve + finalize normally.
-    /// If heuristic also fails → return `.failed` with a typed reason reflecting
-    /// what we could infer about why parsing died.
+    /// Stage 4: falls through to the `HeuristicCognitiveParser`. If it finds tools, resolve and finalize normally; if it also
+    /// fails, return `.failed` with a typed reason reflecting what can be inferred about why parsing failed.
     private func runHeuristicRecovery(
         sanitized: SanitizedOutput,
         primaryResult: ModernCognitiveStep,
@@ -602,7 +508,6 @@ struct CognitiveParsePipeline: Sendable {
             )
         }
 
-        // Nothing worked. Classify WHY it didn't work from what's in the sanitized text.
         let reason = inferFailureReason(
             sanitizedText: sanitized.cleaned,
             primaryReasoning: primaryResult.reasoning
@@ -623,24 +528,11 @@ struct CognitiveParsePipeline: Sendable {
 
     // MARK: - Answer-vs-call verdict
 
-    /// A failure that only means "we found no call in this text" becomes the ANSWER,
-    /// unless the text declares an attempted call (`AttemptedToolCallGrammar`).
-    ///
-    /// Why: the cascade routes any reply containing `{…}` or `[…]` to heuristic recovery
-    /// on JSON-family dialects. When recovery finds nothing, the reasons below were then
-    /// reported as format failures — for `{7, 1, 5}`, `int[] prices`, `prices[i]`, a
-    /// Markdown link, a ```json analysis block. Probe 2026-10-05: 12 of 18 dialects
-    /// rejected every one of those answers, and a plain-prose answer passed on all 18.
-    /// Routing is untouched — recovery still gets its shot at every odd call shape; only
-    /// the verdict when it recovers NOTHING changes.
-    ///
-    /// Scope, deliberately narrow:
-    ///   - Only with a registry. An EMPTY `registeredTools` marks a provider-level parse
-    ///     (Ollama/MLX content fallback) whose verdict `NativeParsePipeline` re-decides
-    ///     against the run's real tool names — deciding here would pre-empt it blind.
-    ///   - Only `.malformedJSON`, `.noStructuredOutput`, `.schemaKeyMismatch`. Drift,
-    ///     `.toolNameInProse`, `.proseDescribedIntent`, tool-name failures and
-    ///     `.emptyOutput` keep their existing meaning.
+    // Why: JSON-dialect recovery triggers on any `{…}` or `[…]`, so code-like answers (`prices[i]`, a Markdown link) would
+    // otherwise be reported as format failures
+    /// A failure that only means "found no call in this text" becomes the answer unless the text declares an attempted call
+    /// (`AttemptedToolCallGrammar`). Only with a registry (an empty `registeredTools` marks a provider-level parse that
+    /// `NativeParsePipeline` re-decides), and only for `.malformedJSON`, `.noStructuredOutput` and `.schemaKeyMismatch`.
     private func answerUnlessAttemptedCall(
         _ step: ModernCognitiveStep,
         callEvidence: String,
@@ -667,8 +559,8 @@ struct CognitiveParsePipeline: Sendable {
         )
     }
 
-    /// Best-effort classification of WHY the cascade failed, based on the sanitized text.
-    /// The distinctions drive different corrective alerts to the model.
+    /// Best-effort classification of why the cascade failed, from the sanitized text; the distinctions drive
+    /// different corrective alerts.
     private func inferFailureReason(sanitizedText: String, primaryReasoning: String) -> ParseFailureReason {
         let text = sanitizedText
         let lowered = text.lowercased()
@@ -698,10 +590,8 @@ struct CognitiveParsePipeline: Sendable {
             return .malformedJSON(syntaxDetail: "JSON object present but could not be decoded", rawSnippet: preview)
         }
 
-        // Registered tool name mentioned in short prose — high-signal case where we
-        // know exactly which tool the model attempted. The corrective alert can name
-        // the tool and show the expected JSON shape precisely.
-        // Checked BEFORE the generic prose-description match because it's more specific.
+        // A registered tool name in short prose: the attempted tool is known, so the alert can name it and show the
+        // JSON shape. Checked before the more generic prose-description match.
         if let toolName = firstMentionedToolName(in: text) {
             return .toolNameInProse(toolName: toolName, snippet: preview)
         }

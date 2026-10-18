@@ -4,26 +4,14 @@
 //  ToolPathKeys.swift
 //  Devgentic
 //
-//  Every argument name a native tool reads as a FILESYSTEM PATH, per tool — the one list both the
-//  tool's decoder and `WorkspaceBoundary` read.
-//
-//  ⚠️⚠️ WHY (readiness CR-6, 2026-10-10). The boundary kept its OWN set of path argument names, and
-//  the tools kept theirs inline in their decoders. They drifted: all four Code-preset write tools
-//  accept `file`, which the boundary did not know, so `create_new_file({"file":"/Users/x/.zshrc"})`
-//  was never checked — no refusal, and a relative `{"file":"src/A.swift"}` wrote to `~/src/A.swift`.
-//  The same gap covered `batch_move_files` (`sourcePaths` ARRAY, `destinationFolder`) and the
-//  `dest`/`to`/`target`/`item`/`filename` aliases of the file tools. One list, read by both sides,
-//  makes that drift unrepresentable; `ToolPathKeysDriftTests` fails if a tool declares a path alias
-//  list inline again.
-//
-//  ⚠️ PER TOOL, never one global set. `target` is a process id in `kill_process`, `folder` is a Notes
-//  folder name, `name` is a folder name only in `create_folder`. The boundary REWRITES an allowed path
-//  to its absolute form, so a global `target` would turn a PID into `/proj/1234` — the
-//  content-corruption class again. A name is a path only where that tool's decoder says so.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Every argument name a native tool reads as a filesystem path, per tool: the one list both the tool's decoder
+/// and `WorkspaceBoundary` read. Per tool, never one global set: `target` is a process id in `kill_process`,
+/// and the boundary rewrites allowed paths to absolute form. A name is a path only where that tool's decoder says so.
 enum ToolPathKeys {
 
     // MARK: - The decoders' own alias lists (read by the tools — order is their precedence)
@@ -45,7 +33,7 @@ enum ToolPathKeys {
     static let previewFile = ["path", "file", "filePath"]
     static let spotlightScope = ["search_scope", "scope", "path", "folder", "directory", "searchScope"]
     static let fileMetadata = ["path", "filePath", "file", "filename"]
-    /// ⚠️ Each may hold a STRING or an ARRAY of strings — the boundary checks both shapes.
+    /// Each may hold a string or an array of strings; the boundary checks both shapes.
     static let batchMoveSources = ["sourcePaths", "source_paths", "paths", "files", "sourcePath", "source_path",
                                    "path", "file", "src", "source", "from"]
     static let batchMoveDestination = ["destinationFolder", "destination_folder", "destination", "folder", "target",

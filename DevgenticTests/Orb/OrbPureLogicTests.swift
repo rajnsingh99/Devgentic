@@ -4,14 +4,7 @@
 //  OrbPureLogicTests.swift
 //  DevgenticTests
 //
-//  Phase 0 (2026-09-04): the FIRST tests for anything under Devgentic/Orb/ — the audit
-//  found zero. Every function here is a `static` on `OrbSessionController` deliberately
-//  written to be pure, so none of this needs WhisperKit, AVFoundation, a microphone, or a
-//  running panel. Loading a Whisper model in tests is forbidden (see MEMORY.md); nothing
-//  here comes near one.
-//
-//  `OrbSessionController` is `@MainActor`, so its statics inherit that isolation — hence
-//  the `@MainActor` on each suite rather than an `await` at every call site.
+//  Created by Raj Singh.
 //
 
 import XCTest

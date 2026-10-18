@@ -4,8 +4,7 @@
 //  ListFormattingEngineTests.swift
 //  DevgenticTests
 //
-//  Tests for ListFormattingEngine — numbered list detection, empty item check,
-//  enter-key state machine, and paragraph style creation.
+//  Created by Raj Singh.
 //
 
 import XCTest

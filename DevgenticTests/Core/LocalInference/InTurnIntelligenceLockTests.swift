@@ -4,11 +4,7 @@
 //  InTurnIntelligenceLockTests.swift
 //  DevgenticTests
 //
-//  In-turn Core Intelligence calls (RAG query rewrite, response synthesis) and the local lock
-//  (2026-10-13; "DEFERRED 2" of the coordinator plan). They used to generate on the IC MLX model
-//  with no lock at all, alongside another conversation's local run. Now they never WAIT for the
-//  lock: inside their own run's lock they proceed, on a free lock they claim it for the call, and
-//  on a busy one the step is SKIPPED and the caller's fallback runs.
+//  Created by Raj Singh.
 //
 
 import XCTest

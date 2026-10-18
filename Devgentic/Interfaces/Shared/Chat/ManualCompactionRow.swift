@@ -4,23 +4,7 @@
 //  ManualCompactionRow.swift
 //  Devgentic
 //
-//  The transcript's view of a MANUAL compaction ("Compact history" in the context gauge),
-//  2026-09-25.
-//
-//  ⚠️ Why a row at the bottom and not an agent-timeline milestone. The timeline belongs to one
-//  assistant message's RUN, and a manual compaction happens BETWEEN runs — there is no message to
-//  hang it on, and appending it to the last reply would put it inside a finished run it was never
-//  part of (and there may be no reply at all in a plain bot chat). So it is a standalone row at the
-//  end of the transcript, drawn with the timeline's own `CapabilityMilestoneRow`.
-//
-//  ⚠️ Why it is needed at all. Before this, the only sign of a manual compaction was the spinner
-//  INSIDE the gauge popover — close the popover and nothing said it was running — and the result,
-//  the "History Checkpoint" card, lands where the summarized turns END (its timestamp decides what
-//  it replaces), which is usually far above the fold. So a compaction finished invisibly.
-//
-//  ⚠️ LIVE ONLY, by decision. Nothing here is persisted: the checkpoint card is the durable record,
-//  and a persisted event row would need a new message kind kept out of model history, exports and
-//  search. The row leaves once the conversation moves on (a newer message arrives) or on dismiss.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -40,8 +24,8 @@ final class ManualCompactionActivity {
 
     private(set) var phases: [UUID: Phase] = [:]
 
-    /// Conversations whose current run is AUTOMATIC — started by the app after a turn, not by the
-    /// user — so the row can say so (owner decision 2026-09-27: automatic compaction is shown too).
+    /// Conversations whose current run is automatic (started by the app after a turn, not by the user),
+    /// so the row can say so.
     private(set) var automatic: Set<UUID> = []
 
     /// Returns false when one is already running here — the caller must not then report its own

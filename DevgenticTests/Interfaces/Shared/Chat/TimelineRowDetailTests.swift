@@ -4,14 +4,7 @@
 //  TimelineRowDetailTests.swift
 //  DevgenticTests
 //
-//  Field-reported 2026-07-27: a write row's diff was permanently visible and its chevron
-//  did nothing, while a read row expanded and collapsed correctly.
-//
-//  Cause: `ActionDetailView` asked THREE different questions about the same row. The chevron
-//  and the tap target keyed on `data.output`; the body keyed on `data.effect`. A write has
-//  both, so the body rendered its diff unconditionally and the chevron toggled a flag nothing
-//  read. `TimelineRowDetail.resolve` is now the single answer all three consume — these tests
-//  pin the answer for every row shape, so the three can never drift apart again.
+//  Created by Raj Singh.
 //
 
 import XCTest

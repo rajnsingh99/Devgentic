@@ -4,9 +4,7 @@
 //  TimeoutStatusSweepTests.swift
 //  DevgenticTests
 //
-//  HITL Waiting Contract — status sweep (§3–4) and the MCP slice. A timeout is its own status with
-//  its own wording and category everywhere, never "Failed", "Response Error", "Provider 5xx" or
-//  "Cancelled by user".
+//  Created by Raj Singh.
 //
 
 import XCTest

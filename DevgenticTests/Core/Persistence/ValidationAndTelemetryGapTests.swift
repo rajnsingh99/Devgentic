@@ -4,11 +4,7 @@
 //  ValidationAndTelemetryGapTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Registers A35 (the "instructions are required" rule lived in two views and nowhere else),
-//  A36 (`ProfileValidator` never inspected `advancedConfiguration` at all) and A38 (the limits that
-//  terminate a run were unrecoverable from telemetry). A33 is a menu action with no testable seam.
+//  Created by Raj Singh.
 //
 
 import XCTest

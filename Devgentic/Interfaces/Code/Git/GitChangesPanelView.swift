@@ -4,16 +4,13 @@
 //  GitChangesPanelView.swift
 //  Devgentic
 //
-//  The floating panel that hosts `GitChangesListView` — the open Code project's uncommitted changes.
-//
-//  ⚠️ A SIBLING of the Code Viewer and Background Tasks panels, not a Code Viewer tab: a diff list
-//  carries none of `CodeViewerTab`'s editor state and would inherit all of it as dead weight. The
-//  three share one trailing slot and are mutually exclusive via the `didSet`s on
-//  `ChatHistoryViewModel`. The chrome is `TrailingSidePanel`, shared with Background Tasks.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The floating panel that hosts `GitChangesListView`, showing the open Code project's uncommitted changes.
+/// It shares the trailing slot with the Code Viewer and Background Tasks panels and is mutually exclusive with them.
 struct GitChangesPanelView: View {
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
@@ -33,7 +30,7 @@ struct GitChangesPanelView: View {
             content: { GitChangesListView() }
         )
         .background(refreshShortcut)
-        // Opening the panel is a refresh trigger (§6.2 #1): what it shows must be current.
+        // Opening the panel refreshes the list so what it shows is current.
         .task { store.requestRefresh(reason: "panel opened") }
     }
 

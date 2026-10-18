@@ -4,8 +4,7 @@
 //  GitUICommandTests.swift
 //  DevgenticTests
 //
-//  The argv/env factory's guarantees, per command. The store-level wiring test
-//  (`GitChangesStoreTests.testEveryInvocationTheStoreMakesIsHardened`) proves the store uses it.
+//  Created by Raj Singh.
 //
 
 import XCTest

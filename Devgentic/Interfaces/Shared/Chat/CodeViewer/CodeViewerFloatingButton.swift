@@ -4,19 +4,14 @@
 //  CodeViewerFloatingButton.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// The floating "reopen" pill shown when the Code Viewer has been MINIMIZED but still has
-/// open tabs (feature #2). Closing the panel no longer discards the tabs — it hides the panel
-/// and hands off to this pill, which reopens the panel where it left off. A separate dismiss
-/// control closes every tab for good.
-///
-/// It's mounted at the app-window level (`MainApplicationView`) rather than inside the panel,
-/// because the panel isn't in the tree while minimized. Uses the app theme (not the code
-/// syntax theme) so it matches the surrounding chat chrome.
+/// The floating reopen pill shown when the Code Viewer is minimized but still has open tabs.
+/// Closing the panel hides it and hands off to this pill, which reopens it where it left off; dismiss closes every tab.
+/// Mounted at the app-window level (`MainApplicationView`) since the panel isn't in the tree while minimized.
 struct CodeViewerFloatingButton: View {
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(\.appTheme) private var theme
@@ -33,9 +28,8 @@ struct CodeViewerFloatingButton: View {
             Button {
                 chatHistoryViewModel.reopenCodeViewer()
             } label: {
-                // Icon + count only — no text label. The pill sits over the chat's
-                // top-right corner, so every point of width is contested real estate;
-                // the accessibility label below carries the words instead.
+                // Icon + count only, no text label: the pill sits over the chat's top-right corner where width is contested; the
+                // accessibility label below carries the words.
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
                         .font(.system(size: 12, weight: .semibold)) // Fixed size: pill affordance

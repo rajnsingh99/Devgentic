@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsUpgradePairingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  NEW-1 and NEW-2 — two defects introduced BY the per-sender authorization fix (invariant 38) and
-//  found only by auditing that fix against current source.
-//
-//  NEW-1: `authorizedUserID` is written by a pairing service and by nothing else, so every pairing
-//  made before invariant 38 restores with it nil and the gate refuses every inbound message. The
-//  launch restore read credentials + ADDRESS only, so Settings painted `.connected` — a green dot —
-//  over a bridge that could not answer anything, and all three gate call sites bare-return, so the
-//  remote user got silence. The register called this an accepted cost whose "log line says so
-//  explicitly"; a log line is not an affordance.
-//
-//  NEW-2: the Telegram pairing loop computed ONE `origin` — `from?.id ?? String(chatID)` — for the
-//  lockout ledger and then reused it as the authorized IDENTITY. A PIN arriving on a message with no
-//  `from` paired "successfully" against a chat id, and `ChatOpsSecurityGate` compares against
-//  `from?.id` with no such fallback, so every later message was refused forever.
+//  Created by Raj Singh.
 //
 
 import XCTest

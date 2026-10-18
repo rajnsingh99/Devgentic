@@ -4,7 +4,7 @@
 //  MLXDisplayModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -18,10 +18,8 @@ enum MLXModelCapability: String, Codable, Hashable, CaseIterable {
     case coding = "Coding"            // e.g. Specialized code models
     case textGeneration = "Chat"      // Standard text models
     
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-    /// invisible to the String Catalog extractor and would have shipped untranslated inside
-    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    /// User-facing name, separate from `rawValue`, which is for persistence and logging only. `Text(x.rawValue)` is not
+    /// localized, so labels must come from here to reach the String Catalog.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .reasoning:      return "Reasoning"
@@ -48,7 +46,7 @@ struct MLXModelItem: Identifiable, Hashable {
     let id: String         // Folder Name
     let displayName: String // Readable Name (e.g. "mlx-community/Llama-3...")
     let localPath: URL
-    let createdAt: Date?   // Filesystem creation date — used to sort by recency
+    let createdAt: Date?   // Filesystem creation date, for sorting by recency
     /// Git commit this copy was downloaded at, read back from HubApi's own download metadata.
     /// Nil for imported models and anything downloaded before revision tracking.
     var revision: String?
@@ -60,24 +58,16 @@ struct MLXDisplayModel: Identifiable, Hashable {
     let id: String               // e.g. "mlx-community/Llama-3.2..."
     var size: String?            // Display string only, e.g. "2.4 GB" — never parse this back
 
-    /// The authoritative byte total.
-    ///
-    /// ⚠️ Sort and fit-assessment MUST use this, never `size`. `size` comes from a
-    /// locale-aware `ByteCountFormatter`, which emits "," as the decimal separator across
-    /// most of Europe; the old parser kept only ASCII digits and ".", so the separator was
-    /// *stripped rather than converted* and "2,4 GB" became 24 GB. On a German Mac that put
-    /// a compatible 2.4 GB model past `effectiveBudget`, producing an `.incompatible`
-    /// verdict and diverting the user into a "Model Too Large" sheet — capability metadata
-    /// blocking an action on a number the code itself had corrupted.
+    /// The authoritative byte total; sort and fit assessment must use this, never `size`. `size` comes from a
+    /// locale-aware formatter, so parsing it can corrupt the value ("2,4 GB" read as 24 GB).
     var sizeBytes: Int64?
 
     /// Bits-per-weight, parsed from the repo id. Nil when the publisher didn't encode one.
     /// Drives the quantization badge, the filter, and the RAM-fit estimate.
     var quantization: MLXQuantization?
 
-    /// HuggingFace requires an access token (or the user hasn't accepted the licence).
-    /// Labelled on the card, never used to disable the button — the user may well have a
-    /// token configured, and gating on a listing flag would block a download that works.
+    /// HuggingFace requires an access token (or the user has not accepted the licence). Labelled on the card but never
+    /// disables the button, since the user may already have a token configured.
     var isGated: Bool = false
 
     /// HuggingFace's declared `pipeline_tag`. Only the remote-search mapping fills it in; nil
@@ -106,9 +96,8 @@ struct MLXDisplayModel: Identifiable, Hashable {
     }
     
     var organization: String {
-        // "mlx-community/Llama-3.2-3B" -> "mlx-community"
-        // "bodega-raptor-90m" (no slash) -> "" — avoid duplicating displayName,
-        // since .first and .last on a 1-element split return the same string.
+        // "mlx-community/Llama-3.2-3B" gives "mlx-community"; an id with no slash gives "" to avoid duplicating
+        // `displayName`.
         let parts = id.components(separatedBy: "/")
         return parts.count > 1 ? parts[0] : ""
     }

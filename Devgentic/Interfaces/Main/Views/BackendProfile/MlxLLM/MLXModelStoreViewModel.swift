@@ -4,7 +4,7 @@
 //  MLXModelStoreViewModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -40,39 +40,17 @@ class MLXModelStoreViewModel {
     var selectedCategory: StoreCategory = .all {
         didSet {
             if selectedCategory != oldValue {
-                // A tab the USER picked ends the auto-switch: clearing the search box must not
-                // then yank them back to Recommended from a tab they chose deliberately.
-                //
-                // ⚠️ AND IT CANCELS A PENDING KEYSTROKE. The fence below guards the synchronous
-                // path; nothing guarded the asynchronous one. A debounce armed before the tab
-                // switch would fire 500 ms later, route on the NEW category, and yank the user
-                // straight back off the tab they had just chosen — then set
-                // `didAutoLeaveRecommended`, so clearing the box bounced them a second time.
+                // A tab the user picked ends the auto-switch, so clearing the search box does not return to Recommended.
+                // Cancels any pending debounced search so it cannot route on the new category.
                 if !isAutoSwitchingCategory {
                     didAutoLeaveRecommended = false
                     cancelPendingSearch()
                 }
-                // ⚠️ Drop the quantization narrowing on a category switch. It was chosen
-                // against a different result set, and the picker that undoes it only renders
-                // when the NEW set offers more than one quantization — so carrying it over
-                // could present an empty grid with no control to clear it, directly
-                // contradicting the "3 installed · 12.4 GB" summary above it. This view model
-                // is cached by `DestinationCoordinator` for the app lifetime, so leaving the
-                // store did not reset it either. A filter the user cannot see is a filter
-                // that enforces rather than describes.
-                // ⚠️ ONLY ON A TAB THE USER PICKED. The rationale below — "chosen against a
-                // different result set", "the picker that undoes it may not render on the new
-                // tab" — is about a deliberate navigation. It does not hold for the auto-switch
-                // to `.all`, which the code performs on the user's behalf and where the picker
-                // always renders: clearing there threw away a width the user had explicitly
-                // chosen moments earlier, with no interaction of theirs in between.
+                // Drops the quantization filter on a user-picked category switch; the picker may not render for the new result set.
+                // Not applied during the automatic switch, where the picker always renders.
                 if let cleared = quantizationFilter, !isAutoSwitchingCategory {
                     logger.info("[MLXSTORE] Cleared the \(cleared.rawValue)-bit quantization filter on switching to the \(self.selectedCategory.rawValue) tab. CONSEQUENCE: the new tab shows all its models; the filter was chosen against the previous result set.")
-                    // ⚠️ Suppress this clear's OWN refresh. `quantizationFilter`'s didSet now
-                    // re-queries HuggingFace, and the `refreshCategoryData()` below is about to
-                    // do exactly that for the new tab. Without the fence, every tab switch made
-                    // from a filtered tab fires two listing requests plus two rounds of size
-                    // lookups; the generation token discards one, but it is still sent.
+                    // Suppresses this clear's own refresh; the category refresh below already re-queries.
                     isClearingQuantizationForCategorySwitch = true
                     quantizationFilter = nil
                     isClearingQuantizationForCategorySwitch = false
@@ -142,14 +120,10 @@ class MLXModelStoreViewModel {
         return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
-    /// The last download failure, surfaced as a dismissible banner. A failed MLX download
-    /// used to revert the card to a plain Download button with the reason shown nowhere in
-    /// the store at all — `MLXModelService.errorMessage` had no reader.
+    /// The last download failure, surfaced as a dismissible banner.
     var downloadError: String?
 
-    /// Why the last remote fetch failed. Mirrored from the service so the grid can explain
-    /// itself: rate-limited, offline, gated and genuinely-empty previously all rendered the
-    /// same "No models found" dead end with a reload button that re-provoked the failure.
+    /// Why the last remote fetch failed, mirrored from the service so the grid can explain an empty result.
     var loadError: HFRequestError?
 
     /// The sort the user had before the Installed tab forced `.recent`, so it can be put back.
@@ -180,10 +154,8 @@ class MLXModelStoreViewModel {
         
         var id: String { rawValue }
         
-        /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-        /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-        /// invisible to the String Catalog extractor and would have shipped untranslated inside
-        /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+        /// User-facing name of the category.
+        /// Separate from `rawValue` so the label is localizable; `rawValue` is for persistence and logging only.
         var localizedTitle: LocalizedStringKey {
             switch self {
             case .installed:   return "Installed"
@@ -205,11 +177,8 @@ class MLXModelStoreViewModel {
         }
         
         /// Client-side capability to filter on for this category.
-        /// We deliberately avoid forwarding capability tags to the HF filter because
-        /// `filter=mlx,tool-use` is ANDed server-side — which eliminates most popular
-        /// MLX models (Qwen2.5, Llama-3.x, etc.) since their authors rarely add the
-        /// `tool-use` / `reasoning` HF tag. Instead, we fetch all MLX models and
-        /// classify via `MLXDisplayModel.capabilities` (set by `classifyCapabilities`).
+        /// Capability tags are not forwarded to the HuggingFace filter: it ANDs them server-side and hides most models.
+        /// Models are fetched unfiltered and classified via `MLXDisplayModel.capabilities`.
         var clientCapability: MLXModelCapability? {
             switch self {
             case .all, .installed, .recommended: return nil
@@ -219,22 +188,14 @@ class MLXModelStoreViewModel {
         }
     }
     
-    /// ⚠️ Every category stays available even in tool-filtering mode.
-    ///
-    /// This used to return `[.installed, .toolUse]`, deleting the "All" tab — so a model the
-    /// `classifyCapabilities` name heuristic failed to tag had NO browse path at all. Combined
-    /// with the hard filter below and the picker's own filter, a heuristic false negative
-    /// became a product lockout with no override: the user could not select or download their
-    /// own tool-capable model in an Agent profile. Classification may label and group; it must
-    /// never gate.
+    /// Every category stays available, including in tool-filtering mode.
+    /// Classification may label and group models; it never gates browsing.
     var availableCategories: [StoreCategory] {
         StoreCategory.allCases
     }
 
-    /// Show only this quantization, or nil for all. The store previously had no way to narrow
-    /// to 4-bit even though the listing routinely returns the same model at four different
-    /// quantizations as visually identical cards.
-    /// ⚠️ On a server-backed tab this is a QUERY, not a client-side sieve — see `remoteQuery`.
+    /// Show only this quantization, or nil for all.
+    /// On a server-backed tab this is part of the query, not a client-side filter; see `remoteQuery`.
     var quantizationFilter: MLXQuantization? {
         didSet {
             guard quantizationFilter != oldValue else { return }
@@ -246,12 +207,7 @@ class MLXModelStoreViewModel {
                 applyFilterAndSort()
             } else {
                 logger.info("[MLXSTORE] Quantization → \(self.quantizationFilter?.searchToken ?? "any") on the \(self.selectedCategory.rawValue) tab. CONSEQUENCE: re-querying HuggingFace with the bit-width in the search term; narrowing the current 30-row page client-side left only the few of that width that happened to land on it.")
-                // ⚠️ This re-query supersedes any pending one. Picking a width within 500 ms of a
-                // keystroke — or clicking "Reset Filters", which clears the box and then the
-                // width — otherwise sent TWO byte-identical listing requests plus two rounds of
-                // ~30 per-repo size lookups. The generation token discards one response, but both
-                // requests still go out, at a store HuggingFace rate-limits hard enough to need a
-                // dedicated 429 path with no retry.
+                // This re-query supersedes any pending one, so a width picked right after a keystroke sends a single request.
                 cancelPendingSearch()
                 refreshCategoryData(reason: .filterChanged)
             }
@@ -262,35 +218,20 @@ class MLXModelStoreViewModel {
     /// not issue a fetch on top of the one the category switch is already about to make.
     @ObservationIgnored private var isClearingQuantizationForCategorySwitch = false
 
-    /// The exact `search=` term the next HuggingFace listing request will carry.
-    ///
-    /// ⚠️ BOTH remote call sites read this one property, so a page-2 fetch can never drop the
-    /// narrowing page 1 was built with.
+    /// The exact `search=` term the next HuggingFace listing request carries.
+    /// Every remote call site reads this property so later pages keep the narrowing of page 1.
     var remoteSearchQuery: String? {
         Self.remoteQuery(search: searchText, quantization: quantizationFilter)
     }
 
-    /// Folds the search box and the quantization picker into ONE HuggingFace `search=` term.
-    ///
-    /// ⚠️ The quantization has to go into the SERVER query. HuggingFace returns 30 rows per page
-    /// ranked by downloads; narrowing those 30 locally showed two or three cards — or none —
-    /// while HF holds hundreds of repos at that width. `search` ANDs its tokens against the
-    /// repo id, so "qwen 4bit" returns only 4-bit Qwen repos.
-    ///
-    /// ⚠️ A bare bit-width the user TYPED is dropped when it contradicts the picker: HF ANDs, so
-    /// "gemma 8bit" plus a 4-bit selection returns literally zero rows — exactly the empty grid
-    /// this change exists to remove. The picker is the explicit choice, so it wins. Only a token
-    /// that is NOTHING BUT a width is dropped; "Qwen3-8bit" survives intact, because deleting it
-    /// would throw away the family name and search for a width alone.
-    ///
-    /// Pure and `nonisolated` so it is testable without building a view model.
+    // Why: HuggingFace ANDs search tokens against the repo id, so contradicting or duplicate widths return zero rows.
+    /// Folds the search box and the quantization picker into one HuggingFace `search=` term.
+    /// A bare bit-width typed by the user is dropped in favour of the picker's canonical spelling.
+    /// Pure and `nonisolated`.
     nonisolated static func remoteQuery(
         search: String, quantization: MLXQuantization?
     ) -> String? {
-        // ⚠️ Tokenise on the whitespace CLASS and re-join on plain spaces, on BOTH paths. A
-        // trim only cleans the ENDS, so a non-breaking space or tab pasted from a web page rode
-        // straight into `search=` — and, with a picker set, glued a contradicting width onto its
-        // neighbour so the drop below never saw it.
+        // Tokenises on the whitespace class and re-joins on plain spaces; a trim alone leaves non-breaking spaces inside.
         let tokens = search.split(whereSeparator: { $0.isWhitespace })
         guard let quantization else {
             return tokens.isEmpty ? nil : tokens.joined(separator: " ")
@@ -300,38 +241,16 @@ class MLXModelStoreViewModel {
             let isBareWidth = MLXQuantization.allCases.contains { quant in
                 ["\(quant.rawValue)bit", "\(quant.rawValue)-bit", "\(quant.rawValue)_bit"].contains(lower)
             } || ["bf16", "fp16", "float16"].contains(lower)
-            // ⚠️ DROP EVERY bare width, including one that AGREES with the picker.
-            //
-            // This used to keep an agreeing token and then append `searchToken` as well, which
-            // emits two spellings of the same width whenever they differ — "4-bit" + "4bit", or
-            // "16bit" + "bf16". HuggingFace ANDs the terms against `filter=mlx`, so the composed
-            // query is unsatisfiable: verified live, `search=qwen 4bit` returns 30 rows while
-            // `search=qwen 4-bit 4bit` returns 0. The picker's own menu spells widths "4-bit",
-            // so the broken spelling is the one the app teaches.
-            //
-            // The 16-bit case was self-refuting: `searchToken` exists precisely because "16bit"
-            // matches almost nothing, and the old filter put the user's literal "16bit" back in.
-            //
-            // The picker is the explicit choice, so it supplies the one canonical spelling and
-            // every typed width defers to it — agreeing or not.
+            // Drops every bare width, including one that agrees with the picker; the picker supplies the one canonical spelling.
+            // HuggingFace ANDs the terms, so two spellings of the same width make the query unsatisfiable.
             return !isBareWidth
         }
         return (kept.map(String.init) + [quantization.searchToken]).joined(separator: " ")
     }
 
-    /// Quantizations actually present in the current results — no point offering a 2-bit
-    /// filter for a page that has none.
-    /// ⚠️ On a server-backed tab this is the FULL set, not what the current page contains.
-    /// Now that the choice goes into the HuggingFace query, a 4-bit page contains only 4-bit
-    /// models — deriving the menu from the results would leave "Any" and "4-bit" as the only
-    /// entries, so 4-bit → 8-bit would mean routing back through "Any" and waiting for a round
-    /// trip. HuggingFace has a full page at every width, so every width is a real offer.
-    ///
-    /// `.installed` and `.recommended` are fixed local sets, so there the rows ARE the universe
-    /// and offering a width nothing holds would empty the grid with no server able to fill it.
-    /// ⚠️ `.recommended` reads `CuratedMLXCatalog`, NOT `availableModels`: its grid is built
-    /// from the curated list, so the old source offered widths left over from whatever tab was
-    /// fetched last.
+    /// Quantizations offered by the picker.
+    /// On server-backed tabs this is the full set; on `.installed` and `.recommended` it is derived from the local rows
+    /// (`CuratedMLXCatalog` for `.recommended`), and always includes the active filter.
     var availableQuantizations: [MLXQuantization] {
         guard selectedCategory == .installed || selectedCategory == .recommended else {
             return MLXQuantization.allCases.sorted()
@@ -345,9 +264,7 @@ class MLXModelStoreViewModel {
                 .compactMap { MLXQuantization.parse(fromRepoId: $0.id) }
         }
         var present = Set(source)
-        // ⚠️ Always offer the ACTIVE filter, even when nothing in the current results matches
-        // it. Otherwise the Picker has no tag for its own selection, renders blank, and the
-        // user cannot clear the very filter that emptied the grid.
+        // Always offers the active filter so the picker has a tag for its own selection and the user can clear it.
         if let quantizationFilter { present.insert(quantizationFilter) }
         return Array(present).sorted()
     }
@@ -361,15 +278,8 @@ class MLXModelStoreViewModel {
         }
     }
 
-    /// Narrow the grid to models this Mac can actually run.
-    ///
-    /// ⚠️ DEFAULT OFF, unlike `showToolCapableOnly` above. That one narrows inside a mode the
-    /// user already opted into (an Agent profile asking for tool-capable models); this one hides
-    /// models on a hardware verdict nobody asked about. The store's own precedent for this exact
-    /// signal is ORDERING, not hiding — `CuratedMLXCatalog.recommended` calls it "Ordering only —
-    /// nothing is hidden" — and the download path refuses to gate on an `.unknown` verdict for
-    /// the same reason: describe, don't gate. Turning the badge into a hide is the user's call,
-    /// and it stays one click from off at all times.
+    /// Narrows the grid to models this Mac can run.
+    /// Defaults to off: the fit verdict describes models and orders them elsewhere; hiding is the user's explicit choice.
     var fitsMyMacOnly: Bool = false {
         didSet {
             guard fitsMyMacOnly != oldValue else { return }
@@ -379,26 +289,12 @@ class MLXModelStoreViewModel {
         }
     }
 
-    /// How many models the fit filter is hiding right now, for the label beside the checkbox.
-    /// ⚠️ Must stay observable — a filter that empties the grid without saying so is the
-    /// enforcing kind.
+    /// How many models the fit filter is hiding right now, shown beside the checkbox.
     var hiddenByFitFilter: Int = 0
 
-    /// Whether a verdict survives the "Fits my Mac" filter.
-    ///
-    /// Pure and `nonisolated` so the rule is testable without building a view model — same shape
-    /// as `searchDestination` and `serverSortRefetch`.
-    ///
-    /// ⚠️ `.unknown` is KEPT, and this case is the whole risk. Remote cards are built with a
-    /// `sizeBytes` that is nil until the size pass lands, and `fetchRemoteModels` clears
-    /// `isLoading` BEFORE awaiting it. Hiding unknowns would therefore paint "No models found",
-    /// with its "Try Reloading" button, over a page that had just loaded fine — and permanently
-    /// so under a 429, where the size batch is abandoned and there is deliberately no retry.
-    /// Nothing is misrepresented by keeping the card: its own badge renders `.unknown` as
-    /// "Size Unknown".
-    ///
-    /// ⚠️ Exhaustive, no `default:` — a verdict added later must fail the build here rather than
-    /// silently inherit "keep".
+    // Why: the switch is exhaustive with no `default:` so a new verdict must be decided here at build time.
+    /// Whether a verdict survives the "Fits my Mac" filter. Pure and `nonisolated`.
+    /// `.unknown` is kept: remote cards have no size until the size pass lands, and hiding them would show an empty grid.
     nonisolated static func passesFitFilter(_ verdict: ModelFitVerdict) -> Bool {
         switch verdict {
         case .comfortable, .tight:  return true
@@ -407,30 +303,10 @@ class MLXModelStoreViewModel {
         }
     }
 
-    /// The canonical `owner/name` repo id a pasted string denotes, or nil when the text is a
-    /// SEARCH TERM rather than an identifier.
-    ///
-    /// ⚠️ The store's one text input is a QUERY — it goes to HuggingFace as `search=`, which ranks
-    /// and fuzzy-matches. A user holding an exact id from a model card or a blog post had no way
-    /// to say "fetch THIS one"; it had to be located in ranked results first. This rule tells the
-    /// two apart, so the Fetch affordance appears only when the text really is an id.
-    ///
-    /// Returns the id rather than a Bool on purpose: the caller needs the cleaned string, and a
-    /// separate predicate and normaliser are two rules that can disagree.
-    ///
-    /// ACCEPTS — all of these yield `mlx-community/Qwen3-8B-4bit`: the bare id; surrounding
-    /// whitespace (pasting out of a code block); one trailing `/` (pasting out of an address bar);
-    /// `https://huggingface.co/<id>` with or without scheme, with `www.` or `hf.co`, with a `?…`
-    /// query or `#…` fragment, and with a trailing `/tree/main` or `/blob/main/…`.
-    ///
-    /// REJECTS — these stay plain searches: anything with no `/` (`qwen3 8bit`, the common case);
-    /// anything with whitespace INSIDE, because `remoteQuery` splits this box on spaces so a space
-    /// means the user is typing tokens; a bare form that is not exactly two components.
-    ///
-    /// ⚠️ The character check is NOT cosmetic. The value is interpolated straight into
-    /// `https://huggingface.co/api/models/\(repoId)` and handed to `HubApi.snapshot`, whose
-    /// `localRepoLocation` appends it under the models directory. A `.` or `..` component is a
-    /// path, not a name.
+    // Why: the id is interpolated into an API URL and a local path, so `.` and `..` components must be rejected.
+    /// The canonical `owner/name` repo id a pasted string denotes, or nil when the text is a search term.
+    /// Accepts a bare id or a huggingface.co / hf.co URL (optional scheme, query, fragment, `/tree/main`, `/blob/...`).
+    /// Rejects text without a `/`, with inner whitespace, or not exactly two components.
     nonisolated static func repoIdToDownload(from text: String) -> String? {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty, !s.contains(where: { $0.isWhitespace }) else { return nil }
@@ -484,15 +360,9 @@ class MLXModelStoreViewModel {
             }
         }
 
-        /// The HuggingFace `sort=` field this option maps to, or nil when the API cannot rank
-        /// by it and the ordering can only be imposed client-side.
-        ///
-        /// ⚠️ The size sorts are nil ON PURPOSE. Repo size is not a field on `/api/models`; it
-        /// is fetched per-repo afterwards by `fetchSizes`, so only models already on the page
-        /// have one. A size sort is therefore a re-ordering of the pages already loaded, never
-        /// a global ranking — which is exactly today's behaviour, preserved deliberately.
-        /// ⚠️ No `default:` — a fifth option must fail the build here rather than ship as
-        /// `downloads` without anyone deciding that.
+        // Why: no `default:` so a new option must choose its server mapping at build time.
+        /// The HuggingFace `sort=` field this option maps to, or nil when only a client-side ordering is possible.
+        /// The size sorts are nil: repo size is fetched per repo after the listing, so they re-order loaded pages only.
         var hfSort: String? {
             switch self {
             case .popularity:   return "downloads"
@@ -517,9 +387,7 @@ class MLXModelStoreViewModel {
 
     init(filterForTools: Bool = false) {
         self.filterForTools = filterForTools
-        // A first run — no models on disk — lands on the curated list. That is exactly when
-        // the raw HuggingFace popularity listing is least helpful: its top results included
-        // speech-recognition models badged "Chat" and a 657 GB repo.
+        // A first run with no models on disk lands on the curated list, where the raw popularity listing is least useful.
         let hasModels = !MLXModelService.shared.installedModels.isEmpty
         self.selectedCategory = hasModels ? (filterForTools ? .installed : .all) : .recommended
         setupObserver()
@@ -527,9 +395,7 @@ class MLXModelStoreViewModel {
     }
 
     deinit {
-        // Releasing `serviceObserver` triggers `ObservationStream.deinit`,
-        // which flips its own `isActive` flag so any in-flight onChange task
-        // short-circuits instead of writing to a zombie self.
+        // Releasing `serviceObserver` flips its `isActive` flag so in-flight onChange tasks stop.
     }
 
     /// Bridges MLXModelService (@Observable) changes into this @Observable view model.
@@ -545,11 +411,7 @@ class MLXModelStoreViewModel {
                 _ = self.service.isLoadingRemoteModels
                 _ = self.service.remoteLoadError
                 _ = self.service.isDownloading
-                // ⚠️ `downloadProgress` is deliberately NOT tracked here. It ticks
-                // continuously during a pull, and this observer's `onChange` runs
-                // `applyFilterAndSort()` — a full re-filter and re-sort of the entire grid
-                // per tick. The progress UI reads `DownloadManager`'s per-record state
-                // directly, so nothing in this view model needs the value.
+                // `downloadProgress` is not tracked: it ticks continuously and each change would re-filter the whole grid.
                 _ = self.service.currentDownloadName
                 _ = self.service.errorMessage
             },
@@ -570,15 +432,8 @@ class MLXModelStoreViewModel {
     
     // MARK: - Logic
 
-    /// Why `refreshCategoryData` is being called. Register A43.
-    ///
-    /// ⚠️ The Installed tab's forced disk scan is correct for a Refresh click, a tab switch and
-    /// first load — all explicit requests for current data — and wrong for a keystroke in the
-    /// filter field. `force: true` bypasses both the 2 s debounce AND the in-flight coalescing
-    /// (a forcing caller joins the running walk and then deliberately starts a new one), so every
-    /// typing pause guaranteed a fresh recursive `FileManager.enumerator` walk plus a full
-    /// cognitive-profile rebuild — and none of it could change the result, because filtering the
-    /// Installed tab happens entirely client-side in `filterAndSortModels`.
+    /// Why `refreshCategoryData` is being called.
+    /// A filter keystroke must not force a disk rescan of the Installed tab, since filtering there is client-side.
     private enum RefreshReason {
         /// Refresh button, tab switch, first load — re-read the disk.
         case userRequest
@@ -586,24 +441,9 @@ class MLXModelStoreViewModel {
         case filterChanged
     }
 
-    /// Where a search keystroke should send the user, or `nil` to stay on this tab and
-    /// re-filter in place.
-    ///
-    /// Pure and `nonisolated` so the rule can be tested without building a view model (which
-    /// would drag in `MLXModelService.shared` and a disk scan).
-    ///
-    /// ⚠️ THE RECOMMENDED TAB CANNOT ANSWER A QUERY. Its rows come from `CuratedMLXCatalog`,
-    /// selected in `filterAndSortModels`, and `refreshCategoryData` serves that tab entirely
-    /// locally — it issues no HuggingFace request at all. So a query typed there is routed to
-    /// `.all`, which does issue one, instead of being silently dropped.
-    ///
-    /// ⚠️ MOVING THE TAB IS THE POINT, not a side effect. The results must be labelled by what
-    /// they are: a remote search answers from all of HuggingFace, not from the seven hand-picked
-    /// entries, so leaving the grid titled "Recommended" would be a lie about its own contents.
-    ///
-    /// The return trip is deliberate too — the user never asked to leave Recommended, so
-    /// clearing the box undoes the move. It is guarded on `.all` as well as on the flag, so that
-    /// a stale flag can never bounce the user out of a tab they picked themselves.
+    /// Where a search keystroke should send the user, or nil to stay on this tab and re-filter in place.
+    /// A query typed on Recommended routes to `.all`, since the curated list issues no remote request; clearing returns.
+    /// Pure and `nonisolated`.
     nonisolated static func searchDestination(
         from current: StoreCategory,
         query: String,
@@ -615,16 +455,9 @@ class MLXModelStoreViewModel {
         return nil
     }
 
-    /// The HF `sort=` field a sort change must re-query with, or nil to leave the loaded result
-    /// set alone and merely re-order it client-side.
-    ///
-    /// Pure and `nonisolated` for the same reason `searchDestination` is: testable without
-    /// building a view model, whose `init` scans the disk and fetches from HuggingFace.
-    ///
-    /// ⚠️ nil for `.installed` and `.recommended` — neither has a server behind it. One is a
-    /// disk scan; the other is `CuratedMLXCatalog`, served entirely locally.
-    /// ⚠️ nil for a size sort — re-querying would throw away every page the user loaded to
-    /// change nothing, because the API cannot rank by repo bytes.
+    /// The HF `sort=` field a sort change must re-query with, or nil to just re-order the loaded results client-side.
+    /// Nil for `.installed`, `.recommended` (no server behind them) and for size sorts the API cannot rank.
+    /// Pure and `nonisolated`.
     nonisolated static func serverSortRefetch(
         from oldValue: SortOption,
         to newValue: SortOption,
@@ -637,12 +470,8 @@ class MLXModelStoreViewModel {
         return target
     }
 
-    /// Re-queries HuggingFace when the user's sort choice changes the ranking the SERVER owes us.
-    ///
-    /// ⚠️ THE `isRestoringSort` GUARD IS MANDATORY. `refreshCategoryData` restores
-    /// `sortBeforeInstalledTab` by assigning `sortOption` BEFORE it clears the stash, and this
-    /// didSet has no equality guard of its own — so without the fence, leaving the Installed tab
-    /// runs didSet → refreshCategoryData → assign → didSet → … and never terminates.
+    // Why: the `isRestoringSort` guard breaks a didSet -> refreshCategoryData -> assign -> didSet loop; do not remove it.
+    /// Re-queries HuggingFace when the user's sort choice changes the ranking the server provides.
     private func maybeRefetchForServerSort(from oldValue: SortOption) {
         guard !isRestoringSort else { return }
         guard let target = Self.serverSortRefetch(
@@ -653,18 +482,8 @@ class MLXModelStoreViewModel {
         refreshCategoryData()
     }
 
-    /// True when the shared `availableModels` was produced by a DIFFERENT query than this
-    /// instance is showing.
-    ///
-    /// ⚠️ TWO STORE VIEW MODELS SHARE ONE PAYLOAD. `DestinationCoordinator` caches an instance
-    /// for `filterForTools: true` and another for false, both for the app lifetime, and both read
-    /// `MLXModelService.shared.availableModels`. Open the agent store, let it fetch `.all`, come
-    /// back to the general store: the category still matches, so the old guard passed and this
-    /// instance rendered the OTHER one's rows — then `loadMore` paged its own sort and offset into
-    /// them, leaving a coverage hole no further click could fill.
-    ///
-    /// Local tabs are exempt: `.installed` is a disk scan and `.recommended` is served from
-    /// `CuratedMLXCatalog`, so neither reads the shared array at all.
+    /// True when the shared `availableModels` was produced by a different query than this instance is showing.
+    /// Two store view models share one payload; local tabs (`.installed`, `.recommended`) never read it and are exempt.
     var sharedPayloadIsForeign: Bool {
         Self.payloadIsForeign(
             category: selectedCategory,
@@ -676,13 +495,8 @@ class MLXModelStoreViewModel {
         )
     }
 
-    /// The comparison itself. Pure and `nonisolated`, like `searchDestination` and
-    /// `serverSortRefetch`, so it is testable without building a view model — whose `init` scans
-    /// the disk and fetches from huggingface.co.
-    ///
-    /// ⚠️ `payloadCategory == nil` means nothing has been fetched this launch, which is NOT
-    /// foreign: returning true there would make a cold store refetch on its own first appearance,
-    /// on top of the fetch `init` already issued.
+    /// The comparison behind `sharedPayloadIsForeign`; pure and `nonisolated`.
+    /// A nil `payloadCategory` means nothing has been fetched yet, which is not foreign.
     nonisolated static func payloadIsForeign(
         category: StoreCategory,
         payloadCategory: String?,
@@ -699,10 +513,7 @@ class MLXModelStoreViewModel {
     }
 
     /// Re-queries when the shared payload belongs to the other store instance.
-    ///
-    /// Call this on re-entry: neither view model refetches on appear, so returning to a store
-    /// whose payload was replaced while you were away otherwise shows the other one's results
-    /// until you touch a control.
+    /// Call on re-entry, since neither view model refetches on appear.
     func refreshIfSharedPayloadIsForeign() {
         guard sharedPayloadIsForeign else { return }
         logger.info("[MLXSTORE] Shared payload belongs to another store instance (category=\(self.service.availableModelsCategory ?? "<none>") sort=\(self.service.availableModelsSort ?? "<none>") vs mine \(self.selectedCategory.rawValue)/\(self.lastFetchedSort)). CONSEQUENCE: re-querying page 0 rather than rendering or paging another instance's results.")
@@ -710,11 +521,7 @@ class MLXModelStoreViewModel {
     }
 
     /// Drops a pending debounced search.
-    ///
-    /// ⚠️ Call this from any path that is ABOUT TO refresh. The debounced task carries only the
-    /// intent to re-query; once another action has re-queried, that task either duplicates the
-    /// request byte-for-byte or — after a category change — applies a routing decision computed
-    /// against state the user has since moved on from.
+    /// Call from any path about to refresh, so the debounced task cannot duplicate the request or route on stale state.
     private func cancelPendingSearch() {
         searchDebounceTask?.cancel()
         searchDebounceTask = nil
@@ -735,9 +542,8 @@ class MLXModelStoreViewModel {
             isAutoSwitchingCategory = false
             return
         }
-        // ⚠️ register A43 — `.filterChanged`, so the Installed tab re-filters without re-walking
-        // the disk. Remote categories still issue their fetch: for those the search text is a
-        // QUERY the server answers, not a client-side filter.
+        // `.filterChanged` lets the Installed tab re-filter without re-walking the disk.
+        // Remote categories still fetch: for them the search text is a server query.
         refreshCategoryData(reason: .filterChanged)
     }
 
@@ -745,10 +551,7 @@ class MLXModelStoreViewModel {
         currentPage = 0
 
         if selectedCategory == .recommended {
-            // ⚠️ Restore the Installed tab's stashed sort HERE too. Only the remote branch did it,
-            // so Installed → Recommended left `sortOption` on the forced `.recent` the user never
-            // picked AND kept the stash — then a sort chosen on Recommended was silently
-            // overwritten by that stale stash on the next move to a remote tab.
+            // Restores the Installed tab's stashed sort here too, not only on the remote branch.
             if let restore = sortBeforeInstalledTab {
                 isRestoringSort = true
                 sortOption = restore
@@ -761,24 +564,13 @@ class MLXModelStoreViewModel {
             // verdict has a denominator; one bounded fetch, not the 30-per-page fan-out.
             Task { await service.fetchSizesForCuratedModels() }
         } else if selectedCategory == .installed {
-            // Default the Installed tab to most-recent-first, remembering what to restore.
-            // This used to flip the sort and never put it back, so returning to All left the
-            // user on "Recent" — which is meaningless for remote results and, before the
-            // comparator was made total, reshuffled the grid on every size-update tick.
+            // Defaults the Installed tab to most-recent-first and stashes the previous sort for restoration.
             if sortOption == .popularity {
                 sortBeforeInstalledTab = sortOption
                 sortOption = .recent
             }
-            // Force: this path is reached from the Refresh button and from switching to the
-            // Installed tab, both of which are explicit user requests for current data. The
-            // debounce exists to absorb the init + onAppear double-fire, not to ignore the
-            // user. (The comment here used to say the window was <2s while the constant was
-            // 30s — a refresh could silently do nothing for half a minute.)
-            //
-            // ⚠️ register A43 — but NOT for a filter keystroke, which this comment predates and
-            // was never written for. Filtering is client-side, so the scan could not change what
-            // the user sees; it was pure I/O per typing pause, and worse on a custom models
-            // directory pointed at an external or network volume.
+            // Forced: reached from the Refresh button and Installed tab switches, which are explicit requests for current data.
+            // A filter keystroke does not force, since filtering is client-side.
             if reason == .userRequest {
                 logger.info("Refresh: category=installed — scanning local models")
                 service.forceRefreshInstalledModels()
@@ -790,15 +582,13 @@ class MLXModelStoreViewModel {
             applyFilterAndSort()
         } else {
             if let restore = sortBeforeInstalledTab {
-                // ⚠️ Fence the assignment: `sortOption`'s didSet re-enters this function, and
-                // `sortBeforeInstalledTab` is still non-nil at that instant — without the fence
-                // this recurses forever.
+                // Fences the assignment: `sortOption`'s didSet re-enters this function while the stash is non-nil.
                 isRestoringSort = true
                 sortOption = restore
                 isRestoringSort = false
                 sortBeforeInstalledTab = nil
             }
-            // ⚠️ `remoteSearchQuery`, not `searchText`: the quantization is part of the QUERY.
+            // Uses `remoteSearchQuery`, not `searchText`: the quantization is part of the query.
             let search = remoteSearchQuery
             // A size sort has no server equivalent, so keep the ranking the loaded results were
             // fetched with rather than silently reverting the listing to `downloads`.
@@ -806,14 +596,8 @@ class MLXModelStoreViewModel {
             lastFetchedSort = serverSort
             logger.info("Refresh: category=\(self.selectedCategory.rawValue) search=\(search ?? "<none>") sort=\(serverSort) clientCapability=\(self.selectedCategory.clientCapability?.rawValue ?? "<none>")")
 
-            // Clear stale cards from the prior tab so the loading UI shows
-            // instead of (incorrectly) rendering the previous category's
-            // models until the remote fetch completes.
-            //
-            // `isLoading` is set here, synchronously, alongside the clear. The service sets
-            // its own flag two actor hops later, so for those two hops the grid was empty
-            // AND not-loading — which is exactly the "No models found" empty state. Every
-            // category switch flashed it.
+            // Clears the previous tab's cards and sets `isLoading` synchronously, so the grid never flashes "No models found"
+            // during the actor hops before the service sets its own flag.
             isLoading = true
             loadError = nil
             displayedModels = []
@@ -844,40 +628,25 @@ class MLXModelStoreViewModel {
     }
     
     func loadMore() {
-        // ⚠️ `.recommended` TOO, not just `.installed`. Both are served from a fixed local set, so
-        // paging either spends a listing request plus ~30 per-repo size lookups and then changes
-        // nothing: `filterAndSortModels` sources the curated tab from `CuratedMLXCatalog` and
-        // never looks at what the fetch appended.
+        // `.recommended` is excluded as well as `.installed`: both are fixed local sets, so paging them changes nothing.
         guard selectedCategory != .installed, selectedCategory != .recommended else { return }
 
-        // ⚠️ NEVER APPEND ONTO ANOTHER INSTANCE'S RESULTS. The offset below is measured against
-        // the shared array, so if that array came from a different query the page we ask for is
-        // indexed into a ranking we are not showing. Re-query page 0 instead — the grid is already
-        // displaying the wrong rows at this point, so refetching is a correction, not a loss.
+        // Never appends onto another instance's results: the offset is measured against the shared array.
+        // Re-queries page 0 instead.
         guard !sharedPayloadIsForeign else {
             logger.info("[MLXSTORE] LoadMore REFUSED — the shared payload is another store instance's. CONSEQUENCE: re-querying page 0 for this instance instead of paging into a ranking it never fetched.")
             refreshCategoryData()
             return
         }
 
-        // ⚠️ THE OFFSET COMES FROM WHAT ACTUALLY LANDED, not from an optimistic page counter.
-        // `currentPage += 1` was applied before the fetch and never rolled back, so a 429 or a
-        // dropped connection — which the service handles by leaving `availableModels` untouched
-        // when `append` is true — left the counter one ahead. The next click then asked for
-        // `skip=60` and rows 30-59 were never fetched: a permanent hole no further action could
-        // fill short of a full refresh.
+        // The offset comes from what actually landed, not a page counter, so a failed fetch leaves no hole in the paging.
         let offset = service.availableModels.count
         currentPage += 1
-        // ⚠️ Must match `refreshCategoryData` exactly. Sending the bare `searchText` here would
-        // append an UNFILTERED page 2 under a filtered page 1 — and because the client filter in
-        // `filterAndSortModels` then drops nearly all of it, "Load More" would appear to do
-        // nothing while still spending a request.
+        // Must match `refreshCategoryData`; a bare `searchText` would append an unfiltered page under a filtered one.
         let search = remoteSearchQuery
         logger.info("LoadMore: page=\(self.currentPage) offset=\(offset) sort=\(self.lastFetchedSort) search=\(search ?? "<none>") currentAvailable=\(self.service.availableModels.count)")
 
-        // ⚠️ `lastFetchedSort`, NOT `sortOption.hfSort`. `skip=offset` is only meaningful against
-        // the ranking that produced pages 0..n-1, and a size sort deliberately does not re-query —
-        // so it must keep paging the listing it started on.
+        // Uses `lastFetchedSort`, not `sortOption.hfSort`: `skip=offset` only fits the ranking that produced the loaded pages.
         Task { [category = selectedCategory.rawValue, sort = lastFetchedSort] in
             await service.fetchRemoteModels(
                 limit: pageSize,
@@ -929,9 +698,7 @@ class MLXModelStoreViewModel {
                 }
                 
                 let lowerId = item.displayName.lowercased()
-                // Reasoning badge: check the centralized heuristics (catches qwq, magistral,
-                // gpt-oss, o1/o3/o4 families) plus the generic "reasoning" / "chain-of-thought"
-                // keywords users/publishers sometimes add to model names.
+                // Reasoning badge: the centralized heuristics plus generic "reasoning" / "chain-of-thought" keywords in model names.
                 if ModelCapabilityHeuristics.isReasoningOnly(nameCandidates: item.displayName) ||
                    lowerId.contains("reasoning") || lowerId.contains("chain-of-thought") {
                     caps.insert(.reasoning)
@@ -948,9 +715,7 @@ class MLXModelStoreViewModel {
                     caps.insert(.textGeneration)
                 }
                 
-                // Installed models used to be mapped with `size: nil`, so the Installed tab
-                // showed no disk figure, suppressed the fit badge, and made "Sort by size" a
-                // silent no-op there. Sizes arrive from the background sizing pass.
+                // Installed models carry their size from the background sizing pass (nil until it lands).
                 let bytes = service.installedSizeBytes[item.displayName]
                 return MLXDisplayModel(
                     id: item.displayName,
@@ -966,38 +731,26 @@ class MLXModelStoreViewModel {
                 )
             }
             
-            // Soft filter only, and only while the user leaves the toggle on. `capabilities`
-            // here comes from substring matching over the model id, so a false negative is
-            // routine for any newly-released family, re-quantized upload or personal
-            // fine-tune. Hiding those outright removed the only way to reach them.
+            // Soft filter, applied only while the toggle is on: `capabilities` comes from substring matching, so false negatives
+            // are routine and hiding them would remove the only way to reach those models.
             if filterForTools && showToolCapableOnly {
                 sourceModels = sourceModels.filter { $0.capabilities.contains(.toolUse) }
             }
             
         } else {
-            // Only use the remote payload if it was actually fetched for this category.
-            // ⚠️ Category AND ranking AND search — see `sharedPayloadIsForeign`. Matching on the
-            // category alone let the other store instance's `.all` page render here as ours.
+            // Uses the remote payload only if it was fetched for this category, ranking and search; see `sharedPayloadIsForeign`.
             guard service.availableModelsCategory == nil
                     || (service.availableModelsCategory == category.rawValue
                         && service.availableModelsSort == lastFetchedSort
                         && service.availableModelsSearch == remoteSearchQuery) else {
-                // ⚠️ This early return sits ABOVE the fit block, so without this the count from
-                // the PREVIOUS tab survives: switching tabs rendered "(8 hidden)" over an empty,
-                // loading grid for the whole round trip. The property exists to stop a filter
-                // emptying the grid silently — saying something false instead is worse.
+                // Resets the count here: this early return sits above the fit block, so the previous tab's count would otherwise stay.
                 hiddenByFitFilter = 0
                 return []
             }
             sourceModels = remote
 
-            // Filter remote results by category capability (client-side).
-            // HF's server-side tag filter is too restrictive (authors rarely add
-            // `tool-use`/`reasoning` tags), so we rely on `classifyCapabilities`
-            // heuristics baked into `MLXDisplayModel.capabilities`.
-            // NOTE: no log here — `applyFilterAndSort` is invoked on every
-            // observer tick (including per-model size updates), so logging
-            // would emit 30+ lines per fetch.
+            // Filters remote results client-side by category capability using `MLXDisplayModel.capabilities`.
+            // No log here: this runs on every observer tick.
             if let cap = category.clientCapability {
                 sourceModels = sourceModels.filter { $0.capabilities.contains(cap) }
             }
@@ -1008,18 +761,8 @@ class MLXModelStoreViewModel {
             sourceModels = sourceModels.filter { $0.quantization == quantizationFilter }
         }
 
-        // 2b. "Fits my Mac" — the RAM advisory used as a filter, because the user asked for it.
-        //
-        // ⚠️ NEVER on the Installed tab. That tab is the only surface carrying Delete, and the
-        // model a user most needs to reach there is the oversized one they want gone. Installed
-        // cards are also sizeless until the background sizing pass lands, so they would all read
-        // `.unknown` on first paint anyway.
-        //
-        // ⚠️ `ModelFitAdvisor.verdict`, not `assess`: `assess` logs one line per model and this
-        // runs on every observer tick. Same reason the capability filter above has no log.
-        //
-        // The three arguments are deliberately identical to `ModelCardView.fitAssessment`, so a
-        // card can never be hidden while its own badge shows a different verdict.
+        // "Fits my Mac": the RAM advisory used as a filter on request. Never on the Installed tab, which carries Delete.
+        // Uses `ModelFitAdvisor.verdict` (no per-model logging) with the same arguments as `ModelCardView.fitAssessment`.
         if fitsMyMacOnly && category != .installed {
             let before = sourceModels.count
             sourceModels = sourceModels.filter { model in
@@ -1034,15 +777,7 @@ class MLXModelStoreViewModel {
             hiddenByFitFilter = 0
         }
 
-        // 3. Filter by search text.
-        //
-        // ⚠️ ONLY `.installed` FILTERS CLIENT-SIDE. Every other tab's query is answered by
-        // HuggingFace, so filtering here as well would narrow the server's own answer.
-        // This used to read `|| !isRemoteSearchEnabled` — a property initialised to `true` and
-        // assigned nowhere in the repo, which made the whole branch dead and left `.recommended`
-        // with neither a remote fetch nor a local filter. That combination is what made typing
-        // on the first-run tab do nothing at all; `applySearchChange` now routes such a query to
-        // `.all`, where it is really answered.
+        // Filters by search text. Only `.installed` filters client-side; other tabs' queries are answered by HuggingFace.
         let filtersLocally = category == .installed
         if !query.isEmpty && filtersLocally {
             sourceModels = sourceModels.filter { model in
@@ -1051,14 +786,8 @@ class MLXModelStoreViewModel {
             }
         }
         
-        // 3. Sort.
-        //
-        // Every comparator below tie-breaks down to `id`. Swift's `sort` is introsort and is
-        // NOT stable, so a comparator that returns false for every pair (which "Recent" did
-        // for remote models, since none carried a date) permutes the array arbitrarily —
-        // cards visibly jumped under the cursor on each of the ~30 size-update ticks.
-        // The curated list is ordered deliberately — what this machine can run, smallest
-        // first — so a popularity sort (every entry has 0 downloads) would scramble it.
+        // Sorts. Every comparator tie-breaks on `id` because Swift's sort is not stable.
+        // The curated list keeps its deliberate order (what this machine can run, smallest first).
         if category == .recommended { return sourceModels }
 
         switch sort {
@@ -1105,13 +834,7 @@ class MLXModelStoreViewModel {
     
     // MARK: - Actions
     
-    /// ⚠️ This used to fall back to `installed.displayName.contains(model.displayName)`.
-    /// `model.displayName` is the bare name with the org stripped, so the substring test
-    /// matched any installed model that merely *contained* it — a different quantization,
-    /// a suffixed variant (`…-4bit` inside `…-4bit-DWQ`), or another org entirely. The card
-    /// then rendered a green "Installed" capsule, and since the Download affordance only
-    /// exists in the `else` branch there was no way to download that model at all.
-    /// Goes through the shared comparator now, which never uses substrings.
+    /// Whether the model is installed, using the shared repo-id comparator, which never matches by substring.
     func isInstalled(_ model: MLXDisplayModel) -> Bool {
         service.isInstalled(repoId: model.id)
     }
@@ -1122,9 +845,6 @@ class MLXModelStoreViewModel {
     
     func deleteModel(_ model: MLXDisplayModel) {
         guard let item = service.installedModel(named: model.id) else {
-            // Was a silent no-op: the strict `==` lookup here disagreed with the lenient
-            // `isInstalled` used to render the card, so a card could offer Delete on a model
-            // this lookup could not find, and nothing happened or was logged.
             logger.error("[MLXSTORE] Delete requested for '\(model.id)' but it is not in the installed list (\(self.service.installedModels.count) model(s)). CONSEQUENCE: nothing was deleted and the card still shows it as installed — the list is stale, refresh the store.")
             return
         }

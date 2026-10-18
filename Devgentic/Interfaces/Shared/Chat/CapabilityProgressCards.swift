@@ -4,30 +4,21 @@
 //  CapabilityProgressCards.swift
 //  Devgentic
 //
-//  Structured progress cards for agent capabilities:
-//    - PlanProgressCard: a Plan & Execute run as a checklist — step rows with live
-//      statuses, each expanding into its own nested timeline. The running step is
-//      auto-expanded; completed steps collapse to one line; a finished card folds
-//      to a one-line receipt.
-//    - ReflectionAttemptsCard: a Reflexion run as attempt rows with the evaluator's
-//      verdict and full critique, each expanding into its own nested timeline.
-//
-//  Both render `TimelineEvent.planExecution` / `.reflectionRun` (updated in place by
-//  CapabilityCardRouter while streaming) and reuse AgentTimelineView for the nested
-//  event lists, so tool rows / reasoning rows look identical at every nesting level.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Plan Progress Card
 
+/// Structured progress cards for agent capabilities: `PlanProgressCard` (Plan & Execute checklist) and
+/// `ReflectionAttemptsCard` (Reflexion attempts). Both render `TimelineEvent` payloads updated in place
+/// while streaming and reuse AgentTimelineView for nested events.
 struct PlanProgressCard: View {
     let data: PlanRunData
     var isStreaming: Bool = false
-    /// The chat conversation this card lives in, forwarded into each step's nested timeline so
-    /// its file rows get CF-53's destination check. A step's tool rows are still rows in a chat
-    /// message — and with Plan & Execute on, they are where most of them are. nil off the chat
-    /// path (the previews, and any future non-chat host).
+    /// The chat conversation this card lives in, forwarded into each step's nested timeline for its file
+    /// rows' destination check. nil off the chat path (previews, non-chat hosts).
     var conversationID: UUID? = nil
 
     @Environment(\.appTheme) private var theme
@@ -40,21 +31,15 @@ struct PlanProgressCard: View {
 
     private var capColor: Color { theme.capabilityColor(for: .planning) }
 
-    /// Live = the run is still producing events. A persisted card left unfinished by a
-    /// force-quit is NOT live (isStreaming false on reload) — it renders frozen, and the
-    /// InterruptedRunChip below the bubble explains why.
-    ///
-    /// ⚠️ This gates the ticking `elapsedLabel` AND the step glyph (`CapabilityStatusIcon`).
-    /// It used to gate only the label, so the comment above was aspirational: a `.running`
-    /// step still rendered an animating spinner on a dead card.
+    /// Live means the run is still producing events; a persisted card left unfinished by a force-quit is
+    /// not live and renders frozen. Gates both the ticking `elapsedLabel` and the step glyph
+    /// (`CapabilityStatusIcon`).
     private var isLive: Bool { isStreaming && data.phase != .finished }
 
     private var isCardExpanded: Bool { cardExpandedOverride ?? (data.phase != .finished) }
 
-    /// ⚠️ `.other` is deliberately NOT settled. Under the old `!= .pending && != .running` test an
-    /// unrecognised status counted as done, so a newer build's in-flight state would have shown the
-    /// progress capsule as complete while the step was still running. Under-reporting progress on a
-    /// finished plan is the safer error.
+    /// `.other` is deliberately not settled: an unrecognised status from a newer build must not count as
+    /// done. Under-reporting progress on a finished plan is the safer error.
     private var settledCount: Int {
         data.steps.filter {
             $0.status != .pending && $0.status != .running && !$0.status.isUnrecognised
@@ -115,17 +100,9 @@ struct PlanProgressCard: View {
 
     // MARK: Header
 
-    /// Everything the header ASSERTS about the run, as one string.
-    ///
-    /// [CF-50] `headerStatusText` alone was the container's label and it never mentions
-    /// failures — "4 steps · 3 done" for a plan with a failed step. The amber `WarningsPill`
-    /// beside it carries that, but it lives inside the Button's label, which
-    /// `.accessibilityLabel` replaces wholesale, and the per-step labels that carry status are
-    /// unreachable while the card is collapsed — which a FINISHED card is by default. So the
-    /// one fact a degraded plan most needs to convey reached sighted users only.
-    ///
-    /// `nonisolated static` and pure so the rule is unit-testable; the `.accessibilityLabel`
-    /// plumbing that consumes it is not.
+    /// Everything the header asserts about the run, as one string, including failures that
+    /// `headerStatusText` omits. The accessibility label replaces the button's content wholesale, so the
+    /// warnings pill and per-step labels are otherwise unreachable.
     nonisolated static func headerSummary(for data: PlanRunData, statusText: String) -> String {
         guard let suffix = degradedSuffix(for: data) else { return statusText }
         return "\(statusText) · \(suffix)"
@@ -186,9 +163,8 @@ struct PlanProgressCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // The summary rides the button label too — `.accessibilityLabel` REPLACES the button's
-        // computed label, so the status text and the WarningsPill inside it were both invisible
-        // to VoiceOver and the control announced only its own verb (CF-50).
+        // The summary rides the button label: `.accessibilityLabel` replaces the computed label, hiding status
+        // and warnings.
         .accessibilityLabel(
             "\(headerSummaryText). " + (isCardExpanded ? String(localized: "Collapse plan") : String(localized: "Expand plan"))
         )
@@ -237,19 +213,9 @@ struct PlanProgressCard: View {
         stepExpandOverrides[step.id] ?? (step.status == .running)
     }
 
-    /// [tc-6] The summary the DISCLOSURE will actually show, or nil when it would show none.
-    ///
-    /// ONE predicate, read by both the chevron (`hasDetail`) and the disclosure body, because
-    /// they used to disagree: `hasDetail` counted any non-empty summary, while the disclosure
-    /// rendered one only for `.completed`. A `.cancelled` subtask therefore grew a chevron that
-    /// expanded to nothing, and its intermediate answer — the thing a cancelled step has to
-    /// show — was reachable from nowhere; a `.failed` step's reason past two lines was likewise
-    /// readable only in the clamped collapsed row.
-    ///
-    /// Dropping the `.completed` requirement is the fix, not tightening `hasDetail`: tightening
-    /// would have closed the empty chevron and kept the loss. The `"Completed ("` guard stays —
-    /// that prefix is the capability's own synthetic "Completed (N tool calls)" string, which is
-    /// already said by the meta label and is not worth a disclosure of its own.
+    /// The summary the disclosure will actually show, or nil when it would show none.
+    /// One predicate read by both the chevron (`hasDetail`) and the body, so a chevron never expands to
+    /// nothing. The "Completed (" guard skips the capability's synthetic "Completed (N tool calls)" string.
     nonisolated static func disclosedSummary(_ step: PlanStepData) -> String? {
         guard let summary = step.summary, !summary.isEmpty, !summary.hasPrefix("Completed (") else { return nil }
         return summary
@@ -279,8 +245,8 @@ struct PlanProgressCard: View {
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        // Failure / early-stop reason at a glance — expanding shouldn't
-                        // be required to learn WHY a step went amber or red.
+                        // Failure or early-stop reason at a glance, so expanding is not required to learn why a step went
+                        // amber or red.
                         if step.status == .failed || step.status == .warning,
                            let summary = step.summary, !summary.isEmpty {
                             Text(summary)
@@ -328,12 +294,8 @@ struct PlanProgressCard: View {
                             conversationID: conversationID
                         )
                     }
-                    // The subtask's own closing summary (its intermediate answer) —
-                    // shown after the events, muted, only where it adds signal. [tc-6] Same
-                    // predicate the chevron used to decide there was something in here, so the
-                    // two can no longer disagree. For `.failed`/`.warning` this repeats the
-                    // reason the collapsed row clamps to two lines — deliberately: the clamped
-                    // copy is a glance, this one is the whole text.
+                    // The subtask's closing summary, shown after the events and muted, using the chevron's predicate.
+                    // For `.failed`/`.warning` it repeats the clamped reason in full.
                     if let summary = Self.disclosedSummary(step) {
                         Text(summary)
                             .font(.system(size: 11))
@@ -388,8 +350,8 @@ struct PlanProgressCard: View {
 struct ReflectionAttemptsCard: View {
     let data: ReflectionRunData
     var isStreaming: Bool = false
-    /// Same purpose as `PlanProgressCard.conversationID` — an attempt's nested timeline is still
-    /// inside a chat message, so its file rows need CF-53's destination check too.
+    /// Same purpose as `PlanProgressCard.conversationID`: the attempt's nested timeline sits inside a chat
+    /// message and needs the destination check.
     var conversationID: UUID? = nil
 
     @Environment(\.appTheme) private var theme
@@ -472,10 +434,8 @@ struct ReflectionAttemptsCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // Same replacement trap as the plan header (CF-50): without the status text folded in,
-        // VoiceOver heard only "Expand attempts" and never "no attempt accepted" — and the
-        // per-attempt labels that carry the verdicts are unreachable while the card is
-        // collapsed, which a finished card is by default.
+        // The status text is folded into the label, since `.accessibilityLabel` replaces the computed one
+        // and per-attempt verdicts are unreachable while the card is collapsed.
         .accessibilityLabel(
             "\(headerStatusText). " + (isCardExpanded ? String(localized: "Collapse attempts") : String(localized: "Expand attempts"))
         )
@@ -565,7 +525,7 @@ struct ReflectionAttemptsCard: View {
                         }
                     }
 
-                    // The evaluator's critique — the WHY behind a retry, full text.
+                    // The evaluator's critique, in full: the reason behind a retry.
                     if let critique = attempt.critique, !critique.isEmpty {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                             Text("critique")
@@ -670,13 +630,8 @@ private struct CapabilityStatusIcon: View {
     let status: PlanStepStatus
     var isEvaluating: Bool = false
     /// False when the card is a persisted record rather than a running one.
-    ///
-    /// A `.running` status survives a force-quit: the normal end paths repair it
-    /// (`CapabilityCardRouter.handleExecutionFinished`) and so does
-    /// `sanitizeCapabilityCardsForResume`, but the latter runs ONLY on the resume path — a run
-    /// that is merely reloaded and never resumed keeps `.running` forever. Without this flag
-    /// the glyph animated anyway, so a dead card showed a live spinner next to the
-    /// InterruptedRunChip explaining the run was cut off; the two disagreed.
+    /// A `.running` status survives a force-quit and is repaired only on the resume path, so a reloaded
+    /// card would otherwise show a live spinner.
     var isLive: Bool = true
 
     @Environment(\.appTheme) private var theme
@@ -690,9 +645,8 @@ private struct CapabilityStatusIcon: View {
                 .foregroundColor(theme.tertiaryText.opacity(0.7))
         case .running:
             if !isLive {
-                // Interrupted: the step never reported a terminal status and nothing is
-                // working on it now. A static glyph, distinct from `.cancelled`'s
-                // `slash.circle`, which means "we know it was stopped".
+                // Interrupted: the step never reported a terminal status and nothing is working on it.
+                // A static glyph, distinct from `.cancelled`'s `slash.circle`.
                 Image(systemName: "circle.dotted")
                     .font(.system(size: 12))
                     .foregroundColor(theme.tertiaryText.opacity(0.8))
@@ -878,11 +832,8 @@ struct CapabilityProgressCards_Previews: PreviewProvider {
 
 // MARK: - Localized status names (audit C2)
 
-// ⚠️ Declared HERE, not on the enums themselves. `PlanStepStatus` and `ReflectionAttemptStatus`
-// live in `ChatMessage.swift`, a Foundation-only model file, and both are `Codable` — their
-// `rawValue`s are PERSISTED in saved messages. Adding a SwiftUI dependency to that file to get
-// `LocalizedStringKey` would drag the view layer into the persistence model, so the display
-// form lives beside the view that renders it.
+// Declared here, not on the enums: they live in the Foundation-only `ChatMessage.swift` and are
+// `Codable`. A `LocalizedStringKey` there would pull the view layer into the persistence model.
 
 extension PlanStepStatus {
     var localizedTitle: LocalizedStringKey {

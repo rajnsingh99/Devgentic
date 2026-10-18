@@ -4,25 +4,7 @@
 //  SkillImportSheet.swift
 //  Devgentic
 //
-//  Adding skills to the library: drag in a folder, an archive, or a bare .md — several at once.
-//
-//  ## Read first, commit second
-//
-//  Everything dropped is INGESTED into memory and shown before a single row is written. That is not
-//  politeness: the library owns the only copy of a skill now, and an import that silently took some
-//  files and not others would be invisible until the skill failed to do what its instructions say.
-//  The user sees what will be added and what was refused, with reasons, and then decides.
-//
-//  ⚠️ Reading happens OFF the main actor. An archive runs two `unzip` subprocesses and a full tree
-//  walk; a folder can hold thousands of files. Doing that inline froze the UI for the whole import
-//  with nothing on screen to explain why. The store write afterwards is back on the main actor,
-//  where it belongs.
-//
-//  ⚠️ NO "SECURITY SCAN" ROW, deliberately, even though the reference UI has one. That scan is a
-//  server-side service on someone else's infrastructure; this app has no equivalent and nothing to
-//  put behind such a label. A row that names a check the app does not perform is worse than no row —
-//  it is the user being told they are protected. What IS shown is the list of checks that genuinely
-//  run, which is a shorter and truer claim.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -31,6 +13,9 @@ import UniformTypeIdentifiers
 
 private let logger = DGLogger(category: "SkillImportSheet")
 
+/// Adding skills to the library: drag in a folder, an archive, or a bare .md, several at once.
+/// Everything dropped is ingested and shown, with refusals and reasons, before any row is written; the user then decides.
+/// Reading runs off the main actor; the store write afterwards is back on it.
 struct SkillImportSheet: View {
 
     /// Called after skills are added, so the library re-reads.
@@ -46,10 +31,8 @@ struct SkillImportSheet: View {
     @State private var commitError: String?
 
     /// What to do with each ready skill, keyed by its name.
-    ///
-    /// ⚠️ Preselected from `SkillImportPlan`, never applied silently — a name collision changes what
-    /// the import MEANS (update an existing skill, or add a second one an agent cannot reach), and
-    /// that is the user's call.
+    /// Preselected from `SkillImportPlan` but never applied silently: a name collision changes what the import means,
+    /// and that is the user's call.
     @State private var resolutions: [String: SkillImportResolution] = [:]
 
     /// The library as `SkillImportPlan` wants it — id, name, label and version count.
@@ -59,9 +42,8 @@ struct SkillImportSheet: View {
     }
 
     // MARK: - Log text
-    //
-    // ⚠️ Rendering only. These exist so the log can name a decision in the same words the sheet
-    // uses, WITHOUT putting a logger inside `SkillImportPlan` — whose functions run in the view body.
+    // Rendering only: lets the log name a decision in the sheet's own words without a logger inside `SkillImportPlan`,
+    // whose functions run in the view body.
 
     private static func describe(_ collision: SkillImportPlan.Collision) -> String {
         switch collision {
@@ -91,9 +73,8 @@ struct SkillImportSheet: View {
         }
     }
 
-    /// ⚠️ Only an OVERRIDE is logged, never the default being re-selected. The default is already in
-    /// the QUEUED line; what is worth recording is the user DISAGREEING with it, because that is the
-    /// decision nothing else in the system can reconstruct afterwards.
+    /// Logs only an override, never the default being re-selected: the default is already in the QUEUED line, and the user
+    /// disagreeing with it is the decision nothing else can reconstruct afterwards.
     private static func logOverride(_ name: String, from current: SkillImportResolution, to chosen: SkillImportResolution) {
         guard current != chosen else { return }
         logger.notice("[SKILL_IMPORT] The user changed '\(name)' from \(describe(current)) to \(describe(chosen)). CONSEQUENCE: \(consequence(of: chosen))")
@@ -362,9 +343,7 @@ struct SkillImportSheet: View {
         }
     }
 
-    /// ⚠️ Refusals are SHOWN, not counted. "3 skipped" is a number the user cannot act on; the
-    /// folder name plus the reason is. Silently dropping them is how the old importer made a
-    /// repository look like it contained fewer skills than it did.
+    /// Refusals are shown, not counted: the folder name plus the reason is something the user can act on; a count is not.
     private var refusedList: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
@@ -408,9 +387,8 @@ struct SkillImportSheet: View {
         }
     }
 
-    /// ⚠️ Three outcomes, none of them silent. "Import as new" is offered but never preselected: it
-    /// is the one that creates a name an agent cannot fully reach, and there is no later merge that
-    /// undoes it.
+    /// Three outcomes, none silent. 'Import as new' is offered but never preselected: it creates a name an agent cannot
+    /// fully reach, and no later merge undoes it.
     @ViewBuilder
     private func resolutionPicker(for skill: IngestedSkill) -> some View {
         let current = resolution(for: skill)
@@ -465,8 +443,7 @@ struct SkillImportSheet: View {
             }
             .keyboardShortcut(.cancelAction)
 
-            // ⚠️ PRIMARY ACTION: Hidden when ready is empty (user requested).
-            // Only shown when files are actually staged and actionLabel is an active action.
+            // Primary action: hidden when `ready` is empty; shown only when files are staged and `actionLabel` is an active action.
             if !ready.isEmpty && actionLabel != "Nothing to do" {
                 TactileButton(
                     title: actionLabel,
@@ -528,9 +505,8 @@ struct SkillImportSheet: View {
                 urls.append(url)
             }
 
-            // ⚠️ A drop that yields nothing must not look like a drop that never happened. The
-            // user aimed at the target and let go; silence there reads as the sheet being broken,
-            // and it is the one failure they can act on (drag from Finder instead).
+            // A drop that yields nothing must not look like a drop that never happened; report it so the user can act on it
+            // (drag from Finder instead).
             if let report = SkillDropReport.message(resolved: urls.count, unreadable: unreadable) {
                 commitError = report
                 logger.error("[SKILL_IMPORT] DROP resolved \(urls.count) of \(providers.count) item(s); \(unreadable) could not be read as a file URL. CONSEQUENCE: only the resolved ones are scanned and the user is shown why — an item that yields no file URL is usually dragged from a browser or a non-file source rather than Finder.")
@@ -541,11 +517,9 @@ struct SkillImportSheet: View {
         }
     }
 
-    /// ⚠️ APPENDS rather than replaces, so a second drop adds to the first. Someone assembling an
-    /// import from three places should not lose the first two by dragging the third.
+    /// Appends rather than replaces, so a second drop adds to the first.
     private func read(_ urls: [URL]) {
-        // ⚠️ Returns WITHOUT clearing `commitError` — `handleDrop` may have just set it to explain
-        // why there is nothing to read, and clearing it here is what kept the failure invisible.
+        // Returns without clearing `commitError`: `handleDrop` may have just set it to explain why there is nothing to read.
         guard !urls.isEmpty else { return }
         isReading = true
         commitError = nil
@@ -573,11 +547,8 @@ struct SkillImportSheet: View {
                 for rejection in outcome.rejected {
                     logger.error("[SKILL_IMPORT] REFUSED '\(rejection.label)': \(rejection.reason) CONSEQUENCE: this one is not imported — the rest of the batch is unaffected.")
                 }
-                // ⚠️ THE COLLISION AND ITS DEFAULT ARE LOGGED HERE, NOT INSIDE `SkillImportPlan`.
-                // Those are pure functions called from `resolution(for:)` and directly from a
-                // ViewBuilder, so a `logger` inside them would fire on every SwiftUI re-render —
-                // every keystroke and hover — and bury the one line that matters. Scan completion is
-                // where the decision is made once.
+                // The collision and its default are logged here, not inside `SkillImportPlan`: those are pure functions called from the
+                // view body, so a logger there would fire on every re-render. Scan completion is where the decision is made once.
                 for skill in fresh {
                     let collision = SkillImportPlan.collision(for: skill.name, existing: librarySummary)
                     let planned = SkillImportPlan.defaultResolution(for: collision)
@@ -589,10 +560,8 @@ struct SkillImportSheet: View {
 
     // MARK: - Commit
 
-    /// ⚠️ Writes each skill INDEPENDENTLY and stops at the first failure, keeping what already
-    /// landed. An all-or-nothing rollback would be tidier to describe and worse to live with: the
-    /// common failure here is one oversized skill in a batch of twenty, and discarding nineteen
-    /// good imports to stay tidy is not a trade the user would choose.
+    /// Writes each skill independently and stops at the first failure, keeping what already landed.
+    /// No all-or-nothing rollback: one oversized skill in a batch of twenty should not discard nineteen good imports.
     private func commit() {
         var handled = 0
         logger.notice("[SKILL_IMPORT] COMMIT starting for \(ready.count) queued skill(s). CONSEQUENCE: each is written independently and the pass stops at the first failure, keeping whatever already landed.")
@@ -604,9 +573,8 @@ struct SkillImportSheet: View {
             case .createNew:
                 result = SkillStore.shared.createSkill(from: skill, origin: .imported).map { _ in () }
             case .addVersion(let skillID):
-                // ⚠️ A version is a COMPLETE snapshot, so everything the import read goes in —
-                // description, declaration and files. Carrying only the body would blank the routing
-                // key and delete every bundled file the skill previously had.
+                // A version is a complete snapshot, so everything the import read goes in (description, declaration, files); the body
+                // alone would blank the routing key and delete the skill's bundled files.
                 result = SkillStore.shared.addVersion(
                     toSkillWithID: skillID,
                     description: skill.description,
@@ -614,9 +582,8 @@ struct SkillImportSheet: View {
                     allowedTools: skill.allowedTools,
                     files: skill.files,
                     note: "Re-imported from \(skill.sourceLabel).",
-                    // ⚠️ Declares the name so the store REFUSES a rename. Two skills can share a
-                    // name, so a user could point "add version" at a skill this import is not
-                    // actually an update of; the store's own check is the backstop.
+                    // Declares the name so the store refuses a rename: two skills can share a name, so a user could point add-version at a
+                    // skill this import isn't an update of; the store's own check is the backstop.
                     declaredName: skill.name
                 ).map { _ in () }
             }

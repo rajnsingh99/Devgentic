@@ -4,8 +4,7 @@
 //  GeneralSettingsView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/05/25.
-//  Updated to Modern UI layout matching Agent/Bot configurations.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -43,12 +42,9 @@ struct GeneralSettingsView: View {
     /// The picker's tag for "no usable model".
     private static let noModelTag = ""
 
-    /// The picker shows the stored model only when it is ON DISK; otherwise "No model".
-    ///
-    /// ⚠️ The stored key defaults to "base.en" and outlives its files, so binding the picker to it
-    /// directly presented an undownloaded model as the active one. Picking an undownloaded model
-    /// asks to download it and leaves the stored choice untouched — the getter keeps showing the
-    /// current state, so there is nothing to revert on Cancel.
+    // Why: the stored key defaults to "base.en" and outlives its files; binding the picker to it shows a missing model as active.
+    /// The picker shows the stored model only when it is on disk; otherwise "No model".
+    /// Picking an undownloaded model asks to download it and leaves the stored choice untouched, so Cancel reverts nothing.
     private var modelPickerSelection: Binding<String> {
         Binding(
             get: { downloadService.isModelDownloaded(selectedModel) ? selectedModel : Self.noModelTag },
@@ -147,12 +143,8 @@ struct GeneralSettingsView: View {
                                 }
                             }
 
-                            // Shared status chip — shows Installed / Downloading /
-                            // Download state for the currently-selected model.
-                            // Deletion routes through the existing alert; the
-                            // download alert is handled via Picker onChange above.
-                            // The chip follows a running pull first — with "No model" showing,
-                            // it is the only place the download's progress appears here.
+                            // Shared status chip (Installed / Downloading / Download) for the selected model; deletion uses the existing alert.
+                            // The chip follows a running pull first: with "No model" showing it is the only place progress appears.
                             if let chipModelId = statusChipModelId {
                                 ModelDownloadStatusView(
                                     backend: .whisper,
@@ -221,9 +213,7 @@ struct GeneralSettingsView: View {
                             }
                     }
 
-                    // Progress UI intentionally omitted — `ModelDownloadStatusView`
-                    // above renders inline progress for the selected model,
-                    // and the Downloads sidebar surfaces background pulls.
+                    // No progress UI here: `ModelDownloadStatusView` above shows inline progress, and the Downloads sidebar shows pulls.
                 }
                 .alert(settingsAlertTitle, isPresented: $showWhisperAlert) {
                     if activeAlert == .delete {
@@ -351,7 +341,7 @@ struct GeneralSettingsView: View {
                     }
                 }
 
-                // 4. Observability Section (formerly Developer)
+                // Observability section.
                 SettingsCard(title: "Observability", icon: "chart.xyaxis.line", theme: theme) {
                     SettingsRow(
                         title: "Developer Mode",
@@ -471,9 +461,8 @@ struct GeneralSettingsView: View {
 
         switch activeAlert {
         case .download:
-            // Route through DownloadCoordinator so the history store gets
-            // the record + short-circuit semantics match every other entry
-            // point (hover button, sidebar re-download, etc.).
+            // Route through DownloadCoordinator so the history store gets the record and short-circuit semantics match every other
+            // entry point (hover button, sidebar re-download).
             Task { @MainActor in
                 _ = await DownloadCoordinator.startWhisperDownloadIfNeeded(modelId: modelId)
             }

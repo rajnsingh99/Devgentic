@@ -4,33 +4,15 @@
 //  DownloadRecordSD.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//
-//  SwiftData @Model for persistent download history. Replaces the session-only
-//  `DownloadEntry` struct that used to live on `DownloadManager`. Every model
-//  pull across Ollama, MLX, and Whisper now writes a record here so users can
-//  see their download history across launches, re-initiate past downloads,
-//  and surface per-model status inline in each store view.
-//
-//  Status semantics:
-//
-//    queued       — record created, service hasn't reported progress yet
-//    downloading  — actively in flight (progress 0..<1)
-//    completed    — terminal success; model is on disk as of `updatedAt`
-//    failed       — terminal failure; `errorMessage` populated
-//    cancelled    — user cancelled; `cancelReason` optionally populated
-//    interrupted  — app crashed/killed mid-download; detected on relaunch by
-//                   DownloadHistoryStore.reconcileOrphans()
+//  Created by Raj Singh.
 //
 
 import Foundation
 import SwiftUI
 import SwiftData
 
-/// Persistable subset of `DownloadStatus`. Kept separate from the session-only
-/// `DownloadStatus` enum (which carries an associated String for `.failed`) so
-/// the stored value is a flat raw-representable String. UI callers should
-/// prefer this type over the legacy one for any query / display.
+/// Persistable subset of `DownloadStatus`, stored as a flat raw-representable String.
+/// UI callers prefer this type over the session-only `DownloadStatus` for queries and display.
 enum DownloadRecordStatus: String, CaseIterable, Codable, Hashable {
     case queued
     case downloading
@@ -38,18 +20,13 @@ enum DownloadRecordStatus: String, CaseIterable, Codable, Hashable {
     case failed
     case cancelled
     case interrupted
-    /// User pressed Pause. The partial bytes are deliberately KEPT on disk — HubApi resumes
-    /// from them via a `Range` header — so this is the one non-active state that is not a
-    /// failure and must never be cleaned up automatically.
+    /// The user pressed Pause. Partial bytes stay on disk and HubApi resumes from them via a `Range`
+    /// header. The one non-active state that is not a failure; never cleaned up automatically.
     case paused
 
-    /// `true` for states that represent a completed (non-active) lifecycle.
-    /// Used to partition the Downloads sidebar into "in-progress" vs history.
-    ///
-    /// `.paused` counts as terminal here because nothing is transferring: it must not appear
-    /// in the "In Progress" section, must not hold the sleep assertion, and must not be
-    /// swept by `reconcileOrphans` (which only touches `.queued`/`.downloading`). Resumability
-    /// is a separate question — see `isResumable`.
+    /// `true` for non-active states; partitions the Downloads sidebar into in-progress and history.
+    /// `.paused` counts as terminal here: nothing is transferring. Resumability is a separate question
+    /// (`isResumable`).
     var isTerminal: Bool {
         switch self {
         case .queued, .downloading:
@@ -60,10 +37,7 @@ enum DownloadRecordStatus: String, CaseIterable, Codable, Hashable {
     }
 
     /// `true` when the download can continue from the bytes already on disk.
-    ///
-    /// swift-transformers resumes for free — `Downloader` reads `incompleteFileSize(at:)` and
-    /// sends `Range: bytes=N-` — so the only requirement is that the `.incomplete` files were
-    /// not deleted. `.cancelled` is excluded deliberately: cancelling discards the partial.
+    /// `.cancelled` is excluded because cancelling discards the partial.
     var isResumable: Bool {
         switch self {
         case .paused, .interrupted, .failed: return true
@@ -71,7 +45,7 @@ enum DownloadRecordStatus: String, CaseIterable, Codable, Hashable {
         }
     }
 
-    /// User-facing name. ⚠️ `rawValue` is persisted — never change it for display.
+    /// User-facing name. `rawValue` is persisted and must not change for display.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .queued:      return "Queued"
@@ -88,27 +62,18 @@ enum DownloadRecordStatus: String, CaseIterable, Codable, Hashable {
 @Model
 final class DownloadRecord {
 
-    /// Indexes on the three predicated columns.
-    ///
-    /// `fetchMostRecent` filters on `(backendRaw, modelIdentifier)` and `fetchActive` on
-    /// `statusRaw`; both are called from the download bridges on every reconcile tick, and
-    /// without indexes each was a full-table predicate scan.
-    ///
-    /// ⚠️ This is a schema change. Adding an index is lightweight-migration compatible (it
-    /// alters no attribute), unlike adding a non-optional property without a default — but the
-    /// app has no `VersionedSchema`/`SchemaMigrationPlan`, so any schema touch is worth
-    /// verifying against a real existing store before shipping. See the migration work tracked
-    /// separately from G15.
+    // Why: indexes live outside the SwiftData version hash; verify against a real existing store after changing
+    // them.
+    /// Indexes on the predicated columns: `fetchMostRecent` filters on `(backendRaw, modelIdentifier)`,
+    /// `fetchActive` on `statusRaw`.
     #Index<DownloadRecord>([\.backendRaw], [\.modelIdentifier], [\.statusRaw], [\.updatedAt])
 
 
     @Attribute(.unique)
     var id: UUID
 
-    /// Raw value of `ModelBackendType` ("Ollama" | "MLX" | "Whisper").
-    /// Stored as String rather than the enum directly so SwiftData's schema
-    /// migration story stays simple — if we add a fourth backend later,
-    /// rows written by the old build still decode via the tolerant accessor.
+    /// Raw value of `ModelBackendType` ("Ollama", "MLX", "Whisper").
+    /// Stored as a String so rows written by an older build still decode via the tolerant accessor.
     var backendRaw: String
 
     /// Canonical identifier the backend uses (e.g. "qwen2.5:7b",
@@ -120,12 +85,9 @@ final class DownloadRecord {
     /// doesn't surface a friendlier label.
     var displayName: String
 
+    // Why: must stay optional: a non-optional without a default makes the shared container fail to open after
+    // an update.
     /// Git commit the model was downloaded at, for MLX.
-    ///
-    /// ⚠️ OPTIONAL on purpose. An optional property (or one with a default) is
-    /// lightweight-migration safe; a non-optional with no default is the change that makes the
-    /// shared container fail to open and bricks the app after a Sparkle update. See
-    /// `SWIFTDATA_MIGRATION_PLAN.md`.
     var revisionCommitHash: String?
 
     /// Raw value of `DownloadRecordStatus`. See enum doc.
@@ -146,10 +108,8 @@ final class DownloadRecord {
     var errorMessage: String?
     var cancelReason: String?
 
-    /// Optional source reference for re-download (HF repo URL, Ollama
-    /// registry name). Not used by the backends at trigger time — they
-    /// already know how to resolve `modelIdentifier` — but useful for
-    /// future "export history" or "import shared library" flows.
+    /// Optional source reference for re-download (HF repo URL, Ollama registry name).
+    /// Not used by the backends at trigger time, which resolve `modelIdentifier` themselves.
     var sourceURL: String?
 
     /// Profile that initiated the download, if any. Lets us scope the

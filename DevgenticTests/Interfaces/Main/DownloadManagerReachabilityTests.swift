@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  DownloadManagerReachabilityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  That the Download Manager can be opened at all.
-//
-//  ⚠️⚠️ IT COULD NOT. `DownloadManagerContainerView` existed, `MainApplicationView` rendered it for
-//  `.downloadManager`, and `MainViewRouter.navigateToDownloadManager()` existed to get there — and
-//  nothing called that method, so no user action could ever set the destination. The whole screen
-//  was unreachable. `DownloadSidebarView` even declared `@Environment(MainViewRouter.self)` for the
-//  call that was never written: the dependency was injected, the navigation was not.
-//
-//  Found by a reference-count sweep, not by anyone using the app — which is the point. This is the
-//  same "correct code, no caller" shape that shipped four times in the skills feature.
+//  Created by Raj Singh.
 //
 
 import XCTest

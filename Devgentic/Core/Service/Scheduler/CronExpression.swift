@@ -4,20 +4,14 @@
 //  CronExpression.swift
 //  Devgentic
 //
-//  Lightweight 5-field cron expression parser.
-//  Format: minute hour dayOfMonth month dayOfWeek
-//  Supports: * (any), values (1,3,5), ranges (1-5), steps (*/5)
-//
-//  Semantics follow standard (Vixie) cron — Timeout inventory D-22, owner decision 2026-09-27:
-//  - Day-of-month and day-of-week are ORed when BOTH are restricted (`0 9 1 * 1` = the 1st OR any
-//    Monday); when either is `*` (or `*/n`) the other alone decides.
-//  - Local wall-clock time. A time that does not exist (the spring-forward gap) runs at the moment
-//    the clock jumps; a time that happens twice (fall-back) runs once, at its first occurrence.
-//  - An expression that can never fire (`0 9 31 2 *`) is refused at parse time.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Errors from parsing a five-field cron expression (minute hour dayOfMonth month dayOfWeek, standard Vixie semantics).
+/// Day-of-month and day-of-week are ORed when both are restricted; times use the local clock.
+/// An expression that can never fire, such as `0 9 31 2 *`, is refused at parse time (`neverFires`).
 enum CronParseError: LocalizedError {
     case invalidFormat(String)
     case invalidField(String, position: Int)
@@ -67,11 +61,8 @@ enum CronField: Equatable {
         case .step(let base, let stepValue):
             switch base {
             case .any(let minimum):
-                // ⚠️ READINESS CR-31 (2026-10-12). This was `value % stepValue == 0`, i.e. counted
-                // from 0 for EVERY field. Vixie cron counts from the field's minimum, which is 1
-                // for day-of-month and month: "quarterly" `0 0 1 */3 *` fired Mar/Jun/Sep/Dec
-                // instead of Jan/Apr/Jul/Oct, and `*/2` day-of-month fired on even days instead
-                // of 1, 3, 5…. Minute, hour and day-of-week start at 0, so they are unchanged.
+                // Steps count from the field's minimum, as Vixie cron does: 1 for day-of-month and month, 0 for minute, hour and day-of-
+                // week.
                 return value >= minimum && (value - minimum) % stepValue == 0
             case .range(let r):
                 guard r.contains(value) else { return false }
@@ -157,8 +148,7 @@ struct CronExpression {
         self.month      = try CronField.parse(String(fields[3]), min: 1, max: 12)
         self.dayOfWeek  = try CronField.parse(String(fields[4]), min: 0, max: 7) // 0 and 7 = Sunday
 
-        // ⚠️ Refused here so the editor rejects it on save; before, such a task saved fine and was
-        // silently never armed.
+        // Refused here so the editor rejects an expression that can never fire on save.
         guard canEverFire else { throw CronParseError.neverFires(expression) }
     }
 
@@ -166,12 +156,9 @@ struct CronExpression {
     /// next leap day (the longest gap between two, across a skipped century year, is eight years).
     static let searchHorizonDays = 366 * 8 + 1
 
+    // Why: walks days, not minutes: a minute walk is slow for an expression that never matches and misses a distant leap
+    // day.
     /// The first fire time strictly after the minute containing `date`.
-    ///
-    /// ⚠️ Walks DAYS, not minutes. The old walk stepped minute by minute through a single year:
-    /// 527,040 iterations on the main actor for an expression that never matched (the editor preview
-    /// re-ran it on every keystroke), and a 29 February schedule failed whenever its leap day was more
-    /// than a year away (D-22).
     func nextFireDate(after date: Date, calendar: Calendar = .current) -> Date? {
         guard let floorMinute = calendar.dateInterval(of: .minute, for: date)?.start,
               var day = calendar.dateInterval(of: .day, for: date)?.start else { return nil }
@@ -196,11 +183,9 @@ struct CronExpression {
         return nil
     }
 
-    /// Local (year, month, day, hour, minute) → an instant, with standard cron's clock-change rules.
-    ///
-    /// Foundation's default already picks the FIRST occurrence of a repeated (fall-back) time. For a
-    /// time inside the spring-forward gap it moves forward by the gap (2:30 → 3:30); cron runs such a
-    /// job at the jump instead, which `.nextTime` gives (2:30 → 3:00).
+    /// Resolves local (year, month, day, hour, minute) to an instant with standard cron's clock-change rules.
+    /// A repeated (fall-back) time uses its first occurrence; a time in the spring-forward gap runs at the jump (2:30 gives
+    /// 3:00).
     private static func resolve(year: Int, month: Int, day: Int, hour: Int, minute: Int,
                                 calendar: Calendar) -> Date? {
         let wanted = DateComponents(year: year, month: month, day: day, hour: hour, minute: minute)
@@ -260,8 +245,7 @@ struct CronExpression {
             timeStr = ""
         }
 
-        // Days. ⚠️ Day-of-month and month were ignored here, so `0 9 1 * *` read "at 9:00 AM" and
-        // `0 9 29 2 *` read the same — the description hid when the task really runs.
+        // Days: day-of-month and month are included, so `0 9 1 * *` and `0 9 29 2 *` do not read the same.
         let dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         let weekdayText: String? = switch dayOfWeek {
         case .any: nil

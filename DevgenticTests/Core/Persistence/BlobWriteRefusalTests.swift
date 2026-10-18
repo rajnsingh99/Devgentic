@@ -4,22 +4,7 @@
 //  BlobWriteRefusalTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards the two remaining blob columns where a READ failure could become a WRITE failure.
-//
-//  Both are the same defect class already fixed for `BackendProfile`: a blob that cannot be decoded
-//  yields a fallback, and the next save persists that fallback over the user's real bytes. Neither
-//  needs a schema change to trigger — the store opens perfectly and the damage happens at read time.
-//
-//    G16 — `WorkflowLayoutSD.layout` fell back to `.empty` and the setter overwrote `layoutData`,
-//          losing the user's entire workflow canvas.
-//    G14/G15 — `ChatMessageSD.timelineEventsData` decoded all-or-nothing; a failure left
-//          `timelineEvents == []`, and BOTH writers null the column whenever the timeline is empty,
-//          so the next flush erased the run's timeline permanently.
-//
-//  ⚠️ The refusal RULES differ between the three entities, deliberately. See the comments on each
-//  test — copying one to another would be wrong.
+//  Created by Raj Singh.
 //
 
 import XCTest

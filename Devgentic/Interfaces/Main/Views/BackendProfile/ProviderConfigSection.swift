@@ -4,13 +4,12 @@
 //  ProviderConfigSection.swift
 //  Devgentic
 //
-//  Unified Model-First Inference Engine configuration UI.
-//  Replaces legacy provider/key/endpoint dropdown clutter with a sleek,
-//  authoritative Selected Model Card backed by the dedicated Model Catalog.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Model-first inference-engine configuration UI: a Selected Model Card backed by the dedicated Model Catalog.
 struct ProviderConfigSection: View {
 
     // MARK: - Inputs

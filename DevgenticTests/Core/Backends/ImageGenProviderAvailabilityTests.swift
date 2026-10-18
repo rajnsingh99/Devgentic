@@ -4,11 +4,7 @@
 //  ImageGenProviderAvailabilityTests.swift
 //  DevgenticTests
 //
-//  On-device MLX image generation is compiled out unless `MLX_IMAGE_GEN` is set (the
-//  flux-2-swift-mlx package held the MLX stack back and was removed). These pin the invariant
-//  that matters whichever way the flag is set: the image-generation picker offers only providers
-//  the factory can build, and a saved profile on a provider this build lacks is explained, not
-//  hidden or crashed.
+//  Created by Raj Singh.
 //
 
 import XCTest

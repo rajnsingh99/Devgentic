@@ -4,8 +4,7 @@
 //  ReportOnlyRunTests.swift
 //  DevgenticTests
 //
-//  Tier 3 wakes the agent when a background task finishes. That run is UNATTENDED — not typed,
-//  nothing waiting on it, the user possibly in another app — so it may answer but must not act.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,13 +4,7 @@
 //  OrbApprovalGrammarWiringTests.swift
 //  DevgenticTests
 //
-//  The spoken-approval grammar, now that it is actually reachable.
-//
-//  ⚠️ WHY THIS FILE EXISTS. `parseApprovalUtterance` shipped with eight tests and ZERO production
-//  callers, so "approve one" — the natural phrasing right after hearing a tool named — was rejected
-//  as a non-confirmation while the grammar that handles it sat unreachable beside it. Wiring it in
-//  widens what a microphone can commit, so what is pinned here is that it widened along the ONE
-//  axis intended (a target for the user's own keyword) and along no other.
+//  Created by Raj Singh.
 //
 
 import XCTest

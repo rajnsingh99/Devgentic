@@ -4,26 +4,7 @@
 //  WorkflowRunTraceResidencyTests.swift
 //  DevgenticTests
 //
-//  Register `Workflow_Production_Readiness_Fresh.md` — `XUI-11`, fixed 2026-09-02: the in-memory
-//  run-history dictionary is keyed by conversation and only ever GROWS, so every workflow
-//  conversation the user visits leaves up to `maxRecordsPerConversation` fully decoded records —
-//  each node carrying up to 400 timeline events, tool rows holding whole outputs — resident until
-//  the app quits.
-//
-//  The fix drops the TRACES from the in-memory mirror and re-reads them for the one run the user
-//  opens; it does NOT evict conversations. Eviction is the dangerous shape: the load-once guard
-//  `loadedRunHistoryConversationIDs` is a monotone Set private to a different coordinator than the
-//  one that clears the dictionary, and `finalize` inserts on a miss.
-//
-//  ⚠️⚠️ THE DATA-LOSS DIRECTION IS THE ONE THAT MATTERS. Stripping the record that gets PERSISTED
-//  instead of the mirror would silently destroy every run's debugging evidence — invisibly, and
-//  worst for exactly the failed runs the traces are kept for. `testFinalizePersistsTheFullTrace…`
-//  below rides the real store round-trip for that reason and must never be weakened to a mirror
-//  -only assertion.
-//
-//  ⚠️ What is NOT covered here: the SwiftUI `.onChange` that triggers hydration and the `@State`
-//  cache it fills have no headless seam. The decision they act on — `needsTraceHydration` — is
-//  pure and truth-tabled below, and the fetch it calls is covered by the store round-trip.
+//  Created by Raj Singh.
 //
 
 import XCTest

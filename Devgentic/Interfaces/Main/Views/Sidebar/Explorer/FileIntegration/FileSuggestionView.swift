@@ -39,8 +39,7 @@ struct FileSuggestionView: View {
             if !files.isEmpty {
                 fileListView
             } else {
-                // An empty list says WHY. "Type to search files" used to stand in for all of
-                // these — including a search that simply had not run yet.
+                // An empty list says why (for example a search that has not run yet), not a generic prompt.
                 emptyStateView(text: emptyMessage)
             }
         }

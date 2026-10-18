@@ -4,23 +4,14 @@
 //  EndpointTransportSecurity.swift
 //  Devgentic
 //
-//  Created on 08/08/26.
-//
-//  Whether a profile's endpoint carries its credential in the clear.
-//
-//  ⚠️ Register A52. `ProfileValidator` Rule 5 accepted any `http` scheme, so a cloud profile could
-//  point at `http://gateway.internal/v1` and the app would send `Authorization: Bearer <key>` over
-//  unencrypted HTTP — readable by anything on the path, and logged in full by every intermediary
-//  that records request headers. Nothing warned.
-//
-//  ⚠️ It must NOT be an error. `http://localhost:11434` is how Ollama works, `http://127.0.0.1:1234/v1`
-//  is how LM Studio works, and a self-hosted gateway on a trusted LAN is a legitimate choice the user
-//  is entitled to make. Blocking here would break the app's own default local setup — this describes
-//  a risk, it does not gate an action.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Whether a profile's endpoint carries its credential in the clear (plain `http` to a non-loopback host).
+/// Describes a risk and does not gate an action: local setups such as Ollama (`http://localhost:11434`) and
+/// LM Studio are legitimate.
 enum EndpointTransportSecurity {
 
     enum Verdict: Equatable {
@@ -34,10 +25,8 @@ enum EndpointTransportSecurity {
         case trafficInClear(host: String)
     }
 
-    /// Hosts that never leave the machine, so plain HTTP to them is not a transport risk.
-    ///
-    /// ⚠️ `.local` is deliberately NOT here: mDNS names resolve to real LAN addresses and the
-    /// traffic crosses the network like any other.
+    /// Hosts that never leave the machine, so plain HTTP to them is not a transport risk. `.local` is
+    /// deliberately not here: mDNS names resolve to real LAN addresses.
     private static let loopbackHosts: Set<String> = ["localhost", "::1", "[::1]", "0.0.0.0"]
 
     static func evaluate(baseURL: String?, apiKey: String?) -> Verdict {

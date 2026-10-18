@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  AdvisoryCenterTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 12/07/26.
-//
-//  Covers the advisory banner's lifecycle contract: one advisory surfaced per
-//  conversation, dedupe-key update-in-place (never stacks), dismissal suppresses
-//  the exact situation until its inputs change, and clear() self-heals the
-//  banner when the condition resolves. Plus the PromptFitCheck estimate that
-//  gates the context-overflow advisory.
+//  Created by Raj Singh.
 //
 
 import XCTest

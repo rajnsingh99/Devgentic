@@ -4,9 +4,7 @@
 //  MCPRootsProviderTests.swift
 //  DevgenticTests
 //
-//  Roots wiring, 2026-08-02. Roots are a PERMISSION BOUNDARY handed to third-party servers,
-//  so the rules that matter most here are the negative ones: no fallback, no invented default,
-//  no slot clobbering another.
+//  Created by Raj Singh.
 //
 
 import XCTest

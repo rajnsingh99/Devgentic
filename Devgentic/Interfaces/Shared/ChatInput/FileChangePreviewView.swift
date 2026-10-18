@@ -4,16 +4,16 @@
 //  FileChangePreviewView.swift
 //  Devgentic
 //
-//  [HITL A2] Diff / preview for file-mutating tool confirmations. The highest-stakes approvals
-//  (write / delete / move / copy / create_folder) previously showed only a one-line args string;
-//  this renders what will actually change — a unified diff for write_file (vs the on-disk file),
-//  and a concise source→destination / target summary for the others.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Parsed file operation
 
+/// Diff / preview for file-mutating tool confirmations.
+/// Shows a unified diff for write_file against the on-disk file, and a source-to-destination or target
+/// summary for the others.
 enum FileChange: Equatable {
     /// `append` = write_file's append mode, where `content` is the appended FRAGMENT,
     /// not the full file — the preview must reconstruct existing + fragment or it shows
@@ -23,15 +23,9 @@ enum FileChange: Equatable {
     case move(source: String, destination: String)
     case copy(source: String, destination: String)
     case createFolder(path: String)
-    /// A search-and-replace edit — `edit_code_single` / `edit_code_batch`.
-    ///
-    /// ⚠️⚠️ ADDED 2026-09-20 because the Code interface had NO file preview at all. Every tool
-    /// this enum understood (`write_file`, `delete_file`, `move_file`, `copy_file`,
-    /// `create_folder`) is a `.library` tool, and `write_file` is `.libraryExceptCode` — hidden
-    /// from Code profiles. So a Code-mode approval banner fell back to raw JSON for every edit it
-    /// ever showed. Field-observed: a user approved an `edit_code_batch` whose `old_string` was a
-    /// whole method body, because serialized JSON does not look destructive. It deleted
-    /// `greetRaj()`, duplicated another method, and left the file uncompilable.
+    /// A search-and-replace edit: `edit_code_single` / `edit_code_batch`.
+    /// Code profiles hide the library file tools, so edits need their own preview rather than a raw JSON
+    /// banner.
     case replace(path: String, hunks: [ReplacementHunk])
 
     /// One search-and-replace pair. Kept as a type (not a tuple) so `FileChange` stays `Equatable`.
@@ -90,17 +84,11 @@ enum FileChange: Equatable {
             guard let p = value(folderKeys), !p.isEmpty else { return nil }
             return .createFolder(path: p)
 
-        // ── Code preset ────────────────────────────────────────────────────────────────────
-        // ⚠️ These four are `.codeOnly`, so they reach ONLY the Code interface — the one place
-        // that had no preview. `create_new_file` / `overwrite_file` are full-content writes and
-        // reuse `.write` unchanged; only search-and-replace needed a new shape.
+        // Code preset: these tools are `.codeOnly`; full-content writes reuse `.write`, only
+        // search-and-replace needs a new shape.
 
-        // ⚠️ `file_path` EXACTLY — not the `writeKeys` alias list. Those aliases exist because
-        // the library tools have lenient hand-written decoders; these four declare
-        // `let file_path: String` with a synthesized `Decodable`, so any other spelling fails to
-        // decode and the tool never runs. Previewing a looser key would draw a confident diff for
-        // a call that is about to error. (Caught by `CodeEditPreviewTests` — `writeKeys` contains
-        // `filepath` and `filePath` but not `file_path`, so reusing it previewed nothing at all.)
+        // Uses `file_path` exactly, not the `writeKeys` aliases: these tools decode a synthesized `Decodable`.
+        // Previewing a looser key would draw a confident diff for a call that is about to fail.
         case "create_new_file", "overwrite_file":
             guard case .string(let p)? = dict["file_path"], !p.isEmpty else { return nil }
             return .write(path: p, content: value(contentKeys) ?? "", append: false)
@@ -134,14 +122,9 @@ enum FileChange: Equatable {
 // `diffLineText`, `DiffLineRow` and `DiffLinesList` live in `CodeViewer/DiffLineView.swift`,
 // shared with the Git Changes panel.
 
-/// The path the tool will ACTUALLY act on, abbreviated with `~` for display.
-///
-/// Resolving first is load-bearing, not cosmetic. A model that emits a bare relative path
-/// (`January2026.java`) has that path anchored to HOME by `FilePathResolver`, but the raw
-/// string renders as a lone filename — so an approval banner built from it looked exactly
-/// like an edit to the file the user had attached, while the write landed in the home
-/// folder (field-observed 2026-07-25). Resolved, the same call reads `~/January2026.java`
-/// and the wrong target is obvious before the user approves it.
+/// The path the tool will actually act on, abbreviated with `~` for display.
+/// Resolved first because a bare relative path is anchored to HOME by `FilePathResolver`; the raw
+/// string would hide the real target.
 private func displayPath(_ path: String) -> String {
     (FilePathResolver.resolve(path) as NSString).abbreviatingWithTildeInPath
 }
@@ -257,9 +240,8 @@ private struct WriteFilePreview: View {
             }
             let existing = try? String(contentsOfFile: resolved, encoding: .utf8)
             let readable = !exists || existing != nil
-            // Append mode: `content` is the fragment; the post-state being approved is
-            // existing + fragment. Diffing the fragment alone rendered the entire file
-            // as deleted — the inverse of what the user was approving.
+            // Append mode: `content` is the fragment, so the approved post-state is existing plus fragment;
+            // diffing the fragment alone would show a full delete.
             let effectiveNew = (isAppend && exists) ? ((existing ?? "") + content) : content
             return (exists, readable, false, DiffUtility.generateDiff(original: existing ?? "", modified: effectiveNew))
         }.value
@@ -332,18 +314,11 @@ private struct FilePathTransition: View {
 
 // MARK: - Search-and-replace diff
 
-/// Previews `edit_code_single` / `edit_code_batch` by applying their hunks to the file ON DISK
-/// and diffing the real before/after.
-///
-/// ⚠️⚠️ Deliberately NOT a diff of the hunks in isolation. Rendering `old_string` as red and
-/// `new_string` as green would be cheaper, but it cannot answer the question that matters —
-/// *what does the file look like afterwards?* The edit that prompted this view replaced a whole
-/// method body with a DIFFERENT method: shown as two isolated blobs it reads as "some code
-/// changes"; shown against the file it reads as "`greetRaj()` disappears and a second copy of
-/// `farewell()` appears", which is refusable at a glance.
-///
-/// ⚠️ It also reports hunks whose `old_string` is ABSENT or AMBIGUOUS. Those make the tool fail
-/// or edit the wrong occurrence, and the old JSON banner gave no hint before approval.
+// Why: isolated old/new blobs cannot show what the file looks like afterwards, which is what approval
+// depends on.
+/// Previews `edit_code_single` / `edit_code_batch` by applying their hunks to the file on disk and
+/// diffing the real before/after. Also reports hunks whose `old_string` is absent or ambiguous, which
+/// make the tool fail or edit the wrong occurrence.
 private struct ReplaceFilePreview: View {
     let path: String
     let hunks: [FileChange.ReplacementHunk]
@@ -385,8 +360,7 @@ private struct ReplaceFilePreview: View {
                 }
             }
 
-            // ⚠️ Surfaced ABOVE the diff: a hunk that will not apply is the most important thing
-            // on screen, because approving it wastes a turn or edits the wrong place.
+            // Shown above the diff: a hunk that will not apply is the most important thing on screen.
             if !unmatched.isEmpty {
                 ForEach(unmatched, id: \.index) { problem in
                     Text(problem.occurrences == 0

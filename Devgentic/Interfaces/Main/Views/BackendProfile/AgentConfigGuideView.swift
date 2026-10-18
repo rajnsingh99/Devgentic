@@ -4,8 +4,7 @@
 //  AgentConfigGuideView.swift
 //  Devgentic
 //
-//  Comprehensive guide for agent configuration settings.
-//  Helps users understand capabilities, execution limits, and error recovery.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -13,6 +12,7 @@ import AppKit
 
 // MARK: - Navigation Hierarchy
 
+/// A section of the agent configuration guide covering capabilities, execution limits and error recovery.
 enum AgentGuideSection: String, CaseIterable, Identifiable {
     case all = "all"
     case howAgentsWork = "how_agents_work"
@@ -645,17 +645,6 @@ struct AgentConfigGuideView: View {
                     description: "Maximum number of subtasks the planner can generate (2-10). Higher values suit complex, multi-faceted tasks."
                 )
 
-                // ⚠️ Register A74: a "Parallel Subtasks" row sat here describing a
-                // toggle the user cannot find — the control was removed from
-                // `AgentCapabilitiesSection` and this guide was not updated with it, so
-                // the only remaining mention of the setting was an instruction to go and
-                // change something that isn't there.
-                //
-                // ⚠️ Removed rather than reworded: this list documents CONTROLS, and
-                // there is no control. The stored `parallelSubtasks` field is still read
-                // by `PlanningCapability` for profiles that persisted `true` — that is
-                // register A67 and is NOT fixed by this. If A67 restores the toggle,
-                // restore this row with it.
                 guideSettingCard(
                     title: "Tool Filtering",
                     badge: "Context Optimizer",
@@ -684,15 +673,6 @@ struct AgentConfigGuideView: View {
 
             guideTip("Enable Self-Reflection for quality-critical tasks — code generation, writing, analysis where accuracy matters more than speed.")
 
-            // ⚠️ register B15 — the "Agent Delegation" subsection was REMOVED, not
-            // reworded. It documented sub-agents "that you define" running "in
-            // parallel": there has been no UI to define them since the toggle was
-            // withdrawn, the parallel claim contradicted A66's own note that sub-agents
-            // share one model and therefore queue, and as of B15 the runtime does not
-            // inject `call_agent` at all (`AgentConnect.agentDelegationSupported`).
-            // A74 removed the sibling "Parallel Subtasks" row for the same reason: this
-            // list documents CONTROLS, and there is no control here to document.
-            // Restore this section if `agentDelegationSupported` is ever flipped back.
         }
     }
 
@@ -961,7 +941,7 @@ struct AgentConfigGuideView: View {
                     .background(capabilitiesColor.opacity(0.12))
                     .clipShape(Capsule())
 
-                // ⚠️ `iterations` stays a plain String — it is a numeral, not prose.
+                // `iterations` stays a plain String because it is a numeral, not prose.
                 Text("\(iterations) iters")
                     .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                     .foregroundColor(theme.secondaryText)
@@ -1088,8 +1068,7 @@ struct AgentConfigGuideView: View {
         )
     }
 
-    // ⚠️ Register A62. Every helper below takes a `LocalizedStringKey` so literals at call sites
-    // remain extractable keys in the String Catalog.
+    // Every helper below takes a `LocalizedStringKey` so literals at call sites stay extractable String Catalog keys.
     private func guideParagraph(_ text: LocalizedStringKey) -> some View {
         Text(text)
             .font(theme.fontCaption2)
@@ -1123,8 +1102,7 @@ struct AgentConfigGuideView: View {
         )
     }
 
-    // ⚠️ Also a `LocalizedStringKey`: its only content is "Think → Act → Observe → … → Answer",
-    // which is four translatable words, not ASCII art.
+    // Also a `LocalizedStringKey`: its content is four translatable words, not ASCII art.
     private func guideDiagram(_ text: LocalizedStringKey) -> some View {
         Text(text)
             .font(theme.fontCodeCaption)

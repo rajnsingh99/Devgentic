@@ -4,42 +4,23 @@
 //  DownloadManager.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//  Refactored 2026-04-21 — retired session-only `DownloadEntry` in favor of
-//  persistent `DownloadRecord` written to `DownloadHistoryStore`. The manager
-//  is now a thin orchestrator that bridges each backend service's in-memory
-//  download state into SwiftData-backed history. Views fetch records from
-//  `DownloadHistoryStore` directly (or via `@Query`).
-//
-//  Extended 2026-04-21 with live speed + ETA:
-//    · Each bridge feeds a per-record `SpeedSampler` with byte counts
-//    · `activeSpeeds` is an @Observable map of UUID → snapshot so views
-//      animate MB/s + "3 min left" without subscribing to the sampler
-//    · Backends differ in how they source bytes — see per-bridge notes
-//
-//  What used to live here that's now gone:
-//    · `DownloadEntry` struct → replaced by `DownloadRecord` @Model
-//    · `activeDownloads` / `completedDownloads` arrays → query the store
-//    · `clearCompleted` / `removeCompleted` → `DownloadHistoryStore.delete(...)`
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Models
 
+/// The backend a model download comes from (Ollama, MLX or Whisper). `DownloadManager` bridges each backend
+/// service's in-memory download state into the SwiftData-backed `DownloadHistoryStore`.
 enum ModelBackendType: String, Equatable, Hashable {
     case ollama  = "Ollama"
     case mlx     = "MLX"
     case whisper = "Whisper"
 
-    /// ⚠️ `rawValue` is a PERSISTENCE key (`DownloadRecord.backendRaw`, the pre-seed dictionary
-    /// key). Never change it for display purposes.
-    ///
-    /// There is deliberately NO `localizedTitle` here, unlike the other enums the C2 sweep
-    /// touched. These three are product names: a catalog entry mapping "Ollama" to "Ollama" in
-    /// every locale is noise, and worse, it invites a translator to localize a proper noun.
-    /// Display sites render `Text(verbatim: backend.rawValue)` and localize only the
-    /// *fallback* prose ("Unknown", "the backend"), which is where the real defect was.
+    /// `rawValue` is a persistence key (`DownloadRecord.backendRaw`, the pre-seed dictionary key); never change
+    /// it for display. There is no `localizedTitle`: these are product names, so display sites render
+    /// `Text(verbatim: backend.rawValue)` and localize only fallback prose.
     var icon: String {
         switch self {
         case .ollama:  return "server.rack"
@@ -57,19 +38,14 @@ enum ModelBackendType: String, Equatable, Hashable {
     }
 }
 
-/// How a download ended, as decided by a bridge's terminal branch.
-///
-/// Typed rather than a raw string so the notification policy can be unit-tested without
-/// driving a real download, and so a typo can't silently drop a case.
-/// ⚠️ `CaseIterable` so the notification-policy test covers the real set rather than a
-/// hand-written array that a new terminal state would slip past unnoticed.
+/// How a download ended, as decided by a bridge's terminal branch. Typed rather than a raw string so the
+/// notification policy is unit-testable and a typo cannot silently drop a case. `CaseIterable` so the policy
+/// test covers the real set.
 private let classifierLogger = DGLogger(category: "DownloadManager")
 
-/// How a download ENDED, as the service that ran it saw it.
-///
-/// ⚠️ Recorded by the service itself, synchronously, BEFORE it flips `isDownloading` off, so the
-/// history bridge reads the truth instead of inferring it. Inference was the CR-35 defect class:
-/// a percentage says how far a download got, never how it stopped.
+// Why: a percentage says how far a download got, never how it stopped
+/// How a download ended, as the service that ran it saw it. Recorded by the service itself, synchronously,
+/// before it flips `isDownloading` off, so the history bridge reads the truth instead of inferring it.
 enum DownloadEnding: String, Equatable, Sendable {
     case succeeded, failed, cancelled, paused
 }
@@ -123,16 +99,10 @@ final class DownloadManager {
 
     // MARK: - Live counters (read from SwiftData on demand)
 
-    /// ⚠️ Read `activeCount` / `hasActiveDownloads` from views, not this.
-    ///
-    /// `@Observable` only instruments STORED properties. This computed one touches nothing on
-    /// `self` — it calls into `DownloadHistoryStore` (a plain `@MainActor` class) which runs a
-    /// fetch and returns records without reading any observable property. Inside SwiftUI's
-    /// `withObservationTracking` nothing gets registered, so a view built on it never
-    /// invalidates: the activity-bar badge only appeared when its body happened to re-run for
-    /// an unrelated reason (a hover changing `@State`), and went stale again afterwards —
-    /// visibly disagreeing with the `@Query`-backed sidebar. It also costs a full predicated
-    /// main-thread fetch per access.
+    // Why: `@Observable` only instruments stored properties: this one reads no observable state, so a view
+    // built on it never invalidates
+    /// Computed on demand with a main-thread fetch per access; read `activeCount` / `hasActiveDownloads` from
+    /// views instead.
     var activeRecords: [DownloadRecord] {
         DownloadHistoryStore.shared.fetchActive()
     }
@@ -151,10 +121,8 @@ final class DownloadManager {
             logger.info("[DOWNLOAD] Active download count \(self.activeCount) → \(count).")
             activeCount = count
         }
-        // Single seam for the sleep assertion across all three backends: every bridge start
-        // and terminal transition already routes through here. Keyed off the aggregate count
-        // rather than per-download so a leaked key cannot pin the machine awake — when
-        // nothing is active we release everything unconditionally.
+        // Single seam for the sleep assertion across all three backends; keyed off the aggregate count so a leaked
+        // key cannot pin the machine awake.
         if count > 0 {
             DownloadPowerAssertion.shared.begin(
                 "downloads",
@@ -170,21 +138,14 @@ final class DownloadManager {
     /// "12.4 MB/s · 3 min left" line under the progress bar.
     var activeSpeeds: [UUID: DownloadSpeedSnapshot] = [:]
 
-    /// Active record IDs keyed by `"<backend>:<modelIdentifier>"`.
-    /// Published separately from `activeSpeeds` because the speed dict
-    /// doesn't populate until the sampler has enough data (up to ~1s
-    /// into a pull), whereas this dict flips the moment a bridge sees
-    /// the service transition to `isDownloading = true`. Views use this
-    /// for the "is this model actively being pulled RIGHT NOW?" check —
-    /// replaces the earlier `@Query` lookup in `ModelDownloadStatusView`
-    /// which wasn't reliable when SwiftUI recycled rows in `LazyVStack`.
+    /// Active record IDs keyed by `"<backend>:<modelIdentifier>"`. Published separately from `activeSpeeds`
+    /// because the speed dictionary only fills once the sampler has enough data, whereas this flips the moment a
+    /// bridge sees `isDownloading = true`.
     var activeRecordIDsByKey: [String: UUID] = [:]
 
     // MARK: - Per-backend active record tracking
-    //
-    // Services only know "am I currently pulling?" — they don't own a UUID
-    // per download. The bridge assigns a UUID when the service flips to
-    // `isPulling = true`, then uses it for every subsequent update.
+    // Services only know "am I currently pulling?", not a UUID per download; the bridge assigns one when the
+    // service flips to `isPulling = true` and uses it for every later update.
 
     @ObservationIgnored private var ollamaActiveID: UUID?
     @ObservationIgnored private var mlxActiveID: UUID?
@@ -195,16 +156,13 @@ final class DownloadManager {
     @ObservationIgnored private var mlxThrottler = ProgressThrottler()
     @ObservationIgnored private var whisperThrottler = ProgressThrottler()
 
-    // Speed samplers — keyed by record UUID rather than backend so that
-    // (theoretically) multi-download scenarios work out-of-the-box if we
-    // ever support them. Cleared on terminal transitions.
+    // Speed samplers keyed by record UUID rather than backend, so concurrent downloads would work; cleared on
+    // terminal transitions.
     @ObservationIgnored private var samplers: [UUID: SpeedSampler] = [:]
 
-    /// Pre-seeded total byte counts, keyed by `"<backend>:<modelIdentifier>"`.
-    /// MLX writes here from `DownloadCoordinator` (which hits the HF API
-    /// before triggering the pull) so the bridge can attach a correct size
-    /// to the fresh `DownloadRecord`. Consumed once on download-start and
-    /// evicted.
+    /// Pre-seeded total byte counts keyed by `"<backend>:<modelIdentifier>"`; MLX writes here from
+    /// `DownloadCoordinator` (which queries the HF API before the pull) so the bridge can attach a correct size.
+    /// Consumed once on download start, then evicted.
     @ObservationIgnored private var pendingTotalBytes: [String: Int64] = [:]
 
     @ObservationIgnored private var ollamaObserver: ObservationStream?
@@ -215,12 +173,10 @@ final class DownloadManager {
         bindOllama()
         bindMLX()
         bindWhisper()
-        // ⚠️ Deliberately NOT priming `activeCount` here. This singleton is constructed
-        // during launch BEFORE `DownloadHistoryStore.configureContainer` runs (that happens
-        // in an async Task in DevgenticApp), so a fetch here hits an unconfigured container,
-        // logs a hard error on every single launch, and returns 0 regardless of reality.
-        // `DevgenticApp` calls `primeActiveCount()` once the container is up and orphans
-        // have been reconciled.
+        // Why: this singleton is built before `DownloadHistoryStore.configureContainer` runs, so a fetch here hits
+        // an unconfigured container
+        // `activeCount` is not primed here; `DevgenticApp` calls `primeActiveCount()` once the container is up and
+        // orphans are reconciled.
     }
 
     /// Seeds `activeCount` after the SwiftData container is configured. Call once at launch,
@@ -231,10 +187,9 @@ final class DownloadManager {
 
     // MARK: - Pre-seed hook for coordinators
 
-    /// Called by `DownloadCoordinator` before triggering a download when
-    /// the total size is known up-front (MLX fetches from HF API). The
-    /// bridge reads this on its next `isDownloading = true` transition
-    /// and seeds the record's `fileSizeBytes`.
+    /// Called by `DownloadCoordinator` before a download when the total size is known up front (MLX fetches it
+    /// from the HF API); the bridge reads it on the next `isDownloading = true` transition and seeds the record's
+    /// `fileSizeBytes`.
     func preSeedTotalBytes(backend: ModelBackendType, modelIdentifier: String, bytes: Int64?) {
         guard let bytes = bytes, bytes > 0 else { return }
         pendingTotalBytes[Self.presseedKey(backend, modelIdentifier)] = bytes
@@ -260,17 +215,9 @@ final class DownloadManager {
 
     // MARK: - Shared progress application
 
-    /// Unified progress handler used by all three bridges. Responsible for:
-    ///   1. Feeding the sampler with the latest byte count (derived from
-    ///      `completedBytes` if provided, otherwise `fractionalProgress ×
-    ///      totalBytes`).
-    ///   2. Publishing an `activeSpeeds` snapshot when the sampler has
-    ///      enough data.
-    ///   3. Persisting the progress update (throttled) to SwiftData.
-    ///
-    /// `completedBytes` is optional because MLX's progress closure only
-    /// hands us a fraction — we reconstruct bytes from the pre-seeded
-    /// `totalBytes`. Ollama and Whisper pass real bytes directly.
+    /// Unified progress handler for all three bridges: feeds the speed sampler, publishes an `activeSpeeds`
+    /// snapshot once it has enough data, and persists (throttled) to SwiftData. `completedBytes` is optional
+    /// because MLX reports only a fraction; bytes are rebuilt from the pre-seeded `totalBytes`.
     private func applyProgress(
         recordID: UUID,
         fractionalProgress: Double,
@@ -315,16 +262,10 @@ final class DownloadManager {
 
     // MARK: - Active-record identity
 
-    /// True when `recordID`'s persisted `modelIdentifier` still matches the model the
-    /// service reports as in-flight.
-    ///
-    /// The services expose a single download slot, but `isDownloading` does not return to
-    /// false between one pull being superseded and its replacement starting — both happen
-    /// in the same MainActor turn. Without this check the bridge only saw "still
-    /// downloading", so the NEW model's progress ticks were persisted into the OLD model's
-    /// record, and when the old pull's terminal branch fired it nil'd the active ID —
-    /// leaving the new download with no record, no sidebar row and no cancel button.
-    /// A missing record counts as a mismatch so we re-open rather than write into nothing.
+    // Why: `isDownloading` stays true when one pull is superseded by another in the same MainActor turn, so
+    // progress would be persisted into the old record
+    /// True when `recordID`'s persisted `modelIdentifier` still matches the model the service reports as in
+    /// flight; a missing record counts as a mismatch so the bridge re-opens rather than write into nothing.
     private func activeRecordMatches(_ recordID: UUID, modelName: String) -> Bool {
         DownloadHistoryStore.shared.fetch(id: recordID)?.modelIdentifier == modelName
     }
@@ -342,9 +283,8 @@ final class DownloadManager {
         clearTransients(recordID: recordID, backend: backend, modelIdentifier: previous)
     }
 
-    /// Logs how a terminal transition was classified. Every one of these branches was
-    /// previously silent, so a download that ended up "failed" in history left no trace
-    /// of which signal produced that verdict.
+    /// Logs how a terminal transition was classified, so a download recorded as failed shows which signal
+    /// produced the verdict.
     private func logTerminal(
         backend: ModelBackendType,
         recordID: UUID,
@@ -359,24 +299,9 @@ final class DownloadManager {
                        classification: classification, errorMessage: errorMessage)
     }
 
-    /// Surfaces a finished download through the app's notification channel.
-    ///
-    /// Model downloads are the longest-running operation in the app — tens of minutes to hours
-    /// — and the terminal transition used to write a SwiftData row and nothing else, so a user
-    /// who switched away had to poll the sidebar to learn the model was ready.
-    ///
-    /// This is emitted from `logTerminal`, which every backend's reconcile already funnels
-    /// through, so all three are covered by one seam rather than three parallel call sites.
-    ///
-    /// Two deliberate policy choices:
-    ///
-    /// 1. **Only completion and failure notify.** `cancelled` and `paused` are user-initiated —
-    ///    the user pressed the button a moment ago and does not need telling.
-    /// 2. **Success is suppressed while the app is frontmost; failure is not.** When the app is
-    ///    in front, a successful download is already visible in the sidebar row, the activity
-    ///    badge and the store card, so a banner would only duplicate what is on screen. A
-    ///    FAILURE's only in-app surface is the MLX store's error banner, which a user sitting
-    ///    in a chat never sees — so that one is worth interrupting for wherever they are.
+    /// Surfaces a finished download through the notification channel (called from `logTerminal`, which every
+    /// backend funnels through). Only completion and failure notify (cancel and pause are user-initiated);
+    /// success is suppressed while the app is frontmost, failure is not.
     private func notifyTerminal(
         backend: ModelBackendType,
         modelIdentifier: String,
@@ -389,9 +314,8 @@ final class DownloadManager {
 
         Task.detached(priority: .utility) {
             if policy == .whenAway {
-                // Mirrors ActiveStreamManager's rule: the QuickAccess panel can be key while
-                // `NSApp.isActive` is false, so check both or a watched completion notifies
-                // on top of what the user is already looking at.
+                // Mirrors ActiveStreamManager's rule: the QuickAccess panel can be key while `NSApp.isActive` is false, so
+                // check both or a watched completion notifies on top of what the user is looking at.
                 let userIsViewing = await MainActor.run {
                     NSApp.isActive || (AppDelegate.shared?.isQuickAccessPanelKey ?? false)
                 }
@@ -413,9 +337,8 @@ final class DownloadManager {
         }
     }
 
-    /// Terminal cleanup for a record — removes sampler + speed snapshot,
-    /// clears backend-specific active ID + public active lookup.
-    /// Called from each bridge's reconcile when the service flips
+    /// Terminal cleanup for a record: removes the sampler and speed snapshot and clears the backend-specific
+    /// active ID and public active lookup; called from each bridge's reconcile when the service flips
     /// `isDownloading = false`.
     private func clearTransients(recordID: UUID, backend: ModelBackendType, modelIdentifier: String) {
         samplers.removeValue(forKey: recordID)
@@ -424,10 +347,8 @@ final class DownloadManager {
         refreshActiveCount()
     }
 
-    /// Public lookup used by `ModelDownloadStatusView` — returns the
-    /// currently-active record for a given (backend, model) pair, if any.
-    /// Observable-safe because it reads `activeRecordIDsByKey` which is
-    /// a stored @Observable property.
+    /// Public lookup used by `ModelDownloadStatusView`: the currently-active record for a (backend, model) pair,
+    /// if any. Observable-safe because it reads the stored `activeRecordIDsByKey`.
     func activeRecord(backend: ModelBackendType, modelIdentifier: String) -> DownloadRecord? {
         let key = Self.presseedKey(backend, modelIdentifier)
         guard let id = activeRecordIDsByKey[key] else { return nil }
@@ -503,17 +424,10 @@ final class DownloadManager {
             }
         } else if let id = ollamaActiveID {
             let modelIdentifier = DownloadHistoryStore.shared.fetch(id: id)?.modelIdentifier ?? ""
-            // Prefer backend-truth over percentage threshold. After a successful pull,
-            // OllamaService awaits its refresh before flipping `isPullingModel = false`, so by
-            // the time we see the transition, `localModels` is fresh.
-            //
-            // ⚠️ THIS COMMENT WAS AN ASSERTION THE CODE DID NOT HONOUR. The refresh call was
-            // `loadLocalModels()`, whose first line is `guard …, !isPullingModel, … else
-            // { return }` — and `isPullingModel` is still true at that point, so it returned
-            // having fetched nothing and `isInstalledNow` was ALWAYS false. Classification
-            // silently rested on a percentage fallback (since removed — CR-35). The pull path now calls
-            // an unguarded `performLocalModelRefresh()`; if that is ever reverted, this line goes
-            // back to being a lie and this branch goes back to being dead.
+            // Why: the refresh must be the unguarded `performLocalModelRefresh()`: `loadLocalModels()` returns early
+            // while `isPullingModel` is true
+            // Prefers backend truth over a percentage threshold: after a successful pull `OllamaService` awaits its
+            // refresh before flipping `isPullingModel = false`, so `localModels` is fresh at the transition.
             let isInstalledNow = OllamaService.shared.localModels.contains { $0.name == modelIdentifier }
             let classification = Self.classifyOllamaPull(terminalState: terminalState, errorMessage: errorMessage,
                                                          isInstalledNow: isInstalledNow)
@@ -530,14 +444,10 @@ final class DownloadManager {
         }
     }
 
-    /// How a finished Ollama pull is recorded.
-    ///
-    /// ⚠️ READINESS CR-35 (2026-10-12). A pull with no error and `progress >= 0.99` was recorded
-    /// COMPLETED — but Ollama reports progress PER LAYER (each layer runs 0 → 100 %), and a cancel
-    /// clears the error, so a pull cancelled near the end of any layer went into history as a
-    /// finished download of a model that is not there. The service's own terminal state is the
-    /// truth; without one (an older code path), only an error or the installed list decides —
-    /// never the percentage.
+    // Why: Ollama reports progress per layer and a cancel clears the error, so a pull cancelled near a layer's
+    // end would look finished
+    /// How a finished Ollama pull is recorded. The service's own terminal state decides; without one, only an
+    /// error or the installed list decides, never the percentage.
     static func classifyOllamaPull(terminalState: OllamaService.PullTerminalState?, errorMessage: String?,
                                    isInstalledNow: Bool) -> DownloadTerminalClassification {
         switch terminalState {
@@ -550,16 +460,11 @@ final class DownloadManager {
         }
     }
 
-    /// How a finished MLX or Whisper download is recorded (the CR-35 follow-up, 2026-10-13).
-    ///
-    /// ⚠️ Both bridges used `isInstalledNow || progress >= 0.99 → completed`, else cancelled. The
-    /// percentage never says how a download STOPPED: it only happened to be right because every
-    /// cancel and pause path resets progress to 0 first (and Whisper's SUCCESS path does too,
-    /// which made the fallback dead there). What it actually decided was the one case it got
-    /// wrong: a download that SUCCEEDED but that the installed scan does not list (an
-    /// unrecognised layout or publisher spelling) was recorded as CANCELLED. The service's own
-    /// `lastDownloadEnding` decides now. Without one for this model (an older path), only the
-    /// error, the pause marker and the installed list decide, never the percentage.
+    // Why: progress is no evidence of how a download stopped: a success the installed scan does not list would
+    // be recorded as cancelled
+    /// How a finished MLX or Whisper download is recorded. The service's own `lastDownloadEnding` decides;
+    /// without one for this model, only the error, the pause marker and the installed list decide, never the
+    /// percentage.
     static func classifyEndedDownload(
         backend: ModelBackendType, modelIdentifier: String, ending: RecordedDownloadEnding?,
         errorMessage: String?, isInstalledNow: Bool, isPausedNow: Bool
@@ -614,9 +519,8 @@ final class DownloadManager {
     ) {
         if isDownloading && !modelName.isEmpty {
             if let id = mlxActiveID, activeRecordMatches(id, modelName: modelName) {
-                // MLX doesn't expose completed bytes — the applyProgress
-                // helper derives bytes from progress × totalBytes using
-                // whatever we pre-seeded on the record.
+                // MLX exposes no completed bytes: `applyProgress` derives bytes from progress × totalBytes, using the size
+                // pre-seeded on the record.
                 let totalBytes = DownloadHistoryStore.shared.fetch(id: id)?.fileSizeBytes
                 applyProgress(
                     recordID: id,
@@ -651,13 +555,8 @@ final class DownloadManager {
             let record = DownloadHistoryStore.shared.fetch(id: id)
             let totalBytes = record?.fileSizeBytes
             let modelIdentifier = record?.modelIdentifier ?? ""
-            // MLXModelService calls `forceRefreshInstalledModels()`
-            // (synchronous on MainActor) before flipping isDownloading,
-            // so installedModels is fresh at this moment.
-            // Goes through the shared identity comparator: an exact `displayName ==` test
-            // never matched for publishers other than `mlx-community`. The service's recorded
-            // ending decides the classification now; the installed check only adds the
-            // "finished but not listed" warning (see `classifyEndedDownload`).
+            // `MLXModelService` refreshes the installed list before flipping `isDownloading`, so `installedModels` is
+            // fresh here; the shared identity comparator handles non-`mlx-community` publishers.
             let isInstalledNow = MLXModelService.shared.isInstalled(repoId: modelIdentifier)
             // A pause and a cancel both stop the task; only the pause keeps the bytes, so
             // recording it as cancelled would tell the user their progress was discarded.
@@ -716,12 +615,8 @@ final class DownloadManager {
     ) {
         if isDownloading && !modelName.isEmpty {
             if let id = whisperActiveID, activeRecordMatches(id, modelName: modelName) {
-                // IMPORTANT: Whisper's `completedBytes` / `totalBytes` from
-                // the service are *file counts* (WhisperKit's `Progress`
-                // unit-count is per-file, not per-byte). Passing them to
-                // the sampler rounds to ~0 B/s. Instead we ignore them and
-                // derive bytes from `fileSizeBytes × fractionalProgress`
-                // using the pre-seeded catalog size on the record.
+                // Whisper's `completedBytes` / `totalBytes` are file counts (WhisperKit progress is per file), so bytes are
+                // derived from `fileSizeBytes × fractionalProgress` using the pre-seeded catalog size.
                 let recordTotal = DownloadHistoryStore.shared.fetch(id: id)?.fileSizeBytes
                 applyProgress(
                     recordID: id,
@@ -757,9 +652,8 @@ final class DownloadManager {
             let record = DownloadHistoryStore.shared.fetch(id: id)
             let modelIdentifier = record?.modelIdentifier ?? ""
             let recordTotal = record?.fileSizeBytes
-            // WhisperModelDownloadService refreshes downloadedModelIds
-            // before resetDownloadState flips isDownloading=false, so
-            // this is the authoritative "installed?" check.
+            // `WhisperModelDownloadService` refreshes `downloadedModelIds` before `resetDownloadState` flips
+            // `isDownloading = false`, so this is the authoritative "installed?" check.
             let isInstalledNow = WhisperModelDownloadService.shared.downloadedModelIds.contains(modelIdentifier)
             let classification = Self.classifyEndedDownload(
                 backend: .whisper, modelIdentifier: modelIdentifier,

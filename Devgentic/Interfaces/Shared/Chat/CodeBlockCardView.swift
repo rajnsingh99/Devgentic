@@ -4,19 +4,17 @@
 //  CodeBlockCardView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 20/07/25.
+//  Created by Raj Singh.
 //
-//  MODERNIZED: Glassmorphic card design with language badges.
-//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
 
 import SwiftUI
 
+/// A card summarizing a code block (language badge, line count, file name) that opens it in the viewer.
 struct CodeBlockCardView: View {
     let language: String
     let lineCount: Int
     let fileName: String?
     /// The code itself, so the card can be copied without opening the viewer first.
-    /// The card previously received only its metadata, which is why it had no copy at all.
     var content: String = ""
     let action: () -> Void
 
@@ -91,11 +89,8 @@ struct CodeBlockCardView: View {
         .accessibilityLabel("\(title), \(lineCount) lines")
         .accessibilityHint("Double-tap to open in code viewer")
         .accessibilityAddTraits(.isButton)
-        // Copy without a round trip through the viewer. Deliberately NOT a button inside
-        // the card's Button — nesting them makes the inner one unreliable for mouse and
-        // VoiceOver alike. A context menu is reachable by Control-click AND VO-Shift-M,
-        // and the accessibility action puts it in the VoiceOver actions rotor; neither is
-        // hover-gated, which is what made the image toolbar unreachable earlier today.
+        // Copy lives in a context menu, not a nested button: nesting makes the inner button unreliable
+        // for mouse and VoiceOver, while a context menu is reachable by Control-click and VO-Shift-M.
         .contextMenu {
             Button(action: copyCode) {
                 Label("Copy Code", systemImage: "doc.on.doc")

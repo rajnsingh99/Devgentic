@@ -4,21 +4,14 @@
 //  WorkspaceActivity.swift
 //  Devgentic
 //
-//  "Files on disk may have changed" — posted by the run loop and the save path, observed by
-//  anything that caches disk state (today: the Git Changes panel).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
-/// A HINT, not a report: posters do not know whether anything changed, only that something which
-/// CAN change files just finished. Observers re-read; a spurious hint costs one cheap refresh.
-///
-/// ⚠️ Deliberately NOT keyed by tool name. A file-mutating-tool allowlist was wrong on day one
-/// (`write_file` had been removed) and missed the tools most likely to change the tree —
-/// `run_command` (`sed -i`, `npm install`, `git checkout`), background tasks, folder ops. Every
-/// successful tool posts; observers debounce.
-///
-/// Always posted on the MAIN actor, so SwiftUI `onReceive` observers update state on main.
+// Why: not keyed by tool name: an allowlist misses `run_command` and folder ops, so every successful tool posts
+/// A hint that something which can change files just finished; observers re-read and debounce.
+/// Always posted on the main actor so SwiftUI `onReceive` observers update state on main.
 enum WorkspaceActivity {
     static let didChange = Notification.Name("devgentic.workspaceActivity.didChange")
     /// `String` — why, for the observer's log.

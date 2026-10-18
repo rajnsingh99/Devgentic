@@ -4,12 +4,7 @@
 //  ProcessRunnerTests.swift
 //  DevgenticTests
 //
-//  The two-pipe deadlock is the one the obvious fix misses. Draining stdout to EOF while
-//  stderr fills just relocates the hang, so "swap the two lines" — correct for a single-pipe
-//  site — leaves these broken while looking fixed.
-//
-//  Every size below is chosen to exceed the ~64 KB pipe buffer. Before `ProcessRunner`, the
-//  both-streams-large test would never return.
+//  Created by Raj Singh.
 //
 
 import XCTest

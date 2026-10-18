@@ -4,21 +4,7 @@
 //  ProfileBlobHardeningTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards the data-loss class that schema migration cannot see.
-//
-//  Everything rich in this app is persisted as an opaque JSON blob inside a `Data` column.
-//  SwiftData's migration never looks inside one, so a change to a blob type's SHAPE is invisible
-//  to every schema check: the store opens perfectly and the damage happens at read time — and
-//  then at the next write, when the degraded value is persisted over the original.
-//
-//  These tests fail on the two specific mechanisms audited as critical:
-//    G12 — an undecodable blob was replaced by a blank bot and then saved over the original.
-//    G13 — Swift's SYNTHESIZED init(from:) throws keyNotFound for a non-optional property EVEN
-//          WHEN IT HAS A DEFAULT, so adding one routine field broke every persisted profile.
-//
-//  See SWIFTDATA_GAP_REGISTER.md and SWIFTDATA_MIGRATION_PLAN.md.
+//  Created by Raj Singh.
 //
 
 import XCTest

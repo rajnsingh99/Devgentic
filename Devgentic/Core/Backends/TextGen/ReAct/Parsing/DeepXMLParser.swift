@@ -4,14 +4,7 @@
 //  DeepXMLParser.swift
 //  Devgentic
 //
-//  Fallback parser for the Qwen-Coder deep XML format.
-//  Expected format:
-//    <function=tool_name>
-//      <parameter=key1>value1</parameter>
-//      <parameter=key2>value2</parameter>
-//    </function>
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

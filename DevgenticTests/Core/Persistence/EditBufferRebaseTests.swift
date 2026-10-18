@@ -4,14 +4,7 @@
 //  EditBufferRebaseTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Regression tests for the edit-buffer bypass cluster (register A1–A6).
-//
-//  ⚠️ The shared root of all six: several surfaces persist ONE facet of a profile while a detail
-//  editor is open on it, and none of them re-baselined the buffer. The symptoms looked unrelated —
-//  a Revert that restores the wrong thing, a just-saved workflow that stays dirty, a chat chip that
-//  reverts editor work — but they are one missing operation, so they are pinned in one file.
+//  Created by Raj Singh.
 //
 
 import XCTest

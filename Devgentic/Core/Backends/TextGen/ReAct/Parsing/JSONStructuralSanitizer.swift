@@ -4,51 +4,22 @@
 //  JSONStructuralSanitizer.swift
 //  Devgentic
 //
-//  Repairs the structural defects local models put in their JSON — trailing commas, unquoted
-//  keys, Python literals — WITHOUT touching the data inside string values.
-//
-//  That distinction is the whole point of this file. Every parser used to run these regexes
-//  over the entire payload, which cannot tell a JSON token from a byte of a source file the
-//  model is trying to write. The `arguments.content` of a `write_file` call is just a string
-//  value in that payload, so:
-//
-//    • `\bNaN\b → null`  turned Java's `Double.NaN` into `Double.null`
-//    • `\bNULL\b → null` turned C's `if (p == NULL)` into `if (p == null)`
-//    • `,\s*([}\]])`     deleted the legitimate trailing comma from an array initializer
-//    • the unquoted-key regex rewrote a bare `default:` line into `"default":`
-//
-//  All of it silent: the payload stayed valid JSON, nothing errored, and the corrupted bytes
-//  went to disk and then back into the model's next prompt. Same class as the
-//  `normalizePathArguments` bug (see `Docs/` and the path-normalization notes): a transform
-//  applied to a payload it cannot distinguish structure from content in.
-//
-//  The fix is to walk the string once, tracking quote state, and apply the repairs ONLY to
-//  the spans between string values.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "JSONStructuralSanitizer")
 
+/// Repairs structural defects in model-emitted JSON (trailing commas, unquoted keys, Python literals) without
+/// touching the data inside string values, by walking the string once and tracking quote state.
 enum JSONStructuralSanitizer {
 
     // MARK: - The walker
 
-    /// Applies `transform` to each maximal run of `json` that lies OUTSIDE a double-quoted
-    /// string, copying every string value through byte-for-byte.
-    ///
-    /// Equivalent to the old whole-payload regexes for well-formed JSON — the lookbehind
-    /// characters the key regex needs (`{`, `[`, `,`, newline) are all structural, so they
-    /// always land in the same span as the token that follows them.
-    ///
-    /// Escape-aware, so a `\"` inside a string does not end it. Raw (unescaped) newlines
-    /// inside a string are fine here: only `"` opens or closes a span, which is why this can
-    /// run BEFORE the pass that escapes them.
-    ///
-    /// FAIL-SAFE: if the payload has an unbalanced quote — a model emitting
-    /// `"content": "he said "hi""` — the walker ends inside a string and the trailing span is
-    /// left unrepaired. That degrades to "we didn't fix your JSON", never to "we rewrote your
-    /// file". The old behaviour on the same input was to corrupt it.
+    /// Applies `transform` to each maximal run of `json` outside a double-quoted string, copying string values through.
+    /// Escape-aware, and raw newlines inside a string are fine: only an unescaped quote opens or closes a span.
+    /// An unbalanced quote leaves the trailing span unrepaired rather than rewriting the payload.
     static func rewritingOutsideStrings(_ json: String, _ transform: (String) -> String) -> String {
         var out = ""
         out.reserveCapacity(json.count + 16)
@@ -92,12 +63,8 @@ enum JSONStructuralSanitizer {
 
     // MARK: - Repairs
 
-    /// Trailing commas, Python literals, and (optionally) unquoted keys — applied to structure
-    /// only, in one pass.
-    ///
-    /// `quotingUnquotedKeys` is opt-in because only `HeuristicCognitiveParser` ever did it;
-    /// the dialect parsers have always been trailing-comma + literals, and widening them here
-    /// would be a behaviour change smuggled in under a bug fix.
+    /// Repairs trailing commas, Python literals and (optionally) unquoted keys, applied to structure only, in one pass.
+    /// `quotingUnquotedKeys` is opt-in because only `HeuristicCognitiveParser` quotes unquoted keys.
     static func repairingStructure(_ json: String, quotingUnquotedKeys: Bool = false) -> String {
         let repaired = rewritingOutsideStrings(keepingInvalidEscapesLiteral(escapingRawControlCharacters(json))) { span in
             guard !span.isEmpty else { return span }
@@ -116,13 +83,9 @@ enum JSONStructuralSanitizer {
         return repaired
     }
 
-    /// Escapes RAW control characters (a literal newline, tab, carriage return…) inside string values.
-    ///
-    /// ⚠️ CR-19 (2026-10-10): a model writing a multi-line `final_answer` in a ReAct `Action Input`
-    /// puts real line breaks inside the string — invalid JSON, so the call decoded to `[:]` and failed
-    /// as "missing answer". Like `keepingInvalidEscapesLiteral`, this never changes a byte the model
-    /// meant: a valid document has no raw control characters inside strings, so it is returned
-    /// unchanged; an invalid one did not decode at all before.
+    /// Escapes raw control characters (a literal newline, tab, carriage return...) inside string values.
+    /// Never changes a byte the model meant: a valid document has none, so it is returned unchanged.
+    /// Lets a multi-line `final_answer` in a ReAct `Action Input` decode.
     static func escapingRawControlCharacters(_ json: String) -> String {
         var out = ""
         out.reserveCapacity(json.count + 8)
@@ -169,22 +132,11 @@ enum JSONStructuralSanitizer {
         return try? JSONDecoder().decode([String: JSONValue].self, from: data)
     }
 
-    /// Doubles the backslash of every escape JSON does not define, so `\'` decodes as the two
-    /// characters the model wrote instead of failing the whole call.
-    ///
-    /// The one repair here that reaches INTO string values, and it is safe for the same reason
-    /// the walker is: it never changes a byte the model meant. A valid document has no invalid
-    /// escapes, so it is returned unchanged; an invalid one did not decode at all before. Keeping
-    /// the backslash, rather than dropping it, is deliberate: `\'` is an apostrophe in prose
-    /// but a real backslash in `'\''` (shell) or `print('don\'t')` (Python source), and a call
-    /// that writes a file must not lose one silently. Prose pays with a visible backslash.
-    ///
-    /// On the 2026-10-06 device run Qwen2.5-3B answered T3 correctly as
-    /// `{"answer": "…Devgentic\'s local models.\n\nCodename: BLUEFIN-42"}`; the `\'` failed the
-    /// decode, the two retries repeated it, and the run ended on a wrong answer.
-    ///
-    /// `\u` counts as valid only with four hex digits after it: `"C:\users"` is a Windows path,
-    /// not a broken escape.
+    // Why: keep the backslash rather than dropping it: `\'` is a real backslash in shell or Python source, and a file
+    // write must not lose one silently (prose pays with a visible backslash).
+    /// Doubles the backslash of every escape JSON does not define, so `\'` decodes as the two characters the model
+    /// wrote instead of failing the call. `\u` is valid only with four hex digits after it (`C:\users` is a path).
+    /// A valid document is returned unchanged.
     static func keepingInvalidEscapesLiteral(_ json: String) -> String {
         let chars = Array(json)
         var out = ""

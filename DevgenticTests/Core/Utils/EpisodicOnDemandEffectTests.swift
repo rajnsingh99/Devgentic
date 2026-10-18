@@ -4,14 +4,7 @@
 //  EpisodicOnDemandEffectTests.swift
 //  DevgenticTests
 //
-//  Phase 3 of the episodic `<effect>` track: the pointer strategy had no route to effect
-//  information AT ALL. Its skeleton omitted `<effect>` (by design) and
-//  `ConversationHistoryTool` — the on-demand half the design promises — returned only tool
-//  name, params, status and error. So `.pointer`, which Code mode hardcodes, could not
-//  answer "undo that" by any path.
-//
-//  Also covers the append-without-a-snapshot asymmetry: `resolve` returns nil there, right
-//  for a timeline chip and wrong for memory, where silence reads as "nothing happened".
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,15 +4,7 @@
 //  ClassificationTokenMapper.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/04/26.
-//
-//  Maps human-readable classification labels to opaque 4-char tokens
-//  for AI Classifier prompts. Opaque tokens prevent collision with
-//  upstream content and simplify response parsing — even if the model
-//  wraps the token in a sentence, extraction is trivial.
-//
-//  Tokens are generated fresh per invocation (never cached or persisted)
-//  so they can't leak into training data or cached context.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -27,18 +19,10 @@ struct ClassificationTokenMapper: Sendable {
     /// Maps original label → opaque token.
     let labelToToken: [String: String]
 
-    /// The token the prompt advertises for "none of these fit" — a dedicated sentinel that maps to
-    /// NO label. Answering it means "no category matched", which the Router's decision policy then
-    /// handles like any other undecided input.
-    ///
-    /// ⚠️ WF-OB1: this used to be an arbitrary entry of an unordered Dictionary when no catch-all
-    /// was configured — a REAL branch nobody chose, and which one could differ between app launches
-    /// (Swift seeds Dictionary hashing per process). The escape hatch is KEPT rather than removed:
-    /// dropping the "if unsure" line would leave a genuinely-unsure model no way to say so, and it
-    /// would simply guess a real token.
-    ///
-    /// ⚠️ Generated with `excluding:` the label tokens, so it can never collide with a real label's
-    /// token.
+    // Why: keep the escape hatch: without an "if unsure" line a genuinely unsure model would guess a real token.
+    /// The token the prompt advertises for "none of these fit": a dedicated sentinel that maps to no label.
+    /// Answering it means no category matched, which the Router's decision policy handles like any undecided input.
+    /// Generated with `excluding:` the label tokens, so it never collides with a real label's token.
     let fallbackToken: String
 
     // MARK: - Initialization
@@ -64,31 +48,18 @@ struct ClassificationTokenMapper: Sendable {
     }
 
     /// True when `response` carries the no-match sentinel and no real label token.
-    ///
-    /// Used for REPORTING only — `parseResponse` already returns nil for the sentinel, because the
-    /// sentinel is deliberately absent from `tokenToLabel`. This exists so the log and the node's
-    /// failure reason can say "the classifier reported that nothing matched" rather than the much
-    /// weaker "the reply contained no recognisable token", which is also what an unparseable answer
-    /// produces. Those are different situations for the user: one means the rules do not cover the
-    /// input, the other means the model misbehaved.
+    /// For reporting only (`parseResponse` already returns nil for the sentinel): lets the log and the node's failure reason
+    /// say "nothing matched" rather than the weaker "no recognisable token", which an unparseable answer also produces.
     func isExplicitNoMatch(_ response: String) -> Bool {
         guard parseResponse(response) == nil else { return false }
-        // [EIO-10] The SAME boundary test `parse` uses. This sibling was left on bare containment in
-        // the first pass, so the two sentinel checks could disagree about the same reply — one seeing
-        // a sentinel embedded in a word that the other refused.
+        // The same boundary test `parse` uses, so the two sentinel checks cannot disagree about a sentinel embedded in a word.
         return Self.firstStandaloneOccurrence(of: fallbackToken, in: response.uppercased()) != nil
     }
 
     // MARK: - Prompt Building
 
-    /// Builds the XML label block for the classification prompt.
-    /// Each label is wrapped with its opaque token ID.
-    ///
-    /// Example output:
-    /// ```
-    /// <label id="XK7M">Essay</label>
-    /// <label id="QP3N">Code</label>
-    /// ```
+    /// Builds the XML label block for the classification prompt, each label wrapped with its opaque token ID,
+    /// e.g. `<label id="XK7M">Essay</label>`.
     var xmlLabelBlock: String {
         labelToToken
             .sorted(by: { $0.key < $1.key }) // Deterministic order
@@ -103,37 +74,22 @@ struct ClassificationTokenMapper: Sendable {
 
     // MARK: - Response Parsing
 
-    /// Extracts a label from the model's response by scanning for any known token.
-    /// Returns the matched label, or `nil` if no token was found.
-    ///
-    /// Handles common model behaviors:
-    /// - Clean response: "XK7M" → "Essay"
-    /// - Wrapped response: "I think XK7M fits best" → "Essay"
-    /// - Lowercased response: "xk7m" → "Essay" (case-insensitive scan)
+    /// Extracts a label from the model's response by scanning for any known token; returns nil if none was found.
+    /// Tolerates wrapped ("I think XK7M fits best") and lowercased ("xk7m") replies.
     func parseResponse(_ response: String) -> String? {
-        // ⚠️ Retained as a thin adapter over `parse(_:)` so the ambiguity information cannot be
-        // discarded by accident. Returns a label ONLY for an unambiguous single hit — a reply
-        // naming two labels is `.ambiguous`, and collapsing that to one of them here is exactly
-        // the WF-OB2 defect this rewrite removed.
+        // Thin adapter over `parse(_:)` that returns a label only for an unambiguous single hit;
+        // a reply naming two labels is `.ambiguous`.
         if case .label(let l) = parse(response) { return l }
         return nil
     }
 
+    // Why: a reply naming two labels is ambiguous; resolving it by Dictionary order made routing differ across launches.
     /// The total classification of a model reply.
-    ///
-    /// ⚠️ Replaces the old "scan until the first token matches" loop, which iterated an unordered
-    /// `Dictionary` — so a reply naming TWO labels resolved to whichever key Swift happened to
-    /// yield first, and, because Swift seeds hashing per process, the SAME input could take a
-    /// different branch after an app restart with the run reporting success either way (WF-OB2).
-    /// The failure was biased toward wrong: models phrase conclusions as "not X, it's Y", so the
-    /// rejected label often appeared first in the text.
     enum ParseResult: Equatable, Sendable {
         /// Exactly one distinct label was named.
         case label(String)
-        /// Two or more distinct labels were named, in FIRST-APPEARANCE order in the reply.
-        /// ⚠️ Reply order, not rule order: the model was instructed to emit ONE token, so what it
-        /// emitted first is its answer and the rest is hedging. Deterministic either way — the
-        /// point is that it comes from character positions, never Dictionary iteration.
+        /// Two or more distinct labels were named, in first-appearance order in the reply.
+        /// Reply order, not rule order: the model was told to emit one token, so what it emitted first is its answer.
         case ambiguous(candidates: [String])
         /// The model answered with the no-match sentinel and no real token: a verdict about the
         /// RULES ("none of these fit"). Remedy: add or widen a rule.
@@ -146,16 +102,12 @@ struct ClassificationTokenMapper: Sendable {
     func parse(_ response: String) -> ParseResult {
         let uppercased = response.uppercased()
 
-        // Record each real token's FIRST occurrence, then order by position. Deduped BY LABEL,
-        // keeping the earliest: two rules may legitimately share a label (they share one output
-        // port), and without this such a pair would manufacture a phantom self-ambiguity.
+        // Record each real token's first occurrence, then order by position. Deduped by label, keeping the earliest:
+        // two rules may share a label (one output port), and this stops such a pair producing a phantom ambiguity.
         var earliestByLabel: [String: String.Index] = [:]
         for (token, label) in tokenToLabel {
-            // [EIO-10] STANDALONE occurrence, not bare containment. A 4-character token can appear
-            // INSIDE a longer alphanumeric run in ordinary prose — the reply "MENTION the refund"
-            // contains the token "MENT" — so a plain `range(of:)` let the model's own wording
-            // manufacture a routing decision it never made, or a second candidate that turned a
-            // clean answer into a phantom `.ambiguous`.
+            // Standalone occurrence, not bare containment: a 4-character token can sit inside a longer word ("MENTION"
+            // contains "MENT"), which would manufacture a routing decision or a phantom `.ambiguous`.
             guard let idx = Self.firstStandaloneOccurrence(of: token, in: uppercased) else { continue }
             if let existing = earliestByLabel[label], existing <= idx { continue }
             earliestByLabel[label] = idx
@@ -168,25 +120,17 @@ struct ClassificationTokenMapper: Sendable {
         if ordered.count == 1 { return .label(ordered[0]) }
         if ordered.count > 1 { return .ambiguous(candidates: ordered) }
 
-        // ⚠️ The sentinel is consulted ONLY when no real token was found. A reply carrying a real
-        // token AND the sentinel routes on the real token — today's semantics, preserved exactly.
-        // The sentinel gets the same boundary treatment, for the same reason.
+        // The sentinel is consulted only when no real token was found; a reply with a real token and the sentinel
+        // routes on the real token. The sentinel gets the same boundary treatment.
         if Self.firstStandaloneOccurrence(of: fallbackToken, in: uppercased) != nil {
             return .explicitNoMatch
         }
         return .unreadable
     }
 
-    /// The first occurrence of `token` in `haystack` that is NOT embedded in a longer alphanumeric
-    /// run (register EIO-10).
-    ///
-    /// ⚠️ The boundary predicate is ASCII alphanumeric — wider than `tokenCharacters` (which omits
-    /// I, O, 0 and 1, so a membership test would still accept "MENT" inside "MENTION") but NARROWER
-    /// than `Character.isLetter`, which is true for every Unicode letter and would break CJK replies
-    /// that place a token directly against a character with no space. Punctuation, whitespace,
-    /// non-ASCII letters and the string ends all count as boundaries.
-    ///
-    /// `nonisolated static` and pure so the rule is truth-tableable on its own (WF-UI5).
+    // Why: boundary is ASCII alphanumeric, not `isLetter`: Unicode letters would break CJK replies with no space around a token.
+    /// The first occurrence of `token` in `haystack` that is not embedded in a longer alphanumeric run.
+    /// Punctuation, whitespace, non-ASCII letters and the string ends all count as boundaries.
     nonisolated static func firstStandaloneOccurrence(
         of token: String,
         in haystack: String
@@ -209,7 +153,7 @@ struct ClassificationTokenMapper: Sendable {
 
     /// Character set for token generation: uppercase letters + digits.
     private static let tokenCharacters = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-    // Note: Excluded I/O/0/1 to avoid visual ambiguity in logs
+    // Excludes I/O/0/1 to avoid visual ambiguity in logs.
 
     /// Generates a unique 4-character token not in the exclusion set.
     private static func generateUniqueToken(excluding used: Set<String>) -> String {
@@ -223,14 +167,7 @@ struct ClassificationTokenMapper: Sendable {
 }
 
 private extension Character {
-    /// Boundary test for `ClassificationTokenMapper.firstStandaloneOccurrence` (register EIO-10).
-    ///
-    /// ⚠️ ASCII ONLY, deliberately. `Character.isLetter` is true for EVERY Unicode letter — CJK,
-    /// Kana, Hangul, Thai, Devanagari — but a token is drawn from an ASCII alphabet
-    /// (`tokenCharacters`), so a token can never be part of a CJK "word". Using the Unicode-wide
-    /// test made a Japanese or Chinese reply that placed the token directly against a CJK character
-    /// (no space, which is normal in those scripts) fail to match, silently turning a decided
-    /// classification into `.unreadable`. The boundary that matters is "could this be the same TOKEN",
-    /// and only ASCII alphanumerics can be.
+    // Why: tokens come from an ASCII alphabet, so a Unicode-wide letter test would reject tokens placed against CJK text.
+    /// Boundary test for `ClassificationTokenMapper.firstStandaloneOccurrence`: true for ASCII letters and digits only.
     var isASCIITokenCharacter: Bool { isASCII && (isLetter || isNumber) }
 }

@@ -4,18 +4,7 @@
 //  MCPObservabilityTests.swift
 //  DevgenticTests
 //
-//  Registers KC-31, KC-52, KC-64, KC-49, KC-50.
-//
-//  - KC-31: `MCPRuntimeSecrets.materialize` dropped an unreadable env value or auth header with
-//    NO log — a server launched with no credential and the diagnostic trail said nothing. The
-//    fix reads three-state and logs every refusal through a sink seam.
-//  - KC-52: `MCPSecretStore.delete` logged nothing on failure while five of its six call sites
-//    discarded the Bool — a refused wipe was invisible everywhere.
-//  - KC-64: the RFC 7592 registration access token was persisted and never read; deleting a
-//    server left the dynamic client registration alive at the provider forever.
-//  - KC-49 / KC-50: the HuggingFace entry set its shape warning and wiped the draft BEFORE the
-//    save result was known — a failed save showed "It has been saved anyway" with nothing left
-//    to retry. The ordering is pinned by source scan (the logic is private SwiftUI state).
+//  Created by Raj Singh.
 //
 
 import XCTest

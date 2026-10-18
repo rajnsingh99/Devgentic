@@ -4,15 +4,13 @@
 //  ChatActionsSuppressedKey.swift
 //  Devgentic
 //
-//  [QA revival P1c] Environment flag: when true, in-bubble actions that route through the
-//  MAIN window's MessagingCoordinator (Redo/regenerate, Resume interrupted run) are hidden.
-//  The QuickAccess panel sets this because those actions guard on membership in the main
-//  window's currentChatMessages and would benignly no-op on a panel-only message — showing a
-//  dead button. Defaults to false, so the main window is unaffected.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Environment flag that hides in-bubble actions routed through the main window's MessagingCoordinator (Redo, Resume).
+/// The QuickAccess panel sets it; defaults to false.
 private struct ChatActionsSuppressedKey: EnvironmentKey {
     static let defaultValue: Bool = false
 }

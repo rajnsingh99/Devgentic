@@ -4,8 +4,7 @@
 //  MCPIconLoader.swift
 //  Devgentic
 //
-//  Created on 27/02/26.
-//  MCP v0.11.0: Icon loading service with caching and SwiftUI view component.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -75,17 +74,8 @@ final class MCPIconLoader {
     private static let maxIconBytes = 2 * 1024 * 1024
 
     /// Fetches a server-supplied icon URL.
-    ///
-    /// This is an SSRF sink: the URL comes from a third-party MCP server and the request
-    /// is issued by the user's machine, with the user's network position, merely because
-    /// the Tool Library rendered a row. Before 2026-08-01 it was an unguarded
-    /// `URLSession.shared.data(from:)`, which would happily fetch `file:///etc/passwd`,
-    /// probe `http://localhost:*` or `http://169.254.169.254/…`, follow redirects to any
-    /// of those, and buffer a response of any size.
-    ///
-    /// The response never returns to the server, so this is blind SSRF — but a blind
-    /// probe still reaches internal services and still leaks the user's IP to whoever the
-    /// server names. Constrain the request instead of trusting the URL.
+    /// The URL comes from a third-party MCP server and the request leaves the user's machine, so it is constrained
+    /// (permitted-URL check, bounded response) rather than trusted.
     private func downloadImage(from url: URL) async -> NSImage? {
         guard Self.isPermittedIconURL(url) else {
             logger.warning("""
@@ -133,20 +123,9 @@ final class MCPIconLoader {
         return URLSession(configuration: configuration, delegate: IconRedirectBlocker(), delegateQueue: nil)
     }()
 
-    /// HTTPS to a public host, and nothing else.
-    ///
-    /// Loopback is deliberately NOT exempted here, unlike in the OAuth code (RFC 8252 needs
-    /// it there). An icon is decoration: refusing one costs an SF Symbol fallback, whereas
-    /// allowing loopback would let a remote MCP server use icon URLs to probe services on
-    /// the user's own machine and infer what is running. A locally-run MCP server just
-    /// shows the fallback glyph.
-    ///
-    /// Hostnames that RESOLVE into private space are not caught — that needs
-    /// resolution-time checking, which URLSession does not expose. This blocks the
-    /// direct-literal case, which is what a hostile icon URL actually uses.
-    ///
-    /// `nonisolated`: a pure predicate over a URL with no actor state, so it stays callable
-    /// from any context (and directly unit-testable).
+    /// HTTPS to a public host, and nothing else; loopback is not exempted, so icon URLs cannot probe local services.
+    /// Hostnames that resolve into private space are not caught; only direct literals are blocked.
+    /// `nonisolated`: a pure predicate with no actor state.
     nonisolated static func isPermittedIconURL(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else {
             return false

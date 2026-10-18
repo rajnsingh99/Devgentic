@@ -4,11 +4,7 @@
 //  LLMRetryStrategyTests.swift
 //  DevgenticTests
 //
-//  Unit tests for LLMRetryStrategy under the Phase-A resilience contract
-//  (audit #5): parse-failure counting, bounded transient retries with backoff,
-//  bounded 429 throttles, typed fatal verdicts for deterministic 4xx errors
-//  (auth, model-not-found, context overflow), provider-class connection-refused
-//  handling, and model-unloaded detection.
+//  Created by Raj Singh.
 //
 
 import XCTest

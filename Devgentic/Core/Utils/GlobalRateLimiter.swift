@@ -4,16 +4,14 @@
 //  GlobalRateLimiter.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
 /// Identifies the provider type for selecting default bucket parameters.
-/// No longer used as the bucket key — buckets are keyed on a derived string
-/// from (provider + apiKey/baseURL) so profiles sharing the same API key
-/// share the same server-side quota boundary.
+/// Buckets are keyed on a string derived from provider plus apiKey/baseURL, not on the category.
 enum RateLimitCategory: String, Codable, Sendable {
     case local
     case openAI
@@ -57,14 +55,9 @@ enum RateLimitCategory: String, Codable, Sendable {
 
 extension RateLimitCategory {
 
-    /// Derives a bucket key from a provider config.
-    /// Profiles sharing the same API key (or same local endpoint) share a bucket.
-    ///
-    /// Key composition:
-    /// - Cloud providers: `"anthropic:<apiKey-hash>"` — same key = same server quota
-    /// - Ollama: `"local:<baseURL-hash>"` — same endpoint = same server
-    /// - MLX: `"local:mlx"` — single GPU, always shared
-    /// - OpenRouter `:free` models: `"openRouterFree:<apiKey-hash>"` — metered apart from paid ones
+    /// Derives a bucket key from a provider config; profiles sharing an API key or local endpoint share a
+    /// bucket. Cloud: `anthropic:<apiKey-hash>`; Ollama: `local:<baseURL-hash>`; MLX: `local:mlx`.
+    /// OpenRouter `:free` models use `openRouterFree:<apiKey-hash>`, metered apart from paid ones.
     static func deriveBucketKey(provider: ApiProvider, apiKey: String?, baseURL: String?, modelName: String? = nil) -> String {
         switch provider {
         case .anthropic, .openAI, .google, .openRouter:
@@ -72,9 +65,8 @@ extension RateLimitCategory {
             let keyHash = apiKey.map { String($0.hashValue) } ?? "no-key"
             return "\(category.rawValue):\(keyHash)"
         case .openAICompatible:
-            // The endpoint IS the server/quota boundary (the key is often absent
-            // for local servers), so key the bucket by baseURL — two different
-            // compatible endpoints must not share one token bucket.
+            // The endpoint is the quota boundary (the key is often absent locally), so the bucket is keyed by
+            // baseURL.
             let urlHash = baseURL.map { String($0.hashValue) } ?? "no-url"
             return "openAICompatible:\(urlHash)"
         case .ollama:
@@ -85,12 +77,9 @@ extension RateLimitCategory {
         }
     }
 
-    /// Maps ApiProvider to the corresponding rate limit category.
-    ///
-    /// ⚠️ Pass `modelName` wherever the model is known. Without it an OpenRouter `:free` model is
-    /// classed as paid `.openRouter` (200 RPM) and trips OpenRouter's 20 RPM free limit on 429s
-    /// instead of pacing under it. Every caller that shares a bucket key must agree on the
-    /// category, because whichever call creates the bucket fixes its rate.
+    /// Maps ApiProvider to its rate limit category.
+    /// Pass `modelName` where known: without it an OpenRouter `:free` model is classed as paid. Callers
+    /// sharing a bucket key must agree on the category, since the first call creates the bucket.
     static func from(provider: ApiProvider, modelName: String? = nil) -> RateLimitCategory {
         switch provider {
         case .anthropic:        return .anthropic
@@ -110,15 +99,9 @@ extension RateLimitCategory {
     }
 }
 
-/// A thread-safe Token Bucket implementation to manage API quotas.
-/// Buckets are keyed on (provider + apiKey/baseURL) so profiles sharing
-/// the same API key share the same server-side quota boundary.
-/// Prevents "Death Spirals" where multiple agent loops exhaust limits simultaneously.
-///
-/// `.local` providers bypass the limiter entirely: MLX runs in-process (requests
-/// already serialize on the GPU) and Ollama queues at the server, so there is no
-/// upstream quota to protect — a proactive bucket only added ~1s latency per
-/// agent iteration.
+/// A thread-safe token bucket that manages API quotas, keyed on provider plus apiKey/baseURL.
+/// Prevents several agent loops from exhausting a shared limit at once.
+/// `.local` providers bypass it: MLX serializes on the GPU and Ollama queues at the server.
 actor GlobalRateLimiter {
 
     // MARK: - Singleton
@@ -166,17 +149,12 @@ actor GlobalRateLimiter {
 
     // MARK: - Public API
 
-    /// Acquires a token for the specified bucket key.
-    /// Suspends execution if the bucket is empty until a token is available.
-    /// - Parameters:
-    ///   - key: The derived bucket key from `RateLimitCategory.deriveBucketKey()`.
-    ///   - category: The provider category (used for default bucket params if key is new).
-    /// - Returns: The time waited (in seconds).
+    /// Acquires a token for the bucket key, suspending until one is available; returns the seconds waited.
+    /// `key` is from `RateLimitCategory.deriveBucketKey()`; `category` seeds defaults for a new bucket.
     @discardableResult
     func wait(forKey key: String, category: RateLimitCategory) async -> TimeInterval {
-        // Local inference is unmetered — no bucket is ever created. This also
-        // covers a remote Ollama baseURL (still classified `.local`): self-hosted
-        // servers have no quota tiers and apply their own request queueing.
+        // Local inference is unmetered and no bucket is created, including a remote Ollama baseURL (still
+        // `.local`).
         guard category != .local else { return 0 }
 
         var bucket = getOrCreateBucket(key: key, category: category)
@@ -234,11 +212,8 @@ actor GlobalRateLimiter {
 
         var bucket = getOrCreateBucket(key: key, category: category)
 
-        // ⚠️ Clamped HERE, at the one place debt is written, not only at the callers. The penalty
-        // is a server's Retry-After, and `wait` turns debt into `UInt64(seconds * 1e9)`, which
-        // TRAPS on infinity, NaN or anything past ~584 years. A `Retry-After: inf` used to set the
-        // debt to −∞ and crash the app on the next request to that provider (Timeout inventory
-        // D-09, 2026-09-26). Same bounds the retry sleeps already use: finite, ≥ 0, ≤ 1 hour.
+        // Clamped here, where debt is written: `wait` converts debt to `UInt64(seconds * 1e9)`, which traps on
+        // infinity, NaN or huge values. Bounds match the retry sleeps: finite, at least 0, at most 1 hour.
         let penaltySeconds: TimeInterval
         if let sane = ProviderErrorClassifier.sanitizedRetryAfter(requestedPenalty) {
             penaltySeconds = sane
@@ -261,14 +236,9 @@ actor GlobalRateLimiter {
         drainAndPenalize(key: category.rawValue, category: category, penaltySeconds: penaltySeconds)
     }
 
-    /// Waits until the bucket would have a token, WITHOUT taking it. Returns the time waited.
-    ///
-    /// ⚠️ For callers ABOVE the HTTP layer — the ReAct loop, Planning, Reflexion. The token itself is
-    /// taken exactly once per request by `CloudRequestPipeline`, which every metered provider call
-    /// goes through. These callers used `wait(forKey:)` too, so each model call cost TWO tokens and
-    /// every limit was effectively halved (a `:free` OpenRouter model got ~10 steps/min, not 20).
-    /// They still want backpressure — pause before a step rather than fire it into a dry bucket, and
-    /// show "Throttling…" while doing it — which is what this provides without the second charge.
+    /// Waits until the bucket would have a token without taking it, and returns the time waited.
+    /// For callers above the HTTP layer (ReAct loop, Planning, Reflexion); `CloudRequestPipeline` takes the
+    /// token once per request.
     @discardableResult
     func waitForCapacity(forKey key: String, category: RateLimitCategory) async -> TimeInterval {
         let delay = timeUntilNextToken(forKey: key, category: category)

@@ -4,15 +4,7 @@
 //  ReActMarkdownParser.swift
 //  Devgentic
 //
-//  Step 3.3: Parser for the .reactMarkdown dialect.
-//  Target: Classic ReAct format (Thought / Action / Action Input).
-//
-//  Expected format:
-//    Thought: I need to list the directory
-//    Action: list_directory
-//    Action Input: {"path": "/"}
-//
-//  Created by Raj Singh on 06/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -20,6 +12,7 @@ import OSLog
 
 private let logger = DGLogger(category: "ReActMarkdownParser")
 
+/// Parser for the `.reactMarkdown` dialect, the classic ReAct format of `Thought:`, `Action:` and `Action Input:` lines.
 struct ReActMarkdownParser: CognitiveParserProtocol {
 
     func parse(rawResponse: String) -> ModernCognitiveStep {
@@ -43,12 +36,8 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
             )
         }
 
-        // 3. Extract Action Input (JSON arguments)
-        // ⚠️⚠️ CR-19: an Action Input that is PRESENT but undecodable used to become `[:]` and the
-        // call still went out — `final_answer` then failed as "missing answer" (`argSchemaMismatch`),
-        // which neither told the model what was wrong nor let the answer-vs-call verdict rescue it.
-        // It is now a typed malformed-JSON failure, after the shared repairs (raw newlines, invalid
-        // escapes, trailing commas) had their chance.
+        // 3. Extract Action Input (JSON arguments).
+        // A present but undecodable Action Input is a typed malformed-JSON failure, after the shared repairs ran.
         guard let arguments = extractActionInput(from: text) else {
             logger.warning("ReActMarkdownParser: Action Input for '\(rawToolName)' is not valid JSON even after repair. CONSEQUENCE: a malformed-JSON failure — the model is told its arguments were invalid and retries; no call with empty arguments is sent.")
             return ModernCognitiveStep(
@@ -62,10 +51,8 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
 
         logger.info("ReActMarkdownParser: Parsed action='\(rawToolName)' with \(arguments.count) argument(s).")
         let call = PendingToolCall(id: UUID().uuidString, name: rawToolName, arguments: arguments)
-        // Filter template-stub narration ("Calling X…") out of the with-tools reasoning so it
-        // doesn't pollute the working-memory scratchpad (#15 / G7). A nil/stub Thought becomes
-        // "" — empty reasoning is correct (the UI renders "Executing <tool>…" from the tool
-        // event). The termination path above is deliberately NOT filtered (it's the final answer).
+        // Filter template-stub narration ("Calling X…") from the reasoning so it does not pollute the scratchpad;
+        // an empty reasoning is correct. The termination path above is deliberately not filtered (the final answer).
         return ModernCognitiveStep(reasoning: ReasoningQualityFilter.filter(reasoning), toolCalls: [call])
     }
 
@@ -82,12 +69,8 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
     }
 
     /// The value of a `Field:` line, e.g. `Action: tool_name`, up to the end of that line.
-    ///
-    /// ⚠️ READINESS CR-54 (2026-10-12). This matched `Action:` ANYWHERE, case-insensitively, so
-    /// prose like "the last transaction: history shows…" produced a call to a tool named
-    /// `history`. The field must now START a line, after at most the markdown a model wraps it in
-    /// (indentation, a bullet, a quote, `**`/`__`), and the emphasis closing it (`**Action:**`) is
-    /// skipped.
+    /// The field must start a line, after at most wrapping markdown (indentation, bullet, quote, `**`/`__`).
+    /// Matching it mid-prose would turn text like "the last transaction: history" into a tool call.
     static func extractField(named fieldName: String, from text: String) -> String? {
         let pattern = "(?m)^[ \\t]*(?:[-*>#]+[ \\t]*)?(?:\\*\\*|__)?\(NSRegularExpression.escapedPattern(for: fieldName)):(?:\\*\\*|__)?[ \\t]*([^\\n]+)"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),

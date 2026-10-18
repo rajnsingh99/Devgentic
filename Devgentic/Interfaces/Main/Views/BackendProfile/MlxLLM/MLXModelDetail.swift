@@ -4,16 +4,7 @@
 //  MLXModelDetail.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for G6 — the model detail sheet.
-//
-//  What a user needs before committing to a multi-gigabyte download: the licence (material for
-//  anyone shipping commercial work), how big it is, how it was quantized, and what the
-//  publisher says about it. The store previously showed name, org, download count, size and
-//  heuristic capability badges — nothing else — and `MLXDisplayModel.description` was hardcoded
-//  nil for every remote model.
-//
-//  The data is free: the detail endpoint was already being hit for size and its response
-//  decoded into `HFModelDetail`, which discarded everything except sibling sizes.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,9 +15,8 @@ struct MLXModelDetail: Sendable, Equatable {
     let author: String?
     let license: String?
     let licenseURL: URL?
-    /// Stored tensor elements. ⚠️ NOT the logical parameter count for a quantized repo —
-    /// packed weights inflate it — so the UI labels it honestly rather than calling it
-    /// "parameters".
+    /// Stored tensor elements.
+    /// Not the logical parameter count of a quantized repo (packed weights inflate it); the UI must not call it "parameters".
     let tensorElements: Int64?
     let quantizationBits: Int?
     let architecture: String?
@@ -48,13 +38,9 @@ struct MLXModelDetail: Sendable, Equatable {
     /// publisher shipped no README.
     var readme: String?
 
-    /// ⚠️ Always nil, deliberately.
-    ///
-    /// Verified against the HuggingFace API across four MLX repos: the `config` block never
-    /// includes `max_position_embeddings`. A model's real context window is only knowable
-    /// after download, when `MLXTokenizerAnalyzer` reads its `config.json` — which is exactly
-    /// why `MLXContextWindowHealer` exists. The field is kept so the UI can say "not
-    /// published" rather than silently omitting a fact users look for.
+    /// Always nil: the HuggingFace API `config` block never includes `max_position_embeddings`.
+    /// The real window is known only after download, when `MLXTokenizerAnalyzer` reads `config.json`.
+    /// Kept so the UI can say "not published" rather than omit it.
     var contextWindow: Int? { nil }
 
     /// Human-readable quantization, falling back to the name when the API omits the config

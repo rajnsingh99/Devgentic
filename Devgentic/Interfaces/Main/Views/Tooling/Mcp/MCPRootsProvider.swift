@@ -4,15 +4,7 @@
 //  MCPRootsProvider.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — MCP `roots/list`.
-//
-//  Roots tell a server which directories it may operate on. Devgentic advertised no roots
-//  capability and answered `roots/list` with `methodNotFound`, so filesystem-shaped MCP
-//  servers — the single most common category — got no workspace boundary from us. They
-//  either refused to operate, fell back to their own launch CWD, or ranged over the whole
-//  disk, and the user had to duplicate the project path into every server's argv by hand.
-//
-//  The app already knows the answer: Code mode owns a project path. This publishes it.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -21,15 +13,13 @@ import os
 
 private let logger = DGLogger(category: "MCPRootsProvider")
 
+/// Publishes workspace roots to MCP servers (`roots/list`), telling them which directories they may operate on.
+/// The roots come from Code mode's project path and the Explorer's opened folder.
 @MainActor
 enum MCPRootsProvider {
 
     /// The workspace roots currently exposed to MCP servers.
-    ///
-    /// Composed from independent SLOTS rather than a single setter. Two unrelated parts of
-    /// the app know about folders — Code mode's project and the Explorer's opened folder —
-    /// and if both called one `setRoots`, whichever fired last would erase the other's
-    /// contribution. Each owns its slot; the union is recomputed and published.
+    /// Composed from independent slots (Code project, Explorer folder) so one owner's update cannot erase the other's.
     private(set) static var roots: [URL] = []
 
     /// How many times a changed root set has been published — one per `roots/list_changed` sent to
@@ -59,13 +49,9 @@ enum MCPRootsProvider {
         await recompute()
     }
 
-    /// Moves BOTH slots to `url` in ONE publish — a Code project switch.
-    ///
-    /// ⚠️ Why a combined setter (2026-09-24). A switch moves the Explorer and the Code project
-    /// together, but they reached this type as two separate calls, so every switch published
-    /// `[old, new]` and then `[new]`: two notifications to every connected server, and for the
-    /// moment in between a server's boundary included the project the user had just LEFT. Setting
-    /// both first means the per-slot calls that follow find nothing changed and publish nothing.
+    /// Moves both slots to `url` in one publish, for a Code project switch.
+    /// Setting both first makes the later per-slot calls no-ops, so servers get one notification and never a
+    /// boundary that still includes the project just left.
     static func setWorkspace(_ url: URL) async {
         guard codeProjectRoot != url || explorerRoot != url else { return }
         codeProjectRoot = url
@@ -75,42 +61,17 @@ enum MCPRootsProvider {
     }
 
     /// Publishes the union of the slots.
-    ///
-    /// NO FALLBACK, deliberately. With neither slot set the answer is an empty list, which is
-    /// the honest one: roots are a permission boundary, and defaulting to something broad —
-    /// the home directory, the last-used folder — would silently hand a third-party server
-    /// the run of the user's disk. This app is not sandboxed, so that grant would be real.
-    /// An empty list makes the server decline or fall back to its own launch directory, which
-    /// is a recoverable, explicable state; a silent over-grant is not.
+    /// With neither slot set the result is an empty list rather than a broad default such as the home directory.
+    /// Roots are a permission boundary: an empty list makes a server decline or use its own launch directory.
     private static func recompute() async {
         await setRoots([codeProjectRoot, explorerRoot].compactMap { $0 })
     }
 
-    /// Replaces the root set and notifies every connected server, per the
-    /// `notifications/roots/list_changed` contract. Idempotent — an unchanged set is a
-    /// no-op, so callers can push on every project-path read without churn.
+    /// Sets the root set and notifies every connected server (`notifications/roots/list_changed`).
+    /// Idempotent: an unchanged set is a no-op, so callers can push on every project-path read.
     static func setRoots(_ urls: [URL]) async {
-        // ⚠️ Symlinks are RESOLVED, not merely standardized. `standardizedFileURL` collapses
-        // `..` and `~` but leaves symlinks alone, so a project reached through a symlinked
-        // parent was advertised as the link path. Servers enforce their boundary by TEXTUAL
-        // containment against the path they resolved for themselves, so the two forms
-        // disagree and a file plainly inside the user's folder reads as outside it —
-        // "Access denied - path outside allowed directories". Verified against
-        // `@modelcontextprotocol/server-filesystem`, which does exactly this.
-        //
-        // ⚠️ This does NOT rewrite `/var` → `/private/var`. Foundation's
-        // `resolvingSymlinksInPath()` deliberately hides the `/private` prefix on macOS's
-        // `/tmp`, `/var` and `/etc`, and forcing it (via `realpath`) would advertise a path
-        // the user never sees in Finder for no benefit — real roots are project folders under
-        // `/Users`, not system temp directories. Anything comparing our roots against a
-        // `realpath`-canonical form must canonicalise both sides itself.
-        //
-        // Resolving also makes the dedup below correct for two paths reaching one directory.
-        // ⚠️ Dedup on the normalized PATH, not on `URL` equality. `file:///a/b` and
-        // `file:///a/b/` are the same directory and compare UNEQUAL as URLs, and the two
-        // slots produce URLs both ways — `NSTemporaryDirectory()`-derived paths carry a
-        // trailing slash while `URL(fileURLWithPath:)` on a symlink does not. Set the same
-        // folder in both slots and it was advertised twice.
+        // Resolve symlinks, not just standardize: servers test containment textually against their own resolved paths.
+        // Dedup on the normalized path, not `URL` equality: `file:///a/b` and `file:///a/b/` compare unequal as URLs.
         var seen = Set<String>()
         var normalized: [URL] = []
 

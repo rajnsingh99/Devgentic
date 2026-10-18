@@ -4,13 +4,13 @@
 //  ScheduledTaskCreateContainerView.swift
 //  Devgentic
 //
-//  In-window destination for creating a new scheduled task.
-//  Thin wrapper around CreateScheduledTaskView, which owns its own
-//  DynamicIslandBar + card-based layout (matches AgentConfigDetailView).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// In-window destination for creating a new scheduled task; a thin wrapper around `CreateScheduledTaskView`,
+/// which owns its own layout.
 struct ScheduledTaskCreateContainerView: View {
 
     let prefillPrompt: String?

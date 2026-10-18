@@ -4,17 +4,14 @@
 //  QuickAccessFloatingButton.swift
 //  Devgentic
 //
-//  The floating utility pill that wraps the Quick Access handoff button (to move
-//  the active chat conversation into the floating QuickAccess overlay panel) and
-//  the Orb voice HUD toggle in a single consolidated capsule.
-//
-//  Mounted alongside `BackgroundTasksFloatingButton` and `CodeViewerFloatingButton` in
-//  `MainApplicationView.floatingPills`.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// A floating capsule holding the QuickAccess handoff button (moves the active chat into the floating panel)
+/// and the Orb voice HUD toggle. Mounted alongside the other floating pills in `MainApplicationView.floatingPills`.
 struct QuickAccessFloatingButton: View {
     @Environment(MainApplicationViewModel.self) private var mainAppViewModel
     @Environment(\.appTheme) private var theme

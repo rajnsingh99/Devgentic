@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  devgenticTests.swift
-//  devgenticTests
+//  DevgenticTests.swift
+//  DevgenticTests
 //
-//  Created by Raj Singh on 20/04/25.
+//  Created by Raj Singh.
 //
 
 import Testing

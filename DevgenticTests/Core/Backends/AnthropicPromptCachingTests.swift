@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  AnthropicPromptCachingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Claude caches only where a request marks a breakpoint, and reads only a position an earlier
-//  request wrote. These pin WHERE the breakpoints go — each where the next request shares the
-//  prefix — and that the usage they produce is counted and priced right.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,8 +4,7 @@
 //  NativeSystemTools.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 26/01/26.
-//  Updated for Robust JSON Parsing & Schema Injection.
+//  Created by Raj Singh.
 //
 
 @preconcurrency import Foundation
@@ -13,12 +12,6 @@ import AppKit
 import os
 
 private let logger = DGLogger(category: "NativeSystemTools")
-
-// ⚠️ `execute_shell` (`TerminalTool`) WAS REMOVED 2026-09-24 — user decision: a duplicate of
-// `run_command`, which the Library already offered beside it in every mode. It persisted `cd`
-// across calls in a per-conversation "virtual session" (`ShellSessionManager`, removed with it);
-// `run_command` takes `working_directory` explicitly on every call instead, and its runs get a
-// card, a stop control and a kept log, which `execute_shell`'s never had.
 
 // MARK: - Open Application Tool
 
@@ -161,16 +154,8 @@ struct RunAppleScriptTool: DevgenticTool {
         return await MainActor.run {
             var errorInfo: NSDictionary?
 
-            // Both failure paths are prefixed "Error:" so `ToolExecutionMediator.isSemanticFailure`
-            // actually classifies them. They previously read "Failed to init script." and
-            // "AppleScript Error: …", and the sniffer requires the word "error" at the START of
-            // the output followed by `:` or whitespace — so a script that failed to compile, or
-            // one that threw, was reported accurately and then recorded as a SUCCESSFUL tool
-            // call. The agent went on to reason about a result that never existed.
-            //
-            // This is the same defect as `git_tool`'s "Git error:" and `diff_files`'s
-            // "Diff error:", both fixed for the same reason: the detection was right and the
-            // prefix missed by one word.
+            // Both failure paths are prefixed "Error:" so `ToolExecutionMediator.isSemanticFailure` classifies
+            // them. That check requires "error" at the start of the output, followed by `:` or whitespace.
             guard let scriptObject = NSAppleScript(source: arguments.script) else {
                 logger.error("[APPLESCRIPT] NSAppleScript(source:) returned nil — the script could not be compiled, so nothing ran. Reported to the model as a failure.")
                 return "Error: the AppleScript could not be compiled. Check for unbalanced quotes, "

@@ -2,20 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  WorkspaceBoundaryTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Code mode's project folder is a BOUNDARY, not a label.
-//
-//  ⚠️⚠️ Field-observed 2026-09-20 and the reason this file exists: a Code session rooted at a
-//  small Java project called `list_directory("/Users/<name>")`. It returned the entire home
-//  directory in 0.005 s — no refusal, no confirmation, nothing logged — and the model then listed
-//  the user's other projects back to them. Before this, `projectPath` reached exactly ONE tool
-//  (`UpdateProjectContextTool`); every filesystem tool was root-blind. The same run also showed
-//  `codebase_map("./")` taking 41.8 SECONDS, because relative paths resolved against $HOME.
-//
-//  These assert the INVARIANT — nothing outside the chosen folder is read or written without the
-//  user — not today's implementation. They say nothing about which tools are on which list or how
-//  the refusal is worded.
+//  Created by Raj Singh.
 //
 
 import XCTest

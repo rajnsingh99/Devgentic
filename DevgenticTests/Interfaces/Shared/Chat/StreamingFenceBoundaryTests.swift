@@ -4,11 +4,7 @@
 //  StreamingFenceBoundaryTests.swift
 //  DevgenticTests
 //
-//  Register render/mc-14 — the streaming parser's settle boundary used a boolean toggle on
-//  `hasPrefix("```")` and split lines with `firstIndex(of: "\n")`. Both are wrong, and what they
-//  get wrong is PERMANENT: everything before the boundary is parsed without the stream
-//  preprocessor and locked into `prefixBlocks`, which is never re-parsed until the message
-//  settles.
+//  Created by Raj Singh.
 //
 
 import XCTest

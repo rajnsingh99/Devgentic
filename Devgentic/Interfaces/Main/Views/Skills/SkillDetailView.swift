@@ -4,21 +4,7 @@
 //  SkillDetailView.swift
 //  Devgentic
 //
-//  Inspect and edit one library skill: its description, its instructions, its history, and export.
-//
-//  ## Editing creates a VERSION — it never overwrites
-//
-//  Before V6 this rewrote SKILL.md on disk and kept ONE backup, in a `.history` file keyed by NAME,
-//  so two skills sharing a name shared a single revert slot and a second edit destroyed the only
-//  copy of the first. Saving here appends an immutable version and moves the skill's `latest`
-//  pointer. Nothing that existed before is mutated, so "Restore" is a real operation rather than a
-//  single-shot undo — and a profile that PINNED an older version keeps reading exactly that one.
-//
-//  ⚠️ THE NAME IS STILL NOT EDITABLE, but the reason changed. It is no longer that a renamed skill
-//  vanishes on rescan — there is no rescan. It is that `name` is what `load_skill` matches on and
-//  what every linked profile resolved against, so a rename silently repoints them. `SkillStore`
-//  refuses a version that declares a different name; this sheet does not offer one. `displayName`
-//  is free to change and is what the library lists.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -26,37 +12,31 @@ import AppKit
 
 private let logger = DGLogger(category: "SkillDetailSheet")
 
+/// Inspects and edits one library skill: description, instructions, history and export. Saving appends an immutable
+/// version and moves the `latest` pointer, so Restore is real and a pinned older version stays readable. The name is
+/// not editable (`load_skill` and linked profiles resolve against it); `displayName` is.
 struct SkillDetailView: View {
 
     let skill: SkillSD
 
     /// Called after any change the library needs to re-read.
-    /// ⚠️ Optional now that this is a screen rather than a sheet. The library and the sidebar both
-    /// observe `SkillStore.shared.revision`, so a write here already invalidates them; the closure
-    /// survives for the one caller that wants an extra local bump.
+    /// Optional: the library and sidebar observe `SkillStore.shared.revision`, so a write already invalidates them.
     var onChanged: () -> Void = {}
 
     init(skill: SkillSD, onChanged: @escaping () -> Void = {}) {
         self.skill = skill
         self.onChanged = onChanged
-        // ⚠️ Resolved here rather than in `load()`: `@Bindable` needs the object at init, and the
-        // store seeds from the library only on FIRST use, so re-entering a skill returns whatever
-        // the user typed last time rather than overwriting it.
+        // Resolved here rather than in `load()`: `@Bindable` needs the object at init, and the store seeds from the library
+        // only on first use, so re-entering a skill returns the user's last text.
         self.draft = SkillDraftStore.shared.draft(for: skill)
     }
 
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
-    /// ⚠️⚠️ THE EDITED TEXT LIVES IN `SkillDraftStore`, NOT IN `@State`, AND THAT IS THE WHOLE
-    /// UNSAVED-WORK DESIGN. Inline, a skill detail can be left seven ways — the Skills sidebar,
-    /// a library row, the back chevron, ⌘[, the command palette, an ActivityBar tab switch, and quit —
-    /// and the tab switch has no seam to intercept.
-    ///
-    /// Holding the draft outside the view makes every one of those exits lossless: leave, come back,
-    /// the text is still there. That is exactly how profiles work — `editBuffer` lives on the
-    /// service and nothing clears it on a tab switch — and it is what lets the only prompt live at
-    /// quit, where memory genuinely goes away.
+    // Why: a skill detail can be left in many ways with no seam to intercept (e.g. an ActivityBar tab switch); an external
+    // draft makes every exit lossless, so the only unsaved-work prompt is at quit.
+    /// The edited text, held in `SkillDraftStore` rather than `@State` so leaving and returning never loses it.
     @Bindable private var draft: SkillDraft
     @State private var saveError: String?
     @FocusState private var displayNameFocused: Bool
@@ -127,8 +107,8 @@ struct SkillDetailView: View {
         .onChange(of: skill.id) { _, _ in
             isPreviewMode = false
         }
-        // ⚠️ Escape and click-outside run no button action, so without this a rename typed and then
-        // dismissed that way is lost. `commitDisplayName` is a no-op when nothing changed.
+        // Escape and click-outside run no button action, so a rename typed and then dismissed that way would be lost;
+        // `commitDisplayName` is a no-op when nothing changed.
         .onDisappear(perform: commitDisplayName)
         // Mirrors the library's dialog — same warning, because the consequence is the same and a
         // second wording would be a second thing to keep true.
@@ -561,9 +541,8 @@ struct SkillDetailView: View {
         let reading = SkillToolDeclaration.classify(
             declared,
             knownToApp: Set(NativeToolCatalog.byName.keys),
-            // ⚠️ nil ON PURPOSE. The library is profile-independent, so nothing here can honestly
-            // claim a tool is available to a run. Passing the catalogue as if it were a profile's
-            // tool set would turn "this app knows this name" into "you have this tool".
+            // nil on purpose: the library is profile-independent, so nothing here can claim a tool is available to a run;
+            // passing the catalogue would turn "this app knows this name" into "you have this tool".
             availableHere: nil
         )
 
@@ -837,10 +816,8 @@ struct SkillDetailView: View {
 
     // MARK: - Actions
 
-    /// ⚠️ Loads only the DISPLAY NAME. The description and instructions live in the draft, which is
-    /// seeded from the library on first use and then belongs to the user — reloading them here would
-    /// overwrite unsaved work every time the view re-appeared, which is the data loss this design
-    /// removes.
+    /// Loads only the display name: the description and instructions live in the draft, which belongs to the user after first
+    /// seeding, so reloading them here would overwrite unsaved work whenever the view re-appears.
     private func load() {
         displayName = skill.displayName
         loadedDisplayName = skill.displayName
@@ -887,11 +864,8 @@ struct SkillDetailView: View {
         }
     }
 
-    /// Restoring COPIES an old version forward as a new one rather than moving the pointer back.
-    ///
-    /// ⚠️ History stays append-only, which is what makes a pin meaningful: a profile pinned to the
-    /// version being restored keeps reading exactly that version, and the restore is visible in the
-    /// history rather than looking like the last few edits never happened.
+    /// Restoring copies an old version forward as a new one rather than moving the pointer back.
+    /// History stays append-only, so a profile pinned to the restored version keeps reading it and the restore is visible.
     private func restore(_ version: SkillVersionSD) {
         saveError = nil
         let files = version.orderedFiles.map {
@@ -916,9 +890,8 @@ struct SkillDetailView: View {
         }
     }
 
-    /// ⚠️ Saves the LABEL only, and does NOT create a version. A version is a snapshot of what the
-    /// model reads; bumping the chain because someone renamed a label would make history unreadable
-    /// and make pinning a version pin an unrelated preference.
+    /// Saves the display label only; it does NOT create a version. A version snapshots what the model reads, so a rename
+    /// must not bump the chain or a pin would cover an unrelated preference.
     private func commitDisplayName() {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty label would leave a nameless row in the library, so it falls back to the
@@ -944,9 +917,8 @@ struct SkillDetailView: View {
             saveError = error.localizedDescription
             logger.error("[SKILL_EDIT] DELETE FAILED for '\(name)' [skill \(id)]: \(error.localizedDescription). CONSEQUENCE: the skill is still there and still linked; nothing was lost.")
         case .success:
-            // ⚠️ Drop the draft too. A draft outliving its skill would resurrect the deleted
-            // skill's text if an id were ever reused, and would keep quit gated on work for a
-            // skill that no longer exists.
+            // Drop the draft too: one outliving its skill would resurrect the deleted skill's text if an id were reused,
+            // and would keep quit gated on a skill that is gone.
             SkillDraftStore.shared.forget(skillID: id)
             logger.notice("[SKILL_EDIT] DELETED '\(name)' [skill \(id)] and its \(versionCount) version(s). CONSEQUENCE: PERMANENT — every version and bundled file went with it, and any profile still linking it now reports an unresolved skill at run time.")
             onChanged()
@@ -964,9 +936,8 @@ struct SkillDetailView: View {
         }
     }
 
-    /// ⚠️ `NSSavePanel`, not `.fileExporter`. The one `.fileExporter` in this app discards its
-    /// result (`{ _ in }`), so every write error vanishes; a panel hands back a URL this code can
-    /// actually report on.
+    /// Uses `NSSavePanel` rather than `.fileExporter`, whose result the app discards so write errors vanish;
+    /// a panel hands back a URL this code can report on.
     private func export() {
         saveError = nil
         guard let version = skill.latestVersion else {

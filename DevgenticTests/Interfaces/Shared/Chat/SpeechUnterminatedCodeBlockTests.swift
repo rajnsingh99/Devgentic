@@ -4,15 +4,7 @@
 //  SpeechUnterminatedCodeBlockTests.swift
 //  DevgenticTests
 //
-//  [CF-20] `SpeechService.parseSegments` appended a `.codeBlock` from ONE place: the branch
-//  that sees a CLOSING ``` fence. A response that ends inside a block — cancelled mid-stream,
-//  or a model that never wrote the closing fence — therefore had its code lines dropped on the
-//  floor after the loop, with no log, and `totalSegmentCount` short by one.
-//
-//  The bubble does not agree with that: the finalized render runs
-//  `preprocessStreamResilientMarkdown`, which appends the missing fence, so the user is looking
-//  at a code block Read Aloud behaves as though does not exist. These tests pin the repair, and
-//  pin the agreement between the two parsers that the row is really about.
+//  Created by Raj Singh.
 //
 
 import XCTest

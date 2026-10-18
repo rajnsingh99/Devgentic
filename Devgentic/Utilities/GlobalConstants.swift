@@ -4,7 +4,7 @@
 //  GlobalConstants.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -42,41 +42,25 @@ struct GlobalConstants {
     static let agentEndpoint = "/agent/chat"
     
     // --- Diagnostics / Bug Reports ---
-    /// Public issue-tracker "new issue" URL the "Report on GitHub" button in the diagnostic
-    /// export opens, with `?title=&body=` query params (GitHub's new-issue format).
-    /// ⚠️ This is a PUBLIC destination: whatever the export sheet puts in the query params is
-    /// pre-filled into an issue body on github.com. The bundle itself is attached by hand — only
-    /// the title and a short body travel through this URL.
+    // Why: this is a public destination: only a title and short body travel in the URL; the bundle is attached by hand.
+    /// Public issue-tracker new-issue URL opened by the diagnostic export's "Report on GitHub" button.
+    /// Takes `?title=&body=` query params (GitHub's new-issue format).
     static let issueTrackerNewIssueURL = "https://github.com/rajnsingh99/devgentic/issues/new"
 
-    /// The project's public homepage — a GitHub Pages project site, live from the first release.
-    ///
-    /// Sent to OpenRouter as `HTTP-Referer` for app attribution (see `AgentConnect`). It is a
-    /// STATIC project identifier, not telemetry: no user or machine data is derived from it, and
-    /// the app already identifies itself to that provider via `X-Title`.
-    ///
-    /// ⚠️ Tied to the GitHub account and repo name, because GitHub Pages derives the URL from
-    /// them. Attaching a custom domain later does NOT require changing this — GitHub 301-redirects
-    /// this path — but RENAMING the account or repo breaks it, and breaks the Sparkle feed with it.
+    // Why: tied to the GitHub account and repo name; renaming either breaks it and the Sparkle feed.
+    /// The project's public homepage (a GitHub Pages site), also sent to OpenRouter as `HTTP-Referer` for app attribution.
+    /// A static project identifier, not telemetry: no user or machine data is derived from it.
     static let homepageURL = "https://rajnsingh99.github.io/devgentic/"
 
-    /// The public source repository — the AGPL "Corresponding Source" offer, as a URL.
-    ///
-    /// Read by the ChatOps `/help` reply (`ChatOpsCommandService.help`). That placement is the point:
-    /// AGPL §13 obliges anyone who runs a MODIFIED Devgentic that other people reach over Slack,
-    /// Discord or Telegram to offer those users its source. Carrying the offer in the default reply
-    /// means every downstream operator inherits a compliant `/help` instead of having to remember
-    /// to add one. `Resources/Credits.html` (the About panel) repeats the same URL by hand.
-    /// ⚠️ Same account/repo-name dependency as `homepageURL`: a rename breaks both.
+    // Why: tied to the account and repo name like `homepageURL`: a rename breaks both.
+    /// The public source repository: the AGPL "Corresponding Source" offer, as a URL.
+    /// Read by the ChatOps `/help` reply so every operator of a modified build offers its source to remote users.
     static let sourceCodeURL = "https://github.com/rajnsingh99/devgentic"
 
-    /// The GitHub Sponsors page behind "Support Development" — a tip jar, not a paywall.
-    ///
-    /// ⚠️ EVERY SURFACE HIDES ITSELF WHILE THIS IS EMPTY: the app menu item and the About row. To
-    /// move to another page (e.g. Ko-fi) change only this string — and `.github/FUNDING.yml`.
-    /// ⚠️ WORDING IS "Support", NEVER "Donate" (this is not a charity), and NEVER a nag: no launch
-    /// popup, no modal, no badge. ⚠️ AN APP STORE EDITION MUST STRIP EVERY USE OF THIS — Apple
-    /// rejects external tipping links and requires an in-app purchase tip jar instead.
+    // Why: an App Store edition must strip every use of this: Apple rejects external tipping links.
+    /// The GitHub Sponsors page behind "Support Development": a tip jar, not a paywall.
+    /// Surfaces hide themselves while this is empty; to use another page, change this string and `.github/FUNDING.yml`.
+    /// Wording is "Support", never "Donate", and never a nag (no launch popup, modal or badge).
     static let supportURL = "https://github.com/sponsors/rajnsingh99"
 
     /// `supportURL` as a URL, or nil while it is unset — the one gate all support UI reads.
@@ -90,10 +74,9 @@ struct GlobalConstants {
     /// = UUID string). Posted by a notification tap (AppDelegate) and by the panel's
     /// "continue in main window" reverse-handoff. Observed in MainApplicationView.
     static let openConversationNotification = Notification.Name("devgentic.openConversation")
-    /// Navigate the main window to a profile's editor (userInfo["profileID"] = UUID
-    /// string). Posted by surfaces outside the main window's environment — e.g. the
-    /// QuickAccess panel's advisory banner settings action — after activating the
-    /// main window. Observed in MainApplicationView, translated into the router.
+    /// Navigates the main window to a profile's editor (`userInfo["profileID"]` = UUID string).
+    /// Posted by surfaces outside the main window's environment, e.g. QuickAccess's advisory banner, after activating it.
+    /// Observed in MainApplicationView and translated into the router.
     static let openProfileSettingsNotification = Notification.Name("devgentic.openProfileSettings")
 
     // --- Speech Notifications ---

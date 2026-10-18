@@ -4,16 +4,7 @@
 //  OrbPushToTalkAdmissionTests.swift
 //  DevgenticTests
 //
-//  The push-to-talk entry path — which had NO test coverage of any kind until this file, and is
-//  where the production-readiness P1 lived: on a cold open the shortcut arrived in `.welcoming`,
-//  which the guard rejected silently, so the default activation mode lost the whole first
-//  utterance on every single cold open.
-//
-//  ⚠️ WHY THE POLICY IS A PURE STATIC. The full path opens a real microphone (`startListeningLoop`
-//  → permission prompt → `AVAudioEngine`), so it cannot run headlessly. Extracting the DECISION
-//  keeps the part that was actually wrong testable, and `testEveryStageBeginCanLeaveBehindIsUsable`
-//  below pins the coupling that broke — between what `begin()` produces and what the entry guard
-//  accepts — which is the half a pure test of the guard alone would still have missed.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -2,27 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PointerPromiseGatingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  `Call get_conversation_history(N)` is a PROMISE, and it is emitted from two independent
-//  places that both reach the model:
-//
-//    • `EpisodicHistoryFormatter.renderPointerTurn` — into the system prompt's episodic XML
-//    • `NativeHistoryConverter.buildPointerTurns` / `buildHybridTurns` — as real assistant turns
-//
-//  ⚠️⚠️ WHY THIS FILE EXISTS. The gate that stops a tool-less profile being told to call a tool it
-//  does not have was added to the FIRST and not the second. On a native provider that left the
-//  envelope able to say "full detail is not retrievable this turn" while every turn body said
-//  "Call get_conversation_history(N) for full response."
-//
-//  It was never reachable in shipped configurations: `ProfileDetails.historyStrategy` is
-//  `agentConfig?.historyStrategy ?? .recentHistory`, a bot has no `AgentConfig`, and only the
-//  pointer and hybrid branches emit the marker — so the one profile type without tools was also
-//  the only one that could never reach a pointer renderer. The gap was held shut by a property of
-//  a DIFFERENT type, with nothing anywhere stating the dependency.
-//
-//  These tests assert the invariant directly — the two emitters agree — so the fix does not
-//  depend on that coincidence continuing to hold.
+//  Created by Raj Singh.
 //
 
 import XCTest

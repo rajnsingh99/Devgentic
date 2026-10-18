@@ -4,10 +4,7 @@
 //  TimelinePayloadBoundsTests.swift
 //  DevgenticTests
 //
-//  Pins the two interim measures that keep large tool payloads out of the message timeline
-//  blob (see Docs/large-tool-payload-storage.md):
-//    1. File snapshots are SESSION-SCOPED — captured in memory, omitted from encoding.
-//    2. Tool output is CAPPED with an explicit marker, never silently truncated.
+//  Created by Raj Singh.
 //
 
 import XCTest

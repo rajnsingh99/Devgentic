@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  CodeModelPickerReachabilityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The Code model picker's reachability invariant: EVERY installed model the provider reports is
-//  reachable in the list, whatever its parameter count. Ordering may rank; only the user's own
-//  search text may narrow.
-//
-//  ⚠️ These assert the INVARIANT, not today's implementation. They deliberately say nothing about
-//  `rank`'s formula, tier names, or how search matches — a future change to any of those should
-//  leave every test here green. What must fail is a model becoming UNREACHABLE.
-//
-//  History: a 14B floor filtered sub-threshold Ollama models out of the only rendered list, so
-//  "too small" was indistinguishable from "not installed" — unsearchable, uncounted, and blamed on
-//  the user's model library by the empty state. Two comments in the picker asserted the opposite of
-//  what the code did for as long as it shipped. Parameter count is a quality proxy that decays with
-//  every model generation, and it gated exactly one of four providers (Ollama; MLX passed nil,
-//  cloud never built an entry). If a size floor is ever reintroduced, these fail.
+//  Created by Raj Singh.
 //
 
 import XCTest

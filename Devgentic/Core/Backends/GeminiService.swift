@@ -4,7 +4,7 @@
 //  GeminiService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 18/08/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -14,15 +14,7 @@ private let logger = DGLogger(category: "GeminiService")
 
 class GeminiService {
 
-    // ⚠️ register A53. This type used to hold `UserDefaults.standard` and a `gemini_api_key`
-    // constant, and `verifyAndFetchModels` wrote the raw key there on every successful fetch.
-    // Nothing ever read it back — `saveApiKey`/`getApiKey`/`clearApiKey` had zero callers
-    // repo-wide — so it was a pure side effect that deposited a plaintext credential in
-    // ~/Library/Preferences/, outlived the profile that owned it, and could not be cleared from
-    // any UI. Provider keys live in `ProviderKeyStore` (Keychain, keyed on profile id); this type
-    // is a stateless fetcher and must not persist anything.
-    // Keys already written by earlier builds are removed by
-    // `ProviderKeyStore.purgeLegacyPlaintextKeys()` at container configuration.
+    // This type is a stateless fetcher and must not persist anything; provider keys live in `ProviderKeyStore` (Keychain).
 
     // Codable struct for parsing the models list from the Gemini API
     private struct GoogleModelsResponse: Codable {
@@ -52,12 +44,8 @@ class GeminiService {
     }
 
     // Verify the API key and fetch models from the Gemini API
-    /// - Parameter baseURL: the profile's configured API Endpoint. ⚠️ Defaulted, never hardcoded:
-    ///   a user on a corporate or self-hosted gateway sets that endpoint and pastes a
-    ///   GATEWAY-SCOPED key. This call used to ignore it and transmit that key to the vendor's
-    ///   public API on every keystroke-debounced fetch — a host they had deliberately routed
-    ///   around, and one their policy may forbid. Same `?? ProviderDefaults.x` shape `AgentConnect`
-    ///   already uses, so listing and chat can never disagree about where a profile talks.
+    // Why: always honour the profile's endpoint, or a gateway-scoped key is sent to the public API.
+    /// - Parameter baseURL: the profile's configured API endpoint; falls back to the vendor default when nil.
     func verifyAndFetchModels(apiKey: String, baseURL: URL? = nil) async throws -> [String] {
         logger.info("Validating Google API Key and fetching models...")
 
@@ -71,13 +59,8 @@ class GeminiService {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        // ⚠️ The key goes in the `x-goog-api-key` HEADER, never the query string. As a query
-        // parameter it is written to URLSession's shared on-disk cache in
-        // ~/Library/Caches/<bundle-id>/ keyed by the FULL URL — a second copy of the secret, in a
-        // directory nothing treats as sensitive and no uninstall or reset path clears. It also
-        // lands in any TLS-terminating proxy's access log and in the provider's own request logs,
-        // where a header-borne credential would not. `GeminiLLMProvider.makeRequest` already does
-        // this correctly; these listing calls were missed.
+        // The key goes in the `x-goog-api-key` header, never the query string, which URLSession caches on disk
+        // and proxy and provider logs record by full URL.
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         // Authenticated listing responses are never worth caching, and caching them is how the
         // credential reached disk in the first place.

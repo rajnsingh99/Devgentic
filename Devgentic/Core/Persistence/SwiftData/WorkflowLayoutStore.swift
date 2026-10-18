@@ -4,17 +4,7 @@
 //  WorkflowLayoutStore.swift
 //  Devgentic
 //
-//  SwiftData-backed persistence for workflow canvas layouts.
-//  Migrated from UserDefaults (was previously a private class inside
-//  `WorkflowCanvasView.swift`).
-//
-//  Public API is preserved (`load`, `save`, `delete`) so existing call sites
-//  (canvas view, executor, dedicated view) don't need to change beyond removing
-//  the old inline definition.
-//
-//  Concurrency: `@MainActor`-isolated, matching `BackendProfileStore` and
-//  `DownloadHistoryStore`. Off-main callers (notably `WorkflowExecutor`, which
-//  is an actor) must hop with `await MainActor.run`.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -23,12 +13,8 @@ import os
 
 private let logger = DGLogger(category: "WorkflowLayoutStore")
 
-/// What actually happened to a `save`.
-///
-/// ⚠️ `save` used to return `Void`. That was fine while every write succeeded, but once
-/// `WorkflowLayoutSD` began REFUSING writes over an unreadable canvas the refusal had nowhere to go:
-/// the model logged it, the store returned, and the canvas kept accepting edits that were silently
-/// discarded for the rest of the session. A caller cannot surface what it is never told.
+/// What actually happened to a `save`; a caller cannot surface a refused write (e.g. over an unreadable canvas) it is
+/// never told about.
 enum WorkflowLayoutSaveOutcome: Equatable {
 
     /// The layout reached disk.
@@ -37,10 +23,8 @@ enum WorkflowLayoutSaveOutcome: Equatable {
     /// No container yet — the write was dropped.
     case notConfigured
 
-    /// The stored canvas could not be decoded, so the write was refused to protect the original
-    /// bytes. Carries the denormalized counts, which live outside the blob and say what the row
-    /// used to hold — that is the evidence a UI should put in front of the user.
-    /// Repair via `repairUnreadableLayout(_:for:reason:)`.
+    /// The stored canvas could not be decoded, so the write was refused to protect the original bytes. Carries the
+    /// denormalized counts, which live outside the blob. Repair via `repairUnreadableLayout(_:for:reason:)`.
     case refusedUnreadable(nodeCount: Int, edgeCount: Int, annotationCount: Int)
 
     /// The stored blob was written by a NEWER build; re-encoding here would strip its fields
@@ -53,17 +37,9 @@ enum WorkflowLayoutSaveOutcome: Equatable {
     /// True only when the bytes are on disk.
     var didPersist: Bool { self == .saved }
 
-    /// [WF-PE2] True for the two outcomes that are refused BY DESIGN and will refuse identically on
-    /// every future attempt, as opposed to `.failed`/`.notConfigured`, which may plausibly succeed
-    /// on retry (transient SwiftData error, or the container finishing configuration).
-    ///
-    /// ⚠️ This is the distinction `didPersist` collapses away. A caller that treats every non-`saved`
-    /// outcome as one undifferentiated failure ends up telling the user to retry something that is
-    /// refused by construction — exactly the quit-time loop this property exists to let callers
-    /// break out of. Both refused branches `return` in `save(_:for:)` strictly before any mutating
-    /// line, so nothing is ever attempted or left pending for either case — a caller may safely
-    /// treat a refused-only batch as "nothing to roll back, safe to proceed" with no compensating
-    /// logic needed.
+    /// True for the two outcomes refused by design, which refuse identically on every attempt, unlike
+    /// `.failed`/`.notConfigured`, which may succeed on retry. Both refusals return before any mutation, so a refused-only
+    /// batch has nothing to roll back.
     var isRefusedByDesign: Bool {
         switch self {
         case .refusedUnreadable, .refusedNewerVersion: return true
@@ -71,16 +47,8 @@ enum WorkflowLayoutSaveOutcome: Equatable {
         }
     }
 
-    /// [WF-PE2] User-facing reason for a refused-by-design outcome, for the quit-time choice this
-    /// row's own doc comment on `.refusedNewerVersion` promises. `nil` for every other case — a
-    /// caller has no business asking this of an outcome it never checked `isRefusedByDesign` on.
-    ///
-    /// A DELIBERATELY SEPARATE property from `WorkflowCanvasView`'s own in-canvas copy for these
-    /// same two cases, not a shared one: the in-canvas banner/overlay carries node/edge/annotation
-    /// counts and view-local state (`UnreadableLayoutInfo`) this type has no business holding, and
-    /// unifying them would drag UI-layer detail into the persistence layer for a one-line save.
-    /// Kept here rather than inline at the call site so the WORDING is testable independent of
-    /// `AppDelegate`, which has no unit-test seam.
+    /// User-facing reason for a refused-by-design outcome at quit time; nil for every other case. Separate from the canvas's
+    /// own copy, which carries view-local state; kept here so the wording is testable.
     var quitTimeRefusalReason: String? {
         switch self {
         case .refusedNewerVersion(let blobVersion, let appVersion):
@@ -103,20 +71,9 @@ final class WorkflowLayoutStore {
 
     // MARK: - Write Generation
 
-    /// Bumped on every write that CHANGES a stored layout — save, repair, delete.
-    ///
-    /// ⚠️ Exists so a cache of OTHER workflows' layouts can tell that one of them changed. A canvas
-    /// validating sub-workflow nesting caches its children's layouts and keyed that cache on the SET
-    /// of child ids alone — which never changes when a child's CONTENT does. Editing a child (adding
-    /// nodes inside it, introducing a cycle) therefore left the parent validating against a stale
-    /// copy for the rest of its session, so the nesting cycle/depth rules — `.error` severity — went
-    /// quietly wrong in both directions.
-    ///
-    /// A monotonic counter rather than per-profile notifications: comparing one `Int` is cheap
-    /// enough for `revalidate()`, which runs on every node drag and inspector keystroke, and a child
-    /// edited through ANY canvas or code path bumps it without anyone having to subscribe. The cost
-    /// of being coarse is an occasional redundant refetch after an unrelated workflow is saved — far
-    /// cheaper than the fetch-per-keystroke the cache exists to avoid.
+    /// Bumped on every write that changes a stored layout (save, repair, delete), so a cache of other workflows' layouts can
+    /// tell that one changed. A single counter keeps the comparison cheap enough for `revalidate()`, which runs on every
+    /// node drag.
     private(set) var writeGeneration: Int = 0
 
     // MARK: - SwiftData Container
@@ -135,21 +92,11 @@ final class WorkflowLayoutStore {
 
     // MARK: - Public API (matches the old UserDefaults-backed signature)
 
-    /// Loads the layout for a given workflow profile. Returns `.empty` on miss
-    /// (no row, no container, or decode failure) — the canvas treats an empty
-    /// layout as a fresh workflow.
-    /// Loads every workflow layout reachable from `layout` through sub-workflow nodes, keyed by
-    /// workflow profile ID. Feeds `WorkflowValidator`'s nesting and cycle rules.
-    ///
-    /// ⚠️ THE VISITED SET IS FOR TERMINATION, NOT CORRECTNESS. A workflow that contains itself would
-    /// recurse forever *while loading* — before the validator ever gets the chance to report the
-    /// cycle. The set is what makes a cyclic graph loadable at all; reporting the cycle is a
-    /// separate walk over the finished map.
-    ///
-    /// ⚠️ Resolved by the CALLER and handed to the validator, deliberately. The validator is a pure
-    /// synchronous function re-run on every canvas edit (`markDirty` → `revalidate`); making it load
-    /// layouts would put a SwiftData fetch on every keystroke and let stale async results race the
-    /// live ones. Same shape as `availableToolSources`.
+    // Why: resolved by the caller, not the validator: the validator is pure and re-runs on every canvas edit, so
+    // loading there would fetch on every keystroke.
+    /// Loads every workflow layout reachable from `layout` through sub-workflow nodes, keyed by workflow profile ID, for
+    /// `WorkflowValidator`'s nesting and cycle rules. The visited set exists for termination: a self-containing workflow
+    /// would recurse forever while loading.
     func resolveNestedLayouts(from layout: WorkflowLayout) -> [UUID: WorkflowLayout] {
         var resolved: [UUID: WorkflowLayout] = [:]
         var visited = Set<UUID>()
@@ -164,17 +111,8 @@ final class WorkflowLayoutStore {
         return resolved
     }
 
-    /// Every workflow this layout references, with the node that references it.
-    ///
-    /// ⚠️ THE ONE DEFINITION of "what other workflows does this graph run". Today the only shape is
-    /// a `.profile(_, .workflow)` node — but keep this the single extractor anyway. When the Loop
-    /// node existed there were TWO shapes, and for a long time only the first was collected, HERE
-    /// and in a private twin inside `validateNesting`: loop bodies were invisible to cycle/depth
-    /// validation (a mutually-recursive composition validated completely clean and died at run time
-    /// with "nesting depth exceeded", after ~2–3 canvas runs' worth of tokens). That register class
-    /// (WF-VA1 ≡ WF-NS5 ≡ WF-SE4) was one defect filed three times because the extractor existed
-    /// twice — any future node kind that references a workflow MUST be added here and only here.
-    /// (The Loop node was retired and deleted 2026-08-15.)
+    /// Every workflow this layout references, with the node that references it. The single definition of what other
+    /// workflows a graph runs; any future node kind that references a workflow must be added here only.
     nonisolated static func workflowReferences(in layout: WorkflowLayout) -> [(profileID: UUID, nodeName: String)] {
         layout.nodes.compactMap { node in
             if case .profile(let id, .workflow) = node.kind { return (id, node.displayName) }
@@ -191,18 +129,9 @@ final class WorkflowLayoutStore {
         loadWithOutcome(for: profileID).layout
     }
 
-    /// The layout, plus whether the READ actually succeeded.
-    ///
-    /// ⚠️ `load(for:)` collapses "this workflow has no saved row" and "the fetch threw" into the
-    /// same `.empty`, and a caller that then WRITES cannot tell them apart. That is a data-loss
-    /// path: a transient fetch failure renders an empty, clean canvas with no overlay, and the next
-    /// save overwrites the real graph with it — and, since 2026-08-29, hands the save-time reconcile
-    /// an empty reference set, which hard-deletes every one of that workflow's node configurations
-    /// and their Keychain credentials. The layout overwrite alone was recoverable by re-reading
-    /// disk; the credentials are not.
-    ///
-    /// Callers that only READ can keep using `load(for:)`. Any caller that writes, or that decides
-    /// what to delete, must consult `didFail` first.
+    /// The layout, plus whether the read succeeded. `load(for:)` collapses 'no saved row' and 'the fetch threw' into
+    /// `.empty`; any caller that writes or decides what to delete must consult `didFail` first, or a transient failure
+    /// overwrites the real graph and its credentials.
     func loadWithOutcome(for profileID: UUID) -> (layout: WorkflowLayout, didFail: Bool) {
         guard let context = mainContext else {
             logger.error("load(for:) called before container was configured — returning .empty. CONSEQUENCE: the caller cannot distinguish this from an empty workflow; a writer must treat it as a FAILED read and refuse to save over it.")
@@ -223,14 +152,9 @@ final class WorkflowLayoutStore {
         }
     }
 
-    /// Upserts the layout for a workflow profile. If a row already exists it's
-    /// updated in place (the `@Attribute(.unique)` constraint enforces 1:1);
-    /// otherwise a new row is inserted.
-    ///
-    /// ⚠️ Returns the outcome rather than `Void`: a write over an unreadable canvas is REFUSED by
-    /// `WorkflowLayoutSD`, and a caller that is not told keeps letting the user edit a canvas whose
-    /// every save is being thrown away. `@discardableResult` so the fire-and-forget callers that
-    /// genuinely do not care still compile, but a UI save path should check `didPersist`.
+    /// Upserts the layout for a workflow profile: updates the existing row in place (`@Attribute(.unique)`), else inserts a
+    /// new one. Returns the outcome; a write over an unreadable canvas is refused, so UI save paths should check
+    /// `didPersist`.
     @discardableResult
     func save(_ layout: WorkflowLayout, for profileID: UUID) -> WorkflowLayoutSaveOutcome {
         guard let context = mainContext else {
@@ -245,14 +169,8 @@ final class WorkflowLayoutStore {
         var descriptor = FetchDescriptor<WorkflowLayoutSD>(predicate: predicate)
         descriptor.fetchLimit = 1
 
-        // [WF-PE3] Fetched OUTSIDE the mutate-then-save scope so a fetch throw (nothing mutated,
-        // nothing to undo) and a save throw (a mutation is PENDING) are distinguishable — the old
-        // single do/catch conflated them, and the save-throw case matters: every store shares one
-        // `container.mainContext`, so a mutation left pending here would be silently flushed by
-        // the NEXT save any other store performs (the very next line of the canvas's own
-        // `saveLayout` used to call `profileService.saveProfile`, committing the "failed" layout
-        // after all). The rollbacks below make `.failed` actually MEAN "not on disk and nothing
-        // pending" — which is the contract the caller's guard relies on.
+        // Fetched outside the mutate-then-save scope so a fetch throw (nothing to undo) differs from a save throw (a pending
+        // mutation that another store's next save on the shared `mainContext` would flush).
         let existing: WorkflowLayoutSD?
         do {
             existing = try context.fetch(descriptor).first
@@ -299,9 +217,8 @@ final class WorkflowLayoutStore {
                     annotationCount: existing.annotationCount
                 )
             }
-            // [WF-PE3] Captured BEFORE the mutation so a save throw can restore it. Decoding
-            // is safe here: both unreadable and newer-version rows were refused above, so the
-            // getter returns the real stored canvas, not a placeholder.
+            // Captured before the mutation so a save throw can restore it; decoding is safe because unreadable and newer-version
+            // rows were refused above.
             let priorLayout = existing.layout
             existing.layout = layout    // setter refreshes blob + denormalized counts + updatedAt
             do {
@@ -309,12 +226,8 @@ final class WorkflowLayoutStore {
                 writeGeneration &+= 1
                 return .saved
             } catch {
-                // Un-mutate THIS row only — never `context.rollback()`, which would discard
-                // every pending change on the shared mainContext, including other subsystems'.
-                // Re-running the setter restores blob, counts and cache together; `updatedAt`
-                // is re-stamped, which is the one field that may differ from the on-disk row
-                // if this restored state is ever flushed by a later save — acceptable against
-                // the alternative (the "failed" layout itself being flushed).
+                // Un-mutate this row only, never `context.rollback()`, which would discard every pending change on the shared
+                // mainContext. Re-running the setter restores blob, counts and cache together (`updatedAt` is re-stamped).
                 existing.layout = priorLayout
                 logger.error(
                     "[PERSISTENCE] Failed to save layout for \(profileID): \(error.localizedDescription). "
@@ -325,13 +238,8 @@ final class WorkflowLayoutStore {
                 return .failed(error.localizedDescription)
             }
         } else {
-            // The FIRST save of this profile goes through a THROWAWAY context, not `mainContext`,
-            // so a failed save leaves nothing pending anywhere by construction — the scratch
-            // context dies with this scope. (A `context.delete(inserted)` retraction on the shared
-            // context was tried first and measured NOT to work: after the throwing save, SwiftData
-            // still returned the deleted-pending-insert from a fetch on that context.) On success
-            // the committed row is visible to `mainContext`'s next fetch like any other row; there
-            // is no prior in-memory state for this profile to go stale, because no row existed.
+            // The first save of a profile goes through a throwaway context, so a failed save leaves nothing pending by
+            // construction; retracting an insert on the shared context does not work, as SwiftData still returns it from a fetch.
             guard let container = modelContainer else { return .notConfigured }
             let scratch = ModelContext(container)
             scratch.insert(WorkflowLayoutSD(workflowProfileID: profileID, layout: layout))
@@ -351,11 +259,8 @@ final class WorkflowLayoutStore {
         }
     }
 
-    /// Reports whether this profile's stored canvas is unreadable, so a view can say so instead of
-    /// presenting an empty canvas as the user's own.
-    ///
-    /// Exists because `hasUnreadableLayout` lives on the `@Model` and every UI layer goes through
-    /// this store — without it the flag has no reachable consumer.
+    /// Reports whether this profile's stored canvas is unreadable, so a view can say so instead of presenting an empty
+    /// canvas as the user's own.
     func isLayoutUnreadable(for profileID: UUID) -> Bool {
         guard let context = mainContext else { return false }
         let predicate = #Predicate<WorkflowLayoutSD> { $0.workflowProfileID == profileID }
@@ -364,11 +269,8 @@ final class WorkflowLayoutStore {
         return (try? context.fetch(descriptor).first)??.hasUnreadableLayout ?? false
     }
 
-    /// The denormalized counts for this profile's stored layout.
-    ///
-    /// These live OUTSIDE the blob and were written by the last SUCCESSFUL save, so they remain
-    /// trustworthy when the blob itself is not — which is what lets the canvas say "it last held
-    /// 5 nodes" rather than something vague. Zeroes when there is no row.
+    /// The denormalized counts for this profile's stored layout; they live outside the blob and come from the last
+    /// successful save, so they stay trustworthy when the blob is not. Zeroes when there is no row.
     func storedCounts(for profileID: UUID) -> (nodes: Int, edges: Int, annotations: Int) {
         guard let context = mainContext else { return (0, 0, 0) }
         let predicate = #Predicate<WorkflowLayoutSD> { $0.workflowProfileID == profileID }
@@ -378,11 +280,9 @@ final class WorkflowLayoutStore {
         return (row.nodeCount, row.edgeCount, row.annotationCount)
     }
 
-    /// Discards an unreadable canvas and replaces it — the only sanctioned way past the refusal.
-    ///
-    /// ⚠️ DESTRUCTIVE and irreversible: the undecodable bytes are gone afterwards. Deliberately not
-    /// reachable from `save`, so it can only happen when a caller has explicitly decided to. Callers
-    /// should confirm with the user first, quoting the counts from `.refusedUnreadable`.
+    /// Discards an unreadable canvas and replaces it, the only sanctioned way past the refusal. Destructive and
+    /// irreversible, and not reachable from `save`; callers should confirm with the user first, quoting the counts from
+    /// `.refusedUnreadable`.
     @discardableResult
     func repairUnreadableLayout(
         _ layout: WorkflowLayout,
@@ -401,18 +301,10 @@ final class WorkflowLayoutStore {
         var descriptor = FetchDescriptor<WorkflowLayoutSD>(predicate: predicate)
         descriptor.fetchLimit = 1
 
-        // ⚠️ READINESS CR-62 (2026-10-12). Both failure paths below used to call
-        // `context.rollback()` on the SHARED mainContext. That never undid the failed save
-        // (SwiftData cannot, `SharedContextCommitTests`), and it DISCARDED every other subsystem's
-        // pending changes (an unsaved chat auto-title, a skill edit), which this file forbids in
-        // `save(_:for:)`. Now each path touches only its own work: an existing row is put back
-        // field by field, exactly as `save(_:for:)` does, and a missing row is inserted on a
-        // throwaway context, as the first save does.
-        //
-        // ⚠️ The existing row stays on mainContext, NOT a throwaway context: measured, a throwaway
-        // context's committed update refreshes mainContext's instance's stored fields but NOT its
-        // `@Transient` decoded-layout cache, so the canvas would keep showing the pre-repair state
-        // (`PersistenceBatch6Tests` probe).
+        // Why: the existing row stays on mainContext: a throwaway context's update does not refresh the `@Transient`
+        // decoded-layout cache.
+        // Failure paths touch only their own work, never `context.rollback()` on the shared mainContext, which discards others'
+        // pending changes: an existing row is restored field by field, a missing one inserted on a throwaway context.
         let existing: WorkflowLayoutSD?
         do {
             existing = try context.fetch(descriptor).first
@@ -468,11 +360,8 @@ final class WorkflowLayoutStore {
     /// cascade hook in `BackendProfileService.deleteProfile` so a deleted
     /// workflow profile doesn't leave an orphan layout behind.
     func delete(for profileID: UUID) {
-        // CR-62: the delete is staged on a THROWAWAY context. A failed save then leaves no pending
-        // delete on the shared mainContext to ride out on another subsystem's next save, and needs
-        // no `rollback()`, which discarded everyone else's pending changes. Measured: a throwaway
-        // context's committed delete is visible to mainContext's next fetch, even for a row
-        // mainContext had already loaded (`PersistenceBatch6Tests` probe).
+        // The delete is staged on a throwaway context, so a failed save leaves no pending delete on the shared mainContext and
+        // needs no rollback; its committed delete is visible to mainContext's next fetch.
         guard let container = modelContainer else {
             logger.error("[PERSISTENCE] delete(for:) called before the container was configured — profile \(profileID). CONSEQUENCE: the layout row (if any) is left in place as an orphan.")
             return

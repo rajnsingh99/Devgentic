@@ -4,10 +4,7 @@
 //  BotResilienceIntegrationTests.swift
 //  DevgenticTests
 //
-//  Phase-C resilience: end-to-end proof that the bot path (ChatExecutor) now
-//  bounds transport failures and surfaces honest classified messages (audit #9).
-//  Before this, the bot streamed with zero retry/throttle handling — a single 429
-//  or network blip produced a raw error card.
+//  Created by Raj Singh.
 //
 
 import XCTest

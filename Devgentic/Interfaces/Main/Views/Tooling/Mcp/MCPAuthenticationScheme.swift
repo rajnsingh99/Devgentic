@@ -4,13 +4,7 @@
 //  MCPAuthenticationScheme.swift
 //  Devgentic
 //
-//  Typed model for how a remote MCP server authenticates the client.
-//  Today: none / bearer / api-key header. Phase 2 fills in OAuth.
-//
-//  This is the *configuration* — what kind of auth — not the secret material.
-//  Tokens and keys live in `MCPSecretStore` (Keychain), keyed by `sourceID`
-//  + scope. That separation is why this enum is plain Codable: nothing in here
-//  is sensitive, so it's safe to persist inside `ServerDefinition`.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -32,18 +26,12 @@ enum MCPAuthenticationScheme: Codable, Hashable {
     /// `headerName` is part of config (not secret) so we keep it inline.
     case apiKeyHeader(headerName: String)
 
-    /// OAuth 2.1 (PKCE + dynamic client registration). The full credential
-    /// bundle — access token, refresh token, expiry, scopes, registered client
-    /// metadata — lives in Keychain at `MCPSecretScope.oauthBundle` for this
-    /// source. The `issuer` URL is config (not secret).
-    ///
-    /// Reserved for Phase 2; declared here so the type is stable from the
-    /// start and we don't have to migrate every call site later.
+    /// OAuth 2.1 (PKCE + dynamic client registration). The credential bundle (tokens, expiry, scopes, registered client
+    /// metadata) lives in Keychain at `MCPSecretScope.oauthBundle`; the `issuer` URL is config, not secret.
     case oauth(issuer: URL)
 
-    /// True for `.oauth` — the scheme whose credential is the Keychain bundle that
-    /// `MCPOAuthBinding`'s URL invariant (register KC-14) governs. Exists because the case
-    /// carries a payload, so `== .oauth` does not compile.
+    /// True for `.oauth`, whose credential is the Keychain bundle governed by `MCPOAuthBinding`'s URL invariant.
+    /// Exists because the case carries a payload, so `== .oauth` does not compile.
     var isOAuth: Bool {
         if case .oauth = self { return true }
         return false

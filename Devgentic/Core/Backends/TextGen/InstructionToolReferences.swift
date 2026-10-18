@@ -4,32 +4,20 @@
 //  InstructionToolReferences.swift
 //  Devgentic
 //
-//  Finds tool names in a profile's system instructions that the profile cannot actually call.
-//
-//  ⚠️ WHY (2026-10-04). Agent 3's instructions said "use fs_smart_search first". That tool had been
-//  renamed `spotlight_search` nine days earlier, and the profile did not have it enabled under
-//  either name — so every run told the model to call a tool that was not in its loadout. Nothing
-//  said so: the `[TOOLS]` log line only lists what IS offered. The model coped by guessing paths,
-//  costing a wasted step per run.
-//
-//  ⚠️ DESCRIBES, NEVER GATES (standing directive: capability metadata may label, never block). The
-//  findings become an ADVISORY in `ProfileValidator` and a log line in `AgentConnect`; a profile
-//  that mentions a tool it lacks still saves and still runs.
-//
-//  Matching is by EXACT name against declared vocabularies — the native catalogue, the injected
-//  control-plane tools, and the retired-name lists — never by "looks like a tool". Only names
-//  containing an underscore are considered, so prose words that happen to equal a one-word tool
-//  name (`git`) are never flagged.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Finds tool names in a profile's system instructions that the profile cannot actually call.
+/// Findings are advisory and logged, never a gate; matching is by exact name against declared vocabularies.
+/// Only names containing an underscore are considered, so one-word prose like `git` is never flagged.
 enum InstructionToolReference: Equatable, Sendable {
     /// A real tool, not enabled on this profile.
     case notEnabled(name: String)
     /// A tool that was renamed; `replacementEnabled` says whether the new name is in the loadout.
     case renamed(old: String, new: String, replacementEnabled: Bool)
-    /// A tool that no longer exists.
+    /// A tool name from the retired-name lists.
     case removed(name: String)
 
     var name: String {
@@ -60,11 +48,8 @@ enum InstructionToolReferences {
     private static let identifierPattern = try! NSRegularExpression(pattern: #"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b"#)
 
     /// The findings for `instructions`, in order of first mention, one per name.
-    ///
-    /// - Parameters:
-    ///   - enabledToolNames: names the profile actually offers the model.
-    ///   - knownToolNames: every real tool name (defaults to the native catalogue). Tests inject.
-    ///   - alwaysAvailable: tools every run carries regardless of the profile (control plane).
+    /// - Parameters: `enabledToolNames` is what the profile offers; `knownToolNames` defaults to the native catalogue.
+    ///   `alwaysAvailable` lists control-plane tools every run carries regardless of the profile.
     static func check(
         instructions: String?,
         enabledToolNames: Set<String>,

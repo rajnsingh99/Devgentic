@@ -4,7 +4,7 @@
 //  OpenAIAdvancedConfig.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -36,10 +36,8 @@ struct OpenAIAdvancedConfig: Codable, Hashable {
 
     // MARK: - OpenRouter Routing
 
-    /// OpenRouter only: when true, requests carry `provider.data_collection: "deny"`, so OpenRouter
-    /// routes only to upstream providers that do not retain or train on prompts. Off (nil) by
-    /// default — many `:free` models are served ONLY by providers that do collect data, and with
-    /// this on OpenRouter refuses them ("No endpoints found matching your data policy").
+    /// OpenRouter only: when true, requests carry `provider.data_collection: "deny"` (no retaining or training on prompts).
+    /// Off (nil) by default: many `:free` models are served only by data-collecting providers, which this setting excludes.
     /// Ignored by OpenAI proper, which shares this config type.
     var denyDataCollection: Bool?
 
@@ -110,7 +108,7 @@ struct OpenAIAdvancedConfig: Codable, Hashable {
         // reasoningEffort
         self.reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
 
-        // denyDataCollection — absent in every config saved before 2026-09-27 → nil (off).
+        // `denyDataCollection` decodes as nil (off) when absent.
         self.denyDataCollection = try container.decodeIfPresent(Bool.self, forKey: .denyDataCollection)
     }
 }

@@ -4,14 +4,12 @@
 //  SettingsDetailContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  Wraps the SettingsCategory destination view for display
-//  in the main content area.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Wraps the `SettingsCategory` destination view for display in the main content area.
 struct SettingsDetailContainerView: View {
 
     let category: SettingsCategory

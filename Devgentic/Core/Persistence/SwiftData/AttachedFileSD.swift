@@ -4,8 +4,7 @@
 //  AttachedFileSD.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 03/04/26.
-//  SwiftData models replacing AttachedTextFileEntity and AttachedImageFileEntity (CoreData).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -13,33 +12,10 @@ import SwiftData
 
 private let logger = DGLogger(category: "AttachedFileSD")
 
+// Why: the placeholder must be unique per row (the id feeds `FileSystemItem(id:)`), or two attachments collide in a list.
 /// Resolves a persisted URL string without ever trapping.
-///
-/// ⚠️ Both `toStruct()` methods used to do `URL(string: url)!`. That trapped on the READ path —
-/// while LOADING A CONVERSATION, with the user's history on screen — not merely rendering badly.
-///
-/// ⚠️ MEASURED on macOS 26, because the intuition here is wrong: `URL(string:)` returns nil ONLY
-/// for the EMPTY string. Spaces, NUL bytes, newlines and control characters all parse, percent-
-/// encoded. So the crash surface was exactly one value — but an empty column is precisely what a
-/// defaulted or truncated write produces, so it was a real trap, not a theoretical one.
-///
-/// That leniency creates a second, quieter problem this also fixes: a BARE PATH like `/tmp/x`
-/// parses successfully into a SCHEMELESS URL, which is not a usable file URL. `from(_:)` always
-/// writes an `absoluteString` (which carries a scheme), so a schemeless value means the row came
-/// from somewhere else — a hand-edited store, or a future change that persists raw paths.
-///
-/// The ladder, in order:
-///   1. A parse that yields a SCHEME — the normal `absoluteString` round-trip.
-///   2. An existing file at that path — recovered as a proper file URL rather than left schemeless.
-///   3. Whatever the lenient parse produced — preserved rather than discarded.
-///   4. A placeholder derived from the row id (the empty-string case).
-///
-/// ⚠️ The placeholder must be UNIQUE PER ROW, not a shared sentinel: `MessagingCoordinator` builds
-/// `FileSystemItem(id: $0.url, …)`, so a shared value would collide two attachments into one
-/// identity in a SwiftUI list. Deriving it from the row id also keeps it stable across loads.
-///
-/// Nothing is lost at any rung — `name`, `content` and `binaryData` live in their own columns, so
-/// the attachment still renders; only its source path is degraded.
+/// `URL(string:)` returns nil only for the empty string, and a schemeless bare path parses but is not a usable file URL.
+/// Ladder: a parse with a scheme, an existing file at that path, the lenient parse, else a row-id placeholder.
 private func resolvePersistedURL(_ raw: String, rowID: UUID, kind: String) -> URL {
     let parsed = URL(string: raw)
 
@@ -68,7 +44,7 @@ private func resolvePersistedURL(_ raw: String, rowID: UUID, kind: String) -> UR
         return parsed
     }
 
-    // 4. Empty. The only value that used to crash.
+    // Empty: the one value `URL(string:)` rejects.
     logger.error(
         "[DECODE] \(kind) \(rowID.uuidString.prefix(8)): stored url is EMPTY — substituting a "
         + "unique placeholder. CONSEQUENCE: the attachment's name and contents are unaffected and "
@@ -81,6 +57,7 @@ private func resolvePersistedURL(_ raw: String, rowID: UUID, kind: String) -> UR
         ?? URL(fileURLWithPath: "/dev/null")
 }
 
+/// SwiftData models for attached text and image files.
 @Model
 final class AttachedTextFileSD {
     @Attribute(.unique) var id: UUID
@@ -125,12 +102,8 @@ final class AttachedImageFileSD {
     var name: String
     var url: String
     var fileExtension: String
-    /// The transcript's durable copy of the image — `AttachedImageCardView` renders
-    /// from these bytes because the source `url` goes stale (moved/deleted files,
-    /// sandbox scope not surviving relaunch). `.externalStorage` keeps the blob out
-    /// of the SQLite row (sidecar file, managed by the store) so fetching messages
-    /// doesn't drag megabytes of pixels through the row cache. Storage-option-only
-    /// change: lightweight migration; existing inline blobs remain readable.
+    /// The durable copy of the image: `AttachedImageCardView` renders from these bytes because the source `url` goes stale.
+    /// `.externalStorage` keeps the blob out of the SQLite row so fetching messages does not load the pixels.
     @Attribute(.externalStorage) var binaryData: Data
     var size: Int64
 
@@ -140,19 +113,9 @@ final class AttachedImageFileSD {
                           fileExtension: fileExtension, binaryData: binaryData, size: size)
     }
 
-    /// [mm-4] The struct WITHOUT its bytes. `binaryData` is the schema's only
-    /// `@Attribute(.externalStorage)` field and the ONE property this method never reads, so
-    /// the sidecar file is never faulted in — for consumers that need the name and size only
-    /// (the conversation export lists images by name and size and never embeds them). `size`
-    /// is the byte count recorded at attach time, which is what `ConversationExporter.
-    /// imageByteCount` falls back to when `binaryData` is empty.
-    ///
-    /// The "never faulted in" part is MEASURED, not assumed (2026-09-12, standalone SwiftData
-    /// probe, on-disk store, 40 rows × 2 MB, fresh process): fetching all rows and reading
-    /// `name`/`size` only took ~1 ms; reading `data.count` took ~9 ms and the store had written
-    /// 40 sidecar files. SwiftData loads an external-storage blob on ATTRIBUTE access, not when
-    /// the object fault fires. The unit test can only pin the struct's shape (it runs in-memory,
-    /// where there is no sidecar), which is why the number lives here.
+    // Why: SwiftData loads an external-storage blob on attribute access, so reading `binaryData` would fault in sidecar files.
+    /// Returns the struct without its bytes; `binaryData` is never read, so its external-storage sidecar is never loaded.
+    /// For consumers that need name and size only; `size` is the byte count recorded at attach time.
     func toStructOmittingBytes() -> AttachedImageFile {
         AttachedImageFile(id: id, name: name,
                           url: resolvePersistedURL(url, rowID: id, kind: "AttachedImageFile"),

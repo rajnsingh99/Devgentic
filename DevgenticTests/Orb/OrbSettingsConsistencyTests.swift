@@ -4,8 +4,7 @@
 //  OrbSettingsConsistencyTests.swift
 //  DevgenticTests
 //
-//  [Audit Batch 1] Pins the promises the settings pane makes. Each row here corresponds to a
-//  finding where the UI said one thing and the code did another.
+//  Created by Raj Singh.
 //
 
 import XCTest

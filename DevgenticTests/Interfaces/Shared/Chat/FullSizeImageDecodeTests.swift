@@ -4,20 +4,7 @@
 //  FullSizeImageDecodeTests.swift
 //  DevgenticTests
 //
-//  [CF-23] Both image renderers decoded the full-size picture as
-//  `Task.detached { NSImage(data: data) }`, under a comment claiming this kept a large artifact
-//  from stalling the bubble. It did not: `NSImage(data:)` only reads headers — measured at
-//  ~0.2 ms for a 4000×3000 JPEG whose real decode is ~60 ms — and materialises the pixels on
-//  FIRST DRAW, inside `Image(nsImage:)`, on the main thread. The hop moved the cheap half.
-//
-//  `ImageDownsampler.fullSize` replaces it, going through the same ImageIO path
-//  `ImageDownsampler.thumbnail` already used but unbounded, with
-//  `kCGImageSourceShouldCacheImmediately` so the pixels are produced on the caller's thread.
-//
-//  ⚠️ Two of these tests are REGRESSION guards, not fixes. `NSImage(data:)` already honoured
-//  EXIF orientation and already reported true pixel dimensions; the naive replacements
-//  (`CGImageSourceCreateImageAtIndex`, and `NSImage(cgImage:size:)`) quietly break both. They
-//  are pinned here because the change is where they would have been lost.
+//  Created by Raj Singh.
 //
 
 import XCTest

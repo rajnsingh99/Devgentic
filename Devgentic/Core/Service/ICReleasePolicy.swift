@@ -4,31 +4,14 @@
 //  ICReleasePolicy.swift
 //  Devgentic
 //
-//  Pure decision table for Intelligence Core model residency, extracted from
-//  `IntelligenceCoreService` so the concurrency policy is verifiable without loading an
-//  MLX model. The actor owns an instance and performs whatever `Action` it returns.
-//
-//  Two rules this encodes:
-//
-//  1. NEVER free while a generation is in flight. Previously `unload` nil'd the container
-//     and called `MLX.GPU.clearCache()` unconditionally, so any feature could clear the
-//     cache mid-inference and force the next caller to reload a model that was still
-//     resident. The in-flight generation survived (it captures the container before its
-//     first suspension), so this was thrash rather than corruption — but it was invisible.
-//
-//  2. Release is IDLE-DEBOUNCED, not immediate. The IC features run sequentially inside a
-//     single chat turn (RAG query rewriting → history compaction → response synthesis).
-//     Freeing the model the moment each finished made a turn pay 2-3 multi-second MLX
-//     loads. Deferring the free lets one load serve the whole turn while an idle app still
-//     gives the memory back.
-//
-//  `requestImmediateRelease` opts out of (2) for deliberate teardown — the user switching
-//  Core Intelligence off, or changing the IC model, where lingering residency would mean
-//  the next inference silently reuses the OLD model.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Pure decision table for Intelligence Core model residency; the owning actor performs the `Action` it returns.
+/// Never frees while a generation is in flight, and release is idle-debounced so one load serves a whole chat turn.
+/// `requestImmediateRelease` opts out for deliberate teardown (feature switched off, model changed).
 struct ICReleasePolicy: Equatable {
 
     /// What the actor should do as a result of a state change.

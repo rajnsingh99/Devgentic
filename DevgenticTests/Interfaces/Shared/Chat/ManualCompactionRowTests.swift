@@ -4,8 +4,7 @@
 //  ManualCompactionRowTests.swift
 //  DevgenticTests
 //
-//  The transcript row for a manual compaction (2026-09-25). Before it, a compaction started and
-//  finished with nothing on screen once the gauge popover closed.
+//  Created by Raj Singh.
 //
 
 import XCTest

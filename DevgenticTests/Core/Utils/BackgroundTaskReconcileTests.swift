@@ -4,22 +4,7 @@
 //  BackgroundTaskReconcileTests.swift
 //  DevgenticTests
 //
-//  What a `running` row means after it comes back off disk.
-//
-//  ⚠️ A persisted row keeps whatever status was last flushed, and `BackgroundTaskCard` renders
-//  `.running` as LIVE: a spinner, an elapsed clock counting up from `startedAt`, and an
-//  auto-expanded output pane. After a relaunch that is always false — `terminateAll` kills every
-//  task inside `applicationShouldTerminate`, and the registry does not survive the process — so
-//  yesterday's build came back claiming to have been running for fourteen hours.
-//
-//  `.interrupted` existed in the wire format from the beginning and NOTHING EVER SET IT. The card
-//  already had its icon, its colour, and a label written to claim no duration. Only the thing that
-//  assigns it was missing.
-//
-//  ⚠️ The interesting case is not the relaunch. It is a task that finished while its conversation
-//  was unloaded: `Tracked.message` is a WEAK reference on purpose, so the observer drops tracking
-//  and the real ending never reaches the row. The registry still knows it — and the row should
-//  adopt THAT, not be flattened to "interrupted".
+//  Created by Raj Singh.
 //
 
 import XCTest

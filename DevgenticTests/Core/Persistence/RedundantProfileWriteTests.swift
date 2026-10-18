@@ -2,23 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RedundantProfileWriteTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  `refreshInstructionsOnProfile()` runs before EVERY send and rebuilds the same instruction block
-//  from the same inputs.
-//
-//  ⚠️⚠️ Field-observed 2026-09-20: a Code session emitted one
-//  `[PROFILE_SAVE] ⚠️ REDUNDANT — saved with NO field changed` per message. Each was a real
-//  SwiftData write, a WAL entry, and a `lastSelected` bump that reordered "recently used" for a
-//  profile the user had not selected — they were typing in it.
-//
-//  ⚠️ The guard is at the CALLER, not in `BackendProfileStore`. A store-level early return was
-//  written and reverted: `BackendProfile.details` has a setter that moves the API key to the
-//  Keychain, refuses to overwrite an undecodable blob and rewrites every denormalized column.
-//  Skipping it centrally skips those too — and would strand a row whose `_cachedDetails` diverged
-//  from its persisted blob after an encode failure, because the next identical save would then
-//  look like a no-op instead of repairing it. These tests therefore assert the OBSERVABLE
-//  outcome — the row is not rewritten — rather than which layer declined to write.
+//  Created by Raj Singh.
 //
 
 import XCTest

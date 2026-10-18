@@ -4,9 +4,7 @@
 //  ManualCompactionTests.swift
 //  DevgenticTests
 //
-//  The context gauge's "Compact history" (2026-09-24). Automatic compaction runs only through the
-//  Intelligence Core, which is off by default — so before this, a long conversation could only
-//  ever be trimmed, never summarized.
+//  Created by Raj Singh.
 //
 
 import XCTest

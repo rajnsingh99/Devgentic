@@ -4,18 +4,13 @@
 //  BalancedJSONScanner.swift
 //  Devgentic
 //
-//  Single, correct implementation of "find the first balanced {…} / […] block in a
-//  string" (audit #15, sub-issue 5). Previously this was hand-rolled in ~12 parsers and
-//  OllamaLLMProvider, with two genuinely buggy variants:
-//    - `prevChar != "\\"` escape checks (Ollama / ReActMarkdown) mishandle `\\"` — an
-//      escaped backslash followed by a real closing quote — and stay "inside the string".
-//    - inline scans with NO string-state (MistralXML) break on a `{`/`[` that lives inside
-//      a JSON string value.
-//  This scanner honors JSON string + escape rules so delimiters inside strings never count.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Finds the first balanced `{…}` / `[…]` block in a string, honoring JSON string and escape rules
+/// so delimiters inside strings never count.
 enum BalancedJSONScanner {
 
     /// Range of the first balanced group of `opener` (`{` or `[`) at/after `start`.
@@ -61,35 +56,11 @@ enum BalancedJSONScanner {
         balancedRange(in: text, from: start, opener: "[").map { text[$0] }
     }
 
-    /// Splits `text` into `(prose, block, tail)` where `block` is the first balanced `{…}` OR
-    /// `[…]` that is ALSO shaped like a leaked tool call, `prose` is everything before it, and
-    /// `tail` is everything after. `block` is `nil` when nothing qualifies, in which case the
-    /// whole text is returned as `prose`. Substrings are untrimmed — the caller trims/strips.
-    ///
-    /// ⚠️⚠️ TWO DEFECTS FIXED HERE 2026-09-20, both of which destroyed model output.
-    ///
-    /// 1. `tail` did not exist. This returned `(before, block)` and the caller had nowhere to put
-    ///    the rest, so EVERYTHING AFTER THE BLOCK WAS SILENTLY DISCARDED. The test that covered
-    ///    this fed `prose here {"k":1} tail` and asserted nothing about `" tail"`.
-    ///
-    /// 2. Balance alone decided what a block was. Balanced brackets are not evidence of JSON:
-    ///    `[truncated]`, `[the docs]`, `[a-z]`, `[INFO]` are all balanced, and all ordinary prose.
-    ///
-    /// Together they produced silent content loss on any Ollama response carrying a bracketed
-    /// token and no native tool calls. Measured against the real splitter:
-    ///
-    ///     "…output was [truncated] so I could not…"        →  35B of 80B dropped
-    ///     "See [the docs](https://example.com) for…"       →  55B of 68B dropped  (81%)
-    ///     "…the approach in [1] which uses…"               →  33B of 64B dropped
-    ///     "Use the pattern [a-z]+ to match…"               →  41B of 61B dropped
-    ///     "The log line [INFO] startup complete…"          →  47B of 65B dropped
-    ///
-    /// Field-observed: a 474-byte answer reached the parser as the 11-byte string "[truncated]".
-    ///
-    /// ⚠️ This is the FIFTH member of the content-corruption class in this codebase — a transform
-    /// rewriting a payload because it matched a SHAPE. The other four were fixed by keying off the
-    /// argument NAME; there is no name here, so the shape test is made strict enough to mean
-    /// something instead.
+    // Why: balance alone is not evidence of JSON: `[truncated]`, `[INFO]` and `[1]` are balanced prose, and treating them as
+    // a block silently drops the surrounding model output
+    /// Splits `text` into `(prose, block, tail)`: `block` is the first balanced `{…}` or `[…]` that is also shaped like a
+    /// leaked tool call, `prose` everything before it and `tail` everything after (both untrimmed). `block` is nil when
+    /// nothing qualifies, and the whole text is returned as `prose`.
     static func splitProseAndBlock(in text: String) -> (prose: Substring, block: Substring?, tail: Substring) {
         let whole = text[...]
         let empty = text[text.endIndex...]
@@ -110,16 +81,9 @@ enum BalancedJSONScanner {
         return (whole, nil, empty)
     }
 
-    /// True when `candidate` is JSON that could carry a tool call: an object, or an array of
-    /// objects.
-    ///
-    /// ⚠️ "Parses as JSON" alone is NOT sufficient, and that is the whole subtlety. `[1]` — a
-    /// citation marker in ordinary prose — is perfectly valid JSON. So is `[1,2]`. A leaked tool
-    /// call is always an object (`{"name":…}`) or an array of them, never an array of scalars, so
-    /// the element type is what separates the two.
-    ///
-    /// ⚠️ `.fragmentsAllowed` is deliberately NOT passed: with it, a bare `"word"` or number would
-    /// qualify and the check would be nearly as weak as balance alone.
+    // Why: parsing as JSON is not enough (`[1]` parses): a leaked call is an object or array of objects, and
+    // `.fragmentsAllowed` stays off so a bare word or number does not qualify
+    /// True when `candidate` is JSON that could carry a tool call: an object, or an array of objects.
     static func isToolCallShaped(_ candidate: Substring) -> Bool {
         guard let data = String(candidate).data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data) else { return false }

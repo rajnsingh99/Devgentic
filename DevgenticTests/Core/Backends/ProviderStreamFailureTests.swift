@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ProviderStreamFailureTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-14, CR-15, CR-16 — three ways a provider failure on an HTTP-200 stream was lost.
-//
-//  CR-14: an Anthropic in-stream `overloaded_error` became `.invalidResponse`, which nothing retries,
-//         while the identical failure sent as HTTP 529 got three retries.
-//  CR-15: an Ollama `{"error": …}` line mid-stream was skipped; the stream then ended cleanly and a
-//         cut-off answer was saved as a success.
-//  CR-16: Anthropic `stop_reason: "refusal"` and Gemini blocks were never checked — an empty or
-//         partial answer with no explanation.
-//
-//  These drive the providers' REAL decoders, which each stream passes as `handleLine:` directly.
+//  Created by Raj Singh.
 //
 
 import XCTest

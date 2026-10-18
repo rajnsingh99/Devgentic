@@ -2,20 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsSourceScan.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  ONE reader for every structural scan over the ChatOps tree.
-//
-//  ⚠️⚠️ THREE TEST FILES CARRIED THREE READERS, AND THEY DID NOT AGREE. `ChatOpsSilentDropTests` had a
-//  `codeLines` that dropped WHOLE comment lines only — so a trailing `// …` comment after code was
-//  still scanned — while `ChatOpsLoggingHygieneTests` and `ChatOpsSecurityTierMatrixTests` stripped to
-//  end-of-line. A scan is only as good as its reader, and a comment-blind scan has produced a false
-//  verdict FOUR times in this subsystem's history, in both directions: a commented-out line failing a
-//  test, and prose quoting the very pattern being searched for.
-//
-//  ⚠️ EVERY SCAN GOES THROUGH `strippingComments`. These files document the patterns being searched
-//  for — several comments quote `_ = try? await apiClient?.sendMessage(...)` verbatim while explaining
-//  why it was replaced.
+//  Created by Raj Singh.
 //
 
 import XCTest

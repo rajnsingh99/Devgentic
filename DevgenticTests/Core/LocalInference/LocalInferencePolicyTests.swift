@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  The coordinator's pure decision table (plan §3.3) and queue order (§3.4).
+//  LocalInferencePolicyTests.swift
+//  DevgenticTests
+//
+//  Created by Raj Singh.
 //
 
 import XCTest

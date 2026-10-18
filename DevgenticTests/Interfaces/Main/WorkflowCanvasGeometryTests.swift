@@ -4,21 +4,7 @@
 //  WorkflowCanvasGeometryTests.swift
 //  DevgenticTests
 //
-//  Register `Workflow_Production_Readiness_Fresh.md`, canvas cluster — `CVC-5` (selection outliving
-//  its graph), `CVC-8` (one sticky-note resize floor) and `CVC-9` (reveal the offending node).
-//
-//  ⚠️ THE DRAG FLOOR IS GONE (owner decision, 2026-09-02). `CVC-6` narrowed a `max(0, …)` and
-//  `CVC-10` made the preview honour it; both are now superseded — a node may be dragged to ANY
-//  coordinate. The tests that pinned the floor were REPLACED, not deleted, by tests that pin its
-//  absence, and `CVC-10`'s property (preview ≡ commit) outlives the rule it was written for and is
-//  asserted through the real seams. ⚠️ The sticky-note RESIZE floor (`CVC-8`) is a SIZE floor and
-//  is unaffected — do not remove it while tidying.
-//
-//  Every one of these was a DECISION buried where a test could not reach it — inside a
-//  `DragGesture` closure, inside a SwiftUI view's private computed property, or inside a
-//  `@MainActor` method's side effects. Each fix extracted the decision first (WF-UI5 doctrine) and
-//  this file is what makes that extraction worth anything: the rules are truth-tabled directly,
-//  including their boundaries, so a later "simplification" that re-inlines one of them goes red.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,25 +4,13 @@
 //  KnowledgeSourceImport.swift
 //  Devgentic
 //
-//  Created on 07/08/26.
-//
-//  The "Add File" importer shared by the agent and bot editors.
-//
-//  ⚠️ Register A60. The two editors each carried their own copy of this loop, both written
-//  `if case let .success(urls) = result` — so a `.failure` was dropped entirely: no message, no log,
-//  no retry hint. An iCloud placeholder that fails to materialise, a file on an ejected volume, or a
-//  sandbox permission denial all looked exactly like pressing Cancel.
-//
-//  ⚠️ Both copies also dropped duplicates in silence. Re-adding a file already attached is not an
-//  error and must not be reported as one — but selecting three files and seeing the list grow by one
-//  needs a word of explanation, or it reads as a broken import.
-//
-//  One implementation because two copies of the same loop is how they came to be wrong in the same
-//  way twice (cf. registers A28, A32).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The "Add File" importer shared by the agent and bot editors.
+/// Reports import failures and explains skipped duplicates instead of dropping them silently.
 enum KnowledgeSourceImport {
 
     /// Applies a `.fileImporter` result to a knowledge-source list.

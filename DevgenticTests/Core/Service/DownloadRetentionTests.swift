@@ -4,11 +4,7 @@
 //  DownloadRetentionTests.swift
 //  DevgenticTests
 //
-//  G15 parts 1 & 2 — retention and bounded reads. (The migration-plan half is tracked
-//  separately; see MIGRATION_PLAN.md.)
-//
-//  Download history was monotonic for the life of the install and every row was scanned on
-//  each bridge reconcile and each sidebar render.
+//  Created by Raj Singh.
 //
 
 import XCTest

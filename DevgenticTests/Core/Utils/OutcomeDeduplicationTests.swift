@@ -4,10 +4,7 @@
 //  OutcomeDeduplicationTests.swift
 //  DevgenticTests
 //
-//  Item 13 (2026-10-04): on native providers every prior answer reached the model twice — complete,
-//  as a native assistant turn, and again as a 200-char `<outcome>` clip in the episodic XML, cut
-//  mid-word. The XML now drops `<outcome>` for exactly the answers the native turns carry in full,
-//  matched by agent message id.
+//  Created by Raj Singh.
 //
 
 import XCTest

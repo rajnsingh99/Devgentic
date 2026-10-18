@@ -4,7 +4,7 @@
 //  CatalogModelItem.swift
 //  Devgentic
 //
-//  Data model representing an LLM model in the dedicated Model Catalog split-view window.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -12,6 +12,7 @@ import SwiftUI
 
 // MARK: - Provider Categories for Catalog Sidebar
 
+/// Data model for an LLM entry in the Model Catalog split-view window.
 enum ModelCatalogProviderCategory: String, CaseIterable, Identifiable, Sendable {
     case ollama
     case mlx
@@ -178,13 +179,9 @@ struct CatalogModelItem: Identifiable, Hashable, Sendable {
     let baseURL: String?
     let tags: [String]
     let fitAssessment: ModelFitAssessment?
-    /// Everything the local analyzer measured for this model — capability, dialect, metadata
-    /// (tier, quantization, family, window), modalities, chat-template source and stop sequences.
+    /// Everything the local analyzer measured: capability, dialect, metadata, modalities, chat-template source and stops.
     /// Set for installed local models (MLX, Ollama); nil for cloud entries, which are not measured.
-    ///
-    /// ⚠️ Picking a model must write ALL of it (`CatalogModelSelection`). The flat fields above
-    /// carried only capability, dialect and modalities, so a pick left the PREVIOUS model's
-    /// metadata, template and stop sequences in the profile — a 3B model stored as "Medium" tier.
+    /// Picking a model must write all of it (`CatalogModelSelection`).
     let detectedProfile: CognitiveProfile?
 
     init(

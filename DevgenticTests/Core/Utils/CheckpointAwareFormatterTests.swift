@@ -4,10 +4,7 @@
 //  CheckpointAwareFormatterTests.swift
 //  DevgenticTests
 //
-//  Tests for checkpoint-aware history formatting in EpisodicHistoryFormatter,
-//  NativeHistoryConverter, and ConversationHistoryTool.
-//  Verifies that checkpoint messages are correctly detected, filtered,
-//  and used to produce compacted context blocks.
+//  Created by Raj Singh.
 //
 
 import XCTest

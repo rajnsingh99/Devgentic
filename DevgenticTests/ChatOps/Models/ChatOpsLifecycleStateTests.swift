@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsLifecycleStateTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  "Paired" and "switched on" are different questions.
-//
-//  ⚠️⚠️ LIFE-4: THE OFF SWITCH WAS A ONE-WAY DOOR. `ChatOpsConfigManager.init` restored
-//  `connectionState` only when `isEnabled` was ALSO true, so a user who turned ChatOps off — which
-//  the toggle's own description invites — and then quit came back to `.disconnected`, a Pairing card
-//  offering "Start Pairing", and an Enable toggle greyed out by
-//  `.disabled(!config.connectionState.isConnected)`. Nothing in the app could turn it back on: the
-//  only other writer of `isEnabled = true` is a pairing service. Their credentials and chat id were
-//  intact the whole time; the only way back was re-doing a pairing they never undid.
-//
-//  ⚠️⚠️ LIFE-5: ONE TIER, THREE TABS. The same `securityCard` was embedded in each platform's stack
-//  with no qualifier, reading and writing ONE global value — so Full Access granted for a private
-//  Telegram DM was already showing on the Discord tab, and setting Discord to Read Only silently
-//  dropped the phone to Read Only too.
+//  Created by Raj Singh.
 //
 
 import XCTest

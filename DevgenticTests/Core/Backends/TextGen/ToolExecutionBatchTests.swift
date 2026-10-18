@@ -4,14 +4,7 @@
 //  ToolExecutionBatchTests.swift
 //  DevgenticTests
 //
-//  Readiness P2 batch 2 (2026-10-12): tool execution correctness.
-//    CR-43  two copy_file calls of one source collided in the dedupe; the dropped call got nothing
-//    CR-44  banner-edited arguments skipped the workspace boundary, and the record kept the originals
-//    CR-45  parallel edits of one file raced (last write won, both reported success)
-//    CR-51  fuzzy name matching ran the wrong tool (create_file → create_folder)
-//    CR-56  a Code-profile workflow node ran with no project folder
-//
-//  The wiring tests drive the REAL `executeToolCalls` with recording tools.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,13 +4,7 @@
 //  ModelSupportPolicyTests.swift
 //  DevgenticTests
 //
-//  Decision models (Jev-style / Laya / GLiNER2.5-Decide) are encoders with a typed head — nothing
-//  in MLXService or OllamaService can run them. The download surfaces must say "Not supported"
-//  instead of pulling gigabytes that fail at first use.
-//
-//  ⚠️ The fixtures are the REAL HuggingFace API shapes, captured 2026-10-03. Laya declares an
-//  EMPTY `config` (no architectures), so a policy keyed on architectures would have passed it —
-//  these tests fail if the policy stops reading the declared pipeline tag.
+//  Created by Raj Singh.
 //
 
 import XCTest

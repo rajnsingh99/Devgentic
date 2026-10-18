@@ -4,25 +4,7 @@
 //  MLXPromptCache.swift
 //  Devgentic
 //
-//  Keeps an MLX model's KV cache between the iterations of one agent run, so each iteration reads
-//  only the part of the prompt that changed.
-//
-//  WHY (device run 2026-10-06, Qwen2.5-3B-Instruct-4bit). Every MLX iteration used to re-read the
-//  whole 6-7k-token prompt from token 0: `MLXLMCommon.generate` was called without a cache, so one
-//  was built and dropped per call. Prefill runs at ~800 tokens/s on that model, so each iteration
-//  spent 7-11s re-reading text identical to the previous iteration's. That was 66s of T4's 111s
-//  and 62s of T5's 119s. Ollama and cloud providers keep this cache server-side (G12); MLX runs
-//  in-process, so the app keeps it.
-//
-//  HOW. A ledger records exactly which tokens the cache represents. Each call compares the new
-//  prompt with the ledger, keeps the longest common prefix, rewinds the rest and feeds only the
-//  suffix. After the call the cache is rewound to the prompt again: the legacy path never shows the
-//  model its own output verbatim, so generated tokens are never reusable, and a rejected or failed
-//  turn's output never lingers in the cache.
-//
-//  mlx-swift-lm has the same logic (`PromptCacheReusePolicy`), but it is internal and only its
-//  `ChatSession` uses it, which renders its own chat template. The app renders its own tokens
-//  (including the repaired Qwen template), so it applies the idea through the public cache API.
+//  Created by Raj Singh.
 //
 
 import Foundation

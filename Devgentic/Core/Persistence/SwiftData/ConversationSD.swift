@@ -4,8 +4,7 @@
 //  ConversationSD.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 03/04/26.
-//  SwiftData model replacing ConversationEntity (CoreData).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,10 +18,8 @@ final class ConversationSD {
     var isPinned: Bool
     var backendEntityId: UUID?
     var profileTypeRaw: String?
-    /// The project folder a Code conversation runs in — recorded on its first send and fixed from
-    /// then on (2026-09-24). Selecting the conversation reopens this folder, and the Code sidebar
-    /// groups conversations by it. `nil` for Chat/Workflow and for Code conversations from before
-    /// it existed ("No project").
+    /// The project folder a Code conversation runs in, recorded on its first send and fixed afterwards.
+    /// Reopened on selection and the key for grouping the Code sidebar; nil for Chat, Workflow and "No project" Code.
     var projectPath: String?
 
     @Relationship(deleteRule: .cascade, inverse: \ChatMessageSD.conversation)
@@ -57,17 +54,11 @@ final class ConversationSD {
         )
     }
 
-    /// [P1] Row-weight projection for the sidebar. `toStruct()` maps EVERY message
-    /// through `toChatMessage()` — four JSON blob decodes per message — and the
-    /// sidebar called it per row, per render, on the MainActor, re-running on every
-    /// mid-stream flush (each flush touches `timestamp`, invalidating the @Query).
-    /// A row displays five fields; the only one needing message data is the derived
-    /// title, which needs at most the FIRST message carrying non-empty text.
-    ///
-    /// The probe message reuses `Conversation.displayTitle`'s own selection +
-    /// truncation logic (one-element `messages`), so row titles can never drift from
-    /// the full projection's. `isStreaming` reads false either way — the persisted
-    /// column doesn't exist (known P8), so the full decode bought nothing there.
+    // Why: the full projection decodes four JSON blobs per message,
+    // and the sidebar runs it per row on the MainActor on every mid-stream flush.
+    /// Row-weight projection for the sidebar: a `Conversation` built without decoding every message.
+    /// The title comes from the first message with non-empty text, via the same logic as `Conversation.displayTitle`.
+    /// `isStreaming` is false here as in the full projection, since no persisted column backs it.
     func toRowStruct() -> Conversation {
         var probe: ChatMessage?
         let hasUserTitle = !(userDefinedTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)

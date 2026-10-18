@@ -4,11 +4,7 @@
 //  MCPArgumentTokenizerTests.swift
 //  DevgenticTests
 //
-//  P1 #16 — arguments used to be whitespace-split with no quoting, and the JSON pane
-//  joined them back with a plain " ". Any argument containing a space was therefore
-//  corrupted, and a paste→save round-trip silently rewrote a config the user never edited.
-//
-//  The round-trip property `tokenize(join(x)) == x` is the real contract here.
+//  Created by Raj Singh.
 //
 
 import XCTest

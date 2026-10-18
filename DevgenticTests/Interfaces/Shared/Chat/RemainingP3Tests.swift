@@ -4,9 +4,7 @@
 //  RemainingP3Tests.swift
 //  DevgenticTests
 //
-//  The last unverified P3 rows, each put through its own verification pass first:
-//  model/mm-3, viewmodel/vm-5, workflow/vm-3, plus a defect found while verifying render/mc-7
-//  that is not in the register at all.
+//  Created by Raj Singh.
 //
 
 import XCTest

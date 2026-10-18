@@ -4,32 +4,18 @@
 //  MCPArgumentTokenizer.swift
 //  Devgentic
 //
-//  Created 2026-08-01 for P1 #16.
-//
-//  The Add-Server form keeps arguments as one free-text field but `ServerDefinition.args`
-//  is an argv ARRAY, so the two representations have to convert both ways without loss.
-//
-//  They used to convert with a bare `split(whereSeparator: \.isWhitespace)` one way and a
-//  `joined(separator: " ")` the other. Neither honoured quoting, so any argument containing
-//  a space — overwhelmingly a path — was silently split into two argv entries. Worse, the
-//  two halves round-tripped: pasting a valid JSON config into the JSON tab joined the args
-//  with spaces, and saving split them back differently, corrupting a config the user never
-//  edited.
-//
-//  These are pure functions with no UI or I/O so they can be unit-tested directly.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Converts between the Add-Server form's free-text arguments and `ServerDefinition.args` (an argv array) without
+/// loss, honouring quoting. Pure functions with no UI or I/O.
 enum MCPArgumentTokenizer {
 
-    /// Splits a command-line-ish string into argv entries, honouring single and double
-    /// quotes and backslash escapes.
-    ///
-    /// Deliberately NOT a shell parser: it does not expand `$VAR`, globs, or backticks.
-    /// `ShellProcess` execs argv directly with no shell, so expanding anything here would
-    /// reintroduce exactly the injection surface that design removes. Quotes are purely a
-    /// grouping mechanism for the user.
+    /// Splits a command-line-style string into argv entries, honouring single and double quotes and backslash escapes.
+    /// Not a shell parser: it never expands `$VAR`, globs or backticks, because `ShellProcess` execs argv with no
+    /// shell.
     static func tokenize(_ input: String) -> [String] {
         var tokens: [String] = []
         var current = ""

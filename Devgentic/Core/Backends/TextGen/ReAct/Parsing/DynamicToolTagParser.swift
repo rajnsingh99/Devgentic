@@ -4,16 +4,7 @@
 //  DynamicToolTagParser.swift
 //  Devgentic
 //
-//  Fallback parser for the .dynamicToolTag drift format.
-//  Handles Mistral's native tool-calling output where the XML tag itself IS the tool name:
-//
-//    <search_issues>{"q": "Acme", "per_page": 10}</search_issues>
-//    <get_file_contents>{"owner": "Acme", "repo": "main", "path": "."}</get_file_contents>
-//
-//  This is distinct from <tool_call> (fixed wrapper) or <tools> (generic wrapper).
-//  The tag name is dynamic and matches the actual tool name the model chose to invoke.
-//
-//  Created by Devgentic Architect.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -21,6 +12,9 @@ import OSLog
 
 private let logger = DGLogger(category: "DynamicToolTagParser")
 
+/// Fallback parser for the dynamic-tag format, where the XML tag itself is the tool name (Mistral
+/// native output). Example: `<search_issues>{"q": "Acme"}</search_issues>`; distinct from the fixed
+/// `<tool_call>` wrapper.
 struct DynamicToolTagParser: CognitiveParserProtocol {
 
     func parse(rawResponse: String) -> ModernCognitiveStep {
@@ -40,15 +34,9 @@ struct DynamicToolTagParser: CognitiveParserProtocol {
 
     // MARK: - Extraction
 
-    /// Extracts all `<tool_name>{JSON}</tool_name>` patterns from the text.
-    ///
-    /// The regex matches:
-    ///   - Opening tag: `<identifier>` where identifier is lowercase + digits + underscores
-    ///   - Body: any content (captured for JSON parsing)
-    ///   - Closing tag: `</identifier>` matching the opening tag (backreference \1)
-    ///
-    /// This deliberately excludes known structural tags (tool_call, tools, content, etc.)
-    /// to avoid overlap with other parsers.
+    /// Extracts all `<tool_name>{JSON}</tool_name>` patterns: a lowercase-identifier tag with a
+    /// backreferenced closer. Known structural tags (tool_call, tools, content) are excluded to avoid
+    /// overlap with other parsers.
     private func extractDynamicToolCalls(from text: String) -> [PendingToolCall] {
         let pattern = #"<([a-z][a-z0-9_]*)>([\s\S]*?)</\1>"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
@@ -121,9 +109,8 @@ struct DynamicToolTagParser: CognitiveParserProtocol {
             return decoded
         }
 
-        // Sanitize trailing commas and Python literals — OUTSIDE string values only, so a
-        // tool argument carrying file content keeps its own commas and `None`/`NULL` tokens.
-        // (The old block also mapped `\bnull\b` → `null`, a no-op, and is dropped.)
+        // Sanitizes trailing commas and Python literals outside string values only, so tool arguments keep
+        // their own commas and `None` tokens.
         let sanitized = JSONStructuralSanitizer.repairingStructure(jsonString)
 
         if let data = sanitized.data(using: .utf8),

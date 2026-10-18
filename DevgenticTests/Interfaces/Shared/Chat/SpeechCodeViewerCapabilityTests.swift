@@ -4,24 +4,7 @@
 //  SpeechCodeViewerCapabilityTests.swift
 //  DevgenticTests
 //
-//  [CF-21] Read Aloud announced "Here is the code in the panel view" and posted
-//  `.speechOpenCodeViewer` unconditionally. That notification's only observer calls
-//  `showCodeInViewer` on whatever `ChatHistoryViewModel` is in its environment, and QuickAccess
-//  builds its view model WITHOUT `ownsCodeViewer` — so in that window the promise is empty, and
-//  with pause-on-code enabled playback then stopped waiting for a Resume the user has no
-//  transport to press (QuickAccess mounts no `SpeechControlIsland`).
-//
-//  SpeechService now takes the capability as a session input. These tests pin the two halves it
-//  owns: what the reader SAYS, and the session default.
-//
-//  The call site is now wired too: `ChatBubbleView.toggleReadAloud` passes
-//  `chatHistoryViewModel.canPresentCodeViewer`, so QuickAccess's view model (built WITHOUT
-//  `ownsCodeViewer`) correctly gets `false` and the wrong-announcement / stuck-waiting symptom
-//  is gone — not testable from this file since `toggleReadAloud` is a private SwiftUI method,
-//  verified by reading `ChatBubbleView.swift` directly. The transport half is closed too:
-//  `QuickAccessContentView` now mounts `SpeechControlIsland` over its transcript on the same
-//  `speechService.isActive` gate the main window uses — see `SpeechTransportMountSignalTests`
-//  at the bottom of this file for what is and is not testable about that.
+//  Created by Raj Singh.
 //
 
 import XCTest

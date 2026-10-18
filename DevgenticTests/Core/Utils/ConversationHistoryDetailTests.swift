@@ -4,17 +4,7 @@
 //  ConversationHistoryDetailTests.swift
 //  DevgenticTests
 //
-//  `get_conversation_history(N)` is the escape hatch for the pointer strategy's lossiness —
-//  the skeleton replaces `<outcome>` with "Call get_conversation_history(N) for details." and
-//  the tool is supposed to supply what was withheld.
-//
-//  For the agent's response it never did: `TurnRecord.agentResponse` was `pair.outcome`, the
-//  identical 200-char clip the prompt already carried. A pointer agent could not recover more
-//  than 200 characters of any answer it had given, and a recentHistory agent got a round trip
-//  that returned exactly what it already had.
-//
-//  Tool RESULTS remain deliberately unserved: a call is reproducible from the name and
-//  arguments the tool does return.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,17 +4,7 @@
 //  MLXWindowHealingTests.swift
 //  DevgenticTests
 //
-//  `MLXContextWindowHealer.persistBackfill` guarded on
-//  `cfg.llmConfig.modelMetadata?.contextWindow == nil`, which is ALSO true when
-//  `modelMetadata` is entirely nil. In that case the optional-chained assignment silently did
-//  nothing, yet `saveProfile` still ran and logged a success message.
-//
-//  So an MLX profile with no metadata was NEVER healed, while a sibling profile on the same
-//  model that happened to have metadata was — a permanent 8K-vs-real divergence in every
-//  window-derived budget, reported in the log as a successful backfill.
-//
-//  The healing helper is exercised through `ProviderConfig` directly; the store write is a
-//  separate concern and is not what broke.
+//  Created by Raj Singh.
 //
 
 import XCTest

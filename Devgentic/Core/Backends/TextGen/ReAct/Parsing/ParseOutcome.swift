@@ -4,20 +4,7 @@
 //  ParseOutcome.swift
 //  Devgentic
 //
-//  Two distinct parse-related types live here:
-//
-//  1. `ParseConfidence` — internal to `CognitiveParsePipeline`. A stage-level
-//     confidence signal used by `classifyOutcome` to decide whether drift
-//     detection and fallback stages should fire. Not carried on the step.
-//
-//  2. `ParseOutcome` — carried on `ModernCognitiveStep`. The terminator and
-//     executor pattern-match on this to distinguish genuine completion from
-//     parse failure, and to build targeted corrective alerts per failure mode.
-//
-//  3. `ParseFailureReason` — typed causes of parse failure, each carrying
-//     enough context to build both a UI chip and a model-directed retry alert.
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -109,12 +96,8 @@ enum ParseFailureReason: Sendable, Equatable, Codable {
     /// Model emitted a different dialect than configured (e.g. XML in a native-JSON flow).
     case dialectDrift(expected: String, detected: String)
 
-    /// Model emitted a registered tool name in plain prose without structural
-    /// tool-call syntax (e.g. `codebase_map path: "/some/path"` — a function-call-
-    /// shaped text that no parser recognizes). Distinct from `.proseDescribedIntent`
-    /// because we have confidence about WHICH tool the model attempted, so the
-    /// corrective alert can be targeted: "you wrote `codebase_map` in prose, use
-    /// this JSON shape instead".
+    /// Model emitted a registered tool name in plain prose without structural tool-call syntax.
+    /// Distinct from `.proseDescribedIntent` because the attempted tool is known, so the corrective alert can name it.
     case toolNameInProse(toolName: String, snippet: String)
 }
 
@@ -176,24 +159,10 @@ extension ParseFailureReason {
         }
     }
 
-    /// Directive text injected into the next iteration's working memory so the
-    /// model can course-correct instead of repeating the same mistake.
-    ///
-    /// ⚠️ `dialect` is the wire format THIS RUN parses back, or nil on a transport-native flow.
-    /// It is not optional decoration: five of these arms used to state a shape, and every one of
-    /// them stated the `.nativeJSON` envelope — `{"name": …, "arguments": {…}}` — regardless of
-    /// what the run could actually read. Sent to a `.mistralV11Flat` run that is a demand for JSON
-    /// where `MistralV11Parser` requires `[TOOL_CALLS]name[ARGS]{…}`, so a model that OBEYED failed
-    /// again on the next pass. `LLMRetryStrategy` carried the same defect in its own corrective and
-    /// was fixed first (invariant 80); this is the sibling on the path parse failures actually take,
-    /// since generators return `.failed` rather than throwing.
-    ///
-    /// ⚠️ nil means SAY NOTHING ABOUT SHAPE, and that is a verdict rather than a gap: on a
-    /// transport-native flow the tool call rides in the protocol, so there is no text shape the
-    /// model could emit differently and a format instruction is noise it cannot act on.
-    ///
-    /// ⚠️ The shape text comes from `ModelDialect.formatReminder` — never a literal here — so the
-    /// two correctives in this codebase cannot describe the same format differently.
+    // Why: state the run's own dialect, never the `.nativeJSON` envelope: demanding JSON from a flat-format run fails again.
+    /// Directive text injected into the next iteration's working memory so the model can course-correct.
+    /// `dialect` is the wire format this run parses back, or nil on a transport-native flow, where no format is stated.
+    /// The shape text comes from `ModelDialect.formatReminder`, so correctives cannot describe a format differently.
     func modelCorrectiveAlert(availableToolNames: [String], dialect: ModelDialect?) -> String {
         /// " This model's tool-call format is X." — or nothing at all on a native flow.
         /// Leading space included so call sites read as one sentence stream.
@@ -210,27 +179,16 @@ extension ParseFailureReason {
             return "You described a tool call in prose. Actually emit the structured tool call — don't narrate it.\(formatClause) Available tools: \(availableToolNames.joined(separator: ", "))."
 
         case .malformedJSON(let detail, _):
-            // The JSON syntax advice is kept only where the arguments really are JSON. For the
-            // three dialects where they are not, it would instruct the model away from its own
-            // format — `.pythonicBracketList` is SUPPOSED to emit True/False/None.
+            // JSON syntax advice is given only where arguments really are JSON; `.pythonicBracketList` is supposed to emit
+            // True/False/None.
             let syntaxAdvice = (dialect?.argumentsAreJSON ?? true)
                 ? " Escape newlines inside strings with \\n, use double quotes, and produce strict JSON syntax."
                 : ""
             return "Your tool call failed to decode: \(detail).\(syntaxAdvice)\(formatClause)"
 
         case .schemaKeyMismatch(let expected, let found, let rawSnippet):
-            // ⚠️ The snippet is the discriminator, and this arm discarded it from the day the enum
-            // was declared. `foundKeys` comes from a regex for ASCII `"key":`, so an output the
-            // model wrote with smart quotes (`“arguments”`) yields `[]`, and the alert read
-            // `You used keys []` — a sentence naming nothing the model did. Every iteration's
-            // alert was then byte-identical; in the 2026-09-13 gemma:7b run it failed to land 14
-            // times in a row. `.toolNameInProse` below has quoted its snippet all along — same
-            // shape here: what was emitted, then the format it should have been.
-            //
-            // Bounded and single-lined BEFORE quoting. It lands in the scratchpad's un-evictable
-            // alert block as one `- [SYSTEM ALERT]` line, and the producers capture up to 200
-            // chars of possibly pretty-printed JSON — whitespace is collapsed first so the window
-            // holds content rather than indentation. 80 chars matches `.toolNameInProse`.
+            // The snippet is the discriminator: the alert quotes what was emitted, since `foundKeys` is empty for non-ASCII
+            // quotes.
             let quoted = String(rawSnippet.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(80))
             let emitted = quoted.isEmpty ? "" : " (you emitted: `\(quoted)`)"
             let keysClause = found.isEmpty
@@ -251,18 +209,11 @@ extension ParseFailureReason {
             return "Tool `\(resolved)` (you called it `\(attempted)`) has a schema mismatch — \(hints.joined(separator: "; ")). Retry with the correct argument names."
 
         case .dialectDrift(let expected, let detected):
-            // ⚠️ This case has ZERO construction sites in the app (verified 2026-09-13) — nothing
-            // produces it, so this text has never reached a model. Corrected anyway rather than
-            // left as the one arm still carrying the defect, because its first two sentences are
-            // the ones a future caller would trust: they named the expected format and then the
-            // third sentence contradicted them with the nativeJSON envelope.
+            // No code path constructs this case today; it states the dialect's own shape rather than the nativeJSON envelope.
             return "This provider expects \(expected) format. You emitted \(detected).\(formatClause)"
 
         case .toolNameInProse(let toolName, let snippet):
-            // Targeted corrective — names the specific tool the model attempted, then the shape
-            // this run can actually read. The targeting is why this case exists separately from
-            // `.proseDescribedIntent`, so the tool name is kept even though the shape is now
-            // generic: "put `X` in that shape" is still a per-tool instruction.
+            // Targeted corrective: names the specific tool the model attempted, then the shape this run can read.
             let shape = dialect.map { " Re-emit `\(toolName)` as a structured tool call in this model's format: \($0.formatReminder)." }
                 ?? " Emit it as a structured tool call using this provider's native tool-calling API, not as text."
             return "You wrote `\(toolName)` in plain prose (`\(snippet.prefix(80))`).\(shape) Do not describe the tool call in prose — emit it directly."

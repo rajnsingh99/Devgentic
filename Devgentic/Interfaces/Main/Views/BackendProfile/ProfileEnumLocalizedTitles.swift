@@ -4,42 +4,19 @@
 //  ProfileEnumLocalizedTitles.swift
 //  Devgentic
 //
-//  Created on 08/08/26.
-//
-//  Localizable presentation strings for the profile-configuration enums. Register A63.
-//
-//  ⚠️ WHY THESE ARE NOT ON THE ENUMS. `BackendProfile.swift` and `FileContextStrategy.swift` import
-//  `Foundation` only, deliberately — their types are `Codable` and reach SwiftData and JSON, so
-//  they must not import SwiftUI. `LocalizedStringKey` is a SwiftUI type, so the presentation layer
-//  is where it can live. Two neighbouring files already record this exact reasoning for
-//  `ApiProvider` and `ModelCognitiveCapability`.
-//
-//  ⚠️ WHY A `String` `displayName` WAS A BUG, NOT A STYLE CHOICE. A `String` reaches `Text` two ways
-//  and both lose localization: `Text(someString)` binds to the non-localizing `StringProtocol`
-//  overload, and `Text(LocalizedStringKey(someString))` builds the key at RUNTIME, invisible to the
-//  String Catalog extractor. Verified against `Localizable.xcstrings`: the section headers above
-//  these controls ("Error Recovery", "Conversation Memory") ARE extracted keys, while every option
-//  label under them — "Abort", "Skip & Continue", "Fallback Prompt", "Best-effort Response",
-//  "Fail Hard", "Full", "On-Demand", "Smart", "Direct Injection", "Stateless" — was absent. A
-//  translator would have seen a complete-looking sheet and shipped it half-translated.
-//
-//  ⚠️ THE OLD `String` PROPERTIES ARE DELETED, NOT KEPT ALONGSIDE. Unlike `ApiProvider`, whose
-//  `rawValue` is itself display text ("Ollama (Local)") and therefore needed a parallel accessor,
-//  every enum here has an identifier-shaped `rawValue` (`abort`, `skipAndContinue`, `recentHistory`)
-//  that carries the persistence and telemetry contract independently — `ErrorRecovery.init(from:)`,
-//  `TraceConfigSnapshot` and `BackendOrchestrationService` all use `rawValue`, never `displayName`.
-//  Keeping both would be the "two identical copies that then drift" pattern this module's register
-//  names as its top recurring defect. Nothing persists or compares these strings, so **no migration
-//  is required**.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Error Recovery
 
+// Why: titles are `LocalizedStringKey`, not `String`: a `String` reaches `Text` without catalog extraction.
+/// Localizable presentation strings for the profile-configuration enums.
+/// Kept out of the enums because their files import only Foundation (they are Codable and reach SwiftData and JSON),
+/// while `LocalizedStringKey` is a SwiftUI type.
 extension ToolFailurePolicy {
-    /// ⚠️ Separate from `rawValue` on purpose: `rawValue` is the persisted identifier, this is the
-    /// human-facing label. They must never be conflated.
+    /// The human-facing label, separate from `rawValue`, which is the persisted identifier; never conflate them.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .abort: return "Abort"
@@ -50,7 +27,7 @@ extension ToolFailurePolicy {
 }
 
 extension ExhaustionPolicy {
-    /// ⚠️ Separate from `rawValue` on purpose — see `ToolFailurePolicy.localizedTitle`.
+    /// Human-facing label; `rawValue` stays the persisted identifier (see `ToolFailurePolicy.localizedTitle`).
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .synthesizeBestEffort: return "Best-effort Response"
@@ -62,7 +39,7 @@ extension ExhaustionPolicy {
 // MARK: - Conversation Memory
 
 extension HistoryStrategy {
-    /// ⚠️ Separate from `rawValue` on purpose — `BackendOrchestrationService` logs `rawValue`.
+    /// Human-facing label; `rawValue` stays the identifier `BackendOrchestrationService` logs.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .recentHistory: return "Recent"
@@ -89,7 +66,7 @@ extension HistoryStrategy {
 // MARK: - File Context
 
 extension FileContextStrategy {
-    /// ⚠️ Separate from `rawValue` on purpose — `rawValue` is persisted in the profile blob.
+    /// Human-facing label; `rawValue` stays the identifier persisted in the profile blob.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .contextualRAG: return "Contextual RAG"

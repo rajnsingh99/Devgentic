@@ -4,17 +4,7 @@
 //  AppProviderKeyStore.swift
 //  Devgentic
 //
-//  Global Keychain storage for remote provider API keys across the app's lifetime.
-//  Once a user supplies an API key for a provider (e.g. Anthropic, OpenAI, Hugging Face,
-//  Google Gemini, OpenRouter), it is stored securely and reused across all profiles.
-//
-//  ⚠️ ONE KEY PER PROVIDER (2026-10-03). For OpenAI, Anthropic, Google and OpenRouter this is the
-//  ONLY home of the key: profiles carry it in memory (injected by `BackendProfile.details`) and never
-//  store a copy. It used to be copied into every profile (`ProviderKeyStore`, keyed by profile id)
-//  and again into a Code-mode slot, so one OpenRouter key became several Keychain items — one access
-//  prompt each whenever the app's signature changed — and replacing the key here left stale copies
-//  in the profiles, which kept sending the old one. `.openAICompatible` stays per profile: each such
-//  profile can point at a different server with its own credential.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,23 +14,15 @@ import SwiftUI
 
 private let logger = DGLogger(category: "AppProviderKeyStore")
 
-/// The Keychain core of the global provider keys: thread-safe, cached, and usable from any
-/// isolation — `BackendProfile.details` reads it from SwiftData model code, not the main actor.
-///
-/// ⚠️ CACHED FOR THE PROCESS. Every profile fetch and every view render used to decrypt the key
-/// again (one launch read the same item 7 times from 6 callers; a single screen visit read the
-/// global key 5 times from a view body). Each read of an item whose ACL no longer matches the app
-/// is a separate access prompt, and each one blocks the calling thread — the main thread, for every
-/// caller above. The cache makes it one Keychain read per account per process. All writes go
-/// through here and update it, so it cannot go stale within the app.
-///
-/// ⚠️ A FAILED read is cached too, but only for `failedReadRetryInterval`: retrying on every
-/// render would re-raise a prompt the user just denied, once per frame. `retry(account:)` is the
-/// explicit way past it (the profile's Try Again button).
+// Why: each read of an item whose ACL does not match the app is a blocking access prompt, and retrying a denied read on
+// every render would re-raise it once per frame; `retry(account:)` is the explicit way past the cache.
+/// The Keychain core of the global provider keys: thread-safe, cached, and usable from any isolation
+/// (`BackendProfile.details` reads it from SwiftData model code, off the main actor).
+/// Cached for the process (one Keychain read per account, writes update it); a failed read is cached for a short time.
 enum GlobalProviderKeys {
 
-    /// Keychain service identifier for globally scoped provider credentials. ⚠️ Changing this
-    /// orphans every stored key — items are looked up by (service, account) and nothing migrates.
+    // Why: changing this orphans every stored key: items are looked up by (service, account).
+    /// Keychain service identifier for globally scoped provider credentials.
     static let service = "com.devgentic.provider.global"
 
     /// How long a failed read is answered from the cache before the Keychain is asked again.
@@ -82,9 +64,8 @@ enum GlobalProviderKeys {
         cache.withLock { $0.removeAll() }
     }
 
-    /// ⚠️ TEST ISOLATION. A shared key is process-wide state — one test's "anthropic" key is every
-    /// later test's "anthropic" key, where per-profile keys never collided (each test's profiles have
-    /// fresh ids). The test bundle calls this before every test case. No-op outside a test host.
+    // Why: a shared key is process-wide state, so one test's anthropic key would be every later test's anthropic key.
+    /// Resets the process-wide shared keys before each test case; no-op outside a test host.
     static func resetForTestIsolation() {
         guard TestHost.isRunning else { return }
         TestHostKeychain.shared.removeAll(service: service)
@@ -174,11 +155,10 @@ final class AppProviderKeyStore {
 
     // MARK: - Vendor Account Resolution
 
-    /// The Hugging Face token's account name in the catalog. ⚠️ Its ONLY home is
-    /// `HuggingFaceTokenStore` (service `com.devgentic.huggingface`) — the MLX downloader reads it
-    /// there. This store used to ALSO write a copy under the shared provider service, so one token
-    /// was two Keychain items (two access prompts after a signature change), and clearing it left
-    /// the copy behind for the fallback read below to resurrect.
+    // Why: do not also write a copy under the shared provider service: it makes two Keychain items, and clearing one leaves the
+    // other for the fallback read to resurrect.
+    /// The Hugging Face token's account name in the catalog.
+    /// Its only home is `HuggingFaceTokenStore` (service `com.devgentic.huggingface`), which the MLX downloader reads.
     static let huggingFaceAccount = "huggingface"
 
     static func account(for provider: ApiProvider) -> String {

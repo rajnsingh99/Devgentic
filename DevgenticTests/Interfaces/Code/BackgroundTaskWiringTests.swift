@@ -4,13 +4,7 @@
 //  BackgroundTaskWiringTests.swift
 //  DevgenticTests
 //
-//  ⚠️ THE WIRING, not the policy. `BackgroundProcessRegistryTests` proves the registry behaves;
-//  these prove anything actually REACHES it. F2 shipped non-functional with 163 green tests
-//  because every one of them tested the policy and none tested the call site.
-//
-//  Each test here fails if a specific wire is cut: the tool's background branch going back to
-//  `/dev/null`, the catalogue dropping the conversation id, the preset not offering the tools, or
-//  quit-time teardown being removed.
+//  Created by Raj Singh.
 //
 
 import XCTest

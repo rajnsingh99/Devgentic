@@ -27,40 +27,27 @@ final class MainApplicationViewModel {
 
     // Dependencies are now injected and stored.
     @ObservationIgnored private(set) var activeStreamManager: ActiveStreamManager
-    /// [HITL/P1] Single source of truth for pending HITL across all interfaces. Views read it
-    /// (it is itself @Observable); ASM gets the reference injected in init for P2 enqueue.
+    /// Single source of truth for pending HITL across all interfaces; views read it (it is itself @Observable) and the
+    /// stream manager enqueues into it.
     @ObservationIgnored let interactionCenter = InteractionCenter()
     @ObservationIgnored private(set) var persistenceService: ChatPersistenceProtocol
     @ObservationIgnored private let fileProcessorService: FileProcessorService
     @ObservationIgnored private let chatHistoryViewModel: ChatHistoryViewModel
 
-    /// Whether a send/stream is in flight — exposed because `chatHistoryViewModel` is private and
-    /// views must not reach it. Reading through this computed property still registers observation
-    /// (`ChatHistoryViewModel` is `@Observable`), so a view that reads it re-renders when the
-    /// stream starts and ends — which is exactly what lets the Re-run pill disable itself live
-    /// (WF-UI4: it used to stay fully enabled during a stream and silently drop the click).
+    /// Whether a send/stream is in flight, exposed because `chatHistoryViewModel` is private. Reading it registers
+    /// observation, so a view that reads it re-renders when the stream starts and ends.
     var isSendInProgress: Bool { chatHistoryViewModel.isSending }
 
-    // ⚠️ `useStreamingResponseObserver` / `intelligenceCoreObserver` lived here. Both were
-    // DECLARED AND NEVER ASSIGNED — the Combine bridge that was supposed to persist those two
-    // toggles was designed and never wired, which is why neither setting survived a relaunch and
-    // why every Intelligence Core gate read false. Both properties now read and write
-    // `UserDefaults` directly, so there is nothing left to bridge.
-
-    // Code mode — used to build ephemeral profiles on each send
+    // Code mode: builds the ephemeral profile for each send.
     @ObservationIgnored private(set) var codeSessionManager: CodeSessionManager?
 
     // MARK: - ChatOps
-    //
-    // Lifecycle + bridge ownership has been extracted to `ChatOpsCoordinator`
-    // (Gap C — the MainApplicationViewModel god-object split). The properties
-    // and methods remaining in this file are thin forwards preserved for
-    // external callers (currently: `ChatOpsSettingsView`).
+    // Lifecycle and bridge ownership live in `ChatOpsCoordinator`; the properties and methods here are thin forwards for
+    // external callers.
     @ObservationIgnored private var chatOpsCoordinator: ChatOpsCoordinator!
 
-    /// Owns the message-sending pipeline (local + remote sends, regeneration,
-    /// cancellation, HITL resolutions, createUserMessage factory). Extracted
-    /// from this file as part of Gap C — see `MessagingCoordinator.swift`.
+    /// Owns the message-sending pipeline (local and remote sends, regeneration, cancellation, HITL resolutions,
+    /// `createUserMessage` factory).
     @ObservationIgnored private(set) var messagingCoordinator: MessagingCoordinator!
 
     /// Owns conversation CRUD (create/select/pin/rename/delete/export + the
@@ -80,11 +67,11 @@ final class MainApplicationViewModel {
     /// observation, debounce, model unload, message load, backend rebind,
     /// workflow history fetch. See `ConversationSwitchCoordinator.swift`.
     @ObservationIgnored private var conversationSwitchCoordinator: ConversationSwitchCoordinator!
-    /// Forward for external callers that previously reached `viewModel.chatOpsBridge?.stop()`.
+    /// Forwards to the Telegram bridge owned by `ChatOpsCoordinator`.
     var chatOpsBridge: ChatOpsBridge? { chatOpsCoordinator.telegramBridge }
-    /// Forward for external callers that previously reached `viewModel.discordChatOpsBridge?.stop()`.
+    /// Forwards to the Discord bridge owned by `ChatOpsCoordinator`.
     var discordChatOpsBridge: DiscordChatOpsBridge? { chatOpsCoordinator.discordBridge }
-    /// Forward for external callers that previously reached `viewModel.slackChatOpsBridge?.stop()`.
+    /// Forwards to the Slack bridge owned by `ChatOpsCoordinator`.
     var slackChatOpsBridge: SlackChatOpsBridge? { chatOpsCoordinator.slackBridge }
 
     // MARK: - Service & Store
@@ -97,21 +84,9 @@ final class MainApplicationViewModel {
     var showContextArea: Bool = false
     var activeContextFilePath: String? = nil
     var attachedFiles: [FileSystemItem] = []
-    /// Stream the LLM response word-by-word.
-    ///
-    /// ⚠️ COMPUTED OVER `UserDefaults`, NOT STORED. As a stored `var` this held the toggle's value
-    /// in memory and NOTHING EVER WROTE IT BACK: the persist hook existed
-    /// (`SettingsCoordinator.didChangeUseStreamingResponse`) and had zero callers, and the
-    /// `AnyCancellable` that was meant to bridge them was declared and never assigned. The setting
-    /// therefore reverted on every relaunch, because `loadSettings` reads this key at startup.
-    ///
-    /// Reading through the store is what makes "the toggle shows what is used" true by
-    /// construction rather than by convention — one rule and one state, not one rule over two
-    /// copies. Same shape as `NotificationConfiguration.isGloballyEnabled`.
-    ///
-    /// ⚠️ Absent key reads as TRUE. `bool(forKey:)` alone returns false for an absent key, which
-    /// would invert the shipped default and silently disable streaming for every install that had
-    /// never touched the setting — the trap `NotificationGatePolicy` documents.
+    // Why: computed over UserDefaults so the toggle shows what is used; an absent key reads as true, since
+    // `bool(forKey:)` alone would invert the default.
+    /// Whether the LLM response streams word by word; persisted in `UserDefaults`.
     var useStreamingResponse: Bool {
         get {
             access(keyPath: \.useStreamingResponse)
@@ -128,23 +103,9 @@ final class MainApplicationViewModel {
 
     // Intelligence Core
 
-    /// Master switch for the on-device Intelligence Core.
-    ///
-    /// ⚠️⚠️ COMPUTED OVER `UserDefaults`, NOT STORED — THIS WAS THE MORNING BRIEF BUG. Every
-    /// consumer gates on `UserDefaults.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)`:
-    /// `MorningBriefService`, `UserPersonalService`, `AgentConnect`, `BackendOrchestrationService`
-    /// and both Welcome widgets. The settings toggle, meanwhile, bound straight to this property
-    /// as a stored `var`, and the only thing that wrote the key
-    /// (`SettingsCoordinator.didChangeIntelligenceCoreEnabled`) had ZERO callers — the
-    /// `AnyCancellable` meant to bridge them was declared and never assigned.
-    ///
-    /// So the switch turned the UI on and nothing else: the Core Intelligence pane revealed its
-    /// model picker and its debug card, while every gate still read false. Running the Morning
-    /// Brief from that very pane logged
-    /// "Gate check FAILED — IC enabled: false, Brief enabled: true, Model selected: true".
-    /// The user could see the feature enabled and could not make it run.
-    ///
-    /// ⚠️ Absent key reads as FALSE, which is the intended default — do not add a seeding branch.
+    // Why: computed over UserDefaults so the toggle and the gates share one state; an absent key reads as false, the
+    // intended default.
+    /// Master switch for the on-device Intelligence Core; persisted in `UserDefaults`, the key every consumer gate reads.
     var isIntelligenceCoreEnabled: Bool {
         get {
             access(keyPath: \.isIntelligenceCoreEnabled)
@@ -154,7 +115,7 @@ final class MainApplicationViewModel {
             withMutation(keyPath: \.isIntelligenceCoreEnabled) {
                 UserDefaults.standard.set(newValue, forKey: AppSettings.isIntelligenceCoreEnabledKey)
             }
-            logger.info("[IC] Intelligence Core \(newValue ? "ENABLED" : "DISABLED"). CONSEQUENCE: every gate reads this key live — Morning Brief, User Personal, AgentConnect, BackendOrchestration and the Welcome widgets all follow immediately.")
+            logger.info("[IC] Intelligence Core \(newValue ? "ENABLED" : "DISABLED"). CONSEQUENCE: every gate reads this key live — Briefing, User Personal, AgentConnect, BackendOrchestration and the Welcome widgets all follow immediately.")
             // Switching off must release the model; holding an idle MLX model is expensive.
             if !newValue {
                 Task { await IntelligenceCoreService.shared.unloadNow(caller: .unknown) }
@@ -162,22 +123,9 @@ final class MainApplicationViewModel {
         }
     }
 
-    /// The run the composer is talking about: what Stop targets, and whether the send button
-    /// shows Send or Stop. DERIVED — never stored.
-    ///
-    /// ⚠️ This was two stored `var`s until 2026-08-17. Five surfaces wrote them and five
-    /// completions nil'd them, none with an ownership guard, so whichever run finished first
-    /// silently orphaned every other run — the composer flipped back to Send and the survivor
-    /// became unstoppable from the UI. A clear-side identity guard provably does NOT fix that
-    /// (see `ForegroundRunResolver`), so the storage was removed instead of guarded.
-    ///
-    /// Scope rule: a run belongs to a conversation, and only the conversation on screen can stop
-    /// it. `nil` while a background scheduled or ChatOps run streams elsewhere is CORRECT — that
-    /// run is stopped by opening its conversation, not from here.
-    ///
-    /// `streamingMessage` was deleted outright rather than derived: it had one reader
-    /// (`MessagingCoordinator.cancelStreamingResponse`), which now takes the conversation id from
-    /// the resolver directly.
+    /// The run the composer is talking about: what Stop targets, and whether the send button shows Send or Stop. Derived,
+    /// never stored. Only the conversation on screen can stop a run; nil while a background scheduled or ChatOps run streams
+    /// elsewhere is correct.
     var streamingMessageID: UUID? {
         ForegroundRunResolver.foregroundRun(
             live: activeStreamManager.liveRunSnapshot(),
@@ -239,11 +187,9 @@ final class MainApplicationViewModel {
         }
     }
 
-    /// [HITL/P4] Navigate to a (possibly different-mode) conversation that has a pending HITL —
-    /// e.g. from the cross-conversation chip in `InteractionBannerStack`. Aligns `interfaceMode`
-    /// to the request's origin so the correct dedicated view + mode-filtered sidebar are shown
-    /// (not a contextually-wrong empty screen), and routes through `workflowEditGuard` so leaving
-    /// a dirty workflow canvas still prompts Save/Discard/Cancel.
+    /// Navigates to a (possibly different-mode) conversation that has a pending HITL, aligning `interfaceMode` to the
+    /// request's origin and routing through `workflowEditGuard` so leaving a dirty workflow canvas still prompts
+    /// Save/Discard/Cancel.
     func navigateToPendingInteraction(conversationID: UUID, interface: HITLOrigin.Interface) {
         let targetMode: InterfaceMode = {
             switch interface {
@@ -284,18 +230,15 @@ final class MainApplicationViewModel {
             : ModeResumeMemory.Spot()
 
         interfaceMode = mode
-        // ⚠️ Mode and selection change in the SAME pass, so the composer sees one draft-key change
-        // (old mode + conversation → new mode + conversation) and swaps the draft once. Drafts are
-        // keyed per mode, so nothing typed here follows the user into the other mode.
+        // Mode and selection change in the same pass so the composer sees one draft-key change; drafts are keyed per mode.
         selectedConversationID = spot.conversationID
         // A resumed conversation brings its own profile (loaded on selection); Home gets back the
         // profile that was picked on it.
         backendConfiguration.selectedProfileID = spot.profileID
         chatHistoryViewModel.currentChatMessages = []
         settingsCoordinator.didChangeInterfaceMode(mode)
-        // Code's FIRST entry this session lands on a clean Home: nothing to resume, and the Code
-        // profile can still carry the folder of the last launch, which would show instead of
-        // "Select Project folder". Later entries resume — the session's project is the one left.
+        // Code's first entry in a session lands on a clean Home, since the Code profile can still carry the last launch's
+        // folder; later entries resume.
         if mode == .code, firstVisit, resume, spot.conversationID == nil {
             codeSessionManager?.resetSession()
         }
@@ -310,32 +253,13 @@ final class MainApplicationViewModel {
     /// Persistent run history keyed by conversation ID.
     var workflowRunHistory: [UUID: [WorkflowRunRecord]] = [:]
 
-    /// Live canvas editing state keyed by WORKFLOW PROFILE ID (not conversation).
-    ///
-    /// ⚠️ Owned here, not by `WorkflowCanvasView`, because the view is torn down and rebuilt
-    /// whenever the dedicated view flips between Canvas and Execution — and a run STARTING flips
-    /// it automatically. While this lived in the view's `@State`, that flip destroyed every
-    /// unsaved node, edge and task description with no prompt and no dirty indicator, on the most
-    /// natural action there is: running the workflow you were just editing.
-    ///
-    /// Keyed by profile so the edits also survive a conversation switch. ⚠️ In-memory only — the
-    /// ONLY thing that writes them to disk is an explicit Save (there is no autosave), so the quit
-    /// path must drain them: see `unsavedWorkflowCanvasProfileIDs` / `persistDirtyWorkflowCanvases`.
+    /// Live canvas editing state keyed by workflow profile ID (not conversation), so edits survive the Canvas/Execution view
+    /// flip and conversation switches. In memory only; the quit path drains it (see `persistDirtyWorkflowCanvases`).
     @ObservationIgnored private var workflowCanvasStates: [UUID: WorkflowCanvasState] = [:]
 
-    /// Profiles whose cached canvas holds unsaved edits — the OBSERVABLE mirror of that fact.
-    ///
-    /// ⚠️ Exists because `workflowCanvasStates` is `@ObservationIgnored` (deliberately — body-time
-    /// `workflowCanvasState(for:)` mutates it, and observing that would reintroduce "Modifying state
-    /// during view update"). So nothing could drive UI from it, and the only dirty signal reaching
-    /// the chrome was `WorkflowEditGuard.hasUnsavedChanges` — which mirrors ONLY the canvas currently
-    /// on screen and is cleared by `unregister()` on teardown. Consequence: edit a graph, navigate
-    /// away, and the unsaved work became invisible until ⌘Q asked about it.
-    ///
-    /// ⚠️ A MIRROR, NEVER THE AUTHORITY. The quit gate must keep reading
-    /// `unsavedWorkflowCanvasProfileIDs`, which pulls from the live state objects; this set is
-    /// pushed from views and would silently under-report if a push were ever missed. Do not swap the
-    /// quit decision onto it.
+    // Why: a mirror, never the authority: the quit gate must read `unsavedWorkflowCanvasProfileIDs`, which pulls from
+    // live state and cannot miss a push.
+    /// Profiles whose cached canvas holds unsaved edits: the observable mirror of that fact, pushed from views.
     private(set) var dirtyWorkflowCanvasIDs: Set<UUID> = []
 
     /// Pushed by `WorkflowCanvasView` whenever its canvas's dirty flag changes, and on mount.
@@ -355,26 +279,15 @@ final class MainApplicationViewModel {
         return created
     }
 
-    /// Profiles whose cached canvas holds edits that are not on disk.
-    ///
-    /// ⚠️ This is deliberately NOT `workflowEditGuard.hasUnsavedChanges`. That guard mirrors only
-    /// the canvas currently ON SCREEN, and these states outlive the view: edit workflow A, switch
-    /// to workflow B, and A's dirty state stays cached while the guard now reports B's. An exit
-    /// point that consults the guard alone therefore cannot see A's work at all.
+    /// Profiles whose cached canvas holds edits that are not on disk. Not `workflowEditGuard.hasUnsavedChanges`: that guard
+    /// mirrors only the canvas currently on screen, while these states outlive the view.
     var unsavedWorkflowCanvasProfileIDs: [UUID] {
         workflowCanvasStates.filter { $0.value.hasUnsavedChanges }.map(\.key)
     }
 
-    /// What a bulk canvas drain actually did, per profile.
-    ///
-    /// ⚠️ Three fields, not two, because an exit point needs THREE questions answered: "must I
-    /// cancel the exit?" (`failed` — genuinely, plausibly-transiently failed, worth retrying); "is
-    /// this profile refused by design, so canceling-and-asking-to-retry would be asking for
-    /// something that can never happen?" (`refused`, [WF-PE2]); and "has this profile's row already
-    /// been written OR already conclusively resolved-without-writing, so an on-screen `saveHook` for
-    /// it would be a redundant/second write attempt?" (`persisted` — see WF-PE1; `refused` profiles
-    /// belong in that same "already handled" bucket for that specific question, since a refusal is
-    /// exactly as final as a write and a caller must not chase it a second time).
+    /// What a bulk canvas drain did, per profile: `failed` (plausibly transient, worth retrying), `refused` (refused by
+    /// design, will refuse identically on retry), and `persisted` (already written, so an on-screen `saveHook` would be a
+    /// redundant second write).
     struct CanvasDrainResult {
         /// Profiles whose layout reached disk.
         let persisted: [UUID]
@@ -393,27 +306,9 @@ final class MainApplicationViewModel {
         }
     }
 
-    /// Writes every dirty cached canvas to disk. Returns the profiles it could NOT persist.
-    ///
-    /// Mirrors `WorkflowCanvasView.saveLayout()` — store write first, owned-row reconcile only
-    /// once the bytes are down, `markSaved()` only once both succeeded — because a partial save is
-    /// worse than none: collecting a node's configuration against a canvas that was never written
-    /// would delete the config of nodes that still exist.
-    ///
-    /// ⚠️ Callers at an exit point must treat a non-empty `failed` as a REFUSAL to continue. Quitting
-    /// after a failed save destroys the very work the user asked to keep.
-    ///
-    /// ⚠️ [WF-PE2] `refused` is NOT `failed`. A `.refusedUnreadable`/`.refusedNewerVersion` canvas
-    /// will refuse identically on every retry — cancelling the exit and telling the user to "save it
-    /// from the canvas" asks for something that can never happen. A caller must offer an explicit
-    /// choice for `refused` instead of the retry framing `failed` gets.
-    ///
-    /// ⚠️ `persisted` is reported so an exit point can tell whether a canvas it is ALSO about to save
-    /// through an on-screen `saveHook` has already been written here (WF-PE1). Both paths write the
-    /// same `WorkflowLayoutSD` row and the store has no compare-and-swap, so "did the drain already
-    /// cover this profile?" has to be answerable rather than assumed. A REFUSED profile belongs in
-    /// that same "already handled" question too — see the caller-side note in `saveOpenProfileEdits`
-    /// for why treating it as un-covered would fire a redundant, misleadingly-logged second attempt.
+    /// Writes every dirty cached canvas to disk and returns the profiles it could not persist; store write first, owned-row
+    /// reconcile once the bytes are down, `markSaved()` once both succeeded. Exit points must treat a non-empty `failed` as
+    /// a refusal to continue.
     @discardableResult
     func persistDirtyWorkflowCanvases(profileService: BackendProfileService) -> CanvasDrainResult {
         let dirty = workflowCanvasStates.filter { $0.value.hasUnsavedChanges }
@@ -431,20 +326,8 @@ final class MainApplicationViewModel {
             }
             let outcome = WorkflowLayoutStore.shared.save(layout, for: profileID)
 
-            // [WF-PE2] Refused-by-design is not a failure: it will refuse identically on every
-            // retry, so a caller that cancels an exit and asks the user to "save it from the
-            // canvas" would be asking for the one thing that can never happen. Bucketed separately
-            // from `failed`, which stays for the plausibly-transient cases — a caller must still
-            // block on THOSE.
-            //
-            // ⚠️ NO UNIT-TEST SEAM for this branch itself — `MainApplicationViewModel` cannot be
-            // constructed in a test (claims `HITLPresenter` globally; established by
-            // `EditBufferRebaseTests.swift`'s own disclosure and repeated by every VM-adjacent fix
-            // this session). What IS tested, exhaustively, is the classifier this branching decision
-            // is entirely DERIVED FROM — `WorkflowLayoutSaveOutcome.isRefusedByDesign`/`didPersist`
-            // in `BlobWriteRefusalTests.swift`'s WF-PE2 section — so the 3-way split below is proven
-            // correct at the decision level even though the loop that consumes it is reviewed, not
-            // directly tested.
+            // Refused-by-design is not a failure: it refuses identically on every retry, so it is bucketed apart from `failed`,
+            // which stays for plausibly-transient cases that a caller must block on.
             if outcome.isRefusedByDesign {
                 refused.append((profileID, outcome))
                 logger.notice(
@@ -466,10 +349,8 @@ final class MainApplicationViewModel {
                 continue
             }
 
-            // Same ordering rule as the canvas's own save, and for the same reason: this is past
-            // `outcome.didPersist`, so the nodes named here are the ones that reached disk.
-            // Same refusal as the canvas save — a state loaded from a failed read cannot be
-            // trusted to name every node this workflow has.
+            // Same ordering and refusal rule as the canvas's own save: past `outcome.didPersist`, and a state loaded from a failed
+            // read cannot be trusted to name every node this workflow has.
             if state.lastLoadDidFail {
                 logger.error("[WF_CANVAS] Exit-time owned-row reconcile REFUSED for workflow \(profileID): its canvas was loaded from a failed read. CONSEQUENCE: rows for deleted nodes are left on disk rather than risking deletion of configurations whose nodes still exist.")
             } else {
@@ -482,9 +363,8 @@ final class MainApplicationViewModel {
             )
             }
 
-            // No profile re-save: this drain has no editor draft to flush — it runs over cached
-            // canvas STATES whose views may not even be mounted. The layout write above plus the
-            // reconcile is the whole job.
+            // No profile re-save: this drain has no editor draft to flush and runs over cached states whose views may not be
+            // mounted.
 
             state.markSaved()
             // The drain runs over states whose views may not be mounted, so no `onChange` will fire
@@ -499,15 +379,10 @@ final class MainApplicationViewModel {
         return CanvasDrainResult(persisted: persisted, refused: refused, failed: failed)
     }
 
-    /// Drops the cached canvas state for a profile that no longer exists.
-    ///
-    /// ⚠️ Wired from `BackendProfileService.onProfileDeleted`, alongside the layout-row delete, so
-    /// every delete path cascades. Without it a DIRTY canvas for a just-deleted workflow stayed in
-    /// the cache and `persistDirtyWorkflowCanvases` re-INSERTED its `WorkflowLayoutSD` row at quit —
-    /// resurrecting the layout the delete had removed, as a row nothing will ever collect.
-    ///
-    /// ⚠️ Deliberately silent when there is nothing cached: deleting a non-workflow profile, or a
-    /// workflow whose canvas was never opened, is the ordinary case and must not log.
+    // Why: a dirty canvas of a deleted workflow would otherwise be re-inserted at quit as an orphaned
+    // `WorkflowLayoutSD` row.
+    /// Drops the cached canvas state for a profile that is gone; wired from `BackendProfileService.onProfileDeleted`. Silent
+    /// when nothing is cached, which is the ordinary case.
     func discardWorkflowCanvasState(for profileID: UUID) {
         dirtyWorkflowCanvasIDs.remove(profileID)
         guard let state = workflowCanvasStates.removeValue(forKey: profileID) else { return }
@@ -520,11 +395,6 @@ final class MainApplicationViewModel {
             )
         }
     }
-
-    // No general-purpose `discard(for:)` beyond the delete cascade above. Profile ids are UUIDs, so a
-    // deleted profile's state is a few KB that no recreated profile can ever inherit. Shipping an
-    // unreachable cleanup hook would be a guard with no consumer, which is a defect in its own
-    // right; add one here only alongside a caller that actually runs.
 
     // MARK: - Query History Properties
     private(set) var queryHistory: [String] = []
@@ -550,14 +420,9 @@ final class MainApplicationViewModel {
     }
 
     // MARK: - Initialization
-    /// - Parameter bootstrapChatOps: whether to start the ChatOps bridges.
-    ///
-    ///   ⚠️ Defaults to true so the one production call site (`DevgenticApp`) is unchanged. It exists
-    ///   so a test can construct this view model DELIBERATELY and say so, instead of the codebase
-    ///   forbidding construction by comment — which is what left the whole ChatOps lifecycle surface
-    ///   untested. ⚠️ It is NOT the safety mechanism: `ChatOpsCoordinator.bootstrap()` refuses
-    ///   outright under XCTest, because the test host constructs this object whether tests ask for it
-    ///   or not. This parameter makes the intent explicit; that guard makes it safe.
+    /// - Parameter bootstrapChatOps: whether to start the ChatOps bridges; defaults to true. Tests pass false to construct
+    /// deliberately; `ChatOpsCoordinator.bootstrap()` still refuses outright under XCTest, which is what makes construction
+    /// safe.
     init(
         persistenceService: ChatPersistenceProtocol = ChatPersistenceStore.shared,
         fileProcessorService: FileProcessorService = FileProcessorService(),
@@ -570,14 +435,12 @@ final class MainApplicationViewModel {
         self.activeStreamManager = activeStreamManager
         self.chatHistoryViewModel = chatHistoryViewModel
 
-        // [HITL/P1] Hand the shared interaction queue to the stream manager (dead in P1 —
-        // ASM begins enqueueing in P2). The VM owns it; ASM holds the back-reference.
+        // Hands the shared interaction queue to the stream manager; the view model owns it and the manager holds the
+        // back-reference.
         activeStreamManager.interactionCenter = interactionCenter
 
-        // Claim presentation for out-of-band HITL. MCP sampling / elicitation requests
-        // arrive from a server at a moment of its choosing, with no stream in scope, so they
-        // cannot go through ActiveStreamManager's injected reference. The main window owns
-        // this; QuickAccess deliberately does not claim it.
+        // Claims presentation for out-of-band HITL: MCP sampling/elicitation requests arrive with no stream in scope, so they
+        // cannot use ActiveStreamManager's injected reference. The main window owns this; QuickAccess does not claim it.
         HITLPresenter.claim(interactionCenter)
 
         logger.info("MainApplicationViewModel initialized.")
@@ -614,13 +477,8 @@ final class MainApplicationViewModel {
             backendConfiguration: backendConfiguration
         )
 
-        // Scheduler / remote-bridge message flow.
-        //
-        // ⚠️ This said "Must come after messagingCoordinator since it reaches through the VM for
-        // the shared `createUserMessage` factory". It no longer reaches through the VM for that:
-        // it takes the static `MessagingCoordinator.makeUserMessage` with an injected
-        // `FileProcessorService`. (The ordering was never a real construction constraint even
-        // then — the reach was lazy, at send time.) The order below is now free.
+        // Scheduler / remote-bridge message flow; it takes the static `MessagingCoordinator.makeUserMessage`, so construction
+        // order is free.
         schedulerCoordinator = SchedulerCoordinator(
             viewModel: self,
             persistenceService: persistenceService,
@@ -629,9 +487,8 @@ final class MainApplicationViewModel {
             runRegistry: self
         )
 
-        // ChatOps lifecycle lives in its own coordinator. We build it here
-        // (needs `self` as back-reference for bridges) and let it bootstrap
-        // the always-on sync service plus any enabled bridges.
+        // ChatOps lifecycle lives in its own coordinator, built here (it needs `self` as a back-reference) and bootstrapped
+        // with the always-on sync service plus any enabled bridges.
         chatOpsCoordinator = ChatOpsCoordinator(
             viewModel: self,
             chatHistoryViewModel: chatHistoryViewModel,
@@ -646,12 +503,9 @@ final class MainApplicationViewModel {
 
     // MARK: - Code Session
 
-    /// Late-injected by DevgenticApp from `body` (NOT from `init()` — see the note there).
-    ///
-    /// ⚠️ The identity check is a TRIPWIRE, not bookkeeping. Binding the wrong instance here is
-    /// silent by construction: everything still compiles, the UI still works, and the only symptom
-    /// is that the Code system prompt quietly stops being applied. If this ever logs a swap after
-    /// the first bind, that defect is back.
+    // Why: the identity check is a tripwire: binding the wrong instance is silent (the Code system prompt just stops
+    // being applied), so a swap after the first bind is logged.
+    /// Late-injected by DevgenticApp from `body`, not from `init()`.
     func configureCodeSession(_ manager: CodeSessionManager) {
         if let existing = codeSessionManager, existing !== manager {
             logger.error("[CODE] configureCodeSession REPLACED the bound manager (\(ObjectIdentifier(existing).debugDescription) → \(ObjectIdentifier(manager).debugDescription)). CONSEQUENCE: more than one CodeSessionManager is live, so the instance the views mutate may not be the one the send path reads — which silently drops the Code system prompt. Find the second construction site.")
@@ -662,14 +516,8 @@ final class MainApplicationViewModel {
         syncExplorerToInterfaceMode()
     }
 
-    /// Points the shared Explorer at the folder the CURRENT mode owns:
-    ///  • Code — the Code session's project, or none on Home ("Select Project folder");
-    ///  • every other mode — Chat's own remembered folder, or none ("Open Folder").
-    ///
-    /// ⚠️ Called on every event that can change either side: a mode switch, a Code conversation
-    /// selection (whatever its outcome), Code Home, and a Code folder pick. It used to be synced
-    /// only when the Code folder CHANGED, so a session whose folder was already open
-    /// (`alreadyOpen`) left Chat's folder in the Explorer until the Project popup was tapped.
+    /// Points the shared Explorer at the folder the current mode owns: the Code session's project (none on Home), or Chat's
+    /// own remembered folder in every other mode. Called on every event that can change either side.
     func syncExplorerToInterfaceMode() {
         if interfaceMode == .code {
             explorerViewModel.showCodeProject(codeSessionManager?.projectPath)
@@ -678,17 +526,8 @@ final class MainApplicationViewModel {
         }
     }
 
-    /// Refreshes the code profile's instructions and sets it as the selected profile for send.
-    /// Called before each send when `interfaceMode == .code`.
-    /// Visibility: needed by `MessagingCoordinator` for its code-mode branch.
-    /// - Returns: `false` when the session is not ready, so the caller can REFUSE the send.
-    ///
-    /// ⚠️⚠️ This used to return `Void` and simply log on the unconfigured path — and the send
-    /// carried on regardless. That is how a wrong-instance bind became a silent prompt loss: the
-    /// Code system prompt was skipped, the profile kept whatever instructions it already had
-    /// (none), and the model ran against the generic assistant fallback with no project root. A
-    /// Code send that cannot be prepared must not proceed; the reason has to reach the user, not
-    /// just the log.
+    /// Refreshes the code profile's instructions and sets it as the selected profile for send; called before each send in
+    /// Code mode. Returns `false` when the session is not ready, so the caller refuses the send and tells the user.
     @discardableResult
     func prepareCodeProfileForSend() -> Bool {
         guard let csm = codeSessionManager else {
@@ -706,10 +545,7 @@ final class MainApplicationViewModel {
     }
 
     // MARK: - ChatOps Lifecycle (forwards to ChatOpsCoordinator)
-    //
-    // These entry points are kept on the VM so `ChatOpsSettingsView` (the
-    // only external caller) continues to work unchanged. All logic lives in
-    // the coordinator — the methods here are one-line forwards.
+    // One-line forwards to `ChatOpsCoordinator`, kept on the view model for `ChatOpsSettingsView`.
 
     func startChatOps()        { chatOpsCoordinator.startTelegram() }
     func stopChatOps()         { chatOpsCoordinator.stopTelegram() }
@@ -726,21 +562,10 @@ final class MainApplicationViewModel {
     }
     
     // MARK: - Settings (forwards to SettingsCoordinator)
-    //
-    // Load + persist paths live in `SettingsCoordinator`. These forwards are
-    // kept so the SwiftUI settings views (GeneralSettings, CoreIntelligence)
-    // can keep calling `viewModel.didChange...()` without refactoring.
-
-    // `loadWorkflowRunHistoryIfNeeded` (was a private helper here) and
-    // `setupConversationLoader` (was a ~65-line method) both moved to
-    // `ConversationSwitchCoordinator` — the selection-change pipeline lives
-    // fully in that coordinator now.
+    // Forwards to `SettingsCoordinator`, which owns the load and persist paths, for the SwiftUI settings views.
 
     // MARK: - Message Sending (forwards to MessagingCoordinator)
-    //
-    // Full implementation lives in `MessagingCoordinator`. Kept here as a
-    // forwarding method for API stability — many SwiftUI views call
-    // `viewModel.sendMessage(...)` directly via a closure passed down from
+    // Forwards to `MessagingCoordinator`; SwiftUI views call this directly through a closure passed down from
     // `MainApplicationView`.
 
     func sendMessage(attributedString: NSAttributedString, withConfig config: BackendRequestConfig) {
@@ -790,18 +615,11 @@ final class MainApplicationViewModel {
     }
     
     // MARK: - Response Regeneration / Cancel / HITL / Remote Send
-    //
-    // All bodies live in `MessagingCoordinator`. These are thin forwards for
-    // API stability (multiple SwiftUI views and the three ChatOps bridges
-    // call `viewModel.xxx(...)` directly).
+    // Thin forwards to `MessagingCoordinator`, called by SwiftUI views and the three ChatOps bridges.
 
-    /// Why Redo / Retry is unavailable for `message`, or `nil` if it may run.
-    ///
-    /// Single source for the button's disabled state AND the runtime refusal — they used to
-    /// disagree: the view hardcoded `generationAttempts >= 5` while the coordinator read
-    /// `ChatMessage.maxGenerationAttempts`, and nothing at all expressed "a run is already live
-    /// here". Reading this from a view body registers on `activeStreams`, so the control
-    /// re-enables by itself when the blocking run ends.
+    /// Why Redo / Retry is unavailable for `message`, or nil if it may run; the single source for the button's disabled
+    /// state and the runtime refusal. Reading it from a view body registers on `activeStreams`, so the control re-enables
+    /// when the run ends.
     func regenerationRefusal(for message: ChatMessage) -> RunAdmissionPolicy.Refusal? {
         messagingCoordinator.regenerationRefusal(for: message)
     }
@@ -859,10 +677,7 @@ final class MainApplicationViewModel {
     }
 
     // MARK: - Chat History Management (forwards to ConversationManagementCoordinator)
-    //
-    // All bodies live in `ConversationManagementCoordinator`. Kept here as
-    // thin forwards because many SwiftUI views (sidebar, welcome, activity
-    // bar) plus `MessagingCoordinator` call `viewModel.xxx(...)` directly.
+    // Thin forwards to `ConversationManagementCoordinator`, called by SwiftUI views and `MessagingCoordinator`.
 
     func startNewConversation() {
         conversationManagementCoordinator.startNewConversation()
@@ -884,10 +699,8 @@ final class MainApplicationViewModel {
         conversationManagementCoordinator.codeSendRefusal(openFolder: openFolder)
     }
 
-    /// Persists the backend profile selection on the given conversation.
-    /// Visibility: needed by `MessagingCoordinator.sendMessage` at send time
-    /// (stays on the VM so the messaging coordinator can reach it via its
-    /// own weak VM back-reference without learning about a second coordinator).
+    /// Persists the backend profile selection on the given conversation; stays on the view model so `MessagingCoordinator`
+    /// can reach it through its weak back-reference at send time.
     func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
         conversationManagementCoordinator.updateBackendForCurrentConversation(
             conversationID: conversationID,
@@ -962,10 +775,7 @@ final class MainApplicationViewModel {
     }
     
     // MARK: - Scheduler Support (forwards to SchedulerCoordinator)
-    //
-    // Bodies live in `SchedulerCoordinator`. Kept as forwards because
-    // `SchedulerService` and the three ChatOps bridges call these directly
-    // on the VM.
+    // Forwards to `SchedulerCoordinator`, called by `SchedulerService` and the three ChatOps bridges.
 
     @discardableResult
     func createConversationForScheduledTask(profileID: BackendProfileModel, title: String) -> UUID {

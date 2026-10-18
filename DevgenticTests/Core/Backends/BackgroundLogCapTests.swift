@@ -4,24 +4,7 @@
 //  BackgroundLogCapTests.swift
 //  DevgenticTests
 //
-//  "Uncapped logs" was two leaks wearing one name.
-//
-//  ── 1. One file, no ceiling ─────────────────────────────────────────────────────────────
-//
-//  A task's log grew for as long as the task ran. `start_background_task` recommends itself for a
-//  dev server, and a dev server appends for hours. Nothing watched the size, and the incremental
-//  tail rewrite had just removed the last periodic read that might have noticed.
-//
-//  ── 2. One directory per conversation, forever ──────────────────────────────────────────
-//
-//  Log directories were removed ONLY by `discard`, which fires on conversation deletion. A user who
-//  never deletes a conversation kept one directory per conversation that ever ran a command — and
-//  after a restart those directories are unreachable from every surface, because the list view
-//  renders registry entries and the registry is empty.
-//
-//  ⚠️ These tests use SMALL caps via the init seam. Writing 32 MB to prove a 32 MB cap works would
-//  add seconds of disk I/O for no extra confidence: rotation is the behaviour, the threshold is a
-//  number, and `testTheShippedCapsAreTheOnesProductionUses` pins the number separately.
+//  Created by Raj Singh.
 //
 
 import XCTest

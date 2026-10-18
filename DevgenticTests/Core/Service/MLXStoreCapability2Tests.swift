@@ -4,15 +4,7 @@
 //  MLXStoreCapability2Tests.swift
 //  DevgenticTests
 //
-//  Capabilities 7, 9, 10 and 11, added 2026-09-13:
-//     7  paste a HuggingFace repo id into the MLX store instead of hunting for it in results
-//     9  Ollama pulls finally produce a record, progress, Cancel and a completion message
-//    10  the HuggingFace token can be entered where the 401 happens
-//    11  the token is checked against the server, not just shape-matched
-//
-//  ⚠️ The rules are pure `nonisolated static`s because neither store view model can be built in
-//  a test (each init scans disk and/or fetches over the network). Wiring is covered by source
-//  tests at the bottom, which FAIL rather than skip on a missing path.
+//  Created by Raj Singh.
 //
 
 import XCTest

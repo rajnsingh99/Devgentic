@@ -4,24 +4,17 @@
 //  WorkflowRunHistoryListView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 12/04/26.
-//
-//  Rich run history list for the workflow empty/ready state.
-//  Shows per-run cards with user input, output preview, node count,
-//  and status. Width-aligned with chat input via ViewLayout.maxContentWidth.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A run history list for the workflow empty/ready state, with a card per run showing user input, output preview,
+/// node count and status. Width-aligned with the chat input via `ViewLayout.maxContentWidth`.
 struct WorkflowRunHistoryListView: View {
     let runHistory: [WorkflowRunRecord]
-    /// ⚠️ WRITE-ONLY from this list, by construction (register CF-61). The one call site is
-    /// `WorkflowDedicatedView.emptyExecutionState`, which renders in the `else` of
-    /// `if let data = displayData` — and `displayData` is non-nil exactly when this id resolves to
-    /// a record in `runHistory`. So whenever the list is on screen nothing is selected, and a tap
-    /// replaces the list with the timeline in the same update. The per-card selected styling and
-    /// `.isSelected` trait that used to read it back were unreachable and have been deleted rather
-    /// than left as a description of a state the code cannot produce.
+    /// Write-only from this list: `WorkflowDedicatedView.emptyExecutionState` renders it only while nothing is selected,
+    /// and a tap replaces the list with the timeline in the same update.
     @Binding var selectedRunID: UUID?
     @Environment(\.appTheme) private var theme
 
@@ -69,19 +62,8 @@ struct WorkflowRunHistoryListView: View {
 
 // MARK: - Card body and spoken form
 
-/// What a run card's third row shows, and in what register (register XUI-5).
-///
-/// ⚠️ Keyed on the run STATUS, not on `error != nil`. EVERY cancel path leaves an `error` behind:
-/// `WorkflowRunRecord.freeze` copies `state.workflowError`, which a Stop has already set to
-/// "Cancelled" (`handleError` writes the message before the cancelled flag is latched), and
-/// `WorkflowRunHistoryStore.reconcileOrphans` stamps "Interrupted" on a run reconciled after a quit.
-/// Both land on a `.cancelled` STATUS, which is why that is the thing to test. Testing the error
-/// alone drew a red warning triangle and two lines of error-coloured text beside the
-/// card's own amber "Cancelled" badge, reporting the user's own Stop back to them as a fault. That
-/// is the same conflation `NodeStatus.color`'s "amber, not red" rule already settled one layer down.
-///
-/// ⚠️ And because the branch was EXCLUSIVE, it also HID the partial output that `handleStreamEnd`
-/// deliberately preserves so that stopping a run discards no evidence.
+/// What a run card's third row shows, and in what register. Keyed on the run status, not `error != nil`: every cancel
+/// path leaves an `error` behind, so a Stop would otherwise read as a fault. Partial output is kept visible.
 enum RunCardBody: Equatable {
     /// A genuine failure — red glyph, error-coloured text.
     case failure(String)
@@ -90,20 +72,9 @@ enum RunCardBody: Equatable {
     case output(String)
     case none
 
-    /// [workflow/vm-4] The display bound for a card's payload strings.
-    ///
-    /// A run record holds the run's WHOLE input and final output — tens of kilobytes is ordinary
-    /// — and the card showed them through `Text(...).lineLimit(1|2)`. `lineLimit` is a LAYOUT
-    /// constraint: the full string is still handed to SwiftUI, measured and retained per card,
-    /// per body pass, for up to 20 cards. Measured on an isolated release build (8 cards, ~62 KB
-    /// each, 40 forced passes): bounding the `Text` payloads alone saved ~1.1 ms/pass, and
-    /// bounding what the accessibility label reads saved ~5.1 ms/pass on top — the a11y path is
-    /// the expensive one because `RunCardSpeech.spokenPreview` allocates two full-size copies
-    /// and walks the whole string for `count` BEFORE its own 120-char cap.
-    ///
-    /// Deliberately NOT applied inside `of(status:error:finalOutput:)`: that decision function
-    /// returns the true strings, and a future copy/export consumer must not inherit a display
-    /// truncation. Callers that DISPLAY call this.
+    /// The display bound for a card's payload strings. `lineLimit` is only a layout constraint (the full string is still
+    /// measured per card per pass), so bound the string itself. Not applied inside `of(status:error:finalOutput:)`, which
+    /// returns the true strings; callers that display call this.
     nonisolated static func bounded(_ text: String, limit: Int = 200) -> String {
         // `prefix` on a String is O(limit), not O(n) — the point is to never walk the tail.
         var result = ""
@@ -146,22 +117,12 @@ enum RunCardBody: Equatable {
     }
 }
 
-/// What VoiceOver says for a run card.
-///
-/// Extracted for the same reason as `TableSpeech`: a SwiftUI accessibility label can't be
-/// read back from a hosted view (the tree is built lazily when a real assistive client
-/// attaches), so testing this function is the only way to pin the contract.
+/// What VoiceOver says for a run card. A separate type so the contract can be tested, since an accessibility label
+/// cannot be read back from a hosted view.
 enum RunCardSpeech {
 
-    /// The whole card as ONE utterance.
-    ///
-    /// Every fact is already on screen, but scattered across four rows of icon+text pairs,
-    /// so VoiceOver read the card as a pile of disconnected fragments:
-    /// "checkmark.circle.fill, 12.4s, text.bubble, <input>, square.on.square, 3 nodes, Failed".
-    /// Ordered by what identifies a run: what happened, then what was asked, then the result.
-    /// - Parameter notRunNodes: nodes that never ran because something upstream failed. Spoken
-    ///   separately from `failedNodes`, which used to absorb them. Defaulted so the existing
-    ///   contract tests keep compiling.
+    /// The whole card as one utterance, ordered by what identifies a run: what happened, what was asked, the result.
+    /// `notRunNodes` are nodes that never ran because something upstream failed, spoken separately from `failedNodes`.
     static func label(for record: WorkflowRunRecord, totalNodes: Int, failedNodes: Int,
                       notRunNodes: Int = 0) -> String {
         var parts: [String] = []
@@ -178,12 +139,8 @@ enum RunCardSpeech {
         if !record.userInput.isEmpty {
             parts.append(String(localized: "Input: \(spokenPreview(RunCardBody.bounded(record.userInput)))"))
         }
-        // [XUI-5] Through the SAME decision the visible row uses. This used to test `error != nil`
-        // independently, and `freeze` sets `error` on every cancel path — so once the row stopped
-        // calling a Stop a failure, VoiceOver still announced "Error: Cancelled" for a run whose card
-        // now showed a neutral stop glyph and its partial output. Fixing only the visual half would
-        // have left the two descriptions of one card contradicting each other, which is the defect
-        // `nodeTagLabel` exists to prevent one screen over.
+        // Uses the same decision as the visible row, so VoiceOver and the card cannot contradict each other about a stopped
+        // run.
         switch RunCardBody.of(status: record.status, error: record.error,
                               finalOutput: record.finalOutput) {
         case .failure(let message):
@@ -211,22 +168,11 @@ enum RunCardSpeech {
     nonisolated(unsafe) static var longestSpokenPreviewInputForTesting = 0
     #endif
 
-    /// Trims to a spoken length. The card shows 1–2 lines; reading a full multi-kilobyte output
-    /// aloud for one row of a list is its own accessibility failure.
-    ///
-    /// ⚠️ [workflow/vm-4] This used to claim it "mirrors the card's visual truncation". It did
-    /// not: the card's `lineLimit` is a layout constraint applied after the whole string is
-    /// handed over, so there was no string-level bound to mirror — and this function's own
-    /// `replacingOccurrences` + `trimmingCharacters` + `count` ran over the FULL multi-kilobyte
-    /// value before the cap below could apply, three passes and two full-size copies per card
-    /// per body pass, whether or not VoiceOver was attached. Callers now hand in
-    /// `RunCardBody.bounded(_:)` output, so the mirror is real and this never sees more than the
-    /// display bound.
+    /// Trims to a spoken length; reading a full multi-kilobyte output aloud for one list row is an accessibility failure.
+    /// Callers pass `RunCardBody.bounded(_:)` output so this never walks a full-size value.
     static func spokenPreview(_ text: String, limit: Int = 120) -> String {
         #if DEBUG
-        // Test seam [workflow/vm-4]: the defect is the SIZE of what reaches here, not the size
-        // of what leaves — the cap below always bounded the output, which is why an assertion on
-        // the result could not fail. Records the largest input this has been handed.
+        // Test seam: records the largest input this has been handed, since the cap always bounds the output.
         longestSpokenPreviewInputForTesting = max(longestSpokenPreviewInputForTesting, text.count)
         #endif
         let flat = text
@@ -239,10 +185,8 @@ enum RunCardSpeech {
 
 // MARK: - Run Card
 
-/// ⚠️ NO selected state (register CF-61). This card had `isSelected` styling — accent fill, a
-/// 1.5pt accent border, a status-tinted shadow — and an `.isSelected` accessibility trait, none of
-/// which could ever render: see the gate documented on `WorkflowRunHistoryListView.selectedRunID`.
-/// If this list is ever shown BESIDE a selection, the styling comes back with the gate, not before.
+/// A run card. It has no selected state: the list is only shown while nothing is selected (see
+/// `WorkflowRunHistoryListView.selectedRunID`).
 private struct WorkflowRunCardView: View {
     let record: WorkflowRunRecord
     let onSelect: () -> Void
@@ -270,10 +214,8 @@ private struct WorkflowRunCardView: View {
     }
 
     var body: some View {
-        // [workflow/vm-4] Both derived ONCE per pass. `nodeStats` runs two filters over
-        // `nodeResults` and was evaluated twice (the bottom strip and the accessibility label);
-        // `cardAccessibilityLabel` is a modifier ARGUMENT, so it is built eagerly whether or not
-        // an assistive client is attached.
+        // Both derived once per pass: `nodeStats` filters `nodeResults` twice, and the accessibility label modifier argument
+        // is built eagerly.
         let stats = nodeStats
         let accessibilityLabel = RunCardSpeech.label(for: record, totalNodes: stats.total,
                                                      failedNodes: stats.failed, notRunNodes: stats.notRun)
@@ -372,9 +314,7 @@ private struct WorkflowRunCardView: View {
                             )
                     }
 
-                    // Neutral, not red: these nodes never ran. The split was computed and SPOKEN
-                    // from the day CH47 landed but never rendered, so the card still showed only
-                    // "1 failed" for a 6-node cascade — sighted users saw less than VoiceOver did.
+                    // Neutral, not red: these nodes never ran. Shown so sighted users see the same split VoiceOver speaks.
                     if stats.notRun > 0 {
                         Text("\(stats.notRun) not run")
                             .font(.system(size: 9, weight: .bold))
@@ -418,9 +358,8 @@ private struct WorkflowRunCardView: View {
                 isHovering = hovering
             }
         }
-        // `.ignore` rather than `.combine`: combining would still read every icon and
-        // fragment, just glued together. This replaces them with one composed sentence —
-        // and it takes the decorative glyphs out of the tree for free.
+        // `.ignore` rather than `.combine`, replacing the fragments with one composed sentence and removing the decorative
+        // glyphs from the tree.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(.isButton)

@@ -4,7 +4,7 @@
 //  ActiveStreamManager.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/08/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,23 +17,10 @@ private let logger = DGLogger(category: "ActiveStreamManager")
 /// Delegate protocol for RemoteMirrorService to observe stream lifecycle.
 @MainActor
 protocol ActiveStreamMirrorDelegate: AnyObject {
-    /// - Parameter startedBy: which surface started this run.
-    ///
-    ///   ⚠️⚠️ PASSED EXPLICITLY BECAUSE IT CANNOT BE READ OFF `message`. The delegate is handed the
-    ///   AGENT message, whose `messageSource` is still the `.localUI` default at this instant —
-    ///   every attributing surface assigns it AFTER `startMessageStream` returns
-    ///   (`MessagingCoordinator`, `SchedulerCoordinator`, `QuickAccessSessionViewModel`,
-    ///   `OrbSessionController`). Two conformers already document having hit this. The USER
-    ///   message carries the truth here and is stamped before the call, so it is read from there.
-    ///
-    ///   ⚠️ **Do NOT "fix" this by stamping `agentMessage.messageSource` earlier instead.**
-    ///   `OrbAmbientRunWatcher` reads that field off the agent message at `didEndStream` and its
-    ///   classification is calibrated to today's timing; moving the write changes what Orb
-    ///   announces.
-    ///
-    ///   ⚠️ `.localUI` here means "not attributed", not "definitely typed by hand" — a new surface
-    ///   that forgets to stamp lands here. A consumer deciding whether to send data OFF the machine
-    ///   must therefore treat it as a refusal, never as permission.
+    // Why: `.localUI` means 'not attributed', so a consumer sending data off the machine must treat it as a refusal.
+    // Do not stamp `agentMessage.messageSource` earlier: `OrbAmbientRunWatcher` reads it at `didEndStream`.
+    /// - Parameter startedBy: the surface that started this run, read from the user message.
+    /// The agent message is not yet attributed when the delegate is called.
     func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, startedBy: MessageSource, for conversationID: UUID)
     func activeStreamManager(_ manager: ActiveStreamManager, didEndStream message: ChatMessage)
     /// A started run is WAITING for the local model, which another run holds (local inference
@@ -62,16 +49,8 @@ final class ActiveStreamManager {
 
     // MARK: - Conversation admission
 
-    /// One run at a time, per conversation. See `ConversationAdmission` for the whole argument —
-    /// briefly: two concurrent runs in one conversation were reachable and unguarded, because the
-    /// only thing stopping them was the composer's send button greying out, and the scheduler, Orb
-    /// and the ChatOps bridge never touch a button.
-    ///
-    /// ⚠️ The busy test is injected rather than owned by that type, so `activeStreams` stays the
-    /// single source of "what is running" — the `streamingMessageID`/`streamingMessage` pair this
-    /// dictionary already replaced is what a second copy of that state turns into.
-    /// One LOCAL run at a time, across conversations — layer 2 beneath `admission`. Settable so tests
-    /// can observe registration without the process-wide instance.
+    /// Coordinator that admits one local run at a time across conversations.
+    /// Settable so tests can observe registration without the process-wide instance.
     @ObservationIgnored var inferenceCoordinator: LocalInferenceCoordinator = .shared
 
     @ObservationIgnored private lazy var admission = ConversationAdmission { [weak self] conversationID, messageID in
@@ -79,29 +58,16 @@ final class ActiveStreamManager {
         return Self.isConversationBusy(self.activeStreams, conversationID: conversationID, excluding: messageID)
     }
 
-    /// Whether some OTHER run is live in `conversationID`.
-    ///
-    /// ⚠️ `excluding` IS THE WHOLE SUBJECT. A waiting run is already in `activeStreams` — it is
-    /// registered before its task starts so Stop and the sidebar can see it — so without this every
-    /// run would find ITSELF busy and park forever, and no conversation would ever run anything
-    /// again.
-    ///
-    /// ⚠️ A pure static over the dictionary rather than a closure body, because the closure body
-    /// was unreachable from tests: they inject their own `isBusy` to exercise the queue, so the
-    /// REAL predicate had no coverage at all and mutation removing `excluding` survived.
+    /// Whether some other run is live in `conversationID`.
+    /// `excluding` is the asking run's own message id: a waiting run is already registered and must not find itself busy.
     static func isConversationBusy(_ streams: [UUID: ChatMessage],
                                    conversationID: UUID,
                                    excluding messageID: UUID) -> Bool {
         streams.values.contains { $0.conversationId == conversationID && $0.id != messageID }
     }
 
-    /// When each live run CLAIMED its stream. Written and removed in lockstep with
-    /// `activeStreams` (the only two sites are the insert below and `finalizeMessage`), so it
-    /// cannot outlive the run it describes.
-    ///
-    /// Needed because a run's start time is NOT `ChatMessage.timestamp`: Redo and Resume stream
-    /// into a pre-existing message whose timestamp is hours old. `ForegroundRunResolver` uses this
-    /// to break a tie deterministically when a conversation somehow holds two live runs.
+    /// When each live run claimed its stream; written and removed in lockstep with `activeStreams`.
+    /// Distinct from `ChatMessage.timestamp`, which is old for a Redo or Resume that streams into an existing message.
     @ObservationIgnored private var streamStartedAt: [UUID: Date] = [:]
     @ObservationIgnored nonisolated(unsafe) private var permissionResolvedObserver: Any?
     @ObservationIgnored nonisolated(unsafe) private var clarificationResolvedObserver: Any?
@@ -110,18 +76,15 @@ final class ActiveStreamManager {
 
     @ObservationIgnored private let persistenceService: ChatPersistenceProtocol
 
-    /// [G1 Piece 1] Per-message timestamp of the last in-flight flush, used to rate-limit the
-    /// token-path coalesced flush. Boundary flushes (tool start/finish, HITL park) pass
-    /// `immediate: true` and bypass this. Cleared when the message finalizes to bound the map.
+    /// Per-message time of the last in-flight flush; rate-limits the token-path flush.
+    /// Boundary flushes pass `immediate: true` and bypass it; cleared when the message finalizes.
     @ObservationIgnored private var lastInFlightFlush: [UUID: Date] = [:]
     private static let inFlightFlushInterval: TimeInterval = 2.0
     @ObservationIgnored private let fileProcessorService: FileProcessorService
     @ObservationIgnored private let backendOrchestrationService: BackendOrchestrationService
 
-    /// [D2] Multicast stream-lifecycle delegates. Each active ChatOps transport (Telegram/Discord/Slack)
-    /// owns its own RemoteMirrorService and registers here. A single `weak var` let the last-started
-    /// transport clobber the others, so only ONE actually mirrored. Weak refs so a torn-down service
-    /// auto-clears.
+    /// Weak holder for a multicast stream-lifecycle delegate; each ChatOps transport registers its own mirror.
+    /// A torn-down mirror service clears itself.
     private struct WeakMirror { weak var delegate: ActiveStreamMirrorDelegate? }
     @ObservationIgnored private var mirrorDelegates: [WeakMirror] = []
 
@@ -141,8 +104,7 @@ final class ActiveStreamManager {
         mirrorDelegates.compactMap { $0.delegate }
     }
 
-    /// [HITL/P1] Unified pending-interaction queue, owned by MainApplicationViewModel and
-    /// injected after init. P1 only holds the reference (no writers yet); P2 wires enqueue.
+    /// Unified pending-interaction queue, owned by `MainApplicationViewModel` and injected after init.
     @ObservationIgnored var interactionCenter: InteractionCenter?
 
     init(
@@ -292,30 +254,10 @@ final class ActiveStreamManager {
     }
 
 
-    /// Ids belonging to a turn that is still being WRITTEN, and therefore must not appear in any
-    /// run's history — every live assistant message plus the question it is answering — except
-    /// `keeping`, the question the calling run is itself asking.
-    ///
-    /// ⚠️ WHY THE WHOLE TURN, not just the assistant row. Dropping a live reply while keeping its
-    /// question makes that question the trailing unanswered message, and `pairTurns`' orphan
-    /// handler then emits it as `wasCancelled: true` /
-    /// "Agent never responded to this query" — a LOUDER falsehood than the one being fixed,
-    /// because it also fires `renderTerminationElement`. An unfinished turn is simply not part of
-    /// history yet; asserting nothing about it is the only honest option.
-    ///
-    /// ⚠️ WHY IT MUST BE APPLIED AFTER `resolve`, not by filtering `inMemory`. `flushInFlight`
-    /// upserts the in-flight assistant row into the STORE at every tool boundary and on the first
-    /// content flush, so the store returns it within ~100 ms regardless of what the caller passes
-    /// in memory. Filtering only the in-memory side would not remove the row — it would swap the
-    /// live copy for a staler disk copy, since `BackendHistoryResolver.merge` lets in-memory win.
-    ///
-    /// ⚠️ AND WHY NOT `lifecycleState`. Nothing resets a persisted `.streaming` row at launch, so
-    /// a force-quit during a long agent run leaves one on disk indefinitely. Filtering the store
-    /// on lifecycle would erase every crash-interrupted turn — including completed tool work —
-    /// from all future context in that conversation, which is far more common than this race.
-    /// Keying on ids of runs that are live IN THIS PROCESS cannot make that mistake.
-    ///
-    /// `nonisolated static` over plain values so the rule is testable with no manager.
+    // Why: Applied after `resolve`, not by filtering `inMemory`: the in-flight row reaches the store within ~100 ms.
+    // Keyed on live in-process runs, not `lifecycleState`: a force-quit leaves persisted `.streaming` rows on disk.
+    /// Ids of turns still being written (live assistant messages plus their questions), except `keeping`.
+    /// Such turns are omitted from every run's history; the rule is a `nonisolated static` over plain values.
     nonisolated static func incompleteTurnIDs(
         liveRuns: [UUID: UUID],
         keeping keepID: UUID?
@@ -329,75 +271,20 @@ final class ActiveStreamManager {
         return ids
     }
 
-    /// ⚠️ THE SINGLE SOURCE both consumers of history must use.
-    ///
-    /// `BackendHistoryResolver`'s header states the rule this upholds: "There are two consumers
-    /// and they MUST agree: the request path, which sends it, and the context gauge, which sizes
-    /// it." Sharing the resolver was necessary but not sufficient — once the request began OMITTING
-    /// in-flight turns, a gauge that still counted them was measuring a payload that would never
-    /// ship. Both now ask this.
-    ///
+    /// The single source both history consumers (request path and context gauge) use for omitted in-flight turns.
     /// - Parameter keeping: the question the calling run is itself asking, which is never omitted.
     func incompleteTurnIDs(keeping keepID: UUID? = nil) -> Set<UUID> {
         Self.incompleteTurnIDs(liveRuns: liveRunQuestionIDs, keeping: keepID)
     }
 
-    /// The live ASSISTANT rows, and nothing else — the context gauge's omission.
-    ///
-    /// ⚠️ NOT `incompleteTurnIDs()`. The two consumers must agree about what the next request
-    /// CARRIES, not about which ids are in flight, and on that question they differ by one row.
-    /// The request path omits a whole turn because a HALF-WRITTEN turn poisons `pairTurns` — the
-    /// question would be reported as answered with nothing. The gauge is not building a
-    /// transcript; it is pricing tokens, and the question it would drop is a settled, persisted
-    /// row that the next request certainly carries.
-    ///
-    /// Using the request path's set here made the ring FALL at the moment of send — the just-sent
-    /// question was subtracted from the size of a request that had just included it — and jump
-    /// back when streaming ended. The reply is still omitted: `flushInFlight` upserts the partial
-    /// assistant row into the store within ~100 ms, and pricing a half-written answer makes the
-    /// ring climb through a run and then drop as the row is replaced.
+    /// The live assistant rows only: the context gauge's omission set.
+    /// Unlike `incompleteTurnIDs`, the just-sent question stays counted because the next request carries it.
     func liveReplyIDs() -> Set<UUID> {
         Set(liveRunQuestionIDs.keys)
     }
 
-    /// The history a run will actually carry, OLDEST-FIRST — derived from the store and the
-    /// message being sent, rather than accepted from the surface that started the run.
-    ///
-    /// ⚠️ THE ONLY in-memory input is `[userMessage]` — the message racing its own persist on the
-    /// surfaces that do not await it. In-flight streams are NOT passed in: `flushInFlight` upserts
-    /// the live assistant row into the STORE within ~100 ms, so they arrive from the resolver on
-    /// their own, and `omitting` then REMOVES them. Live-run state reaches this method only as
-    /// that subtraction — never as an added source. (An earlier version of this comment said the
-    /// method "holds both the message being sent and any in-flight streams", and a still earlier
-    /// one said in-flight rows are "never in the store while running". Both were false, and
-    /// `DerivedHistoryContractTests` has a scan that fails the build if `inMemory:` grows again.)
-    /// The UI's `currentChatMessages` was over-supply — passing it is what let QuickAccess ship
-    /// its 20-message pagination window as model history.
-    ///
-    /// - Parameter omitting: ids of messages belonging to a turn still being written, from
-    ///   `incompleteTurnIDs`. Applied AFTER the resolve, for the `flushInFlight` reason above —
-    ///   filtering the in-memory side alone removes nothing. The current `userMessage` is never
-    ///   omitted, whatever the set says.
-    /// - Parameter before: the assistant message being rewritten (regenerate / resume). When set,
-    ///   the run replays only what preceded it, via `MessagingCoordinator.historySlice` — reused
-    ///   rather than reimplemented so both callers keep one definition of "before".
-    ///
-    ///   ⚠️ ON THIS PATH THE CUT IS ALWAYS BY TIMESTAMP, never by identity, and the slice's own
-    ///   doc describes identity as the primary branch because its OTHER caller
-    ///   (`resolveBackendHistory(before:)`) does reach it. Here the boundary is the live assistant
-    ///   row, so its id is always in `omitting` and `settled` never contains it — `firstIndex`
-    ///   cannot match. The two cuts differ only for a row whose timestamp exactly TIES the
-    ///   boundary's, which nothing in this codebase is known to produce (timestamps are assigned
-    ///   once at init, and compaction checkpoints are deliberately offset by +0.001s). Treat the
-    ///   identity branch as unreachable from here rather than as the normal case.
-    ///
-    /// `static` over plain values so the derivation is testable with no manager and no view model.
-    /// The text conversation memory is searched with: what the user actually SAID (the
-    /// persisted row), not the model-facing query. `promptOverride` decorates the latter — Orb
-    /// appends a ~300-char spoken-style hint, a background-task wake sends its own prompt — and
-    /// that decoration swamped MiniLM's 128-token window and switched BM25 fusion on for the
-    /// hint's own words (RAG-19). Falls back to the model query when the row has no text (an
-    /// image-only turn), so retrieval never runs on an empty string it did not run on before.
+    /// The text conversation memory is searched with: what the user said (the persisted row), not the model query.
+    /// Falls back to `modelQuery` when the row has no text, e.g. an image-only turn.
     static func retrievalQuery(for userMessage: ChatMessage, modelQuery: String) -> String {
         guard let said = userMessage.content.textContent,
               !said.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return modelQuery }
@@ -420,11 +307,7 @@ final class ActiveStreamManager {
             : resolved.history.filter { $0.id == userMessage.id || !omitting.contains($0.id) }
         let final = boundary.map { MessagingCoordinator.historySlice(before: $0, in: settled) } ?? settled
 
-        // ⚠️ THE COMPOSITION LINE. `MessagingCoordinator.resolveBackendHistory` used to emit this on
-        // every send; when the resolve moved in here the request path went SILENT — no surface
-        // logged what the model was actually given. Restored at the one place every run passes
-        // through, so a field log can answer "what history did this turn carry, and what was left
-        // out?" without reproducing.
+        // Single place every run passes through, so the log shows what history the turn carried and what was left out.
         let omittedCount = resolved.history.count - settled.count
         let cutCount = settled.count - final.count
         var notes: [String] = []
@@ -441,15 +324,8 @@ final class ActiveStreamManager {
         return final
     }
 
-    /// Index of the first message that is OLDER than the one before it, or nil if `history` is
-    /// oldest-first. The check behind the `[HISTORY]` guard-rail in `startMessageStream`.
-    ///
-    /// Equal timestamps do NOT trip it: a tie is unordered, not descending, and
-    /// `BackendHistoryResolver.merge` can legitimately produce one (it sorts by timestamp over a
-    /// dictionary's values). Only a strict inversion is evidence a caller built history backwards.
-    ///
-    /// `nonisolated static` over plain values so the rule is unit-testable with no manager, no
-    /// persistence and no view model — the `RunAdmissionPolicy` shape.
+    /// Index of the first message older than its predecessor, or nil if `history` is oldest-first.
+    /// Equal timestamps do not count: a tie is unordered, and `BackendHistoryResolver.merge` can produce one.
     nonisolated static func firstDescendingPair(in history: [ChatMessage]) -> Int? {
         guard history.count > 1 else { return nil }
         for index in 1..<history.count where history[index].timestamp < history[index - 1].timestamp {
@@ -470,33 +346,19 @@ final class ActiveStreamManager {
         onComplete: @escaping () -> Void
     ) -> ChatMessage {
 
-        // Both derived from the message rather than passed alongside it, so they cannot disagree
-        // with it. `conversationID` used to be a separate argument that every caller had to keep
-        // in sync with the message it was sending.
+        // Both derived from the message so they cannot disagree with it.
         let conversationID = userMessage.conversationId
         let userQuery = promptOverride ?? userMessage.content.textContent ?? ""
 
-        // ⚠️ A Code run takes ITS CONVERSATION'S project, not whichever one is open. Every path in —
-        // composer, background-task wake, scheduler, resume, Orb, QuickAccess — comes through here,
-        // which is why this is the one place it is done. A no-op for composer sends, whose
-        // conversation is always bound to the open folder. See `CodeSessionManager.profile(_:forConversationProject:)`.
+        // A Code run takes its conversation's project, not whichever one is open; every send surface passes through here.
         let config = config.profile.profileType == .code
             ? BackendRequestConfig(profile: CodeSessionManager.profile(
                 config.profile,
                 forConversationProject: persistenceService.getConversation(withId: conversationID)?.projectPath))
             : config
         
-        // ⚠️ GUARD-RAIL: a workflow profile started without workflow bookkeeping.
-        //
-        // Six of the seven callers of this method used to do exactly that. The run still
-        // EXECUTES, which is why it went unnoticed — but with no `WorkflowExecutionState` there is
-        // no run record (no stub, no freeze, no per-node timelines — that detail lives only in
-        // the state and is never captured), HITL attributes to `.chat` instead of `.workflow`
-        // (`enqueueHITL` keys on `workflowState != nil`), and the capability-card router stays on
-        // even though parallel nodes interleave segments it cannot separate.
-        //
-        // `WorkflowRunBootstrap.begin(...)` is the fix; this line exists because a helper can be
-        // forgotten by the NEXT new call site and a loud log cannot.
+        // Guard-rail: a workflow profile started without `WorkflowExecutionState` loses its run record and HITL attribution.
+        // `WorkflowRunBootstrap.begin(...)` creates that state.
         if config.profile.profileType == .workflow && workflowExecutionState == nil {
             logger.error("""
                 [WF_RUN] ⚠️ Workflow '\(config.profile.displayName)' (\(config.profile.id)) started \
@@ -515,12 +377,8 @@ final class ActiveStreamManager {
         if let messageToUpdate = existingMessage {
             agentMessage = messageToUpdate
             if resumeState != nil {
-                // [ASM-3] A resumed run RE-GENERATES the assistant turn from the
-                // reconstructed history — it does not continue the interrupted text
-                // mid-sentence. Streaming into the old variant appended the new answer
-                // onto the stale partial ("…partial sentenceHere is the full answer…").
-                // Clear the streamed text; the timeline (tool rows, cards) survives —
-                // resumeRun already sanitized it.
+                // A resumed run regenerates the turn instead of continuing it, so the stale streamed text is cleared.
+                // The timeline (tool rows, cards) survives.
                 let staleChars = agentMessage.currentAgentContent?.textContent?.count
                     ?? agentMessage.content.textContent?.count ?? 0
                 if let agentResponse = agentMessage.agentResponse,
@@ -542,20 +400,12 @@ final class ActiveStreamManager {
                 backendEntityId: config.profile.id
             )
             agentMessage.profileType = config.profile.profileType
-            // ⚠️ Reads `messageSource` off the USER's message, which every surface must set BEFORE
-            // calling this — `.orb`, `.quickAccess`, `.scheduled`, the ChatOps sources, else the
-            // `.localUI` default for a typed send. The scheduler set it only on the AGENT message
-            // until 2026-09-07, so scheduled runs reported `localUI` here; if a new surface appears
-            // and forgets, this line under-reports rather than lying loudly, so treat `localUI` on a
-            // run you did not type as a missing attribution rather than proof of a manual send.
+            // `messageSource` is read from the user's message, which every surface must stamp before this call.
+            // `.localUI` also means 'not attributed', so on a run you did not type it may be a missing stamp.
             logger.notice("🚀 [STREAM_START] Created message \(agentMessage.id.uuidString) for conversation \(conversationID.uuidString) — started by \(userMessage.messageSource.rawValue), profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue))\(promptOverride != nil ? ", model-facing query DIFFERS from the displayed message (promptOverride)" : "").")
         }
 
-        // [G1 Piece 1] Mark the run in-flight and stamp the model identity that's about to run.
-        // The lifecycle marker makes an interrupted (force-quit / crash) run distinguishable from a
-        // finished one after restart; the run-identity stamp records which model actually produced
-        // this message — the resume-safety guard plus an honest "which model ran" UI label even
-        // after the originating profile is later edited.
+        // Marks the run in-flight and stamps the model identity, so an interrupted run is distinguishable after restart.
         agentMessage.lifecycleState = .streaming
         if let llm = config.profile.resolvedLLMConfig {
             agentMessage.apiProvider = llm.apiProvider.rawValue
@@ -564,84 +414,46 @@ final class ActiveStreamManager {
         }
 
         activeStreams[agentMessage.id] = agentMessage
-        // The question this run is answering, recorded from the caller rather than inferred.
-        // `ChatMessage` has no parent link, so without this the only way to find a live reply's
-        // question would be POSITION or TIMESTAMP — the identity-by-inference class this whole
-        // change set removes. See `incompleteTurnIDs`.
+        // The question this run is answering, recorded from the caller since `ChatMessage` has no parent link.
         liveRunQuestionIDs[agentMessage.id] = userMessage.id
         streamStartedAt[agentMessage.id] = Date()
         for delegate in liveMirrorDelegates {
-            // ⚠️ `userMessage.messageSource`, not `agentMessage`'s — see the protocol's own note.
+            // Uses `userMessage.messageSource`; the agent message is not yet attributed.
             delegate.activeStreamManager(self, didStartStream: agentMessage,
                                          startedBy: userMessage.messageSource, for: conversationID)
         }
 
-        // Defer initial state mutations to the next run loop tick.
-        // This prevents "Modifying state during view update" warnings when the returned
-        // ChatMessage is immediately assigned to SwiftUI state within a view update cycle.
+        // Deferred to the next run-loop tick to avoid 'Modifying state during view update' when the caller
+        // assigns the returned message to SwiftUI state.
         Task { @MainActor in
             agentMessage.agentState = .thinking(.reasoning)
         }
         
-        // ⚠️ THE RUN'S ORIGIN TRAVELS WITH THE RUN. Bound once, here, so no surface can forget it —
-        // see `WorkflowRunAttendance.origin` for the grant that crossed a surface boundary without it.
-        // ⚠️ Bound around the Task's CREATION, not inside its body: an unstructured `Task {}`
-        // inherits the task-local values of the context that creates it, which is the same mechanism
-        // `$hasRemoteResponder` and `$isAttended` already rely on at their binding site.
-        //
-        // ⚠️ A WOKEN RUN IS UNATTENDED BY CONSTRUCTION, and binding that HERE — rather than at
-        // whatever eventually triggers one — is the same argument `$origin` makes just above: a
-        // surface cannot forget what it never had to remember. `.backgroundTask` exists only for a
-        // run that a FINISHED PROCESS started. Nobody typed it and nobody is watching.
-        //
-        // ⚠️⚠️ NOT COSMETIC. `SessionToolApprovals.isAllowed` reads `canReachAHuman` off this
-        // before serving a standing "Allow for this chat" grant. Left at its `true` default, a build
-        // finishing overnight would spend approvals the user granted while sitting at the keyboard —
-        // and the per-tool grant is keyed on `(conversation, node)` with NO surface, so
-        // `MessageSource.backgroundTask` alone does not close it. `ToolExecutionLoop`'s two arms
-        // (WF-SE11) key on the same predicate: with nobody reachable, `ask_user` and a tool
-        // confirmation are refused with an honest observation instead of parking until a deadline
-        // cancels the run.
-        //
-        // ⚠️ ADDITIVE ON PURPOSE. Every other source re-binds whatever the CALLER already bound, so
-        // this cannot contradict ChatOps (`isAttended = false` AND `hasRemoteResponder = true`) or
-        // `SchedulerCoordinator`. Deriving attendance from the source for ALL sources was the
-        // obvious version and is wrong: it would have flipped a ChatOps run back to attended and
-        // deleted the Router's first-match behaviour (WF-EX5), which exists because an arbitration
-        // park there has no deadline to end it.
+        // Why: Additive on purpose: other sources keep what the caller bound (ChatOps is unattended with a remote responder).
+        // `SessionToolApprovals.isAllowed` reads it, so an unattended run cannot spend grants given at the keyboard.
+        // The run's origin and attendance are bound around the Task's creation, which unstructured tasks inherit.
+        // A woken `.backgroundTask` run is unattended: nobody typed it and nobody is watching.
         let attended = userMessage.messageSource == .backgroundTask
             ? false
             : WorkflowRunAttendance.isAttended
-        // ⚠️ THE UNATTENDED CASE IS SAID OUT LOUD; the attended one is not, so this is a signal
-        // rather than noise on every send. Three behaviours hang off this value and all three are
-        // silent refusals — a standing grant not served, `ask_user` refused, a tool confirmation
-        // refused — so without this line an unattended run's behaviour looks like a bug.
+        // Only the unattended case is logged: it silently refuses standing grants, `ask_user` and tool confirmations.
         if !attended {
             logger.notice("[ATTENDANCE] Run \(agentMessage.id.uuidString.prefix(8)) in conversation \(conversationID.uuidString.prefix(8)) is UNATTENDED (started by \(userMessage.messageSource.rawValue), remote responder: \(WorkflowRunAttendance.hasRemoteResponder)). CONSEQUENCE: standing 'allow for this chat' grants are NOT served to it, and ask_user plus any tool confirmation are refused with an honest observation instead of parking for an answer nobody will give.")
         }
-        // ⚠️ The run's identity travels with it for the same reason its origin does: the local
-        // providers report which run touched a model through `LocalInferenceScope.runID`, read deep
-        // inside orchestration where nothing else names the run.
+        // The run's identity travels with it: local providers report which run touched a model via `LocalInferenceScope.runID`.
         let streamTask = WorkflowRunAttendance.$isAttended.withValue(attended) {
             WorkflowRunAttendance.$origin.withValue(userMessage.messageSource) {
             LocalInferenceScope.$runID.withValue(agentMessage.id) {
             Task { [weak self] in
             guard let self = self else { return }
 
-            // ⚠️ ONE RUN PER CONVERSATION, enforced HERE because this is the send path's single
-            // chokepoint — all seven call sites are covered by one line, including any future one.
-            // The task is created (so Stop and `activeTasks` work immediately) but does no work
-            // until the conversation is free. See `admissionQueue`.
-            // The wait behind this conversation's own run is credited to the run's time bounds like a
-            // wait for the local model — a scheduled run's deadline must not run out in line. Only
-            // when a bound is open (a scheduled run's): otherwise there is nothing to credit.
+            // One run per conversation is enforced here, the send path's single chokepoint; the task waits for its turn.
+            // The wait is credited to the run's open time bound, so a scheduled run's deadline does not expire in line.
             let admissionCredit: UUID? = ParkScope.chain.isEmpty ? nil : UUID()
             if let admissionCredit { await ExecutionSuspensionService.shared.beginQueueWait(admissionCredit) }
             let waited = await self.admission.awaitTurn(
                 conversationID: conversationID, messageID: agentMessage.id,
-                // ⚠️ Said on screen, not just in the log. A queued run otherwise shows the ordinary
-                // thinking indicator, so a ChatOps message sent while the user is typing locally
-                // looks like the app has stalled rather than like it is second in line.
+                // Shown on screen as well as logged, so a queued run does not look like a stalled app.
                 onWait: {
                     agentMessage.agentState = .thinking(.queued)
                     self.conversationQueueBegan(agentMessage, conversationID: conversationID)
@@ -655,25 +467,15 @@ final class ActiveStreamManager {
                 logger.info("[ADMISSION] Run \(agentMessage.id.uuidString.prefix(8)) was cancelled while waiting for conversation \(conversationID.uuidString.prefix(8)).")
                 Self.markWithdrawnBeforeStart(agentMessage, workflow: workflowExecutionState)
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
-                // ⚠️ The SAME two lines every other exit of this task ends with. This early return
-                // used to skip them, so a run cancelled while QUEUED never called `onComplete` —
-                // and `SchedulerCoordinator.sendScheduledMessage` waits on exactly that callback.
-                // Its 600 s deadline cancels a queued scheduled run, the callback never came, the
-                // task stayed pinned in `runningTaskIDs`, and every later fire was skipped as
-                // "already running" until relaunch; the task also leaked in `activeTasks`
-                // (Timeout inventory D-12, 2026-09-26).
+                // Same cleanup as every other exit of this task.
+                // A run cancelled while queued must still reach `onComplete`; `SchedulerCoordinator.sendScheduledMessage` waits on it.
                 self.removeTask(for: agentMessage.id)
                 onComplete()
                 return
             }
 
-            // ⚠️ LAYER 2, AFTER layer 1 — never before. The coordinator decides across
-            // conversations; a run still queued behind its OWN conversation is not competing for
-            // the machine yet, and registering it early would put it in the local queue twice over.
-            // A local run WAITS here while another local run holds the lock (cloud-only runs never
-            // do). Released in `finalizeMessage`, beside `admitNext`.
-            // The observer covers EVERY wait of this run: this one, and any later one when the run
-            // takes the lock back after a HITL answer (phase 4).
+            // Local-model layer comes after conversation admission: a run queued behind its own conversation is not competing.
+            // A local run waits while another holds the lock; released in `finalizeMessage`.
             let startedBy = userMessage.messageSource
             let localAcquire = await self.inferenceCoordinator.acquire(
                 InferenceRunManifest.build(
@@ -724,12 +526,8 @@ final class ActiveStreamManager {
                 return
             }
 
-            // ⚠️ THE GLOBAL TIME CEILING (local inference coordinator, phase 5) — the outermost limit on
-            // every run, opened HERE, at admission, so time spent in either queue never counts. COMPUTE
-            // time: the ceiling's scope joins the run's owner chain, so HITL parks and local-model waits
-            // anywhere in the run pause it (owner-chain credit). Its frame is the outermost
-            // `ExecutionBudget`, so a turn, node or tool limit inside is shortened to fit and fires
-            // first, with its own honest outcome.
+            // Global compute-time ceiling, opened at admission so queue time never counts; HITL parks and local waits pause it.
+            // It is the outermost `ExecutionBudget`, so inner turn, node or tool limits are shortened to fit.
             let ceilingScope = UUID()
             let ceiling = LocalInferenceCoordinator.globalCeiling
             let ceilingFrame: ExecutionBudget.Frame? = if let ceiling {
@@ -750,10 +548,8 @@ final class ActiveStreamManager {
             await ParkScope.withScope(ceilingScope, conversationID: conversationID) {
             await ExecutionBudget.$frames.withValue(ExecutionBudget.frames + (ceilingFrame.map { [$0] } ?? [])) {
 
-            // Structured Plan & Execute / Reflexion cards (chat + code agents only).
-            // Workflow runs keep the legacy flat milestone chips: their capability
-            // events carry no node attribution, and parallel workflow nodes would
-            // interleave segments the ordering-based router can't separate.
+            // Structured Plan & Execute / Reflexion cards (chat and code agents only).
+            // Workflow runs keep flat milestone chips: parallel nodes interleave segments the router cannot separate.
             let capabilityRouter = CapabilityCardRouter(message: agentMessage)
             let capabilityCardsEnabled = (workflowExecutionState == nil)
 
@@ -765,17 +561,12 @@ final class ActiveStreamManager {
                     let waitedMs = Int(localQueueWait * 1000)
                     Task { await TraceRecorder.shared.emitMetric(span: traceContext, key: "local_queue_wait", valueMs: waitedMs) }
                 }
-                // Run-Report Phase 5: the workflow run record carries the same join key,
-                // so run history and the trace store stop being unlinkable (old Seam 4).
+                // The workflow run record carries the same trace id, linking run history to the trace store.
                 workflowExecutionState?.traceID = traceContext.traceID
 
                 let profileType = config.profile.profileType.rawValue
-                // ⚠️ EVERY turn still being written is excluded — this run's own (its placeholder is
-                // registered before this task starts, and is EMPTY here) and any CONCURRENT run's.
-                // Concurrency in one conversation is reachable: the scheduler, Orb and the
-                // ChatOps bridge carry no admission check. Including an unfinished turn makes
-                // `pairTurns` report the question as answered with nothing —
-                // "(Terminated by user before any tools ran)" — while the run is still going.
+                // Every turn still being written is excluded: this run's own empty placeholder and any concurrent run's.
+                // An unfinished turn would make `pairTurns` report its question as answered with nothing.
                 let history = await Self.deriveHistory(
                     userMessage: userMessage,
                     omitting: self.incompleteTurnIDs(keeping: userMessage.id),
@@ -790,26 +581,15 @@ final class ActiveStreamManager {
                         context: traceContext,
                         conversationID: conversationID,
                         messageID: agentMessage.id,
-                        // The resolved model for single-model profiles (bot/agent/code/imageGen);
-                        // nil for workflows, which have no single model. A label for the trace:
-                        // cost no longer prices against it — each call is priced at its own model
-                        // when its usage is read (`ModelPriceList`), and `recordTokenUsage` stores
-                        // their sum. (Passing nil here was once why `traces.estimatedCostUSD` had
-                        // been NULL on every run; with per-call pricing, workflows get a cost too.)
+                        // The resolved model for single-model profiles; nil for workflows. A trace label only:
+                        // cost is priced per call at each call's own model.
                         modelName: config.profile.resolvedLLMConfig?.modelName
                     )
 
-                    // Phase B: capture the complete request configuration so the
-                    // Report Inspector can show exactly which profile/model/tools/
-                    // capabilities/retry-policy/hardware were in effect. Writes one
-                    // row to `trace_configs` cascading on `traces.traceID`.
-                    //
+                    // Captures the complete request configuration for the Report Inspector (one `trace_configs` row per trace).
                     // TODO: pass `codeMemoryContent` from MainApplicationViewModel
-                    // (CodeSystemPrompt.projectKnowledge) for a
-                    // complete Code-mode snapshot. Current capture records only
-                    // the project path — memory length/hash stay nil.
-                    // ⚠️ The LIVE-detected capability, not the stored copy, so a trace records the
-                    // tool-calling mode the run actually used (`LiveModelDetection`).
+                    // Uses the live-detected capability, not the stored copy, so the trace records the tool-calling mode actually used.
+                    // Code-mode capture records only the project path; memory length and hash stay nil.
                     let snapshot = TraceConfigSnapshot.capture(
                         traceID: traceContext.traceID,
                         config: BackendRequestConfig(profile: await LiveModelDetection.resolving(config.profile)),
@@ -820,16 +600,8 @@ final class ActiveStreamManager {
                     await TraceRecorder.shared.captureConfigSnapshot(snapshot)
                 }
 
-                // [M6] Log the query LENGTH, not its text — the raw prompt is user content and this
-                // line goes to the unified OS log (readable via Console / sysdiagnose). traceID +
-                // history/file counts are enough to correlate the handoff.
-                // ⚠️ DERIVED, never accepted. Callers no longer supply history, so a surface
-                // CANNOT hand over a pagination window, a private transcript, or a descending
-                // store dump — the three shapes that produced `architecture_readme.md` §7
-                // invariant #8's only live violation. This is the same move
-                // `LLM_Execution_Concurrency_Design.md:55-59` made for `streamingMessageID`:
-                // delete the storage, derive the value, and the wrong call becomes
-                // unrepresentable rather than guarded against.
+                // Log lines carry the query length, not its text: the raw prompt is user content and this reaches the OS log.
+                // Callers do not supply history, so a surface cannot hand over a pagination window or a descending store dump.
 
                 // Retained as a SELF-check, not a caller check. Nothing outside can get this
                 // wrong any more, so a trip here means the resolver itself regressed.
@@ -845,8 +617,7 @@ final class ActiveStreamManager {
                     userQuery: userQuery,
                     currentUserMessageID: userMessage.id,
                     retrievalQuery: Self.retrievalQuery(for: userMessage, modelQuery: userQuery),
-                    // A Redo/Resume regenerates `existingMessage`: memory from it onward is the
-                    // rejected answer and the conversation's "future" (RAG-4).
+                    // A Redo/Resume regenerates `existingMessage`: memory from it onward is the rejected answer.
                     regenerating: existingMessage.map { RegenerationBoundary(messageID: $0.id, timestamp: $0.timestamp) },
                     history: history,
                     files: files,
@@ -861,9 +632,7 @@ final class ActiveStreamManager {
                 var lastUpdateTime = Date()
                 var tokensReceivedInWindow = 0
                 var adaptiveInterval: TimeInterval = 0.1 // Start with default
-                // [WF-RU1] The last `.error` event's message — the richest failure text the
-                // stream produced. Consulted ONLY at stream end, and only when the engine's
-                // terminal outcome is `.failed` (see the workflow settle there).
+                // The last `.error` event's message; consulted at stream end only when the engine's terminal outcome is `.failed`.
                 var lastErrorEventMessage: String?
                 // The bubble's content from before a `.draftText` preview started, or nil when no
                 // draft is showing. Restored when the draft is withdrawn, and before the first
@@ -886,9 +655,7 @@ final class ActiveStreamManager {
                         }
 
                     case .reasoning(let text, let id, let sourceNodeID):
-                        // Model-authored monologue (step.reasoning). Same UI handling as
-                        // .thought for now (shared ThinkingDynamicIsland + timeline rendering),
-                        // but persisted as .reasoning so downstream consumers can distinguish.
+                        // Model-authored monologue; persisted as `.reasoning` so consumers can tell it from `.thought`.
                         agentMessage.agentState = .thinking(.reasoning)
                         let reasoningEvent = TimelineEvent.reasoning(id: id, text: text)
                         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
@@ -919,19 +686,13 @@ final class ActiveStreamManager {
                         // run shows it ran (and, when this is the parked tool, that it was in flight).
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
 
-                    // [HITL] Permission request → unified InteractionCenter (single source of truth).
-                    // Node attribution rides in the banner via the origin; the thinking-island
-                    // headline stays generic (the banner carries which node/agent is asking).
+                    // Permission request goes to the unified `InteractionCenter`; the banner carries which node is asking.
                     case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID, let sourceNodeName):
                         agentMessage.agentState = .interaction(.permission(toolName: toolName))
-                        // [G1 Piece 1] Park marker + the operationID join key, flushed immediately:
-                        // a run parked on approval can sit indefinitely, so this is the prime
-                        // restart case. Resume (Piece 2) re-raises the HITL from this persisted opID.
+                        // Park marker plus the operationID join key, flushed immediately so a restart can re-raise the HITL.
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
-                        // [WF-SE3] Provenance-aware tier: native names use the native map, MCP
-                        // tools use their server-declared annotations (labelled as such), and a
-                        // name collision floors at .moderate — see ToolRiskResolver.
+                        // Provenance-aware tier: native map for native names, declared annotations for MCP tools, `.moderate` on collision.
                         let riskResolution = ToolRiskResolver.resolve(toolName: toolName)
                         await self.enqueueHITL(
                             operationID: operationID,
@@ -1035,9 +796,7 @@ final class ActiveStreamManager {
 
 
                     case .draftText(let draft):
-                        // Provisional step text (see `AgentStreamEvent.draftText`). Set directly —
-                        // not merged, buffered or flushed to disk: it is cumulative, and it may yet
-                        // be withdrawn.
+                        // Provisional step text, set directly: it is cumulative and may be withdrawn, so it is not merged or persisted.
                         if draft.isEmpty {
                             if let baseline = draftBaseline {
                                 setMessageContent(agentMessage, baseline, isRegeneration: isRegeneration)
@@ -1056,9 +815,7 @@ final class ActiveStreamManager {
                         if let baseline = draftBaseline {
                             setMessageContent(agentMessage, baseline, isRegeneration: isRegeneration)
                             draftBaseline = nil
-                            // Render this chunk NOW rather than on the next throttle tick — the bubble
-                            // just lost the draft, and waiting up to `adaptiveInterval` would blink it
-                            // empty between the preview and the answer.
+                            // Render this chunk now: the bubble just lost the draft and would blink empty until the next throttle tick.
                             lastUpdateTime = .distantPast
                         }
                         // 3. Handle Final Text (Buffered)
@@ -1069,20 +826,8 @@ final class ActiveStreamManager {
                         tokenBuffer += textChunk
                         tokensReceivedInWindow += textChunk.count
 
-                        // Flush on TIME only.
-                        //
-                        // There used to be an `|| tokenBuffer.count > 50` escape hatch, which
-                        // inverted the whole throttle for fast producers: an in-process MLX
-                        // model fills 50 chars far quicker than `adaptiveInterval`, so the
-                        // buffer clause won every time and forced a re-render every ~50 chars
-                        // (~54 for a 2.7k reply) no matter how far behind the UI already was.
-                        // The producer would finish while the consumer was still draining
-                        // buffered tokens one render at a time — the model completed in 15s
-                        // and the bubble kept dripping for ~a minute.
-                        //
-                        // The time clause alone already bounds latency to <= adaptiveInterval
-                        // (0.2s worst case), and it degrades the RIGHT way: the further behind
-                        // we fall, the more tokens coalesce into a single render.
+                        // Flush on time only: a token-count escape hatch defeats the throttle for fast local producers.
+                        // Latency stays within `adaptiveInterval`; the further behind the UI, the more tokens coalesce per render.
                         let elapsed = -lastUpdateTime.timeIntervalSinceNow
                         if elapsed >= adaptiveInterval {
                             self.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
@@ -1090,9 +835,7 @@ final class ActiveStreamManager {
                             // `inFlightFlushInterval`, so a long final answer isn't lost if interrupted.
                             await self.flushInFlight(agentMessage, conversationID: conversationID)
 
-                            // Adapt interval based on token throughput:
-                            // High throughput (fast local models) → shorter interval (0.05s) for smooth streaming
-                            // Low throughput (slow remote APIs)  → longer interval (0.2s) to reduce UI churn
+                            // Adapts the interval to token throughput: 0.05s for fast local models, 0.2s for slow remote APIs.
                             if elapsed > 0 {
                                 let charsPerSecond = Double(tokensReceivedInWindow) / elapsed
                                 if charsPerSecond > 500 {
@@ -1110,20 +853,12 @@ final class ActiveStreamManager {
                         }
                         
                     case .error(let structuredError):
-                        // [WF-RU1] Remember the richest failure text for the workflow settle at
-                        // stream end. Only USED when the engine's terminal outcome is `.failed` —
-                        // an inner-node error a recovery branch survives never reaches it.
+                        // Remembers the failure text for the workflow settle; used only when the engine's terminal outcome is `.failed`.
                         lastErrorEventMessage = structuredError.message
                         // The error card below replaces whatever the bubble shows, draft included;
                         // forget the draft so a later withdrawal cannot restore over the card.
                         draftBaseline = nil
-                        // Surface the failure as a distinct error card in the bubble
-                        // instead of leaving it buried in streaming prose. Without this,
-                        // capability/system failures render as plain text that mimics
-                        // the agent's own output and misleads users into thinking the
-                        // run is still in progress.
-                        // (Phase 4: category-aware title + actionable suggestion +
-                        // category icon, rendered by ErrorMessageView.)
+                        // Surfaces the failure as a distinct error card with category icon and suggestion, so it does not read as agent prose.
                         logger.error("Stream Error Event [\(structuredError.category.rawValue)]: \(structuredError.message)")
                         agentMessage.content = MessageContent.error(
                             title: structuredError.title,
@@ -1155,15 +890,10 @@ final class ActiveStreamManager {
 
                     case .workflowNodeCompleted(let nodeID, let profileName, let summary, let nodeHasWarnings):
                         let completedId = UUID()
-                        // `summary` now carries the node's FULL output (for the per-node
-                        // Output panel + persistence via handleNodeCompleted). Keep the
-                        // orchestrator's aggregate thought log a brief milestone so it
-                        // isn't bloated by full node outputs.
+                        // `summary` carries the node's full output; keep the aggregate thought log to a brief milestone.
                         let summaryPreview = summary.count > 200 ? String(summary.prefix(200)) + "…" : summary
                         agentMessage.appendTimelineEvent(.thought(id: completedId, text: "✅ \(profileName): \(summaryPreview)"))
-                        // [M6] Log the summary LENGTH, not the node's output text (model content) —
-                        // this line reaches the unified OS log. The full output is in the per-node
-                        // Output panel + persisted via handleNodeCompleted for real inspection.
+                        // Logs the summary length, not the node's output text: this line reaches the unified OS log.
                         logger.info("[WF_EVENT] NodeCompleted: '\(profileName)' [\(nodeID)] summary=\(summary.count) chars")
                         workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary, hasWarnings: nodeHasWarnings)
 
@@ -1174,20 +904,8 @@ final class ActiveStreamManager {
                         workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error, suggestion: suggestion)
 
                     case .workflowNodeSkipped(let nodeID, let profileName, let reason, let ranBeforeSkip):
-                        // [XUI-12] `.info` and `reason.rawValue`: this matches the five sibling arms,
-                        // skips are high-volume (a wide DAG can skip a whole subtree, so this must not
-                        // be a `.notice`), and the raw value is the stable machine token that already
-                        // appears in the trace context as `skip_reason` — `displayText` is localized
-                        // prose that would break log grepping across locales.
-                        //
-                        // ⚠️ BOTH consequence clauses are CONDITIONAL, and the first draft of this
-                        // line stated both unconditionally — inverting the engine's own central skip
-                        // invariant in the line a field debugger reads. `.byUser` is the ONE skip
-                        // whose subtree stays live (`NodeSkipReason.keepsDownstreamAlive`); for the
-                        // other six `edgeIsLive` kills every edge below. And a pre-dispatch skip —
-                        // which is the high-volume case, both engine emitters pass
-                        // `ranBeforeSkip: false` — is labelled "Not run" on screen, not "Skipped".
-                        // The line already printed both discriminators right beside the false claims.
+                        // Logged at `.info` because skips are high-volume; uses the stable `reason.rawValue`, not localized `displayText`.
+                        // Only `.byUser` keeps its subtree live; a pre-dispatch skip is labelled 'Not run' on screen.
                         let skipRowWord = ranBeforeSkip ? "Skipped" : "Not run"
                         let skipDownstream = reason.keepsDownstreamAlive
                             ? "downstream receives this node's INPUT unchanged"
@@ -1196,17 +914,13 @@ final class ActiveStreamManager {
                         workflowExecutionState?.handleNodeSkipped(nodeID: nodeID, profileName: profileName, reason: reason, ranBeforeSkip: ranBeforeSkip)
 
                     case .workflowNodeCancelled(let nodeID, let profileName):
-                        // [XUI-12] `.notice`, not `.info`: a cancel is rare and user-initiated, and it
-                        // is the one path whose emitter side is also quiet — keeping both at `.notice`
-                        // makes the Stop story readable at one level across the two files.
+                        // Logged at `.notice`: a cancel is rare and user-initiated, matching the emitter side.
                         logger.notice("[WF_EVENT] NodeCancelled: '\(profileName)' [\(nodeID)]. CONSEQUENCE: the node's row settles as 'Cancelled' (not failed) with any partial output discarded; no output port is activated, so nothing downstream of it runs.")
                         workflowExecutionState?.handleNodeCancelled(nodeID: nodeID, profileName: profileName)
 
                     case .workflowNodeRetryScheduled(let nodeID, let profileName, let attemptsRemaining):
-                        // [CF-30] The row deliberately keeps showing the failure of the attempt
-                        // that just ended; this only records that the engine has not given up, so
-                        // a Stop during the back-off settles it as cancelled instead of leaving a
-                        // failure the user pre-empted.
+                        // The row keeps showing the last failure; this records that the engine has not given up,
+                        // so a Stop during back-off settles it as cancelled.
                         logger.notice("[WF_EVENT] NodeRetryScheduled: '\(profileName)' [\(nodeID)], \(attemptsRemaining) attempt(s) left. CONSEQUENCE: the node's row stays 'Failed' for the back-off (it is not retrying yet, and may never), but a Stop pressed now settles it as Cancelled rather than as a genuine failure.")
                         workflowExecutionState?.handleNodeRetryScheduled(nodeID: nodeID, profileName: profileName, attemptsRemaining: attemptsRemaining)
 
@@ -1215,9 +929,7 @@ final class ActiveStreamManager {
                         workflowExecutionState?.handleProgress(completed: completed, total: total)
 
                     case .workflowRunFinished(let hadGenuineFailure):
-                        // [WF-RU4] See the case's own doc for why this is separate from
-                        // `agentMessage.terminalOutcome` — that one drives the chat bubble and
-                        // must not change here.
+                        // Separate from `agentMessage.terminalOutcome`, which drives the chat bubble and must not change here.
                         logger.info("[WF_EVENT] RunFinished: hadGenuineFailure=\(hadGenuineFailure)")
                         workflowExecutionState?.completedDespiteNodeFailure = hadGenuineFailure
 
@@ -1246,12 +958,8 @@ final class ActiveStreamManager {
 
                     case .requestPlanReview(let subtasks, let operationID, let sourceNodeID, let sourceNodeName):
                         agentMessage.agentState = .interaction(.planReview)
-                        // [ASM-5] Park + immediate boundary flush — every other HITL case
-                        // (tool confirmation, clarification, gate) does exactly this. Without
-                        // the marker a plan-review park reloaded as `.streaming` after a quit
-                        // (resume couldn't re-raise the review), and the run never reached the
-                        // parked state the local-model release keys off — the loaded MLX model
-                        // stayed pinned in memory for as long as the banner sat unanswered.
+                        // Park plus immediate boundary flush, as every other HITL case does.
+                        // Without the marker a plan-review park reloads as `.streaming` and the local model stays pinned while the banner waits.
                         agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
                         await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         if capabilityCardsEnabled {
@@ -1352,11 +1060,8 @@ final class ActiveStreamManager {
 
                     // MARK: History Compaction Events
                     case .compactionCompleted(let turns, let preview, let checkpoint):
-                        // Chip ONLY. Persistence + live-array splice moved to
-                        // HistoryCompactionService's checkpoint sink (registered by
-                        // MessagingCoordinator): compaction runs in the background now, so
-                        // it can complete after this stream has finished — at which point
-                        // this event is never delivered. Data must not depend on it.
+                        // Chip only: checkpoint persistence lives in `HistoryCompactionService`'s sink, because compaction can finish
+                        // after this stream has ended, when this event is never delivered.
                         let shortPreview = String(preview.prefix(100))
                         agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .compactionCompleted,
@@ -1375,19 +1080,8 @@ final class ActiveStreamManager {
 
                     // MARK: Multimodal Events
                     case .mediaProgress:
-                        // Deliberately dropped. This only ever drove the dynamic island's headline
-                        // ("imageGen: Step 12/30"), and the island is gone.
-                        //
-                        // Generation is still visible: its only emitter (ImageGenExecutor) yields
-                        // `.thought("Generating image with <model>…")` immediately before the first
-                        // progress event, and that reaches the timeline — followed by the artifact
-                        // itself. What's lost is the live step counter, nothing else.
-                        //
-                        // Restoring it isn't a one-liner and would be a NEW feature rather than a
-                        // repair: the timeline has no progress concept at all, `TimelineEvent`
-                        // carries no percent, and `appendTimelineEvent` only appends — so ticking
-                        // events would either flood the action group ("Produced 47 artifacts") or
-                        // need an upsert plus a change to a persisted enum.
+                        // Progress events are dropped: only the live step counter is lost, since the generation thought and artifact still
+                        // reach the timeline.
                         break
 
                     case .artifactProduced(let artifact):
@@ -1425,29 +1119,15 @@ final class ActiveStreamManager {
                 
                 logger.info("[STREAM_LOOP_END] Finished — traceID: \(traceContext.traceID), messageID: \(agentMessage.id.uuidString.prefix(8)), profileType: \(profileType)")
 
-                // Forward the stream's end to the workflow execution state.
-                //
-                // ⚠️ `Task.isCancelled` is load-bearing here, not decoration. A workflow Stop
-                // tears this loop down WITHOUT throwing (see `handleStreamEnd`), so the
-                // `catch is CancellationError` arm below never runs for one — this is the only
-                // place the workflow state can learn the run was stopped. Passing the flag
-                // through is what keeps the frozen record's status agreeing with the trace
-                // status stamped a few lines down.
+                // Why: Pass `Task.isCancelled` through: a workflow Stop ends this loop without throwing, so no catch arm sees it.
+                // Forwards the stream's end to the workflow execution state.
                 if let wfState = workflowExecutionState {
                     let finalText = agentMessage.content.textContent ?? ""
                     let stopped = Task.isCancelled
                     logger.info("[WF_EVENT] StreamEnd: cancelled=\(stopped), \(finalText.count) chars, nodeTimelines=\(wfState.nodeTimelines.count) nodes tracked")
                     logger.debug("[WF_EVENT] FinalOutput preview: \(String(finalText.prefix(300)))")
-                    // [WF-RU1] An engine-declared run FAILURE must reach the workflow state as an
-                    // ERROR, not be laundered into `finalOutput` as the run's answer. The `.error`
-                    // arm only rewrites the MESSAGE; nothing called `handleError`, so
-                    // `record.error` froze as nil, the Final Outcome panel rendered the failure
-                    // text as ordinary markdown with a Copy chip, VoiceOver spoke it as
-                    // "Output: …", and — because `handleError` is what runs `settleInFlightWork`
-                    // — dangling tool rows spun for the rest of the session. Keyed off the
-                    // engine's own `.executionFinished(.failed)` (stamped on the message by its
-                    // arm above), NOT off `.error` events, which inner nodes also emit on runs a
-                    // recovery branch then completes.
+                    // An engine-declared run failure must reach the workflow state as an error, not become `finalOutput`.
+                    // Keyed off `.executionFinished(.failed)`; inner nodes also emit `.error` on runs a recovery branch completes.
                     if !stopped, agentMessage.terminalOutcome == .failed, wfState.workflowError == nil {
                         let reason = lastErrorEventMessage ?? agentMessage.terminalReason ?? String(localized: "The workflow failed.")
                         wfState.handleError(reason)
@@ -1459,10 +1139,8 @@ final class ActiveStreamManager {
                     }
                 }
 
-                // Stop-button race: cancelling the consumer tears the stream down before
-                // the producer's `.executionFinished(.cancelled)` can be consumed, so the
-                // outcome arrives as nil and the safety net would record `.completed`
-                // (audit #2). Stamp the honest outcome here.
+                // Stop race: the consumer can be cancelled before `.executionFinished(.cancelled)` arrives,
+                // leaving a nil outcome that the safety net would record as `.completed`; stamp the outcome here.
                 if Task.isCancelled, agentMessage.terminalOutcome == nil {
                     agentMessage.terminalOutcome = .cancelled
                     agentMessage.terminalReason = agentMessage.terminalReason ?? "Cancelled by user"
@@ -1522,12 +1200,8 @@ final class ActiveStreamManager {
         agentMessage: ChatMessage,
         workflowExecutionState: WorkflowExecutionState?
     ) {
-        // Bound what enters the timeline. `output` is an UNCAPPED string that lands in the
-        // message's timeline blob — re-encoded whole on every flush and decoded eagerly on
-        // every conversation load — so one verbose command (a build log, a large file dump)
-        // could balloon a conversation permanently. Truncation is explicit: the marker is
-        // visible to the user AND to a resumed run's LLM history, which
-        // `TimelineTurnReconstructor` rebuilds from this field.
+        // Bounds what enters the timeline: an uncapped output is re-encoded on every flush and decoded on every load.
+        // Truncation is explicit, so the user and a resumed run's LLM history both see the marker.
         let cappedOutput = ToolExecutionData.cappedOutput(output.output)
         if cappedOutput.count != output.output.count {
             logger.warning("[TOOL_OUTPUT] '\(output.toolName)' returned \(output.output.count) chars — truncated to \(ToolExecutionData.maxPersistedOutputLength) for the timeline. The full text reached the model on THIS run; a resumed run sees the truncation marker instead.")
@@ -1544,9 +1218,8 @@ final class ActiveStreamManager {
             data.isExecuting = false
             data.preWriteContent = output.preWriteContent
             data.postWriteContent = output.postWriteContent
-            // Derive the change ONCE, here, while the snapshots are in hand. The episodic
-            // formatter runs per request; deriving it there re-diffed every historical
-            // write on every prompt build.
+            // Derived once here while the snapshots are in hand; the episodic formatter would otherwise re-diff every write per
+            // request.
             data.effect = ActionEffect.from(toolExecution: data)
             // Same reasoning, same seam: parsed once here rather than re-scanned on every
             // prompt build. Nil for every tool that doesn't annotate a status.
@@ -1582,10 +1255,8 @@ final class ActiveStreamManager {
         }
     }
 
-    /// [HITL/P5] Enqueue a HITL request into the unified `InteractionCenter` — the single source
-    /// of truth across chat / code / workflow / scheduled. Builds the source-attributed origin
-    /// (interface + workflow node identity + banner title). Replaces the retired per-message
-    /// `ChatMessage.pendingInteraction` and per-workflow `WorkflowExecutionState.pendingInteractions`.
+    /// Enqueues a HITL request into the unified `InteractionCenter`, with a source-attributed origin
+    /// (interface, workflow node identity, banner title).
     func enqueueHITL(
         operationID: UUID,
         kind: PendingInteraction,
@@ -1599,8 +1270,8 @@ final class ActiveStreamManager {
         profileID: UUID?,
         traceContext: TraceContext
     ) async {
-        // ⚠️ CR-40: every caller awaits a persistence flush before getting here, and the request
-        // can be resolved during it. Showing its banner now would leave one nobody can answer.
+        // Every caller awaits a persistence flush first, and the request may be resolved during it;
+        // showing its banner now would leave one nobody can answer.
         if await ExecutionSuspensionService.shared.wasResolved(operationID) {
             logger.notice("[HITL] op \(operationID.uuidString.prefix(8)) was resolved before its banner could be shown (conversation \(conversationID.uuidString.prefix(8))). CONSEQUENCE: no banner is raised and no trace record is opened; the run has already moved on.")
             return
@@ -1617,11 +1288,8 @@ final class ActiveStreamManager {
             ? .workflow
             : (profileType == .code ? .code : .chat)
 
-        // Prefer a name the PRODUCER supplied. The `nodeResults` lookup below only works for a
-        // node of the CURRENT canvas; for a request forwarded out of a sub-workflow, `sourceNodeID`
-        // names an inner node this state has never heard of (the child's node events are
-        // suppressed), so it always missed and the banner rendered a bare kind label — with two
-        // nodes parked at once the user could not tell which was asking.
+        // Prefers a name the producer supplied: for a request forwarded out of a sub-workflow,
+        // `sourceNodeID` names an inner node that `nodeResults` does not know.
         let nodeName: String? = sourceNodeName ?? sourceNodeID.flatMap { id in
             workflowState?.nodeResults.first(where: { $0.nodeID == id })?.profileName
         }
@@ -1636,9 +1304,7 @@ final class ActiveStreamManager {
         }()
         let title = nodeName.map { "\($0) · \(kindLabel)" } ?? kindLabel
 
-        // Logged HERE (not at function entry) so it can reuse `kindLabel` — the first
-        // version stringified the enum and truncated it to 40 chars, emitting the
-        // half-word "toolConfirmation(devgentic.PendingToolCo".
+        // Logged here, not at function entry, so it can reuse `kindLabel`.
         logger.log("[HITL] Parked op \(operationID.uuidString.prefix(8)) — \(kindLabel), conversation: \(conversationID.uuidString.prefix(8)), interface: \(interface.rawValue), profile: \(profileType.rawValue), node: \(nodeName ?? "none"). Awaiting user.")
 
         let origin = HITLOrigin(
@@ -1648,17 +1314,13 @@ final class ActiveStreamManager {
             nodeName: nodeName,
             title: title,
             profileID: profileID,
-            // ⚠️ WHICH RUN IS ASKING. `traceContext.messageID` is the agent message this run is
-            // streaming into — the same object `RemoteMirrorService` observes — so this is the join
-            // key that lets the mirror post only the items belonging to the run it is mirroring.
-            // Stamped here rather than at the four call sites so a fifth cannot forget it.
+            // `traceContext.messageID` is the agent message this run streams into: the key the mirror uses to post only this run's
+            // items.
             runMessageID: traceContext.messageID
         )
         interactionCenter.enqueue(PendingHITL(id: operationID, origin: origin, kind: kind))
 
-        // [HITL/C1] Record the raise for the trace span emitted on resolve — chat, code, and ALL workflow
-        // HITL including gates. Gates are now a first-class `.gate` interaction (WorkflowExecutor no longer
-        // emits its own span), so they are traced uniformly here with no double-emit to guard against.
+        // Records the raise for the trace span emitted on resolve, covering chat, code and all workflow HITL including gates.
         let kindType: String
         let kindToolName: String?
         switch kind {
@@ -1703,8 +1365,7 @@ final class ActiveStreamManager {
     }
     @ObservationIgnored private var hitlTraceInfo: [UUID: HITLTraceRecord] = [:]
 
-    /// [HITL/C1] Emit a `userInteraction` trace span when a HITL resolves — captures decision +
-    /// wait duration so chat HITL (previously span-less) is visible in the Report Inspector.
+    /// Emits a `userInteraction` trace span when a HITL resolves, with the decision and wait duration.
     private func emitHITLTraceSpan(operationID: UUID?, outcome: String) {
         guard let opID = operationID, let rec = hitlTraceInfo.removeValue(forKey: opID) else { return }
         let waitMs = Int(Date().timeIntervalSince(rec.raisedAt) * 1000)
@@ -1737,12 +1398,8 @@ final class ActiveStreamManager {
     }
 
     private func updateMessageContent(_ agentMessage: ChatMessage, with newTextChunk: String, isRegeneration: Bool) {
-        // Merge decision lives in `ChatMessage.resolveStreamedChunkMerge` (pure,
-        // testable). ASM-1: when current content is an `.error` card and prose
-        // streams afterwards (workflow node failure + surviving terminal nodes;
-        // planning subtask failure), the merge starts the answer fresh and hands
-        // back a demoted timeline event so the failure stays discoverable instead
-        // of being laundered into the answer's opening words.
+        // Merge decision lives in `ChatMessage.resolveStreamedChunkMerge`: prose streaming after an `.error` card starts the
+        // answer fresh and demotes the failure to a timeline event.
         if isRegeneration {
             guard let agentResponse = agentMessage.agentResponse,
                   agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) else {
@@ -1765,33 +1422,18 @@ final class ActiveStreamManager {
                 }
             }
         }
-        // Invalidate cached markdown blocks so the next body evaluation reparses
-        // with the updated content. This works with getOrCreateMarkdownBlocks() to
-        // provide O(1) no-ops when body re-evaluates without new content.
+        // Invalidates cached markdown blocks so the next body evaluation reparses; pairs with `getOrCreateMarkdownBlocks()`.
         agentMessage.invalidateMarkdownCache()
     }
     
-    /// [P8] Whether any stream is live for `conversationID` RIGHT NOW. Drives the
-    /// sidebar's `StreamingPulseIndicator` — which had never rendered once: it read a
-    /// persisted `isStreaming` that has no column, so every decode said `false`.
-    /// "Streaming" is a live-process property (after a crash, nothing is streaming),
-    /// so the live dictionary is the honest source; reading it from a view body
-    /// auto-updates rows on stream start/end (`activeStreams` is observable).
+    /// Whether any stream is live for `conversationID` right now; drives the sidebar's `StreamingPulseIndicator`.
+    /// Streaming is a live-process property, so the observable `activeStreams` is the source.
     func hasActiveStream(inConversation conversationID: UUID) -> Bool {
         activeStreams.values.contains { $0.conversationId == conversationID }
     }
 
     /// Every live run, reduced to the fields the foreground decision needs.
-    ///
-    /// This is the authoritative answer to "what is running?" — it replaced
-    /// `MainApplicationViewModel.streamingMessageID` / `.streamingMessage`, two stored `var`s that
-    /// five surfaces overwrote and five completions nil'd with no ownership guard. `activeStreams`
-    /// was always correctly keyed and always observable; the slot was a lossy copy of it.
-    /// See `ForegroundRunResolver` for the full history and `LLM_Execution_Concurrency_Design.md`.
-    ///
-    /// Reading this inside a SwiftUI view body or an `ObservationStream` registers on
-    /// `activeStreams`, so the composer's Send/Stop state updates on every stream start and end
-    /// exactly as the sidebar's pulse already does.
+    /// The authoritative answer to 'what is running'; reading it in a view body registers on `activeStreams`.
     func liveRunSnapshot() -> [ForegroundRunResolver.LiveRun] {
         activeStreams.values.map { message in
             let parked: Bool
@@ -1803,8 +1445,7 @@ final class ActiveStreamManager {
                 // "loses to everything", never the candidacy itself.
                 startedAt: streamStartedAt[message.id] ?? .distantPast,
                 isParked: parked,
-                // ⚠️ From admission, the one place that knows: a queued run's message looks exactly
-                // like a working one (`.streaming`, registered, timestamped). See `LiveRun.isQueued`.
+                // Taken from admission, the one place that knows: a queued run's message looks exactly like a working one.
                 isQueued: admission.isWaiting(message.id)
             )
         }
@@ -1818,19 +1459,15 @@ final class ActiveStreamManager {
         
         logger.info("Cancelling stream task for message ID: \(messageId.uuidString)")
         taskToCancel.cancel()
-        // ⚠️ A QUEUED run's task is suspended in `ConversationAdmission`'s `withCheckedContinuation`,
-        // which ignores cancellation — so cancelling the task alone did NOTHING until the run in
-        // front finished (CR-4). Withdrawing the waiter resumes it, and it exits through its own
-        // `Task.isCancelled` branch (withdrawn-before-start, finalize, `onComplete`). Harmless for a
-        // run that is not waiting.
+        // A queued run is suspended in `ConversationAdmission` and ignores cancellation, so withdraw the waiter
+        // to let it exit through its own cancellation branch. Harmless for a run that is not waiting.
         if let conversationID = activeStreams[messageId]?.conversationId {
             admission.forget(messageID: messageId, inConversation: conversationID)
         }
     }
 
-    /// [HITL/P5] Cancel any active stream(s) for a conversation. Used on conversation deletion so a
-    /// run parked on a HITL (which no longer has a per-HITL watchdog) doesn't strand — cancellation
-    /// cascades to the suspension's withTaskCancellationHandler (deny / nil) and then finalizes.
+    /// Cancels any active streams for a conversation, e.g. on deletion, so a run parked on a HITL does not strand.
+    /// Cancellation cascades to the suspension's handler (deny / nil) and then finalizes.
     public func cancelStreams(forConversation conversationID: UUID) {
         let messageIDs = activeStreams.filter { $0.value.conversationId == conversationID }.map(\.key)
         for messageID in messageIDs {
@@ -1841,13 +1478,9 @@ final class ActiveStreamManager {
     }
     
     
-    /// [G1 Piece 1] Durably persist the in-flight agent message mid-run so an interrupted run
-    /// (force-quit / crash) survives with its partial timeline instead of vanishing on restart.
-    /// `addMessage` is an upsert-by-id, so repeated calls update one row rather than duplicating.
-    /// Boundary flushes (tool start/finish, HITL park) pass `immediate: true`; the token path
-    /// coalesces behind `inFlightFlushInterval`. No-ops if the task was cancelled (e.g. a
-    /// delete-conversation cascade is tearing the run down) so a late flush can't re-insert a row
-    /// that is being deleted.
+    /// Durably persists the in-flight agent message so an interrupted run survives with its partial timeline.
+    /// Upserts by id; boundary flushes pass `immediate: true`, the token path coalesces behind `inFlightFlushInterval`.
+    /// No-ops once the task is cancelled, so a late flush cannot re-insert a row being deleted.
     private func flushInFlight(_ message: ChatMessage, conversationID: UUID, immediate: Bool = false) async {
         if Task.isCancelled { return }
         if !immediate, let last = lastInFlightFlush[message.id], -last.timeIntervalSinceNow < Self.inFlightFlushInterval {
@@ -1865,9 +1498,8 @@ final class ActiveStreamManager {
     /// Runs whose queue banner is on screen, so a position change updates it in place.
     @ObservationIgnored private var localQueueBannerShown: Set<UUID> = []
 
-    /// A run started waiting for the local model — at its start, or to take the lock back after a HITL
-    /// answer. ⚠️ Said on screen and to a remote chat, not just in the log: a run waiting for ANOTHER
-    /// conversation's run otherwise looks exactly like a hung one.
+    /// Announces that a run started waiting for the local model, at its start or to retake the lock after a HITL answer.
+    /// Shown on screen and to a remote chat, since a run waiting on another conversation looks hung.
     private func localWaitBegan(_ agentMessage: ChatMessage, conversationID: UUID,
                                 startedBy: MessageSource, position: Int) {
         agentMessage.agentState = .thinking(.awaitingLocalModel)
@@ -1948,7 +1580,7 @@ final class ActiveStreamManager {
     nonisolated static let conversationQueueNotice =
         "Your message is queued behind this conversation's current run and starts by itself when that run finishes."
 
-    // MARK: Phase 7 — asking before a run starts
+    // MARK: Asking before a run starts
 
     /// The run is held until its user chooses Proceed or Stop. The banner asks at once (no delay — it
     /// has a deadline), with a live countdown to the auto-deny.
@@ -1981,8 +1613,7 @@ final class ActiveStreamManager {
         logger.info("[LOCAL-COORD] Proceed pressed for run \(messageID.uuidString.prefix(8)) — \(accepted ? "accepted" : "too late, nothing to do").")
     }
 
-    /// What the asking banner says: the concern, and what may happen. The countdown and the buttons
-    /// carry the rest. No advice (architecture_readme invariant 15).
+    /// What the asking banner says: the concern and what may happen. No advice.
     nonisolated static func confirmationNotice(_ concerns: [RunConcern]) -> String {
         let what = concerns.map { $0.description.prefix(1).uppercased() + $0.description.dropFirst() }.joined(separator: ". ")
         return "\(what). It may run very slowly or fail."
@@ -2001,11 +1632,8 @@ final class ActiveStreamManager {
         }
     }
 
-    /// Stops a run that has used more than `limit` of COMPUTE (the global ceiling, phase 5). Returns
-    /// without doing anything when the run ends first — its task is cancelled by the run itself.
-    ///
-    /// ⚠️ Stamps TIMED OUT before cancelling, like the scheduler's deadline: finalize writes
-    /// "Cancelled by user" only when no outcome is set yet, and this is not the user's Stop.
+    /// Stops a run that has used more than `limit` of compute; returns without action when the run ends first.
+    /// Stamps timed out before cancelling, so finalize does not write 'Cancelled by user'.
     private func enforceGlobalCeiling(_ limit: TimeInterval, scope: UUID, on agentMessage: ChatMessage) async {
         do {
             try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
@@ -2031,14 +1659,9 @@ final class ActiveStreamManager {
         }
     }
 
-    /// A run withdrawn before it did any work — Stop, a deadline or a deleted conversation while it
-    /// waited behind its conversation or for the local model. Stamped exactly as the run body's own
-    /// cancellation is, and then finalized WITHOUT an error.
-    ///
-    /// ⚠️ Finalizing with a `CancellationError` (as these two exits used to) records the run as
-    /// FAILED under a "Response Error" card reading "The operation couldn't be completed
-    /// (Swift.CancellationError error 1.)" — mirrored as a failure to a ChatOps chat — and leaves a
-    /// workflow run's record unsettled.
+    /// A run withdrawn before doing any work (Stop, deadline or deleted conversation while waiting), stamped like a
+    /// cancelled run body.
+    /// Finalized without an error: a `CancellationError` would record a failed run with a 'Response Error' card.
     static func markWithdrawnBeforeStart(_ message: ChatMessage, workflow: WorkflowExecutionState?) {
         workflow?.handleError("Cancelled", cancelled: true)
         if message.terminalOutcome == nil {
@@ -2047,7 +1670,7 @@ final class ActiveStreamManager {
         }
     }
 
-    /// The wording of a global-ceiling stop (HITL Waiting Contract §4 style).
+    /// The wording of a global-ceiling stop.
     nonisolated static func globalCeilingMessage(limit: TimeInterval) -> String {
         "Run stopped: it reached the \(ToolExecutionMediator.describe(limit)) maximum run time set in Settings → General. Time spent waiting for your approval or for the local model was not counted."
     }
@@ -2055,8 +1678,9 @@ final class ActiveStreamManager {
     /// How long a run waits for the local model before its conversation shows the banner.
     static let localQueueBannerDelay: Duration = .seconds(5)
 
-    /// What a run waiting for the local model tells the user (banner) and a remote chat. Plain
-    /// status: who holds the model and where this run stands — no advice (architecture_readme invariant 15).
+    /// What a run waiting for the local model tells the user and a remote chat: who holds the model and where this run
+    /// stands.
+    /// Plain status, no advice.
     nonisolated static func localQueueNotice(holder: InferenceRunManifest?, holderTitle: String?, position: Int) -> String {
         let models = holder?.localModels.map(\.modelID).joined(separator: ", ") ?? ""
         let model = models.isEmpty ? "The local model" : "The local model (\(models))"
@@ -2071,7 +1695,7 @@ final class ActiveStreamManager {
         return "\(model) is in use by \(place). This run is \(line) and starts by itself when that run finishes."
     }
 
-    /// The execution-timeout wording (HITL Waiting Contract §4), shared by chat, Code and the scheduler.
+    /// The execution-timeout wording shared by chat, Code and the scheduler.
     nonisolated static func executionTimeoutMessage(limit: TimeInterval) -> String {
         "Run stopped: it exceeded its \(ToolExecutionMediator.describe(limit)) execution limit. Time spent waiting for your approval was not counted."
     }
@@ -2080,32 +1704,19 @@ final class ActiveStreamManager {
         message.isStreaming = false
         // A run ending (success, error or Stop) is when its file changes are complete.
         WorkspaceActivity.post(reason: "run finished")
-        // [G1 Piece 1] A finalized run (success, error, or user Stop) is a clean terminal state —
-        // mark it `.final` so it is NOT mistaken for an interrupted run on restart. Only a process
-        // death that skips finalize leaves a persisted `.streaming` / `.parkedHITL` row behind.
+        // A finalized run (success, error or Stop) is marked `.final`, so only a process death leaves a `.streaming` /
+        // `.parkedHITL` row.
         message.lifecycleState = .final
         lastInFlightFlush.removeValue(forKey: message.id)
         message.agentState = .idle
-        // [HITL/P5] No center drain here: a normally-finalized stream has no parked HITL (the agent
-        // can't complete while waiting), and cancel/error paths route through
-        // ExecutionSuspensionService.cancel(for:) which posts .hitl*Resolved → op-id resolve.
-        // A coarse resolveAll(conversationID:) here would wrongly clear a *concurrent* stream's
-        // still-parked HITL in the same conversation, so it is intentionally omitted.
+        // No center drain here: a normally finalized stream has no parked HITL, and cancel paths resolve by operation id.
+        // A coarse `resolveAll(conversationID:)` would clear a concurrent stream's parked HITL.
 
-        // NOTE: per-conversation "Allow for this chat" grants are deliberately NOT cleared here. They
-        // persist for the conversation's lifetime (and across restarts via SessionToolApprovals' durable
-        // store), so a later message in the same chat isn't re-prompted; they're dropped only when the
-        // conversation is deleted (ConversationManagementCoordinator.drainLiveExecution).
+        // Per-conversation 'Allow for this chat' grants are not cleared here: they persist for the conversation's lifetime
+        // and are dropped when it is deleted (`ConversationManagementCoordinator.drainLiveExecution`).
 
-        // Terminal-outcome safety net: if no executor emitted `.executionFinished`
-        // (legacy code path, early `continuation.finish()` in a catch block, or a
-        // third-party executor), infer the outcome from how the run actually ended.
-        // [ASM-4] Keying only on "did a throw reach us" stamped `.completed` (green
-        // chip + `completed` trace status) over an ERROR CARD whenever a producer
-        // yielded `.error` and then finished without throwing. The resolver also
-        // inspects the content (pure + tested: `ChatMessage.resolveFallbackOutcome`).
-        // HITL Waiting Contract §3–4: an execution limit is TIMED OUT, with the contract's message —
-        // not a "Response Error" card or a generic failure.
+        // Terminal-outcome safety net: if no executor emitted `.executionFinished`, infer the outcome from how the run ended.
+        // The resolver also inspects content, so an error card is never stamped `.completed`; an execution limit is timed out.
         if message.terminalOutcome == nil,
            let agentError = error as? AgentExecutionError,
            case .executionTimeout(_, let limit) = agentError.reason {
@@ -2126,36 +1737,15 @@ final class ActiveStreamManager {
             }
         }
 
-        // [TL-1] Close any tool row still spinning at end-of-run — cancel and failure
-        // mid-tool used to persist rows with `isExecuting == true`, so the spinner
-        // survived reload forever.
+        // Closes any tool row still spinning at end of run, so a cancel or failure mid-tool does not persist `isExecuting ==
+        // true`.
         let closedRows = message.closeDanglingToolRowsReporting(outcome: message.terminalOutcome)
         if !closedRows.isEmpty {
             logger.warning("[STREAM_FINALIZE] messageID: \(message.id.uuidString.prefix(8)) — closed \(closedRows.count) dangling tool row(s) at finalize (outcome: \(message.terminalOutcome?.rawValue ?? "nil")); a persisted row must never claim to still be executing (TL-1).")
         }
 
-        // [CF-9] Settle the LIVE CODE VIEWER TAB for every abandoned file write.
-        //
-        // A live tab is opened from `.toolCall`, which `ToolExecutionLoop` yields BEFORE the
-        // permission park; both of its terminal transitions hang off the `.toolSucceeded` /
-        // `.toolFailed` posts above. Stop pressed while a write is parked throws
-        // `CancellationError` WITHOUT yielding `.toolFailed` (ToolExecutionLoop, "if
-        // Task.isCancelled { throw CancellationError() }"), and a provider throw reaches the
-        // generic catch the same way — so neither posted a completion and
-        // `ChatHistoryViewModel.handleAgentWriteCompleted` was never called. The tab kept
-        // `liveState == .active` for the rest of the session: the orange "Agent is writing this
-        // file" banner stayed up, `hasLiveAgentTabs` kept the minimized pill pulsing, and the
-        // proposal that never reached disk was never marked rejected.
-        //
-        // This runs on EVERY finalize, including the clean one — where it is a no-op, because a
-        // tool that completed normally is not a dangling row. `isSuccess: false` is the honest
-        // value: the write did not land.
-        //
-        // ⚠️ `completed(...)` is NOT the exact inverse of `began(...)`, and the log below is worded
-        // for that. `began` additionally refuses an empty `content` and anything over
-        // `liveContentByteLimit`, so a 600 KB write opens no tab and this loop still produces a
-        // payload for it. Posting one is harmless — `handleAgentWriteCompleted` finds no matching
-        // `.active` tab and says so at debug — but the line must not claim a tab settled.
+        // Settles the live Code viewer tab of every abandoned file write; Stop and provider throws post no completion.
+        // A no-op on a clean finalize; a write that opened no tab (empty or oversized) still gets a harmless payload.
         for row in closedRows {
             guard let payload = AgentLiveWriteEvent.completed(
                 toolName: row.name,
@@ -2172,14 +1762,8 @@ final class ActiveStreamManager {
         }
 
         if let traceID = message.traceID {
-            // Derive the persisted trace status from how the run *actually* ended, not
-            // merely from whether an error was thrown. A thrown exception reaching this
-            // boundary is the most severe signal and always wins; otherwise we honor the
-            // `terminalOutcome` the executor reported via `.executionFinished` (set just
-            // above), so graceful failures (circuit-breaker, exhaustion, all-nodes-failed,
-            // ImageGen) and cancellations stop being recorded as `.completed`.
-            // `terminalReason` carries the human-readable cause for non-thrown failures;
-            // it is sanitized inside `endTrace`.
+            // Derives the trace status from how the run ended: a thrown error wins, otherwise the executor's `terminalOutcome`.
+            // `terminalReason` carries the cause for non-thrown failures and is sanitized in `endTrace`.
             let traceStatus = TraceStatus.resolve(thrownError: error != nil, terminalOutcome: message.terminalOutcome)
             let endErrorSummary = error?.localizedDescription ?? message.terminalReason
             logger.info("[TRACE_END] traceID: \(traceID), status: \(traceStatus.rawValue), messageID: \(message.id.uuidString.prefix(8))")
@@ -2190,10 +1774,7 @@ final class ActiveStreamManager {
         }
         
         if let error = error {
-            // Render typed retrieval failures (e.g. an attached image that couldn't
-            // be loaded for a vision turn) with their category icon + remediation,
-            // symmetric with the streaming `.error(StructuredError)` path, instead of
-            // the generic "Response Error" card this chokepoint would otherwise force.
+            // Renders typed retrieval failures with their category icon and remediation, like the streaming `.error` path.
             let errorCard: MessageContent
             if let fre = error as? FileRetrievalError {
                 let se = fre.structuredError
@@ -2209,10 +1790,8 @@ final class ActiveStreamManager {
                 }
             }
 
-            // [ASM-2] Don't discard prose the user watched stream: if real partial text
-            // exists it stays as content and the error demotes to a timeline warning
-            // (failure remains loud via the `.failed` chip + retry). No prose → the
-            // error card replaces as before. Pure + tested: `resolveThrownFinalContent`.
+            // Keeps prose the user watched stream and demotes the error to a timeline warning; with no prose the error card
+            // replaces it.
             let resolved = ChatMessage.resolveThrownFinalContent(
                 streamed: message.currentAgentContent ?? message.content,
                 errorCard: errorCard
@@ -2229,23 +1808,14 @@ final class ActiveStreamManager {
                 message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = resolved.content
             }
         } else {
-            // Resolve the display content: streamed text if any; else a generated
-            // image (image runs stream NO text — without this promotion the artifact
-            // stayed only in the timeline as a `.mediaGeneration` event, which the
-            // bubble can't render, so a successful generation showed the placeholder
-            // and the image was invisible — audit gap #2); else the "stopped"
-            // placeholder so an empty/cancelled run doesn't masquerade as a clean
-            // completion. Logic lives in `ChatMessage.resolveFinalizedContent` so it's
-            // unit-testable (GeneratedImageRenderGapTests).
+            // Display content: streamed text if any, else a generated image (image runs stream no text), else a 'stopped'
+            // placeholder.
             let resolvedContent = ChatMessage.resolveFinalizedContent(
                 streamed: message.currentAgentContent,
                 imageArtifact: message.lastCompletedImageArtifact
             )
             message.content = resolvedContent
-            // Keep the selected variant in sync so `currentAgentContent` (which the UI
-            // reads) doesn't return a stale empty variant. A no-op when `resolvedContent`
-            // IS the streamed content; load-bearing for the promoted-image / placeholder
-            // cases.
+            // Keeps the selected variant in sync so `currentAgentContent` does not return a stale empty variant.
             if let agentResponse = message.agentResponse,
                agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
                 message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = resolvedContent
@@ -2258,15 +1828,13 @@ final class ActiveStreamManager {
         // [RAG UPGRADE] Event-Driven Vectorization
         // Fire-and-forget: Index the final message into the vector database without blocking the UI.
         let persistence = persistenceService
-        // Snapshot NOW, on the main actor — the detached indexer must never read the live message,
-        // which a Redo can start rewriting within the 500 ms below (RAG-16).
+        // Snapshot now on the main actor: the detached indexer must not read the live message, which a Redo can rewrite.
         let indexable = IndexableMessage(message)
         Task.detached(priority: .background) {
             // Brief pause to ensure UI settles and CoreData write completes
             try? await Task.sleep(nanoseconds: 500_000_000)
-            // ⚠️ CR-61: the conversation may have been DELETED meanwhile — deleting it is what
-            // cancelled this run. Indexing now would put content the user deleted back into the
-            // vector store, after its documents were removed.
+            // The conversation may have been deleted meanwhile (that is what cancelled this run);
+            // indexing now would put deleted content back into the vector store.
             let stillExists = await MainActor.run { persistence.getConversation(withId: conversationID) != nil }
             guard stillExists else {
                 logger.notice("[RAG] Not indexing message \(message.id.uuidString.prefix(8)) — conversation \(conversationID.uuidString.prefix(8)) was deleted. CONSEQUENCE: nothing from it re-enters the vector store.")
@@ -2278,9 +1846,8 @@ final class ActiveStreamManager {
         activeStreams.removeValue(forKey: message.id)
         liveRunQuestionIDs.removeValue(forKey: message.id)   // in lockstep with activeStreams
         streamStartedAt.removeValue(forKey: message.id)
-        // ⚠️ AFTER the removal, never before: `isConversationBusy` reads `activeStreams`, so
-        // admitting first would hand the next run a conversation that still looks occupied by the
-        // one just finishing — and it would park again with nothing left to wake it.
+        // Admit after the removal, never before: `isConversationBusy` reads `activeStreams`, so the next run would park
+        // again with nothing left to wake it.
         admission.admitNext(inConversation: conversationID)
         // Every run end comes through here (finished, failed, cancelled); idempotent for a run that
         // never registered (cancelled while queued behind its conversation).
@@ -2307,9 +1874,7 @@ final class ActiveStreamManager {
         }()
 
         Task.detached(priority: .utility) {
-            // [C6] Suppress when the user is actively viewing — app frontmost OR the
-            // non-activating QuickAccess panel is key (which NSApp.isActive alone misses,
-            // so a completion the user watches in the panel would otherwise double-notify).
+            // Suppress when the user is viewing: the app is frontmost or the non-activating QuickAccess panel is key.
             let userIsViewing = await MainActor.run { NSApp.isActive || (AppDelegate.shared?.isQuickAccessPanelKey ?? false) }
             guard !userIsViewing else { return }
 
@@ -2323,11 +1888,8 @@ final class ActiveStreamManager {
     }
     
     
-    /// The title of the "your run finished" notification, or nil for a run that must not announce
-    /// itself. Pure.
-    /// ⚠️ A CANCELLED run is not announced. It used to arrive as "Query Completed", because a cancel
-    /// carries no error (device test 2026-10-10: closing the orb mid-answer notified that the query
-    /// had completed). Someone stopped it on purpose, so there is nothing to tell them.
+    /// The title of the 'run finished' notification, or nil for a run that must not announce itself. Pure.
+    /// A cancelled run is not announced: someone stopped it on purpose.
     nonisolated static func completionNotificationTitle(outcome: ExecutionOutcome?, hasError: Bool) -> String? {
         if outcome == .cancelled { return nil }
         return hasError || outcome == .failed ? "Query Failed" : "Query Completed"
@@ -2340,7 +1902,5 @@ final class ActiveStreamManager {
     }
 }
 
-// The send path's chokepoint, as a seam. See `MessageStreamStarting` for why it is this narrow
-// and why a surface's hand-off is worth pinning. Both members already exist with the required
-// shapes, so this is a declaration of intent rather than an adapter.
+// The send path's chokepoint as a seam; both members already have the required shapes.
 extension ActiveStreamManager: MessageStreamStarting {}

@@ -4,17 +4,7 @@
 //  SearchUnreachableCountStorageTests.swift
 //  DevgenticTests
 //
-//  Register viewmodel/vm-3 — `ChatSearchBar.body` computed the "N older not shown" count by
-//  calling `unreachableMatchCount(in:)`, which enumerates the COMPUTED `searchCorpus` (a
-//  1,000-entry dictionary rebuild + sort + a full-text hash of every resident message) — on
-//  every keystroke and, because reading each resident message's `displayedContent` made the
-//  bar an observer of all of them, on every streaming flush. `ChatSearchDecomposition`'s header
-//  says "never call this from inside a SwiftUI body"; the bar did.
-//
-//  The count is now STORED on `ChatSearchViewModel`, written by `ChatHistoryViewModel.runSearch`
-//  from the same corpus snapshot the matches came from. These pin: one corpus build per search
-//  run, zero per read of the count, and the bar's source no longer holding the handle it would
-//  need to do it the old way.
+//  Created by Raj Singh.
 //
 
 import XCTest

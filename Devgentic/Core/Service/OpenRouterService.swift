@@ -4,13 +4,7 @@
 //  OpenRouterService.swift
 //  Devgentic
 //
-//  Created on 08/07/26.
-//
-//  Model listing + key verification for OpenRouter (OpenAI-compatible aggregator).
-//  Unlike the other cloud services, GET /models is PUBLIC — fetching it proves
-//  nothing about the pasted key. verifyAndFetchModels therefore hits the
-//  authenticated GET /key first, preserving the app-wide invariant that a
-//  populated model picker means the key was accepted.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,10 +13,7 @@ import OSLog
 private let logger = DGLogger(category: "OpenRouterService")
 
 /// One entry from OpenRouter's catalog, reduced to the fields the app routes on.
-/// `toolCapable` and `visionInput` come from OpenRouter's own metadata — the only
-/// cloud provider where capability is knowable BEFORE the first request, so the
-/// model picker can enforce the agent tool-capability gate pre-flight instead of
-/// relying on the runtime 400-classifier.
+/// `toolCapable` and `visionInput` come from OpenRouter's own metadata, so the picker can gate on capability pre-flight.
 struct OpenRouterModel: Identifiable, Hashable, Sendable {
     /// Routing id sent as the request `model`, e.g. "anthropic/claude-sonnet-4.5".
     let id: String
@@ -67,14 +58,9 @@ struct OpenRouterService {
 
     // MARK: - Fetch
 
-    /// Verifies the API key against GET /key, then fetches the public model catalog.
-    /// Sorted alphabetically by id; the picker applies tool filtering per profile type.
-    /// - Parameter baseURL: the profile's configured API Endpoint. ⚠️ Defaulted, never hardcoded:
-    ///   a user on a corporate or self-hosted gateway sets that endpoint and pastes a
-    ///   GATEWAY-SCOPED key. This call used to ignore it and transmit that key to the vendor's
-    ///   public API on every keystroke-debounced fetch — a host they had deliberately routed
-    ///   around, and one their policy may forbid. Same `?? ProviderDefaults.x` shape `AgentConnect`
-    ///   already uses, so listing and chat can never disagree about where a profile talks.
+    // Why: always honour the profile's endpoint, or a gateway-scoped key is sent to the public API.
+    /// Verifies the API key against GET /key, then fetches the public model catalog, sorted alphabetically by id.
+    /// - Parameter baseURL: the profile's configured API endpoint; falls back to the vendor default when nil.
     func verifyAndFetchModels(apiKey: String, baseURL: URL? = nil) async throws -> [OpenRouterModel] {
         try await verifyKey(apiKey: apiKey, baseURL: baseURL)
 

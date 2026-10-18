@@ -4,9 +4,7 @@
 //  ToolResultBudgetTests.swift
 //  DevgenticTests
 //
-//  The defect: every tool result in Chat, Code and workflow agents reached an 8K model as its first
-//  200 characters. A seven-task `command_output` listing arrived as three lines, a 17-entry
-//  `list_directory` as three names and "(truncated listing)". See `ToolResultBudget`.
+//  Created by Raj Singh.
 //
 
 import XCTest

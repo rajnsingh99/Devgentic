@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
-// Views/Messages/ErrorMessageView.swift (Example location)
-//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
+//
+//  ErrorMessageView.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
 
 import SwiftUI
 
+/// Error card for agent, image and media failures; announces itself to VoiceOver and offers a copy-whole-error action.
 struct ErrorMessageView: View {
     let title: String?
     let details: String
@@ -14,13 +19,9 @@ struct ErrorMessageView: View {
     /// Optional actionable remediation ("try re-attaching the file"). Rendered as a
     /// distinct lightbulb line below the details when present.
     var suggestion: String? = nil
-    /// ⚠️ [CF-40] Identity for the repeat-suppression window, when the caller has one.
-    ///
-    /// Suppression defaults to keying on the SENTENCE, which stops a rebuilt card re-speaking a
-    /// days-old failure — but it also silences a genuinely NEW failure that happens to read the
-    /// same, and "the retry failed the same way" is the case a VoiceOver user most needs to hear.
-    /// A caller that can distinguish occurrences (an artifact id plus an attempt counter) passes
-    /// one here; `nil` keeps the sentence-keyed behaviour for callers that cannot.
+    /// Identity for the VoiceOver repeat-suppression window, when the caller has one.
+    /// Without one, suppression keys on the sentence, which silences a new failure that reads the same.
+    /// Callers that can tell occurrences apart (artifact id plus attempt counter) pass one.
     var announcementKey: String? = nil
     @Environment(\.appTheme) private var theme
     @Environment(ThemeManager.self) private var themeManager
@@ -54,9 +55,7 @@ struct ErrorMessageView: View {
                         .foregroundColor(theme.errorColor.opacity(0.95))
                 }
                 Text(details)
-                    // `theme.fontBody` is a fixed ~13pt, so at 20pt chat the error text
-                    // stayed small while the prose around it grew — exactly the message a
-                    // reader who sized up needs to be able to read.
+                    // `theme.fontBody` is a fixed size, so the chat font keeps error text readable when chat text is scaled up.
                     .font(themeManager.chatFont)
                     .foregroundColor(theme.primaryText.opacity(0.85))
                     .textSelection(.enabled) 
@@ -95,33 +94,16 @@ struct ErrorMessageView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(spokenDescription)
         .accessibilityAddTraits(.isStaticText)
-        // An error card appears wherever the agent happens to be writing, which is rarely
-        // where the VoiceOver cursor is — so the run just went quiet and stayed quiet.
-        // `.polite` rather than `.immediate`: the error has already happened and the card
-        // isn't going anywhere; nothing is lost by waiting for the current utterance.
-        //
-        // ⚠️ `announceOnce`, not `announce` (CF-40). `.task(id:)` fires on APPEARANCE as well as
-        // on id change, and the transcript is a LazyVStack: scrolling an old error card back
-        // into view, or switching away and back, rebuilt this view and re-spoke a failure that
-        // may be days old as if it were happening now. The key is the sentence itself, so the
-        // same card cannot be re-announced by a rebuild.
-        //
-        // ⚠️ This does NOT make the announcement live-only — a historical card scrolled into
-        // view for the FIRST time still speaks. That needs a liveness signal from the caller
-        // (the message's timestamp), which this view is not given.
-        //
-        // ⚠️ The key is `announcementKey` when the caller supplied one, so a NEW occurrence that
-        // reads identically (a retry failing the same way) still speaks. Sentence-keying alone
-        // silenced it for the whole suppression window — see `announcementKey`.
+        // Why: `.task(id:)` fires on appearance and the transcript is a LazyVStack, so rebuilds would re-announce old errors.
+        // Announce politely, once per error: the card may sit far from the VoiceOver cursor.
+        // Keyed on `announcementKey` or the sentence, so a view rebuild never re-speaks an old failure.
         .task(id: announcementKey ?? spokenDescription) {
             AccessibilityAnnouncer.announceOnce(spokenDescription,
                                                 key: announcementKey ?? spokenDescription,
                                                 urgency: .polite)
         }
-        // One-click copy of the WHOLE error for a bug report. `.textSelection` on the
-        // details covers partial selection, but drag-selecting across title + details +
-        // suggestion is fiddly and loses the structure. Lives here so every consumer
-        // (agent errors, image failures, media failures) inherits it identically.
+        // One-click copy of the whole error for a bug report; lives here so every consumer (agent, image, media errors)
+        // inherits it.
         .contextMenu {
             Button(action: copyError) {
                 Label("Copy Error", systemImage: "doc.on.doc")

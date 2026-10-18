@@ -4,33 +4,15 @@
 //  BackgroundTaskCard.swift
 //  Devgentic
 //
-//  The timeline row for a `batch_command(background:)` task: what ran, how long it has been
-//  running, and what it has written.
-//
-//  ── Why this exists ─────────────────────────────────────────────────────────────────────
-//
-//  Device test, 2026-09-21. The model started a build and said:
-//
-//      "I will now periodically check the status of this background job (bg_1) and notify you
-//       immediately when it finishes."
-//
-//  …then emitted `final_answer`. The turn ended, the ReAct loop terminated, and nothing polled —
-//  nothing could. The user was told a watch was in place that structurally could not exist, and
-//  had no way to tell otherwise: the tool card showed the launch line and froze.
-//
-//  So this row is not a convenience. It is the thing that makes the promise unnecessary. With the
-//  output visible here, the user is never blind regardless of what the model does, and the model
-//  polling becomes an optimisation rather than the only path to knowing what happened.
-//
-//  ⚠️ Renders `data.outputTail` — a BOUNDED tail carried in the timeline — not the log file. The
-//  full log is at `data.logPath` and is deliberately not loaded here: it is 375 KB for a real
-//  build, and `ToolExecutionData` already documents what putting that much text through the
-//  message blob costs. "Open full log" is the escape hatch for the whole thing.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// The timeline row for a `batch_command(background:)` task: what ran, how long it has been running, and what it
+/// wrote.
+/// Renders the bounded `data.outputTail`, not the log file; Open full log is the way to see all of it.
 struct BackgroundTaskCard: View {
 
     let data: BackgroundTaskData
@@ -40,29 +22,20 @@ struct BackgroundTaskCard: View {
     var conversationID: UUID? = nil
 
     @Environment(\.appTheme) private var theme
-    /// ⚠️ OPTIONAL, matching `ActionDetailView` and `CodeBlockView`: a timeline can be rendered
-    /// without a chat view model in the environment (workflow per-node views, previews), and those
-    /// contexts should simply show no "open" affordance rather than crash.
+    /// Optional: a timeline can render without a chat view model in the environment (workflow node views, previews),
+    /// and those contexts then show no open affordance.
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel: ChatHistoryViewModel?
     @AppStorage(AppSettings.chatFontSizeKey) private var chatFontSize: Double = 14.0
     @State private var isHoveringCard = false
 
-    /// Drives the elapsed readout while the task runs. ⚠️ The timer itself keeps firing for a
-    /// finished task (it is autoconnected at init); `onReceive` ignores it then — `now` is written
-    /// only while running and `refreshLiveTail` returns early — so nothing re-renders.
+    /// Drives the elapsed readout while the task runs. The timer keeps firing for a finished task,
+    /// but `onReceive` ignores it, so nothing re-renders.
     @State private var now = Date()
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    /// Live output, held only while this card is watching and its task is still RUNNING.
-    ///
-    /// ⚠️ EXISTS BECAUSE THE OBSERVER NO LONGER POLLS. `data.outputTail` is written by
-    /// `BackgroundTaskObserver`, which is now event-driven: it fires at launch and at completion,
-    /// not once a second. A card left open during a build would otherwise sit on the launch-time
-    /// tail — empty — until the task ended.
-    ///
-    /// This is the "someone is actually looking" refresh that replaced the 1 Hz whole-file read.
-    /// `refreshTail` drains only the bytes written since the last call, and this stops entirely the
-    /// moment the card is collapsed or the task finishes.
+    /// Live output, held only while this card is watching and its task is running.
+    /// Refreshed here because `data.outputTail` is written only at launch and completion; `refreshTail` drains only new
+    /// bytes.
     @State private var liveTail: String?
     @State private var liveCharacters = 0
 
@@ -202,9 +175,9 @@ struct BackgroundTaskCard: View {
         }
     }
 
-    /// ⚠️ `exited` is NOT rendered as success. A non-zero exit is the command's own verdict, and
-    /// reporting it with a tick is the same false statement the registry's log wording had to be
-    /// corrected for: "it ran" and "it worked" are different facts.
+    // Why: `exited` is not shown as success: a non-zero exit is the command's own verdict, and ran is not the same as
+    // worked.
+    /// The SF Symbol for the task's status.
     private var iconName: String {
         switch data.status {
         case .running:     return "circle.dotted"
@@ -233,8 +206,8 @@ struct BackgroundTaskCard: View {
         case .exited:      return "finished in \(elapsed) · exit \(data.exitCode.map(String.init) ?? "?")"
         case .timedOut:    return "killed at timeout (\(elapsed))"
         case .stopped:     return "stopped after \(elapsed)"
-        // Deliberately explicit rather than "unknown": quit KILLS every background task, so a task
-        // last seen running did not survive the restart, and saying so beats a shrug.
+        // Explicit rather than unknown: quit kills every background task, so one last seen running did not survive the
+        // restart.
         case .interrupted: return "ended when the app restarted"
         }
     }
@@ -249,11 +222,8 @@ struct BackgroundTaskCard: View {
 
     private var canOpenPanel: Bool { chatHistoryViewModel != nil }
 
-    /// Opens the persistent task list focused on THIS task.
-    ///
-    /// The card is pinned to the turn that produced it, so a build started six turns ago is
-    /// scrolled away; the panel is where the whole run history lives. Focusing rather than just
-    /// opening is what makes the click answer the question that prompted it.
+    /// Opens the persistent task list focused on this task.
+    /// The card is pinned to the turn that produced it, so the panel is where the whole run history lives.
     private func openInPanel() {
         guard let chatHistoryViewModel else { return }
         // By log file, not task id: `bg_1` repeats across launches, and the list now holds both.
@@ -261,10 +231,8 @@ struct BackgroundTaskCard: View {
     }
 
     /// Pulls the registry's in-memory tail while this card is watching; releases it otherwise.
-    ///
-    /// Cheap by construction — `refreshTail` reads only what the task has written since last time.
-    /// The guard is the design: collapsed, finished, or without a conversation, this does nothing
-    /// at all and no file is touched.
+    /// Does nothing, touching no file, when collapsed, finished or without a conversation; `refreshTail` reads only new
+    /// bytes.
     private func refreshLiveTail() {
         guard data.status == .running, let conversationID else {
             // Fall back to the row's tail, which the observer finalises when the task ends.

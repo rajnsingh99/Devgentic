@@ -4,17 +4,7 @@
 //  WorkflowBatch5Tests.swift
 //  DevgenticTests
 //
-//  Core readiness P2 batch 5 (2026-10-12): CR-46, CR-47, CR-48, CR-49.
-//
-//  Every row is driven through the REAL `WorkflowExecutor` with the mock stream provider, so a
-//  test fails if the fix is unwired, not only if a helper is wrong:
-//  - CR-46: a sub-workflow whose own run absorbed a failure completes WITH WARNINGS, and the
-//    parent's verdict (`workflowRunFinished`) says so.
-//  - CR-47: a dismissed Gate is cancelled (no branch, no error port); only the timer's own nil is
-//    an expiry.
-//  - CR-48: Router `equals` / `isEmpty` compare the trimmed message, without the entry node's
-//    folded attachments; `contains` still searches the attachments.
-//  - CR-49: a document is inlined at the first node that reads it, not again at every node after.
+//  Created by Raj Singh.
 //
 
 import XCTest

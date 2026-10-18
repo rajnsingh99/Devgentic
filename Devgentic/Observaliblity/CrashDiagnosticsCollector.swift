@@ -4,27 +4,7 @@
 //  CrashDiagnosticsCollector.swift
 //  Devgentic
 //
-//  Crash & hang capture (observability §12.1). Before this, a crash was the one
-//  scenario where the trace stack recorded NOTHING — the event buffer died with the
-//  process and the trace stayed `running` with no cause. Three mechanisms close that:
-//
-//  1. **MetricKit subscriber** — macOS delivers `MXDiagnosticPayload`s (crash, hang,
-//     CPU-exception, disk-write-exception diagnostics) on the launch after the incident.
-//     We persist each payload's JSON to Application Support/Devgentic/CrashDiagnostics/
-//     and emit an error-level log entry (always recorded post-B3) for correlation.
-//     Persisted as files, not DB rows, deliberately: no schema migration, and the
-//     diagnostic bundle ships them verbatim.
-//
-//  2. **`.ips` harvest** — macOS writes full crash reports to
-//     ~/Library/Logs/DiagnosticReports/<ProcessName>-<date>.ips. Reading that directory
-//     is only possible UN-sandboxed — which the website-distribution decision locked in.
-//     `BundleExporter` calls `harvestCrashReports` to fold them (sanitized) into the
-//     bundle's crashes/ section.
-//
-//  3. **Clean-exit sentinel** — a UserDefaults flag set false at launch and true in
-//     `applicationWillTerminate`. If a launch reads false, the previous session crashed
-//     or was force-killed; the orphan-trace reconciliation reason says so instead of
-//     the generic "interrupted".
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -32,6 +12,9 @@ import MetricKit
 
 private let logger = DGLogger(category: "CrashDiagnostics")
 
+/// Captures crashes and hangs via three mechanisms: a MetricKit subscriber that persists each diagnostic payload,
+/// a harvest of `.ips` reports from ~/Library/Logs/DiagnosticReports (readable only un-sandboxed), and a clean-exit
+/// sentinel that tells the next launch the previous session crashed or was force-killed.
 final class CrashDiagnosticsCollector: NSObject, MXMetricManagerSubscriber {
 
     static let shared = CrashDiagnosticsCollector()
@@ -102,9 +85,8 @@ final class CrashDiagnosticsCollector: NSObject, MXMetricManagerSubscriber {
 
     /// Deletes persisted MetricKit JSONs older than `date` (same 30-day policy as traces).
     static func purgeDiagnostics(olderThan date: Date) {
-        // ⚠️ DELETES REAL FILES FROM THE DEVELOPER'S `Application Support/Devgentic/CrashDiagnostics`.
-        // The store redirect does not cover this directory, so a test run silently ages out the
-        // developer's own crash payloads — the ones a diagnostic bundle would have carried.
+        // Deletes real files under `Application Support/Devgentic/CrashDiagnostics`; the test store redirect does not
+        // cover this directory, so the `TestHost` guard is required.
         guard TestHost.permits("purge crash-diagnostic payloads", logger: logger) else { return }
 
         let fm = FileManager.default
@@ -138,10 +120,8 @@ final class CrashDiagnosticsCollector: NSObject, MXMetricManagerSubscriber {
         return lower.hasSuffix(".ips") || lower.hasSuffix(".hang")
     }
 
-    /// Crash/hang reports relevant to a diagnostic bundle: this app's `.ips`/`.hang`
-    /// files from the system DiagnosticReports directory PLUS our persisted MetricKit
-    /// JSONs, modified at/after `since`, newest first, capped at `limit` (the raw
-    /// reports can be a few hundred KB each).
+    /// Crash/hang reports for a diagnostic bundle: this app's `.ips`/`.hang` files plus persisted MetricKit JSONs, modified
+    /// at/after `since`, newest first, capped at `limit` (reports can be a few hundred KB each).
     static func harvestCrashReports(since: Date, limit: Int = 10) -> [URL] {
         let fm = FileManager.default
         let processName = ProcessInfo.processInfo.processName
@@ -177,10 +157,8 @@ final class CrashDiagnosticsCollector: NSObject, MXMetricManagerSubscriber {
 
     private static let sentinelKey = "diagnosticsCleanExitSentinel"
 
-    /// Reads whether the PREVIOUS session exited cleanly, then marks the current
-    /// session dirty (it stays dirty until `markCleanExit` runs at termination).
-    /// A missing value (first launch / pre-feature install) counts as clean — never
-    /// report a phantom crash. Call exactly once, first thing at launch.
+    /// Reads whether the previous session exited cleanly, then marks the current session dirty until `markCleanExit` runs.
+    /// A missing value counts as clean, so no phantom crash is reported. Call exactly once, first thing at launch.
     @discardableResult
     static func consumeLaunchSentinel(defaults: UserDefaults = .standard) -> Bool {
         let wasClean = (defaults.object(forKey: sentinelKey) as? Bool) ?? true

@@ -2,21 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PairingPrefixParsingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  A sentence that starts with the word "pair" is a prompt, not a pairing attempt.
-//
-//  ⚠️⚠️ THE FAILURE THIS PINS (BR-5). `ChatOpsCommand.parse` accepted `PAIR ` followed by ANYTHING
-//  non-empty, case-insensitively. So "Pair these two CSVs on the id column and write the result to
-//  out.csv" parsed as `.pairingAttempt("THESE TWO CSVS ON…")`, cleared the tier gate (pairing is
-//  allowed at every tier), and was then discarded by all three bridges without a reply: no answer,
-//  no error, not even a typing indicator. `parseSlack` and `parseDiscord` both delegate here for
-//  plain text, so this was every platform, not just Telegram.
-//
-//  ⚠️ THIS IS NOT `PairingAttemptPolicy`, WHICH IS DELIBERATELY LOOSER. That classifier runs only
-//  inside an open pairing window and treats `PAIR <anything>` as a failed attempt on purpose —
-//  someone fumbling the format is still someone trying to pair, and the lockout needs to see them.
-//  Tightening it would be a bug; tightening the always-on command parser is the fix.
+//  Created by Raj Singh.
 //
 
 import XCTest

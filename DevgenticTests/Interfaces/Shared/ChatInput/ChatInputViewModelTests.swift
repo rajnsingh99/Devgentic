@@ -4,9 +4,7 @@
 //  ChatInputViewModelTests.swift
 //  DevgenticTests
 //
-//  Tests for ChatInputViewModel — state management, suggestion navigation,
-//  API key validation, voice input state machine, and delegate mediation.
-//  All external services are mocked; no UI or view-layer testing.
+//  Created by Raj Singh.
 //
 
 import XCTest

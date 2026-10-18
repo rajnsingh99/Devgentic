@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RemoteEgressWideningTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  What the credential floor used to let through, and what a Slack approval prompt used to render.
-//
-//  ⚠️⚠️ EG-2 — THE FLOOR HAD THREE HOLES, ALL REACHABLE BY ASKING THE AGENT AN ORDINARY QUESTION.
-//  `sanitizeURLCredentials` matched a FIXED scheme list, `(https?|ftp|ssh|wss?)`, so every database
-//  URI walked through untouched — and `DATABASE_URL` contains none of TOKEN/KEY/SECRET/PASSWORD/
-//  PASS/CREDENTIAL/API, so the env-var pass did not fire either. "Why can't the app reach the
-//  database?" is all it took. A bare JWT missed too (`sanitizeBearerToken` needs a literal `Bearer `
-//  prefix, and the Discord pattern is anchored `[MNO]`), as did a PEM block from `cat id_ed25519`.
-//
-//  ⚠️⚠️ EG-4 — SLACK RENDERED MODEL TEXT AS MARKUP INSIDE AN APPROVAL PROMPT. `sectionBlock`
-//  hard-codes `mrkdwn`, and `promptDraft` interpolated tool names, params, questions, plan steps and
-//  gate prompts RAW. `<!channel>` from a file the agent read fired a channel-wide notification, and
-//  `<url|label>` rendered a clickable link with model-chosen visible text — directly above the real
-//  ✅ Approve button, in the same message.
+//  Created by Raj Singh.
 //
 
 import XCTest

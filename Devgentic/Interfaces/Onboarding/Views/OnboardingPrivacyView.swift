@@ -4,15 +4,14 @@
 //  OnboardingPrivacyView.swift
 //  Devgentic
 //
-//  What stays on the Mac, what leaves it and when, the diagnostics opt-out, and the update-check
-//  question. ⚠️ Keep this in step with PRIVACY.md — it is the same promise in fewer words.
-//
-//  The update question has NO pre-selected answer: PRIVACY.md promises nothing is requested
-//  before the user answers, and a switch that defaults on would answer for them.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// What stays on the Mac, what leaves it and when, the diagnostics opt-out and the update-check
+/// question; mirrors PRIVACY.md. The update question has no pre-selected answer, since nothing is
+/// requested before the user answers.
 struct OnboardingPrivacyView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(\.appTheme) private var theme

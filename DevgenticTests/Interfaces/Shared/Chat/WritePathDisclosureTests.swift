@@ -4,16 +4,7 @@
 //  WritePathDisclosureTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the field-observed wrong-target write (2026-07-25).
-//
-//  The model emitted a bare relative path (`January2026.java`) for a file the user had
-//  attached from a project directory. `FilePathResolver` anchors relative paths to HOME,
-//  so the write landed at `~/January2026.java` — but the approval banner rendered the RAW
-//  string, which looked exactly like the attached file. The user approved a write to a
-//  file they had never seen, and their real file was untouched.
-//
-//  The banner now shows the resolved target, and the preview reads the same path the
-//  executor writes.
+//  Created by Raj Singh.
 //
 
 import XCTest

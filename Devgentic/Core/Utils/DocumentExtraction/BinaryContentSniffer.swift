@@ -4,7 +4,7 @@
 //  BinaryContentSniffer.swift
 //  Devgentic
 //
-//  Whether a byte sequence plausibly IS text, asked before any lossy decode of it.
+//  Created by Raj Singh.
 //
 
 import Foundation

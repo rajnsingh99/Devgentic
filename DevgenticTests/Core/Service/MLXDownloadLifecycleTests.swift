@@ -4,21 +4,7 @@
 //  MLXDownloadLifecycleTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Batch 0 of the MLX Model Manager production-readiness audit
-//  (2026-08-03). These four defects mask each other, so they were fixed together and are
-//  pinned together:
-//
-//    A1  `partialDownloadFolder` rebuilt HubApi's destination by hand and omitted the
-//        `models` path component, making `removePartialDownload` a permanent silent no-op.
-//    A4  `downloadModel` pre-empted any in-flight pull instead of refusing.
-//    A5  Cancellation was classified off `CancellationError`, which HubApi never throws.
-//    A6  No terminal branch cleared `downloadTask` / `currentDownloadName`, so the next
-//        download's cleanup targeted the previous — and once A1 was fixed, that cleanup
-//        would have deleted a fully-installed multi-gigabyte model.
-//
-//  Every test runs against a temp directory via `MLXModelService(modelsRootOverride:)`.
-//  ⚠️ Never point these at the real Application Support tree: `removePartialDownload` is a
-//  recursive delete and the user's real models live there.
+//  Created by Raj Singh.
 //
 
 import XCTest

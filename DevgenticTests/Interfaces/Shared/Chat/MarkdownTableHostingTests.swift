@@ -4,12 +4,7 @@
 //  MarkdownTableHostingTests.swift
 //  DevgenticTests
 //
-//  HOSTED-rendering regression tests for the 2026-07-16 streaming-table crash
-//  (Fatal error: Index out of range). Unit-constructing a view can't reproduce
-//  SwiftUI identity persistence — the crash mechanism was @State surviving across
-//  updates while the inputs grew. These tests mount the real views in an
-//  NSHostingView and mutate inputs under a STABLE identity, exactly like a
-//  streaming response updating in place.
+//  Created by Raj Singh.
 //
 
 import XCTest

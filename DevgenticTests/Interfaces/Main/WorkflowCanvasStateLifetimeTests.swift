@@ -4,21 +4,7 @@
 //  WorkflowCanvasStateLifetimeTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF9.
-//
-//  `WorkflowDedicatedView` flips from Canvas to Execution automatically when a run starts, which
-//  tears the canvas subtree down. While `WorkflowCanvasState` lived in that view's `@State`, the
-//  flip destroyed every unsaved node, edge and task description — silently, with no prompt and no
-//  dirty indicator — on the most natural action there is: running the workflow you were editing.
-//
-//  The state is now owned by `MainApplicationViewModel` (keyed by workflow profile) and injected,
-//  so it outlives the view. That makes `.onAppear` fire on a canvas that is already mid-edit,
-//  which is what `acceptsDiskReload` guards.
-//
-//  ⚠️ The ownership half is NOT covered here: constructing a `MainApplicationViewModel` claims
-//  `HITLPresenter` globally and loads settings, so building one in a unit test would leak state
-//  across the suite. What is covered is the rule that made reuse safe — without it, keeping the
-//  state alive would simply move the data loss to the return trip.
+//  Created by Raj Singh.
 //
 
 import XCTest

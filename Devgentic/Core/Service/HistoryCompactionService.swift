@@ -4,12 +4,7 @@
 //  HistoryCompactionService.swift
 //  Devgentic
 //
-//  IC-powered adaptive history compaction. Summarizes older conversation turns
-//  into compact checkpoints using the Intelligence Core (local MLX model).
-//  Batch size adapts to the IC model's context window — small models produce
-//  frequent high-resolution checkpoints; large models compact in fewer passes.
-//
-//  Created by Devgentic Architect on 09/04/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,15 +14,11 @@ private let logger = DGLogger(category: "HistoryCompaction")
 
 // MARK: - Compaction Result
 
-/// What a compaction WOULD do, decided without calling the Intelligence Core.
-///
-/// Exists so the UI can announce compaction *before* the multi-second IC inference rather
-/// than after it (the `compactionStarted` payload is derived from this decision, which is
-/// why the event could not simply be moved earlier). It also gives the trigger/batch math a
-/// pure, testable seam — previously every path past the guards ended in an IC call, so the
-/// arithmetic could only be exercised by loading a model.
+/// What a compaction would do, decided without calling the Intelligence Core.
+/// Lets the UI announce compaction before the multi-second IC inference (`compactionStarted` is derived from it)
+/// and gives the trigger/batch math a pure, testable seam.
 struct CompactionPlan: Sendable {
-    /// The oldest messages to summarize (recent turns are deliberately excluded).
+    /// The oldest messages to summarize; recent turns are excluded.
     let turnsToCompact: [ChatMessage]
     /// Summary from the previous checkpoint, for cascading. Empty when this is the first.
     let priorSummary: String
@@ -37,8 +28,8 @@ struct CompactionPlan: Sendable {
     let turnPairsInBatch: Int
     /// Estimated chars of all pending turns, for logging/tuning.
     let estimatedChars: Int
-    /// Where the checkpoint goes: strictly after the last compacted message and strictly before
-    /// the first one it keeps (CR-39). Readers keep `timestamp > checkpoint.timestamp`.
+    /// Where the checkpoint goes: strictly after the last compacted message and strictly before the first one kept.
+    /// Readers keep `timestamp > checkpoint.timestamp`.
     let checkpointTimestamp: Date
 }
 
@@ -55,16 +46,11 @@ struct CompactionResult: Sendable {
 
 // MARK: - History Compaction Service
 
-/// Evaluates whether conversation history needs compaction and produces IC-powered
-/// checkpoint summaries when triggered.
-///
-/// Compaction runs OFF the request path: `evaluate` (cheap, no IC) decides during the
-/// turn, `scheduleExecution` runs the summarization in the background, and the persisted
-/// checkpoint benefits every turn from the next one on. The current request proceeds with
-/// uncompacted history — the history builders trim to budget, and the trigger fires at
-/// ~36% of the context window, so one turn without relief costs little. This replaced a
-/// synchronous design whose 30s "timeout" could not actually bound the stall (cold load
-/// and prefill are uninterruptible).
+// Why: cold model load and prefill are uninterruptible, so summarization must not block the request path or rely on a
+// timeout.
+/// Evaluates whether conversation history needs compaction and produces IC-powered checkpoint summaries.
+/// Off the request path: `evaluate` (cheap, no IC) decides during the turn, `scheduleExecution` summarizes in background.
+/// The current request proceeds with uncompacted history; the persisted checkpoint benefits every later turn.
 actor HistoryCompactionService {
 
     static let shared = HistoryCompactionService()
@@ -78,15 +64,10 @@ actor HistoryCompactionService {
 
     // MARK: - Background Delivery
 
-    /// Stream-independent delivery path for finished checkpoints: persists the message and
-    /// splices it into the live transcript. Registered once at startup by
-    /// `MessagingCoordinator` (the one object holding both the persistence store and the
-    /// live history array).
-    ///
-    /// This exists because compaction no longer runs on the request path — it can finish
-    /// AFTER the originating stream has ended, and yielding to a finished continuation is a
-    /// silent no-op. Data delivery therefore must not ride stream events; only the optional
-    /// UI chips do.
+    // Why: compaction can finish after its originating stream ended, and yielding to a finished continuation is a silent
+    // no-op; data delivery must not ride stream events (only the optional UI chips do).
+    /// Stream-independent delivery path for finished checkpoints: persists the message and splices it into the transcript.
+    /// Registered once at startup by `MessagingCoordinator`, which holds both the persistence store and the history array.
     private var checkpointSink: (@Sendable (ChatMessage, UUID) async -> Void)?
 
     /// Conversations with a background compaction currently running. Prevents a second turn
@@ -98,11 +79,9 @@ actor HistoryCompactionService {
         checkpointSink = sink
     }
 
-    /// Stream-independent UI reporting for AUTOMATIC compaction: `begin` shows the "Compacting
-    /// history…" row, `finish` its outcome — the same row a manual compaction uses. Registered at
-    /// startup beside the checkpoint sink, because an automatic run starts after its turn's stream
-    /// has ended and so cannot report through it. `begin` returns false when a row is already
-    /// running for the conversation.
+    /// Stream-independent UI reporting for automatic compaction: `begin` shows the progress row, `finish` its outcome.
+    /// Registered at startup beside the checkpoint sink, since an automatic run starts after its turn's stream has ended.
+    /// `begin` returns false when a row is already running for the conversation.
     private var activityBegin: (@Sendable (UUID) async -> Bool)?
     private var activityFinish: (@Sendable (UUID, ManualOutcome) async -> Void)?
 
@@ -112,10 +91,8 @@ actor HistoryCompactionService {
         activityFinish = finish
     }
 
-    /// WHICH MODEL SUMMARIZES — one rule for manual and automatic compaction (owner decision
-    /// 2026-09-27): the Intelligence Core when it is on, its History Compaction feature is on and a
-    /// model is selected; otherwise the conversation's own model, which is always available because
-    /// it is the one the user is already talking to.
+    /// Which model summarizes, for manual and automatic compaction alike: the Intelligence Core when it is on, its History
+    /// Compaction feature is on and a model is selected; otherwise the conversation's own model, which is always available.
     static func useIntelligenceCore(defaults: UserDefaults = .standard, icModelSelected: Bool) -> Bool {
         let master = defaults.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
         let feature = defaults.object(forKey: AppSettings.ciFeatureHistoryCompactionKey) as? Bool ?? true
@@ -135,22 +112,11 @@ actor HistoryCompactionService {
         backgroundRuns.remove(conversationID)
     }
 
-    /// Runs the planned compaction OFF the request path.
-    ///
-    /// Returns immediately; the summarization happens in a background task. The checkpoint
-    /// benefits every turn from the next one on.
-    ///
-    /// ⚠️ Summarized by the Intelligence Core when `useIntelligenceCore` says so, otherwise by the
-    /// CONVERSATION'S OWN MODEL (`conversationModel`). Automatic compaction used to run only through
-    /// the Intelligence Core, which is off by default — so with it off a long conversation was never
-    /// summarized, only trimmed.
-    ///
-    /// ⚠️ NO TIME LIMIT (owner decision 2026-09-27). The old 30 s "timeout" could not stop an
-    /// uninterruptible model load or prefill; it only reported late. Compaction is a bot call with
-    /// no tools, and the transcript row says it is running.
-    ///
-    /// - Parameter onEvent: Optional stream chips; nil when the turn's stream has already ended,
-    ///   which is the normal case now that compaction starts after the answer.
+    // Why: no time limit: a model load or prefill is uninterruptible, so a timeout would only report late; compaction is a
+    // tool-less bot call and the transcript row shows it is running.
+    /// Runs the planned compaction off the request path; returns immediately while a background task summarizes.
+    /// Summarized by the Intelligence Core when `useIntelligenceCore` says so, otherwise by the conversation's own model.
+    /// `onEvent` receives optional stream chips; it is nil when the turn's stream has already ended (the normal case).
     func scheduleExecution(
         plan: CompactionPlan,
         conversationID: UUID,
@@ -178,8 +144,8 @@ actor HistoryCompactionService {
                 if let summarizerOverride {
                     result = try await execute(plan: plan, conversationID: conversationID, summarize: summarizerOverride)
                 } else if useIC {
-                    // ⚠️ CR-9: through the coordinator, as a background run of its own — never under
-                    // the finished turn's identity. See `runBackgroundLocal`.
+                    // Through the coordinator, as a background run of its own, never under the finished turn's identity.
+                    // See `runBackgroundLocal`.
                     result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "Compaction") {
                         try await execute(plan: plan, conversationID: conversationID)
                     }
@@ -197,8 +163,7 @@ actor HistoryCompactionService {
                 if let sink = deliverOverride ?? checkpointSink {
                     await sink(result.checkpointMessage, conversationID)
                 } else {
-                    // Should be impossible after startup wiring; loud because the
-                    // consequence is severe — the summary was paid for and then dropped,
+                    // Should be impossible after startup wiring; loud because the summary was paid for and then dropped,
                     // and the next turn will re-plan the same batch.
                     logger.error("[COMPACTION] No checkpoint sink registered — checkpoint #\(result.checkpointNumber) for conversation \(conversationID.uuidString.prefix(8)) is LOST and the work will repeat next turn.")
                 }
@@ -256,18 +221,9 @@ actor HistoryCompactionService {
         }
     }
 
-    /// Compacts NOW, at the user's request, regardless of the automatic trigger.
-    ///
-    /// ⚠️ Added 2026-09-24 for the context gauge. Automatic compaction only runs through the
-    /// Intelligence Core — with it off, which is the default, a long conversation could never be
-    /// summarized at all, only trimmed. So this summarizes with the IC when it is on and has a
-    /// model, and otherwise with the CONVERSATION'S OWN MODEL (`fallbackModel`), which is always
-    /// available because it is the one the user is already talking to.
-    ///
-    /// The planner is the automatic one with the trigger ratio at 0: same batch rules (the 5
-    /// most recent messages are kept, at least 4 are needed), same prompt, same checkpoint card,
-    /// delivered through the same sink. The transcript itself is untouched — the checkpoint only
-    /// changes what is SENT from the next turn on.
+    /// Compacts now, at the user's request, regardless of the automatic trigger.
+    /// Summarizes with the IC when it is on and has a model, otherwise with the conversation's own model (`fallbackModel`).
+    /// Uses the automatic planner with the trigger ratio at 0 (same batch rules, prompt, card, sink); transcript untouched.
     func compactNow(
         chatHistory: [ChatMessage],
         conversationID: UUID,
@@ -300,7 +256,7 @@ actor HistoryCompactionService {
             if let summarizerOverride {
                 result = try await execute(plan: plan, conversationID: conversationID, summarize: summarizerOverride)
             } else if useIC {
-                // ⚠️ CR-9: manual "Compact now" carried no run id at all — it generated outside the lock.
+                // Manual 'Compact now' also runs through the coordinator, so it carries a run id and generates under the lock.
                 result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "Compaction (manual)") {
                     try await execute(plan: plan, conversationID: conversationID)
                 }
@@ -335,17 +291,9 @@ actor HistoryCompactionService {
 
     // MARK: - Public API
 
-    /// Evaluates whether compaction is needed and produces a checkpoint if so.
-    ///
-    /// Convenience wrapper over `evaluate` + `execute`. Callers that want to tell the user
-    /// compaction is happening should use the two-step form instead — this one can only
-    /// report after the IC inference has already finished.
-    ///
-    /// - Parameters:
-    ///   - chatHistory: The full conversation history.
-    ///   - conversationID: Current conversation UUID.
-    ///   - charBudget: The history character budget (60% of context window × 4).
-    /// - Returns: A `CompactionResult` if compaction was performed, or `nil` if not needed.
+    /// Evaluates whether compaction is needed and produces a checkpoint if so; a wrapper over `evaluate` + `execute`.
+    /// It can only report after the IC inference has finished, so use the two-step form to announce compaction.
+    /// Returns a `CompactionResult`, or nil if not needed. `charBudget` is the history character budget (60% of window × 4).
     func compactIfNeeded(
         chatHistory: [ChatMessage],
         conversationID: UUID,
@@ -372,11 +320,8 @@ actor HistoryCompactionService {
         )
     }
 
-    /// Pure planning core — all trigger and batch arithmetic, no IC and no I/O.
-    ///
-    /// Internal + static so the math is unit-testable. Before the split, every path that got
-    /// past the guards ended in an IC call, so these numbers could only be exercised by
-    /// loading a model — which is why the trigger logic had almost no real coverage.
+    /// Pure planning core: all trigger and batch arithmetic, no IC and no I/O.
+    /// Internal and static so the math is unit-testable.
     static func planCompaction(
         chatHistory: [ChatMessage],
         charBudget: Int,
@@ -397,14 +342,8 @@ actor HistoryCompactionService {
             turnsAfterCheckpoint = chatHistory
         }
 
-        // Reported for triage only — NOT a gate. A `minTurnThreshold = 15` user-turn
-        // guard used to sit here, but context pressure is a size question, not a count
-        // question: the char-budget trigger below already answers it in the same units
-        // the budget is expressed in, and derived from the model's own context window.
-        // Two gates in different units could only ever disagree — and this one silently
-        // won, refusing to compact histories that were genuinely over budget.
-        // The structural floor now lives entirely in the batch guard further down
-        // (keep the 5 most recent, require >= 4 compactable messages).
+        // Reported for triage only, not a gate: context pressure is a size question, answered by the char-budget trigger below;
+        // the structural floor lives in the batch guard (keep the 5 most recent, require >= 4 compactable messages).
         let turnPairCount = turnsAfterCheckpoint.filter { $0.sender == .user }.count
 
         // Step 3: Estimate char size of pending turns.
@@ -438,10 +377,8 @@ actor HistoryCompactionService {
         }
         let turnsToCompact = boundary.batch
 
-        // The ONLY structural floor now that the turn-count gate is gone: never pay an IC
-        // inference to summarize fewer than ~2 turn pairs. Combined with `keepRecentCount`
-        // this also stops a short-but-huge history (a couple of very large messages) from
-        // compacting away everything it has.
+        // The only structural floor: never pay an IC inference to summarize fewer than ~2 turn pairs. With `keepRecentCount`
+        // it also stops a short-but-huge history from compacting away everything it has.
         guard turnsToCompact.count >= 4 else {
             logger.info("[COMPACTION] Skipped — only \(turnsToCompact.count) message(s) fit the batch after keeping the 5 most recent (need >= 4) → history passed through uncompacted.")
             return nil
@@ -460,17 +397,11 @@ actor HistoryCompactionService {
         )
     }
 
+    // Why: readers keep only messages strictly after the checkpoint; a message inside its margin is in neither the summary
+    // nor the history, and a batch ending on a user turn leaves an answer without its question.
     /// Trims a batch so the checkpoint can sit cleanly after it, and says where.
-    ///
-    /// ⚠️⚠️ READINESS CR-39 (2026-10-12). The checkpoint went at "last compacted + 1 ms", and every
-    /// reader keeps only messages strictly after it. A message within that millisecond — a reply
-    /// stamped right after its question — was in neither the summary nor the history: silently
-    /// gone. And the batch could end on a USER turn, so its reply stayed after the checkpoint:
-    /// the model saw an answer with no question, and native APIs got two assistant turns in a row.
-    ///
-    /// Now the batch never ends on a user message, and ends only where the next message is
-    /// strictly later; the checkpoint goes halfway between the two (or 1 ms after the end when
-    /// nothing follows). Nil when trimming leaves nothing.
+    /// The batch never ends on a user message and ends only where the next message is strictly later; the checkpoint goes
+    /// halfway between the two (or 1 ms after the end when nothing follows). Nil when trimming leaves nothing.
     static func alignBatchBoundary(_ batch: [ChatMessage], in turns: [ChatMessage]) -> (batch: [ChatMessage], checkpointTimestamp: Date)? {
         var batch = batch
         while let last = batch.last {
@@ -488,8 +419,7 @@ actor HistoryCompactionService {
     }
 
     /// Runs the planned compaction: one IC summarization, then the checkpoint message.
-    /// This is the expensive half — a model load plus inference, deliberately unbounded
-    /// (owner decision 2026-09-27; see `scheduleExecution`).
+    /// The expensive half (a model load plus inference), unbounded by design; see `scheduleExecution`.
     func execute(plan: CompactionPlan, conversationID: UUID) async throws -> CompactionResult {
         try await execute(plan: plan, conversationID: conversationID) { messages in
             try await self.callIC(messages: messages)
@@ -517,8 +447,7 @@ actor HistoryCompactionService {
                           userInfo: [NSLocalizedDescriptionKey: "The model returned an empty summary. Compaction skipped."])
         }
 
-        // Step 8: Create the checkpoint ChatMessage.
-        // CR-39: placed by the planner between the last compacted message and the first kept one.
+        // Create the checkpoint ChatMessage, placed by the planner between the last compacted message and the first kept one.
         let checkpointTimestamp = plan.checkpointTimestamp
 
         let checkpointMessage = ChatMessage(
@@ -577,15 +506,13 @@ actor HistoryCompactionService {
         let selectedModelName = UserDefaults.standard.string(forKey: AppSettings.coreIntelligenceModelKey) ?? ""
         guard !selectedModelName.isEmpty else { return 4096 }
 
-        // Wait for the scan: a list that simply hasn't populated yet is otherwise
-        // indistinguishable from a deleted model, and both silently collapse the IC window
-        // to 4096 — which makes compaction far more aggressive than the model requires.
+        // Wait for the scan: a list that hasn't populated yet is indistinguishable from a deleted model, and both silently
+        // collapse the IC window to 4096, making compaction far more aggressive than the model requires.
         await MLXModelService.shared.ensureLoaded()
         return await MainActor.run {
             guard let model = MLXModelService.shared.installedModel(named: selectedModelName) else {
-                // Was a silent early return. The other three lookup sites surface the miss
-                // (404 / rejected-load / nodeExecutionFailed); this one feeds every compaction
-                // budget downstream, so a silent 4096 makes history vanish with no explanation.
+                // A miss is logged: this lookup feeds every compaction budget downstream, so a silent 4096 would make history
+                // vanish with no explanation.
                 logger.error("[COMPACTION] IC context-window lookup MISSED for model '\(selectedModelName)' — not among \(MLXModelService.shared.installedModels.count) installed model(s). CONSEQUENCE: falling back to a 4096-token IC window, so compaction runs far more aggressively than the model actually requires (frequent checkpoints, history disappearing). Re-select the Intelligence Core model.")
                 return 4096
             }
@@ -633,9 +560,8 @@ actor HistoryCompactionService {
             case .error(let title, let details, _, _): text = "\(title ?? "Error"): \(details)"
             case .mediaArtifact(let a): text = "[Media: \(a.label ?? a.kind.rawValue)]"
             case .checkpoint: continue // Already handled above
-            // ⚠️ SKIP, do not summarize. This build cannot read the content, so any text it
-            // produced would be invented — and a compaction summary is fed back to the model as
-            // fact. Skipping loses the turn from the summary; fabricating would poison it.
+            // Skip, do not summarize: this build cannot read the content, so any text produced would be invented, and a
+            // compaction summary is fed back to the model as fact.
             case .unknown: continue
             }
             let truncated = text.count > 500 ? String(text.prefix(500)) + "..." : text
@@ -698,15 +624,11 @@ actor HistoryCompactionService {
     /// Calls the Intelligence Core to produce the checkpoint summary.
     /// Enforces a timeout to prevent blocking the agent pipeline indefinitely.
     private func callIC(messages: [[String: String]]) async throws -> String {
-        // Release our hold however this ends (success, empty summary, timeout, cancellation).
-        // Compaction was the ONLY IC consumer that never did this, so once it ran the model
-        // stayed resident for the app's lifetime unless some other feature happened to free
-        // it. `releaseHold` is idle-debounced, so the rest of this turn's IC work (response
-        // synthesis) still reuses the same load rather than paying a second one.
+        // Release our hold however this ends (success, empty summary, timeout, cancellation); `releaseHold` is
+        // idle-debounced, so the rest of this turn's IC work (response synthesis) still reuses the same load.
         defer { Task { await IntelligenceCoreService.shared.releaseHold(caller: .historyCompaction) } }
 
-        // NO TIMEOUT (owner decision 2026-09-27). This was a 30 s task-group race, which could
-        // not stop an uninterruptible load or prefill and so only reported "timed out" late.
+        // No timeout: an uninterruptible model load or prefill cannot be stopped by one, so it would only report late.
         let result = try await IntelligenceCoreService.shared.generate(
             messages: messages,
             maxTokens: 1024,

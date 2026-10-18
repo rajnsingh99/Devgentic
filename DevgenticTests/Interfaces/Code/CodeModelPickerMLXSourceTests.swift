@@ -4,9 +4,7 @@
 //  CodeModelPickerMLXSourceTests.swift
 //  DevgenticTests
 //
-//  The Code picker's MLX tab (2026-09-27). It scanned `~/.cache/huggingface/hub` — not the app's
-//  MLX model store — so it listed a stray embedding model and none of the installed chat models,
-//  and saved names the runtime (which resolves against the store) could not load.
+//  Created by Raj Singh.
 //
 
 import XCTest

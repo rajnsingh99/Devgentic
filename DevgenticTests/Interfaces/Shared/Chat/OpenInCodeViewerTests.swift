@@ -4,22 +4,7 @@
 //  OpenInCodeViewerTests.swift
 //  DevgenticTests
 //
-//  Drives the REAL `openMessageInCodeViewer` end-to-end: markdown → parseMarkdown →
-//  CodeSnippetExtractor → largeSnippets filter → source-file linking → the index the
-//  viewer actually opens on.
-//
-//  Everything else pins a piece in isolation (does the extractor trim? does
-//  denotesSameBlock match?). Nothing covered the method that composes them, which is
-//  exactly where both identity bugs lived:
-//
-//    1. The click site passed cmark's raw content (trailing "\n") while the extractor
-//       trimmed, so `firstIndex` never matched and every click opened snippet 0.
-//    2. `==` also compares sourceMessageID/sourceFileID, which the viewer stamps on only
-//       AFTER resolving the filename — a click site cannot know them. So even after (1),
-//       any successfully LINKED snippet still missed and fell back to snippet 0.
-//
-//  Bug 2 only appears when a linked snippet is NOT first, which is why the on-device runs
-//  kept missing it: one had no attachment, the other had a single snippet.
+//  Created by Raj Singh.
 //
 
 import XCTest

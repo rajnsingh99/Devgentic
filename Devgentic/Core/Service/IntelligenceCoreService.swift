@@ -4,7 +4,7 @@
 //  IntelligenceCoreService.swift
 //  Devgentic
 //
-//  Created by Antigravity on 12/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,7 +19,7 @@ import os
 /// Used for structured logging and diagnostics.
 enum ICCallerFeature: String, Sendable {
     case ragRewriting = "RAG Query Rewriting"
-    case morningBrief = "Morning Brief"
+    case briefing = "Briefing"
     case suggestion = "Context-Aware Suggestion"
     case userPersonal = "User Personal"
     case responseSynthesis = "Response Synthesis"
@@ -37,15 +37,14 @@ actor IntelligenceCoreService {
     private static let logger = DGLogger(category: "IntelligenceCoreService")
     private var logger: DGLogger { Self.logger }
 
-    /// Which model is resident and the one load in flight — see `ICModelResidency` (CR-32).
+    /// Which model is resident and the one load in flight; see `ICModelResidency`.
     private let residency: ICModelResidency<ModelContainer>
 
     /// Cumulative inference count since app launch.
     private var totalInferenceCount: Int = 0
 
-    /// ⚠️ The MLX buffer-cache cap is set by whichever MLX container starts FIRST. A session that
-    /// only ever uses this one (Morning Brief at launch, nothing local after) never starts
-    /// `MLXService`, and ran with MLX's default — a cache as large as the memory limit.
+    // Why: a session that never starts `MLXService` would otherwise run with MLX's default cache, as large as the memory limit.
+    /// Configures the MLX memory policy at init: the buffer-cache cap is set by whichever MLX container starts first.
     private init() {
         MLXMemoryPolicy.configure()
         residency = ICModelResidency(
@@ -126,9 +125,8 @@ actor IntelligenceCoreService {
         logger.notice("[IC Load] load \(loadID) BEGIN — Model: \(name), Caller: \(caller.rawValue)")
         logger.info("[IC Load] load \(loadID) Pre-load memory — System: \(preMemory.available), GPU: \(preMemory.gpuCache)")
 
-        // mlx-swift-lm 3.x: `loadModelContainer(from:using:)` replaces the old
-        // `loadModelContainer(configuration:)`. The tokenizer loader is our own bridge
-        // backed by swift-transformers' AutoTokenizer (see MLXTokenizerBridge.swift).
+        // `loadModelContainer(from:using:)` takes the tokenizer from our own bridge, backed by swift-transformers'
+        // AutoTokenizer (see MLXTokenizerBridge.swift).
         let container = try await MLXLMCommon.loadModelContainer(
             from: localPath,
             using: HuggingFaceTokenizerLoader()
@@ -143,17 +141,8 @@ actor IntelligenceCoreService {
     }
 
     // MARK: - Release Policy
-    //
-    // The IC model is shared by several features that run SEQUENTIALLY within a single
-    // chat turn (RAG query rewriting → history compaction → response synthesis). Freeing
-    // the model the instant each one finishes made every turn pay 2-3 multi-second MLX
-    // loads, so `releaseHold` only marks the model *releasable*: the actual free happens
-    // after an idle grace period, and any new load cancels it. A turn's features therefore
-    // share ONE load, while an idle app still gives the memory back.
-    //
-    // Leases additionally guarantee a feature can never free the model out from under
-    // another's in-flight generation. The decision table is `ICReleasePolicy`; the residency
-    // (which model, which load) is `ICModelResidency`.
+    // The IC model is shared by features that run in sequence in one turn, so `releaseHold` only marks it
+    // releasable and the free happens after an idle grace period; leases stop one feature freeing it mid-generation.
 
     /// Seconds the model stays resident after the last feature releases it.
     private static let idleReleaseSeconds: Double = 60
@@ -165,8 +154,7 @@ actor IntelligenceCoreService {
     }
 
     /// Frees the model as soon as it is safe to do so, skipping the idle grace period.
-    /// For deliberate teardown — Core Intelligence switched off. (A changed IC model no longer
-    /// needs this: the next request compares the resident model with the selection and swaps.)
+    /// For deliberate teardown, e.g. Core Intelligence switched off; a changed IC model is swapped by the next request.
     func unloadNow(caller: ICCallerFeature = .unknown) async {
         await residency.requestImmediateRelease(caller: caller)
     }
@@ -182,11 +170,8 @@ actor IntelligenceCoreService {
     // MARK: - Inference
 
     /// Generates a response from the Intelligence Core model (collects all tokens).
-    /// - Parameters:
-    ///   - messages: Chat messages in `[role: content]` format.
-    ///   - maxTokens: Maximum tokens to generate.
-    ///   - temperature: Sampling temperature.
-    ///   - caller: The feature requesting generation.
+    /// `messages` are `[role: content]` chat messages; `maxTokens` and `temperature` bound sampling;
+    /// `caller` names the requesting feature.
     func generate(messages: [[String: String]], maxTokens: Int = 1024, temperature: Float = 0.6, caller: ICCallerFeature = .unknown) async throws -> String {
         // Loads (or joins the load of, or reuses) the SELECTED model and takes a lease in one step,
         // so no other feature can free the model (or clear the GPU cache) mid-inference.
@@ -227,9 +212,8 @@ actor IntelligenceCoreService {
         }
         await residency.endGeneration(caller: caller)
 
-        // ⚠️ Timeout inventory D-27: `MLXLMCommon.generate`'s stream ends NORMALLY on
-        // cancellation, so a stopped call used to return its partial text as the answer — a
-        // half-written synthesis or a truncated RAG rewrite reported as success.
+        // `MLXLMCommon.generate`'s stream ends normally on cancellation, so a stopped call must not return its partial text
+        // as the answer: a half-written synthesis would be reported as success.
         if Task.isCancelled {
             logger.notice("[IC Generate #\(inferenceNum)] CANCELLED after \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - genStart))s, \(result.count) chars, Caller: \(caller.rawValue). CONSEQUENCE: the partial text is discarded and the caller sees a cancellation.")
             throw CancellationError()

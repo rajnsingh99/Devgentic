@@ -4,7 +4,7 @@
 //  SidebarComponents.swift
 //  Devgentic
 //
-//  Created by Antigravity.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -227,11 +227,9 @@ struct SidebarSearchBarView: View {
 
 // MARK: - Batch Header Text Button
 
-/// Text-only toolbar button used by sidebar batch-selection headers
-/// (Prompt Library, Conversations, etc.). Adds a subtle pill-shaped hover
-/// fill so the tap target is discoverable instead of looking like static
-/// caption text. Tint is parameterized so a secondary "Cancel" reads as
-/// muted while a primary "Select All" picks up the accent color.
+/// Text-only toolbar button for sidebar batch-selection headers (Prompt Library, Conversations).
+/// A subtle pill-shaped hover fill makes the target discoverable; the tint is a parameter so "Cancel" reads muted
+/// while a primary "Select All" takes the accent color.
 struct BatchHeaderTextButton: View {
     let title: String
     let tint: Color
@@ -266,10 +264,8 @@ struct BatchHeaderTextButton: View {
 
 // MARK: - Shared Category Chip (Filter Bubble)
 struct CategoryChip: View {
-    /// ⚠️ `LocalizedStringKey`, not `String`. As a `String` this went to the non-localizing
-    /// `Text` overload, so every filter chip in the app shipped untranslated (audit C2).
-    /// Callers with a genuinely runtime title must model it as an enum rather than reaching
-    /// for `LocalizedStringKey(someString)`, which the extractor cannot see either.
+    /// `LocalizedStringKey`, not `String`, so the title reaches the localizing `Text` overload.
+    /// A runtime title must be modelled as an enum, not `LocalizedStringKey(someString)`, which the extractor cannot see.
     let title: LocalizedStringKey
     let isSelected: Bool
     let action: () -> Void

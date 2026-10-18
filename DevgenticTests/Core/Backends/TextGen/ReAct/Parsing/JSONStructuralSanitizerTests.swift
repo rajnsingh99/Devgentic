@@ -4,16 +4,7 @@
 //  JSONStructuralSanitizerTests.swift
 //  DevgenticTests
 //
-//  The JSON sanitizers used to run their repair regexes over the WHOLE payload. An extracted
-//  JSON object contains the file the model is writing — as the string value of
-//  `arguments.content` — so every repair was also an edit to the user's source code, applied
-//  silently because the payload stayed valid JSON either way.
-//
-//  Two halves to pin, and both matter:
-//    1. structure is still repaired (or these parsers stop working on local models), and
-//    2. string values come through byte-for-byte.
-//
-//  Same class as the `normalizePathArguments` bug — see `ActionEffectTests`.
+//  Created by Raj Singh.
 //
 
 import XCTest

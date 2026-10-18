@@ -4,32 +4,15 @@
 //  MessagingCoordinator.swift
 //  Devgentic
 //
-//  Owns the message-sending pipeline: local sends, remote (ChatOps) submissions,
-//  response regeneration, stream cancellation, HITL resolutions, and the shared
-//  `createUserMessage` factory. Extracted from `MainApplicationViewModel` as the
-//  biggest piece of the Gap C god-object split — before extraction these methods
-//  accounted for ~360 of the VM's lines.
-//
-//  Dependency posture:
-//
-//  - Services used directly (persistence, streaming, file processing, backend
-//    config) are injected explicitly. The coordinator calls them without going
-//    through the VM, which keeps intent legible and unit-testable.
-//
-//  - Shared VM state (interfaceMode, selectedConversationID, attachedFiles,
-//    streaming properties, query history, workflow state) still lives on
-//    `MainApplicationViewModel`. The coordinator reaches back via a weak
-//    reference because moving those state properties into the coordinator
-//    would be a bigger refactor (observable-binding churn across views).
-//    That's deliberate scope: this pass is about *method* extraction.
-//
-//  A future pass could lift the stream/workflow state here, at which point
-//  the weak back-reference would shrink to just interfaceMode + helpers.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Owns the message-sending pipeline: local sends, remote (ChatOps) submissions, regeneration, stream cancellation,
+/// HITL resolutions and the shared `createUserMessage` factory.
+/// Services are injected; shared view-model state is reached through a weak reference to `MainApplicationViewModel`.
 @MainActor
 final class MessagingCoordinator {
 
@@ -48,17 +31,8 @@ final class MessagingCoordinator {
     private let fileProcessorService: FileProcessorService
 
     /// The attachment processor this coordinator builds user messages with.
-    ///
-    /// Exposed so a surface that builds its own message through `makeUserMessage` can reach the
-    /// one the main send path uses, rather than threading a `MessagingCoordinator` it does not
-    /// otherwise need. Read-only on purpose.
-    ///
-    /// ⚠️ This claimed "a second instance would mean two classification paths for the same file".
-    /// It would not: `FileProcessorService` is a `struct` with NO stored properties and no static
-    /// state, so instances are behaviourally identical — Orb constructs its own at its call
-    /// site, and both dispatch test files do the same. Sharing is a convenience, not an
-    /// invariant. If the type ever gains state, THAT is when a real rule has to be written, and
-    /// it has to be written at every construction site, not here.
+    /// Exposed read-only so a surface using `makeUserMessage` need not thread a `MessagingCoordinator` just for it.
+    /// A convenience, not an invariant: `FileProcessorService` is a stateless struct, so instances behave identically.
     var fileProcessor: FileProcessorService { fileProcessorService }
     private let backendConfiguration: BackendConfiguration
 
@@ -85,13 +59,8 @@ final class MessagingCoordinator {
     // MARK: - Compaction Checkpoint Sink
 
     /// The stream-independent delivery path for background compaction checkpoints.
-    ///
-    /// This coordinator is the one app-lifetime object holding BOTH halves of delivery:
-    /// the persistence store and the live history array. Registered here (not per stream)
-    /// because compaction runs off the request path now and can finish after the
-    /// originating stream — and its events — are gone.
-    /// Shows AUTOMATIC compaction in the transcript with the manual-compaction row (owner decision
-    /// 2026-09-27): it runs after a turn's answer, off the stream, so it reports here instead.
+    /// Registered here, not per stream, because compaction runs off the request path and can outlive its stream.
+    /// This coordinator holds both halves of delivery: the persistence store and the live history array.
     private func registerCompactionActivitySink() {
         Task {
             await HistoryCompactionService.shared.setActivitySink(
@@ -108,10 +77,8 @@ final class MessagingCoordinator {
     private func registerCompactionCheckpointSink() {
         Task { [logger] in
             await HistoryCompactionService.shared.setCheckpointSink { [weak self, logger] checkpoint, conversationID in
-                // The weak read must be main-actor isolated, but the delivery below must NOT be
-                // wrapped in `MainActor.run` — that closure is SYNCHRONOUS, which is precisely
-                // why the store write used to be flung into a detached `Task` and lost its
-                // ordering against the splice. See `deliverCheckpoint`.
+                // The weak read must be main-actor isolated, but the delivery below must not be wrapped in `MainActor.run`:
+                // that closure is synchronous and would detach the store write from the splice ordering (see `deliverCheckpoint`).
                 let deps = await MainActor.run {
                     self.map { ($0.persistenceService, $0.chatHistoryViewModel) }
                 }
@@ -131,35 +98,11 @@ final class MessagingCoordinator {
         }
     }
 
-    /// Delivers a compaction checkpoint: durable store FIRST, live splice SECOND.
-    ///
-    /// ⚠️ THE ORDER IS LOAD-BEARING, and it is the reason this is a separate function.
-    ///
-    /// It used to be the other way round — an UNAWAITED `Task` around `addMessage` with the
-    /// splice running immediately after — and the splice's own comment said it existed "so the
-    /// NEXT turn's history resolution sees it in memory too". That made
-    /// `currentChatMessages` a DATA channel rather than a render window: for the width of that
-    /// write it was the only copy of the checkpoint. Any history resolution that read the store
-    /// alone in that window got neither the compacted turns (already removed from the batch)
-    /// nor the summary standing in for them — silent context loss, with no log line. It also
-    /// blocks deriving history from `ActiveStreamManager`'s own state, because a checkpoint is
-    /// neither a live stream nor the message being sent (`DerivedHistorySourceTests`).
-    ///
-    /// With the write awaited, the store is authoritative before anything can observe the
-    /// checkpoint, and the splice is RENDER-ONLY. `addMessage` is an upsert-by-id, so a repeat
-    /// updates one row rather than duplicating; `insertCheckpoint` guards against a different
-    /// conversation being open and against duplicate ids, and a skipped splice costs only a
-    /// bubble that appears on reopen.
-    ///
-    /// Awaiting is free here: the sink is already invoked from a background task off the
-    /// request path (`HistoryCompactionService.swift:133-139`), and holding it open until the
-    /// row lands also tightens that service's duplicate-run guard — `backgroundRuns` now stays
-    /// set until the checkpoint is durably stored, so a turn arriving mid-compaction cannot
-    /// re-plan the same batch against a store that does not yet have it.
-    ///
-    /// `static` + internal so the ordering is unit-testable without a `MainApplicationViewModel`,
-    /// the same reason `ChatHistoryViewModel.descendingInsertionIndex` is pure.
-    /// Pinned by `CompactionCheckpointDeliveryTests`.
+    // Why: an unawaited store write leaves the in-memory splice as the only copy;
+    // a history read in that window silently loses the compacted turns.
+    /// Delivers a compaction checkpoint: durable store first, live splice second.
+    /// The write is awaited so the store is authoritative before anything observes the checkpoint; the splice is render-only.
+    /// `static` and internal so the ordering is unit-testable without a `MainApplicationViewModel`.
     static func deliverCheckpoint(
         _ checkpoint: ChatMessage,
         conversationID: UUID,
@@ -192,18 +135,9 @@ final class MessagingCoordinator {
         // Code mode: refresh instructions and the project-knowledge display copy, and set selectedProfileID.
         if vm.interfaceMode == .code {
             logger.info("[CODE] ────────── Code mode send initiated ──────────")
-            logger.debug("[CODE] Query preview: \(String(plainUserQueryFromEditor.prefix(120)))") // CR-57: the query is content — debug only
-            // ⚠️ The return value is LOAD-BEARING. This call used to be fire-and-forget: when it
-            // could not prepare the profile it logged a warning and the send continued, shipping
-            // the model a profile with no Code system prompt and no project root. Refusing here is
-            // the only choke point that covers every send entry, not just the composer's own
-            // guard in `ChatInputAreaView.attemptSend`.
-            //
-            // No user-facing message from here: the composer's own guard
-            // (`ChatInputAreaView.attemptSend`) intercepts an unconfigured session first and opens
-            // the model or folder picker, which is the actionable response. This is the backstop
-            // for every OTHER entry point — ChatOps, scheduler, resume — where silently running a
-            // Code profile with no project root is the worse outcome.
+            logger.debug("[CODE] Query preview: \(String(plainUserQueryFromEditor.prefix(120)))") // The query is content, so debug only.
+            // The return value is load-bearing: refusing here is the only choke point covering every send entry (ChatOps,
+            // scheduler, resume), not just the composer's own guard in `ChatInputAreaView.attemptSend`.
             guard vm.prepareCodeProfileForSend() else {
                 logger.error("[CODE] Send DROPPED — the Code session could not be prepared (see the [CODE] line above for which of model/folder is missing). CONSEQUENCE: no message was persisted and no stream started; the user's typed text is left in the composer because this returns before the input is cleared, so nothing they wrote is lost.")
                 return
@@ -254,8 +188,7 @@ final class MessagingCoordinator {
             }
         }
 
-        // Auto-title if empty — through the store, which SAVES it (RAG-39). It used to be set on the
-        // model here and left pending on the shared context across the send's awaits.
+        // Auto-title if empty, through the store, which saves it.
         if persistenceService.getConversation(withId: conversationIDToUse) != nil {
             persistenceService.setTitleIfUntitled(plainUserQueryFromEditor, for: conversationIDToUse)
         } else {
@@ -281,25 +214,12 @@ final class MessagingCoordinator {
             self.chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
             self.logger.debug("Appended user message into UI.")
 
-            // [IMG-PERSIST] Persist the user message — which may carry a large
-            // `@Attribute(.externalStorage)` image blob — and AWAIT it here, before resolving
-            // history / starting the stream, rather than the old fire-and-forget Task. That
-            // detached Task let this INSERT's save land LATE (only when the actor next freed at
-            // the `resolveBackendHistory` await), temporally adjacent to the agent stream's first
-            // flush save on the SAME autosave-enabled `mainContext` — so CoreData's async
-            // external-file maintenance for the two nearby commits raced, producing the benign
-            // but noisy "Failed to clone external data reference … .interim doesn't exist" log.
-            // Awaiting separates the image write from the stream's first flush (the model's
-            // first-token latency now sits between them) and makes the durable write ordered
-            // before the run begins. History still merges the in-memory copy inserted just above,
-            // so the backend sees no difference. Conversation-memory indexing happens inside
-            // addMessage (ChatPersistenceStore.addMessages — the funnel all surfaces share).
+            // Persist and await the user message (it may carry a large `.externalStorage` image blob) before resolving
+            // history or starting the stream, so the write cannot race the stream's first flush save on the same context.
             await self.persistenceService.addMessage(userMessage, toConversation: conversationIDToUse)
             self.logger.debug("User message persisted successfully (awaited before stream start).")
 
-            // Workflow bookkeeping (no-op for every other profile type). See
-            // `WorkflowRunBootstrap` for what this buys and what breaks without it — it was
-            // inline here and missing from every other `startMessageStream` caller.
+            // Workflow bookkeeping (no-op for every other profile type); see `WorkflowRunBootstrap`.
             let workflowTicket = WorkflowRunBootstrap.begin(
                 config: config,
                 conversationID: conversationIDToUse,
@@ -339,9 +259,8 @@ final class MessagingCoordinator {
 
     // MARK: - Response Regeneration
 
-    /// The wake stub in front of `agentMessage` when that message is a background-task report, or
-    /// nil. Read off the STUB, not the report's own `messageSource`: reports written before the
-    /// report was stamped (2026-09-27) still read `.localUI`, and the stub was always stamped.
+    /// The wake stub in front of `agentMessage` when that message is a background-task report, or nil.
+    /// Read off the stub, not the report's `messageSource`: older reports still read `.localUI`; the stub is always stamped.
     func precedingWakeStub(for agentMessage: ChatMessage) -> ChatMessage? {
         Self.precedingWakeStub(for: agentMessage, in: chatHistoryViewModel.currentChatMessages)
     }
@@ -382,26 +301,13 @@ final class MessagingCoordinator {
 
     func regenerateResponse(for agentMessage: ChatMessage) {
         // Cheap guard first so a refused Redo never pays for a history fetch.
-        //
-        // ⚠️ The `conversationBusy` arm is the INTERIM one-root-run-per-conversation rule. Without
-        // it, Redo on an older message while another run streams starts a second root run whose
-        // `startMessageStream` overwrites `activeTasks[messageID]`, orphaning the first run's task
-        // handle permanently. The Redo button is gated per-message (`message.isStreaming`), so it
-        // stays live on older messages and this is reachable with one click and no automation.
+        // `conversationBusy` enforces one root run per conversation; a second run would orphan the first run's task handle.
         if let refusal = regenerationRefusal(for: agentMessage) {
             logger.warning("[RUN_CLAIM] Redo REFUSED for message \(agentMessage.id.uuidString.prefix(8)) in conversation \(agentMessage.conversationId.uuidString.prefix(8)): \(refusal.logReason)")
             return
         }
-        // ⚠️ THE HOP IS LOAD-BEARING, THE FETCH IS NOT. This used to `await` a full
-        // store-authoritative history resolve here and hand the result to `continueRegeneration`.
-        // `ActiveStreamManager` derives history now, so that result was read by nothing — a
-        // discarded 300-row fetch and decode on every Redo.
-        //
-        // The SUSPENSION stays: the admission re-check at the top of `continueRegeneration`
-        // exists precisely because this hop is a staleness window in which a scheduled task, a
-        // ChatOps message or a second Redo can claim the conversation. Removing the await
-        // entirely would close that window silently and make the re-check look redundant, which
-        // is how it would get deleted next.
+        // The hop is load-bearing, the fetch is not: the suspension is the staleness window in which a scheduled task,
+        // ChatOps message or second Redo can claim the conversation; the re-check in `continueRegeneration` closes it.
         Task { @MainActor [weak self] in
             await Task.yield()
             guard let self else { return }
@@ -412,14 +318,8 @@ final class MessagingCoordinator {
     private func continueRegeneration(for agentMessage: ChatMessage) {
         guard let vm = viewModel else { return }
 
-        // Re-check after the actor hop — that hop is a staleness window in which a scheduled task,
-        // a ChatOps message or another Redo can claim this conversation. The guards below already
-        // re-validate for the same reason; admission is no different.
-        //
-        // ⚠️ This said "after the async history resolve". There is no resolve on this path any
-        // more — only `await Task.yield()`, kept because the HOP is what creates the window the
-        // guard closes, while the fetch it used to sit behind was read by nothing. `resumeRun`
-        // still does resolve, so the identical wording in `continueResume` remains accurate there.
+        // Re-check after the actor hop: it is a staleness window in which a scheduled task, a ChatOps message or
+        // another Redo can claim this conversation. Admission is re-validated like the guards below.
         if let refusal = regenerationRefusal(for: agentMessage) {
             logger.warning("[RUN_CLAIM] Redo REFUSED for message \(agentMessage.id.uuidString.prefix(8)) after the actor hop (a run claimed conversation \(agentMessage.conversationId.uuidString.prefix(8)) during the hop): \(refusal.logReason)")
             return
@@ -437,12 +337,8 @@ final class MessagingCoordinator {
         }
         let userQuery = userQueryMessage.content.textContent ?? ""
 
-        // ⚠️⚠️ A BACKGROUND-TASK REPORT IS REDONE AS A REPORT. Its "user message" is the wake stub,
-        // a one-line summary; the task output went to the original run through `promptOverride`
-        // and was never persisted. Re-sent as-is, the stub produced a report on output the model
-        // never saw — and with the profile's FULL toolset, since nothing bound `ReportOnlyRun`.
-        // Now: the same prompt, rebuilt from the card the stub saved, run report-only. The
-        // admission check above has already refused a report whose stub saved no card.
+        // A background-task report is redone as a report: its user message is a one-line stub, so the prompt is rebuilt
+        // from the card the stub saved and run report-only. Admission above already refused a report with no saved card.
         let reportCard = BackgroundTaskWakeCoordinator.reportCard(behind: userQueryMessage)
         if userQueryMessage.messageSource == .backgroundTask, reportCard == nil {
             logger.error("[RUN_CLAIM] Redo for report \(agentMessage.id.uuidString.prefix(8)) reached the run with no saved task card. CONSEQUENCE: refused — admission should have caught this; nothing starts.")
@@ -458,21 +354,15 @@ final class MessagingCoordinator {
             return
         }
 
-        // [P0 crash fix] Single-write mutation via ChatMessage.beginRegenerationVariant —
-        // the inline optional-chained writes here trapped Swift exclusivity (the
-        // selectedVariantIndex line re-READ agentResponse on its RHS while the LHS
-        // held the modify access) and killed the app on Retry, on-device 2026-07-19.
+        // Single-write mutation via `ChatMessage.beginRegenerationVariant`: inline optional-chained writes trap Swift
+        // exclusivity (the right-hand side re-reads `agentResponse` while the left holds modify access).
         guard agentMessage.beginRegenerationVariant(backendEntityId: config.profile.id) else {
             logger.warning("[regenerateResponse] Message \(agentMessage.id.uuidString.prefix(8)) not regenerable (attempt cap or no response) — no mutation performed.")
             return
         }
 
-        // Workflow bookkeeping (no-op for other profile types). Regenerating a workflow answer
-        // RE-EXECUTES the whole DAG with real side effects, so it is a genuinely new run and gets
-        // its own record — without this the transcript showed a second execution that run history
-        // had no trace of.
-        // ⚠️ Not for a report: the wake starts no workflow run, so its redo must not either — that
-        // would re-execute the whole DAG to rewrite a paragraph about a finished task.
+        // Workflow bookkeeping (no-op for other profile types). Regenerating a workflow answer re-executes the whole DAG
+        // with real side effects, so it gets its own run record; not for a report, whose wake starts no workflow run.
         let workflowTicket = reportCard != nil ? nil : WorkflowRunBootstrap.begin(
             config: config,
             conversationID: agentMessage.conversationId,
@@ -481,13 +371,12 @@ final class MessagingCoordinator {
             origin: .regenerate
         )
 
-        // Return value intentionally unused: `updating: agentMessage` streams into that same
-        // object, so the returned reference is `agentMessage` itself.
+        // Return value intentionally unused: `updating: agentMessage` streams into that same object.
         if let reportCard {
             logger.info("[BGWAKE] Redoing report \(agentMessage.id.uuidString.prefix(8)) for \(reportCard.taskID) from its saved card (\(reportCard.outputTail.count) chars of output). CONSEQUENCE: a report-only run — no profile tools — on the same output the original report saw.")
         }
-        // ⚠️ Bound around the CALL, like the wake: the stream task inherits task-locals from the
-        // context that creates it. `false` for every ordinary Redo, which is the default.
+        // Bound around the call, like the wake: the stream task inherits task-locals from the context that creates it.
+        // `false` for every ordinary Redo.
         ReportOnlyRun.$isActive.withValue(reportCard != nil) {
             _ = activeStreamManager.startMessageStream(
                 withConfig: config,
@@ -507,15 +396,9 @@ final class MessagingCoordinator {
         }
     }
 
-    /// [G1 Piece 2] Resume an interrupted run after the app last closed. Rebuilds the in-flight reasoning
-    /// state from the persisted message timeline (`TimelineTurnReconstructor`) and re-enters the agent loop
-    /// by streaming back into the SAME bubble via `startMessageStream(updating:)`. Two cases:
-    ///   • `.parkedHITL` — the run was idle on a HITL banner; the dangling tool is re-raised + re-run.
-    ///   • `.streaming` — the run died mid-compute; the dangling (mid-execution) tool is DROPPED (its side
-    ///     effect may have partially happened, so it is not replayed or re-run) and the agent re-decides
-    ///     from the completed work.
-    /// Scope: plain-ReAct native agent profiles only; guards refuse a capability-wrapped profile or a
-    /// provider/dialect that drifted since the run started.
+    /// Resumes an interrupted run, streaming back into the same bubble via `startMessageStream(updating:)`.
+    /// `.parkedHITL` re-raises and re-runs the dangling tool; `.streaming` drops it (it may have half-run) and re-decides.
+    /// Plain-ReAct native agent profiles only; guards refuse a capability-wrapped or drifted provider/dialect.
     func resumeRun(for agentMessage: ChatMessage) {
         // Cheap guard first so a refused resume never pays for a history fetch.
         if let refusal = RunAdmissionPolicy.admitResume(
@@ -526,10 +409,8 @@ final class MessagingCoordinator {
             return
         }
 
-        // Resolve the replay history up front (store-authoritative — a resume must not
-        // replay less context than the original run had), then run the ENTIRE original
-        // body synchronously and in order. Splitting it this way keeps every guard and
-        // mutation of this G1 path exactly where it was.
+        // Resolve the replay history up front (store-authoritative, so a resume never replays less context than the
+        // original run), then run the entire original body synchronously and in order.
         Task { @MainActor [weak self] in
             guard let self else { return }
             let resolved = await self.resolveBackendHistory(
@@ -543,12 +424,8 @@ final class MessagingCoordinator {
     private func continueResume(for agentMessage: ChatMessage, resolvedHistory: [ChatMessage]) {
         guard let vm = viewModel else { return }
 
-        // ⚠️ THE LOAD-BEARING GUARD. Re-check after the async history resolve: the Resume chip
-        // stays live throughout that hop (the message has not started streaming yet), so a
-        // double-press lands two runs on ONE message. The second `startMessageStream(updating:)`
-        // would overwrite `activeTasks[messageID]` and leave the first run's Task unreachable by
-        // `cancelStream(for:)` forever. From here to `startMessageStream` there is no suspension
-        // point, so the claim is atomic on the main actor.
+        // Re-check after the async history resolve: the Resume chip stays live through that hop, so a double-press would
+        // land two runs on one message and orphan the first task; nothing suspends from here, so the claim is atomic.
         if let refusal = RunAdmissionPolicy.admitResume(
             in: agentMessage.conversationId,
             live: vm.activeStreamManager.liveRunSnapshot()
@@ -584,12 +461,8 @@ final class MessagingCoordinator {
             return
         }
 
-        // Scope: plain-ReAct executors only — .agent AND .code without capability wrappers
-        // (Code sessions are always plain ReAct; the check is defensive). Capability-wrapped
-        // Planning/Reflexion agents stay excluded: their wrapper owns iter-1 seeding + episode
-        // lifecycle, which the resume preamble would corrupt. Workflow-resume is not
-        // implemented (deferred). EVERY unresumable path FINALIZES the message with a visible
-        // reason — a silent return leaves a permanently dead Resume chip.
+        // Plain-ReAct executors only (`.agent` and `.code` without capability wrappers); workflows cannot be resumed.
+        // Every unresumable path finalizes the message with a visible reason; a silent return leaves a dead Resume chip.
         let resumeRefusalReason: String? = {
             switch profile.details {
             case .agent(let config), .code(let config):
@@ -607,9 +480,8 @@ final class MessagingCoordinator {
             return
         }
 
-        // Dialect / provider guard: the reconstructed native turns are only valid for the same provider
-        // family. If the profile's model was swapped since the park, refuse rather than feed mismatched
-        // turns to the wrong adapter.
+        // Dialect / provider guard: reconstructed native turns are only valid for the same provider family, so refuse
+        // if the profile's model was swapped since the park rather than feed mismatched turns to the wrong adapter.
         guard let llm = profile.resolvedLLMConfig else {
             finalizeUnresumable(agentMessage,
                 reason: "The profile no longer has a usable model configuration — send the request again.")
@@ -626,16 +498,8 @@ final class MessagingCoordinator {
             return
         }
 
-        // ⚠️ The timeline must be a FAITHFUL record before it can drive a resume. Resuming rebuilds
-        // the model's view of what already happened, so an event this build could not read is not a
-        // cosmetic gap — a completed `.toolExecution` that survived only as `.unknown` is invisible
-        // to the reconstructor, so the model has no record it already ran that tool and will run it
-        // AGAIN. For a side-effectful tool (a shell command, a file write) that is a real-world
-        // repeat, not a display glitch.
-        //
-        // Refusing costs some runs that would in fact have resumed fine — an unrecognised
-        // warning-class event is harmless. That trade is deliberate: the alternative is silently
-        // repeating work, and the refusal gives the user a full sentence instead of a dead end.
+        // The timeline must be faithful to drive a resume: an unreadable completed `.toolExecution` is invisible to the
+        // reconstructor, so a side-effectful tool would run again. Refusing costs some resumable runs, deliberately.
         if agentMessage.timelineIsDegraded {
             logger.error(
                 "[resumeRun] Refusing resume for message \(agentMessage.id.uuidString.prefix(8)): the "
@@ -649,18 +513,15 @@ final class MessagingCoordinator {
             return
         }
 
-        // Rebuild the in-flight state from the persisted timeline. Streaming resume DROPS the dangling
-        // tool; parked resume keeps it to re-raise.
-        // Flattened: a run parked inside a plan subtask / reflection trial keeps its tool
-        // and reasoning events nested in the capability card — the reconstructor needs them.
+        // Rebuild the in-flight state from the persisted timeline. Streaming resume drops the dangling tool; parked resume
+        // keeps it to re-raise. Flattened, because nested capability cards hold events the reconstructor needs.
         let reconstruction = TimelineTurnReconstructor.reconstruct(
             from: agentMessage.flattenedTimelineEvents,
             parkedOperationID: parkedOpID,
             dropDanglingTool: isStreamingResume
         )
-        // Parked resume needs the dangling tool to re-raise. Streaming resume drops it and continues from
-        // whatever completed work exists (possibly none → effectively a clean re-run of the task), so it
-        // has no such precondition.
+        // Parked resume needs the dangling tool to re-raise. Streaming resume drops it and continues from whatever completed
+        // work exists (possibly none), so it has no such precondition.
         if !isStreamingResume {
             guard reconstruction.parkedTool != nil else {
                 finalizeUnresumable(agentMessage,
@@ -669,29 +530,14 @@ final class MessagingCoordinator {
             }
         }
 
-        // Deliberately NOT finalized: this is a transient UI-state guard (the chip
-        // renders from the message's own bubble, so this shouldn't fire) — the run
-        // may be perfectly resumable from the right conversation view.
+        // Deliberately not finalized: a transient UI-state guard (the chip renders from the message's own bubble); the run
+        // may be resumable from the right conversation view.
         guard let idx = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
             logger.error("[resumeRun] Message not in the current conversation; aborting resume.")
             return
         }
-        // History strictly below this message + the originating user query (same slice regenerate uses).
-        // The user query is normally the adjacent resident message; fall back to the last
-        // user turn in the resolved history when the pair straddles the residency cap.
-        // ⚠️ OPTION A (decided 2026-09-06): resume REFUSES when it cannot identify the question,
-        // rather than replaying with an empty one.
-        //
-        // This used to fall through to `?? ""`, which asked the model to redo a turn with no
-        // question attached — a silent degradation of the very feature resume exists to provide.
-        // It also cannot survive the derived-history contract: `startMessageStream` needs the
-        // user's MESSAGE (for its id and conversation), and there is no honest message to
-        // synthesize when none was found.
-        //
-        // The adjacent-resident lookup is kept as the fast path but is POSITIONAL, so it is now
-        // sender-checked; the resolved-history scan is the reliable fallback for a pair that
-        // straddles the residency cap. A run being resumed has a question by definition, so
-        // reaching the refusal means the transcript is genuinely inconsistent.
+        // History strictly below this message plus the originating user query (the slice regenerate uses).
+        // Prefers the adjacent sender-checked user message, else the last user turn of the resolved history; refuses if none.
         let adjacentResident = chatHistoryViewModel.currentChatMessages[safe: idx + 1]
         let userQueryMessage = (adjacentResident?.sender == .user ? adjacentResident : nil)
             ?? resolvedHistory.last(where: { $0.sender == .user })
@@ -707,27 +553,21 @@ final class MessagingCoordinator {
             if case .toolExecution(let data) = event { return data.isExecuting || data.output == nil }
             return false
         }
-        // Same cleanup one level down: dangling tools nested inside plan/reflection cards,
-        // plus closing any card the interruption left open (the resumed continuation streams
-        // new top-level events, never back into the old card).
+        // Same cleanup one level down: dangling tools nested inside plan/reflection cards, plus closing any card the
+        // interruption left open (the continuation streams new top-level events, never into the old card).
         agentMessage.sanitizeCapabilityCardsForResume()
 
         // Flip back to a live, streaming state — hides the interrupted chip, re-enables indicators.
         agentMessage.isStreaming = true
 
-        // [G1] Reflect the recovery in the durable HITL audit: the parked HITL the launch reconcile
-        // stamped "interrupted" is now being resumed, so flip its row to "resumed". Parked-only — a
-        // streaming resume has no parked operationID and no HITL audit row to update.
+        // Reflect the recovery in the durable HITL audit: flip the parked row the launch reconcile stamped "interrupted"
+        // to "resumed". Parked-only: a streaming resume has no parked operationID or audit row.
         if let opID = parkedOpID {
             Task { await TraceRecorder.shared.recordHITLResumed(operationID: opID.uuidString) }
         }
 
-        // ⚠️ No `WorkflowRunBootstrap` here, deliberately: resume REFUSES workflow profiles up
-        // front ("Workflow runs can't be resumed after an interruption yet", :399-400), so this
-        // path is unreachable for them. If workflow resume is ever implemented, bootstrap here
-        // too — `ActiveStreamManager`'s [WF_RUN] guard-rail will say so loudly in the meantime.
-        // Return value intentionally unused: `updating: agentMessage` streams into that same
-        // object, so the returned reference is `agentMessage` itself.
+        // No `WorkflowRunBootstrap` here: resume refuses workflow profiles up front, so this path is unreachable for them.
+        // Return value intentionally unused: `updating: agentMessage` streams into that same object.
         _ = activeStreamManager.startMessageStream(
             withConfig: BackendRequestConfig(profile: profile),
             userMessage: userQueryMessage,
@@ -744,20 +584,16 @@ final class MessagingCoordinator {
         )
     }
 
-    /// Marks an interrupted message as definitively non-resumable: visible reason on
-    /// the bubble, `.final` lifecycle (removes the Resume chip), persisted. Every
-    /// unresumable path in `resumeRun` must route here — a bare `return` leaves a
-    /// permanently dead Resume chip that does nothing when clicked.
+    /// Marks an interrupted message as definitively non-resumable: visible reason, `.final` lifecycle, persisted.
+    /// Every unresumable path in `resumeRun` must route here; a bare `return` leaves a dead Resume chip.
     private func finalizeUnresumable(_ agentMessage: ChatMessage, reason: String) {
         logger.warning("[resumeRun] \(reason) Finalizing interrupted message \(agentMessage.id.uuidString).")
         agentMessage.isStreaming = false
         agentMessage.lifecycleState = .final
         agentMessage.terminalOutcome = .cancelled
         agentMessage.terminalReason = reason
-        // [CF-44] This is the LAST word on the run — no resume will follow, so any row still
-        // marked executing would spin forever with nothing left to settle it. The decode-time
-        // repair deliberately spares `.parkedHITL` messages (their dangling row is what resume
-        // re-raises); this is the path where that sparing ends, so close them here.
+        // This is the last word on the run: nothing will settle a row still marked executing, so close them here.
+        // The decode-time repair spares `.parkedHITL` messages (resume re-raises their dangling row); this path ends that.
         let closed = agentMessage.closeDanglingToolRows(outcome: .cancelled)
         if closed > 0 {
             logger.warning("[resumeRun] Closed \(closed) dangling tool row(s) on message \(agentMessage.id.uuidString.prefix(8)) while marking it unresumable. CONSEQUENCE: the rows settle as cancelled instead of animating a spinner forever on a run that can no longer be resumed.")
@@ -769,9 +605,8 @@ final class MessagingCoordinator {
     func cancelStreamingResponse() {
         guard let vm = viewModel else { return }
 
-        // Stop targets the run in the conversation ON SCREEN — never an app-global slot. A
-        // background scheduled / ChatOps / QuickAccess run in another conversation is deliberately
-        // out of reach here; it is stopped by opening its conversation (or from its own panel).
+        // Stop targets the run in the conversation on screen, never an app-global slot; a background run in another
+        // conversation is stopped by opening it (or from its own panel).
         let live = vm.activeStreamManager.liveRunSnapshot()
         let selected = vm.selectedConversationID
         let candidates = ForegroundRunResolver.liveRuns(in: selected, from: live)
@@ -785,30 +620,20 @@ final class MessagingCoordinator {
         // only two runs that have both STARTED are the anomaly worth an error.
         let started = candidates.filter { !$0.isQueued }
         if started.count > 1 {
-            // Should be impossible under the product model (one root run per conversation) and
-            // will be refused at claim time by admission control. Until then Redo on an older
-            // message while a newer run streams can produce it, so say so rather than pick silently.
+            // Should not happen (one root run per conversation); a Redo on an older message while a newer run streams can
+            // produce it, so log it rather than pick silently.
             logger.error("[RUN_STOP] ⚠️ conversation \(target.conversationID.uuidString.prefix(8)) holds \(started.count) started runs: \(started.map { $0.messageID.uuidString.prefix(8) }.joined(separator: ", ")). CONSEQUENCE: Stop cancels only \(target.messageID.uuidString.prefix(8)) (most recently started, unparked first); the others keep streaming and must be stopped by pressing Stop again.")
         }
 
         logger.info("[RUN_STOP] Cancelling run \(target.messageID.uuidString.prefix(8)) in conversation \(target.conversationID.uuidString.prefix(8)) (parked: \(target.isParked), queued: \(target.isQueued), \(candidates.count - 1) other run(s) waiting) — user pressed Stop. CONSEQUENCE: \(candidates.count > 1 ? "the queued run(s) behind it start next" : "nothing else is affected").")
         activeStreamManager.cancelStream(for: target.messageID)
 
-        // ⚠️ A QUEUED target has no park, and the drain below is CONVERSATION-wide: it would resolve
-        // some other run's approval with `false` while that run's task is NOT cancelled — a denial
-        // nobody made (CR-4). The resolver only picks a queued run when nothing has started, so
-        // there is nothing to drain anyway.
+        // A queued target has no park, and the drain below is conversation-wide: it would resolve another run's approval
+        // with `false` while that run's task is not cancelled. A queued run is only picked when nothing has started.
         guard !target.isQueued else { return }
 
-        // [HITL/P0] If a HITL banner is up for this conversation, drain the parked suspension
-        // immediately so Stop returns at once. The suspend* cancellation handlers cover the
-        // task-cancellation path; this also covers a suspension whose owning task isn't the one
-        // we just cancelled (defensive, idempotent — resume on a resolved op is a no-op).
-        //
-        // ⚠️ Still CONVERSATION-scoped, not run-scoped: it drains every park in the target's
-        // conversation. Acceptable while one root run per conversation holds, but it does reach a
-        // sibling workflow NODE's park within the same run. Run-scoping is design-doc increment 2,
-        // deferred with per-node stop.
+        // If a HITL banner is up for this conversation, drain the parked suspension so Stop returns at once (idempotent).
+        // Conversation-scoped, not run-scoped: it also drains a sibling workflow node's park in the same conversation.
         let conversationID = target.conversationID
         Task { await ExecutionSuspensionService.shared.cancel(for: conversationID) }
     }
@@ -849,13 +674,9 @@ final class MessagingCoordinator {
 
     // MARK: - Remote Message Submission (ChatOps Single-Path)
 
-    /// Submits a message from a remote transport (Telegram, Discord, etc.) through the SAME
-    /// flow as the Mac UI's `sendMessage()`. This ensures:
-    /// - The message appears in Mac UI chat history
-    /// - HITL banners work identically on both surfaces
-    /// - The agent response streams through ActiveStreamManager (not a truncated summary)
-    ///
-    /// The `RemoteMirrorService` observes the resulting stream and mirrors events back to the transport.
+    /// Submits a message from a remote transport (Telegram, Discord, ...) through the same flow as `sendMessage()`.
+    /// The message shows in Mac UI history and HITL banners work on both surfaces; the reply streams normally.
+    /// `RemoteMirrorService` observes the resulting stream and mirrors events back to the transport.
     func submitRemoteMessage(
         prompt: String,
         conversationID: UUID,
@@ -866,37 +687,18 @@ final class MessagingCoordinator {
             logger.error("[ChatOps] Could not find conversation for ID: \(conversationID.uuidString)")
             return
         }
-        // ⚠️ An existence check, not a binding: the view model is re-acquired inside the Task below,
-        // and the only outer use was the window navigation this method no longer does. Kept as an
-        // early abort so a deallocated VM is reported here rather than as a silent no-op later.
+        // An existence check, not a binding: the view model is re-acquired inside the Task below. Kept as an early abort so
+        // a deallocated VM is reported here rather than as a silent no-op later.
         guard viewModel != nil else {
             logger.warning("[ChatOps] submitRemoteMessage aborted — view model deallocated. CONSEQUENCE: the remote user's message is not submitted and they receive no reply; nothing retries it.")
             return
         }
 
-        // Auto-title if empty (same as sendMessage) — saved by the store (RAG-39).
+        // Auto-title if empty (as in `sendMessage`), saved by the store.
         persistenceService.setTitleIfUntitled(prompt, for: conversationID)
 
-        // ⚠️⚠️ THE MAC WINDOW IS NOT MOVED, AND THAT IS THE POINT. This used to assign
-        // `vm.selectedConversationID = conversationID` on every remote turn, so a message arriving
-        // while the user was working in another conversation yanked the window to it — clearing the
-        // web-search toggle and repointing the app-global composer profile, which
-        // `ChatOpsHosting`'s own seam calls out as the thing a remote write must never do
-        // ("exposed READ-ONLY on purpose: a remote write would retarget the local user's composer").
-        //
-        // ⚠️ IT WAS NEVER LOAD-BEARING FOR ROUTING. Every step below is keyed by the passed
-        // `conversationID` — the lookup, the user message, its persistence, the workflow ticket and
-        // the stream — and the mirror replies to the session's own chat id. The ONLY thing that
-        // depended on the selection was the UI insert below, whose comment read "the conversation is
-        // now guaranteed to be selected"; that line is now guarded instead, so the assumption it
-        // relied on no longer has to be manufactured by moving the user.
-        //
-        // ⚠️ A REMOTE RUN DOES NOT NEED THE WINDOW. Streams are conversation-scoped and survive a
-        // switch — `ConversationSwitchCoordinator` cancels only its load task, and
-        // `cancelStreams(forConversation:)` is reached only from an explicit Stop and from delete —
-        // so the run completes, is persisted, and is waiting in the conversation when the user opens
-        // it. Accepted cost: there is no longer a visual signal on the Mac that a remote run
-        // happened unless the user is already looking at that conversation.
+        // Do not move the Mac window: a remote turn must not yank the user to another conversation or repoint the composer.
+        // Every step below is keyed by `conversationID` and streams survive a switch, so the run completes without the window.
 
         Task { @MainActor [weak self] in
             guard let self, let vm = self.viewModel else { return }
@@ -904,18 +706,8 @@ final class MessagingCoordinator {
             let userMessage = await self.createUserMessage(conversationID: conversationID, query: prompt, files: [])
             userMessage.messageSource = source
 
-            // ⚠️ ONLY WHEN THIS CONVERSATION IS THE ONE ON SCREEN. Unguarded, this dropped the
-            // remote user's question into whichever conversation the user happened to be viewing —
-            // which is why the window was moved first, to make the assumption true. The agent's
-            // reply is injected by `ConversationSyncService` under the same predicate; this is its
-            // counterpart for the question, so a local user watching the conversation still sees
-            // both halves live, and one watching a different conversation sees neither.
-            //
-            // ⚠️ `destinationConversationID`, not `selectedConversationID`: it is VIEWER identity
-            // (`loadingConversationID ?? viewerOwningConversationID`), so a message arriving during
-            // an in-flight switch is filed against the conversation actually being loaded rather
-            // than the one being left. `ConversationSyncService` uses the same authority for the
-            // same decision.
+            // Only when this conversation is on screen; `ConversationSyncService` injects the reply under the same predicate.
+            // `destinationConversationID` is viewer identity (`loadingConversationID ?? viewerOwningConversationID`), not selection.
             if self.chatHistoryViewModel.destinationConversationID == conversationID {
                 self.chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
             }
@@ -924,13 +716,10 @@ final class MessagingCoordinator {
                 await persistenceService.addMessage(userMessage, toConversation: conversationID)
             }
 
-            // History is DERIVED by ActiveStreamManager now, so a remote turn gets exactly the
-            // same view of the conversation as the desktop UI by construction rather than by
-            // this call site remembering to ask for it.
+            // History is derived by `ActiveStreamManager`, so a remote turn sees the same view of the conversation as the desktop.
 
-            // Workflow bookkeeping (no-op for other profile types) — a remote-triggered workflow
-            // run must leave the same reviewable record a desktop one does, and its HITL must
-            // reach the workflow interface rather than chat.
+            // Workflow bookkeeping (no-op for other profile types): a remote-triggered workflow run leaves the same reviewable
+            // record as a desktop one, and its HITL reaches the workflow interface rather than chat.
             let workflowTicket = WorkflowRunBootstrap.begin(
                 config: config,
                 conversationID: conversationID,
@@ -939,23 +728,8 @@ final class MessagingCoordinator {
                 origin: .chatOps
             )
 
-            // ⚠️ UNATTENDED — same binding as the scheduler's, for the same reason: a Router's
-            // ambiguity arbitration must take first-match instead of parking, because a bridge
-            // run has NO container deadline at all and an unanswered park is forever.
-            //
-            // ⚠️ …BUT A HUMAN IS REACHABLE (WF-SE6/SE11). `RemoteMirrorService` mirrors this run's
-            // HITL requests to Telegram/Slack/Discord with tappable Approve/Deny and resolves them
-            // through `handleApproval`, so a tool CONFIRMATION here must still park and mirror —
-            // refusing it would delete a shipped capability whose only remedy for a plain agent
-            // chat is disabling Ask-first globally. The two flags answer different questions; see
-            // `WorkflowRunAttendance.hasRemoteResponder`.
-            // ⚠️⚠️ THE POLICY IS RE-APPLIED EVERY TURN, NOT ONCE AT PAIRING — the same discipline
-            // `OrbSessionController` states for its own: "the setting can change while the orb is
-            // open, and a stale autonomous grant is exactly the kind of invisible state this feature
-            // must not have." Re-asserting here also means the surface about to run is always the
-            // last writer, so a grant made on another surface cannot be inherited by accident.
-            // ⚠️ `isAutonomous(for:)` re-checks the `.full` tier, so tightening the tier revokes the
-            // grant even though the stored approvals setting stays put.
+            // Unattended binding as in the scheduler (a Router takes first-match instead of parking), yet a human is reachable:
+            // tool confirmations still park and mirror. Re-applied every turn so a stale autonomous grant is never inherited.
             if let provider = source.remoteProvider {
                 let autonomous = ChatOpsConfigManager.shared.isAutonomous(for: provider)
                 Task {
@@ -993,33 +767,15 @@ final class MessagingCoordinator {
 
     // MARK: - Backend History Resolution
 
-    /// Upper bound on messages pulled from the store for model context. Downstream already
-    /// trims to the model's real budget (`charBudget`, the `recentHistory` /
-    /// `nativeHistoryTurns` limits), so this only bounds fetch+decode cost on a very long
-    /// conversation — it is not the context policy.
-    /// Kept as the coordinator's own name for the shared limit so existing call sites and
-    /// log copy stay put; the value lives on `BackendHistoryResolver`.
+    /// Upper bound on messages pulled from the store for model context.
+    /// Downstream trims to the model's real budget, so this only bounds fetch+decode cost on a very long conversation.
+    /// The value lives on `BackendHistoryResolver`; this is the coordinator's name for it.
     private static let backendHistoryMessageLimit = BackendHistoryResolver.messageLimit
 
+    // Why: dropping in-memory just-sent or streaming messages silently omits the user's question from its own request.
     /// Resolves the conversation history handed to the backend, oldest-first.
-    ///
-    /// STORE-AUTHORITATIVE, ALWAYS. `currentChatMessages` is the UI's *pagination window*
-    /// (20 messages on open, +10 per scroll upward, capped at `maxResidentMessages`), so
-    /// deriving history from it makes the model's memory depend on how far the user
-    /// happened to scroll. What the model sees is a context concern; what the list renders
-    /// is a rendering concern, and the two must not be the same value.
-    ///
-    /// This previously short-circuited to the in-memory window whenever
-    /// `canLoadMorePages == false` ("the whole conversation is loaded, so the window IS the
-    /// conversation"). That held only while nothing could shrink the window — it made
-    /// `canLoadMorePages` silently load-bearing for model memory, so any future eviction or
-    /// residency cap would have truncated the model's history with no visible symptom. The
-    /// fetch is bounded and conversation-scoped; correctness beats saving it.
-    ///
-    /// In-memory messages are merged OVER the stored ones, never replaced by them: the
-    /// just-sent user message is persisted in a DETACHED task that may not have landed yet,
-    /// and in-flight streaming messages are never in the store. Dropping either would
-    /// silently omit the user's own question from the request that answers it.
+    /// Store-authoritative: the UI's pagination window must not decide what the model remembers.
+    /// In-memory messages are merged over stored ones, never replaced; the just-sent user message may not be persisted yet.
     private func resolveBackendHistory(conversationID: UUID) async -> [ChatMessage] {
         let inMemory = chatHistoryViewModel.currentChatMessages
         let resolved = await BackendHistoryResolver.resolve(
@@ -1031,11 +787,8 @@ final class MessagingCoordinator {
         return resolved.history
     }
 
-    /// History strictly OLDER than `message`, oldest-first — the slice a regeneration or a
-    /// resume must replay. Store-authoritative for the same reason as above: regenerating
-    /// the newest message of a freshly-opened long conversation previously replayed only
-    /// the ~19 messages that happened to be loaded, so a retry silently ran with less
-    /// context than the original send.
+    /// History strictly older than `message`, oldest-first: the slice a regeneration or resume must replay.
+    /// Store-authoritative like the resolver above, so a retry replays the full context of the original send.
     private func resolveBackendHistory(before message: ChatMessage, conversationID: UUID) async -> [ChatMessage] {
         let full = await resolveBackendHistory(conversationID: conversationID)
         let slice = Self.historySlice(before: message, in: full)
@@ -1046,13 +799,8 @@ final class MessagingCoordinator {
     }
 
     /// Everything strictly before `message` in an oldest-first history.
-    ///
-    /// Cuts by IDENTITY when the target is present — timestamps can tie (a message and its
-    /// reply persisted in the same instant), and an identity cut is exact. Falls back to a
-    /// timestamp cut only when the target isn't in the resolved window at all, which beats
-    /// replaying the entire conversation past it.
-    ///
-    /// Pure + internal so the slice contract is testable without building a coordinator.
+    /// Cuts by identity when the target is present (timestamps can tie); uses a timestamp cut only when it is absent.
+    /// Pure and internal so the slice contract is testable without a coordinator.
     static func historySlice(before message: ChatMessage, in full: [ChatMessage]) -> [ChatMessage] {
         if let index = full.firstIndex(where: { $0.id == message.id }) {
             return Array(full[..<index])
@@ -1062,29 +810,17 @@ final class MessagingCoordinator {
 
     // MARK: - Message Factory
 
-    /// Builds a `ChatMessage` for the user, classifying attached files into
-    /// text (with read-in content) vs. image (with binary data).
-    ///
-    /// ⚠️ The instance method is now a thin forwarder to `Self.makeUserMessage`, and its only
-    /// callers are inside this file. Its stated reason for being internal rather than private —
-    /// "`MainApplicationViewModel`'s scheduler path also needs this factory; that scheduler code
-    /// still lives on the VM for now" — is gone twice over: the scheduler body moved to
-    /// `SchedulerCoordinator` before this change, and on 2026-09-06 that coordinator stopped
-    /// calling this at all in favour of the static factory. Left internal because nothing depends
-    /// on tightening it; it is no longer part of any cross-type contract.
+    /// Builds a user `ChatMessage`, classifying attached files into text (read-in content) and image (binary data).
+    /// A thin forwarder to `Self.makeUserMessage`.
     func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem],
                            deliveryMode: AttachmentDeliveryMode? = nil) async -> ChatMessage {
         await Self.makeUserMessage(conversationID: conversationID, query: query, files: files,
                                    fileProcessorService: fileProcessorService, deliveryMode: deliveryMode)
     }
 
-    /// The same factory, as a free function over its one real dependency.
-    ///
-    /// `SchedulerCoordinator` used to reach this through `viewModel!.messagingCoordinator`, which
-    /// made its whole send path untestable: constructing a `MainApplicationViewModel` runs
-    /// `ChatOpsCoordinator.bootstrap()`, which opens REAL Telegram/Discord/Slack connections when
-    /// the developer has them enabled. Nothing about building a user message needs a view model —
-    /// only a `FileProcessorService` — so it no longer asks for one.
+    // Why: constructing a MainApplicationViewModel bootstraps ChatOps and opens real Telegram/Discord/Slack connections.
+    /// The same factory, as a free function over its one real dependency, `FileProcessorService`.
+    /// Needs no view model, so callers such as `SchedulerCoordinator` stay testable without a `MainApplicationViewModel`.
     static func makeUserMessage(
         conversationID: UUID,
         query: String,
@@ -1092,10 +828,8 @@ final class MessagingCoordinator {
         fileProcessorService: FileProcessorService,
         deliveryMode: AttachmentDeliveryMode? = nil
     ) async -> ChatMessage {
-        // Classification + reads live in MessageAttachmentBuilder (testable
-        // without the coordinator's VM graph — see ATT-1 contract note there).
-        // ⚠️ Every sender with files passes `AttachmentDeliveryMode.resolve(for: profile)` so the
-        // chip records what the model receives; nil records nothing.
+        // Classification and reads live in `MessageAttachmentBuilder` (testable without the coordinator's VM graph).
+        // Senders with files pass `AttachmentDeliveryMode.resolve(for: profile)` so the chip records what the model gets.
         let attachments = await MessageAttachmentBuilder(fileProcessorService: fileProcessorService)
             .build(from: files, deliveryMode: deliveryMode)
 

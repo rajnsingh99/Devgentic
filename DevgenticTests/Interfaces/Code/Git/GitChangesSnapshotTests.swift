@@ -4,8 +4,7 @@
 //  GitChangesSnapshotTests.swift
 //  DevgenticTests
 //
-//  The pure merge of status + numstats + untracked measurements into panel rows. Inputs are the
-//  verbatim git 2.54 fixtures from the parser tests.
+//  Created by Raj Singh.
 //
 
 import XCTest

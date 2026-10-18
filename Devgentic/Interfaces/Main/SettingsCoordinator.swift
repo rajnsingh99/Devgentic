@@ -4,26 +4,15 @@
 //  SettingsCoordinator.swift
 //  Devgentic
 //
-//  Owns the read/persist paths for every persisted user setting the VM
-//  exposes: streaming response toggle, intelligence core toggle and the
-//  persisted interface mode (UserDefaults).
-//
-//  Scope choice: state stays on `MainApplicationViewModel`. SwiftUI views
-//  use `Bindable(viewModel).useStreamingResponse` directly — moving the
-//  property into the coordinator would require every settings view to
-//  switch to `Bindable(viewModel.settingsCoordinator).useStreamingResponse`
-//  or to observe the coordinator through a new environment injection. The
-//  goal of this extraction is to lift the *load/persist logic* out of the
-//  VM, not to re-shape the observed-state graph.
-//
-//  The coordinator mutates VM state through a weak back-reference on load
-//  and reads VM state on persist — the same pattern the prior coordinators
-//  use.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Owns the read/persist paths for the persisted user settings the view model exposes: the streaming response toggle,
+/// the intelligence core toggle and the interface mode (UserDefaults).
+/// State stays on `MainApplicationViewModel`; the coordinator mutates it through a weak back-reference on load.
 @MainActor
 final class SettingsCoordinator {
 
@@ -57,23 +46,16 @@ final class SettingsCoordinator {
         if UserDefaults.standard.object(forKey: AppSettings.useStreamingResponseKey) == nil {
             UserDefaults.standard.set(true, forKey: AppSettings.useStreamingResponseKey)
         }
-        // ⚠️ NOTHING TO COPY INTO THE VIEW MODEL ANY MORE. `useStreamingResponse` and
-        // `isIntelligenceCoreEnabled` are computed over `UserDefaults`, so assigning them here
-        // would write back the value just read. The seeding above stays: it is load-bearing for
-        // the DIRECT readers of the key (e.g. `WorkflowPreferenceSource`), which use
-        // `bool(forKey:)` and would read an absent key as false — the opposite of the shipped
-        // default.
+        // Nothing to copy into the view model: its toggles are computed over `UserDefaults`, so assigning them would write back.
+        // The seeding above stays for direct `bool(forKey:)` readers, which would read an absent key as false.
 
         logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(vm.useStreamingResponse)")
     }
 
     // MARK: - Individual-Setting Change Persisters
 
-    // ⚠️ `didChangeUseStreamingResponse` and `didChangeIntelligenceCoreEnabled` lived here and
-    // were the ONLY writers of their two keys. Neither had a single caller: the settings toggles
-    // bound straight to the stored view-model properties, so flipping one updated the UI and
-    // nothing else. Both properties now persist in their own setters, so a second persistence
-    // path would be exactly the "one rule over two copies" shape that caused the bug.
+    // The streaming and intelligence-core toggles persist in their own setters, so this handles interface mode only:
+    // a second persistence path would be the "one rule over two copies" shape.
 
     /// Persists the interface-mode change. Called from `switchInterfaceMode` on
     /// the VM after the mode has been updated in memory.

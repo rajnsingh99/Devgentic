@@ -4,11 +4,7 @@
 //  OpenRouterSupportTests.swift
 //  DevgenticTests
 //
-//  Created on 08/07/26.
-//
-//  Unit tests for OpenRouter provider support: catalog parsing/mapping,
-//  402 out-of-credits classification, rate-limit bucketing, capability
-//  defaults, and the validator's API-key requirement.
+//  Created by Raj Singh.
 //
 
 import XCTest

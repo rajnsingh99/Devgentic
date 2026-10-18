@@ -4,14 +4,7 @@
 //  WorkflowDataPassingTests.swift
 //  DevgenticTests
 //
-//  Unit tests for structured-data + artifact passing between workflow nodes:
-//    • JSONValue structured parsing, path access, and template rendering
-//    • WorkflowTemplate placeholder resolution ({{ input }}, {{ input.json.path }},
-//      {{ var.name }}, {{ var.name.path }}) including injection safety
-//    • WorkflowInputAssembler artifact manifest rendering
-//
-//  Pure-logic tests — no LLM, network, or filesystem (manifest uses in-memory
-//  references; document extraction is covered by integration tests).
+//  Created by Raj Singh.
 //
 
 import XCTest

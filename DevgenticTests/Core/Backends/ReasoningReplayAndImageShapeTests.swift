@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ReasoningReplayAndImageShapeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-23: Claude thinking blocks (with their signatures) and Gemini thought signatures are
-//  replayed on the next tool turn, unchanged. They were reduced to text and the signatures dropped.
-//  Readiness CR-24: OpenAI image requests carry only sizes and fields the model accepts.
-//
-//  ⚠️ CR-23 was filed SUSPECTED (the 400 needs a live tool loop to observe); these tests pin that the
-//  data the API documents as required is captured and sent back verbatim. A device run is still owed.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,25 +4,7 @@
 //  RemoteSessionStore.swift
 //  Devgentic
 //
-//  Which conversation a remote channel is pointed at — C4 of the ChatOps remote-interface plan.
-//
-//  WHY THIS EXISTS. "Which conversation am I in" is currently three hand-written property bodies on
-//  `ChatOpsConfigManager` — `activeConversationID`, `discordActiveConversationID`,
-//  `slackActiveConversationID` — each independently reading and writing its own `UserDefaults` key,
-//  read from 30 call sites across the three bridges. Three copies of one concept is how the concept
-//  drifts, and it is the reason nothing outside `ChatOpsConfigManager` can ask the question
-//  generically.
-//
-//  ⚠️ THIS COMMIT DELIBERATELY DOES NOT MIGRATE ANY DATA. The store reads and writes the SAME
-//  `AppSettings` keys the properties use today, so an existing user's cursor survives untouched and
-//  there is no migration to get wrong. The win here is ONE typed code path, not new storage —
-//  `RemoteSessionKeyParityTests` pins the key mapping precisely so that stays true.
-//
-//  ⚠️ KEYED BY PROVIDER, NOT BY CHANNEL, AND THAT IS A CONSEQUENCE OF THE SINGLE-USER DECISION.
-//  A paired channel means exactly one human, so one cursor per provider IS one cursor per session
-//  and this preserves today's semantics exactly. If multi-user is ever revisited, the channel
-//  dimension is an additive change to this one type instead of an edit to 30 call sites — which is
-//  the actual point of collecting them here first.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -54,11 +36,9 @@ final class RemoteSessionStore {
 
     // MARK: - Keys
 
-    /// ⚠️ THESE THREE STRINGS ARE THE COMPATIBILITY CONTRACT. They are the keys the shipped
-    /// properties already use, so changing one silently loses the cursor of every existing user —
-    /// their next `/status` would report no active conversation and `/new` would create a duplicate
-    /// instead of reusing the one they were in. `nonisolated static` so the mapping is testable
-    /// with no store and no defaults.
+    /// The `UserDefaults` key for a provider's cursor. These strings are a compatibility contract with the shipped keys:
+    /// changing one loses every existing user's cursor. `nonisolated static` so the mapping is testable with no store and
+    /// no defaults.
     nonisolated static func defaultsKey(for provider: RemoteChannel.Provider) -> String {
         switch provider {
         case .telegram: return AppSettings.chatOpsActiveConversationIDKey

@@ -4,10 +4,7 @@
 //  EpisodicImageLabelTests.swift
 //  DevgenticTests
 //
-//  Covers the `<attached_images>` label in the episodic memory XML — the per-turn
-//  filename hook that lets a vision model map the re-provided image bytes back to the
-//  turn they belonged to. Vision-gated: labels appear only when images are actually
-//  being sent (non-vision → omitted, so labeling them would be misleading).
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,15 +4,7 @@
 //  ConversationAdmissionTests.swift
 //  DevgenticTests
 //
-//  ⚠️⚠️ THE DEFECT: two concurrent runs in ONE conversation were reachable and nothing stopped
-//  them. The only guard was the composer greying out its send button — a property of the TEXT BOX.
-//  `SchedulerCoordinator`, Orb and the ChatOps bridge call `ActiveStreamManager` directly, and
-//  `deriveHistory`'s own comment said so: *"the scheduler, Orb and the ChatOps bridge carry no
-//  admission check."*
-//
-//  Nothing threw, because `activeStreams` is keyed by MESSAGE id and two runs in one conversation
-//  are a valid state. The damage was silent: two agents reading the same history (each seeing the
-//  other's half-written turn), calling tools against the same files, at double the token cost.
+//  Created by Raj Singh.
 //
 
 import XCTest

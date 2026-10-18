@@ -4,12 +4,7 @@
 //  LiveWriteSettlementTests.swift
 //  DevgenticTests
 //
-//  Regression cover for AD4 and its twin (Chat_Production_Readiness.md Part D).
-//
-//  CH60 migrated the live-write BEGAN guard to `destinationConversationID` but left the
-//  symmetric handlers on `currentChatMessages.first?.conversationId`, which names the OUTGOING
-//  conversation for the whole duration of a switch. So a write admitted mid-load could never be
-//  settled, and a close mid-load resolved the wrong conversation's stash.
+//  Created by Raj Singh.
 //
 
 import XCTest

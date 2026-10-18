@@ -4,16 +4,7 @@
 //  WorkflowRunRollupTests.swift
 //  DevgenticTests
 //
-//  Register WF-UI5 (and the WF-UI1/WF-UI3 fixes) — the run-level verdict the user actually READS.
-//  Also WF-RU3 — the same verdict the user actually HEARS, which used to be a second, divergent
-//  computation.
-//
-//  ⚠️ These were private computed properties on `WorkflowExecutionTimelineView`: a second,
-//  independent implementation of "what happened to this run" with a five-comment regression
-//  history and NO test that could reach it. The suite named "StatusRollupTests" exercises
-//  `freeze()`'s PERSISTENCE roll-up — a different function — and passed against every defect in
-//  the view. The logic now lives on `WorkflowRunDisplayData` ("Run roll-up" extension); this file
-//  is the truth table for it, over the same `from(record:)` path the view renders.
+//  Created by Raj Singh.
 //
 
 import XCTest

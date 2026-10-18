@@ -4,8 +4,7 @@
 //  GitChangesAccessibilityTests.swift
 //  DevgenticTests
 //
-//  What VoiceOver reads in the Git Changes panel. The glyphs (`M`, `+3 −2`, the `−` gutter) read
-//  aloud as letters and "plus / minus" — these pin the words that replace them.
+//  Created by Raj Singh.
 //
 
 import XCTest

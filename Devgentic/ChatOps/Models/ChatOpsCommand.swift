@@ -4,7 +4,7 @@
 //  ChatOpsCommand.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -59,12 +59,9 @@ enum ChatOpsCommand {
 
     // MARK: - Parsing
 
-    /// Parses a Telegram update into a structured command.
-    /// Callback data takes priority over message text.
-    /// - Parameters:
-    ///   - text: The text content of a message (if any).
-    ///   - callbackData: The callback_data from an inline keyboard tap (if any).
-    ///   - awaitingClarification: Whether the bridge is currently waiting for a clarification response.
+    /// Parses a Telegram update into a structured command; callback data takes priority over message text.
+    /// - Parameters: `text` is the message text, `callbackData` an inline keyboard tap, and `awaitingClarification`
+    ///   whether the bridge is waiting for a clarification response.
     static func parse(
         text: String?,
         callbackData: String?,
@@ -81,26 +78,8 @@ enum ChatOpsCommand {
             return .unknown
         }
 
-        // 3. Pairing attempt
-        //
-        // ⚠️⚠️ THE PIN SHAPE IS REQUIRED, AND WITHOUT IT THIS BRANCH ATE ORDINARY PROMPTS. It used to
-        // accept `PAIR ` followed by ANYTHING non-empty, case-insensitively — so "Pair these two CSVs
-        // on the id column and write the result to out.csv" parsed as
-        // `.pairingAttempt("THESE TWO CSVS ON…")`, cleared the tier gate (pairing is allowed at every
-        // tier), and was then dropped by all three bridges without a reply: no answer, no error, no
-        // typing indicator. `parseSlack` and `parseDiscord` both delegate here for plain text, so it
-        // was every platform.
-        //
-        // ⚠️ SIX ASCII DIGITS, EXACTLY, AND THE WHOLE REMAINDER. `generatePIN()` mints
-        // `Int.random(in: 100_000...999_999)`, so a real attempt always has this shape; anything else
-        // falls through to the verb table and then to the agent, which is where a sentence belongs.
-        // ⚠️ `isASCII` as well as `isNumber`: `Character.isNumber` is true for Arabic-Indic and other
-        // non-ASCII numerals, which a PIN never contains.
-        //
-        // ⚠️ THIS IS NOT `PairingAttemptPolicy.classify`, WHICH IS DELIBERATELY LOOSER. That one runs
-        // only inside an open pairing window and treats `PAIR <anything>` as a failed attempt on
-        // purpose — someone fumbling the format is still someone trying to pair, and it needs to see
-        // them. This is the always-on command parser, where the same looseness is a swallowed prompt.
+        // 3. Pairing attempt: `PAIR ` plus exactly six ASCII digits, as `generatePIN()` mints.
+        // Anything else falls through to the verb table and the agent; looser than `PairingAttemptPolicy.classify`.
         let upper = text.uppercased()
         if upper.hasPrefix("PAIR ") {
             let pin = String(upper.dropFirst(5)).trimmingCharacters(in: .whitespaces)
@@ -110,35 +89,16 @@ enum ChatOpsCommand {
             // Not a PIN — fall through so the verb table and free text get their turn.
         }
 
-        // 4. Slash commands — one alias table, shared with the Discord and Slack entry points.
-        //    ⚠️ The leading slash stays REQUIRED here: bare "status" is a message to the agent.
-        //
-        //    ⚠️⚠️ THIS MOVED ABOVE THE CLARIFICATION BRANCH IN SLICE 4, AND IT IS A BUG FIX, NOT A
-        //    TIDY-UP. The clarification branch swallowed EVERY message while a run was parked —
-        //    including `/cancel`. A remote user therefore could not stop a parked run from chat at
-        //    all: the command intended to end the wait was consumed as the answer to it, which
-        //    resumed the run rather than cancelling it, and `/status`, `/new` and `/conversations`
-        //    were equally unreachable for as long as the agent waited.
-        //
-        //    ⚠️ An answer that merely LOOKS like a command is unaffected: the table matches known
-        //    verbs only, so answering "/usr/local/bin" to "which path?" still falls through to the
-        //    clarification branch below.
+        // 4. Slash commands: one alias table shared with Discord and Slack; the leading slash is required here.
+        // Checked before the clarification branch so `/cancel` can end a parked run; only known verbs match.
         if let (verb, argument) = ChatOpsVerbTable.parse(slashPrefixedText: text) {
-            // ⚠️ Only argument-taking verbs reach here with a non-empty `argument`; for the rest the
-            // table refuses a trailing remainder, so `/status extra` still falls through to
-            // `.freeText` and reaches the agent, exactly as it does today.
-            // ⚠️ WAS `verb.takesArgument ? .useProfile(argument) : verb.command`, which made
-            // `.use` the only argument-taking verb that could exist — any second one would have
-            // been dispatched as a profile name. The verb now names its own command.
+            // Only argument-taking verbs reach here with a non-empty `argument`; for the rest the table refuses a trailing
+            // remainder, so `/status extra` still falls through to `.freeText` and reaches the agent.
             return verb.command(argument: argument)
         }
 
-        // 5. Awaiting a clarification → plain text is the answer.
-        //    ⚠️ THIS IS THE IMPRECISE FALLBACK, and it is why slice 4 exists. It cannot say WHICH
-        //    clarification is being answered: the caller derives that from the provider's single
-        //    conversation cursor and then takes the oldest pending item. A reply carrying
-        //    `reply_to_message` names the operation exactly and is handled before parsing ever
-        //    reaches here; this remains for a user who types instead of replying.
+        // 5. Awaiting a clarification: plain text is the answer. This is the imprecise fallback, so the caller takes the oldest
+        // pending item; a `reply_to_message` names the operation exactly and is handled before parsing reaches here.
         if awaitingClarification {
             if text.lowercased() == "/skip" {
                 return .clarificationResponse("")
@@ -166,15 +126,8 @@ enum ChatOpsCommand {
             return parseCallbackData(id)
         }
 
-        // 2. Slash command (from INTERACTION_CREATE type 2) — same alias table as Telegram's text
-        //    path, with the leading slash optional because Discord delivers a bare name.
-        //
-        // ⚠️ NO ARGUMENT IS AVAILABLE ON THIS PATH, and that is a platform-model gap rather than a
-        // choice: `DiscordSlashCommand` has no `options` field to DECLARE a parameter and
-        // `DiscordInteractionData` has none to READ one, so a registered `/search` would arrive
-        // with nothing after it. Argument-taking verbs are therefore not registered as Discord
-        // slash commands at all — they are reachable by typing `/search foo` as an ordinary
-        // message, which routes through `parse` above and does carry the argument.
+        // 2. Slash command (INTERACTION_CREATE type 2): same alias table as Telegram's text path, slash optional.
+        // No argument is available here: `DiscordSlashCommand` cannot declare one, so such verbs are typed as messages.
         if let name = slashCommandName, let verb = ChatOpsVerbTable.verb(forSlashCommandName: name) {
             return verb.command(argument: "")
         }
@@ -186,14 +139,8 @@ enum ChatOpsCommand {
 
     // MARK: - Slack Parsing
 
-    /// Parses a Slack event or interaction into a structured command.
-    /// Handles slash commands, button action_ids, and plain text messages.
-    /// - Parameter slashArgument: the text Slack sends after the command name
-    ///   (`SlackSlashCommandPayload.text`).
-    ///
-    /// ⚠️ SLACK HAS ALWAYS SENT THIS AND THE BRIDGE ALWAYS DISCARDED IT, passing only
-    /// `payload.command`. Until slice 5 nothing needed it, because `.use` was reachable only as a
-    /// typed message; a registered `/use Coder` on Slack silently became `/use` with no name.
+    /// Parses a Slack event or interaction into a structured command: slash commands, button action_ids and plain text.
+    /// - Parameter slashArgument: the text Slack sends after the command name (`SlackSlashCommandPayload.text`).
     static func parseSlack(
         text: String? = nil,
         actionID: String? = nil,
@@ -229,9 +176,8 @@ enum ChatOpsCommand {
 
         if data.hasPrefix("page:") {
             let raw = String(data.dropFirst("page:".count))
-            // ⚠️ A NEGATIVE OR JUNK OFFSET IS REFUSED, not clamped. `page:-1` reaching the store
-            // would be clamped there anyway, but a token that decodes to something the user never
-            // tapped is how a stale button silently jumps somewhere unexpected.
+            // A negative or junk offset is refused, not clamped: a token that decodes to something the user never tapped
+            // is how a stale button jumps somewhere unexpected.
             if let offset = Int(raw), offset >= 0 { return .conversationPage(offset: offset) }
             return .unknown
         }

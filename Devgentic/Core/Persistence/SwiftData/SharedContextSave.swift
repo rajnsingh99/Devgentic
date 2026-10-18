@@ -4,24 +4,7 @@
 //  SharedContextSave.swift
 //  Devgentic
 //
-//  The ONE way a store saves a SwiftData context (RAG-27 / CR-69).
-//
-//  Every store — chat, profiles, prompts, MCP tools, run history, downloads, scheduler, skills,
-//  workflow layouts — is configured with the SAME container and saves its `mainContext`. A save
-//  commits every pending change in that context, not just the caller's.
-//
-//  ⚠️⚠️ A failed save CANNOT be undone in place. SwiftData's `rollback()` after a failed save leaves
-//  the failed change in the context (a failed insert keeps failing every later save; a changed
-//  value is not restored) — proven and pinned by `SharedContextCommitTests`. So when a failure is
-//  persistent (an invalid object, an external-storage clone error, a full disk), EVERY later save
-//  from EVERY store fails with it until the app is relaunched, which is the only recovery.
-//
-//  What this does about it is make the failure impossible to miss: the first failure on a context
-//  latches it, logs, and posts ONE app-wide advisory saying changes are not being saved and since
-//  when; the next successful save of that context clears it. A transient failure therefore costs a
-//  banner that disappears with the next good save — the failed change is still pending and goes
-//  out with it — and a persistent one tells the user to restart rather than letting them work for
-//  an hour on writes that will vanish.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -29,6 +12,11 @@ import SwiftData
 
 private let logger = DGLogger(category: "SharedContextSave")
 
+// Why: a failed save cannot be undone in place: rollback() keeps the failed change,
+// so a persistent failure fails every later save until relaunch.
+/// The single path through which every store saves its SwiftData `mainContext`.
+/// The first failure on a context is logged and raises one app-wide advisory that changes are not being saved.
+/// The next successful save of that context clears it.
 @MainActor
 enum SharedContextSave {
 
@@ -44,10 +32,8 @@ enum SharedContextSave {
     /// Contexts whose last save failed → when they started failing.
     private static var failingSince: [ObjectIdentifier: Date] = [:]
 
-    /// Saves `context`. On failure: latches it, posts the app-wide advisory, logs, and rethrows.
-    /// Callers keep their own failure log — they know what the lost write MEANT to the user.
-    ///
-    /// - Parameter label: the write, for the log ("chat: upsert 2 message(s) → conv 1A2B3C4D").
+    /// Saves `context`. On failure: latches it, posts the app-wide advisory, logs, and rethrows. Callers keep their own
+    /// failure log. - Parameter label: the write, for the log ("chat: upsert 2 message(s) → conv 1A2B3C4D").
     static func save(_ context: ModelContext, _ label: @autoclosure () -> String, scope: Scope = .shared) throws {
         let key = ObjectIdentifier(context)
         do {

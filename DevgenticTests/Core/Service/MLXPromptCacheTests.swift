@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MLXPromptCacheTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Reusing the KV cache across agent iterations (see MLXPromptCache.swift). On the 2026-10-06
-//  device run Qwen2.5-3B spent 7-11s per iteration re-reading a prompt that was ~90% unchanged.
-//
-//  Three things must hold, and each has a test that fails if it is cut:
-//    - the decision table keeps only a prefix the new prompt really shares;
-//    - a reused prefix reads EXACTLY like the whole prompt (same logits, same greedy text);
-//    - the wiring: `streamChat` uses the slot only for a keyed call, reports the full prompt as
-//      usage, and the executor names the conversation around an agent iteration's model call only.
-//
-//  The model is a 2-layer Qwen2 with random weights built in memory, and the tokenizer maps one
-//  Unicode scalar to one token, so no model files are needed and every prompt's tokens are known.
+//  Created by Raj Singh.
 //
 
 import XCTest

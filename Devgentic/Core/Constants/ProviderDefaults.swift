@@ -4,22 +4,13 @@
 //  ProviderDefaults.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/03/26.
-//
-//  Single source of truth for all provider endpoint defaults.
-//  Every service, provider, factory, and UI view resolves its default
-//  base URL from this file — no hardcoded URL strings anywhere else.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 /// Canonical default endpoints for every supported API provider.
-///
-/// Usage:
-/// - **Services** (model listing): `ProviderDefaults.anthropicBaseURL.appendingPathComponent("models")`
-/// - **AgentConnect** (runtime fallback): `ProviderDefaults.baseURL(for: provider)`
-/// - **UI** (placeholder display): `ProviderDefaults.baseURLString(for: provider)`
-/// - **ImageGen factories**: `ProviderDefaults.openAIBaseURL` etc.
+/// Used by model-listing services, AgentConnect's runtime fallback, placeholder display and the ImageGen factories.
 enum ProviderDefaults {
 
     // MARK: - Base URLs
@@ -44,12 +35,8 @@ enum ProviderDefaults {
     /// placeholder, pre-filled to LM Studio's local server for discoverability.
     static let openAICompatibleHintURL = URL(string: "http://localhost:1234/v1")!
 
-    /// HuggingFace Inference Providers' OpenAI-compatible router.
-    ///
-    /// ⚠️ NOT in `baseURL(for:)` below — no `ApiProvider` case maps to it. HuggingFace needs no
-    /// provider of its own: the router speaks the OpenAI wire format, so `.openAICompatible`
-    /// already drives it end to end, native tool calls included. What was missing was any way to
-    /// FIND that out; this constant exists to be offered as a preset.
+    /// HuggingFace Inference Providers' OpenAI-compatible router, offered as a preset.
+    /// Not in `baseURL(for:)`: no `ApiProvider` case maps to it, because `.openAICompatible` already drives it.
     static let huggingFaceRouterBaseURL = URL(string: "https://router.huggingface.co/v1")!
 
     // MARK: - Provider Lookup
@@ -79,28 +66,8 @@ enum ProviderDefaults {
 
     private static let logger = DGLogger(category: "ProviderDefaults")
 
-    /// Resolves a profile's configured endpoint, falling back to the vendor default.
-    ///
-    /// ⚠️ EXTRACTED because the three call sites that needed it had three different behaviours, one
-    /// of which was "ignore the setting entirely". `GeminiImageGenService` hardcoded
-    /// `geminiBaseURL` in both request builders while `GeminiService.verifyAndFetchModels` — the
-    /// model list for the SAME profile — honoured `baseURL`. So a profile pointed at a corporate
-    /// gateway listed its models through the gateway and then sent its gateway-scoped key to
-    /// `generativelanguage.googleapis.com` on every actual request: a credential leaving the
-    /// network it was issued for, to a host the user explicitly configured away from.
-    ///
-    /// ⚠️ An unparseable endpoint falls back rather than crashing. `OpenAIImageGenService` did
-    /// `URL(string: base)!` on a free-text field, so "my gateway" (or a pasted URL with a space)
-    /// was a force-unwrap crash on the first generate. Falling back is the wrong host too — hence
-    /// the error log; but the failure is now visible and survivable instead of terminal.
-    /// Whether a URL can actually carry an API request.
-    ///
-    /// ⚠️ `URL(string:)` is far more permissive than "usable". `"://nope"` parses with an EMPTY
-    /// scheme and a host of `nope`, and `"http:///path"` parses with no host at all — a
-    /// `scheme != nil, host != nil` check waves both through, and `URLSession` then fails on
-    /// something the user was told was fine. Requiring a real HTTP scheme also rejects a pasted
-    /// `file://` path. `http` stays allowed: `http://localhost` is how the local providers work,
-    /// and A52 warns about plaintext transport rather than blocking it.
+    /// Whether a URL can actually carry an API request: a real http(s) scheme and a non-empty host.
+    /// `URL(string:)` is more permissive than usable (`"://nope"` parses). `http` stays allowed for local providers.
     static func isUsableEndpoint(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
             return false
@@ -109,6 +76,9 @@ enum ProviderDefaults {
         return true
     }
 
+    // Why: an unparseable endpoint falls back to the default and logs an error, since force-unwrapping a free-text field would crash.
+    /// Resolves a profile's configured endpoint, falling back to the vendor default.
+    /// Every request path uses this so a configured gateway is honoured everywhere, never only for model listing.
     static func resolvedBaseURL(configured: String?, fallback: URL) -> URL {
         guard let configured, !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return fallback

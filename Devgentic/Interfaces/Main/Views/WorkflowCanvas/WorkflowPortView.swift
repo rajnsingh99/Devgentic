@@ -4,24 +4,20 @@
 //  WorkflowPortView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  Input/output port circles on workflow nodes.
-//  Output ports are draggable to create new edges.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Input and output port circles on workflow nodes; output ports are draggable to create edges.
 struct WorkflowPortView: View {
     let portType: PortType
     let nodeColor: Color
     /// Weak tier (register CVV-2): the graph would ACCEPT this connection — visible port,
     /// colored ring. Says "you could connect here", not "release now".
     var isCompatibleTarget: Bool = false
-    /// Strong tier: the drop would LAND here right now (nearest in-radius valid port under the
-    /// live drag point). This is what earns the pulse, the 1.35× scale and the glow — the full
-    /// treatment used to fire for every valid node on the canvas while the actual accept region
-    /// was a 20pt circle, so the canvas promised connections the release then refused in silence.
+    /// Strong tier: the drop would land here right now (nearest in-radius valid port under the drag point). Only this
+    /// earns the pulse, scale and glow, so the canvas promises only connections the release will accept.
     var isPrimaryTarget: Bool = false
     var isNodeHovered: Bool = false
 

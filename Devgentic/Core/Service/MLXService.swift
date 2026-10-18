@@ -4,7 +4,7 @@
 //  MLXService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -60,48 +60,23 @@ actor MLXService {
         }
     }
 
-    /// Resolves the container for a specific model, loading it if necessary.
-    ///
-    /// ⚠️ The identity check and the container capture MUST stay in the same synchronous
-    /// region — no `await` between them. This actor is reentrant across every suspension, so
-    /// a check-then-await-then-use would let a concurrent `loadModel` swap `modelContainer`
-    /// after the check passed. Capturing the container into a local first means the caller
-    /// holds a strong reference to the model it validated, even if the actor's slot changes
-    /// underneath it a moment later.
-    ///
-    /// Why this exists: `streamChat` took no model identifier, and `lastModelDirectory` is a
-    /// single global slot holding whatever model ANY caller loaded most recently.
-    /// `WorkflowExecutor` runs profile nodes in parallel — branch A (model X) pausing between
-    /// ReAct iterations while branch B loaded model Y meant A's lazy reload restored Y and
-    /// **answered from the classifier's model**, logging only "♻️ Reloading model from: Y".
-    /// The A14 identity rule, as a pure function so it is directly testable.
-    ///
-    /// A request may only be served when a container is loaded AND the directory it was loaded
-    /// from is the one the request expects. ⚠️ `hasContainer` is a separate input on purpose:
-    /// `loadModel` nulls the container BEFORE loading, so "the right path with no container" is
-    /// a real state and it must NOT be treated as resident. Paths are standardized because the
-    /// two sides arrive from different places — a profile's stored URL and the service's own
-    /// record — and `/a/b` vs `/a/b/` vs `/a/c/../b` are the same model.
+    // Why: `hasContainer` is separate: `loadModel` clears the container first, so the right path alone is not residency.
+    /// Returns whether a request expecting `expected` can be served: a container is loaded and came from that directory.
+    /// Paths are compared standardized, since `/a/b`, `/a/b/` and `/a/c/../b` name the same model.
     nonisolated static func isResident(expected: URL, resident: URL?, hasContainer: Bool) -> Bool {
         guard hasContainer, let resident else { return false }
         return samePath(resident, expected)
     }
 
-    /// Compare two model directories. See `URL.sameLocationLexically` for the rule and why
-    /// `URL` equality is wrong for this.
-    ///
-    /// Deliberately the LEXICAL variant: this is on the generation hot path
-    /// (`container(expecting:)` runs per request) and every model directory is derived from the
-    /// service's own `modelsDirectory`, so there is no symlink divergence to resolve.
+    /// Returns whether two model directories are the same location, compared lexically.
+    /// Lexical on purpose: it runs per request, and model directories derive from the service's own `modelsDirectory`.
     nonisolated static func samePath(_ lhs: URL, _ rhs: URL) -> Bool {
         lhs.sameLocationLexically(as: rhs)
     }
 
     private func container(expecting directory: URL?) async throws -> ModelContainer {
         guard let directory else {
-            // No identity supplied (legacy caller). Preserve the old lazy-reload behaviour,
-            // but say so — an unidentified generation is exactly the case that could be
-            // served by the wrong model.
+            // No expected identity was supplied; keeps the lazy reload but logs it, since the wrong model could answer.
             if modelContainer == nil, lastModelDirectory != nil {
                 logger.warning("[MLX-LOAD] Lazy reload with NO expected model identity — restoring '\(self.lastModelDirectory?.lastPathComponent ?? "?")', whichever model that happens to be. CONSEQUENCE: if another caller loaded a different model, this generation is answered by it.")
                 _ = await reloadCurrentModel()
@@ -112,16 +87,7 @@ actor MLXService {
 
         let target = directory.standardizedFileURL
 
-        // Up to two attempts. ⚠️ A single attempt conflated two very different situations:
-        // "another model is resident" (a real wrong-model hazard, must refuse) and "the slot
-        // was emptied underneath us" (a transient interleave). `loadModel` calls
-        // `performUnload()` BEFORE loading, so a concurrent load for a different model nulls
-        // `modelContainer` in the window between our load completing and the check below —
-        // and we threw `modelIdentityMismatch(expected: X, actual: <none>)` for a model that
-        // had just loaded perfectly. `WorkflowExecutor` runs profile nodes in parallel, so
-        // that interleave is routine there, and a hard node failure is the worst possible
-        // response to it. Retrying once lets the transient case settle; sustained contention
-        // still refuses, which is correct.
+        // Up to two attempts, so a concurrent load emptying the slot between our load and the check settles instead of failing.
         for attempt in 1...2 {
             if Self.isResident(expected: directory, resident: currentModelDirectory,
                                hasContainer: modelContainer != nil) { break }
@@ -133,7 +99,7 @@ actor MLXService {
             try await loadModel(from: directory)
         }
 
-        // ⚠️ No suspension permitted between here and the return.
+        // No suspension is allowed between this check and the return.
         guard let container = modelContainer,
               Self.isResident(expected: directory, resident: currentModelDirectory,
                               hasContainer: true) else {
@@ -144,11 +110,8 @@ actor MLXService {
         return container
     }
 
-    /// Whether `directory` is the model currently resident in memory, or the one a lazy
-    /// `reloadCurrentModel()` would restore. `MLXModelService.deleteModel` consults this
-    /// before removing files: deleting a resident model leaves in-flight generations reading
-    /// a path that no longer exists, and deleting the `lastModelDirectory` target makes the
-    /// idle-timer recovery resurrect a deleted path and fail with a raw framework error.
+    /// Whether `directory` is the resident model or the one a lazy `reloadCurrentModel()` would restore.
+    /// `MLXModelService.deleteModel` consults this before removing files.
     func isModelLoaded(at directory: URL) -> Bool {
         // Path comparison — see `samePath`. A false negative here lets `deleteModel` remove
         // files underneath a resident model.
@@ -176,9 +139,7 @@ actor MLXService {
     /// Task handle for the auto-unload timer.
     private var idleCleanupTask: Task<Void, Never>?
 
-    /// The duration of inactivity before the model is automatically unloaded to save RAM.
-    /// NOTE: this is 2 minutes — earlier comments/log strings claimed 5 minutes while
-    /// the constant said 2; the text now derives from the constant so it can't lie.
+    /// The inactivity duration before the model is automatically unloaded to save RAM.
     private let idleTimeoutNanoseconds: UInt64 = 2 * 60 * 1_000_000_000
 
     /// Human-readable form of the idle timeout for log messages.
@@ -186,10 +147,8 @@ actor MLXService {
         "\(idleTimeoutNanoseconds / 60_000_000_000) minute(s)"
     }
 
+    // Why: the idle timer can fire during actor-reentrancy windows mid-stream and would unload an active model.
     /// Count of in-flight generations (stream tasks between start and finish).
-    /// The idle timer can fire during actor-reentrancy windows mid-stream (the
-    /// lost-cancel race seen in run logs: "idle … Releasing memory" printed, then
-    /// "Idle timer cancelled" from the incoming request, unload proceeded anyway).
     /// Both `handleIdleTimeout` and `unloadModel` refuse while this is non-zero.
     private var activeGenerations = 0
 
@@ -218,11 +177,7 @@ actor MLXService {
         // Cancel any pending unload timer since we are about to use the model (or load a new one)
         cancelIdleTimer()
 
-        // Coalesce concurrent loads: this actor is reentrant across the awaits
-        // below, so two streams lazy-reloading simultaneously would otherwise
-        // both observe `modelContainer == nil` and double-load the full model
-        // (transient 2× RAM + doubled latency). Await any in-flight load first,
-        // then re-check.
+        // Coalesces concurrent loads: the actor is reentrant across the awaits, so two lazy reloads would double-load the model.
         if let inflight = loadInFlight {
             _ = try? await inflight.value
         }
@@ -233,13 +188,7 @@ actor MLXService {
             return
         }
 
-        // Pre-load headroom, logged BEFORE the allocation. Per the standing directive this
-        // is purely descriptive — nothing here refuses a load; the user's configured model
-        // always loads. But the only prior memory line was a `.debug` "Post-Load" pair
-        // emitted AFTER the allocation, so a field report of "the app hangs my Mac" had no
-        // evidence at all. The agent model and the Intelligence Core hold independent
-        // containers with independent idle timers and no shared budget, so both can be
-        // resident at once during a single turn.
+        // Logs pre-load headroom before the allocation; descriptive only, nothing here refuses a load.
         let onDiskBytes = MLXModelService.directorySize(at: directory)
         let hardware = SystemHardwareProfiler.shared.profile
         let fit = ModelFitAdvisor.assess(
@@ -251,23 +200,13 @@ actor MLXService {
 
         logger.notice("Loading MLX model from: \(directory.path)")
 
-        // 1. Clean up previous model to free RAM. FORCED variant: the public
-        // unloadModel() refuses while a generation is in flight, but a container
-        // SWAP here is safe — an in-flight generation holds its own container
-        // reference (stays alive as active memory), and clearing the recycle
-        // cache doesn't touch buffers in use. Using the guarded version logged a
-        // spurious "Refusing model unload" on every lazy reload and skipped the
-        // cache clear on mid-generation model switches (multi-GB retention).
+        // Forced unload of the previous model; a swap is safe mid-generation since in-flight work holds its own container.
         _ = performUnload()
         
         // Publish the in-flight load so concurrent callers await it instead of
         // starting a duplicate load (see coalescing check above).
         let load = Task { () throws -> Void in
-            // mlx-swift-lm 3.x: `loadModelContainer(from:using:)` replaces the old
-            // `loadModelContainer(configuration:)` API. The `using:` parameter is a
-            // `TokenizerLoader` that knows how to build an `MLXLMCommon.Tokenizer`
-            // from the model folder. We inject our own loader (backed by
-            // swift-transformers' `AutoTokenizer`) via `TokenizerBridge`.
+            // Loads the container through `TokenizerBridge`, which backs the framework's `TokenizerLoader` with swift-transformers.
             let container = try await MLXLMCommon.loadModelContainer(
                 from: directory,
                 using: HuggingFaceTokenizerLoader()
@@ -281,12 +220,7 @@ actor MLXService {
             self.logMemoryStats(label: "Post-Load")
         }
         loadInFlight = load
-        // ⚠️ Clear only our OWN handle. Both this caller and one coalesced behind it resume
-        // when the previous load finishes; if the other runs first it installs its own
-        // `loadInFlight` before we get here, and an unconditional nil then wiped a live
-        // load's handle — the next caller saw nil, skipped the coalescing check, and started
-        // a duplicate full-model load. That is exactly the transient 2× RAM this handle
-        // exists to prevent. (`Task` is a struct but `Hashable` on task identity, so `==`.)
+        // Clears only our own `loadInFlight` handle; clearing another caller's handle would allow a duplicate model load.
         defer { if loadInFlight == load { loadInFlight = nil } }
 
         do {
@@ -300,9 +234,7 @@ actor MLXService {
     }
     
     /// Unloads the current model from memory and forces a cache clear.
-    /// Refuses while a generation is in flight — external callers (idle timer,
-    /// conversation switch, settings) must not yank the container mid-stream.
-    /// Internal container swaps during `loadModel` use `performUnload()` directly.
+    /// Refuses while a generation is in flight; `loadModel` swaps containers through `performUnload()` directly.
     /// - Returns: A dictionary containing memory stats (freed bytes, remaining active, remaining cache).
     @discardableResult
     func unloadModel() -> [String: Int] {
@@ -313,11 +245,9 @@ actor MLXService {
         return performUnload()
     }
 
-    /// Unloads the resident model unless it is one of `keep` — the local inference coordinator's
-    /// residency step when a run that needs other models takes the local lock. Refuses, like
-    /// `unloadModel()`, while a generation is in flight.
+    /// Unloads the resident model unless it is one of `keep`; refuses while a generation is in flight.
     /// - Returns: whether a model was unloaded.
-    /// - Parameter reason: who asked (the run taking the lock) — named in the log.
+    /// - Parameter reason: who asked, named in the log.
     @discardableResult
     func unloadModel(unlessResidentIn keep: [URL], reason: String) -> Bool {
         guard let current = currentModelDirectory, modelContainer != nil else {
@@ -460,10 +390,9 @@ actor MLXService {
 
     // MARK: - Model Reload (HITL Recovery)
 
-    /// Reloads the last active model if it was unloaded by the idle timer.
-    /// Used by the ReAct executor to recover after HITL suspension caused an idle-timer unload.
+    /// Reloads the last active model if the idle timer unloaded it, e.g. after a HITL suspension.
     /// No-op if a model is already loaded.
-    /// - Returns: `true` if reload succeeded (or model was already loaded), `false` if no model to reload.
+    /// - Returns: `true` if reload succeeded (or a model was already loaded), `false` if there is no model to reload.
     func reloadCurrentModel() async -> Bool {
         if modelContainer != nil { return true }
 
@@ -485,17 +414,8 @@ actor MLXService {
     // MARK: - Inference
 
     /// Streams a chat response from the loaded model.
-    /// - Parameters:
-    ///   - messages: An array of dictionaries, e.g., `[["role": "user", "content": "Hello"]]`.
-    ///   - maxTokens: The maximum number of new tokens to generate.
-    ///   - temperature: Controls randomness (0.0 = deterministic, 1.0 = creative).
-    ///   - chatTemplateSource: Describes how to obtain the correct chat template for the model.
-    ///     Used when the tokenizer lacks a built-in template. Defaults to `.embedded`.
-    /// - Returns: An async stream of string tokens.
-    /// - Parameter expectedModelDirectory: the model this request was configured for. When
-    ///   supplied, the generation is served by THAT model or it throws — it is never answered
-    ///   by whichever model happens to be resident. Nil preserves the legacy behaviour and
-    ///   logs a warning; see `container(expecting:)`.
+    /// With `expectedModelDirectory` the generation is served by that model or throws; `nil` logs a warning.
+    /// `messages` are role/content dictionaries, `maxTokens` caps new tokens, `chatTemplateSource` supplies the template.
     func streamChat(
         expectedModelDirectory: URL? = nil,
         messages: [[String: String]],
@@ -519,21 +439,12 @@ actor MLXService {
         let promptCacheKey = MLXPromptCache.isEnabled ? MLXPromptCacheScope.key : nil
 
         return AsyncThrowingStream { continuation in
-            // ⚠️ The producer handle MUST be captured and cancelled on termination.
-            // Without this, pressing Stop unwound the consumer while the model kept
-            // decoding on the GPU until EOS / a stop sequence / maxTokens — discarding
-            // every token, holding `activeGenerations > 0` so `unloadModel()` refused,
-            // and making the user's NEXT message decode concurrently with the orphan on
-            // the same GPU at roughly half token rate. The vendored evaluator already
-            // breaks on `Task.isCancelled`; nothing was ever cancelling it.
+            // The producer handle is captured and cancelled on termination so Stop halts decoding and releases `activeGenerations`.
             let producer = Task {
                 activeGenerations += 1
                 defer { activeGenerations -= 1 }
 
-                // Lazy reload: an idle-timer unload between iterations (HITL park,
-                // long tool run) recovers inline instead of failing the request into
-                // the retry classifier — no wasted generation attempt, no error card.
-                // Now identity-checked: see `container(expecting:)`.
+                // Lazy reload: an idle-timer unload between iterations recovers inline, identity-checked by `container(expecting:)`.
                 let container: ModelContainer
                 do {
                     container = try await self.container(expecting: expectedModelDirectory)
@@ -565,28 +476,14 @@ actor MLXService {
                 do {
                     // Use container.perform to safely access the ModelContext (which contains model, processor, tokenizer).
                     let wrappedMessages = UnsafeSendable(messages)
-                    // ⚠️ Bridged ON THE ACTOR, before the perform closure, because the stability
-                    // cache is actor state: equal content must hand the template the SAME
-                    // dictionary instances every render, or the `<tools>` bytes shuffle per call
-                    // (Swift dictionaries iterate in per-INSTANCE order — see BridgedToolsStore).
+                    // Bridged on the actor so equal tool content reuses the same dictionary instances and the `<tools>` bytes stay stable.
                     let wrappedTools = UnsafeSendable(tools.map { self.bridgedToolsStore.stableInstances(for: $0) })
 
-                    // Convert MLX C++ fatal errors (e.g. a VLM shape/broadcast mismatch)
-                    // into a Swift throw instead of `fatalError` crashing the whole app.
-                    // `withError` installs a TASK-LOCAL handler; the internal generation
-                    // `Task` that `MLXLMCommon.generate` spawns is created inside this scope
-                    // and inherits it, so an error raised in the forward pass is recorded and
-                    // rethrown here rather than aborting the process. MUST wrap BOTH the
-                    // perform (where the Task is created) and the consume (where it runs).
+                    // Converts MLX C++ fatal errors into a Swift throw via a task-local `withError` handler.
+                    // Must wrap both the perform and the consume, since the generation task inherits the handler.
                     try await withError {
                     let generation = try await container.perform { context -> (AsyncStream<Generation>, Task<Void, Never>, Int) in
-                        // A. Apply Chat Template & Tokenize
-                        //
-                        // mlx-swift-lm 3.x removed `hasChatTemplate` and the
-                        // `applyChatTemplate(chatTemplate: .literal(...))` overload from its
-                        // `Tokenizer` protocol. Primary path uses the embedded template;
-                        // fallback drops to the bridge's upstream swift-transformers tokenizer
-                        // which still has the richer API needed for literal-template override.
+                        // Applies the chat template and tokenizes: embedded template first, then the bridge's swift-transformers tokenizer.
                         let sendableMessages = wrappedMessages.value.map { $0 as [String: any Sendable] }
                         let mlxTools: [[String: any Sendable]]? = wrappedTools.value
                         let toolCount = mlxTools?.count ?? 0
@@ -596,18 +493,7 @@ actor MLXService {
 
                         let promptTokens: [Int]
 
-                        // ⚠️ KNOWN-CORRUPT TEMPLATE OVERRIDE — checked BEFORE the embedded render,
-                        // because the embedded path reads the template straight out of the
-                        // tokenizer, where the app cannot rewrite it. When the analyzer's extracted
-                        // copy (same bytes, same tokenizer_config.json) carries a corruption the
-                        // register can prove and fix, render via the bridge with the REPAIRED
-                        // template instead. Healthy templates take the embedded path unchanged —
-                        // zero behaviour change unless a repair actually applies.
-                        //
-                        // Why this exists: Qwen2.5-3B-4bit ships a tool-call example with doubled
-                        // braces, and the model dutifully copies it into invalid JSON that the
-                        // framework rejects (silently, before mlx-swift-lm 3.32; see
-                        // ChatTemplateRepair.swift).
+                        // Known-corrupt templates are repaired before the embedded render; healthy templates take the embedded path unchanged.
                         let templateRepair: ChatTemplateRepair.Result? = {
                             guard case .extracted(let raw) = chatTemplateSource else { return nil }
                             let result = ChatTemplateRepair.repair(raw)
@@ -629,11 +515,7 @@ actor MLXService {
                             logger.info("🎯 [Template] repaired-literal render OK — prompt tokens=\(promptTokens.count), tools=\(toolCount)")
                         } else {
                         if templateRepair != nil {
-                            // The repair matched but the tokenizer is not the bridge type, so the
-                            // literal-template API is unreachable. Proceeding with the corrupt
-                            // embedded template is still better than failing the run — but it must
-                            // never be silent, because the discard it causes looks like a model
-                            // fault downstream.
+                            // Repair matched but the tokenizer is not the bridge type; proceeds with the embedded template and logs it loudly.
                             logger.error("[TEMPLATE-REPAIR] Repair matched but tokenizer is \(type(of: context.tokenizer)), not TokenizerBridge — CANNOT apply. CONSEQUENCE: rendering the CORRUPT embedded template; expect the doubled-brace tool-call discard on this model.")
                         }
                         do {
@@ -643,11 +525,8 @@ actor MLXService {
                             )
                             logger.info("🎯 [Template] embedded render OK — prompt tokens=\(promptTokens.count), tools=\(toolCount)")
                         } catch MLXLMCommon.TokenizerError.missingChatTemplate {
-                            // Fallback: tokenizer has no embedded chat template. Drop down to the
-                            // upstream swift-transformers API (exposed via TokenizerBridge.upstream)
-                            // to render using our stored ChatTemplateSource:
-                            //   Layer 1 (.extracted): Raw Jinja from tokenizer_config.json — author's own template.
-                            //   Layer 2 (.familyFallback): Hardcoded template matched to the model's token family.
+                            // No embedded chat template: renders through swift-transformers using the stored `ChatTemplateSource`.
+                            // Layer 1 is the extracted Jinja template; layer 2 is a family fallback.
                             logger.warning("⚠️ [Template] No embedded chat_template — falling back to ChatTemplateSource")
                             guard let bridge = context.tokenizer as? TokenizerBridge else {
                                 logger.error("❌ [Template] Tokenizer is not TokenizerBridge — cannot run fallback")
@@ -656,9 +535,7 @@ actor MLXService {
                                     userInfo: [NSLocalizedDescriptionKey: "Tokenizer fallback path requires TokenizerBridge; got \(type(of: context.tokenizer))."]
                                 )
                             }
-                            // The fallback template is repaired through the same register — an
-                            // extracted template reaching this path carries the same bytes the
-                            // primary path would have repaired.
+                            // The fallback template goes through the same repair register as the primary path.
                             let fallbackRepair = ChatTemplateRepair.repair(Self.resolveFallbackTemplate(from: chatTemplateSource))
                             for fix in fallbackRepair.applied {
                                 logger.warning("[TEMPLATE-REPAIR] Fallback template repaired: \(fix)")
@@ -677,20 +554,8 @@ actor MLXService {
                         }
                         }
                         
-                        // ⚠️ THE ONLY PLACE THE MODEL'S ACTUAL INPUT EXISTS. Everything logged
-                        // upstream is the app's message ARRAY — what we handed to the chat
-                        // template. This is what came OUT of it, and the two are not the same
-                        // document: the template injects the dialect's entire tool scaffolding
-                        // (for Qwen, a `<tools>` block of JSON schemas plus the instructions
-                        // telling the model to answer in `<tool_call>` tags), wraps every turn in
-                        // `<|im_start|>` / `<|im_end|>`, and appends the generation prompt. None
-                        // of that is visible anywhere else, in any log, at any level — yet it is
-                        // the majority of the 861 tokens and it is what the model is actually
-                        // reading when it decides how to format a tool call.
-                        //
-                        // `skipSpecialTokens: false` is load-bearing: the turn markers ARE the
-                        // structure. Decoding without them would show the text while hiding the
-                        // conversation shape, which is the half most likely to be wrong.
+                        // Dumps the final chat-template output, the model's actual input including tool scaffolding and turn markers.
+                        // `skipSpecialTokens: false` is required so the turn markers stay visible.
                         if DGLogger.contentDumpsEnabled {
                             // Explicit `String` annotations — see the GRDB `SQL` note at the
                             // matching dump in CognitiveGeneratorProtocol.swift.
@@ -708,10 +573,7 @@ actor MLXService {
                             repetitionContextSize: repetitionContextSize
                         )
 
-                        // C. Without a cache slot: what `generate(input:parameters:context:)` does
-                        // inside, spelled out to KEEP the task handle. `generate` drops it, so a
-                        // consumer that stopped early could not stop the generation: it decoded on
-                        // to `maxTokens` with nobody reading.
+                        // Without a cache slot: spells out `generate` inside to keep the task handle, so an early stop can cancel decoding.
                         guard let slot = wrappedSlot.value else {
                             let input = LMInput(tokens: MLXArray(promptTokens))
                             let iterator = try TokenIterator(
@@ -726,10 +588,7 @@ actor MLXService {
                             return (stream, task, 0)
                         }
 
-                        // D. With one: feed only what the cache does not already hold. Built from
-                        // `TokenIterator` + `generateTask` (what `generate` does inside) to KEEP the
-                        // task handle: the cache may only be rewound once that task has ended,
-                        // including after an early stop, which `generate` gives no way to observe.
+                        // With a cache slot: feeds only uncached tokens, keeping the task handle so the cache is rewound after the task ends.
                         let preparation = try MLXPromptCache.prepare(
                             slot: slot,
                             promptTokens: promptTokens,
@@ -758,12 +617,7 @@ actor MLXService {
                     #endif
 
                     await self.consumeGenerationStream(stream, into: continuation, stopSequences: stopSequences, reportsDiscardedToolCalls: tools?.isEmpty == false, reusedPromptTokens: reusedTokens, onUsage: onUsage)
-                    // The consumer may have stopped early (stop sequence, circuit breaker, the
-                    // repeated-call guard, Stop). Not reading the stream does NOT stop the
-                    // generation: its task decodes on to `maxTokens` (the 2026-10-06 T2 turn
-                    // tripped the guard and still took 50s). Cancel it, a no-op when it already
-                    // finished, then wait: the cache is settled in `defer`, so nothing else may
-                    // touch it by then.
+                    // The consumer may stop early; unread streams keep decoding, so cancel the task and wait before settling the cache.
                     generationTask.cancel()
                     await generationTask.value
                     generationSucceeded = true
@@ -788,23 +642,9 @@ actor MLXService {
     
     // MARK: - Shared Generation Consumer
 
-    /// Consumes an MLX generation stream into `continuation`, applying the two safety
-    /// layers a ReAct loop depends on. Shared by `streamChat` and `streamVisionChat`
-    /// so an agent gets IDENTICAL protection whether or not its turn carries an image
-    /// — previously the vision path had neither, and a small quantized VLM would run a
-    /// repetition loop straight to `maxTokens` with no circuit breaker to stop it.
-    ///
-    ///   Layer 1 — custom stop sequences (multi-token, chunk-boundary safe).
-    ///   Layer 2 — `StreamingCircuitBreaker` (kills pathological repetition).
-    ///
-    /// Also forwards native `.toolCall` events in the app's envelope, and the raw text of
-    /// `.rejectedToolCall` events as ordinary output. On the vision path these are rare (tools are
-    /// prompted as text there), but forwarding them removes a silent drop rather than swallowing a
-    /// real tool call.
-    ///
-    /// Does NOT finish the continuation — the caller owns success/error termination.
-    /// Internal (not private) so tests can drive it with a real `Generation` stream — the only way
-    /// to prove a framework-decoded call survives the trip from MLXLMCommon to the parse pipeline.
+    /// Consumes an MLX generation stream into `continuation` with stop sequences and a `StreamingCircuitBreaker`.
+    /// Forwards native `.toolCall` events in the app's envelope and rejected calls as text; does not finish the continuation.
+    /// Shared by `streamChat` and `streamVisionChat`; internal so tests can drive it.
     func consumeGenerationStream(
         _ stream: AsyncStream<Generation>,
         into continuation: AsyncThrowingStream<String, Error>.Continuation,
@@ -832,24 +672,14 @@ actor MLXService {
         var yieldedChars = 0
         var toolCallCount = 0
         var rejectedCallCount = 0
-        // ⚠️ SPLIT BY EVENT KIND. `chunkCount` counts every event the stream yields — text, tool
-        // calls AND the terminal `.info` completion — so "1 chunk consumed" could mean an empty
-        // text chunk OR just the completion event with no generation at all. Those are different
-        // diagnoses (swallowed output vs the model emitting immediate EOS), and the first field
-        // report needed exactly that distinction.
+        // Counted by event kind: `chunkCount` includes the completion event, so it cannot distinguish empty text from no output.
         var textChunkCount = 0
         var infoEventCount = 0
-        // ⚠️ THE DISCRIMINATOR. Event counts ALONE cannot tell "the model emitted nothing" from
-        // "the model emitted plenty and the framework threw it away" — both arrive here as
-        // textChunks=0, toolCalls=0, infoEvents=1. The completion event carries the framework's own
-        // token counts, which settle it outright, and this method used to read that event for usage
-        // and then discard it. Keeping it is what stops the empty-output log from GUESSING.
+        // Keeps the completion event: its token counts distinguish an empty model output from one the framework discarded.
         var lastInfo: GenerateCompletionInfo?
 
         for await generation in stream {
-            // The vendored evaluator's own `Task.isCancelled` check only fires between
-            // token batches; this is the consumer-side stop, so an abandoned generation
-            // releases the container promptly instead of running to EOS.
+            // Consumer-side stop: the evaluator checks cancellation only between token batches, so release the container here.
             if Task.isCancelled {
                 logger.notice("[MLX-LOAD] Generation cancelled by consumer after \(chunkCount) chunk(s) — releasing the container instead of decoding to EOS.")
                 break
@@ -906,10 +736,7 @@ actor MLXService {
                     trailingWindow = ""
                 }
 
-                // The framework already decoded this call. It travels to the parse pipeline in the
-                // app's own envelope, which `CognitiveParsePipeline` decodes before any dialect
-                // parser runs. It used to be a bare JSON object every dialect parser had to find by
-                // shape, and their fallbacks kept only the first: 3 framework calls ran as 1.
+                // The framework already decoded this call; it is forwarded in `FrameworkToolCallEnvelope` for `CognitiveParsePipeline`.
                 let argsDict: [String: Any] = toolCall.function.arguments.mapValues { $0.anyValue }
                 if let envelope = FrameworkToolCallEnvelope.encode(name: toolCall.function.name, arguments: argsDict) {
                     // The envelope is sorted-keys JSON, so identical calls are identical strings.
@@ -932,18 +759,8 @@ actor MLXService {
                     trailingWindow = ""
                 }
 
-                // ⚠️ THIS USED TO BE A SILENT DROP. Up to mlx-swift-lm 3.31 the framework threw away
-                // a call it could not parse (`parameters` for `arguments`, doubled braces, a raw
-                // newline in a string, a call cut off at EOS) and emitted nothing: 76 tokens in,
-                // 0 out, three times in a row on one prompt (2026-10-06). From 3.32 it reports the
-                // rejection with the raw text. That text goes to the app's own parse pipeline as
-                // ordinary output: its parsers repair more than the framework's, and when they
-                // can't, the correction tells the model what was wrong with what it actually wrote.
-                // An undeclared tool arrives here too; the pipeline's unknown-tool feedback names it.
-                //
-                // The preview is bounded (head + tail, 32 KB by default). A truncated one is missing
-                // its middle, will not parse, and fails as malformed — the honest outcome. The raw
-                // text is NOT logged: the framework warns it can carry sensitive argument values.
+                // Forwards a rejected call's raw text as ordinary output so the app's parsers can repair it or report what was wrong.
+                // The preview is bounded (head and tail) and the raw text is not logged, since it can carry sensitive argument values.
                 let raw = rejection.rawTextPreview
                 let shape = "reason=\(rejection.reason.rawValue), format=\(rejection.format), "
                     + "tool=\(rejection.toolName ?? "unrecovered"), \(rejection.rawTextByteCount) bytes"
@@ -965,11 +782,7 @@ actor MLXService {
             case .info(let info):
                 infoEventCount += 1
                 lastInfo = info
-                // Terminal completion event: EXACT prompt/generation token counts from
-                // mlx-swift-lm. Surfaced so MLX reports real usage instead of the chars/4
-                // estimate. Fires only on natural completion — an early stop-sequence or
-                // circuit-breaker exit breaks the loop before this event, and callers then
-                // fall back to the estimate (documented at the `onUsage` call sites).
+                // Terminal completion event: exact token counts; early stops skip it and callers fall back to the estimate.
                 onUsage?(TokenUsage(inputTokens: info.promptTokenCount + reusedPromptTokens, outputTokens: info.generationTokenCount, isEstimated: false))
             }
 
@@ -978,9 +791,7 @@ actor MLXService {
 
         // Post-loop cleanup
         if let repeatedCallStop {
-            // The model is NOT told (owner decision 2026-10-06): the copies withheld here are ones
-            // the executor would have collapsed anyway, so the turn runs exactly the calls it would
-            // have run, and the executor's own loop breakers still watch for repeats across turns.
+            // The model is not told: the withheld copies would have been collapsed by the executor anyway.
             logger.warning("[MLX-GEN] Generation stopped: \(repeatedCallStop). CONSEQUENCE: that copy and everything after it are dropped; the \(toolCallCount) call(s) and \(rejectedCallCount) rejected call(s) already forwarded go to the parse pipeline as usual, and the turn is not told it was cut. Token counts for this call are estimated (the framework's completion event never arrives after an early stop).")
         } else if circuitBreaker.hasTripped {
             logger.info("Circuit breaker terminated generation after \(circuitBreaker.accumulatedText.count) chars")
@@ -989,15 +800,7 @@ actor MLXService {
             yieldedChars += trailingWindow.count
         }
 
-        // ⚠️ MAKE "EMPTY RESPONSE" EXPLICABLE. The generators throw "Empty response from model" when
-        // nothing was yielded, and that error says nothing about WHY — the log could not
-        // distinguish "the model emitted zero tokens" from "tokens were produced and swallowed"
-        // (by a stop sequence at position 0, the circuit breaker, or a tool call the framework
-        // parsed and dropped). A field report showed five of these in a row with 2.4-9.4s of
-        // generation each, which is not the signature of a model emitting nothing, and there was
-        // no way to tell from the log which it was. Yielded-chars is the discriminator.
-        // Framework-reported facts, when the completion event arrived. `generated` is the ONLY
-        // thing that separates the two very different failures below.
+        // Makes an empty response explicable: reports framework-reported token counts, since yielded chars alone cannot say why.
         let generated = lastInfo?.generationTokenCount
         let stopReason = lastInfo.map { String(describing: $0.stopReason) } ?? "unknown"
         let timing = lastInfo.map {
@@ -1008,20 +811,8 @@ actor MLXService {
         } ?? "timings unavailable"
 
         if yieldedChars == 0 {
-            // ⚠️ DO NOT INFER THE VERDICT FROM EVENT COUNTS. An earlier version of this log declared
-            // "the model generated NOTHING (immediate EOS)" purely because textChunks==0 &&
-            // toolCalls==0, and sent the operator to the sampling settings on that basis. Those
-            // counters are ALSO what a swallowed generation looks like:
-            //
-            //   MLXLMCommon.ToolCallProcessor buffers every chunk from `<tool_call>` onward and
-            //   returns nil while collecting. If the closing `</tool_call>` never arrives, or the
-            //   JSON between the tags fails to decode as ToolCall.Function (which requires exactly
-            //   `name` + `arguments` — a model writing `parameters` fails it), then `processEOS()`
-            //   parses the buffer, finds no tool call, and `onGenerationEnd` emits ONLY tool calls.
-            //   The buffered TEXT is dropped on the floor. Nothing is logged by the framework.
-            //
-            // The completion event's generationTokenCount tells the two apart with certainty, so
-            // this branches on evidence instead of asserting the more convenient explanation.
+            // Branches on the framework's `generationTokenCount`, not on event counts, to tell an empty output from a swallowed one.
+            // `ToolCallProcessor` buffers from `<tool_call>` onward and drops the text if the call fails to decode, logging nothing.
             let verdict: String
             switch generated {
             case .none:
@@ -1053,11 +844,7 @@ actor MLXService {
             // event is expected. Not the cancellation/fault case below.
             logger.notice("[MLX-GEN] Generation stopped early by \(repeatedCallStop != nil ? "the repeated-call guard" : circuitBreaker.hasTripped ? "the text-repetition breaker" : "a stop sequence") — \(yieldedChars) chars yielded | textChunks=\(textChunkCount) toolCalls=\(toolCallCount) rejectedCalls=\(rejectedCallCount). CONSEQUENCE: token counts and timings for this call are unavailable, so usage is estimated.")
         } else if infoEventCount == 0 {
-            // Text WAS yielded but the framework's terminal `.info` event never arrived — the
-            // stream ended before completing. On-device this is the teardown shape: the consumer
-            // was cancelled mid-generation (Stop, node timeout, or per-node skip) and the yielded
-            // text is a PARTIAL that goes nowhere. Logging it as a plain "complete" with
-            // "unknown" counts read as a diagnostic dead-end (observed 2026-08-22).
+            // Text was yielded but no completion event arrived: the consumer was cancelled mid-generation and the text is partial.
             logger.notice("[MLX-GEN] Generation ended WITHOUT a completion event — \(yieldedChars) chars yielded then the stream stopped (Task.isCancelled=\(Task.isCancelled)) | textChunks=\(textChunkCount) toolCalls=\(toolCallCount), stopSequenceHit=\(stopDetected). CONSEQUENCE: token counts and timings are unavailable and the yielded text is PARTIAL — cancelled mid-generation (Stop / node timeout / per-node skip) if isCancelled is true, otherwise a framework fault worth reporting.")
         } else {
             logger.debug("[MLX-GEN] Generation complete — \(yieldedChars) chars yielded, generatedTokens=\(generated.map(String.init) ?? "unknown") stopReason=\(stopReason), \(timing) | textChunks=\(textChunkCount) toolCalls=\(toolCallCount) rejectedCalls=\(rejectedCallCount) infoEvents=\(infoEventCount), stopSequenceHit=\(stopDetected).")
@@ -1066,26 +853,9 @@ actor MLXService {
 
     // MARK: - Vision Inference
 
-    /// Streams a VISION chat response. Uses the SAME loaded `modelContainer` as
-    /// `streamChat` (the registry already loaded it via the VLM factory for a vision
-    /// `model_type`), but routes through the model's `UserInputProcessor` so attached
-    /// images are encoded into the prompt — the processor inserts the per-family image
-    /// tokens automatically, so we never hand-place placeholders.
-    ///
-    /// `imageData` are raw image bytes; `CIImage` is constructed inside `perform` (off
-    /// the actor's Sendable path) and attached to the LAST user turn.
-    ///
-    /// Generation runs through the SAME safety consumer as `streamChat` — stop
-    /// sequences + circuit breaker + repetition penalty — because an image-bearing
-    /// turn on the AGENT path still runs a full ReAct loop over a small quantized VLM,
-    /// exactly the population those layers protect. (The one text-path layer that does
-    /// NOT apply here is the `applyChatTemplate` two-tier fallback: the VLM's own
-    /// `UserInputProcessor` owns templating on this path, so there is no
-    /// `ChatTemplateSource` to fall back through.)
-    /// - Parameter expectedModelDirectory: the model this request was configured for. When
-    ///   supplied, the generation is served by THAT model or it throws — it is never answered
-    ///   by whichever model happens to be resident. Nil preserves the legacy behaviour and
-    ///   logs a warning; see `container(expecting:)`.
+    /// Streams a vision chat response through the model's `UserInputProcessor`, attaching `imageData` to the last user turn.
+    /// Uses the same container and safety consumer as `streamChat`; the processor owns templating.
+    /// `expectedModelDirectory` behaves as in `streamChat`.
     func streamVisionChat(
         expectedModelDirectory: URL? = nil,
         messages: [[String: String]],
@@ -1102,21 +872,12 @@ actor MLXService {
         cancelIdleTimer()
 
         return AsyncThrowingStream { continuation in
-            // ⚠️ The producer handle MUST be captured and cancelled on termination.
-            // Without this, pressing Stop unwound the consumer while the model kept
-            // decoding on the GPU until EOS / a stop sequence / maxTokens — discarding
-            // every token, holding `activeGenerations > 0` so `unloadModel()` refused,
-            // and making the user's NEXT message decode concurrently with the orphan on
-            // the same GPU at roughly half token rate. The vendored evaluator already
-            // breaks on `Task.isCancelled`; nothing was ever cancelling it.
+            // The producer handle is captured and cancelled on termination so Stop halts decoding and releases `activeGenerations`.
             let producer = Task {
                 activeGenerations += 1
                 defer { activeGenerations -= 1 }
 
-                // Lazy reload: an idle-timer unload between iterations (HITL park,
-                // long tool run) recovers inline instead of failing the request into
-                // the retry classifier — no wasted generation attempt, no error card.
-                // Now identity-checked: see `container(expecting:)`.
+                // Lazy reload: an idle-timer unload between iterations recovers inline, identity-checked by `container(expecting:)`.
                 let container: ModelContainer
                 do {
                     container = try await self.container(expecting: expectedModelDirectory)
@@ -1131,22 +892,12 @@ actor MLXService {
                     let wrappedMessages = UnsafeSendable(messages)
                     let wrappedData = UnsafeSendable(imageData)
 
-                    // Convert MLX C++ fatal errors (e.g. a VLM shape/broadcast mismatch)
-                    // into a Swift throw instead of `fatalError` crashing the whole app.
-                    // `withError` installs a TASK-LOCAL handler; the internal generation
-                    // `Task` that `MLXLMCommon.generate` spawns is created inside this scope
-                    // and inherits it, so an error raised in the forward pass is recorded and
-                    // rethrown here rather than aborting the process. MUST wrap BOTH the
-                    // perform (where the Task is created) and the consume (where it runs).
+                    // Converts MLX C++ fatal errors into a Swift throw via a task-local `withError` handler.
+                    // Must wrap both the perform and the consume, since the generation task inherits the handler.
                     try await withError {
                     let (stream, generationTask) = try await container.perform { context -> (AsyncStream<Generation>, Task<Void, Never>) in
-                        // Decode raw bytes → CIImage → UserInput.Image inside the closure.
-                        // Mirror the reference mlx-swift-lm apps: hand the VLM a CGImage-backed
-                        // image (materialized pixel buffer + finite [0,0,w,h] extent) rather than a
-                        // bare CIImage(data:), so the shared MLXVLM.asMLXArray derives its array
-                        // shape from a concrete extent. Each image is logged with extent/bytes/
-                        // colorspace; an undecodable slot is logged as DROPPED so a later
-                        // placeholder/feature-count divergence is traceable to a lost image.
+                        // Decodes raw bytes to a CGImage-backed `UserInput.Image` so the VLM gets a concrete pixel extent.
+                        // An undecodable slot is logged as dropped.
                         let images: [UserInput.Image] = wrappedData.value.enumerated().compactMap { (idx, data) in
                             Self.decodeVisionImage(data, index: idx, logger: self.logger)
                         }
@@ -1154,11 +905,7 @@ actor MLXService {
                             self.logger.error("[VISION] decoded \(images.count)/\(wrappedData.value.count) image(s); \(wrappedData.value.count - images.count) DROPPED — prompt placeholders will outnumber vision features downstream")
                         }
 
-                        // Rebuild the chat, attaching the images to the final user turn.
-                        // Fall back to the last message when NO user turn exists — the
-                        // previous `i == lastUserIdx` with an `Int?` compared every index
-                        // to nil, which is always false, so a malformed (system-only /
-                        // assistant-terminated) array dropped every image silently.
+                        // Rebuilds the chat with the images on the final user turn, or on the last message when there is no user turn.
                         let msgs = wrappedMessages.value
                         let userIdx = msgs.lastIndex(where: { $0["role"] == "user" })
                         if userIdx == nil, !images.isEmpty {
@@ -1178,15 +925,7 @@ actor MLXService {
 
                         let userInput = UserInput(chat: chat)
 
-                        // [VISION] Instrumentation around the crash-prone hop. The MLX vision
-                        // runtime does NOT reproduce this crash from an isolated harness (verified:
-                        // every image size/format/multi-image case either succeeds or throws
-                        // catchably), so the app must self-report enough to pin the trigger on a
-                        // real crash. A hard crash BETWEEN the PRE and POST lines localizes the
-                        // fault to `processor.prepare`; a crash after "starting forward" with no
-                        // token output localizes it to the first `generate` eval. `visionFeatures`
-                        // (the pixel-tensor leading dim) vs `promptTokens` lets us spot a
-                        // placeholder↔feature count divergence — the documented VLM failure family.
+                        // Logs memory and shape around the crash-prone processor hop so a hard crash can be localized.
                         let activeBefore = MLX.Memory.activeMemory
                         let cacheBefore = MLX.Memory.cacheMemory
                         self.logger.info("[VISION] prepare PRE — images=\(images.count), MLX active=\(ByteCountFormatter.string(fromByteCount: Int64(activeBefore), countStyle: .memory)), cache=\(ByteCountFormatter.string(fromByteCount: Int64(cacheBefore), countStyle: .memory))")
@@ -1196,25 +935,8 @@ actor MLXService {
                         let activeAfter = MLX.Memory.activeMemory
                         self.logger.info("[VISION] prepare POST — promptTokens=\(promptLen), visionFeatures(pixels)=\(pixShape), MLX active=\(ByteCountFormatter.string(fromByteCount: Int64(activeAfter), countStyle: .memory)) (Δ=\(ByteCountFormatter.string(fromByteCount: Int64(activeAfter) - Int64(activeBefore), countStyle: .memory)))")
 
-                        // ⚠️ ROOT-CAUSE FIX (reproduced on-device 2026-07-22): drop the library
-                        // repetition penalty on the VISION path. mlx-swift-lm 3.31.3's
-                        // `RepetitionContext.TokenRing.loadPrompt` reads `prompt.dim(0)`, but every
-                        // VLM `UserInputProcessor` builds `LMInput.text.tokens` as 2-D `[1, seqLen]`
-                        // (`MLXArray(promptTokens).expandedDimensions(axis: 0)`). So `dim(0)` is the
-                        // BATCH dim (1), not `seqLen`; the guard `n <= capacity` mis-fires and the
-                        // ring buffer is built as `[seqLen + repCtx - 1]` instead of `[repCtx]`. The
-                        // first `didSample → append` then evaluates
-                        // `MLX.where(positions[repCtx], token, buffer[seqLen+repCtx-1])` →
-                        // `Fatal error: [broadcast_shapes] Shapes (repCtx) and (seqLen+repCtx-1)` —
-                        // the exact reported crash (repCtx=25 → the "(25)"; the other number is
-                        // promptTokens+24). Under MLX lazy eval the corrupted shape can instead
-                        // surface downstream as an uncatchable `Index out of range` 0-dim slice
-                        // (MLXArray+Indexing.swift:551) — hence "crashed two ways across runs". The
-                        // TEXT path passes 1-D tokens so `dim(0) == seqLen` and is unaffected.
-                        // We can't durably patch the vendored checkout (lost on SPM re-resolve), so
-                        // we disable the penalty here. Runaway repetition on this small-quantized-VLM
-                        // population is still bounded by the StreamingCircuitBreaker + stop sequences
-                        // in `consumeGenerationStream` (added for exactly this reason).
+                        // Drops the library repetition penalty on the vision path: its ring buffer mis-sizes on 2-D token arrays and crashes.
+                        // Runaway repetition is still bounded by the circuit breaker and stop sequences in `consumeGenerationStream`.
                         if let rp = repetitionPenalty, rp != 0 {
                             self.logger.warning("[VISION] dropping repetitionPenalty=\(rp) on the MLX vision path — mlx-swift-lm 3.31.3 RepetitionContext broadcast-crashes on 2-D VLM prompts; circuit breaker + stop sequences still bound repetition")
                         }
@@ -1267,17 +989,8 @@ actor MLXService {
     /// `container.perform` closure can reach it without hopping the actor.
     private nonisolated static let visionDecodeContext = CIContext(options: nil)
 
-    /// Decodes raw image bytes into a `UserInput.Image` for the VLM processor.
-    ///
-    /// The reference mlx-swift-lm apps feed a VLM a file URL (decoded via
-    /// `CIImage(contentsOf:)`) or a CGImage-backed image — never a bare
-    /// `CIImage(data:)`. We mirror that: rendering the decoded image through a
-    /// CGImage guarantees the `CIImage` handed to the shared
-    /// `MLXVLM.MediaProcessing` pipeline carries a materialized pixel buffer and a
-    /// concrete, finite `[0,0,w,h]` extent — the value `asMLXArray` reads to derive
-    /// the array shape. Falls back to the raw `CIImage(data:)` when a CGImage can't
-    /// be produced, and returns `nil` (logging the consequence) when the bytes can't
-    /// be decoded at all — a dropped image the caller must account for.
+    /// Decodes raw image bytes into a `UserInput.Image` for the VLM processor, rendered through a CGImage.
+    /// Falls back to `CIImage(data:)` if no CGImage can be made; returns `nil` (and logs) when the bytes cannot be decoded.
     private nonisolated static func decodeVisionImage(
         _ data: Data, index: Int, logger: DGLogger
     ) -> UserInput.Image? {
@@ -1301,18 +1014,11 @@ actor MLXService {
 
     // MARK: - Sendable Bridge
 
-    // Tool-schema bridging + the instance-stability cache live in `BridgedToolsStore` —
-    // including the measured proof of WHY it must be an instance cache and not key sorting.
-
     // MARK: - Fallback Chat Templates (Two-Layer Strategy)
 
-    /// Resolves the correct fallback Jinja template from the stored `ChatTemplateSource`.
-    ///
-    /// - Layer 1 (`.extracted`): Returns the raw Jinja string read from `tokenizer_config.json`
-    ///   during model analysis — the model author's own template, most accurate.
-    /// - Layer 2 (`.familyFallback`): Returns a hardcoded template matched to the model's
-    ///   token vocabulary family (ChatML, Llama 3, Mistral Tekken, etc.).
-    /// - `.embedded`: Should never reach here (tokenizer handles it), but falls back to ChatML.
+    /// Resolves the fallback Jinja template from the stored `ChatTemplateSource`.
+    /// `.extracted` returns the model author's template, `.familyFallback` a template for the token family,
+    /// and `.embedded` should not reach here but falls back to ChatML.
     private static func resolveFallbackTemplate(from source: ChatTemplateSource) -> String {
         switch source {
         case .extracted(let rawJinja):
@@ -1502,19 +1208,14 @@ actor MLXService {
     
     /// The action to perform when the timer fires.
     private func handleIdleTimeout() async {
-        // Never unload under an in-flight generation. The timer can fire during
-        // an actor-reentrancy window mid-stream — run-1 logs showed the unload
-        // proceeding even though the incoming request's cancel had arrived.
+        // Never unload under an in-flight generation; the timer can fire during an actor-reentrancy window mid-stream.
         guard activeGenerations == 0 else {
             logger.notice("Idle timeout while \(self.activeGenerations) generation(s) in flight — keeping model, re-arming timer.")
             startIdleTimer()
             return
         }
 
-        // Parked-HITL runs: unloading is DESIRED (frees 4-6GB while the user
-        // decides at the banner); the lazy reload at generation entry recovers
-        // on resume without a failed attempt. The check only selects the log
-        // message so testers can tell the two cases apart — both paths unload.
+        // A parked HITL run wants the unload to free memory; the check only selects the log message.
         if await ExecutionSuspensionService.shared.hasPendingSuspensions() {
             logger.notice("MLX idle timeout during a parked HITL request — releasing memory; the model lazy-reloads when the run resumes.")
         } else {

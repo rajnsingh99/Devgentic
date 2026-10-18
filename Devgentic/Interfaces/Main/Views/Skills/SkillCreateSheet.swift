@@ -4,23 +4,7 @@
 //  SkillCreateSheet.swift
 //  Devgentic
 //
-//  Writing a skill in the app instead of importing one.
-//
-//  ## Draft is the default, and that is a safety decision rather than a convenience
-//
-//  A skill is a ROUTING entry: the moment it exists and is linked, its description is rendered into
-//  `<available_skills>` and the model starts matching tasks against it. A half-written skill that is
-//  already live routes work to instructions that are not finished yet — and the author is the last
-//  person to notice, because they are still typing.
-//
-//  So "Save as draft" is the primary action. `Create` is there for someone who knows the skill is
-//  complete, and the difference is one click either way.
-//
-//  ⚠️ This is also why there is no `create_skill` TOOL. A new skill is a new ROUTING entry, and
-//  liveness is decided by `SkillSD.isDraft` plus each profile's `SkillSelection.isEnabled` — neither
-//  of which an agent can set. An agent-authored skill would be a routing entry no person reviewed.
-//  Creation stays a human act; `update_skill` can only revise a skill someone already marked
-//  writable.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -28,6 +12,9 @@ import AppKit
 
 private let logger = DGLogger(category: "SkillCreateSheet")
 
+/// Sheet for writing a skill in the app instead of importing one; Save as Draft is the primary action.
+/// A skill is a routing entry once linked, so a draft stays out of `<available_skills>` until the
+/// author marks it complete.
 struct SkillCreateSheet: View {
 
     /// Called after the skill is created, so the library re-reads.
@@ -45,11 +32,8 @@ struct SkillCreateSheet: View {
     // MARK: - Validation
 
     /// Why the name is not acceptable yet, or nil.
-    ///
-    /// ⚠️ Runs the SAME `validateSkillNameShape` the importer does, rather than a second regex that
-    /// agrees with it today. The charset it enforces — lowercase letters, digits and hyphens — is
-    /// what makes `/`, `.` and `..` unrepresentable in a name, and a name reaches a filesystem path
-    /// on export. Two copies of that rule is one copy too many.
+    /// Runs the importer's `validateSkillNameShape`; its charset keeps `/`, `.` and `..` out of a name that
+    /// reaches a path on export.
     private var nameProblem: String? {
         guard !name.isEmpty else { return nil }
         do { try SkillFolderScanner.validateSkillNameShape(name); return nil }
@@ -462,9 +446,7 @@ struct SkillCreateSheet: View {
             }
             .keyboardShortcut(.cancelAction)
 
-            // ⚠️ Draft FIRST and unaccented. A skill is a routing entry the moment it is linked, so
-            // the safe action is the one that does not put unfinished instructions in front of the
-            // model.
+            // Draft first and unaccented: a skill is a routing entry once linked, so the safe action is the draft.
             TactileButton(
                 title: "Save as Draft",
                 icon: "pencil.and.ruler",
@@ -507,18 +489,11 @@ struct SkillCreateSheet: View {
                 refused.append("\(url.lastPathComponent) — it could not be read")
                 continue
             }
-            // ⚠️ Flat by default. A picker gives no directory context, and inventing one (guessing
-            // `scripts/` from a .sh extension, say) would put the file somewhere the author's own
-            // instructions do not reference.
-            //
-            // ⚠️ AND IT IS NOT EDITABLE LATER — the detail sheet renders file paths as static text. An
-            // earlier version of this comment promised it was, which is the kind of reassurance that
-            // sends someone down a path with no exit. Re-import the skill to change its file layout.
+            // The file layout is flat: a picker gives no directory context, and the detail sheet shows paths as
+            // static text. Re-import the skill to change its file layout.
             let relativePath = url.lastPathComponent
-            // ⚠️⚠️ BOTH REFUSALS USED TO BE A BARE `continue`. Because the layout is FLAT, picking
-            // `docs/README.md` and `examples/README.md` in one pass silently kept one and dropped
-            // the other — and the file layout cannot be edited afterwards, so the user had no way
-            // to notice or repair it. Say which, and why.
+            // Refusals are reported with the file and reason: the flat layout makes same-named files collide, and
+            // the layout cannot be edited later.
             guard SkillIngest.isSafeRelativePath(relativePath) else {
                 refused.append("\(relativePath) — its name is not usable as a file path")
                 continue

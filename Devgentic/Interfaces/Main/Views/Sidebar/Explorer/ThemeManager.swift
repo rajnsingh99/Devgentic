@@ -4,7 +4,7 @@
 //  ThemeManager.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 25/07/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -180,17 +180,12 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
 
 // MARK: - Theme Manager
 
-/// A class that manages the application's themes.
-///
-/// This `ObservableObject` is responsible for:
-/// - Holding the list of all available themes.
-/// - Keeping track of the currently active theme.
-/// - Persisting the user's theme choice to `UserDefaults`.
-/// - Applying a new theme and ensuring the UI updates reactively.
-/// - Managing the per-component Code Viewer theme override.
+/// Manages the application's themes: the available list, the active theme and its persistence to
+/// `UserDefaults`. Applies a new theme reactively and manages the per-component Code Viewer theme
+/// override.
 @Observable final class ThemeManager {
 
-    /// The key used to store the selected theme's ID in UserDefaults.
+    /// The UserDefaults key for the selected theme's ID.
     private static let selectedThemeKey = "selectedThemeID"
     private static let codeViewerThemeKey = "codeViewerThemeOverride"
     private static let accentColorKey = "selectedAccentColor"
@@ -242,9 +237,8 @@ enum ChatFontFamily: String, CaseIterable, Identifiable {
         .system(size: size ?? chatFontSize, weight: weight, design: chatFontFamily.design)
     }
 
-    /// ⚠️ COMPUTED and routed through `TestHost.defaults`, not `UserDefaults.standard`.
-    /// Under XCTest, writes and reads are redirected to an isolated in-memory test suite so
-    /// test runs never overwrite the developer's real machine settings.
+    /// Computed and routed through `TestHost.defaults`; under XCTest reads and writes go to an isolated
+    /// suite so tests never touch real settings.
     private static var defaults: UserDefaults { TestHost.defaults }
     private var defaults: UserDefaults { Self.defaults }
 

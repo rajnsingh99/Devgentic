@@ -4,20 +4,7 @@
 //  GraniteLegacyParser.swift
 //  Devgentic
 //
-//  Phase 5 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.graniteLegacyArray` dialect (IBM Granite 3.0 / 3.1 / 3.2 / 3.3).
-//
-//  Covers both sub-variants:
-//    - Granite 3.0: `<|tool_call|>[{...}, ...]<|end_of_text|>` (ASCII pipes)
-//    - Granite 3.1+: `<tool_call>[{...}, ...]` (no pipes)
-//
-//  Both emit a JSON array of `{name, arguments}` objects — we accept either marker.
-//
-//  Drift tolerated:
-//   - `tool_name` alias for `name`
-//   - `parameters` alias for `arguments`
-//   - Python literals in args (True/False/None → true/false/null)
-//   - Missing closing `</tool_call>` or `<|end_of_text|>`
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -25,6 +12,9 @@ import OSLog
 
 private let logger = DGLogger(category: "GraniteLegacyParser")
 
+/// Primary parser for the `.graniteLegacyArray` dialect (IBM Granite 3.0–3.3): a JSON array of `{name,
+/// arguments}` objects after `<|tool_call|>` (3.0) or `<tool_call>` (3.1+). Tolerates `tool_name` /
+/// `parameters` aliases, Python literals in args and a missing closing marker.
 struct GraniteLegacyParser: CognitiveParserProtocol {
 
     private struct ToolCallObject: Decodable {
@@ -116,13 +106,10 @@ struct GraniteLegacyParser: CognitiveParserProtocol {
         BalancedJSONScanner.balancedRange(in: text, from: startingAt, opener: "[")
     }
 
-    /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    // Why: whole-payload regexes also rewrote file content in `write_file` arguments (real trailing commas,
+    // `Double.NaN`); see `JSONStructuralSanitizer`
+    /// Repairs trailing commas and Python literals in the model's JSON, delegating to the shared sanitizer so the
+    /// repair happens outside string values only.
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }

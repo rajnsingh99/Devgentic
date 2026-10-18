@@ -4,26 +4,14 @@
 //  OrbAudioRepair.swift
 //  Devgentic
 //
-//  Restarts CoreAudio's daemon — the documented fix for an app-wide dead microphone.
-//
-//  WHY THIS EXISTS IN THE APP AT ALL. `coreaudiod` can be left in a state where every
-//  `AVAudioEngine` start fails with `-10877` / `_StartIO error 35` AND speech synthesis produces
-//  zero-byte buffers, and it SURVIVES relaunching the app — so nothing the app does on its own
-//  recovers. It was hit on 2026-07-18 and again on 2026-09-04. The only fix is restarting the
-//  daemon, which needs root, which means the user either opens Terminal or the app offers it.
-//  A voice feature whose documented failure mode is silence should not require a terminal.
-//
-//  ⚠️ SAFETY. The command is a FIXED LITERAL. Nothing from a transcript, a model, a tool result
-//  or any other dynamic source reaches it, and it takes no parameters — there is deliberately no
-//  code path that builds this string. `coreaudiod` is launchd-managed and restarts immediately;
-//  the cost is roughly a second of silence in every app, and no data is touched.
-//
-//  ⚠️ The administrator prompt is macOS's own and cannot be suppressed. It is shown only after
-//  the user has confirmed our own dialog, so the system prompt is never the first thing they see.
+//  Created by Raj Singh.
 //
 
 import AppKit
 
+/// Restarts CoreAudio's daemon, the documented fix for an app-wide dead microphone that survives relaunching the
+/// app. The command is a fixed literal that takes no parameters, and the macOS administrator prompt appears only
+/// after the user confirms the app's own dialog.
 enum OrbAudioRepair {
 
     /// The one command. A `static let` literal, never composed.
@@ -62,11 +50,8 @@ enum OrbAudioRepair {
         logger.notice("[ORB_AUDIO]\(tag) Restarting coreaudiod at the user's request. CONSEQUENCE: all audio output stops for about a second while launchd restarts the daemon.")
 
         var errorInfo: NSDictionary?
-        // ⚠️ Optional-chaining this was a lie in the log. If `NSAppleScript(source:)` returned nil
-        // the script never ran, `errorInfo` stayed nil, and the function fell through to the
-        // success notice and returned `.repaired` — telling the user their audio was repaired
-        // while nothing had executed, which sends them back to a still-dead microphone believing
-        // the remedy is exhausted.
+        // Do not optional-chain: if `NSAppleScript(source:)` returns nil nothing ran, and falling through would report
+        // `.repaired`.
         guard let script = NSAppleScript(source: "do shell script \"\(command)\" with administrator privileges") else {
             logger.error("[ORB_AUDIO]\(tag) Could not build the repair script — NSAppleScript(source:) returned nil. CONSEQUENCE: coreaudiod was NOT restarted and the microphone is still dead; the user must run `sudo killall coreaudiod` in Terminal.")
             return .failed("The repair script could not be created.")

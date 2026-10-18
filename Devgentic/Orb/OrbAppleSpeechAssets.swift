@@ -4,21 +4,15 @@
 //  OrbAppleSpeechAssets.swift
 //  Devgentic
 //
-//  Which Apple Speech languages this Mac can use, which are actually installed, and the
-//  install itself — so the choice can be made in Settings BEFORE the recognizer is switched on.
-//
-//  ⚠️ WHY THIS IS A MODEL PICKER, NOT A LANGUAGE PREFERENCE. Apple ships one on-device model per
-//  locale, and `SpeechTranscriber` does NOT fail when that model was never reserved and installed
-//  — it warns once (`Cannot use modules with unallocated locales …`) and then transcribes in a
-//  degraded mode. Device test 2026-09-04: an unallocated `en_IN` turned "write an essay on
-//  technology" into "write an SM technology", while WhisperKit heard the same speech correctly.
-//  Making the language explicit, and its installed state visible, is what stops that happening
-//  silently.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import Speech
 
+/// Which Apple Speech languages this Mac can use, which are installed, and the install itself, chosen in Settings first.
+/// Apple ships one on-device model per locale and `SpeechTranscriber` degrades silently without it, so installed state is
+/// explicit.
 @available(macOS 26.0, *)
 @Observable
 final class OrbAppleSpeechAssets {
@@ -68,9 +62,8 @@ final class OrbAppleSpeechAssets {
     @MainActor
     func install(_ locale: Locale) async {
         guard !isInstalling else {
-            // ⚠️ This returns WITHOUT setting `lastError`, so the settings pane shows nothing at
-            // all — the Download button simply appears dead and neither the UI nor the log says
-            // an install is already running.
+            // Returns without setting `lastError`, so the pane shows nothing; the log line below is the only record that an install
+            // is already running.
             logger.info("[ORB_APPLE_ASR] Install of \(locale.identifier) ignored — another install is already in progress. CONSEQUENCE: the Download button looks inert; wait for the running install to finish.")
             return
         }
@@ -88,10 +81,8 @@ final class OrbAppleSpeechAssets {
         let modules: [any SpeechModule] = [transcriber, detector]
 
         do {
-            // ⚠️ Reservations PERSIST and the cap is small (5 on the 2026-09-04 test machine).
-            // Without releasing the ones we took, a user trying a few languages would silently
-            // exhaust it and every later reserve would fail. Release everything we hold that is
-            // not the locale being installed — recognition only ever uses one at a time.
+            // Reservations persist and the cap is small, so release everything held except the locale being installed;
+            // otherwise trying a few languages would exhaust the cap and every later reserve would fail.
             for stale in await AssetInventory.reservedLocales
             where stale.identifier != locale.identifier {
                 let released = await AssetInventory.release(reservedLocale: stale)

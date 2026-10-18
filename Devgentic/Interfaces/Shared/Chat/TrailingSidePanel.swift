@@ -4,21 +4,15 @@
 //  TrailingSidePanel.swift
 //  Devgentic
 //
-//  The chrome shared by the panels that occupy the chat's trailing slot — Background Tasks and Git
-//  Changes: the floating card, the resizable divider, the split/full width rules and the title bar's
-//  presentation controls. Each panel supplies only its title, extras and content.
-//
-//  ⚠️ Extracted 2026-10-04 from two ~137-line copies that differed only in content. A fix to the
-//  divider or the width rules (the CF-15 live-drag fix is one) must land in every panel; one copy is
-//  how it does. The Code Viewer still has its own — its header is editor-specific.
-//
-//  Verified pixel-equivalent to the copies it replaced: both panels rendered across surface style ×
-//  presentation × Code-Viewer-tabs before and after, within the renderer's own run-to-run noise.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// The chrome shared by the panels in the chat's trailing slot (Background Tasks, Git Changes): the floating card,
+/// resizable divider, split/full width rules and the title bar's presentation controls.
+/// Each panel supplies only its title, extras and content.
 struct TrailingSidePanel<TitleAccessory: View, Controls: View, Content: View>: View {
 
     let title: String
@@ -119,22 +113,17 @@ struct TrailingSidePanel<TitleAccessory: View, Controls: View, Content: View>: V
         .frame(maxHeight: .infinity)
         .offset(x: -7)
         .gesture(
-            // GLOBAL coordinate space is load-bearing. The divider is the panel's leading edge, so it
-            // MOVES as a result of its own drag — in `.local` space `translation.width` then includes
-            // the divider's own (one-frame-stale) displacement on top of the cursor's, the width
-            // overshoots, the next frame compensates back, and the edge oscillates under the cursor.
-            // Global space measures the CURSOR alone. (Same reasoning as `CodeViewerPanelView`.)
+            // Global coordinate space is required: the divider is the panel's leading edge and moves during its own drag, so in
+            // `.local` space the translation includes the divider's own displacement and the edge oscillates under the cursor.
             DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in
-                    // `translation.width` is cumulative from the gesture's START, so it applies to
-                    // the width AT THAT START — not the live width, which is already moving.
-                    // Subtracting it from a moved width compounds and the panel races to the clamp.
+                    // `translation.width` is cumulative from the gesture's start, so apply it to the width at that start, not the live
+                    // width: subtracting it from a moving width compounds and the panel races to the clamp.
                     let start = dragStartWidth ?? displayedWidth
                     if dragStartWidth == nil { dragStartWidth = start }
                     let newWidth = CGFloat(start) - value.translation.width
-                    // Whole points (sub-pixel widths re-solve text layout for no visible gain);
-                    // clamped to the MEASURED container, not an arbitrary cap. Published per tick on
-                    // the view model so the chat's split inset tracks the divider live (CF-15).
+                    // Whole points (sub-pixel widths re-solve text layout), clamped to the measured container.
+                    // Published per tick so the chat's split inset tracks the divider live.
                     chatHistoryViewModel.codeViewerLiveDragWidth =
                         Double(min(max(newWidth, 400), maxPanelWidth)).rounded()
                 }

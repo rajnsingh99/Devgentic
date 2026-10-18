@@ -4,26 +4,13 @@
 //  WorkflowCanvasRunOverlay.swift
 //  Devgentic
 //
-//  Projects a run's per-node outcome onto the CANVAS.
-//
-//  Until 2026-08-15 the canvas showed nothing about execution: `WorkflowCanvasView` did not even
-//  receive execution state, `WorkflowCanvasState` had no per-node status field, and
-//  `WorkflowNodeView` carried an empty `.overlay(alignment: .topLeading) { }` where a badge was
-//  clearly once intended. During and after a run every node looked exactly as it had before it —
-//  the user could not see which node was executing, which finished, which failed, or which never
-//  ran. Worse, a Router with three output ports drew three identical curves, so the one question
-//  the canvas is uniquely able to answer — WHICH BRANCH DID IT TAKE? — was unanswerable there.
-//
-//  ⚠️ Edge liveness is DERIVED, not reported. The engine's authoritative answer lives in
-//  `WorkflowState.edgeIsLive`, which needs `activeOutputPorts` — run state the UI never receives.
-//  Rather than plumb the engine's internals into a view (and create a second, drifting copy of the
-//  routing rules — the defect class `edgeIsLive` itself exists to prevent), this reasons only from
-//  what each ENDPOINT did, which the run record already carries. See `edgeState(from:to:)` for
-//  exactly what that can and cannot conclude.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Projects a run's per-node outcome onto the canvas, including which branch of a Router was taken.
+/// Edge liveness is derived from what each endpoint did, not from engine routing state the UI never receives.
 struct WorkflowCanvasRunOverlay: Equatable {
 
     typealias NodeStatus = WorkflowRunDisplayData.NodeDisplayData.NodeStatus
@@ -51,18 +38,14 @@ struct WorkflowCanvasRunOverlay: Equatable {
     let isLive: Bool
 
     /// Builds an overlay from whatever the run screen is already displaying.
-    ///
-    /// Returns `nil` when there is no run to show, so "no run selected" stays visually identical to
-    /// the canvas before this existed — a builder who has never executed anything sees no run
-    /// chrome at all.
+    /// Returns nil when there is no run to show, so "no run selected" shows no run chrome at all.
     init?(displayData: WorkflowRunDisplayData?) {
         guard let displayData, !displayData.nodeResults.isEmpty else { return nil }
         self.nodeStatus = Dictionary(
             displayData.nodeResults.map { ($0.nodeID, $0.status) },
             uniquingKeysWith: { first, _ in first }
         )
-        // The flat `NodeStatus` cannot say WHY a node was skipped, and one reason behaves the
-        // opposite of the rest — see `carriedTheRun`.
+        // The flat `NodeStatus` cannot say why a node was skipped, and one reason behaves unlike the rest (see `carriedTheRun`).
         self.skipReason = Dictionary(
             displayData.nodeResults.compactMap { row in row.skipReason.map { (row.nodeID, $0) } },
             uniquingKeysWith: { first, _ in first }
@@ -72,14 +55,8 @@ struct WorkflowCanvasRunOverlay: Equatable {
 
     func status(for nodeID: UUID) -> NodeStatus? { nodeStatus[nodeID] }
 
-    /// Did the run flow THROUGH this node, whether or not the node itself executed?
-    ///
-    /// ⚠️ A user skip is a PASS-THROUGH, not a dead branch: it is the one skip reason whose
-    /// downstream still runs — the node's input is forwarded as its output and every default edge
-    /// below it stays live (`NodeSkipReason.keepsDownstreamAlive`, and that type's own doc comment
-    /// warns that matchers assuming "skipped ⇒ downstream never ran" must handle it separately).
-    /// Three engine sites already did; this overlay did not, so skipping a node mid-pipeline drew
-    /// BOTH its edges dead even though the node below it ran on this node's input.
+    /// Returns whether the run flowed through this node, whether or not the node itself executed.
+    /// A user skip is a pass-through: input is forwarded and downstream edges stay live (`keepsDownstreamAlive`).
     private func carriedTheRun(_ nodeID: UUID) -> Bool {
         guard let status = nodeStatus[nodeID] else { return false }
         if status == .skipped { return skipReason[nodeID]?.keepsDownstreamAlive ?? false }
@@ -92,26 +69,15 @@ struct WorkflowCanvasRunOverlay: Equatable {
         skipReason[nodeID]?.decidedTheBranch ?? true
     }
 
-    /// Whether this edge carried the run.
-    ///
-    /// The rule, and its limits:
-    ///
-    /// - **Either endpoint did not run → `.notTaken`.** Sound in both directions. A skipped target
-    ///   was not fed by this edge, and a skipped source fed nothing.
-    /// - **Both endpoints ran → `.fired`.** ⚠️ An APPROXIMATION where a node has several live
-    ///   upstreams: it proves the target ran, not that it ran *because of this particular edge*.
-    ///   The case it can over-report is a fan-in where two upstreams both completed but only one
-    ///   port was wired through — rare, and the failure mode is a highlighted edge rather than a
-    ///   wrong verdict. Every case the user actually asks about (which Router arm fired, did the
-    ///   error handler run) is decided by the first rule, which is exact.
-    /// - **Anything else → `.undetermined`**, drawn exactly as it is today.
+    /// Returns whether this edge carried the run, reasoning only from what each endpoint did.
+    /// Either endpoint did not run: `.notTaken` (exact). Both ran: `.fired`, which over-reports only for some fan-ins.
+    /// Anything else is `.undetermined`, drawn neutrally.
     func edgeState(from sourceID: UUID, to targetID: UUID) -> EdgeState {
         guard let source = nodeStatus[sourceID], let target = nodeStatus[targetID] else {
             return .undetermined
         }
-        // A skip only kills the edge when the branch below it is genuinely dead AND the run
-        // actually decided something about it. A `.notReached` node is neither: the run ended
-        // before it, so its edges stay neutral — see `decidedTheBranch` (CF-29).
+        // A skip kills the edge only when the branch below it is genuinely dead and the run decided something about it;
+        // a `.notReached` node is neither, so its edges stay neutral (see `decidedTheBranch`).
         if (source == .skipped && !carriedTheRun(sourceID) && branchWasDecided(sourceID))
             || (target == .skipped && !carriedTheRun(targetID) && branchWasDecided(targetID)) { return .notTaken }
         // `.undetermined` is still reachable and still important: a target that has not started
@@ -123,18 +89,9 @@ struct WorkflowCanvasRunOverlay: Equatable {
 
 extension WorkflowCanvasRunOverlay {
 
-    /// Whether a node's run badge should PULSE (register CVV-4).
-    ///
-    /// Only the node executing RIGHT NOW, on a run that is still going. A historical run's
-    /// `.running` node is a node that never settled — animating it would claim work is still
-    /// happening in a run that has ended.
-    ///
-    /// ⚠️ `nonisolated static` and pure (WF-UI5) because this rule is the fix. It used to live in a
-    /// `View`'s private computed property, read exactly once from `.onAppear` — and the badge is
-    /// inserted when the CANVAS is, not when the node starts, because
-    /// `WorkflowRunDisplayData.buildNodesFromLayout` pre-populates a `.pending` placeholder for
-    /// every layout node. So `.onAppear` always fired while the answer was still false, the guard
-    /// dropped the arming, and nothing re-ran it when the node actually started.
+    // Why: `nonisolated static` and pure so the rule is testable; read once from `.onAppear` it was always false at arming time.
+    /// Returns whether a node's run badge pulses: only the node executing now, on a run still in progress.
+    /// A historical run's `.running` node never settled, so animating it would claim work is still happening.
     nonisolated static func badgeShouldPulse(status: NodeStatus?, isLive: Bool) -> Bool {
         isLive && status == .running
     }

@@ -4,24 +4,18 @@
 //  QuickAccessConfigManager.swift
 //  Devgentic
 //
-//  [QA revival P1d] Single source of truth for QuickAccess configuration — the global
-//  hotkey, enable flag, and session timeout. Modeled on ChatOpsConfigManager: an
-//  @Observable @MainActor singleton over UserDefaults, so it is reachable BOTH from
-//  AppDelegate (which registers the Carbon hotkey outside any SwiftUI environment) and from
-//  the SwiftUI settings pane. The default profile lives under GlobalConstants.quickAccessProfileID
-//  (see QuickAccessSessionViewModel) and is not duplicated here.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import Observation
 import HotKey
 
-// Not @MainActor (unlike ChatOpsConfigManager): AppDelegate reads it from nonisolated
-// lifecycle/hotkey methods. Backing store is thread-safe UserDefaults and all access happens
-// on the main thread (AppKit lifecycle + the SwiftUI settings pane), so plain @Observable is
-// sufficient. [L10] The Observation `access()`/`withMutation()` machinery is NOT thread-safe,
-// so this type is deliberately MAIN-THREAD-CONFINED; the setters assert it in debug builds as a
-// tripwire against a future off-main mutation slipping in.
+// Not @MainActor (AppDelegate reads it from nonisolated methods) but main-thread-confined: Observation's
+// `access()`/`withMutation()` is not thread-safe, and the setters assert the thread in debug builds.
+/// Single source of truth for QuickAccess configuration: the global hotkey, enable flag and session timeout.
+/// An `@Observable` singleton over UserDefaults, reachable from AppDelegate (which registers the Carbon hotkey outside
+/// SwiftUI) and the settings pane. The default profile lives under `GlobalConstants.quickAccessProfileID`.
 @Observable
 final class QuickAccessConfigManager {
 
@@ -58,10 +52,8 @@ final class QuickAccessConfigManager {
     var carbonKeyCode: UInt32 {
         get {
             access(keyPath: \.carbonKeyCode)
-            // [L1] `UInt32(exactly:)` — the plain `UInt32(v)` traps on a negative/oversized value,
-            // and this is read at launch (applyHotkeyConfig), so a corrupt/externally-written
-            // default (`defaults write … -1`) would crash-loop the app with no in-app recovery.
-            // Fall back to the default combo instead.
+            // Use `UInt32(exactly:)`: `UInt32(v)` traps on a negative or oversized value, and this is read at launch, so a
+            // corrupt default would crash-loop the app. Fall back to the default combo instead.
             if let v = defaults.object(forKey: GlobalConstants.quickAccessHotkeyKeyCode) as? Int,
                let code = UInt32(exactly: v) {
                 return code

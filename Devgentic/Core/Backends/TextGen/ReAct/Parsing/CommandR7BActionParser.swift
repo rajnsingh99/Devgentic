@@ -4,21 +4,7 @@
 //  CommandR7BActionParser.swift
 //  Devgentic
 //
-//  Phase 5 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.commandR7BAction` dialect (Cohere Command-R7B, Command-A).
-//
-//  Canonical output: token-delimited JSON array with an explicit `tool_call_id` field.
-//
-//    <|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|><|START_THINKING|>plan...<|END_THINKING|>
-//    <|START_ACTION|>[
-//        {"tool_call_id": "0", "tool_name": "search", "parameters": {"q": "x"}}
-//    ]<|END_ACTION|><|END_OF_TURN_TOKEN|>
-//
-//  Drift tolerated:
-//   - Missing `<|END_ACTION|>` (balance brackets to find array end)
-//   - Missing `tool_call_id` (we don't require it anyway — if present we preserve it)
-//   - `name` alias for `tool_name`, `arguments` alias for `parameters`
-//   - Python literals in args
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -26,6 +12,9 @@ import OSLog
 
 private let logger = DGLogger(category: "CommandR7BActionParser")
 
+/// Primary parser for the `.commandR7BAction` dialect (Cohere Command-R7B, Command-A): a token-delimited JSON array
+/// of actions with an optional `tool_call_id`. Tolerates a missing `<|END_ACTION|>`, `name`/`arguments` aliases for
+/// `tool_name`/`parameters`, and Python literals.
 struct CommandR7BActionParser: CognitiveParserProtocol {
 
     private struct ToolCallObject: Decodable {
@@ -68,12 +57,8 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
     // MARK: - Extraction
 
     private func extractToolCalls(from text: String) -> [PendingToolCall] {
-        // ⚠️ READINESS CR-50 (2026-10-12). The pipeline hands parsers SANITIZED text, and the
-        // sanitizer strips `<|START_ACTION|>` / `<|END_ACTION|>` with every other special token.
-        // So in production this parser never saw its own marker: every Command-R7B call fell to
-        // the heuristic, which read `"arguments"` only (never this dialect's `"parameters"`) and
-        // the first object only. Each call ran with NO arguments. Without the marker, the action
-        // array is recognised by its own shape instead (`markerlessActionArray`).
+        // The pipeline hands parsers sanitized text, which strips the `<|START_ACTION|>` marker, so without the marker the
+        // action array is recognised by its own shape (`markerlessActionArray`).
         guard let startRange = text.range(of: Self.actionBegin) else {
             let calls = markerlessActionArray(in: text).compactMap { toPendingCall($0) }
             if !calls.isEmpty {
@@ -97,13 +82,9 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
         return decoded.compactMap { toPendingCall($0) }
     }
 
-    /// The first JSON array in `text` that decodes as action objects AND names a tool with
-    /// `tool_name`, this dialect's own key (CR-50).
-    ///
-    /// ⚠️ `tool_name`, not the `name` alias: without the marker, `name` alone would turn an
-    /// ordinary JSON answer (`[{"name": "Ada"}]`) into a call to a tool called "Ada". Arrays that
-    /// do not qualify are stepped over, so a bracket in the prose before it (`[1]`, `[INFO]`)
-    /// does not hide the action array.
+    /// The first JSON array in `text` that decodes as action objects and names a tool with `tool_name`, this dialect's
+    /// own key. Not the `name` alias, which would turn an ordinary JSON answer into a tool call; non-qualifying arrays
+    /// are stepped over.
     private func markerlessActionArray(in text: String) -> [ToolCallObject] {
         var cursor = text.startIndex
         while cursor < text.endIndex, let open = text[cursor...].firstIndex(of: "[") {
@@ -155,13 +136,8 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
         return nil
     }
 
-    /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    /// Repairs trailing commas and Python literals in the model's JSON, outside string values only, via the shared
+    /// sanitizer (see `JSONStructuralSanitizer`).
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }

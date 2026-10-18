@@ -4,13 +4,7 @@
 //  CatalogModelSelectionTests.swift
 //  DevgenticTests
 //
-//  Picking a model from the catalog writes EVERY measurement that describes it.
-//
-//  ⚠️ The defect (2026-10-09, on device): the catalog wrote capability, dialect and modalities
-//  only. A Qwen2.5-3B agent profile kept a `{tier: Medium}` placeholder through a re-pick AND a
-//  save; the coordinator, estimating from that tier, refused the run as needing ~20 GB. Runs
-//  otherwise looked right because live detection overwrites the stored copy at run start — so
-//  only a test of the STORED copy catches this.
+//  Created by Raj Singh.
 //
 
 import XCTest

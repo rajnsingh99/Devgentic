@@ -4,8 +4,7 @@
 //  BundledDocumentTests.swift
 //  DevgenticTests
 //
-//  PRIVACY.md, LICENSE and THIRD_PARTY_NOTICES.md ship in the app and are reachable from it. The
-//  test host IS the app, so `Bundle.main` is the built bundle the user would get.
+//  Created by Raj Singh.
 //
 
 import XCTest

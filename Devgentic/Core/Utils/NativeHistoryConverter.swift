@@ -4,34 +4,14 @@
 //  NativeHistoryConverter.swift
 //  Devgentic
 //
-//  Converts ChatMessage history into native user/assistant turn pairs
-//  for providers that support turn-by-turn conversation history
-//  (Anthropic, OpenAI, Google, Ollama native).
-//
-//  For each user↔agent pair, emits a `HistoryTurn` per side:
-//    HistoryTurn(role: .user,      parts: [.text(userText), .media(image)…])
-//    HistoryTurn(role: .assistant, parts: [.text(agentText)])
-//
-//  Agent text is PROSE ONLY — no tool summary. `buildAssistantContent` used to prepend
-//  `[Used: tool(args) → result]` lines, and models reliably imitated the format instead of
-//  calling tools, inventing markers and fabricating outputs. Tool-execution context lives
-//  in the system prompt's `<episodic_memory>` XML (`EpisodicHistoryFormatter`) instead.
-//
-//  IMAGES: a user turn carries `.media` parts for every image attached to that
-//  message, so a follow-up question about an image sent two turns ago still sees
-//  it. Bytes are NOT loaded here — `.media` holds a `MediaReference`, resolved
-//  lazily at request-build only for turns that survive the budget. Images ride
-//  the same window trimming text gets: when a turn ages out, its images age out
-//  with it. No most-recent-only policy, no image-special tiers.
-//
-//  Token safety: charBudget caps total history size. Oldest turns are dropped
-//  first. Images weigh a flat token-realistic figure (`ImageTokenHeuristic`), NOT
-//  their base64 length — otherwise one screenshot would evict a whole conversation.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Converts ChatMessage history into native user/assistant `HistoryTurn` pairs for turn-based providers.
+/// Agent text is prose only; user turns carry `.media` image references; a character budget drops the oldest turns first.
 struct NativeHistoryConverter {
 
     private static let logger = Logger(subsystem: DGLogger.subsystem, category: "NativeHistoryConverter")
@@ -60,47 +40,11 @@ struct NativeHistoryConverter {
         return (contextTurns, filtered)
     }
 
-    /// Converts ChatMessage history into native turn pairs for LLM API injection.
-    ///
-    /// - Parameters:
-    ///   - history: The array of ChatMessages from the conversation.
-    ///   - limit: Maximum number of turn pairs to include. Nil = all turns.
-    ///   - charBudget: Maximum total character count for all history messages.
-    ///     Oldest turns are dropped first when budget is exceeded.
-    ///   - includeImages: Whether user turns may carry `.media` image parts. Callers
-    ///     pass `false` when the target model can't see images (vision gate), so the
-    ///     budget reflects what will actually be sent.
-    /// - Returns: An array of `HistoryTurn` with alternating user/assistant roles.
-    /// The ONE place a history strategy becomes native turn pairs.
-    ///
-    /// `AgentConnect` builds the request through this and the fit gauges size the request
-    /// through it, so what they measure is what ships. The episodic channel already works
-    /// this way (`EpisodicHistoryFormatter.build`); before that, four hand-rolled copies of
-    /// the same switch drifted and silently lost content on one of them.
-    ///
-    /// - Parameter correlation: nil-equivalent ("") for measurement — the builders only log
-    ///   when given one, so sizing the prompt does not emit trim warnings for prompts that
-    ///   were never sent.
-    /// - Parameter toolsAvailable: false for a BOT, which `AgentConnect` gives `rawTools = []`
-    ///   and `ChatExecutor` sends `tools: nil`. Mirrors
-    ///   `EpisodicHistoryFormatter.build(toolsAvailable:)` — and exists because it did NOT.
-    ///
-    ///   ⚠️⚠️ THE TWO EMITTERS. `Call get_conversation_history(N)` is produced in two independent
-    ///   places: `EpisodicHistoryFormatter.renderPointerTurn`, which reaches the system prompt,
-    ///   and the pointer/hybrid builders here, which reach the model as real assistant turns.
-    ///   When the gate was added in response to a tool-less profile being told to call a tool it
-    ///   does not have, it was applied to the formatter and not to this converter — so on a
-    ///   native provider the envelope could say "full detail is not retrievable this turn" while
-    ///   every turn body said "Call get_conversation_history(N)".
-    ///
-    ///   That was never reachable: `ProfileDetails.historyStrategy` is
-    ///   `agentConfig?.historyStrategy ?? .recentHistory`, a bot has no `AgentConfig`, and only
-    ///   the pointer and hybrid branches emit the marker — so the one profile type without tools
-    ///   was also the one that could never reach either pointer renderer. It was held shut by a
-    ///   property of a DIFFERENT type, with nothing stating the dependency. Closed 2026-09-20.
-    ///
-    ///   No default, deliberately, for the same reason `renderPointerTurn` has none: a silent
-    ///   default is exactly how a call site comes to make that promise on a profile's behalf.
+    // Why: `toolsAvailable` has no default so a call site cannot silently promise `get_conversation_history` on a tool-less
+    // profile; `EpisodicHistoryFormatter.renderPointerTurn` applies the same gate.
+    /// The one place a history strategy becomes native turn pairs; request building and fit gauges both use it.
+    /// `limit` caps turn pairs (nil = all); `charBudget` drops oldest turns first; `includeImages` false skips images.
+    /// `correlation` empty means measurement-only (no trim warnings); `toolsAvailable` false (a bot) omits retrieval wording.
     static func build(
         strategy: HistoryStrategy,
         from history: [ChatMessage],
@@ -114,19 +58,10 @@ struct NativeHistoryConverter {
                                 toolsAvailable: toolsAvailable).turns
     }
 
-    /// The native turns plus WHICH answers they carry in full.
-    ///
-    /// The episodic XML (`EpisodicHistoryFormatter`) used to repeat a 200-char clip of every
-    /// answer in `<outcome>` even when the same answer rode right beside it as a complete
-    /// assistant turn — so the model read each answer twice, once cut mid-word. The formatter
-    /// now drops `<outcome>` for exactly the answers listed here.
-    ///
-    /// ⚠️ The set is the ground truth of what SURVIVED this builder — after the turn limit, the
-    /// char-budget trim and the checkpoint cut. Pointer skeletons are NOT in it (their assistant
-    /// turn is a fetch instruction, not the answer). Matching by message id rather than position
-    /// is deliberate: the two builders pair messages under slightly different rules (this one
-    /// skips unreadable rows), so the Nth turn here is not reliably the Nth turn there, and an
-    /// off-by-one would hide an answer the model has nowhere else to read.
+    // Why: matched by message id, not position: the two builders pair messages under different rules, so Nth turns can differ.
+    /// Returns the native turns plus the ids of the answers they carry in full.
+    /// The episodic XML drops its `<outcome>` clip for exactly those answers, so the model reads each only once.
+    /// The set reflects what survived the turn limit, budget trim and checkpoint cut; pointer skeletons are excluded.
     static func buildCarryingProvenance(
         strategy: HistoryStrategy,
         from history: [ChatMessage],
@@ -233,23 +168,16 @@ struct NativeHistoryConverter {
 
     // MARK: - Pointer Turns (Skeleton + Tool Reference)
 
-    /// Builds compact native turn pairs where every assistant message is a skeleton
-    /// with tool names and a pointer to `get_conversation_history(index)`.
-    /// No charBudget needed — skeletons are minimal.
-    ///
-    /// ⚠️ This strategy has no budget seam, so image parts would be UNBOUNDED here.
-    /// Images are therefore never attached on the pointer path — the whole point of
-    /// pointers is a minimal payload. `includeImages` is accepted for call-site
-    /// symmetry and deliberately ignored; the omission is logged.
+    /// Builds compact native turn pairs where each assistant message is a skeleton of tool names plus a pointer to
+    /// `get_conversation_history(index)`. No `charBudget` is needed.
+    /// `includeImages` is accepted for call-site symmetry and ignored (the omission is logged): this path has no budget seam.
     static func buildPointerTurns(from history: [ChatMessage], includeImages: Bool = false, correlation: String = "", toolsAvailable: Bool) -> [HistoryTurn] {
         let (contextTurns, filteredHistory) = extractCheckpointContext(from: history)
         let pairs = pairMessages(from: filteredHistory, includeImages: false)
         guard !pairs.isEmpty else { return contextTurns }
 
         if includeImages {
-            // Count attachments straight off the source messages. Re-running
-            // pairMessages purely to tally them would rebuild every assistant
-            // prose string on a hot path and throw the result away.
+            // Counts attachments off the source messages; re-running `pairMessages` to tally would rebuild every prose string.
             let dropped = filteredHistory.reduce(0) { total, message in
                 total + (message.sender == .user ? (message.attachedImageFiles?.count ?? 0) : 0)
             }
@@ -265,9 +193,8 @@ struct NativeHistoryConverter {
 
             // Build compact tool list from the original message
             let toolList = pair.toolNames.isEmpty ? "" : "[\(pair.toolNames.joined(separator: ", "))] "
-            // A retrieval instruction is only true when there is something to retrieve WITH.
-            // Wording matches `EpisodicHistoryFormatter.renderPointerTurn`'s withheld branch so
-            // the two emitters read identically in a prompt and grep as a pair.
+            // A retrieval instruction is only true when tools exist; wording matches the withheld branch of
+            // `EpisodicHistoryFormatter.renderPointerTurn` so the two emitters read identically.
             let assistant = toolsAvailable
                 ? "\(toolList)Call get_conversation_history(\(index)) for full response."
                 : "\(toolList)Summary only — full detail is not retrievable this turn."
@@ -279,16 +206,9 @@ struct NativeHistoryConverter {
 
     // MARK: - Hybrid Turns (Recent Full + Older Pointers)
 
-    /// Builds native turn pairs with a split strategy:
-    /// - Older turns: pointer skeletons (compact tool list + pointer)
-    /// - Recent turns (last `inlineCount`): full content with tool summaries and response text
-    ///
-    /// - Parameters:
-    ///   - history: The array of ChatMessages.
-    ///   - inlineCount: Number of most recent turns with full content (default 3).
-    ///   - charBudget: Character budget applied only to the full inline turns.
-    ///   - includeImages: Images attach only to the budgeted RECENT turns, never to
-    ///     the unbudgeted pointer segment (same rationale as `buildPointerTurns`).
+    /// Builds native turn pairs with a split strategy: older turns are pointer skeletons, recent ones full content.
+    /// `inlineCount` sets the number of recent full turns (default 3); `charBudget` applies only to those turns.
+    /// Images attach only to the budgeted recent turns, never to the unbudgeted pointer segment.
     static func buildHybridTurns(
         from history: [ChatMessage],
         inlineCount: Int = 3,
@@ -366,10 +286,7 @@ struct NativeHistoryConverter {
 
     // MARK: - Budget Logging
 
-    /// The converter used to trim silently. A conversation could lose its oldest
-    /// turns with nothing in the log to distinguish "trimmed to fit" from "there
-    /// was nothing to include" — and now that images carry weight, a single large
-    /// attachment can push several text turns out. Log the drop and its cause.
+    /// Logs a history trim and its cause, so "trimmed to fit" is distinguishable from "nothing to include".
     private static func logTrim(strategy: String, candidates: Int, kept: Int, chars: Int, budget: Int, turns: [HistoryTurn], correlation: String) {
         let images = turns.totalImageCount
         if kept < candidates {
@@ -402,16 +319,8 @@ struct NativeHistoryConverter {
         var pendingUserID: UUID? = nil
 
         for message in history {
-            // ⚠️ A message this build cannot READ must not be sent as an EMPTY STRING.
-            //
-            // `MessageContent.unknown` preserves content written by a newer build, and its
-            // `textContent` is deliberately nil — emitting synthetic text would put words into the
-            // conversation that nobody said. But `?? ""` then turned that nil into an empty content
-            // block, and Anthropic rejects an empty string with a 400: the read-side
-            // forward-compatibility guard was creating a request-side failure (G84).
-            //
-            // Gated on `isUnrecognised` specifically, NOT on "textContent == nil" — `.mediaArtifact`
-            // also has nil text, and dropping those would silently strip image turns from history.
+            // A message this build cannot read (`isUnrecognised`) is skipped: an empty string is rejected by Anthropic with a 400.
+            // Gated on `isUnrecognised`, not nil text: `.mediaArtifact` also has nil text and must keep its image turns.
             guard !message.content.isUnrecognised else {
                 logger.warning("[HISTORY] Skipping message \(message.id.uuidString.prefix(8), privacy: .public) — content written by a newer build, unreadable, so there is no text to send. CONSEQUENCE: this turn is omitted from the model's history (stored bytes untouched); sending it as an empty content block is a provider 400.")
                 // Clear any pending user turn: without this, the NEXT assistant message would pair
@@ -458,11 +367,7 @@ struct NativeHistoryConverter {
     }
 
     /// Builds `.media` parts for a user message's attached images.
-    ///
-    /// BYTES-FIRST resolution order: the persisted `binaryData` blob wins over the
-    /// source `url`. The URL leg is unreliable after relaunch — we persist raw URL
-    /// strings, not security-scoped bookmarks, so a moved/deleted file or a lapsed
-    /// sandbox scope makes it unreadable. The blob is durable by construction.
+    /// Resolves bytes first: the persisted `binaryData` blob wins over the source `url`, which is unreliable after relaunch.
     private static func mediaParts(for message: ChatMessage) -> [HistoryTurn.Part] {
         guard let images = message.attachedImageFiles, !images.isEmpty else { return [] }
         return images.map { file in
@@ -478,24 +383,10 @@ struct NativeHistoryConverter {
 
     // MARK: - Assistant Content Builder
 
-    /// Builds the assistant message content — **prose response text only**.
-    ///
-    /// Prior iterations of this function prepended `[Used: tool(args) → result]`
-    /// summaries before the response. Models reliably mimic this format in their
-    /// next response, inventing fake `[Used:]` markers and fabricating tool
-    /// outputs. Tool-execution context now lives in the system-prompt's
-    /// `<episodic_memory>` XML (built by `EpisodicHistoryFormatter`), so this
-    /// function keeps the assistant turn clean of anything resembling a
-    /// structural tool call.
-    ///
-    /// ⚠️⚠️ NEVER EMPTY (readiness CR-10, 2026-10-10). This returned `textContent ?? ""`, and Anthropic
-    /// and Gemini reject an empty text turn with HTTP 400 — so ONE empty turn failed every request in
-    /// the conversation until it aged out of the window. Ways to get one: an image-gen reply
-    /// (`.mediaArtifact`, nil text), and a reply left as `.markdownText("")` by a force-quit mid-run.
-    ///
-    /// ⚠️ Replaced with FACTUAL text, never skipped. Skipping would renumber every later turn, and the
-    /// pointer skeletons' `get_conversation_history(N)` indices are positions in this same pairing
-    /// (CR-11) — a dropped turn would point every later index at the wrong answer.
+    // Why: replace, never skip: pointer skeletons' `get_conversation_history(N)` indices are positions in this same pairing,
+    // so a dropped turn would point every later index at the wrong answer.
+    /// Builds the assistant message content: prose only, since models imitate tool-summary markers and fabricate outputs.
+    /// Never empty: an empty text turn is rejected with HTTP 400 by Anthropic and Gemini, so factual text stands in.
     static func buildAssistantContent(from message: ChatMessage) -> String {
         if let text = message.content.textContent, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text

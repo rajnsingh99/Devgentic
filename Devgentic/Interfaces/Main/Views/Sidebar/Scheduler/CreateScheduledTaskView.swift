@@ -4,16 +4,7 @@
 //  CreateScheduledTaskView.swift
 //  Devgentic
 //
-//  Full-window form for creating or editing a scheduled task.
-//  Mirrors the AgentConfigDetailView card-based layout: DynamicIslandBar
-//  on top with Cancel/Save trailing actions, identity header, then a
-//  stack of SettingsCards for each configuration domain.
-//
-//  The form collapses the two underlying flags (`TaskMode` + `ContextWindowMode`)
-//  into a single user-facing "Run Mode" with three concrete options:
-//    • Continue an existing conversation  → conversationBound + linked conv
-//    • Recurring thread                   → autonomous + continuous
-//    • Fresh each time                    → autonomous + stateless
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -22,6 +13,8 @@ import os
 
 private let logger = DGLogger(category: "CreateScheduledTaskView")
 
+/// Full-window form for creating or editing a scheduled task: title island with Cancel/Save, header, settings cards.
+/// Collapses `TaskMode` and `ContextWindowMode` into one "Run Mode": continue a conversation, recurring, or fresh.
 struct CreateScheduledTaskView: View {
 
     @Environment(MainViewRouter.self) private var router
@@ -30,9 +23,8 @@ struct CreateScheduledTaskView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
-    // Floating prompt-editor managers — per-instance (not singletons), so
-    // opening one of these editors here doesn't trample any open editor in
-    // an Agent/Bot profile detail view.
+    // Floating prompt-editor managers, per-instance (not singletons), so opening one here does not affect editors
+    // open in profile detail views.
     @State private var advancedPromptManager = AdvancedPromptWindowManager()
     @State private var simplePromptManager = SimplePromptWindowManager()
 
@@ -120,10 +112,8 @@ struct CreateScheduledTaskView: View {
         case recurring = "Recurring"
         var id: String { rawValue }
 
-        /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-        /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-        /// invisible to the String Catalog extractor and would have shipped untranslated inside
-        /// otherwise-translated chrome. `rawValue` stays for `id`/`tag` identity only.
+        // Why: `Text(x.rawValue)` binds to the non-localizing overload, so rawValue labels never reach the String Catalog.
+        /// User-facing name; `rawValue` stays for `id`/`tag` identity only.
         var localizedTitle: LocalizedStringKey {
             switch self {
             case .oneShot:   return "One-shot"
@@ -140,8 +130,7 @@ struct CreateScheduledTaskView: View {
 
         var id: String { rawValue }
 
-        /// User-facing name. ⚠️ Separate from `rawValue` on purpose — see `ScheduleType.localizedTitle`.
-        /// `rawValue` stays for `id`/`tag` identity and for `loadFromTask`'s preset matching.
+        /// User-facing name; `rawValue` stays for `id`/`tag` identity and for `loadFromTask`'s preset matching.
         var localizedTitle: LocalizedStringKey {
             switch self {
             case .daily9am:     return "Daily at 9 AM"
@@ -161,19 +150,11 @@ struct CreateScheduledTaskView: View {
         }
     }
 
-    /// Schedulable profile types. Code profiles are ephemeral (folder/file
-    /// context isn't persisted) and image-gen profiles produce images, not
-    /// the text feedback the scheduler reports back. Both make scheduling
-    /// either broken (code) or pointless (imageGen).
+    /// Schedulable profile types: code profiles are ephemeral and image-gen profiles produce no text feedback to report back.
     private static let schedulableTypes: Set<ProfileType> = [.bot, .agent, .workflow]
 
-    /// Backed by the @Observable `BackendProfileService.sharedProfiles` list so the
-    /// picker auto-refreshes when a profile is added or deleted in another
-    /// part of the app while this form is open.
-    ///
-    /// ⚠️ `sharedProfiles`, so a workflow node's owned configuration row is never schedulable —
-    /// it is not a profile the user has anywhere else, and a scheduled run of one would execute a
-    /// single node outside the workflow that gives it its input.
+    /// Backed by the observable `BackendProfileService.sharedProfiles`, so the picker refreshes on add or delete.
+    /// Uses `sharedProfiles` so a workflow node's owned configuration row is never schedulable.
     private var profiles: [BackendProfileModel] {
         profileService.sharedProfiles.filter { Self.schedulableTypes.contains($0.profileType) }
     }
@@ -230,9 +211,8 @@ struct CreateScheduledTaskView: View {
             }
         }
         .onDisappear {
-            // Close any detached prompt editor windows so they don't outlive
-            // the form (mirrors AgentConfigDetailView's cleanup).
-            // Same navigation teardown as the profile editors — commit before closing.
+            // Close any detached prompt editor windows so they do not outlive the form; commit before closing,
+            // as the profile editors do.
             advancedPromptManager.closeWindowCommittingChanges()
             simplePromptManager.closeWindow()
         }
@@ -258,9 +238,7 @@ struct CreateScheduledTaskView: View {
                     .foregroundColor(theme.primaryText)
                     .padding(.bottom, 4)
                     .overlay(alignment: .bottom) {
-                        // Red underline when name validation fails — minimal
-                        // chrome that draws the eye without crowding the header
-                        // with an error caption.
+                        // Red underline when name validation fails: minimal chrome that avoids an error caption crowding the header.
                         Rectangle()
                             .fill(theme.errorColor)
                             .frame(height: nameInvalid ? 2 : 0)
@@ -271,10 +249,8 @@ struct CreateScheduledTaskView: View {
                     .accessibilityValue(nameInvalid ? "Required, missing" : displayName)
                     .onChange(of: displayName) { _, newValue in
                         fieldErrors[.name] = nil
-                        // Keep any open detached editor's window title in sync
-                        // with the live name. Both managers no-op when their
-                        // window isn't visible, so we don't need to know which
-                        // (if any) is open.
+                        // Keep any open detached editor's window title in sync with the live name;
+                        // both managers no-op when their window is not visible.
                         let liveName = editorTitleName(for: newValue)
                         advancedPromptManager.updateTitle(agentName: liveName)
                         simplePromptManager.updateTitle(botName: liveName)
@@ -522,10 +498,8 @@ struct CreateScheduledTaskView: View {
 
     // MARK: - Expand Editor
 
-    /// Opens the appropriate detached prompt editor based on the selected
-    /// profile type. Agent profiles get the advanced editor (with tool
-    /// autocomplete via the profile's configured tools); everything else
-    /// gets the simple editor with token estimation.
+    /// Opens the detached prompt editor for the selected profile type: agent profiles get the advanced editor
+    /// (tool autocomplete from their configured tools), everything else the simple editor with token estimation.
     private func openExpandedEditor() {
         let titleName = editorTitleName(for: displayName)
 
@@ -538,11 +512,8 @@ struct CreateScheduledTaskView: View {
             // tools but shouldn't mutate the underlying profile.
             advancedPromptManager.showEditor(
                 text: $promptTemplate,
-                // ⚠️ `.constant` deliberately, mirroring the simple editor below (register B18):
-                // `titleName` is DERIVED per call from the task name with an "unnamed task"
-                // fallback, so there is no binding into the draft to hand over. This view keeps
-                // driving `updateTitle` explicitly on `.onChange(of: displayName)` — which is why
-                // the agent PROFILE editor was the only place the stale title ever showed.
+                // `.constant` deliberately, mirroring the simple editor: `titleName` is derived per call with an "unnamed task"
+                // fallback, so there is no binding to hand over; `updateTitle` is driven on `.onChange(of: displayName)`.
                 agentName: .constant(titleName),
                 configuredTools: .constant(config.tools),
                 themeManager: themeManager
@@ -550,9 +521,8 @@ struct CreateScheduledTaskView: View {
         } else {
             simplePromptManager.showEditor(
                 text: $promptTemplate,
-                // ⚠️ `.constant` deliberately: `titleName` is derived per call from the task name,
-                // and a scheduled task has no single model, so there is no context window to
-                // report either. Both are honest "not applicable" here rather than oversights.
+                // `.constant` deliberately: `titleName` is derived per call, and a scheduled task has no single model,
+                // so there is no context window to report; both are honestly not applicable.
                 botName: .constant(titleName),
                 themeManager: themeManager
             )
@@ -569,8 +539,8 @@ struct CreateScheduledTaskView: View {
 
     // MARK: - Card: Schedule
 
-    /// Presets offered for a task's own limit (HITL Waiting Contract §5). A stored value outside
-    /// them is still shown, so editing a task never silently changes its limit.
+    /// Presets offered for a task's own limit. A stored value outside them is still shown,
+    /// so editing a task never silently changes its limit.
     private static let runLimitPresets: [TimeInterval] = [5, 15, 30, 60, 120].map { $0 * 60 }
 
     private var runLimitSection: some View {
@@ -773,9 +743,7 @@ struct CreateScheduledTaskView: View {
                         .padding(.vertical, 3)
                         .background(theme.surfaceOverlay)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
-                        // Cron syntax is visual reassurance; the preset name
-                        // is the accessible label so VoiceOver doesn't read
-                        // out "0 9 * * *".
+                        // Cron syntax is visual reassurance; the preset name is the accessible label so VoiceOver does not read out "0 9 * * *".
                         .accessibilityHidden(true)
                 }
 
@@ -885,10 +853,8 @@ struct CreateScheduledTaskView: View {
 
     // MARK: - Validation
 
-    /// Collect every field error in one pass so the user sees all problems
-    /// at once and each error renders next to the input that owns it.
-    /// Returns `nil` when valid; otherwise a tuple of `(cron, scheduledAt)`
-    /// derived once during validation so `createOrSave` doesn't recompute.
+    /// Collects every field error in one pass so each renders next to the input that owns it.
+    /// Returns `nil` when valid; otherwise `(cron, scheduledAt)`, derived once so `createOrSave` does not recompute.
     private func validate() -> (cron: String?, scheduledAt: Date?)? {
         var errors: [ValidationField: String] = [:]
 

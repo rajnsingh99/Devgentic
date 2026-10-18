@@ -4,17 +4,7 @@
 //  HuggingFaceTokenStore.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for G4.
-//
-//  `HubApi` was constructed without an `hfToken:`, so it fell back to `hfTokenFromEnv()` —
-//  which reads `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` from `ProcessInfo.environment`.
-//
-//  ⚠️ A macOS .app launched from Finder, Spotlight or Sparkle does NOT inherit the user's shell
-//  environment, so that lookup is always nil in the shipped product no matter what the user has
-//  in their `.zshrc`. Gated repos therefore failed with "Please provide a valid Hugging Face
-//  token" — an instruction the app gave no way to follow.
-//
-//  Mirrors `MCPSecretStore`: one Keychain service, `SecureKeyStorage` underneath.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -23,16 +13,10 @@ import os
 
 private let logger = DGLogger(category: "HuggingFaceToken")
 
-/// The user's HuggingFace access token, stored in the system Keychain.
-///
-/// ⚠️ Never log, export or telemetry the token value itself — only whether one is present and
-/// its masked form. `TelemetrySanitizer` redacts `Bearer` headers, but the value must not reach
-/// a log line in the first place.
-/// ⚠️ `@Observable` so the settings card re-renders when the token changes. Without it,
-/// "Remove" updated the Keychain but nothing on screen: `hasToken` is derived from a plain
-/// stored property, and the two `@State` writes beside the call are no-ops on the
-/// post-relaunch path (the draft is already empty and `tokenSaved` already false), so the card
-/// went on showing "Token saved" and the masked value for a token that no longer existed.
+// Why: never log, export or send the token value to telemetry, only its presence and masked form; `TelemetrySanitizer`
+// redacts `Bearer` headers, but the value must not reach a log line.
+/// The user's HuggingFace access token, stored in the system Keychain. `@Observable` so the settings card re-renders
+/// when the token changes.
 @MainActor
 @Observable
 final class HuggingFaceTokenStore {
@@ -43,44 +27,26 @@ final class HuggingFaceTokenStore {
     private static let service = "com.devgentic.huggingface"
     private static let account = "access-token"
 
-    /// ⚠️ TEST SEAM (register KC-8). This was `private let backing = SecureKeyStorage()`, so the
-    /// `.failed` branch — the only branch this store's cache policy is about — could not be reached
-    /// from a test at all. A first attempt at covering KC-8 exercised a `KeychainAccessing` stub
-    /// directly instead, and MUTATION-CHECKING PROVED IT VACUOUS: re-introducing the cache
-    /// poisoning left it green, because it never touched this type. Mirrors
-    /// `MCPSecretStore.setBackingForTesting`; production never reassigns it.
+    /// Keychain backend, swappable for tests through `setBackingForTesting`; production never reassigns it. Mirrors
+    /// `MCPSecretStore.setBackingForTesting`.
     private var backing: KeychainAccessing = SecureKeyStorage()
 
-    /// Swaps the Keychain backend. Test-only — pass nil to restore the real one.
-    /// ⚠️ Callers must also `refreshFromKeychain()`, or the cache from the previous backend survives.
+    /// Swaps the Keychain backend. Test-only; pass nil to restore the real one. Callers must also
+    /// `refreshFromKeychain()`, or the cache from the previous backend survives.
     static func setBackingForTesting(_ replacement: KeychainAccessing?) {
         shared.backing = replacement ?? SecureKeyStorage()
         shared.refreshFromKeychain()
     }
 
-    /// Cached so the download path doesn't hit the Keychain on every request. Invalidated by
-    /// `store`/`clear`; nil means "not yet read", `.some(nil)` means "read, and genuinely ABSENT".
-    ///
-    /// ⚠️⚠️ A FAILED READ IS NEVER CACHED — register KC-8. There are three states, not two, and
-    /// this property can only represent two of them. The getter used to write `.some(nil)` for a
-    /// read that FAILED, which made "the Keychain was locked for a moment at launch" indistinguish‐
-    /// able from "the user has no token" **for the entire process lifetime**: `if let cached`
-    /// short-circuits every later read, `invalidateCache()` had zero production callers, and the
-    /// only recovery was to quit the app. Gated repos 401'd against a token sitting intact in the
-    /// Keychain. So on `.failed` we leave this nil and let the next access retry.
-    ///
-    /// ⚠️ `@ObservationIgnored` on purpose, for two reasons. The token VALUE must never enter a
-    /// view's dependency graph, and `token`'s getter WRITES this cache on a miss — an observed
-    /// mutation during a view body evaluation is the "Modifying state during view update"
-    /// class of bug. `hasToken` below is the observable surface instead.
+    // Why: a failed read is never cached (it stays nil so the next access retries); `@ObservationIgnored` keeps the token
+    // value out of view dependencies.
+    /// Cached so the download path does not hit the Keychain on every request; nil means not yet read, `.some(nil)` means
+    /// read and absent. Invalidated by `store`/`clear`.
     @ObservationIgnored private var cached: String??
 
-    /// Whether the last attempt to read the token FAILED, as opposed to finding nothing.
-    ///
-    /// ⚠️ Drives the UI's ability to tell "no token configured" from "I could not look". Without
-    /// it the settings card shows an identical empty state for both, and the user re-pastes a token
-    /// they never lost. Set only from `refreshFromKeychain`, never from the `token` getter, so no
-    /// view-body evaluation can mutate observable state.
+    /// Whether the last attempt to read the token failed, as opposed to finding nothing, so the UI can tell "no token
+    /// configured" from "could not look". Set only from `refreshFromKeychain`, never from the `token` getter, so no view
+    /// body can mutate observable state.
     private(set) var readFailed: Bool = false
 
     /// Whether a token is configured. Safe to call from UI — no value is exposed, and this is
@@ -88,19 +54,14 @@ final class HuggingFaceTokenStore {
     private(set) var hasToken: Bool = false
 
     private init() {
-        // One Keychain read at construction so `hasToken` is right before any view reads it.
-        // Cheap, and `.shared` is only reached from surfaces that were going to need the token
-        // anyway. Tests never construct this — they exercise the static shape helpers only.
+        // One Keychain read at construction so `hasToken` is right before any view reads it. Tests never construct this.
         refreshFromKeychain()
     }
 
     // MARK: - Public API
 
-    /// The stored token, or nil when absent **or unreadable**.
-    ///
-    /// ⚠️ Callers that merely need a value to SEND may use this. Anything deciding whether the user
-    /// has configured a token should read `hasToken` alongside `readFailed` — nil here means both
-    /// "none" and "could not look", and those must not render the same.
+    /// The stored token, or nil when absent or unreadable. Callers that only need a value to send may use this; anything
+    /// deciding whether a token is configured should read `hasToken` alongside `readFailed`.
     var token: String? {
         if let cached { return cached }
         switch backing.read(service: Self.service, account: Self.account) {
@@ -111,9 +72,8 @@ final class HuggingFaceTokenStore {
             cached = .some(nil)
             return nil
         case .failed(let status):
-            // ⚠️ DO NOT CACHE. Register KC-8 — see `cached`. Leaving it nil means the very next
-            // access retries, so a transient lock or a dismissed ACL prompt costs one request
-            // rather than the whole session.
+            // Do not cache the failure: leaving the cache nil means the next access retries (see `cached`), so a transient lock
+            // costs one request, not the session.
             logger.error(
                 "[MLXSTORE] Could not read the HuggingFace token from the Keychain (status \(status)) "
                 + "— this is NOT the same as no token being configured. CONSEQUENCE: this request "
@@ -153,15 +113,8 @@ final class HuggingFaceTokenStore {
     func clear() -> Bool {
         let status = backing.delete(service: Self.service, account: Self.account)
 
-        // ⚠️ STATE IS UPDATED FROM THE RESULT, NOT BEFORE IT — register KC-20. This used to set
-        // `cached = .some(nil)` and `hasToken = false` on the line BEFORE the status check, so a
-        // delete that failed still painted the card as "no token": the user pressed Remove to
-        // revoke a token, was told it was gone, and it was still in the Keychain and still being
-        // sent on every request. The `guard` below returned `false` to say so and both callers
-        // discarded it.
-        //
-        // `errSecItemNotFound` means there was nothing to remove — the caller's intent is
-        // satisfied either way.
+        // State is updated from the delete result, not before it: a failed delete must not paint the card as "no token"
+        // while the token is still sent. `errSecItemNotFound` means there was nothing to remove, which satisfies the intent.
         guard status == errSecSuccess || status == errSecItemNotFound else {
             logger.error(
                 "[MLXSTORE] Failed to remove the HuggingFace token from the Keychain (status \(status)). "
@@ -182,14 +135,9 @@ final class HuggingFaceTokenStore {
         return true
     }
 
-    /// Drops the in-memory copy, forcing the next read to hit the Keychain, and re-derives the
-    /// observable state from what is actually there.
-    ///
-    /// ⚠️ This is the ONLY place `hasToken` and `readFailed` are derived from a read, deliberately:
-    /// the `token` getter must not mutate observable state (it can be reached from a view body).
-    /// It had **zero production callers** before register KC-8 — which is precisely why a failed
-    /// read at launch was unrecoverable for the life of the process. It is now called from `init`,
-    /// from a failed `clear`, and from the settings card when it appears.
+    /// Drops the in-memory copy so the next read hits the Keychain, and re-derives the observable state from what is
+    /// there. The only place `hasToken` and `readFailed` are derived from a read; called from `init`, a failed `clear`,
+    /// and the settings card when it appears.
     func refreshFromKeychain() {
         cached = nil
         switch backing.read(service: Self.service, account: Self.account) {
@@ -211,11 +159,8 @@ final class HuggingFaceTokenStore {
 
     // MARK: - Validation
 
-    /// Whether a string looks like a HuggingFace access token.
-    ///
-    /// Deliberately a *shape* check, not a verdict: HuggingFace has shipped more than one token
-    /// format, and refusing to store something valid because it doesn't match a guess would be
-    /// worse than letting the request fail with a clear 401. The UI warns, it does not block.
+    /// Whether a string looks like a HuggingFace access token. A shape check, not a verdict: token formats vary, so the
+    /// UI warns but does not block.
     nonisolated static func looksLikeToken(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("hf_") && trimmed.count >= 20

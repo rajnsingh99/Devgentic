@@ -4,16 +4,7 @@
 //  ChatOpsCommandServiceTests.swift
 //  DevgenticTests
 //
-//  C5a of the ChatOps remote-interface plan: the read-only verbs, decided without a view model.
-//
-//  ⚠️ THIS FILE IS THE POINT OF THE WHOLE REFACTOR. Until now no ChatOps command logic could be
-//  tested at all: every handler was `private`, `@MainActor`, and reached `MainApplicationViewModel`
-//  — whose init runs `ChatOpsCoordinator.bootstrap()` and opens real Telegram/Discord/Slack
-//  connections, so no unit test may construct one. The 189 green ChatOps tests that exist assert
-//  parsers and codecs; not one drives a verb. That is why three handlers silently diverged and two
-//  shipped dead.
-//
-//  Every test below runs a real verb against fakes, with no view model, no SwiftData and no network.
+//  Created by Raj Singh.
 //
 
 import XCTest

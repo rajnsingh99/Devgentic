@@ -4,8 +4,7 @@
 //  SaveClusterFixTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the Code Viewer save cluster fixed on 2026-08-10
-//  (Chat_Production_Readiness.md rows CH1–CH3, CH8).
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,14 +4,7 @@
 //  FailureSurfacingTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Regression tests for the silent-failure cluster (register A10, A13, A14, A15).
-//
-//  ⚠️ Every one of these failed by looking like nothing had happened: a delete that left the row
-//  in place, a destructive confirmation whose button did nothing, a picker that raced itself. None
-//  raised, none logged, and three of the four had no UI surface at all — so the user's only signal
-//  was that the app appeared broken.
+//  Created by Raj Singh.
 //
 
 import XCTest

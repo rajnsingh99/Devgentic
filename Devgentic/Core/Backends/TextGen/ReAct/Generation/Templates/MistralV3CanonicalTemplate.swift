@@ -4,28 +4,14 @@
 //  MistralV3CanonicalTemplate.swift
 //  Devgentic
 //
-//  POC (2026-04-24) — bundled canonical Mistral v3 Tekken chat template with a
-//  `{% if tools %}` rendering branch. Used to rescue MLX community quantizations of
-//  Mistral-Nemo / Mistral-7B-v0.3 / Mixtral / Ministral / Pixtral which ship STRIPPED
-//  chat templates (only `[INST]...[/INST]` alternation, no tool scaffolding).
-//
-//  Wired via `ChatTemplateSource.override(...)` and consumed in `MLXService.streamChat`
-//  as a preempt of the tokenizer's embedded template.
-//
-//  IMPORTANT (POC scope):
-//  - Simplified from the upstream Mistral v3 template — does NOT implement assistant
-//    `tool_calls` rendering or the strict 9-char tool_call.id validation. The current
-//    executor flow appends tool observations into scratchpad user content, not as
-//    separate assistant(tool_calls) / tool(result) turns, so those branches aren't
-//    needed yet. If we migrate to native tool turns for Mistral (G12-style), extend
-//    this template with the tool_calls / tool_results branches from upstream.
-//  - Still enforces strict user/assistant alternation — callers must merge
-//    consecutive same-role turns before rendering. See
-//    `NativeToolTemplateGenerator.mergeConsecutiveSameRole` for the guard.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Bundled Mistral v3 Tekken chat template with a `{% if tools %}` branch, for stripped quantization templates.
+/// Applied via `ChatTemplateSource.override(...)` in `MLXService.streamChat`; it does not render assistant `tool_calls`.
+/// Strict user/assistant alternation: callers merge consecutive same-role turns first (`mergeConsecutiveSameRole`).
 enum MistralV3CanonicalTemplate {
 
     /// Canonical Jinja source for Mistral v3 Tekken family with tool support.

@@ -4,7 +4,7 @@
 //  RecentConversationSource.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -14,7 +14,7 @@ import os
 /// Gathers raw message content from the most recent conversations.
 /// This content is fed to the Intelligence Core for AI summarization —
 /// the source itself does NOT display anything directly.
-final class RecentConversationSource: MorningBriefSource, Sendable {
+final class RecentConversationSource: BriefingSource, Sendable {
 
     let id = "recent_conversations"
     let displayName = "Recent Conversations"

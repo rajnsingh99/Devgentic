@@ -4,17 +4,7 @@
 //  BackgroundTaskEndingPersistenceTests.swift
 //  DevgenticTests
 //
-//  The defect: a background task's ENDING never reached disk.
-//
-//  Found on the first device run of the wake flow (2026-09-23). The observer wrote the final
-//  status into the in-memory message and nothing saved that message again — the turn that launched
-//  the task had finished streaming 30s earlier, so its last flush carried `running`. The row
-//  reloaded as `running`; `reconcile` corrected it on screen while the process still remembered the
-//  task, but saved nothing either; and after a relaunch the same row became "ended when the app
-//  restarted" for a build that had exited 0 and been reported.
-//
-//  ⚠️ Every test here reads the answer back out of the REAL `ChatPersistenceStore`. The in-memory
-//  row was always right — asserting on it would pass with the defect fully present.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,7 +4,7 @@
 //  OllamaModelStoreViewModel.swift
 //  Devgentic
 //
-//  Created by Antigravity on 07/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -30,13 +30,8 @@ class OllamaModelStoreViewModel {
     var displayedModels: [LocalModel] = []
     var isLoading: Bool = false
 
-    // Download State
-    //
-    // ⚠️ register A42 — `downloadProgress` and `currentDownloadName` were removed with the
-    // `pullProgress` tracking that fed them. Their only reader was a `downloadBanner` in
-    // `OllamaModelStoreView` that was declared and never called, so mirroring them cost a full
-    // re-filter and re-sort of the grid per NDJSON line of a multi-GB pull and rendered nothing.
-    // Live per-row progress comes from `DownloadManager` via `ModelDownloadStatusView`.
+    // Download state. Live per-row progress comes from `DownloadManager` via `ModelDownloadStatusView`, so no progress
+    // fields are mirrored here.
     var isDownloading: Bool = false
     var downloadErrorMessage: String? = nil
 
@@ -54,19 +49,11 @@ class OllamaModelStoreViewModel {
 
     @ObservationIgnored private var supportCheckTask: Task<Void, Never>?
 
-    /// The service's own pull narration, mirrored so it can actually be rendered.
-    ///
-    /// ⚠️ `OllamaService.pullStatusMessage` is written SEVEN times — including "Successfully
-    /// pulled …" — and was read ZERO times anywhere in the app. A user who pulled a multi-GB
-    /// model was never told it had finished; they had to press Refresh and look for the card.
+    /// The service's own pull narration, mirrored so the outcome (including "Successfully pulled …") can be rendered.
     var pullStatus: OllamaService.PullTerminalState? = nil
 
-    // Deletion State
-    //
-    // ⚠️ `OllamaService.modelRemoveError` had ZERO readers anywhere in the app: `removeModel`
-    // writes a reason into it on five separate guard arms and every one of them was invisible.
-    // Confirming "Delete Model?" on the active model, or while a pull was in flight, simply did
-    // nothing — the card stayed on screen with no message, no toast and (for one arm) no log.
+    // Deletion state. A refused delete (active model, or a pull in flight) surfaces its reason from
+    // `OllamaService.modelRemoveError`.
     var isDeleting: Bool = false
     var deleteErrorMessage: String? = nil
 
@@ -91,17 +78,8 @@ class OllamaModelStoreViewModel {
 
     init() {
         setupBindings()
-        // Cold start / disconnected: the cooldown-respecting full probe runs
-        // (`checkServerStatusAndUpdateModels` — status check + model load, with
-        // 30-second failure throttling). When the shared `OllamaService` already
-        // holds data from a prior view-model lifetime, we no longer skip entirely —
-        // that made models pulled via the CLI invisible until an explicit refresh.
-        // Instead we revalidate: `loadLocalModels()` is digest-aware
-        // (`LocalModelRefresher`), so a recreation costs one /api/tags +
-        // /api/version round-trip and re-runs /api/show only for new/changed
-        // models. The original concern (status-probe log floods + full /api/show
-        // fan-outs on every `MainApplicationView` layer toggle) stays solved.
-        // The explicit refresh button still forces the full probe via `refresh()`.
+        // Cold start or disconnected runs the cooldown-respecting full probe; otherwise it revalidates, and the digest-aware
+        // `loadLocalModels()` re-runs /api/show only for new or changed models.
         Task { @MainActor [service] in
             if Self.shouldBootstrapProbe(for: service) {
                 await service.checkServerStatusAndUpdateModels()
@@ -123,9 +101,8 @@ class OllamaModelStoreViewModel {
     }
 
     deinit {
-        // Releasing `serviceObserver` triggers `ObservationStream.deinit`,
-        // which flips its own `isActive` flag so any in-flight onChange task
-        // short-circuits instead of writing to a zombie self.
+        // Releasing `serviceObserver` triggers `ObservationStream.deinit`, which flips `isActive` so an in-flight onChange
+        // task does not write to a zombie self.
     }
 
     /// Bridges OllamaService (@Observable) state via the shared `ObservationStream`
@@ -135,24 +112,14 @@ class OllamaModelStoreViewModel {
         serviceObserver = ObservationStream(
             track: { [weak self] in
                 guard let self else { return }
-                // ⚠️ register A42 — `pullProgress` and `modelToPull` are deliberately NOT tracked.
-                // `pullProgress` ticks once per NDJSON line for the whole of a multi-GB pull, and
-                // this observer's `onChange` runs `applyFilterAndSort` — a full re-filter and
-                // re-sort of the grid, plus a write to every mirrored property — per tick. The
-                // per-row progress UI reads `DownloadManager`'s own state directly
-                // (`ModelDownloadStatusView`), so nothing here needs the value.
-                //
-                // This is the same rule `MLXModelStoreViewModel` records having adopted; the two
-                // view models now document it identically so neither drifts back.
+                // `pullProgress` and `modelToPull` are deliberately not tracked: `pullProgress` ticks per NDJSON line and each tick
+                // would re-filter and re-sort the grid. Per-row progress reads `DownloadManager`.
                 _ = self.service.localModels
                 _ = self.service.isLoadingModels
                 _ = self.service.isPullingModel
                 _ = self.service.modelPullError
-                // ⚠️ `pullTerminalState`, NOT `pullStatusMessage`. The latter is rewritten
-                // once per NDJSON line, so tracking it ran this observer's `applyFilterAndSort`
-                // — a full re-filter and re-sort — for every progress line of a multi-GB pull.
-                // That is precisely what the note above excludes `pullProgress` for, and the
-                // offending line had been added directly beneath it.
+                // Tracks `pullTerminalState`, not `pullStatusMessage`, which is rewritten per NDJSON line and would re-filter and
+                // re-sort the grid for every progress line.
                 _ = self.service.pullTerminalState
                 _ = self.service.isRemovingModel
                 _ = self.service.modelRemoveError
@@ -194,11 +161,8 @@ class OllamaModelStoreViewModel {
     
     // MARK: - Actions
 
-    /// User-triggered refresh. Takes a `UserAction` proof to propagate intent
-    /// down to the service — we don't construct the token internally so a
-    /// stray `refresh()` call from, e.g., an init or onAppear, doesn't silently
-    /// bypass the server-probe cooldown (which is how this path got misused
-    /// originally).
+    /// User-triggered refresh. Takes a `UserAction` proof so intent propagates to the service; a stray call from an init
+    /// or onAppear cannot bypass the server-probe cooldown.
     func refresh(triggeredBy action: UserAction) {
         Task {
             await service.forceCheckServerStatus(triggeredBy: action)
@@ -223,8 +187,8 @@ class OllamaModelStoreViewModel {
     func downloadModel(name: String) {
         guard !name.isEmpty else { return }
         Task {
-            // ⚠️ Same authoritative check the coordinator makes — this entry point (Return in the
-            // search box, the island Pull button) calls `pullModel` directly and never reaches it.
+            // Same authoritative check the coordinator makes: this entry point (Return in the search box, the island Pull
+            // button) calls `pullModel` directly and never reaches it.
             if let repo = ModelSupportPolicy.huggingFaceRepoId(fromOllamaName: name),
                let reason = await MLXModelService.shared.unsupportedReason(forRepo: repo) {
                 unsupportedPullReasons[repo] = reason
@@ -252,14 +216,8 @@ class OllamaModelStoreViewModel {
         }
     }
 
-    /// Clears whichever error banner the store is showing.
-    /// Clears the pull outcome banner.
-    ///
-    /// ⚠️ Must clear it on the SERVICE too. The view model's copy is re-mirrored from
-    /// `service.pullTerminalState` on the very next observer tick, so nilling only the local one
-    /// makes the banner reappear. That is also why the banner could never be dismissed before:
-    /// `clearPullActionStatus()` is the only thing that resets the service-side value and it has
-    /// no callers anywhere in the tree.
+    /// Clears the pull outcome banner and whichever error banner the store is showing. Must clear the service-side value
+    /// too: the view model's copy is re-mirrored from `service.pullTerminalState` on the next observer tick.
     func dismissPullStatus() {
         pullStatus = nil
         service.pullTerminalState = nil
@@ -270,10 +228,8 @@ class OllamaModelStoreViewModel {
         downloadErrorMessage = nil
         service.modelRemoveError = nil
         service.modelPullError = nil
-        // ⚠️ The outcome banner is suppressed while an error is showing, so dismissing the error
-        // used to REVEAL a stale one — dismiss a failed pull's error and "Failed to pull X."
-        // surfaced underneath it, under a green tick. They describe the same event; they go
-        // together.
+        // The outcome banner is hidden while an error shows, so dismissing the error also dismisses the outcome; otherwise a
+        // stale "Failed to pull X." would appear under a green tick.
         dismissPullStatus()
     }
     

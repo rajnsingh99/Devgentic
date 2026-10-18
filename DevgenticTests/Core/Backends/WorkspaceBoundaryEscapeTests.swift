@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  WorkspaceBoundaryEscapeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-6 and CR-7 — two ways a Code-mode tool wrote outside the project folder.
-//
-//  CR-6: the boundary checked a hand-kept set of argument names, and the tools accepted others.
-//        `create_new_file({"file": "/Users/x/.zshrc"})` was never checked.
-//  CR-7: `canonical()` left a NOT-YET-EXISTING path unresolved, so a symlinked PARENT inside the
-//        project (`link -> /elsewhere`) let `create_new_file("link/x")` write outside it.
+//  Created by Raj Singh.
 //
 
 import XCTest

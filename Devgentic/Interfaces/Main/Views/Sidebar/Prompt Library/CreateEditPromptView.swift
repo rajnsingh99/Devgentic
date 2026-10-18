@@ -4,8 +4,7 @@
 //  CreateEditPromptView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 10/05/25.
-//  Converted to sheet semantics + PromptEditViewModel on 2026-04-21.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -116,10 +115,8 @@ struct CreateEditPromptView: View {
             .padding()
         }
         .onAppear {
-            // Defer one run-loop tick via Task.sleep — SwiftUI's sheet-appear
-            // animation sometimes drops focus set during `.onAppear`'s sync
-            // pass. 50ms is enough to land after the animation tick without a
-            // visible flicker. Replaces the old 100ms DispatchQueue workaround.
+            // Defers one tick: SwiftUI's sheet-appear animation can drop focus set during `.onAppear`;
+            // 50 ms lands after the animation without a visible flicker.
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(50))
                 isTitleFocused = true

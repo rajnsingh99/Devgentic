@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  InjectedToolNameReservationTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-2: a configured tool sharing a name with an injected one crashed the app.
-//
-//  ⚠️ THE DEFECT. `resolveExecutableTools` de-duplicated tool names, then the CALLER appended
-//  `final_answer`, `remember`, `forget`, `recall` and `get_conversation_history`. MCP tool names are
-//  the server's raw names, so a memory server exposing `recall` survived the de-dup and gained a
-//  twin. Anthropic 400d every request; every other provider TRAPPED in `ToolExecutionLoop`'s
-//  `Dictionary(uniqueKeysWithValues:)` on the first non-final tool batch.
+//  Created by Raj Singh.
 //
 
 import XCTest

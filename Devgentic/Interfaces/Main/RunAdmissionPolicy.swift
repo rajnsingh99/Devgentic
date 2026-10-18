@@ -4,39 +4,16 @@
 //  RunAdmissionPolicy.swift
 //  Devgentic
 //
-//  Whether a new run may START. The claim-SIDE half of run ownership.
-//
-//  ⚠️ INTERIM AND DELIBERATELY PARTIAL. Today this answers exactly one question — "may a Redo /
-//  Retry start in this conversation right now?" — because that is the one unguarded claim path
-//  that can put two root runs in one conversation. `LLM_Execution_Concurrency_Design.md` increment 4
-//  grows this same type into general admission control (queueing for MLX contention and inbound
-//  ChatOps, child/depth limits, and a `.queued` verdict beside `.refused`). It is named for what it
-//  becomes so that increment extends it rather than replacing it.
-//
-//  WHY A CLAIM-SIDE POLICY AT ALL. Increment 1 removed the stored `streamingMessageID` slot and made
-//  the foreground run a derived query, which killed the clear-side clobber outright. It did NOT kill
-//  this:
-//
-//      activeTasks[agentMessage.id] = streamTask      // ActiveStreamManager
-//
-//  `activeTasks` is the only cancellable handle for an entire run tree, and it is keyed by MESSAGE.
-//  Redo and Resume stream into a pre-existing message (`updating:`), so a second run on the same
-//  message OVERWRITES the first run's task handle — after which the first `Task` is unreachable by
-//  `cancelStream(for:)` forever. Not mis-targeted by Stop: permanently uncancellable by any code
-//  path in the app, still burning tokens and still holding an MLX container. No clear-side guard
-//  reaches that; only refusing the second claim does.
-//
-//  THE RULE (owner decision, 2026-08-17): at most one ROOT run per conversation. That is what makes
-//  "the conversation is the thing you stop" true by construction rather than by convention. Workflow
-//  nodes, sub-workflows, planning subtasks and sub-agents are NOT root runs — they are children of
-//  the conversation's one root run and are unaffected by this policy.
-//
-//  Kept pure (`nonisolated static` over plain values) so the rule is unit-testable with no view
-//  model, no `ActiveStreamManager` and no `ChatMessage` — the `MLXService.isResident(...)` shape.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+// Why: `activeTasks` is keyed by message, so a second run on the same message overwrites the first's
+// task handle and leaves it uncancellable.
+/// Decides whether a new run may start: at most one root run per conversation.
+/// Workflow nodes, sub-workflows, planning subtasks and sub-agents are children of the root run and unaffected.
+/// Pure over plain values.
 enum RunAdmissionPolicy {
 
     /// Why a claim was refused. `nil` from `admitRegeneration` means admitted.
@@ -51,8 +28,8 @@ enum RunAdmissionPolicy {
         /// Nothing to regenerate — the message carries no agent response.
         case noResponseToRegenerate
 
-        /// A background-task report whose stub saved no task card (written before 2026-09-27): the
-        /// output it reported on was never persisted, so a redo would report on nothing. Permanent.
+        /// A background-task report whose stub saved no task card: the output it reported on was never persisted, so a redo would
+        /// report on nothing. Permanent.
         case reportOutputNotSaved
 
         /// A background task this turn started is still running. Transient — the button re-enables
@@ -102,19 +79,8 @@ enum RunAdmissionPolicy {
     }
 
     /// May a regeneration (Redo / Retry) start for a message in `conversation`?
-    ///
-    /// Returns `nil` to admit, or the reason to refuse. Total, deterministic, side-effect free.
-    ///
-    /// Checks the attempt cap BEFORE business: the cap is permanent for this message and the busy
-    /// state is transient, so when both apply the permanent reason is the more useful thing to
-    /// tell the user — waiting would not help them.
-    ///
-    /// `live` is every live run app-wide; only runs in `conversation` are considered, so a run
-    /// streaming in a DIFFERENT conversation never blocks a Redo here. That is the same scope
-    /// boundary `ForegroundRunResolver` encodes for Stop.
-    ///
-    /// ⚠️ A run on this very message counts as busy. That is the primary case — Redo pressed while
-    /// the message it targets is still streaming.
+    /// Returns `nil` to admit, or the reason to refuse; total, deterministic and side-effect free.
+    /// Cap is checked before busy (permanent beats transient); only runs in `conversation` count, including this message's.
     nonisolated static func admitRegeneration(
         in conversation: UUID,
         attempts: Int?,
@@ -144,19 +110,9 @@ enum RunAdmissionPolicy {
         return runningTaskID.map { .backgroundTaskRunning(taskID: $0) }
     }
 
-    /// May a RESUME (the interrupted-run chip) start for a message in `conversation`?
-    ///
-    /// The same one-root-run-per-conversation rule, WITHOUT the attempt cap: a resume re-enters the
-    /// original run rather than appending a variant, so it never calls `beginRegenerationVariant`
-    /// and never consumes a generation attempt. Folding the cap in here would refuse a legitimate
-    /// post-crash resume on a message that had simply been retried five times before the crash.
-    ///
-    /// ⚠️ The case this exists for is a RACE, not a scope failure. `resumeRun` hops through
-    /// `Task { await resolveBackendHistory… }` before claiming the stream, and the chip stays live
-    /// throughout that hop because the message has not started streaming yet — so a double-press
-    /// starts two runs on ONE message and the second overwrites the first's entry in
-    /// `ActiveStreamManager.activeTasks`, orphaning it permanently. Enforcing this AFTER the hop is
-    /// what closes the window.
+    /// May a resume start for a message in `conversation`?
+    /// The same one-root-run rule, without the attempt cap: a resume re-enters the original run, consuming no attempt.
+    /// Enforce it after the history hop: the chip stays live through it, so a double-press could start two runs.
     nonisolated static func admitResume(
         in conversation: UUID,
         live: [ForegroundRunResolver.LiveRun]
@@ -164,10 +120,8 @@ enum RunAdmissionPolicy {
         conversationBusy(in: conversation, live: live)
     }
 
-    /// The shared rule: at most one ROOT run per conversation.
-    ///
-    /// Deterministic — reports the earliest-started blocker, so the log names the same run on every
-    /// press rather than whichever the dictionary happened to yield first.
+    /// The shared rule: at most one root run per conversation.
+    /// Deterministic: reports the earliest-started blocker so the log names the same run on every press.
     nonisolated static func conversationBusy(
         in conversation: UUID,
         live: [ForegroundRunResolver.LiveRun]

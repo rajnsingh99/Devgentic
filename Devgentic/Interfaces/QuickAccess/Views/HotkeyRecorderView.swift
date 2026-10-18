@@ -4,24 +4,16 @@
 //  HotkeyRecorderView.swift
 //  Devgentic
 //
-//  [QA revival P1d] A small key-capture control — the app had no shortcut recorder anywhere.
-//  Click to arm, then press modifier(s)+key; it captures the next keyDown via a local
-//  NSEvent monitor, translates it to the HotKey package's Carbon representation, and reports
-//  (carbonKeyCode, carbonModifiers) back to the caller. Esc cancels.
-//
-//  Robustness pass:
-//   [H4] Candidate combos are validated (HotkeyValidator) — OS-critical / typing-breaking combos
-//        are rejected inline; Spotlight-style combos are bound with a caveat.
-//   [M3] onRecordingStateChanged lets the owner pause the LIVE global hotkey while armed, so the
-//        user can re-record the current combo (otherwise the Carbon hotkey eats it first).
-//   [M4] The armed monitor disarms on a click elsewhere, on window-key loss, and after a short
-//        timeout — so it never silently swallows unrelated keystrokes or rebinds on a stray key.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 import HotKey
 
+/// A key-capture control: click to arm, then press modifier(s)+key; a local NSEvent monitor captures the keyDown,
+/// translates it to the HotKey package's Carbon form and reports `(carbonKeyCode, carbonModifiers)`. Esc cancels.
+/// Combos are validated by `HotkeyValidator`; the armed monitor disarms on an outside click, window-key loss or timeout.
 struct HotkeyRecorderView: View {
     /// Human-readable current shortcut, e.g. "⌥Space".
     let currentDescription: String

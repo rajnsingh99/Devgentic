@@ -4,37 +4,15 @@
 //  DownloadCoordinator.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//
-//  Thin idempotent front-door for "start a download of model X" requests
-//  coming from the Ollama / MLX / Whisper model managers and the Downloads
-//  sidebar. Two jobs:
-//
-//    1. Decide whether a request should actually kick off a new download,
-//       or short-circuit to "already installed" / "already in progress" /
-//       "resumed from history".
-//    2. When we do start, dispatch to the right backend service (which in
-//       turn flips its own @Observable state; DownloadManager's bridges
-//       then write the record).
-//
-//  Keeping the check here — rather than inside each service — means the
-//  services stay focused on the actual transport (HTTP / HuggingFace
-//  Hub / WhisperKit) and every UI surface gets the same "is this already
-//  done?" semantics.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "DownloadCoordinator")
 
-/// Holds an `NSProcessInfo` activity for the lifetime of a download so the system does not
-/// idle-sleep mid-transfer.
-///
-/// There was no power assertion anywhere in the app: a laptop on battery pulling a 30 GB
-/// model hit its sleep timer and the transfer stalled, showing a frozen progress bar with no
-/// explanation and no log line. Display sleep is deliberately still allowed — only *idle
-/// system* sleep is suppressed, so the screen still dims and the machine still sleeps when
-/// the lid closes.
+/// Holds an `NSProcessInfo` activity for the lifetime of a download so the system does not idle-sleep mid-transfer.
+/// Only idle system sleep is suppressed: the display still dims and the machine still sleeps when the lid closes.
 @MainActor
 final class DownloadPowerAssertion {
 
@@ -108,9 +86,8 @@ enum DownloadCoordinator {
 
         // Installed? (server-sourced truth)
         if ollama.localModels.contains(where: { $0.name == trimmed }) {
-            // Make sure history reflects reality — if the user previously
-            // failed/cancelled this model, mark it completed retroactively
-            // so "Installed" badges stay consistent with server state.
+            // Make sure history reflects reality: if the user failed or cancelled this model earlier, mark it completed so
+            // "Installed" badges match server state.
             promoteStaleRecordIfNeeded(backend: .ollama, modelIdentifier: trimmed)
             return .alreadyInstalled
         }
@@ -130,27 +107,21 @@ enum DownloadCoordinator {
             isPresentOnDisk: false
         )
 
-        // `pullModel` refuses silently while another pull is in flight, and its result is
-        // never inspected — so the coordinator used to report `.startedFresh` and the UI
-        // toasted "Downloading B…" while nothing happened at all. The in-flight check above
-        // is scoped to the SAME identifier, so pulling B during A sails past it. Check the
-        // service's actual state here.
+        // `pullModel` refuses silently while another pull is in flight and its result is never inspected, so check the
+        // service's actual state here (the in-flight check above is scoped to the same identifier).
         if ollama.isRemovingModel {
             return .failed("Can't start a download while another model is being removed.")
         }
-        // CR-34: the slot is claimed HERE, before the support lookup's await — checking
-        // `isPullingModel` and claiming later let two quick clicks both start a pull.
+        // The slot is claimed here, before the support lookup's await: checking `isPullingModel` and claiming later lets two
+        // quick clicks both start a pull.
         guard let reservation = ollama.reservePull() else {
             return .failed(ollama.isPullingModel
                 ? "\(ollama.modelToPull) is still downloading — Ollama pulls one model at a time."
                 : "Another Ollama download is starting — Ollama pulls one model at a time.")
         }
 
-        // ⚠️ Authoritative "can we run this at all" check — only possible for `hf.co/<owner>/<repo>`
-        // names, the one form that has pre-download metadata. A library name (`llama3.2:3b`) has
-        // none, so it falls through. A failed lookup is also "unknown → proceed": an offline blip
-        // must not turn a valid pull into a refusal. This is the choke point every coordinator
-        // caller shares (store pill, Downloads sidebar retry, Download Manager, onboarding).
+        // Authoritative "can we run this" check, only possible for `hf.co/<owner>/<repo>` names (the one form with
+        // pre-download metadata). A failed lookup proceeds, so an offline blip never refuses a valid pull.
         if let repoId = ModelSupportPolicy.huggingFaceRepoId(fromOllamaName: trimmed),
            let reason = await MLXModelService.shared.unsupportedReason(forRepo: repoId) {
             ollama.releasePullReservation(reservation)
@@ -166,13 +137,7 @@ enum DownloadCoordinator {
     // MARK: - MLX
 
     /// - Parameter force: skip the "already installed" short-circuit and re-pull.
-    ///   Without this, Re-download was a guaranteed no-op for any installed model: all three
-    ///   re-download entry points funnel through here, the installed check reads the
-    ///   filesystem, and deleting the history record (which is all `force` used to do)
-    ///   changes nothing. A user with a truncated or corrupt model confirmed an alert
-    ///   promising "Existing files will be overwritten" and got "already installed" instead.
-    ///   A forced pull is a genuine repair: `HubFileDownloader` verifies etag/SHA-256 per
-    ///   file and re-fetches only mismatches, so intact shards are not re-downloaded.
+    /// A forced pull is a genuine repair: `HubFileDownloader` verifies etag/SHA-256 per file and re-fetches only mismatches.
     @discardableResult
     static func startMLXDownloadIfNeeded(
         repoId: String,
@@ -183,13 +148,11 @@ enum DownloadCoordinator {
         guard !trimmed.isEmpty else { return .failed("Repo ID is empty") }
 
         let mlx = MLXModelService.shared
-        // ⚠️ Wait for the scan before the install check. It is off-actor now, so an early
-        // call can see an empty list, conclude "not installed", and re-pull a multi-gigabyte
-        // model the user already has.
+        // Wait for the scan before the install check: it runs off-actor, so an early call could see an empty list and
+        // re-pull a model the user already has.
         await mlx.ensureLoaded()
-        // Identity goes through `MLXModelIdentity` (see `isInstalled(repoId:)`) so models
-        // from publishers other than `mlx-community` — and profiles that stored a bare,
-        // author-less name before the canonical-id fix — still resolve.
+        // Identity goes through `MLXModelIdentity` so models from publishers other than `mlx-community`, and profiles that
+        // stored a bare author-less name, still resolve.
         let isInstalled = mlx.isInstalled(repoId: trimmed)
 
         if isInstalled && !force {
@@ -207,11 +170,8 @@ enum DownloadCoordinator {
             return .alreadyInProgress(recordID: active.id)
         }
 
-        // MLX has a single download slot: `MLXModelService.downloadModel` now refuses
-        // rather than pre-empting an in-flight pull (it used to silently cancel it and
-        // corrupt the DownloadManager bridge's record bookkeeping). Detect that here so
-        // the caller shows a `.failed` toast explaining WHY nothing happened — otherwise
-        // the refusal reads to the user as a dead Download button.
+        // MLX has a single download slot and `MLXModelService.downloadModel` refuses rather than pre-empting an in-flight
+        // pull; detect that here so the caller can show a `.failed` toast explaining why nothing happened.
         if mlx.isDownloading, !mlx.currentDownloadName.isEmpty, mlx.currentDownloadName != trimmed {
             return .failed("\(mlx.currentDownloadName) is still downloading — cancel it before starting another.")
         }
@@ -222,24 +182,12 @@ enum DownloadCoordinator {
             isPresentOnDisk: false
         )
 
-        // Pre-fetch total bytes from HuggingFace so the speed/ETA display
-        // has an authoritative denominator from the first progress tick.
-        // Nil on failure — the bridge handles that gracefully (MB/s may
-        // show only after bytes begin to accumulate).
+        // Pre-fetch total bytes from HuggingFace so the speed/ETA display has an authoritative denominator from the first
+        // progress tick; nil on failure.
         let totalBytes = await mlx.getTotalBytesForModel(repoId: trimmed)
 
-        // Disk preflight. The exact size is already in hand and was previously used ONLY as
-        // an ETA denominator — nothing compared it to free space. The store's own top-30 MLX
-        // listing includes a 657 GB repo, so on a 512 GB laptop the RAM advisory fires, the
-        // user clicks "Download Anyway", and the pull fills the startup disk until macOS
-        // starts failing. Unknown free space proceeds rather than blocks: a failed stat must
-        // not stop a legitimate download.
-        // ⚠️ Preflight what will actually be FETCHED, not the repo's full size. On a forced
-        // re-download HubApi hash-verifies each file and re-fetches only mismatches (see the
-        // log above), so charging the whole repo against free space made A7's repair path
-        // unreachable exactly when it is needed: a 40 GB model that is corrupt but present
-        // could not be repaired with 18 GB free, even though the repair might fetch one shard.
-        // `resumeMLXDownload` already sizes the remainder this way.
+        // Disk preflight on what will actually be fetched (total minus bytes already on disk), so a forced repair of a
+        // present-but-corrupt model stays reachable. Unknown free space proceeds rather than blocks.
         let alreadyOnDisk = MLXModelService.resumableBytes(at: mlx.partialDownloadFolder(for: trimmed))
         let bytesToFetch = totalBytes.map { max(0, $0 - alreadyOnDisk) }
         if let bytes = bytesToFetch, let room = mlx.hasRoomForDownload(ofBytes: bytes), !room.fits {
@@ -258,21 +206,17 @@ enum DownloadCoordinator {
             bytes: totalBytes
         )
 
-        // MLX service's `downloadModel` is synchronous — it schedules the
-        // actual pull on an internal Task and flips @Observable state from
-        // there. It returns false if it refused the request (a pull started
-        // in the window between our check above and this call).
+        // MLX service's `downloadModel` is synchronous: it schedules the pull on an internal Task and returns false if it
+        // refused the request (a pull started between our check above and this call).
         guard mlx.downloadModel(repoId: trimmed) else {
             return .failed("Couldn't start the download — another model is already downloading.")
         }
         return outcomeForHistory
     }
 
-    /// Resumes a paused or interrupted MLX download from the bytes already on disk.
-    ///
-    /// Deliberately separate from `startMLXDownloadIfNeeded`: that path's install check and
-    /// disk preflight are about *starting* something new. A resume continues work already paid
-    /// for, so it skips the install short-circuit and only needs the remaining bytes to fit.
+    /// Resumes a paused or interrupted MLX download from the bytes already on disk. Separate from
+    /// `startMLXDownloadIfNeeded`: a resume continues work already paid for, so it skips the install short-circuit and
+    /// only needs the remaining bytes to fit.
     @discardableResult
     static func resumeMLXDownload(repoId: String) async -> DownloadStartOutcome {
         let trimmed = repoId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -343,13 +287,8 @@ enum DownloadCoordinator {
             return .failed("\(trimmed) needs \(needed) but only \(free) is free.")
         }
 
-        // WhisperKit's `Progress` callback reports a file count rather
-        // than bytes (it's downloading several `.mlmodelc` files as a
-        // unit), so the speed sampler would see 0→1→2→3 and compute
-        // essentially 0 B/s. Pre-seed a canonical byte total from the
-        // model catalog so the sampler can derive real bytes from the
-        // fraction × total. Nil for unknown model IDs — the bridge still
-        // works, just with no speed display.
+        // WhisperKit's `Progress` reports a file count, not bytes, so the speed sampler would compute ~0 B/s; pre-seed a
+        // byte total from the model catalog (nil for unknown model IDs: no speed display).
         DownloadManager.shared.preSeedTotalBytes(
             backend: .whisper,
             modelIdentifier: trimmed,
@@ -364,10 +303,8 @@ enum DownloadCoordinator {
 
     // MARK: - History reconciliation helpers
 
-    /// When the backend says installed but the history doesn't, or the
-    /// record is stuck in a non-completed state, promote the most recent
-    /// record to `.completed` so the UI's "Installed" badge and the
-    /// history row agree. No-op if no record exists.
+    /// When the backend says installed but the history doesn't, or the record is stuck in a non-completed state, promotes
+    /// the most recent record to `.completed` so the "Installed" badge and history agree. No-op if no record exists.
     private static func promoteStaleRecordIfNeeded(
         backend: ModelBackendType,
         modelIdentifier: String
@@ -378,10 +315,9 @@ enum DownloadCoordinator {
         _ = store.markCompleted(id: record.id, fileSizeBytes: record.fileSizeBytes)
     }
 
-    /// Handles the "record says completed but disk says missing" case —
-    /// deletes the stale record so the fresh pull starts cleanly without
-    /// tripping the `alreadyInstalled` short-circuit on retry. Returns
-    /// `.resumedFromHistory` if we pruned something, `.startedFresh` otherwise.
+    /// Handles "record says completed but disk says missing": deletes the stale record so the fresh pull starts cleanly
+    /// without tripping the `alreadyInstalled` short-circuit. Returns `.resumedFromHistory` if it pruned something,
+    /// `.startedFresh` otherwise.
     private static func pruneStaleIfCompletedButMissing(
         backend: ModelBackendType,
         modelIdentifier: String,

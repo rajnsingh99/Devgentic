@@ -4,30 +4,7 @@
 //  Llama3JsonParser.swift
 //  Devgentic
 //
-//  Phase 3 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.llama3JsonSingle` dialect.
-//
-//  Handles the native output shape of Llama-3.1 / 3.2 / 3.3 Instruct:
-//
-//    <|python_tag|>{"name": "list_directory", "parameters": {"path": "/tmp"}}<|eot_id|>
-//
-//  ... or without the python_tag prefix (most common when the tool is NOT a builtin):
-//
-//    {"name": "list_directory", "parameters": {"path": "/tmp"}}
-//
-//  SINGLE-CALL ONLY — the Llama 3.x chat template raises an exception for more
-//  than one tool call per message. Multiple calls in the raw are anomalous drift
-//  and we parse only the FIRST one.
-//
-//  Recovery budget:
-//   - Strip `<|python_tag|>` / `<|eot_id|>` / `<|eom_id|>` markers before decoding
-//   - Accept `"arguments"` as alias for `"parameters"` (Q4 drift, Qwen-style leakage)
-//   - Accept `"tool_name"` as alias for `"name"` (cross-family flat-JSON drift —
-//     Llama 3.1-8B-4bit and Qwen 2.5-3B-4bit BOTH emit `{content, tool_name, arguments}`
-//     regardless of their native chat template. Common pre-training pattern dominates
-//     at Q4 quantization.)
-//   - Handle brace-enclosed JSON even if surrounding prose exists
-//   - Sanitize Python literals (True/False/None → true/false/null)
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -35,12 +12,13 @@ import OSLog
 
 private let logger = DGLogger(category: "Llama3JsonParser")
 
+/// Primary parser for the `.llama3JsonSingle` dialect (native Llama-3.1/3.2/3.3 Instruct output).
+/// Single-call only: the template allows one tool call per message, so only the first is parsed.
+/// Tolerates marker tokens, `arguments`/`tool_name` aliases, surrounding prose and Python literals (True/False/None).
 struct Llama3JsonParser: CognitiveParserProtocol {
 
-    /// Canonical decoded shape with tolerance for small-model key drift.
-    /// - `name` is canonical; `tool_name` accepted as alias (cross-family flat-JSON drift).
-    /// - `parameters` is canonical; `arguments` accepted as alias (Qwen-style leakage).
-    /// - `content` captured for reasoning extraction (present in flat-JSON drift output).
+    /// Canonical decoded shape, tolerant of small-model key drift: `tool_name` aliases `name`, `arguments` `parameters`.
+    /// `content` is captured for reasoning extraction (present in flat-JSON drift output).
     private struct ToolCallObject: Decodable {
         let name: String?
         let tool_name: String?
@@ -98,9 +76,8 @@ struct Llama3JsonParser: CognitiveParserProtocol {
     /// Finds the first balanced JSON object containing a `name` or `tool_name` field
     /// and decodes it. Returns nil if no valid tool call found.
     private func extractFirstToolCall(from text: String) -> PendingToolCall? {
-        // Require canonical `"name"` OR alias `"tool_name"` — otherwise any JSON
-        // object would spuriously match. Note: `"name"` means the literal 6 chars
-        // `"name"` (with surrounding quotes), which does NOT appear inside `"tool_name"`.
+        // Require the quoted key `name` or `tool_name`, otherwise any JSON object would spuriously match; the quoted `name`
+        // does not occur inside the quoted `tool_name`.
         guard text.contains("\"name\"") || text.contains("\"tool_name\"") else { return nil }
         guard let range = balancedJSONObjectRange(in: text, startingAt: text.startIndex) else { return nil }
         let body = String(text[range])
@@ -145,28 +122,15 @@ struct Llama3JsonParser: CognitiveParserProtocol {
     }
 
     /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    /// Delegates to the shared `JSONStructuralSanitizer` so repair happens only outside string values;
+    /// whole-payload regexes would rewrite file content carried in a `write_file` call's `arguments.content`.
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }
 
-    /// Reasoning priority:
-    ///   1. Prose text before the first `{` in the stripped raw (pure-prose path).
-    ///   2. `content` field from the decoded tool call JSON (flat-JSON drift shape —
-    ///      `{"content":"...", "tool_name":"...", ...}` has reasoning embedded in the object).
-    ///   3. Empty (no reasoning produced).
-    ///
-    /// Both the prose path and the content-field path are routed through
-    /// `ReasoningQualityFilter`. Llama-3.1 / 3.2 / 3.3 instruction-tuned models
-    /// (especially at Q4) routinely fill the `content` slot with stock phrases
-    /// like "Executing tool list_directory..." that look like reasoning but carry
-    /// no signal beyond the tool name. The filter strips those while passing
-    /// real reasoning through unchanged.
+    /// Reasoning priority: (1) prose before the first `{`, (2) the `content` field of the decoded call, (3) empty.
+    /// Both paths go through `ReasoningQualityFilter`, which strips stock phrases (Executing tool ...) that carry no signal
+    /// (Llama-3.x instruct models, especially at Q4, routinely fill `content` with them).
     private func extractReasoning(from text: String) -> String {
         guard let openIdx = text.firstIndex(of: "{") else {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -181,9 +145,7 @@ struct Llama3JsonParser: CognitiveParserProtocol {
     }
 
     /// Best-effort reasoning from a flat-JSON body's `content` field, if present.
-    /// Used when the model emits `{"content":"...", "tool_name":"...", ...}` with
-    /// no prose text outside the JSON object. Sanitizes Python literals first so
-    /// drifted JSON (`False`/`None`) decodes.
+    /// Used when no prose surrounds the JSON object; sanitizes Python literals first so drifted JSON (False/None) decodes.
     private func extractContentFieldFromBareJSON(_ text: String) -> String? {
         guard let range = balancedJSONObjectRange(in: text, startingAt: text.startIndex) else { return nil }
         let body = String(text[range])

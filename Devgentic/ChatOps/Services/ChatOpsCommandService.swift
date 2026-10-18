@@ -4,61 +4,26 @@
 //  ChatOpsCommandService.swift
 //  Devgentic
 //
-//  Deciding what to show, without knowing how to show it — C5a of the ChatOps remote-interface plan.
-//
-//  ⚠️ THE ONE STRUCTURAL RULE: THIS TYPE HOLDS NO TRANSPORT AND NO API CLIENT, SO IT CANNOT POST.
-//  Every method returns a `RemoteView` and the caller renders it. That is not a convention to be
-//  remembered — there is physically nothing here to send with. It is the replacement for twelve
-//  `private func … -> Void` handlers that each ran a SwiftData query, built a Telegram widget AND
-//  sent the message in one body, which is why the same five verbs exist three times and why
-//  `/conversations` already has two different Discord renderings.
-//
-//  ⚠️ AND IT IS THE FIRST CHATOPS COMMAND LOGIC THAT A TEST CAN DRIVE. Its two dependencies are
-//  narrow protocols, so `ChatOpsCommandServiceTests` exercises every verb with no
-//  `MainApplicationViewModel` (whose init opens real Telegram/Discord/Slack connections), no
-//  SwiftData and no network. The bridges' handlers were unreachable from a test, and being
-//  unreachable is why three of them silently diverged and two shipped dead.
-//
-//  ## Scope: C5a is the READ-ONLY verbs only
-//  `/conversations`, `/status` and `/help`. `/new`, `switch:` and `/cancel` all mutate state and
-//  move in C5b, so their ordering constraints get their own commit and their own tests. Until then
-//  the bridge keeps those arms, along with the ack, the tier-denial send, the four HITL arms and the
-//  `registerSession` + `submitRemote` pair — each of which is a transport-level side effect that a
-//  `-> RemoteView` return cannot express. Gathering the arms into one exhaustive `execute` switch
-//  (so a new `ChatOpsCommand` case becomes a build error rather than silence) is the endgame, and
-//  it can only happen once every arm has moved.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - Session context
 
+// Why: a seam instead of the singleton, whose cursor writes the developer's real `UserDefaults` during tests
 /// The two pieces of ChatOps configuration a read-only verb needs.
-///
-/// ⚠️ A SEAM RATHER THAN `ChatOpsConfigManager` ITSELF, for a concrete reason: that type is a
-/// singleton whose cursor now forwards to `RemoteSessionStore.shared`, which is bound to
-/// `UserDefaults.standard`. A test that set `activeConversationID` on it would move the DEVELOPER's
-/// own ChatOps cursor, and a crash mid-test would leave it moved. Two members, satisfied by
-/// `ChatOpsConfigManager` with no code at all.
+/// Satisfied by `ChatOpsConfigManager` with no extra code.
 @MainActor
 protocol ChatOpsSessionContext: AnyObject {
-    /// ⚠️ SETTABLE as of C5b: `/new` and `switch:` move the cursor. Writing it is what makes the
-    /// write-before-post ordering testable — a fake records the assignment, so a test can prove the
-    /// state change happened before the view was returned rather than after a send that might fail.
+    /// Settable: `/new` and `switch:` move the cursor, and a fake can record the write to prove ordering.
     var activeConversationID: UUID? { get set }
     var securityTier: ChatOpsSecurityTier { get }
 }
 
-/// Binds the shared config to ONE provider's cursor.
-///
-/// ⚠️ WITHOUT THIS THE SERVICE IS TELEGRAM-ONLY. `ChatOpsConfigManager.activeConversationID` IS the
-/// Telegram cursor — the Discord and Slack cursors are separate properties — so a service reading
-/// the bare property would have moved Discord's conversation by writing Telegram's.
-///
-/// ⚠️ It writes through `ChatOpsConfigManager`'s provider-specific property rather than straight to
-/// `RemoteSessionStore`, even though the store is where both end up. Going direct would bypass the
-/// `withMutation(keyPath:)` wrapper and silently drop `@Observable` invalidation. Nothing observes
-/// those three today, which is exactly why the loss would go unnoticed until something did.
+// Why: `activeConversationID` is the Telegram cursor, so a bare read would move Discord via Telegram's
+/// Binds the shared config to one provider's cursor, writing through `ChatOpsConfigManager`'s provider property
+/// so `withMutation(keyPath:)` still invalidates `@Observable`.
 @MainActor
 final class ProviderSessionContext: ChatOpsSessionContext {
 
@@ -87,9 +52,7 @@ final class ProviderSessionContext: ChatOpsSessionContext {
         }
     }
 
-    /// ⚠️ PROVIDER-SCOPED, for exactly the reason this type's header gives about the cursor: reading
-    /// the bare property would report TELEGRAM's tier on Discord and Slack — which is what `/status`
-    /// did, and what every tier refusal message quoted.
+    /// Provider-scoped: the bare property would report Telegram's tier on Discord and Slack.
     var securityTier: ChatOpsSecurityTier { config.securityTier(for: provider) }
 }
 
@@ -98,37 +61,26 @@ final class ProviderSessionContext: ChatOpsSessionContext {
 /// The picker-safe profile list, as a seam.
 @MainActor
 protocol ChatOpsProfileReading: AnyObject {
-    /// ⚠️ SHARED profiles only — node-owned rows must never be offered anywhere a shared profile is,
-    /// and `fetchSharedProfiles()` applies that predicate at the query rather than after the
-    /// 500-row cap.
+    /// Shared profiles only; `fetchSharedProfiles()` excludes node-owned rows at the query, before the 500-row cap.
     func sharedProfiles() -> [BackendProfileModel]
 
+    // Why: must be an uncapped id-keyed read: scanning `sharedProfiles()` misses profiles outside its 500-row window
     /// One profile by id.
-    ///
-    /// ⚠️ MUST BE AN UNCAPPED, ID-KEYED READ — never a scan of `sharedProfiles()`. That scan is the
-    /// C9 defect: `fetchProfiles()` is capped at 500 rows and sorted by `lastSelected`, so a
-    /// conversation bound to a profile outside that window resolved to NOTHING.
     func profile(id: UUID) -> BackendProfileModel?
 }
 
 extension BackendProfileStore: ChatOpsProfileReading {
-    /// ⚠️ SWALLOWS, deliberately and temporarily. The shipping `resolveProfile()` writes
-    /// `(try? fetchSharedProfiles()) ?? []`, so a store failure currently reads as "no agent profile
-    /// configured". Preserved here so C5b changes no copy; it is the one place left where a store
-    /// error is still reported as a configuration problem, and it wants the same `throws` treatment
-    /// `ConversationReading` got — in its own commit, with its own copy decision.
+    /// Swallows store errors, so a store failure reads as "no agent profile configured".
     func sharedProfiles() -> [BackendProfileModel] { (try? fetchSharedProfiles()) ?? [] }
 
-    /// `fetchProfile(byId:)` is the uncapped single-row query — deliberately not `fetchProfiles()`.
+    /// `fetchProfile(byId:)` is the uncapped single-row query, deliberately not `fetchProfiles()`.
     func profile(id: UUID) -> BackendProfileModel? { (try? fetchProfile(byId: id)) ?? nil }
 }
 
 // MARK: - Provider mapping
 
 extension RemoteChannel.Provider {
-    /// ⚠️ The origin enum owns the conversation TITLE too (`bridgeTitle` == "Telegram Chat"), so
-    /// taking it from here deletes a literal that was duplicated three ways while emitting the same
-    /// bytes. The pre-CF-39 placeholder fallback matches on that exact string.
+    /// The origin enum owns the conversation title too (`bridgeTitle`), so the literal exists once.
     var conversationOrigin: RemoteConversationOrigin {
         switch self {
         case .telegram: return .telegram
@@ -143,36 +95,23 @@ final class ChatOpsCommandService {
 
     private let logger = DGLogger(category: "ChatOpsCommands")
 
-    /// ⚠️⚠️ [LIFE-7] WEAK, BECAUSE STRONG RE-CREATED THROUGH THE BACK DOOR THE EXACT RETAIN CYCLE
-    /// `ChatOpsCoordinator`'s `weak var viewModel` was written to prevent. The three bridges declare
-    /// `weak var viewModel` and then hold THIS service strongly — and this service held the view
-    /// model strongly, so the cycle closed: view model → bridge → command service → view model.
-    /// `stop()` did not clear `commands` either, so it outlived a disconnect.
-    ///
-    /// ⚠️ AND THE FIX GOT LARGER TODAY, NOT SMALLER: `submitTurn` routes all free text through this
-    /// service, so it is now on the main command path for all three providers rather than a
-    /// read-only helper. Both protocols are already `AnyObject`-constrained, so no protocol change
-    /// is needed — and deliberately NOT composed into one `RemoteHosting` type, because the tests
-    /// inject two separate fakes.
+    // Why: the bridges hold this service strongly, so a strong view-model reference closes a retain cycle
+    /// Weak reference to the run controller; `submitTurn` routes all free text through this service on every provider.
+    /// Both protocols are `AnyObject`-constrained and kept separate because tests inject two fakes.
     private weak var runControlRef: (any RemoteRunControlling)?
     private let conversations: any ConversationReading
-    /// ⚠️ ONE SERVICE PER PROVIDER. The provider decides the conversation cursor, the recorded
-    /// origin and the log attribution, and `session` must be scoped to the SAME one — which is why
-    /// the bridge constructs both together rather than passing a provider per call.
+    /// One service per provider: the provider decides the cursor, recorded origin and log attribution,
+    /// and `session` must be scoped to the same one, so the bridge constructs both together.
     private let provider: RemoteChannel.Provider
     private var session: any ChatOpsSessionContext
     private weak var commandingRef: (any RemoteConversationCommanding)?
 
-    /// ⚠️ Named so the 13 existing call sites read unchanged; the optionality is the point.
+    /// Named so existing call sites read unchanged; the optionality is intentional.
     private var runControl: (any RemoteRunControlling)? { runControlRef }
     private var commanding: (any RemoteConversationCommanding)? { commandingRef }
 
-    /// What to post when the host is gone.
-    ///
-    /// ⚠️⚠️ ANSWERED, NOT SWALLOWED — the `[NEW-4]` rule this file already applies to `attachMirror`.
-    /// A bridge can outlive the window it acts for (it is retained by the coordinator, the view model
-    /// is not), and a command that silently does nothing is the failure this whole path exists to
-    /// avoid: the user sees a bot that stopped answering with no explanation anywhere.
+    // Why: a bridge outlives the window it acts for, and a silent no-op reads as a bot that stopped answering
+    /// What to post when the host is gone: the user is answered, never silently dropped.
     private func hostLost(_ verb: String) -> RemoteView {
         logger.error("[CHATOPS] A \(provider.rawValue) \(verb) could not run: the app's main view model was deallocated while this bridge was still listening. CONSEQUENCE: the command is REFUSED and the user is told, rather than silently doing nothing. The bridge has outlived the window it acts for and should have been stopped.")
         return .notice(Notice(tone: .failure,
@@ -181,11 +120,8 @@ final class ChatOpsCommandService {
     private let profiles: any ChatOpsProfileReading
     private let recordOrigin: (RemoteConversationOrigin, UUID) -> Void
 
-    /// ⚠️ `conversations` is its OWN parameter rather than being reached through the view model's
-    /// `persistenceService`. That property is typed `ChatPersistenceProtocol`, which
-    /// `ConversationReading` deliberately is not part of, so an `as?` cast would compile and then
-    /// silently return nil against any injected stub — `/conversations` and `/status` would answer
-    /// nothing at all, with no error.
+    // Why: that property's protocol excludes `ConversationReading`, so an `as?` cast silently returns nil against stubs
+    /// `conversations` is its own parameter, not reached through the view model's `persistenceService`.
     init(
         provider: RemoteChannel.Provider,
         runControl: any RemoteRunControlling,
@@ -206,27 +142,16 @@ final class ChatOpsCommandService {
 
     // MARK: - /conversations
 
-    /// ⚠️ How many the list shows. Ten, transcribed from `fetchRecentConversations(limit: 10)` at
-    /// the shipping call site — not a new product decision.
-    /// Conversations per page.
-    ///
-    /// ⚠️ TEN FITS EVERY PLATFORM WITH ROOM FOR THE PAGING BUTTONS. Discord and Slack both cap a
-    /// message at 25 buttons; ten rows plus Previous, Next and New Conversation is thirteen.
-    /// Telegram allows a hundred, so the tightest cap governs — the same reasoning that makes
-    /// Telegram's 64-byte payload budget bind the shared callback grammar.
+    /// Conversations per page. Ten rows plus Previous, Next and New Conversation is thirteen buttons,
+    /// within the tightest platform cap (Discord and Slack allow 25).
     static let conversationListLimit = 10
 
-    /// - Parameter offset: how many of the newest conversations to skip. Zero is the first page.
-    ///
-    /// ⚠️ REQUIRED, NOT DEFAULTED. Every caller states which page it wants, so a bridge cannot page
-    /// by accident or fail to page by omission.
+    /// offset: how many of the newest conversations to skip; zero is the first page.
+    /// Required so every caller states which page it wants.
     func conversationList(offset: Int) -> RemoteView {
         let page: [ConversationRow]
         do {
-            // ⚠️ ONE MORE ROW THAN WE SHOW. The extra row is how we learn whether a "Next" button
-            // belongs, without a count query — counting would materialise every conversation's
-            // messages and derive every title just to produce a number we compare against a page
-            // size. The extra row is discarded below and never rendered.
+            // Fetches one more row than shown; the extra tells whether a "Next" button belongs without a count query.
             page = try conversations.conversationRows(limit: Self.conversationListLimit + 1, offset: offset)
         } catch {
             return Self.storeUnavailableNotice(while: "listing your conversations", logger: logger, error: error)
@@ -235,15 +160,10 @@ final class ChatOpsCommandService {
         let hasNextPage = page.count > Self.conversationListLimit
         let rows = Array(page.prefix(Self.conversationListLimit))
 
-        // ⚠️ THE EMPTY CASE IS A NOTICE, NOT AN EMPTY CHOOSER. A chooser with no options renders as
-        // its heading alone, so handing one over here would silently replace this sentence with a
-        // bare "📋 *Your Conversations:*" — no error, no failing test. Producing the empty-state copy
-        // is this method's job; the renderer never invents it.
+        // Why: a chooser with no options renders as its heading alone and would silently replace the empty-state copy
+        // The empty case is a notice, not an empty chooser.
         guard !rows.isEmpty else {
-            // ⚠️ AN EMPTY LATER PAGE IS NOT AN EMPTY LIST. Telling a user with fifty conversations
-            // "No conversations yet. Use /new to create one." because they tapped a stale Next
-            // button would be the same class of lie as the store-down copy this method already
-            // avoids — and it would invite them to create a conversation they do not need.
+            // An empty later page is not an empty list: a stale "Next" tap must not claim "No conversations yet".
             guard offset == 0 else {
                 logger.info("[CHATOPS] A conversation page at offset \(offset) came back empty. CONSEQUENCE: the user is told the list has changed rather than that they have no conversations; this happens when a paging button outlives the rows it was posted for.")
                 return .notice(Notice(
@@ -255,9 +175,7 @@ final class ChatOpsCommandService {
 
         let active = session.activeConversationID
 
-        // ⚠️ THE RANGE IS SHOWN ONLY WHEN PAGING. On the first page it would be noise; past it, a
-        // list that silently starts at the eleventh newest conversation is indistinguishable from
-        // a list that has lost rows.
+        // The range is shown only when paging; past the first page a list starting mid-way would look like lost rows.
         let heading = offset == 0
             ? "Your Conversations:"
             : "Your Conversations (\(offset + 1)–\(offset + rows.count)):"
@@ -282,8 +200,7 @@ final class ChatOpsCommandService {
                 Chooser.Option(
                     label: row.title,
                     token: .switchConversation(row.id),
-                    // ⚠️ A FLAG. The bridges prepend "⭐ " to the label string here; keeping it a
-                    // flag is what leaves Slack's native `initial_option` reachable later.
+                    // A flag, so bridges prepend "⭐ " to the label and Slack's `initial_option` stays reachable.
                     isCurrent: row.id == active
                 )
             },
@@ -293,63 +210,40 @@ final class ChatOpsCommandService {
 
     // MARK: - /status
 
-    /// ⚠️ The count's window. One hundred, transcribed from `fetchRecentConversations(limit: 100)`
-    /// at the shipping `/status` call site — so "Total Conversations" has always meant "of the 100
-    /// most recent", and this preserves that rather than quietly making it exact.
+    /// The count's window: "Total Conversations" means of the 100 most recent.
     static let statusCountLimit = 100
 
+    // Why: one literal, so `/status` never shows a real title beside an unavailable count or the reverse
     /// What a field reads when the store could not answer it.
-    ///
-    /// ⚠️ ONE literal, because the failure is one event: `/status` reporting a real title beside an
-    /// "unavailable" count (or the reverse) would tell the user the store is half-working.
     static let unavailable = "unavailable"
 
     func status() -> RemoteView {
         let activeID = session.activeConversationID
 
-        // ⚠️ Conversation-scoped, not app-global. `/status` once read `vm.streamingMessageID` and so
-        // reported "streaming" whenever ANY conversation was busy, including a main-window run the
-        // remote user has nothing to do with.
+        // Conversation-scoped, not app-global: otherwise any busy conversation would report this one as streaming.
         let isStreaming = activeID.flatMap { runControl?.hasActiveRun(inConversation: $0) } ?? false
         let hitlPending = activeID.flatMap { runControl?.pendingClarificationID(inConversation: $0) } != nil
 
-        // ⚠️ The active conversation's title cannot come from the list above: a conversation older
-        // than that window would render as "None" while still being active.
-        //
-        // ⚠️ "None" MEANS "NO CURSOR", NEVER "THE READ FAILED". Those are different facts and this
-        // variable used to conflate them: it was initialised to "None" and only overwritten on a
-        // SUCCESSFUL read, so a dead store reported `Active Conversation: None` beside
-        // `Total Conversations: unavailable` — one honest field and one lie, in the same reply,
-        // from the same catch. A user acting on "None" runs /new and creates a duplicate of the
-        // conversation they were already in.
+        // The active title cannot come from the list above: an older conversation would render as "None" while active.
+        // "None" means no cursor, never a failed read; a failed read reads as unavailable.
         var activeTitle = activeID == nil ? "None" : Self.unavailable
         var totalConversations: String
         var storeAnswered = true
         do {
             if let activeID {
-                // ⚠️ A SUCCESSFUL READ THAT FINDS NOTHING IS STILL "None". The cursor outliving its
-                // conversation (deleted on the Mac) is a different fact from the store being down,
-                // and reporting "unavailable" for it would send the user looking for an outage.
+                // A successful read that finds nothing is still "None": a cursor outliving its deleted conversation is no outage.
                 activeTitle = try conversations.conversationRow(id: activeID)?.title ?? "None"
             }
             totalConversations = String(try conversations.conversationRows(limit: Self.statusCountLimit, offset: 0).count)
         } catch {
-            // ⚠️ DELIBERATE DIVERGENCE, RECORDED. The shipping handler writes
-            // `(try? context.fetch(...)) ?? []`, so a dead store reports "Total Conversations: 0" —
-            // indistinguishable from a genuinely empty history. Saying "unavailable" is the whole
-            // reason `ConversationReading` throws; reporting 0 here would re-tell the lie C1 removed.
+            // A dead store reports "unavailable", not a count of 0 that would look like an empty history.
             logger.error("[CHATOPS] /status could not read conversations: \(error.localizedDescription). CONSEQUENCE: both the active conversation and the count read \"unavailable\" instead of \"None\" and 0, so the remote user is not told they have no history — or no active conversation — when the store is simply down.")
             totalConversations = Self.unavailable
             storeAnswered = false
         }
 
-        // [Slice 2] Which profile answers here. Previously invisible remotely: `/new` picked one and
-        // never said which, so a user could not tell what was about to run.
-        //
-        // ⚠️ RESOLVED AFTER THE READ ABOVE, AND GATED ON IT. `profile(boundTo:)` swallows a store
-        // failure and returns nil, which falls to "Default" — the name of a real fallback. With the
-        // store down that put a THIRD description of one outage in a single reply: an "unavailable"
-        // count, an "unavailable" title, and a profile the user would reasonably believe is running.
+        // Why: resolved after the read and gated on it, so a down store does not show "Default" as if it were running
+        // Which profile answers here, so a remote user can tell what `/new` picked.
         let boundProfileName = storeAnswered
             ? (activeID.flatMap { profile(boundTo: $0)?.displayName } ?? "Default")
             : Self.unavailable
@@ -372,21 +266,8 @@ final class ChatOpsCommandService {
 
     // MARK: - /help
 
-    /// ⚠️⚠️ THIS COMMENT USED TO SAY THE OPPOSITE OF THE CODE BENEATH IT. It read: "the command
-    /// lines are transcribed from the shipping literal rather than generated from
-    /// `ChatOpsVerbTable`. Generating them would change the copy … Deriving help from the table is a
-    /// product decision for its own commit." That commit happened — the list fourteen lines below is
-    /// built from `ChatOpsVerb.presentationOrder` — and the comment was left behind describing a
-    /// design that no longer existed, three lines above the code that contradicted it.
-    ///
-    /// ⚠️ THE OBJECTION IT RAISED WAS REAL AND IS ANSWERED BY `usage`. The worry was that the table
-    /// carries aliases (`/convos`, `/stop`, `/start`) this text has never advertised, so generating
-    /// from it would change the copy. `ChatOpsVerb.usage` emits the CANONICAL name only, so the
-    /// aliases stay reachable and stay unlisted — which is why deriving the list was safe.
-    ///
-    /// ⚠️ AND DERIVING IT FIXED A REAL DEFECT. The hand-written list had drifted to seven entries
-    /// against a table of eight, so a shipped command was undiscoverable in the one place users go
-    /// to learn what exists. A verb added to the table is now advertised without touching this file.
+    /// Lists commands from `ChatOpsVerb.presentationOrder`, so a verb added to the table is advertised automatically.
+    /// `ChatOpsVerb.usage` emits the canonical name only, so aliases stay reachable and unlisted.
     func help() -> RemoteView {
         .notice(Notice(
             tone: .info,
@@ -396,10 +277,7 @@ final class ChatOpsCommandService {
                 .spacer,
                 .init(value: "Commands:", emphasis: true),
             ]
-            // ⚠️ DERIVED FROM THE TABLE, not hand-written. This list was seven literals against a
-            // table of eight verbs, so a shipped command was undiscoverable — the exact drift the
-            // catalogue exists to prevent, reappearing in the one place users go to learn what
-            // exists. A verb added to the table is now advertised without touching this file.
+            // Derived from the verb table, not hand-written, so a shipped command cannot become undiscoverable.
             + ChatOpsVerb.presentationOrder.map { verb in
                 Notice.Field(value: "\(verb.usage) — \(verb.helpDescription)")
             }
@@ -411,9 +289,8 @@ final class ChatOpsCommandService {
                 .init(value: "3. The agent responds right here"),
                 .spacer,
                 .init(label: "Security Tier", value: session.securityTier.rawValue, labelEmphasis: true),
-                // AGPL §13: everyone who reaches this app over a network is offered its source. It
-                // lives in the DEFAULT reply so an operator running a modified build inherits a
-                // compliant `/help` without editing anything. See `GlobalConstants.sourceCodeURL`.
+                // AGPL section 13: everyone reaching the app over a network is offered its source, in the default reply
+                // so modified builds inherit it. See `GlobalConstants.sourceCodeURL`.
                 .init(label: "Source", value: "\(GlobalConstants.sourceCodeURL) · GNU AGPL v3", labelEmphasis: true),
             ]
         ))
@@ -421,11 +298,8 @@ final class ChatOpsCommandService {
 
     // MARK: - /new  (C5b)
 
-    /// ⚠️ EVERY STATE WRITE HAPPENS BEFORE THIS RETURNS, which is the ordering the shipping handler
-    /// has and a render-then-apply pipeline would lose. The cursor and the Mac-window selection are
-    /// written first; only then is the view handed back to be posted. Reversing it means a failed
-    /// send leaves the cursor unmoved while the user has been told it moved — and the next `/status`
-    /// or free-text message goes to the wrong conversation.
+    // Why: reversing it lets a failed send leave the cursor unmoved after telling the user it moved
+    /// Every state write happens before this returns: the cursor and Mac-window selection first, then the view.
     func newConversation() -> RemoteView {
         guard let profile = Self.defaultProfile(from: profiles.sharedProfiles(), selected: commanding?.defaultProfileID) else {
             return .notice(Notice(tone: .warning, body: "⚠️ No agent profile configured. Set one in Devgentic Settings."))
@@ -441,9 +315,7 @@ final class ChatOpsCommandService {
         if let reusedID = reusable {
             session.activeConversationID = reusedID
             commanding?.focusConversationInMainWindow(reusedID)
-            // ⚠️ No origin record on the reuse branch — the conversation already has whatever
-            // provenance it was created with, and stamping it here would relabel a locally-created
-            // conversation as remote.
+            // No origin record on the reuse branch: the conversation keeps its provenance, and stamping would relabel it remote.
             logger.info("[ChatOps] Reused empty conversation \(reusedID.uuidString) instead of creating a new one, via \(provider.rawValue).")
             return .notice(Notice(
                 tone: .success,
@@ -454,24 +326,12 @@ final class ChatOpsCommandService {
 
         let origin = provider.conversationOrigin
 
-        // ⚠️ CREATED WITH NO TITLE, DELIBERATELY — this used to stamp `origin.bridgeTitle`, so every
-        // conversation ever started from chat was called "Telegram Chat", "Discord Chat" or "Slack
-        // Chat" FOREVER. The auto-title path that names a conversation after the user's first
-        // message (`MessagingCoordinator`, both send paths) only fires when the title is nil or
-        // EMPTY, and a stamped constant is neither — so remote conversations were the one corpus in
-        // the app that never got a meaningful name. `/conversations` listed them as N identical
-        // rows, and a title search over them could only ever match one of three constants.
-        //
-        // ⚠️ THE STAMP WAS NOT LOAD-BEARING FOR ORIGIN. `recordOrigin` below writes the origin to a
-        // side store keyed by conversation id (CF-39), and `RemoteConversationOriginStore.origin(for:)`
-        // reads it from there. `ChatHistoryView`'s `bridgeTitle == title` match is documented as the
-        // fallback for conversations created BEFORE origins were recorded; those keep their stamped
-        // titles and keep resolving. Only new conversations change, and they change to being named
-        // after what the user actually said.
+        // Why: the auto-title only fires for a nil or empty title, so a stamped constant would name every remote chat identically
+        // Created with no title on purpose, so the auto-title from the user's first message applies.
+        // Origin is recorded in a side store keyed by conversation id, not by title.
         guard let commanding else { return hostLost("/new") }
         let conversationID = commanding.createConversation(profile: profile, title: "")
-        // [CF-39] Recorded while it is a FACT, before anything can rename the conversation — and
-        // BEFORE the cursor moves, matching the shipping order.
+        // Origin is recorded before anything can rename the conversation and before the cursor moves.
         recordOrigin(origin, conversationID)
         session.activeConversationID = conversationID
         commanding.focusConversationInMainWindow(conversationID)
@@ -485,11 +345,8 @@ final class ChatOpsCommandService {
         ))
     }
 
-    /// Which profile a new remote conversation runs under: the composer's current selection if it is
-    /// still a shared profile, else the first agent profile, else the first profile at all.
-    ///
-    /// `nonisolated static` over plain values — the `RunAdmissionPolicy` shape — so the preference
-    /// order is testable with no store and no view model.
+    /// Which profile a new remote conversation runs under: the composer's selection if still shared,
+    /// else the first agent profile, else the first. `nonisolated static`, so the order is testable without a store.
     nonisolated static func defaultProfile(
         from profiles: [BackendProfileModel],
         selected: UUID?
@@ -507,9 +364,7 @@ final class ChatOpsCommandService {
         do {
             row = try conversations.conversationRow(id: conversationID)
         } catch {
-            // ⚠️ DELIBERATE DIVERGENCE. Today a dead store makes the lookup return nil, so the user
-            // is told the conversation was "not found" — a lie about their data. Same class as the
-            // other two store-down cases.
+            // A dead store reports a store-unavailable notice, not "not found", which would misstate the user's data.
             return Self.storeUnavailableNotice(while: "opening that conversation", logger: logger, error: error)
         }
         guard let row else {
@@ -521,8 +376,8 @@ final class ChatOpsCommandService {
         logger.info("[ChatOps] Mac UI navigated to conversation \(conversationID.uuidString).")
         logger.info("[ChatOps] Switched to conversation \(conversationID.uuidString) via \(provider.rawValue).")
 
-        // ⚠️ The title is a FIELD, not interpolated into `body`: it is user-controlled, so it must be
-        // escaped, and `inline` is what keeps `✅ Switched to: *<title>*` on one line.
+        // The title is a field, not interpolated into `body`, because it is user-controlled and must be escaped;
+        // `inline` keeps `✅ Switched to: *<title>*` on one line.
         return .notice(Notice(
             tone: .success,
             body: "✅ Switched to:",
@@ -536,9 +391,8 @@ final class ChatOpsCommandService {
 
     // MARK: - /cancel  (C5b)
 
-    /// ⚠️ `runControl.cancelRun` bundles the [WF-SE10] three-step ordering — read activity, cancel
-    /// the stream, then clear any parked suspension — precisely so this method cannot reorder it.
-    /// The reply text depends on the activity read, which is why it must happen before the cancel.
+    /// `runControl.cancelRun` bundles read activity, cancel the stream, then clear any parked suspension,
+    /// so this method cannot reorder them; the reply text depends on the activity read.
     func cancelRun() async -> RemoteView {
         guard let conversationID = session.activeConversationID else {
             return .notice(Notice(tone: .info, body: "No active conversation to cancel."))
@@ -547,8 +401,7 @@ final class ChatOpsCommandService {
         let hadActiveRun = await runControl?.cancelRun(inConversation: conversationID) ?? false
         logger.info("[CHATOPS] /cancel via \(provider.rawValue) for conversation \(conversationID.uuidString) — hadActiveRun=\(hadActiveRun). CONSEQUENCE: the stream task itself was cancelled (not just the parked HITL), so the run stops instead of continuing after the bot claims it was cancelled.")
 
-        // ⚠️ NOT `.failure` on either branch: `RemoteRenderLog.posted` logs a failure notice at
-        // `.error`, and cancelling an idle conversation is a normal outcome, not an error.
+        // Not `.failure` on either branch: failure notices log at `.error`, and cancelling an idle conversation is normal.
         return .notice(Notice(
             tone: hadActiveRun ? .success : .info,
             body: hadActiveRun
@@ -559,20 +412,8 @@ final class ChatOpsCommandService {
 
     // MARK: - Profile binding  (C9)
 
-    /// The profile a conversation runs under.
-    ///
-    /// ⚠️⚠️ THIS FIXES A LIVE DEFECT THAT WAS DUPLICATED THREE WAYS. Every bridge's
-    /// `resolveProfileForConversation` did:
-    ///
-    ///     ((try? BackendProfileStore.shared.fetchProfiles()) ?? []).first { $0.id == profileID }
-    ///
-    /// `fetchProfiles()` is capped at 500 rows and sorted by `lastSelected` descending, so a
-    /// conversation bound to a profile the user had not touched recently — trivially reachable once
-    /// workflow node-owned rows are counted, since every node adds one — resolved to nil. The
-    /// remote user then got "⚠️ No agent profile configured for this conversation." for a
-    /// conversation that plainly had one, and their message was dropped.
-    ///
-    /// The id-keyed read is uncapped, so the window cannot bite.
+    /// The profile a conversation runs under, read by id.
+    /// Uses the uncapped id-keyed read, so a profile outside the 500-row recency window still resolves.
     func profile(boundTo conversationID: UUID) -> BackendProfileModel? {
         let row: ConversationRow?
         do {
@@ -587,36 +428,9 @@ final class ChatOpsCommandService {
 
     // MARK: - Submitting a turn  (BR-4)
 
-    /// Admits or refuses a remote free-text turn, and submits it when admitted.
-    ///
-    /// ⚠️⚠️ THE THREE STEPS ARE ONE METHOD SO THEIR ORDER CANNOT BE GOT WRONG — the same reasoning
-    /// as `RemoteRunControlling.cancelRun`. They must run as: decide, then register the mirror
-    /// session, then submit. Registering before deciding attaches a remote session to a run that is
-    /// about to be refused; submitting before registering races the mirror against the first
-    /// streamed token. Exposing the steps separately would let each of the three bridges order them
-    /// differently, which is precisely how this subsystem acquired three copies of every other bug.
-    ///
-    /// ⚠️ IT LIVES HERE, NOT IN THE BRIDGES, FOR ONE REASON: THE BRIDGES ARE NOT TESTABLE. They
-    /// construct their own API client, listener and transport inside `start()` and hold a `weak var
-    /// viewModel: MainApplicationViewModel?`, so nothing can stand one up and watch what it submits.
-    /// `ChatOpsCommandService` takes `runControl` and `commanding` as injected seams, so a test can
-    /// report an active run through one and count the submits that reach the other — and a test of
-    /// `RemoteTurnAdmission.decide` alone would stay green for a bridge that never called it.
-    ///
-    /// - Parameter attachMirror: attaches the mirror to this conversation and reports whether it
-    ///   actually managed to. A closure because the transport is the one thing only the bridge holds.
-    ///   ⚠️ NOT CALLED ON A REFUSAL.
-    ///
-    ///   ⚠️⚠️ [NEW-4] IT RETURNS `Bool` BECAUSE `Void` LET IT LIE. This was `() -> Void` and the doc
-    ///   comment claimed the registration was unconditional, but every bridge passed a fully
-    ///   optional-chained body — `self?.remoteMirrorService?.registerSession(...)` — so a nil weak
-    ///   self, a nil mirror or (on Discord and Slack) a nil transport made it a silent no-op. The
-    ///   turn was then submitted anyway: the run streamed to the Mac, spent tokens, possibly ran
-    ///   tools, and the remote user waited forever with nothing logged at any layer. A closure that
-    ///   cannot report failure cannot be checked, so the caller could not have handled it.
-    /// - Returns: `.admitted` when the turn was submitted, `.refused` with the copy to post when it
-    ///   was not. ⚠️ The bridge MUST post a refusal: a silently dropped prompt is the failure this
-    ///   whole path exists to avoid.
+    // Why: decide, register the mirror, then submit is one method so the bridges cannot order the steps differently
+    /// Admits or refuses a remote free-text turn, and submits it when admitted. attachMirror reports whether it attached;
+    /// it is not called on a refusal. Returns `.admitted`, or `.refused` with copy the bridge must post.
     @discardableResult
     func submitTurn(prompt: String,
                     conversationID: UUID,
@@ -634,16 +448,13 @@ final class ChatOpsCommandService {
             return decision
         }
 
-        // ⚠️ [NEW-3/NEW-4] THE SUBMIT IS CONDITIONAL ON THE MIRROR, and that ordering is the fix: a
-        // run nobody can hear from is not worth starting. Checked BEFORE `submitRemote` so a failed
-        // attachment costs nothing at all.
+        // The submit is conditional on the mirror and checked before `submitRemote`, so a failed attachment costs nothing.
         guard attachMirror() else {
             logger.error("[CHATOPS] A \(provider.rawValue) prompt for conversation \(conversationID.uuidString.prefix(8)) was REFUSED because the mirror could not be attached — the transport or the mirror service was unavailable. CONSEQUENCE: nothing was submitted and the user was told, which is deliberate: submitting anyway would run the agent on the Mac, spend tokens and possibly run tools while the remote user watched a chat that never answered.")
             return RemoteTurnAdmission.mirrorUnavailable
         }
 
-        // ⚠️ [LIFE-7 + NEW-4] A lost host cannot submit, and a turn that cannot run must be REFUSED
-        //   rather than reported as started — the same rule `attachMirror` follows above.
+        // A lost host cannot submit, so the turn is refused rather than reported as started, like `attachMirror` above.
         guard let commanding else {
             logger.error("[CHATOPS] A \(provider.rawValue) prompt for conversation \(conversationID.uuidString.prefix(8)) was REFUSED because the app's main view model was deallocated while this bridge was still listening. CONSEQUENCE: nothing was submitted and the user is told, rather than waiting for an answer to a run that could never start.")
             return RemoteTurnAdmission.hostUnavailable
@@ -664,20 +475,10 @@ final class ChatOpsCommandService {
     /// not a directory, and `/use <name>` covers anything past it.
     static let profileListLimit = 10
 
-    /// The profiles a remote user may choose from.
-    ///
-    /// ⚠️ SELECTION ONLY. Creating, editing, duplicating and deleting a profile stay local: a
-    /// profile carries provider credentials, and the create flow immediately needs a model picker
-    /// and an API key — neither of which belongs in a third-party chat client.
-    ///
-    /// ⚠️ SECRETS CANNOT REACH THE VIEW, AND THE COMPILER ENFORCES IT. `BackendProfileSnapshot`
-    /// carries the DECRYPTED provider API key (its `details` getter injects it from the Keychain)
-    /// and was deliberately made non-`Codable` for that reason; `RemoteView` requires `Codable`, so
-    /// a profile object literally cannot be placed in one. Only the projected strings below travel.
+    /// The profiles a remote user may choose from; selection only, since create, edit and delete stay local.
+    /// Only projected strings travel: `RemoteView` requires `Codable` and `BackendProfileSnapshot` is not.
     func profileList() -> RemoteView {
-        // ⚠️ `sharedProfiles()` excludes node-owned rows at the query. `.code` is excluded here for
-        // the same reason the composer picker omits it: it is configured by the Code interface and
-        // is not a thing a user picks from a list.
+        // `sharedProfiles()` excludes node-owned rows at the query; `.code` is excluded here as in the composer picker.
         let selectable = profiles.sharedProfiles().filter { $0.profileType != .code }
 
         guard !selectable.isEmpty else {
@@ -705,12 +506,8 @@ final class ChatOpsCommandService {
         ))
     }
 
-    /// The one-line description under a profile's name.
-    ///
-    /// ⚠️ A DELIBERATE RE-DERIVATION, not a reuse. The composer's equivalent
-    /// (`ProfileSelectorPopover.detailText`) is `fileprivate static` and unreachable, and its
-    /// workflow arm reaches `WorkflowLayoutStore.shared` for a node count — a store this service has
-    /// no business holding. Kind and model are what a remote picker needs.
+    /// The one-line description under a profile's name, re-derived here rather than reused from the composer,
+    /// whose version is unreachable and touches `WorkflowLayoutStore`. Kind and model suffice for a remote picker.
     nonisolated static func subtitle(for profile: BackendProfileModel) -> String? {
         switch profile.details {
         case .bot(let config):      return "Bot · \(config.llmConfig.modelName)"
@@ -740,8 +537,7 @@ final class ChatOpsCommandService {
         }
 
         let selectable = profiles.sharedProfiles().filter { $0.profileType != .code }
-        // Exact match first, then a unique case-insensitive prefix. ⚠️ An AMBIGUOUS prefix is
-        // refused rather than resolved: silently binding the wrong agent is worse than asking again.
+        // Exact match first, then a unique case-insensitive prefix; an ambiguous prefix is refused rather than guessed.
         if let exact = selectable.first(where: { $0.displayName.caseInsensitiveCompare(query) == .orderedSame }) {
             return bind(exact)
         }
@@ -761,7 +557,7 @@ final class ChatOpsCommandService {
         }
     }
 
-    /// ⚠️ THE STATE WRITE HAPPENS BEFORE THE VIEW IS RETURNED, as everywhere else in this service.
+    /// The state write happens before the view is returned.
     private func bind(_ profile: BackendProfileModel) -> RemoteView {
         guard let conversationID = session.activeConversationID else {
             return .notice(Notice(
@@ -787,22 +583,8 @@ final class ChatOpsCommandService {
 
     /// How many turns `/history` shows when the user gives no number.
     static let historyDefaultCount = 6
-    /// The most it will show, whatever they ask for.
-    ///
-    /// ⚠️⚠️ THE ARITHMETIC HERE USED TO BE WRONG, IN BOTH DIRECTIONS. It read: "20 because every
-    /// line is escaped, joined and sent as ONE message: Telegram caps a message at 4096 characters
-    /// … 20 lines × a 200-character preview plus icons sits inside that with room for the heading."
-    /// It does not — 20 × (200 + `…` + icon + space) plus separators and the heading is about
-    /// 4 130, over Telegram's 4 096 before escaping adds a backslash per metacharacter. And it
-    /// considered only Telegram: `render` posts through the UNCHUNKED `sendMessage`, so Discord's
-    /// 2 000-character `content` cap was already exceeded at TEN turns and Slack's 3 000-character
-    /// section-block cap at about fifteen. An over-long reply was not truncated, it was rejected,
-    /// and the remote user received nothing.
-    ///
-    /// ⚠️ SO THIS NUMBER IS NO LONGER LOAD-BEARING FOR DELIVERY. `RemoteTextBudget` enforces each
-    /// platform's real limit at render time and says how many lines it dropped. 20 stays as the
-    /// PRODUCT bound — the point past which a chat transcript stops being readable — and the user
-    /// is told when it bites, by the heading below and by the renderer's own marker.
+    /// The most it will show, whatever they ask for. A product bound, not a delivery limit:
+    /// `RemoteTextBudget` enforces each platform's real limit and reports dropped lines.
     static let historyMaxCount = 20
 
     func conversationHistory(argument: String) -> RemoteView {
@@ -812,12 +594,10 @@ final class ChatOpsCommandService {
         if trimmed.isEmpty {
             count = Self.historyDefaultCount
         } else if let requested = Int(trimmed), requested > 0 {
-            // ⚠️ CLAMPED, and the user is told below when the clamp bit — silently showing 20 of the
-            // 500 they asked for reads as "that is all there is".
+            // Clamped, and the user is told below when the clamp applied, so a capped list does not read as complete.
             count = min(requested, Self.historyMaxCount)
         } else {
-            // ⚠️ A USAGE HINT, NOT `.unknown`. A typed argument is a human making a typo; answering
-            // "unknown command" for `/history five` sends them looking for the wrong problem.
+            // A usage hint, not `.unknown`: a mistyped argument should not send the user hunting for the wrong problem.
             return .notice(Notice(
                 tone: .info,
                 body: "How many turns? For example: /history 10 (up to \(Self.historyMaxCount))."))
@@ -840,15 +620,8 @@ final class ChatOpsCommandService {
             return .notice(Notice(tone: .info, body: "This conversation has no messages yet."))
         }
 
-        // ⚠️ ESCAPING IS WHAT MATTERS HERE, AND `NoticeText.build` DOES IT FOR BOTH `body` AND
-        // `fields` — an earlier version of this comment claimed fields were required for it, which
-        // is false and would have sent the next reader hunting a safety property that does not
-        // depend on this choice. Message text IS the most hostile content this app sends (a stray
-        // `*` or `_` from an agent reply under Telegram's Markdown parse mode is a 400 that makes
-        // the whole message vanish), and it is escaped either way.
-        //
-        // Fields are used because a transcript is a LIST: it keeps each line addressable, and it is
-        // how every other structured notice in this service is built.
+        // `NoticeText.build` escapes both `body` and `fields`, which matters for hostile message text under Telegram Markdown.
+        // Fields are used because a transcript is a list and each line stays addressable.
         let lines = rows.map { row in
             Notice.Field(value: "\(row.isFromUser ? "👤" : "🤖") \(row.text)")
         }
@@ -872,8 +645,7 @@ final class ChatOpsCommandService {
     func searchConversations(query: String) -> RemoteView {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            // ⚠️ A USAGE HINT, NOT THE WHOLE LIST. `/search` with no query is a user who forgot it;
-            // answering with every conversation would look like the query was ignored.
+            // A usage hint, not the whole list: a missing query answered with every conversation would look ignored.
             return .notice(Notice(
                 tone: .info,
                 body: "Give me something to look for — for example: /search deploy"))
@@ -887,9 +659,7 @@ final class ChatOpsCommandService {
         }
 
         guard !result.rows.isEmpty else {
-            // ⚠️ "NOTHING MATCHED" AND "I ONLY LOOKED AT THE NEWEST 200" ARE DIFFERENT FACTS, and a
-            // remote user acts on the first by concluding the conversation is gone. The scan bound
-            // is disclosed rather than hidden behind a confident empty result.
+            // "Nothing matched" and "only the newest 200 were scanned" differ, so the scan bound is disclosed instead of hidden.
             let body = result.scanWasTruncated
                 ? "No conversation title matches “\(trimmed)” in your most recent \(ChatPersistenceStore.searchScanLimit) conversations. Older ones were not searched."
                 : "No conversation title matches “\(trimmed)”."
@@ -917,19 +687,7 @@ final class ChatOpsCommandService {
     // MARK: - Clarification  (C8)
 
     /// The operation id of the clarification the bound conversation is parked on, if any.
-    ///
-    /// ⚠️ DERIVED FROM THE INTERACTION CENTER, NEVER STORED — and that distinction was a live
-    /// blocker on two platforms. Telegram computes it this way and works. Discord and Slack each
-    /// held a `private var awaitingClarification` that was **only ever assigned `false`**: no code
-    /// path anywhere set it true. `ChatOpsCommand.parse` only returns `.clarificationResponse`
-    /// inside `if awaitingClarification`, so on those two platforms a reply to a mirrored
-    /// clarification could never be recognised — it parsed as free text and started a SECOND
-    /// CONCURRENT RUN while the first stayed parked, indefinitely, with the prompt still telling
-    /// the user to "Reply with your answer".
-    ///
-    /// ⚠️ The two parser tests that pass `awaitingClarification: true` directly
-    /// (`ChatOpsCommandSlackTests`, `ChatOpsCommandDiscordTests`) were green the whole time — they
-    /// prove the parser branch works and prove nothing about the wiring that can never reach it.
+    /// Derived from the interaction center, never stored, so replies to mirrored clarifications are recognised everywhere.
     func pendingClarificationOperationID() -> UUID? {
         guard let conversationID = session.activeConversationID else { return nil }
         return runControl?.pendingClarificationID(inConversation: conversationID)

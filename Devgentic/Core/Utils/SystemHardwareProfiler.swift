@@ -4,7 +4,7 @@
 //  SystemHardwareProfiler.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 @preconcurrency import Foundation

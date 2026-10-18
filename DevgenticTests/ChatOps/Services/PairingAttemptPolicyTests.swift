@@ -4,10 +4,7 @@
 //  PairingAttemptPolicyTests.swift
 //  DevgenticTests
 //
-//  ⚠️ THE VALUE OF THIS CLASSIFIER IS ENTIRELY IN ITS FALSE-POSITIVE RATE. A detector that fires on
-//  ordinary conversation is worse than no detector: it buries the one event that matters in exactly
-//  the traffic it needs to stand out from, and the three bare `continue`s it replaces were
-//  defensible precisely because logging everything would have done that.
+//  Created by Raj Singh.
 //
 
 import XCTest

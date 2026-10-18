@@ -4,12 +4,7 @@
 //  MLXStoreLifecycleTests.swift
 //  DevgenticTests
 //
-//  Batch 2 (P2 sweep) of the MLX Model Manager readiness plan.
-//
-//    B10  The scan debounce was 30s, so every explicit Refresh was a no-op for half a
-//         minute — while the code comment claimed the window was 2s.
-//    B15  `applyFilterAndSort()` re-ran on every download progress tick.
-//    B17  The fit verdict was encoded in colour alone.
+//  Created by Raj Singh.
 //
 
 import XCTest

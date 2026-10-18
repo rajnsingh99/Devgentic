@@ -2,17 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PromptLayoutBTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Layout B (owner decision 2026-10-07): the system message holds only what stays the same for the
-//  whole conversation; everything that changes per message rides the user message. A prefix cache —
-//  `MLXPromptCache`, Ollama's KV cache, OpenAI's and Gemini's automatic caching — can only skip the
-//  tokens a request shares with the previous one from the START, and the old order opened the system
-//  message with the new question.
-//
-//  These pin the invariant from the outside: two messages of one conversation, on every path, must
-//  send the same system message; nothing that changes per message may appear in it; and every
-//  payload must still reach the model exactly once.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,9 +4,7 @@
 //  DevgenticActivityIndicator.swift
 //  Devgentic
 //
-//  Bespoke context-adaptive animating activity indicators:
-//  - Gyroscopic Flux: used for Chat reasoning, thought process, and Workflow execution
-//  - Syntax Nexus: used for Code Viewer, live file streaming, and code block synthesis
+//  Created by Raj Singh.
 //
 
 import SwiftUI

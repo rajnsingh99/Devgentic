@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ComposerSuggestionKeyRoutingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Which keystrokes belong to an open suggestion picker rather than to the text.
-//
-//  ⚠️⚠️ THIS FILE EXISTS BECAUSE THE OMISSION SHIPPED. When the `/` skill picker was added, the
-//  routing test inside `keyDown` still read `showPromptSuggestions || showFileSuggestions`. The
-//  picker opened, filtered and highlighted correctly — and was completely deaf: arrows did not move
-//  the selection, and Return fell through to `onCommit`, SENDING the half-typed `/co do the thing`
-//  to the model as literal text. It was a `let` inside an `NSTextView` subclass, so nothing could
-//  reach it; the decision was hoisted into `ComposerSuggestionKeyRouting` so this file could.
+//  Created by Raj Singh.
 //
 
 import XCTest

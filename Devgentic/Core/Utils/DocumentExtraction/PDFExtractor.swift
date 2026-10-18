@@ -4,7 +4,7 @@
 //  PDFExtractor.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 29/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -33,9 +33,8 @@ struct PDFExtractor: DocumentExtractor {
         var fullText = ""
         var method = "pdfkit"
 
-        // Phase 1: Try PDFKit text extraction
-        // Length tracked as pages are added: `fullText.count` is O(n), and asking it once per page
-        // made extracting a long PDF quadratic (RAG-35).
+        // Try PDFKit text extraction first. The length is tracked as pages are added, since `fullText.count` is O(n) and
+        // would make a long PDF quadratic.
         var extractedCount = 0
         for i in 0..<pageCount {
             guard let page = pdfDocument.page(at: i) else { continue }
@@ -46,7 +45,7 @@ struct PDFExtractor: DocumentExtractor {
             if extractedCount >= maxSize { break }
         }
 
-        // Phase 2: If PDFKit returned little/no text, try OCR via Vision
+        // If PDFKit returned little or no text, try OCR via Vision.
         let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count < 50 && pageCount > 0 {
             logger.info("PDFKit extracted only \(trimmed.count) chars — falling back to Vision OCR for \(url.lastPathComponent)")
@@ -128,7 +127,7 @@ struct PDFExtractor: DocumentExtractor {
                 logger.error("Vision OCR failed on page \(i + 1): \(error.localizedDescription)")
             }
 
-            if ocrCount >= maxSize { break }   // tracked, not `ocrText.count` (O(n) per page, RAG-35)
+            if ocrCount >= maxSize { break }   // Tracked rather than `ocrText.count`, which is O(n) per page.
         }
 
         logger.info("Vision OCR complete: \(ocrText.count) chars total across \(document.pageCount) pages")

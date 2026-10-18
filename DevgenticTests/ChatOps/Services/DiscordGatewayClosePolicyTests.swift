@@ -4,10 +4,7 @@
 //  DiscordGatewayClosePolicyTests.swift
 //  DevgenticTests
 //
-//  ⚠️ THE POLICY IS PURE, SO POLICY TESTS ALONE WOULD BE THE EXACT FAILURE THIS REPO KEEPS HITTING:
-//  a correct classifier nothing calls, green while the client retries a rejected token forever.
-//  `testTheClientActsOnThePolicyRatherThanRetryingEverything` is the one that fails if the wiring
-//  is cut, and it is deliberately specific about WHICH arm stops the loop.
+//  Created by Raj Singh.
 //
 
 import XCTest

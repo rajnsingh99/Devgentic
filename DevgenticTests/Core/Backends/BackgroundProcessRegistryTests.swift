@@ -4,12 +4,7 @@
 //  BackgroundProcessRegistryTests.swift
 //  DevgenticTests
 //
-//  Tier 1 of the background-task work. Four defects are pinned here, each of which shipped:
-//  output discarded to /dev/null, `timeout_seconds` computed and never applied on the background
-//  branch, no handle retained so nothing could be polled or stopped, and no quit-time teardown.
-//
-//  ⚠️ Every test builds its OWN registry against a scratch directory. Sharing `.shared` would
-//  leak live children into the next test — the exact failure this type exists to prevent.
+//  Created by Raj Singh.
 //
 
 import XCTest

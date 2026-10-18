@@ -4,16 +4,7 @@
 //  WorkflowCanvasChromeTests.swift
 //  DevgenticTests
 //
-//  Register `Workflow_Production_Readiness_Fresh.md`, canvas cluster — the two chrome rows fixed
-//  2026-09-01: `CVV-3` (an unbounded port badge painting across neighbouring nodes) and `CVV-9`
-//  (the empty-canvas placard rendering over sticky notes and swallowing their clicks).
-//
-//  Both were decisions inside a SwiftUI `body`, so neither could be asserted at all before the fix
-//  extracted them. What CANNOT be asserted here is stated on each test: pixel layout
-//  (`.overlay(alignment:)` + `.fixedSize()` + offset) and hit-testing are SwiftUI runtime
-//  properties with no headless seam. Both fixes are shaped so the pure predicate fully determines
-//  the outcome — that is why the placard fix changes the CONDITION rather than doing
-//  `.allowsHitTesting` surgery on the placard.
+//  Created by Raj Singh.
 //
 
 import XCTest

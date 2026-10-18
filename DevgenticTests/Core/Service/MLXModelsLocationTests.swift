@@ -4,11 +4,7 @@
 //  MLXModelsLocationTests.swift
 //  DevgenticTests
 //
-//  G14 — custom models directory, import, and Reveal in Finder.
-//
-//  ⚠️ These do NOT write to `UserDefaults` for the bookmark, so a test run can never leave the
-//  developer's real models directory repointed at a temp folder that later gets deleted.
-//  Coverage is the pure logic: usability checks, repo-id suggestion, and import validation.
+//  Created by Raj Singh.
 //
 
 import XCTest

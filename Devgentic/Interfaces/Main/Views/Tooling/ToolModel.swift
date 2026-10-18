@@ -4,12 +4,7 @@
 //  ToolModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 20/09/25.
-//
-//  Centralized on 10/10/25 to act as a single source of truth for tool-related data models.
-//  Updated for Phase 1: Security & HITL - Added requiresConfirmation to ToolDefinition
-//  Updated for Phase 2: Added requiresConfirmation to ExecutableTool protocol
-//  Updated for Phase 5: Added category property for UI grouping
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -58,24 +53,8 @@ struct ToolParameters: Codable, Hashable {
 
 // MARK: - Lenient JSON Schema decoding
 
-// These two types model the narrow JSON-Schema subset the *local* tools use. MCP
-// servers emit arbitrary JSON Schema, and decoding it strictly used to throw for
-// perfectly ordinary shapes:
-//
-//   • no `required` key at all (a tool where every argument is optional)
-//   • `"type": ["string", "null"]` — the nullable-union form
-//   • `"items": { "type": "object", "properties": {...} }` — arrays of objects
-//   • a property carrying only `enum` / `oneOf` / `$ref` and no `type`
-//
-// `MCPClientService.listTools` `compactMap`s on that throw, so each one silently
-// removed a tool from the server's advertised list. The user saw a server that
-// connected successfully and exposed a subset of its tools, with nothing in the UI
-// to say why. Decode leniently instead — fall back to a usable default per field
-// rather than discarding the whole tool.
-//
-// Both inits live in extensions on purpose: declaring `init(from:)` inside the
-// struct body would suppress the compiler-synthesized memberwise init, which the
-// local tools use to build their schemas by hand.
+// Decodes leniently because MCP servers emit arbitrary JSON Schema; a strict decode would silently drop the tool.
+// Both inits are in extensions so the synthesized memberwise init (used by local tools) is not suppressed.
 
 extension ToolParameters {
 
@@ -102,10 +81,8 @@ extension ToolParameterProperty {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: LenientKeys.self)
 
-        // `type` may be a plain string, a union array (`["string","null"]`), or absent
-        // when the property is described only by `enum` / `oneOf` / `$ref`. Take the
-        // first meaningful entry of a union; fall back to "string", which is the
-        // safest thing to advertise to a model when the server did not say.
+        // `type` may be a string, a union array (`["string","null"]`) or absent; take the first meaningful union entry,
+        // falling back to "string", the safest thing to advertise to a model.
         if let single = try? container.decode(String.self, forKey: .type) {
             self.type = single
         } else if let union = try? container.decode([String].self, forKey: .type),
@@ -117,10 +94,8 @@ extension ToolParameterProperty {
 
         self.description = try? container.decode(String.self, forKey: .description)
 
-        // `items` is modelled as [String: String] for the local tools. A server may
-        // send a nested object schema there; keep the string-valued entries (which
-        // carries the important `type`) and drop the nested structure rather than
-        // failing. Lossy but non-destructive — see ToolDefinition.parameters callers.
+        // `items` is modelled as [String: String]; a nested object schema keeps its string-valued entries (including `type`)
+        // and drops the nested structure rather than failing.
         if let flat = try? container.decode([String: String].self, forKey: .items) {
             self.items = flat
         } else if let rich = try? container.decode([String: JSONValue].self, forKey: .items) {
@@ -165,10 +140,8 @@ enum ToolSourceType: Hashable, Codable {
 /// built-in local tools or a configured remote MCP server.
 struct ToolSource: Identifiable, Hashable {
 
-    /// The fixed identity of the built-in tool catalogue.
-    ///
-    /// Anything whose `sourceId` is NOT this belongs to an MCP server. Tool dispatch
-    /// keys off that distinction, so the literal must not be re-spelled at each site.
+    /// The fixed identity of the built-in tool catalogue; any other `sourceId` belongs to an MCP server.
+    /// Tool dispatch keys off that distinction, so the literal is not re-spelled at each site.
     static let builtInSourceID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
 
     let id: UUID
@@ -183,16 +156,9 @@ struct ToolSource: Identifiable, Hashable {
     /// catalogue, which has nothing to connect to.
     var isEnabled: Bool = true
 
-    /// True when `mcpConfigData` could not be decoded, so `serverDefinition` is nil because the
-    /// stored bytes are UNREADABLE rather than because this source has no configuration.
-    ///
-    /// ⚠️ The distinction matters and was previously lost (G22): both cases produced a nil
-    /// `serverDefinition`, so a server whose config had become unreadable simply failed to connect
-    /// with nothing to say why. It also changes what the user should DO — deleting an unreadable
-    /// source orphans its Keychain secrets, because the `envKeys` that name them live inside the
-    /// very blob that cannot be read.
-    ///
-    /// Load-scoped: describes this read, not the source. Defaults false for the built-in catalogue.
+    /// True when `mcpConfigData` could not be decoded, so a nil `serverDefinition` means unreadable bytes, not no config.
+    /// Deleting an unreadable source orphans its Keychain secrets, since the `envKeys` naming them live in that blob.
+    /// Describes this read, not the source; false for the built-in catalogue.
     var isConfigurationUnreadable: Bool = false
 }
 
@@ -213,10 +179,8 @@ protocol ExecutableTool: Sendable {
     
     var requiresConfirmation: Bool { get }
     
-    /// The asynchronous method that contains the tool's core logic.
-    /// - Parameter arguments: A dictionary containing the arguments, conforming to the `parameters` schema.
-    /// - Returns: A `String` representing the output or result of the tool's execution.
-    /// - Throws: An error if the tool execution fails.
+    /// Runs the tool's core logic with `arguments` conforming to the `parameters` schema.
+    /// Returns the tool's output as a string; throws if execution fails.
     func execute(arguments: [String: Any]) async throws -> String
 }
 
@@ -227,22 +191,8 @@ struct MCPConfiguration: Codable {
     let mcpServers: [String: ServerDefinition]
 }
 
-/// A unified server definition that works for both local and remote servers.
-///
-/// **Secret-handling contract.** Nothing in this struct holds secret material.
-/// - For local-process servers, `envKeys` lists the names of env vars the
-///   server expects; their values live in Keychain at `MCPSecretScope.envValue(key:)`
-///   for the source's UUID.
-/// - For remote servers, `auth` describes the authentication shape; the actual
-///   token / key / OAuth bundle lives in Keychain under the matching scope.
-///
-/// Callers materialize secrets at use time via `MCPRuntimeSecrets.materialize(...)`.
-/// How Devgentic talks to a REMOTE MCP server.
-///
-/// Remote servers were always constructed with SSE streaming on, which is correct for the
-/// current Streamable HTTP standard but leaves no recourse for a server that does not
-/// implement the SSE GET stream — those servers just failed to connect with no way to
-/// influence it. This is the escape hatch.
+/// How the app talks to a remote MCP server: Streamable HTTP with an SSE stream, or plain HTTP for servers
+/// that do not implement the SSE GET stream.
 enum MCPTransportMode: String, Codable, Hashable, CaseIterable, Identifiable {
     /// Streamable HTTP with an SSE stream for server→client push. The current standard and
     /// the right default: server-initiated notifications (`tools/list_changed`, logging,
@@ -339,14 +289,8 @@ struct ServerDefinition: Codable, Hashable {
     }
 }
 
-/// Runtime secret bundle passed into `MCPClientService.connect`. Carries the
-/// env-var values and auth header that the session needs but which are never
-/// persisted inside `ServerDefinition`. Two construction paths:
-///
-/// 1. **Form-driven (test connection / save):** the Add/Edit form holds env
-///    values and auth tokens in @State; build directly from form data.
-/// 2. **Persisted-source (tool call reconnect):** materialize from Keychain
-///    via the source's UUID and its `ServerDefinition`.
+/// Runtime secret bundle passed into `MCPClientService.connect`: env-var values and the auth header the session needs,
+/// never persisted inside `ServerDefinition`. Built from form data, or materialized from Keychain for a persisted source.
 struct MCPRuntimeSecrets: Sendable {
     var env: [String: String] = [:]
     /// The fully-formed authorization header to attach to remote requests, or
@@ -356,19 +300,15 @@ struct MCPRuntimeSecrets: Sendable {
 
 extension MCPRuntimeSecrets {
 
-    /// Logger for the KC-14 attach refusal — the only log line this extension emits, so it
-    /// lives here rather than in a shared category.
+    /// Logger for the attach-refusal line, the only log line this extension emits.
     private static let attachRefusalLogger = DGLogger(category: "MCPRuntimeSecrets")
 
-    /// ⚠️ TEST SEAM (register KC-31). When set, receives exactly the refusal lines `materialize`
-    /// logs when a credential read FAILS — one message for the sink and the logger alike, so the
-    /// seam cannot drift from the log (the `ShellProcess.stderrLogSinkForTesting` shape).
+    /// Test seam: when set, receives exactly the refusal lines `materialize` logs when a credential read fails,
+    /// one message for the sink and the logger alike so the seam cannot drift from the log.
     nonisolated(unsafe) static var refusalLogSinkForTesting: (@Sendable (String) -> Void)?
 
-    /// Logs one credential refusal. Register KC-31: an unreadable env value or auth header used
-    /// to be dropped with NO log, so a server was launched with no credential and the only hint
-    /// was an authentication failure from the server itself — with nothing in the diagnostic
-    /// trail explaining why.
+    /// Logs one credential refusal; an unreadable env value or auth header must be logged, or a server launches
+    /// with no credential and the only hint is an authentication failure from the server itself.
     private static func logRefusal(_ message: String) {
         if let sink = refusalLogSinkForTesting {
             sink(message)
@@ -389,10 +329,8 @@ extension MCPRuntimeSecrets {
     static func materialize(for sourceID: UUID, definition: ServerDefinition) -> MCPRuntimeSecrets {
         var bundle = MCPRuntimeSecrets()
 
-        // Env vars: read each key's value out of Keychain. MISSING values are skipped silently —
-        // the user may have removed the secret since the server was added; ShellProcess will
-        // surface the failure if the server requires it. FAILED reads are NOT silent (KC-31):
-        // the value may exist, and launching without it must be visible in the diagnostic trail.
+        // Env vars: read each key's value from Keychain. Missing values are skipped silently (the secret may have been removed;
+        // `ShellProcess` surfaces it if required). Failed reads are not silent: launching without the value must be visible.
         if let keys = definition.envKeys {
             for key in keys {
                 switch MCPSecretStore.shared.read(.envValue(key: key), sourceID: sourceID) {
@@ -429,15 +367,11 @@ extension MCPRuntimeSecrets {
                 logRefusal(refusal("the '\(headerName)' header value", sourceID: sourceID, status: status))
             }
         case .oauth:
-            // Read the OAuth credential bundle out of Keychain and attach its
-            // (possibly stale) access token. Refresh-on-401 happens one layer
-            // up in `DynamicMCPTool` once Phase 4 lands; for now a stale
-            // token will surface as a 401 from the transport.
+            // Reads the OAuth credential bundle from Keychain and attaches its (possibly stale) access token;
+            // a stale token surfaces as a 401 from the transport.
             if let oauthBundle = MCPOAuthCoordinator.loadBundle(sourceID: sourceID) {
-                // ⚠️ Register KC-14: the token is attached only to the URL the sign-in was
-                // performed for. A bundle bound to a different server (the URL was edited,
-                // or the row repurposed) must NOT ride along to the new host. Legacy
-                // bundles carry no binding and attach — the edit gate is what retires them.
+                // The token is attached only to the URL the sign-in was performed for; a bundle bound to a different server must not
+                // ride along to a new host. Legacy bundles carry no binding and attach.
                 if MCPOAuthBinding.shouldAttach(oauthBundle, to: definition.url) {
                     bundle.authorizationHeader = ("Authorization", "Bearer \(oauthBundle.accessToken)")
                 } else {
@@ -465,10 +399,8 @@ enum MCPManagerError: LocalizedError {
     case authenticationFailed(String)
     case processFailedToStart(String)
 
-    /// The server ran the tool and the tool itself reported failure (`isError: true`
-    /// on the `tools/call` result). This is a *tool* failure, not a *transport*
-    /// failure: the session is healthy and must not be torn down. `DynamicMCPTool`
-    /// keys its reconnect decision off this distinction.
+    /// The server ran the tool and the tool itself reported failure (`isError: true` on the `tools/call` result).
+    /// A tool failure, not a transport failure: the session is healthy and must not be torn down.
     case toolReportedFailure(tool: String, detail: String)
 
     case unknown

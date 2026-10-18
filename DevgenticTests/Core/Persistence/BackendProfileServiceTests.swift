@@ -4,10 +4,7 @@
 //  BackendProfileServiceTests.swift
 //  DevgenticTests
 //
-//  Created on 27/03/26.
-//
-//  Tests BackendProfileService's edit buffer management and persistence integration.
-//  Uses a mock store to isolate service logic from SwiftData.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,13 +4,7 @@
 //  SecureKeyStorageTestHostRedirectTests.swift
 //  DevgenticTests
 //
-//  Registers KC-54 / KC-55: under XCTest, no plain `SecureKeyStorage()` may reach the login Keychain.
-//
-//  ⚠️ WHAT THIS PINS. The XCTest host is the real app. Nine `ProviderKeyStorageTests` wrote a
-//  sentinel into the PRODUCTION `com.devgentic.provider` service, and constructing
-//  `ChatOpsConfigManager.shared` — which four test classes do — ran a copy-then-delete migration
-//  against live bot tokens. The fix is a redirect inside `SecureKeyStorage` itself; this file asserts
-//  it from the OUTSIDE, through the real Keychain, via the named opt-in that bypasses the redirect.
+//  Created by Raj Singh.
 //
 
 import XCTest

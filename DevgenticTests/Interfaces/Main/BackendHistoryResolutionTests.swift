@@ -4,13 +4,7 @@
 //  BackendHistoryResolutionTests.swift
 //  DevgenticTests
 //
-//  Pins the merge that decoupled the model's history from the UI's pagination window.
-//
-//  Before this, the backend received `currentChatMessages` — the scroll window (20 on open,
-//  +10 per scroll up) — so the model's memory depended on how far the user had scrolled and
-//  a reopened long conversation got 20 messages regardless of its context window.
-//  The store is now the base, but in-memory messages must be merged OVER it, never replaced
-//  by it: the user's message is persisted in a DETACHED task that races the read.
+//  Created by Raj Singh.
 //
 
 import XCTest

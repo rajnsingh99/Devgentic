@@ -4,19 +4,7 @@
 //  MLXLeftoverDownloadTests.swift
 //  DevgenticTests
 //
-//  Timeout inventory D-27, plus the user's report that a stopped MLX download leaves gigabytes
-//  behind that nobody is told about. Four behaviours:
-//
-//    1. A FAILED download keeps its bytes (it used to delete finished shards too), so Resume on
-//       the failed row continues instead of starting over.
-//    2. The partial downloads no history row points at are listed ("untracked").
-//    3. The launch scan tells the user once, only past the size threshold, and badges Downloads
-//       until they look.
-//    4. The user can delete a listed leftover — but never the one downloading right now, and
-//       never a complete install.
-//
-//  ⚠️ Every path lives under a temporary root (`modelsRootOverride`). Never point these at the
-//  real Application Support tree — the delete paths are recursive.
+//  Created by Raj Singh.
 //
 
 import XCTest

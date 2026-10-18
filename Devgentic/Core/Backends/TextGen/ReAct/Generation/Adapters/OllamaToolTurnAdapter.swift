@@ -4,14 +4,13 @@
 //  OllamaToolTurnAdapter.swift
 //  Devgentic
 //
-//  Native-turn serializer for Ollama's /api/chat endpoint. Ollama mirrors
-//  OpenAI's tool-calling shape closely but accepts arguments as a dict
-//  (not a stringified JSON blob) — matches what our receive-side parser
-//  in OllamaLLMProvider emits.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Native-turn serializer for Ollama's /api/chat endpoint. The tool-calling shape mirrors OpenAI's, but arguments are a
+/// dict rather than a stringified JSON blob, matching what the receive-side parser in `OllamaLLMProvider` emits.
 struct OllamaToolTurnAdapter: ToolTurnAdapter {
 
     func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?) -> [String: Any] {
@@ -44,12 +43,9 @@ struct OllamaToolTurnAdapter: ToolTurnAdapter {
         }
     }
 
-    /// Kickoff user turn. Text-only → plain string content (byte-identical to the
-    /// default `normalizeCanonical`, so text runs and their KV-cache prefix are
-    /// unchanged). With images → Ollama's per-message `images` array of RAW base64
-    /// strings (NO `data:` prefix, per /api/chat). The vision model's processor /
-    /// chat template inserts the image tokens server-side, so we never hand-place
-    /// placeholders. Flows straight through `buildCognitiveBody` into the request.
+    /// Kickoff user turn. Text-only gives plain string content (byte-identical to `normalizeCanonical`, so KV-cache holds).
+    /// With images, uses Ollama's per-message `images` array of raw base64 strings (no `data:` prefix).
+    /// The server inserts image tokens; flows straight through `buildCognitiveBody` into the request.
     func userTurn(text: String, images: [ResolvedImage]) -> [String: Any] {
         guard !images.isEmpty else {
             return ["role": "user", "content": text]

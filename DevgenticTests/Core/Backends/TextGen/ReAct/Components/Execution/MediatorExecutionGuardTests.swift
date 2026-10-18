@@ -4,19 +4,7 @@
 //  MediatorExecutionGuardTests.swift
 //  DevgenticTests
 //
-//  A gate that returns the right VALUE but still runs the tool is not a gate.
-//
-//  Every existing test of the mediator's rejection paths asserts on the returned
-//  `ToolExecutionResult` — that a missing argument yields a validation error, that an unknown
-//  name yields `.hallucinated`. None of them asserts the SIDE EFFECT did not happen, which is the
-//  half that matters: `delete_file` rejected for a missing path must also not have deleted
-//  anything.
-//
-//  This codebase has already shipped that exact defect once. The workflow Action-node
-//  confirmation gate added on 2026-07-31 was unreachable dead code — `selectTool` hardcoded
-//  `requiresConfirmation: false`, so the branch could never be entered. It was written,
-//  documented and reviewed without anyone tracing the value to its producer. These tests trace
-//  the effect instead of the return value.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,46 +4,7 @@
 //  SkillArchiveStaging.swift
 //  Devgentic
 //
-//  Expanding a skill archive into a caller-owned staging directory, safely, offline.
-//
-//  ## What this used to be
-//
-//  `SkillPackageInstaller`: it unpacked a .zip and PROMOTED it into
-//  `~/Library/Application Support/Devgentic/Skills/<name>`, because a skill's bytes lived on disk
-//  and the app needed a stable folder to point at. Under the V6 library the bytes live in the store,
-//  so there is nothing to promote — `SkillIngest` reads the staged tree into memory and deletes it.
-//  The promote half, its Application Support root, and the directory-locating step that renamed a
-//  contents-only archive are all gone with it.
-//
-//  ⚠️ That deletion also removed the arbitrary-recursive-delete fix, and it is worth being precise
-//  about why that is safe rather than alarming. The defect was: `locateSkillRoot` derived a
-//  directory name from an untrusted archive's frontmatter and handed it to `removeItem`, so
-//  `name: ../../../../victim` deleted `/victim`. Nothing here builds a path from archive content any
-//  more — the name becomes a database field. The one place a stored name still becomes a path is
-//  `SkillMaterializer` on export, which validates it for exactly this reason.
-//
-//  ## The hardening, and what each part actually stops
-//
-//  `ZipArchiveStaging` contributes exactly one defence — reaching the archive through a symlink it
-//  names itself, so `unzip`'s OWN wildcard matching cannot select a different file. That is real and
-//  hard-won (an `a*.docx` in the same folder made unzip process three archives in turn), and it is
-//  kept. It contributes nothing else: its own doc comment records that no size bound is applied.
-//
-//  Everything below is this file's job, done AFTER extraction against the real tree rather than by
-//  parsing entry names, because the thing that matters is where bytes actually landed:
-//
-//    - **Budget**, in TWO places and the second is the load-bearing one. The pre-flight `unzip -l`
-//      reads sizes the archive DECLARES — a field an attacker controls, so it refuses the honest
-//      majority cheaply and stops nothing else. `enforceExtractedSizeBudget` then measures what
-//      actually landed on disk, which is the only number the archive cannot lie about.
-//    - **Symlink refusal**: any symlink anywhere in the tree refuses the whole package. Not
-//      filtered — refused. A legitimate skill has no reason to ship one, and a symlink is how an
-//      archive reaches outside itself after extraction.
-//    - **Confinement**: every entry must resolve under the staging root, with a trailing separator,
-//      so `/skills` cannot claim `/skills_backup`.
-//
-//  ⚠️ The caller owns the staging directory and MUST delete it. Nothing here is retained, and that
-//  is the whole contract: this type expands and refuses, and has no opinion about what happens next.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -51,6 +12,8 @@ import os
 
 private let logger = DGLogger(category: "SkillArchiveStaging")
 
+/// Errors raised while safely expanding a skill archive into a caller-owned staging directory, offline, before its
+/// contents are ingested.
 enum SkillArchiveError: LocalizedError, Equatable {
     case archiveUnreadable(String)
     case tooLarge(bytes: Int, limit: Int)
@@ -81,14 +44,9 @@ enum SkillArchiveStaging {
     /// Entry-count ceiling. A zip bomb is as easily many tiny files as one huge one.
     static let maxEntries = 5_000
 
-    /// Expands an archive into a caller-owned staging directory and applies EVERY safety check,
-    /// stopping before anything is promoted anywhere.
-    ///
-    /// ⚠️ ONE validation sequence, and it must stay one. Two copies of "preflight, expand, measure
-    /// what landed, refuse symlinks" is how a check gets fixed in one place and left broken in the
-    /// other — the header records the declared-size trap that only the second half catches.
-    ///
-    /// The caller owns `staging` and MUST delete it. Nothing here is promoted, copied, or retained.
+    /// Expands an archive into a caller-owned staging directory and applies every safety check; nothing is promoted or
+    /// retained. The caller owns `staging` and must delete it. This is the single validation sequence (preflight, expand,
+    /// measure, refuse symlinks).
     static func stageValidated(zipAt url: URL, into staging: URL) throws -> URL {
         try preflight(url)
 
@@ -102,11 +60,8 @@ enum SkillArchiveStaging {
             }
         }
 
-        // ⚠️ ENFORCE ON WHAT ACTUALLY LANDED. The pre-flight above reads `unzip -l`, which reports
-        // the sizes the archive's own central directory DECLARES — a field an attacker controls. A
-        // one-line patch makes a 500 MB bomb list as 20 bytes and sail through the budget. Measuring
-        // the extracted tree is the only check the archive cannot lie to; the pre-flight stays
-        // because it refuses the honest majority before anything is written.
+        // Enforces the budget on what actually landed: the pre-flight reads sizes the archive itself declares, which an
+        // attacker controls. The pre-flight stays to refuse honest oversize archives early.
         try enforceExtractedSizeBudget(under: staged.contentRoot)
 
         try refuseSymlinksAndEscapes(under: staged.contentRoot)
@@ -116,11 +71,8 @@ enum SkillArchiveStaging {
 
     // MARK: - Pre-flight
 
-    /// Reads the archive's table of contents and refuses it before a single byte is written.
-    ///
-    /// Goes through the SAME symlink staging as extraction — `unzip -l` performs the same wildcard
-    /// matching on the archive name that `unzip -o` does, so listing the real path would reintroduce
-    /// exactly the hole the staging trick closes.
+    /// Reads the archive's table of contents and refuses it before a byte is written. Goes through the same symlink
+    /// staging as extraction, since `unzip -l` does the same wildcard matching on the archive name.
     private static func preflight(_ url: URL) throws {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -169,19 +121,9 @@ enum SkillArchiveStaging {
         }
     }
 
-    /// Reads the totals line from an `unzip -l` listing: `<bytes> <n> files`.
-    ///
-    /// ⚠️ Deliberately anchored on the LAST line that matches, not the first. A listing's body lines
-    /// are file entries, and a filename can contain digits and the word "file" (`report-file-2.txt`),
-    /// so a forward scan can lock onto an entry and read its size as the archive total. Scanning
-    /// from the end finds the trailer, which is the only line that summarises.
-    ///
-    /// Returns nil rather than guessing when the shape is unrecognised — a localized `unzip`, or a
-    /// future format change, must be an explicit "could not read this archive" rather than a
-    /// silently wrong budget that lets an oversized package through.
-    ///
-    /// ⚠️ This is a CHEAP pre-filter over numbers the ARCHIVE DECLARES. The real bound is
-    /// `enforceExtractedSizeBudget`, which measures what landed. Do not treat this as a defence.
+    /// Reads the totals line from an `unzip -l` listing (`<bytes> <n> files`), anchored on the last matching line since
+    /// entry names can contain digits and "file". Returns nil when the shape is unrecognised, so an unreadable listing is
+    /// an explicit failure. A cheap pre-filter over declared numbers, not a defence.
     static func parseListingTotals(_ listing: String) -> (bytes: Int, entries: Int)? {
         let trailer = listing
             .components(separatedBy: "\n")
@@ -194,11 +136,8 @@ enum SkillArchiveStaging {
 
     // MARK: - Post-extraction validation
 
-    /// Measures the extracted tree and refuses it if it exceeds the budget.
-    ///
-    /// Runs BEFORE the symlink walk so a bomb is caught as early as possible, and before anything is
-    /// promoted — the staging directory is removed by the caller's `defer` either way, so a refusal
-    /// here leaves nothing behind.
+    /// Measures the extracted tree and refuses it if it exceeds the budget. Runs before the symlink walk so a bomb is
+    /// caught early; the caller's `defer` removes the staging directory either way.
     static func enforceExtractedSizeBudget(under root: URL) throws {
         let fm = FileManager.default
         guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey], options: []) else { return }
@@ -223,10 +162,8 @@ enum SkillArchiveStaging {
         }
     }
 
-    /// Refuses the whole package if any symlink exists, or if any entry resolved outside the root.
-    ///
-    /// ⚠️ Walked with `skipsHiddenFiles: false`. A hidden symlink is still a symlink, and an
-    /// enumerator that skips dotfiles would walk straight past `.config -> ~/.ssh`.
+    /// Refuses the whole package if any symlink exists or any entry resolved outside the root. Walked with
+    /// `skipsHiddenFiles: false`, since a hidden symlink such as `.config -> ~/.ssh` is still a symlink.
     private static func refuseSymlinksAndEscapes(under root: URL) throws {
         let fm = FileManager.default
         let rootPath = root.standardizedFileURL.path

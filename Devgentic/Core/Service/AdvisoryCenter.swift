@@ -4,21 +4,7 @@
 //  AdvisoryCenter.swift
 //  Devgentic
 //
-//  Created on 12/07/26.
-//
-//  Non-blocking, actionable notices about AMBIENT conversation state — rendered
-//  as a compact banner between the HITL stack and the chat input (HITL top,
-//  advisory mid, input bottom). Deliberately separate from InteractionCenter:
-//  HITL is blocking request/response with a durable audit; advisories are
-//  dismissible, ephemeral, and update in place.
-//
-//  Lifecycle rules that keep the banner un-annoying:
-//  - One advisory surfaced per conversation (highest = latest posted).
-//  - Same dedupe key → update-in-place, never stacks.
-//  - Dismiss suppresses that dedupe key until the underlying inputs change
-//    (the key encodes them — e.g. profile + effective window).
-//  - Callers clear the category when the condition resolves, so the banner
-//    disappears on its own once a turn fits / the profile changes.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -28,34 +14,21 @@ struct Advisory: Identifiable, Equatable {
     enum Category: String {
         /// Assembled prompt exceeds the model's effective context window.
         case contextOverflow
+        // Why: a nil retrieval is usually healthy; bannering on it would train users to dismiss the real signal.
         /// The vector store did not open, so retrieval is returning nothing for this conversation.
-        /// ⚠️ Post this ONLY on `!VectorStoreService.shared.isAvailable` — never on "0 results".
-        /// `retrieveRAGContext` returns nil for four different reasons, three of them healthy (no
-        /// embedding, nothing above threshold, all hits were history duplicates), and those are the
-        /// COMMON case early in a conversation. Bannering on nil would fire constantly, train the
-        /// user to dismiss, and `dismiss` suppresses the key for the whole session — one reflexive
-        /// dismissal would then disarm the real signal permanently.
+        /// Posted only when `VectorStoreService.shared.isAvailable` is false, never on an empty result.
         case knowledgeUnavailable
-        /// The vector store hit its size cap: new conversation memory is not being saved (RAG-13).
+        /// The vector store hit its size cap: new conversation memory is not being saved.
         case knowledgeStoreFull
-        /// A save of the shared SwiftData context failed, so changes may not be reaching disk
-        /// (`SharedContextSave`, RAG-27). Posted for `Advisory.allConversations`.
+        /// A save of the shared SwiftData context failed, so changes may not be reaching disk (`SharedContextSave`).
+        /// Posted for `Advisory.allConversations`.
         case changesNotSaved
         /// The selected profile's stored configuration could not be decoded, so the app is showing a
         /// placeholder rather than what the user configured.
         case profileUnreadable
-        /// The selected agent/bot has no system instructions. Register B14.
-        ///
-        /// ⚠️ This category exists because `ProfileValidator`'s `.advisory` for missing
-        /// instructions had **no reachable surface**. The save-advisory banner (A34) lives in the
-        /// three editors, and both editors that could generate this finding hard-block the save
-        /// before `saveProfile` is ever called — so the only paths that actually produce it are
-        /// the out-of-band writers (the thinking auto-heal, the capability chips, the Tool
-        /// Library, the quit-time save), every one of which discards the returned array.
-        /// The finding was real, correctly computed, and structurally invisible.
-        ///
-        /// Chat is the right surface precisely because it is where the consequence lands: an agent
-        /// with no instructions is about to answer with no guidance at all.
+        /// The selected agent/bot has no system instructions.
+        /// Surfaced in chat because out-of-band writers (auto-heal, capability chips, Tool Library, quit-time save) discard
+        /// validator advisories.
         case profileMissingInstructions
         /// A run in this conversation is waiting for the local model, which another run holds (local
         /// inference coordinator). Posted only after a short wait, cleared when the run starts or is
@@ -87,9 +60,9 @@ struct Advisory: Identifiable, Equatable {
         /// to inspect or move aside (the vector store has no re-open path: `static let shared` with a
         /// `private init`, so recovery is quit-and-relaunch).
         case revealInFinder(path: String)
-        /// Phase 7: let the held run go ahead.
+        /// Lets the held run go ahead.
         case proceedRun(messageID: UUID)
-        /// Phase 7: stop the held run — the same as the composer's Stop.
+        /// Stops the held run, the same as the composer's Stop.
         case stopRun(messageID: UUID)
     }
 

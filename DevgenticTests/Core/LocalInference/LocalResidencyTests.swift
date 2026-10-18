@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  Phase 3: the coordinator owns what stays loaded. Residency changes when a run takes the local lock —
-//  and only the models that run does not use are unloaded; only Ollama models this app used are ever
-//  touched.
+//  LocalResidencyTests.swift
+//  DevgenticTests
 //
-//  ⚠️ Waits are bounded; results are read from state, never by awaiting a task that might not end.
+//  Created by Raj Singh.
 //
 
 import XCTest
@@ -172,7 +171,7 @@ final class LocalResidencyTests: XCTestCase {
         final class Box { var ran = false }
         let box = Box()
         started.append(Task { @MainActor in
-            _ = try? await c.runBackgroundIntelligence(feature: "Morning Brief", modelName: "tiny") {
+            _ = try? await c.runBackgroundIntelligence(feature: "Briefing", modelName: "tiny") {
                 box.ran = true
                 return 1
             }
@@ -196,11 +195,11 @@ final class LocalResidencyTests: XCTestCase {
     }
 
     func testTheQueueNoticeNamesABackgroundFeature() {
-        let holder = InferenceRunManifest(runID: UUID(), conversationID: nil, origin: .intelligence("Morning Brief"),
+        let holder = InferenceRunManifest(runID: UUID(), conversationID: nil, origin: .intelligence("Briefing"),
                                           attended: false, shape: .single, models: [LIFixtures.mlxQwen],
                                           unresolvedNodes: 0, footprints: [:])
         XCTAssertEqual(ActiveStreamManager.localQueueNotice(holder: holder, holderTitle: nil, position: 1),
-                       "The local model (qwen) is in use by Morning Brief (a background task). This run is next in line and starts by itself when that run finishes.")
+                       "The local model (qwen) is in use by Briefing (a background task). This run is next in line and starts by itself when that run finishes.")
         XCTAssertEqual(PriorityClass.of(origin: .intelligence("x"), attended: false), .backgroundIC)
     }
 

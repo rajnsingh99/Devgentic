@@ -4,31 +4,14 @@
 //  SaveAdvisoryBanner.swift
 //  Devgentic
 //
-//  Created on 08/08/26.
-//
-//  The product half of `ProfileValidationError.Severity.advisory`.
-//
-//  ⚠️ Register A34. The severity existed, the rules were evaluated on every save, and the result
-//  went nowhere but a log line — so an advisory could only reach the user if someone hand-built a
-//  bespoke view for that specific rule. Both rules that exist today did exactly that
-//  (`ModelPickerView`'s alert for tool capability, the endpoint field's inline warning for A52),
-//  which is the tell: the severity had no surface of its own, only workarounds.
-//
-//  ⚠️ Shown AFTER A SAVE, not continuously. That distinction is the whole design:
-//
-//  • An advisory describes likely-degraded behaviour, not a fault. A permanent banner would nag the
-//    user about a choice they already made — and the standing project rule is that classification
-//    metadata may describe but must never gate or badger.
-//  • Appearing in response to the save the user just performed makes it solicited: they acted, and
-//    this is what the app noticed. It is dismissible, and it clears on the next save.
-//
-//  ⚠️ It must never look like a failure. A save that produced advisories SUCCEEDED — the profile is
-//  on disk. Warning colour, not error colour, and the copy says what may not work rather than what
-//  went wrong.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The banner that surfaces `ProfileValidationError.Severity.advisory` results after a save.
+/// Shown after a save, not continuously: advisories describe likely-degraded behaviour, not a fault; it is dismissible
+/// and clears on the next save. Warning colour, never error colour: the save succeeded.
 struct SaveAdvisoryBanner: View {
     let advisories: [ProfileValidationError]
     let onDismiss: () -> Void

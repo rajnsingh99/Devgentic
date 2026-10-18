@@ -4,12 +4,7 @@
 //  AutomaticCompactionTests.swift
 //  DevgenticTests
 //
-//  Owner decisions 2026-09-27:
-//  - automatic compaction has NO time limit;
-//  - it is shown in the transcript like a manual one;
-//  - both manual and automatic summarize with the conversation's own model by default, and with
-//    the Intelligence Core only when it and its History Compaction feature are on.
-//  Also the quit teardown's real bound (HITL Waiting Contract, quit item).
+//  Created by Raj Singh.
 //
 
 import XCTest

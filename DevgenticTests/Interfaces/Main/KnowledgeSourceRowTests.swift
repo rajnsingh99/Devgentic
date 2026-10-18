@@ -4,15 +4,7 @@
 //  KnowledgeSourceRowTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Register A65 — a healthy reference document was drawn in the WARNING colour, so "this file is
-//  fine" (orange) and "this file is missing" (red) both read as alarm states, one shade apart, with
-//  colour the only thing separating them on the icon.
-//
-//  A SwiftUI `body` is not reachable from a unit test, so the assertion here is on the seam that
-//  carries the fix's intent: the two states differ by SYMBOL, not only by tint. That is the property
-//  that regresses silently when someone later tidies two icon names back into one.
+//  Created by Raj Singh.
 //
 
 import XCTest

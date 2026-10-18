@@ -4,20 +4,14 @@
 //  FinalAnswerTool.swift
 //  Devgentic
 //
-//  Signal tool that terminates the ReAct cognitive loop with the model's
-//  composed response. Intercepted by ToolExecutionLoop before dispatch —
-//  never reaches `call()`. The executor consumes the answer, sets it as
-//  the final agent thought, and breaks the loop. The existing response
-//  synthesizer's native fast-path then surfaces it verbatim to the user.
-//
-//  Addresses G1 (see gap analysis): local tool-calling models have strong
-//  priors to always emit a tool call. Without an explicit "done" signal,
-//  the only terminator was the circuit breaker, leading to wasted iterations
-//  and confusing fallback synthesis.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Signal tool that ends the ReAct loop with the model's composed response; intercepted by
+/// ToolExecutionLoop before dispatch. The executor sets the answer as the final thought and the
+/// synthesizer's native fast-path surfaces it verbatim.
 struct FinalAnswerTool: DevgenticTool {
 
     // MARK: - Properties
@@ -88,9 +82,8 @@ struct FinalAnswerTool: DevgenticTool {
 
     // MARK: - Execution
 
-    /// NOTE: Placeholder. ToolExecutionLoop intercepts `final_answer` BEFORE
-    /// reaching this method and builds a terminal observation instead. This
-    /// path only runs as a safety fallback if interception is misconfigured.
+    /// Placeholder: ToolExecutionLoop intercepts `final_answer` before this method and builds a terminal
+    /// observation. Runs only as a safety fallback if interception is misconfigured.
     func call(arguments: Arguments) async throws -> String {
         return arguments.answer
     }

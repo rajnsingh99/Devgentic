@@ -4,20 +4,14 @@
 //  OrbRunNarration.swift
 //  Devgentic
 //
-//  [Phase 6 · F1] Turns a finished run into sentences a person can listen to.
-//
-//  Pure and static on purpose: every function here is a text transform over data the caller
-//  already fetched. Speech phrasing is the part most likely to be wrong, and the part that costs
-//  a device round-trip to check — so it is the part that must be testable without one.
-//
-//  ⚠️ WRITTEN FOR AN EAR, NOT AN EYE. The report view can show `/Users/alice/src/Config.swift` and a
-//  reader skims it; spoken aloud that is eleven words of noise before the only one that matters.
-//  Everything here trims to what carries meaning out loud, and says plainly when it cannot answer
-//  rather than reading a data structure at someone.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Turns a finished run into sentences a person can listen to.
+/// Pure and static: every function is a text transform over data the caller already fetched, testable without a device.
+/// Written for an ear, not an eye: trims to what carries meaning out loud and says plainly when it cannot answer.
 enum OrbRunNarration {
 
     /// Spoken lists are capped hard. A screen can show thirty rows and the eye picks; an ear has
@@ -27,11 +21,9 @@ enum OrbRunNarration {
 
     // MARK: - Verdict
 
+    // Why: check `unavailability` before speaking `verdict.sentence`: an unavailable projection carries an empty verdict, so
+    // speaking it ends the turn in silence with no reason given.
     /// The one-sentence outcome, or an honest explanation of why there isn't one.
-    ///
-    /// ⚠️ Never speak `verdict.sentence` without checking `unavailability` first: an unavailable
-    /// projection carries `RunReportVerdict(label: "", tone: .neutral, sentence: "")`, so speaking
-    /// it speaks nothing at all and the turn ends in silence with no reason given.
     static func verdictSentence(_ projection: RunReportProjection) -> String {
         if let reason = unavailabilitySentence(projection.unavailability) { return reason }
         let sentence = projection.verdict.sentence.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -77,10 +69,8 @@ enum OrbRunNarration {
     /// A problem row's title is already prose; `meta` carries the error category. Spoken, the
     /// category first is the useful half — "a timeout, calling read file" beats the reverse.
     static func spokenProblem(_ row: RunReportRow) -> String {
-        // ⚠️ A FAILED TOOL ROW'S TITLE IS "name · <80 chars of raw JSON>". Speaking it verbatim
-        // read absolute paths and punctuation aloud for twenty seconds — breaking this file's own
-        // rule that a path is never spoken, in the one sentence the user asked for. The tool name
-        // is the half that carries meaning; the arguments are on screen.
+        // A failed tool row's title is the tool name plus the start of its raw JSON arguments; speak only the name, since the
+        // arguments are on screen and reading paths aloud breaks the rule that a path is never spoken.
         let title = row.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let headline = row.kind == .tool
             ? spokenToolName(String(title.split(separator: "·", maxSplits: 1).first ?? "").trimmingCharacters(in: .whitespaces))
@@ -100,14 +90,11 @@ enum OrbRunNarration {
 
     // MARK: - "What did you change"
 
-    /// ⚠️ Sourced from the MESSAGE, not the projection. Tool rows in the report carry no arguments
-    /// — `TraceRecorder.emitToolCall` has no production callers, so every tool row is built with
-    /// `call: nil` — and a successful tool's recorded result is the literal string "success".
-    /// The message timeline is the only place the real file-level change survives.
+    /// Sourced from the message, not the projection: report tool rows carry no arguments (`call: nil`) and a successful
+    /// tool's recorded result is the literal 'success'. The message timeline is the only place the file-level change lives.
     static func changeSentence(effects: [ActionEffect], writeToolNames: [String]) -> String {
-        // ⚠️ GROUPED BY PATH FIRST. `changes(in:)` yields one effect per file-mutating EXECUTION,
-        // so an agent that edited Config.swift three times used to be announced as "I changed 3
-        // files. Config.swift … Config.swift … Config.swift" — a false count and a stutter.
+        // Grouped by path first: `changes(in:)` yields one effect per file-mutating execution, so an agent that edited one
+        // file three times would be announced as three files.
         let merged = mergedByPath(effects)
         if !merged.isEmpty {
             let lines = merged.prefix(spokenListCap).map(spokenEffect)

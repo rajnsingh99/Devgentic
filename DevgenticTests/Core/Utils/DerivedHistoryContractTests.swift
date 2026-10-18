@@ -4,18 +4,7 @@
 //  DerivedHistoryContractTests.swift
 //  DevgenticTests
 //
-//  `ActiveStreamManager.deriveHistory` is now the ONLY place model-facing history comes from.
-//  Seven surfaces used to build it themselves and three of them built it wrong:
-//
-//    - `SchedulerCoordinator` passed raw `fetchMessages` output — DESCENDING.
-//    - `QuickAccessSessionViewModel` passed the panel's pagination window — a hard 20 rows that
-//      never grew, because QuickAccess never calls `loadMoreMessages`.
-//    - `OrbSessionController` passed a private append-only transcript never hydrated from the
-//      store, so a turn typed into the same conversation was invisible to the next voice turn.
-//
-//  None of that is reachable any more: `startMessageStream` has no `history` parameter. This file
-//  pins what replaced it. `DerivedHistorySourceTests` proved the derivation was EQUIVALENT to the
-//  old UI-array source before the switch; these tests pin the derivation's own contract after it.
+//  Created by Raj Singh.
 //
 
 import XCTest

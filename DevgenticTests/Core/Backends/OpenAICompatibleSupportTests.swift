@@ -4,11 +4,7 @@
 //  OpenAICompatibleSupportTests.swift
 //  DevgenticTests
 //
-//  Created on 09/07/26.
-//
-//  Unit tests for the custom OpenAI-compatible provider: unfiltered model-id
-//  parsing, cloud resilience class, baseURL-scoped rate bucketing, capability
-//  defaults, and the validator's baseURL-required / key-optional rules.
+//  Created by Raj Singh.
 //
 
 import XCTest

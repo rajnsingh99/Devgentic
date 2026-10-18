@@ -4,26 +4,7 @@
 //  NodeOwnedCredentialCopyTests.swift
 //  DevgenticTests
 //
-//  Created on 30/08/26.
-//
-//  The import path's credential chain, end to end.
-//
-//  ⚠️ WHY THIS FILE EXISTS. "Import from a profile" is the headline half of node-owned workflow
-//  configuration, and for a CLOUD profile its usefulness rests entirely on a chain that no test
-//  covered: the source snapshot carries `apiKey` in memory (re-injected from the Keychain on read)
-//  -> `duplicated(as:)` copies it by value -> `saveProfile` inserts -> `BackendProfile.init` strips
-//  it back out of the blob and into the Keychain UNDER THE NEW ROW'S UUID -> a later read re-injects
-//  it. `WorkflowNodeProfileFactoryTests` asserts only the second link (the in-memory copy holds the
-//  key); the rest was asserted by comment. If any link is broken, every imported cloud node is
-//  unrunnable — and the failure is silent, because the node looks correctly configured.
-//
-//  ⚠️ These tests run against the redirected in-memory Keychain (`TestHostKeychain`, registers
-//  KC-54/55) — every `SecureKeyStorage()` routes there under XCTest, so nothing written here
-//  reaches the developer's login Keychain. The sentinel is deliberately recognisable so a leaked
-//  item would be identifiable by hand. Since register KC-63 the store is wiped in setUp AND
-//  tearDown: it is one dictionary for the whole process, so without that wipe a sentinel that
-//  escaped its per-profile cleanup would hand the next test a state that depends on what ran
-//  before it.
+//  Created by Raj Singh.
 //
 
 import XCTest

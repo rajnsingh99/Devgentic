@@ -4,8 +4,7 @@
 //  CodeIterationCapTests.swift
 //  DevgenticTests
 //
-//  The Code iteration cap is OPTIONAL since 2026-09-25 (user decision): no cap by default, and a
-//  typed cap of 10–1000 in the quick settings. Previously a +/- stepper, default 20.
+//  Created by Raj Singh.
 //
 
 import XCTest

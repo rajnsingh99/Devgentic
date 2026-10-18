@@ -4,10 +4,7 @@
 //  SmallFixesBatch8Tests.swift
 //  DevgenticTests
 //
-//  Core readiness P2 batch 8 (2026-10-12).
-//    CR-31  cron `*/n` counted day-of-month and month steps from 0 instead of 1
-//    CR-57  persisted log levels carried replies, argument payloads and model output
-//    CR-60  a skill sub-folder that could not be read was skipped and the skill stored without it
+//  Created by Raj Singh.
 //
 
 import XCTest

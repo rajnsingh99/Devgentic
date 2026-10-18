@@ -4,8 +4,7 @@
 //  ExportAndDurationFixTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the export/duration fixes of 2026-08-11
-//  (Chat_Production_Readiness.md rows CH56, CH58, CH59).
+//  Created by Raj Singh.
 //
 
 import XCTest

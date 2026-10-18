@@ -4,15 +4,7 @@
 //  EndpointAndReasoningGatingTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Registers A52 (plain-HTTP endpoints carry the API key in the clear, unwarned) and A55 (Reasoning
-//  Effort exposed with no o-series gating, sent to arbitrary OpenAI-compatible endpoints).
-//
-//  Both fixes are classifiers, and for both the dangerous failure is the FALSE POSITIVE: warning on
-//  `http://localhost` would fire on the app's own default local setup, and classifying a local
-//  fine-tune as a reasoning model would send it a request shape it rejects. Most of what follows
-//  pins those boundaries.
+//  Created by Raj Singh.
 //
 
 import XCTest

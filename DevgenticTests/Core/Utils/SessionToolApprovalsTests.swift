@@ -4,9 +4,7 @@
 //  SessionToolApprovalsTests.swift
 //  DevgenticTests
 //
-//  Locks the "Allow for this chat" contract: a tool approval is scoped STRICTLY to the conversation it
-//  was made in, survives an app restart (durable round-trip), and is dropped only when explicitly
-//  cleared (conversation deletion).
+//  Created by Raj Singh.
 //
 
 import XCTest

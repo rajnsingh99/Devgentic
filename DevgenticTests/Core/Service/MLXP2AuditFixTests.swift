@@ -4,11 +4,7 @@
 //  MLXP2AuditFixTests.swift
 //  DevgenticTests
 //
-//  The P2 batch from the 2026-08-03 validation audit (`MLX_Session_Validation_Audit.md`).
-//  Each suite here covers one fix, and each was mutation-checked once: revert the fix, the
-//  test fails. That check is the whole point — the audit's finding was that several tests in
-//  this subsystem asserted on literals they defined themselves and stayed green with the bug
-//  reinstated.
+//  Created by Raj Singh.
 //
 
 import XCTest

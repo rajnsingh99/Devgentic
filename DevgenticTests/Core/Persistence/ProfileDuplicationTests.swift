@@ -4,16 +4,7 @@
 //  ProfileDuplicationTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Register A31 — duplicating a profile dropped `fileContextStrategy`.
-//
-//  The defect was structural, not a typo: `DuplicateProfileSheet` built its copy by calling the
-//  memberwise init with four arguments, and every parameter of that init has a default, so omitting
-//  the fifth compiled cleanly and produced `nil`. The fix makes duplication copy-by-default
-//  (`duplicated(as:)` re-stamps identity on a whole-value copy), so the test that matters most here
-//  is the LAST one — it fails if a future property is dropped the same way, without anyone having to
-//  remember to extend this file.
+//  Created by Raj Singh.
 //
 
 import XCTest

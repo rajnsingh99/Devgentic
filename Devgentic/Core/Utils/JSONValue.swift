@@ -4,7 +4,7 @@
 //  JSONValue.swift
 //  Devgentic
 //
-//  Created by Antigravity on 09/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -34,16 +34,8 @@ public enum JSONValue: Sendable, Hashable {
         if let string = value as? String {
             self = .string(string)
         } else if let number = value as? NSNumber {
-            // ⚠️ NSNumber MUST be tested before `as? Bool`. `JSONSerialization` returns NSNumber
-            // for booleans AND for every numeric, and an NSNumber holding 0 or 1 bridges to Swift
-            // `Bool` successfully — so with the Bool branch first, this CFGetTypeID check (which
-            // exists precisely to tell the two apart) was unreachable for exactly those values.
-            //
-            // The consequence was not cosmetic: every provider reads its options with
-            // `if case .number(let val) = config.options?[...]`, so a `1.0` that arrived as
-            // `.bool(true)` failed the pattern match and was DROPPED from the request. That hit
-            // the shipped defaults hardest — Gemini's `topP: 1.0` and Anthropic's
-            // `temperature: 1.0` never reached the wire at all.
+            // Why: with the Bool branch first, a numeric 1.0 decodes as `.bool(true)` and providers' `.number` matches drop it.
+            // Test NSNumber via CFGetTypeID before `as? Bool`: an NSNumber holding 0 or 1 bridges to Bool successfully.
             if CFGetTypeID(number) == CFBooleanGetTypeID() {
                 self = .bool(number.boolValue)
             } else {
@@ -129,20 +121,9 @@ public enum JSONValue: Sendable, Hashable {
 
     // MARK: - Structured Parsing (Workflow JSON passing)
 
-    /// Parses a string as a *structured* JSON value (object or array only).
-    ///
-    /// Returns `nil` when the text is empty, not valid JSON, or decodes to a bare
-    /// scalar (string / number / bool / null). The scalar rejection is deliberate:
-    /// a node whose output is the plain text `"42"` or `"done"` should be treated as
-    /// text, not as a structured payload — only objects/arrays unlock `{{ input.json.path }}`
-    /// access.
-    ///
-    /// Detection handles three shapes, in order:
-    ///   1. the whole string is JSON (optionally wrapped in one leading ``` fence),
-    ///   2. JSON inside the first Markdown fenced block (```json … ```), so a chatty
-    ///      model that explains *then* emits a payload is still detected,
-    /// Only explicit fences are searched for embedded JSON — incidental `{ }` in
-    /// prose is never scanned, avoiding false positives.
+    /// Parses a string as a structured JSON value (object or array only).
+    /// Returns `nil` for empty text, invalid JSON or a bare scalar; only objects and arrays unlock `{{ input.json.path }}`.
+    /// Accepts the whole string (optionally one ``` fence) or JSON in the first fenced block; prose is never scanned.
     public static func parseStructured(_ string: String) -> JSONValue? {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }

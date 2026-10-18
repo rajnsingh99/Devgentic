@@ -4,15 +4,7 @@
 //  ErrorRecoveryIntegrationTests.swift
 //  DevgenticTests
 //
-//  Integration tests for the 3 ErrorRecovery.onToolFailure modes
-//  (.abort, .skipAndContinue, .fallbackPrompt) and circuit breaker behavior.
-//
-//  Scripts repeated tool failures to trigger CognitiveCircuitBreaker's
-//  shouldAbort condition, then verifies each recovery mode's behavior
-//  through the real execution pipeline.
-//
-//  Mock: LLMProvider (scripted steps)
-//  Real: ReActAgentExecutor → ToolExecutionLoop → CognitiveCircuitBreaker → WindowedLinearMemory
+//  Created by Raj Singh.
 //
 
 import XCTest

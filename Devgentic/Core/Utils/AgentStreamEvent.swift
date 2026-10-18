@@ -4,7 +4,7 @@
 //  AgentStreamEvent.swift
 //  Devgentic
 //
-//  Created by Raj Singh on [Date].
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,54 +24,31 @@ struct AgentThought: Sendable, Identifiable, Codable, Equatable {
 /// This structured stream allows the UI to render "Thinking", "Artifacts", and "Text" separately.
 enum AgentStreamEvent: Sendable {
     
-    /// Generic "thinking" / narration channel. Used for:
-    ///   - Extended thinking traces (step.thought — e.g. Claude thinking blocks, OpenAI o-series reasoning_content, Ollama thinking)
-    ///   - Progress narration from capabilities (plan subtask status, reflection trials, workflow node progress)
-    ///   - Executor-level status (throttle, format correction, synthesis progress)
-    /// For the LLM's visible assistant monologue (step.reasoning), use `.reasoning` instead.
-    /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this thought.
+    /// Generic thinking/narration channel: extended-thinking traces, capability progress and executor status.
+    /// The model's visible monologue uses `.reasoning`; `sourceNodeID` identifies the emitting workflow node.
     case thought(_ message: String, id: UUID = UUID(), sourceNodeID: UUID? = nil)
 
-    /// The LLM's visible assistant monologue — specifically the `step.reasoning`
-    /// field produced by the model alongside its tool calls. Distinct from `.thought`
-    /// which is used for extended-thinking traces and system narration.
-    ///
-    /// This separation lets analytics, scratchpad injection, and UI rendering treat
-    /// model-authored prose differently from system-authored status text.
-    /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this reasoning.
+    /// The model's visible monologue (`step.reasoning`) produced alongside its tool calls.
+    /// Distinct from `.thought`, which carries thinking traces and system narration.
+    /// `sourceNodeID` identifies the emitting workflow node.
     case reasoning(_ message: String, id: UUID = UUID(), sourceNodeID: UUID? = nil)
 
-    /// The agent is about to execute a tool.
-    /// - name: The tool name (e.g., "list_directory")
-    /// - params: The raw JSON parameters being passed (for debugging/visibility)
-    /// - sourceNodeID: When emitted from a workflow node, identifies which node invoked this tool.
-    /// - stepId: The agent iteration (ReAct step) this call belongs to. Persisted onto the
-    ///   timeline so a resumed run can regroup a flat timeline into per-iteration turns (G1).
+    /// The agent is about to execute tool `name` with the raw JSON `params` (for debugging and visibility).
+    /// `sourceNodeID` identifies the invoking workflow node; `stepId` is the ReAct iteration, persisted so a resumed
+    /// run can regroup a flat timeline into per-iteration turns.
     case toolCall(name: String, params: String, sourceNodeID: UUID? = nil, stepId: Int? = nil)
     
-    /// [HITL] Phase 3: Explicit Permission Request
-    /// The agent pauses and asks the user for permission to proceed.
-    /// - toolName: The name of the sensitive tool (e.g. "delete_file")
-    /// - params: The parameters needed for the tool (e.g. path)
-    /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
+    /// The agent pauses to ask the user for permission to run a sensitive tool.
+    /// `operationID` identifies this human-in-the-loop operation for multi-surface dedup.
 
-    /// Human-readable name of the node that raised this, for the banner title. Carried
-    /// SEPARATELY from `sourceNodeID` because that id is the APPROVAL-SCOPE key and, for a
-    /// request forwarded out of a sub-workflow, it names an INNER node the parent's
-    /// `WorkflowExecutionState.nodeResults` has never heard of (the child's node events are
-    /// deliberately suppressed). Resolving the title from the id therefore always missed and
-    /// every nested request rendered as a bare "Permission required". One field cannot be both
-    /// the security key and the display key.
+    /// Human-readable name of the raising node, shown as the banner title.
+    /// Separate from `sourceNodeID`, the approval-scope key, which can name an inner node of a sub-workflow.
     case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil, sourceNodeName: String? = nil)
 
-    /// [E1] A workflow Gate node is asking the user to pick one of `options`. The choice routes the
-    /// workflow to the matching output port. `deadline` is the absolute expiry time (live countdown): at
-    /// it the node fails as "Gate expired" and NO option port fires — it is never a rejection (INS-3).
-    /// ⚠️ New associated values MUST be defaulted and appended. This event SUSPENDS the executor,
-    /// and the sub-workflow forwarder ends in `default:` — a swallowed suspending
-    /// event is a permanent hang, not a visible failure, because the executor is already parked on
-    /// the operationID and nothing times out. Defaulted values keep every existing positional
-    /// binding compiling while a NEW case would silently fall into those `default:` arms.
+    // Why: new associated values must be defaulted and appended: this event suspends the executor, and a swallowed
+    // suspending event is a permanent hang because the sub-workflow forwarder ends in `default:`
+    /// A workflow Gate node asks the user to pick one of `options`; the choice routes to the matching output port.
+    /// `deadline` is the absolute expiry: at expiry the node fails as "Gate expired" and no option port fires.
     case requestGate(prompt: String, options: [String], operationID: UUID = UUID(), deadline: Date? = nil, sourceNodeID: UUID? = nil, inputText: String? = nil, highlights: [RuleMatchSpan] = [], sourceNodeName: String? = nil)
 
     /// The tool executed successfully. Carries the observation payload for the LLM + UI.
@@ -79,28 +56,17 @@ enum AgentStreamEvent: Sendable {
     /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this output.
     case toolSucceeded(ToolOutput, durationMs: Int? = nil, sourceNodeID: UUID? = nil)
 
-    /// The tool failed. Category drives negativeConstraints policy, episodic-memory retrieval
-    /// weighting, and UI affordance. Replaces the boolean `ToolOutput.isSuccess == false` signal
-    /// with a structured classification.
-    /// - category: machine-readable cause (userDenied / permissionRejected / executionThrew / timeout / invalidArgs / notFound / cancelled)
-    /// - suggestion: optional human-readable remediation hint (surface in UI)
+    /// The tool failed. `category` drives negative-constraint policy, episodic-memory weighting and UI affordance;
+    /// `suggestion` is an optional human-readable remediation hint.
     case toolFailed(ToolOutput, category: ToolFailureCategory, suggestion: String? = nil, sourceNodeID: UUID? = nil)
     
     /// A chunk of the final text response (streaming token).
     /// This is what populates the main chat bubble.
     case content(String)
 
-    /// PROVISIONAL text of the model step in flight, CUMULATIVE (the whole text so far, not a delta).
-    ///
-    /// Streamed while the step is generating, when nobody yet knows whether it will end in tool calls
-    /// (then the text is monologue, and it reaches the timeline through `.reasoning` as before) or
-    /// with none (then it is the answer, and the authoritative `.content` follows). An EMPTY value
-    /// withdraws the draft. A draft is never persisted and is always superseded: by `.draftText("")`,
-    /// or by the first `.content`, which replaces it rather than appending to it.
-    ///
-    /// ⚠️ Safe to ignore. Every consumer that drops it (workflow forwarders, ChatOps, capability
-    /// wrappers) still receives exactly the events it always did — the draft only adds a live
-    /// preview for surfaces that render one.
+    /// Provisional, cumulative text of the model step in flight; an empty value withdraws the draft.
+    /// Never persisted and always superseded, by `.draftText("")` or by the first `.content`, which replaces it.
+    /// Safe to ignore: consumers that drop it still receive every other event unchanged.
     case draftText(String)
     
     /// The agent needs clarification from the user before it can proceed.
@@ -108,26 +74,18 @@ enum AgentStreamEvent: Sendable {
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
     case requestClarification(question: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil, options: [String]? = nil, multiline: Bool = false, sourceNodeName: String? = nil)
 
-    /// A terminal error. Carries a `StructuredError` (category + message +
-    /// optional relatedPath/suggestion). Legacy `.error("string")` call sites
-    /// keep compiling via `StructuredError`'s string-literal/interpolation
-    /// conformance (defaulting to the `.executionFailed` category).
+    /// A terminal error carrying a `StructuredError` (category, message, optional relatedPath/suggestion).
+    /// String-literal call sites still compile through `StructuredError`'s literal conformance (`.executionFailed`).
     case error(StructuredError)
 
-    /// A structured system-level warning — recoverable issue the agent hit during execution.
-    /// Distinct from `.thought` (model reasoning) and `.error` (terminal failure).
-    /// - category: machine-readable classification for negativeConstraints, episodic memory, and UI affordance
-    /// - message: human-readable description
-    /// - relatedPath: optional tool name, iteration id, or context identifier the warning pertains to
+    /// A recoverable system-level warning raised during execution; distinct from `.thought` and the terminal `.error`.
+    /// `relatedPath` is an optional tool name, iteration id or context identifier the warning pertains to.
     case warning(category: WarningCategory, message: String, relatedPath: String? = nil, sourceNodeID: UUID? = nil)
 
     // MARK: - Workflow Orchestration Events
 
-    /// A workflow node has started execution.
-    /// - nodeID: Canvas node identifier
-    /// - profileName: Display name of the profile being executed
-    /// - index: 1-based index of this node in execution order
-    /// - total: Total number of nodes in the workflow
+    /// A workflow node started. `index` is its 1-based position in execution order out of `total`.
+    /// `nodeID` is the canvas node id; `profileName` is the display name of the profile being executed.
     case workflowNodeStarted(nodeID: UUID, profileName: String, index: Int, total: Int)
 
     /// A workflow node has completed execution successfully.
@@ -138,62 +96,27 @@ enum AgentStreamEvent: Sendable {
     /// folds into the node's failure detail.
     case workflowNodeFailed(nodeID: UUID, profileName: String, error: String, suggestion: String? = nil)
 
-    /// A workflow node DID NOT RUN. Not a failure — see `NodeSkipReason`.
-    ///
-    /// ⚠️ This case exists because the channel used to have no way to say it. A skip was squeezed
-    /// through `workflowNodeFailed` carrying the prose "Upstream dependency failed", so:
-    ///   • every node on an unchosen Router branch was reported as an upstream FAILURE on a run
-    ///     where nothing failed;
-    ///   • `.skipped` was declared in both the live and the persisted status enums and was
-    ///     **unreachable in both** — the UI drew a "Skipped" icon, colour and label that no run
-    ///     could ever produce;
-    ///   • nine surfaces string-matched the message back into "did not run", and three of them
-    ///     forgot, so one node read "Not run" on screen and "Failed" to VoiceOver.
-    /// Emit this — never `workflowNodeFailed` — for a node that did not execute.
-    /// `ranBeforeSkip` = did this node BEGIN EXECUTING before the skip settled?
-    ///
-    /// ⚠️ Deliberately NON-defaulted so the compiler forces every emit site to answer. The two
-    /// user-skip settle sites produce the IDENTICAL `.skipped(reason: .byUser)` — correct for the
-    /// engine (both keep downstream edges live and forward the input unchanged) but it left the UI
-    /// no way to tell "never started" from "started, worked, output discarded", so a node that had
-    /// just burned an 829ms model call was tagged "Not run" (observed on-device 2026-08-23).
-    /// The criterion is positional and checkable: a site AFTER the node's `workflowNodeStarted`
-    /// yields true. Carried structurally rather than inferred UI-side, because the executor knows
-    /// it by control flow while the UI could only guess from row presence.
+    // Why: deliberately non-defaulted so the compiler forces every emit site to say whether the node had started;
+    // the executor knows it by control flow, the UI could only guess
+    /// A workflow node did not run. Not a failure: see `NodeSkipReason`. Emit this, never `workflowNodeFailed`.
+    /// `ranBeforeSkip` is true when the node began executing before the skip settled.
     case workflowNodeSkipped(nodeID: UUID, profileName: String, reason: NodeSkipReason, ranBeforeSkip: Bool)
 
     /// A workflow node was cancelled mid-flight. Distinct from failure: the user asked for it.
     case workflowNodeCancelled(nodeID: UUID, profileName: String)
 
-    /// [CF-30] A failed attempt WILL be retried, emitted before the retry back-off begins.
-    ///
-    /// ⚠️ Its whole purpose is to be delivered BEFORE a Stop can arrive. The executor already
-    /// yields `.workflowNodeCancelled` when the back-off sleep is cancelled, but that event can
-    /// never be acted on: `ActiveStreamManager`'s consumer calls `try Task.checkCancellation()`
-    /// at the top of the loop body, so once the task is cancelled it throws before switching on
-    /// whatever was yielded. Anything the UI must know about a cancelled retry therefore has to
-    /// be recorded while the run is still healthy — which is what this is.
-    ///
-    /// Carries no delay: the UI must NOT render "retrying" from it. WF-CC4 deliberately moved
-    /// that claim to AFTER the sleep so an attempt cancelled mid-delay never says it is retrying
-    /// when it never will. This only marks the row as retry-pending so `settleInFlightWork` can
-    /// settle it as cancelled rather than leaving a genuine-looking failure behind.
+    // Why: must be delivered before a Stop can arrive: a cancelled consumer throws before switching on any later event,
+    // so what the UI must know about a cancelled retry is recorded while the run is healthy
+    /// A failed attempt will be retried; emitted before the retry back-off begins.
+    /// Carries no delay: the UI must not render "retrying" from it, only mark the row retry-pending (settled as cancelled).
     case workflowNodeRetryScheduled(nodeID: UUID, profileName: String, attemptsRemaining: Int)
 
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
 
-    /// [WF-RU4] The RUN-LEVEL verdict on whether any node genuinely failed — distinct from
-    /// `.executionFinished`'s `outcome`, which drives the CHAT BUBBLE's chip and must NOT change
-    /// for this case. An error-handled run (or one where an unrelated parallel branch delivered
-    /// the answer) legitimately shows a plain green completed chip in chat: the DELIVERED answer
-    /// is exactly as complete as a clean run's. This tells the WORKFLOW-SPECIFIC surfaces (the
-    /// persisted run record, the Execution view's pill/step-counter) that a node failed anyway,
-    /// so THEY can say so honestly without touching what the chat bubble shows. Yielded once,
-    /// alongside `.executionFinished(outcome: .completed)`, at the exact point the engine already
-    /// computes `successfulTerminals`/`failedNodes` — `freeze()` has no live graph topology of its
-    /// own to determine "is there an answering terminal", so it cannot derive this independently
-    /// without duplicating the engine's own edge-liveness logic.
+    /// The run-level verdict on whether any node genuinely failed, distinct from `.executionFinished`'s `outcome`.
+    /// `outcome` drives the chat bubble chip and is unchanged; workflow surfaces (run record, Execution view) use this
+    /// to report the failure. Yielded once, alongside `.executionFinished(outcome: .completed)`.
     case workflowRunFinished(hadGenuineFailure: Bool)
 
     // MARK: - Capability Events (Planning, Self-Reflection, Delegation)
@@ -211,11 +134,9 @@ enum AgentStreamEvent: Sendable {
     /// - id: the SubTask.id — stable join key for the plan card's step row.
     case subtaskStarted(id: String, index: Int, total: Int, description: String)
 
-    /// Planning capability: a subtask has finished.
-    /// - outcome: the inner run's terminal outcome (nil = clean completion assumed);
-    ///   `.completedWithWarnings` marks a forced-termination (degraded) step,
-    ///   `.failed` a hard failure — drives the step row's status icon honestly.
-    /// - durationMs: wall-clock for the step, measured by the capability.
+    /// Planning capability: a subtask has finished; `durationMs` is the step's wall-clock time.
+    /// `outcome` is the inner run's terminal outcome (nil = clean completion assumed): `.completedWithWarnings` marks a
+    /// degraded forced-termination step and `.failed` a hard failure.
     case subtaskCompleted(id: String, index: Int, total: Int, summary: String, outcome: ExecutionOutcome? = nil, durationMs: Int? = nil)
 
     /// Self-Reflection capability: a new trial has started.
@@ -252,57 +173,33 @@ enum AgentStreamEvent: Sendable {
 
     // MARK: - Plan Review HITL
 
-    /// Planning capability: the generated plan is ready for user review/edit before execution.
-    /// Execution is suspended until the user approves, edits, or rejects the plan.
-    /// - subtasks: The generated subtask plan (user may edit before approving)
-    /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
+    /// Planning capability: the generated plan is ready for user review and editing before execution.
+    /// Execution is suspended until the user approves, edits or rejects the plan; `operationID` identifies the
+    /// human-in-the-loop operation for multi-surface dedup.
     case requestPlanReview(subtasks: [SubTask], operationID: UUID = UUID(), sourceNodeID: UUID? = nil, sourceNodeName: String? = nil)
 
     // MARK: - History Compaction
 
-    /// IC-powered history compaction completed successfully.
-    ///
-    /// (There is deliberately no `compactionStarted` counterpart any more: compaction runs
-    /// in the background, so a "started" chip could persist with no terminal row whenever
-    /// the stream ends first — reading as a hang forever. The completed/failed chips stand
-    /// alone; `CapabilityMilestoneKind.compactionStarted` survives only so historical
-    /// persisted timelines still decode.)
-    /// - turnsCompacted: Number of turns that were summarized into the checkpoint.
-    /// - summaryPreview: First ~120 chars of the checkpoint summary for UI display.
-    /// - checkpoint: The synthetic `.checkpoint` message itself. Carried across the stream
-    ///   boundary because the backend layer has no persistence access — the UI layer saves
-    ///   it and inserts it into the live history. Without this the checkpoint died with the
-    ///   request, so every later turn re-summarized the same turns from scratch (a full IC
-    ///   load + inference per request) and no checkpoint ever survived a restart.
+    // Why: there is no `compactionStarted` counterpart: a started chip could persist with no terminal row
+    /// Background history compaction completed: `turnsCompacted` turns were summarized; `summaryPreview` is ~120 chars.
+    /// `checkpoint` is the synthetic `.checkpoint` message, carried across the stream boundary because the backend layer
+    /// cannot persist; the UI layer saves it and inserts it into the live history.
     case compactionCompleted(turnsCompacted: Int, summaryPreview: String, checkpoint: ChatMessage)
 
-    /// IC-powered history compaction failed or timed out.
-    ///
-    /// Without this, a failure was silent: the catch site only logged, so a user who had
-    /// just waited through a multi-second IC stall saw nothing at all — indistinguishable
-    /// from the model simply being slow. The run continues with uncompacted history.
-    /// - reason: Short, user-facing cause (timeout, empty summary, model unavailable).
+    /// History compaction failed or timed out; the run continues with uncompacted history.
+    /// `reason` is a short, user-facing cause (timeout, empty summary, model unavailable).
     case compactionFailed(reason: String)
 
     // MARK: - Terminal Outcome
 
-    /// Signals the executor has finished with a known outcome. Emitted as the last
-    /// meaningful event before `continuation.finish()`. Drives the final-status
-    /// indicator in the agent bubble so users can distinguish a successful answer
-    /// from a best-effort synthesis produced after the agent aborted (circuit breaker,
-    /// iteration exhaustion) or was cancelled.
+    /// Signals the executor finished with a known outcome; the last meaningful event before `continuation.finish()`.
+    /// Lets the final-status indicator distinguish an authoritative answer from a best-effort synthesis or a cancellation.
     case executionFinished(outcome: ExecutionOutcome, reason: String? = nil)
 }
 
-/// Classification for `.warning` events — drives UI affordance, negativeConstraints,
-/// and episodic memory retrieval. Codable so timeline warnings persist with category intact.
-/// ⚠️ Hand-written `RawRepresentable` so an unrecognised category is PRESERVED, not rejected.
-/// Highest growth probability of the six — new warning kinds are added routinely.
-///
-/// ⚠️ `CaseIterable` cannot be synthesized alongside an associated-value case, so `allCases` is
-/// hand-written below and deliberately EXCLUDES `.other` (it is not a fixed member of the
-/// vocabulary). Verified 2026-08-04: no `allCases` consumer exists repo-wide, so nothing changes
-/// meaning; it is kept only so the conformance does not silently disappear from the API.
+// Why: `CaseIterable` cannot be synthesized with an associated-value case; `allCases` is hand-written, excluding `.other`
+/// Classification for `.warning` events; drives UI affordance, negative constraints and episodic-memory retrieval.
+/// Codable and hand-written `RawRepresentable` so an unrecognised category is preserved, not rejected.
 enum WarningCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIterable {
     case retry             // transient network / backend blip — retry in progress
     case throttle          // rate limit hit — backing off
@@ -385,32 +282,25 @@ enum WarningCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIterab
         }
     }
 
-    /// When `true`, a warning of this category that fires inside a workflow node should
-    /// also bubble up to the workflow-level bubble (not only the per-node timeline).
-    /// Reserved for categories that indicate the **whole run** is at risk — users need
-    /// to see these at the surface even if they haven't drilled into the node.
-    /// Transient, node-local signals (retries, throttling, memory pressure) stay scoped
-    /// to the node timeline.
+    /// Whether a warning of this category raised in a workflow node also bubbles to the workflow-level bubble.
+    /// Reserved for categories that put the whole run at risk; transient node-local signals (retries, throttling,
+    /// memory pressure) stay on the node timeline.
     var bubblesToWorkflowLevel: Bool {
         switch self {
         case .circuitBreaker, .contextPressure, .midRunError:
             return true
         case .retry, .throttle, .memoryPressure, .parseFailure, .formatCorrection, .resourceUnavailable:
             return false
-        // ⚠️ Deliberately `false`. Bubbling to the workflow surface asserts "the whole run is at
-        // risk", and this build cannot know that about a category it does not recognise. The
-        // warning still renders in the node's own timeline, so nothing is hidden — it just does
-        // not get promoted on a guess.
+        // Not promoted: bubbling asserts the whole run is at risk, which cannot be known for an unrecognised category.
+        // The warning still renders in the node's own timeline.
         case .other:
             return false
         }
     }
 }
 
-/// Terminal outcome of an agent execution — tells the UI whether to treat the final
-/// content as an authoritative response (`.completed`), a best-effort synthesis after
-/// the agent gave up (`.failed`), or the stream stopping mid-flight (`.cancelled`).
-/// Emitted as the last event in the stream via `.executionFinished`.
+/// Terminal outcome of an agent execution, emitted last via `.executionFinished`: `.completed` is an authoritative
+/// response, `.failed` a best-effort synthesis after the agent gave up, `.cancelled` the stream stopping mid-flight.
 enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
     case completed
     /// Degraded success: the run stopped early (circuit-breaker abort, iteration budget) but
@@ -419,9 +309,8 @@ enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
     case completedWithWarnings
     case failed
     case cancelled
-    /// A time limit ended the run — an execution limit (chat/Code turn, scheduled run). Its own
-    /// status, not `.failed` or "Cancelled by user" (HITL Waiting Contract §3). Only ever set on the
-    /// run's own message; executors and workflow nodes never emit it.
+    /// A time limit ended the run (chat/Code turn, scheduled run); its own status, not `.failed` or cancelled-by-user.
+    /// Only ever set on the run's own message; executors and workflow nodes never emit it.
     case timedOut
 
     var displayName: String {
@@ -439,20 +328,9 @@ enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
     var isFailureLike: Bool { self == .failed || self == .timedOut }
 }
 
-/// Classification for `.toolFailed` events — drives negativeConstraints policy,
-/// episodic-memory retrieval weight, and UI affordance. Codable so timeline tool events
-/// persist with category intact and survive session re-opens.
-/// ⚠️ Hand-written `RawRepresentable` so an unrecognised category is PRESERVED, not dropped — the
-/// seventh String-raw enum in this persisted blob to get the treatment, and the one the first pass
-/// missed (G85).
-///
-/// It rides `ChatMessageSD.timelineEventsData` inside `TimelineEvent`. Before this, a category
-/// written by a newer build failed the strict decode of the event carrying it; the total `.unknown`
-/// catch-all preserved the bytes, but the whole tool call rendered as an opaque unrecognised event
-/// instead of a failure with a reason. Carrying the rawValue keeps the event legible.
-///
-/// Stdlib `RawRepresentable where RawValue == String` gives byte-identical `Codable` and
-/// rawValue-based `Equatable`, so no call site changes and the wire format is unchanged.
+/// Classification for `.toolFailed` events; drives negative-constraint policy, episodic-memory weight and UI affordance.
+/// Codable and hand-written `RawRepresentable` so a category written by a newer build is preserved and legible.
+/// Encoded as the plain rawValue, so the wire format is the same as a String-raw enum.
 enum ToolFailureCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIterable {
     case userDenied          // Ghost Protocol — user explicitly rejected the call
     case permissionRejected  // sandbox / OS-level permission missing
@@ -490,9 +368,8 @@ enum ToolFailureCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIt
         }
     }
 
-    /// ⚠️ Hand-written: `CaseIterable` synthesis breaks once a case carries an associated value.
-    /// `.other` is excluded because it is unbounded — `allCases` means "the categories this build
-    /// knows", which is what any picker or exhaustiveness check actually wants.
+    // Why: `CaseIterable` synthesis breaks once a case carries an associated value, so `allCases` is hand-written
+    /// The categories this build knows; `.other` is excluded because it is unbounded.
     static var allCases: [ToolFailureCategory] {
         [.userDenied, .permissionRejected, .executionThrew, .timeout, .invalidArgs, .notFound, .cancelled]
     }
@@ -524,14 +401,10 @@ enum ToolFailureCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIt
         }
     }
 
-    /// Whether failures of this category should produce a hard `negativeConstraint` (Ghost Protocol ban
-    /// on the tool name). Soft failures are transient and the agent may retry with different args.
-    ///
-    /// ⚠️ `.other` is SOFT. A hard constraint bans the tool outright, and a check that cannot answer
-    /// must not block the action (§7 invariant 23) — banning a tool because this build does not
-    /// recognise the failure category would turn an unknown into a permanent restriction. The cost of
-    /// being wrong the soft way is one retry; the cost of being wrong the hard way is a capability
-    /// the agent can no longer use for the rest of the run.
+    // Why: `.other` is soft: a check that cannot answer must not block, and a hard ban on an unrecognised category
+    // would be a permanent restriction
+    /// Whether failures of this category produce a hard negative constraint (a ban on the tool name).
+    /// Soft failures are transient: the agent may retry with different args.
     var producesHardConstraint: Bool {
         switch self {
         case .userDenied, .permissionRejected, .notFound:
@@ -541,10 +414,8 @@ enum ToolFailureCategory: RawRepresentable, Sendable, Codable, Equatable, CaseIt
         }
     }
 
-    /// Typed projection into the `ActionStatus` vocabulary used by `MemoryAction`
-    /// and the episodic XML emitters. Each `ToolFailureCategory` case maps 1:1
-    /// to an `ActionStatus` failure case. Render to a prompt-friendly lowercase
-    /// XML attribute via `actionStatus.xmlValue`.
+    /// Typed projection into the `ActionStatus` vocabulary used by `MemoryAction` and the episodic XML emitters.
+    /// Each case maps 1:1 to an `ActionStatus` failure case; render it for prompts via `actionStatus.xmlValue`.
     var actionStatus: ActionStatus {
         switch self {
         case .userDenied:         return .denied
@@ -569,22 +440,17 @@ struct ToolOutput: Sendable, Identifiable, Equatable {
     let params: String
     let output: String
     let isSuccess: Bool
-    /// For file-writing tools: the target file's content captured JUST BEFORE the write
-    /// ("" when the file didn't exist yet; nil when not captured — non-file tool, or the
-    /// file was unreadable/over the snapshot cap). Powers the timeline's "View changes"
-    /// diff in the Code Viewer.
+    /// For file-writing tools: the target file's content captured just before the write ("" if the file did not exist;
+    /// nil when not captured: non-file tool, or the file was unreadable or over the snapshot cap).
+    /// Powers the timeline's "View changes" diff in the Code Viewer.
     let preWriteContent: String?
     /// For EDIT tools (whose params carry only find/replace strings): the file's content
     /// read back JUST AFTER a successful edit — the post-state the params can't provide.
     /// Nil for full-content writers (their params ARE the post-state) and failures.
     let postWriteContent: String?
-    /// The params the call's timeline ROW was created with, when they differ from `params` — set
-    /// only where a run changes a call's params between the row and its result (the user editing
-    /// them in the confirmation banner). `ToolRowMatcher` matches on this, so the result lands on
-    /// its own row, never on a parallel same-name one (CR-41).
-    ///
-    /// ⚠️ In-flight only: deliberately NOT encoded. It joins a live result to a live row; a
-    /// persisted output has already been placed.
+    // Why: in-flight only and deliberately not encoded: it joins a live result to a live row; persisted output is already placed
+    /// The params the call's timeline row was created with, when they differ from `params` (e.g. edited in the banner).
+    /// `ToolRowMatcher` matches on this so the result lands on its own row, never a parallel same-name one.
     let rowParams: String?
 
     init(id: UUID = UUID(), toolName: String, params: String = "", output: String, isSuccess: Bool, preWriteContent: String? = nil, postWriteContent: String? = nil, rowParams: String? = nil) {
@@ -622,8 +488,7 @@ extension ToolOutput: Codable {
     }
 }
 
-/// Severity classification for a tool-confirmation HITL (A1) — drives the banner accent/icon so a
-/// destructive `delete_file` no longer renders identically to a benign `list_directory`.
+/// Severity classification for a tool-confirmation request; drives the banner accent and icon.
 enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
     case safe        // read-only / idempotent — no state change
     case moderate    // mutates state, generally recoverable
@@ -647,46 +512,26 @@ enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
         }
     }
 
-    /// The NATIVE tool name map. [WF-SE3] Callers must not feed it non-native names — the HITL
-    /// enqueue path goes through `ToolRiskResolver.resolve`, which consults `NativeToolCatalog`
-    /// membership first and MCP `ToolAnnotations` for server tools; this map used alone gave a
-    /// third-party tool named `read_file` the native green badge.
-    ///
-    /// The arbitrary-code tools are asked, not listed. This case used to name `execute_shell`
-    /// and `run_applescript` but not `batch_command` — the same `/bin/zsh -c` under another
-    /// name — so identical acts were badged "Destructive" and "Modifies" depending on which
-    /// tool the model happened to pick. `ToolCapability` is the one answer, and a source test
-    /// keeps it honest.
+    /// Classifies a NATIVE tool name; callers must not pass non-native names.
+    /// The HITL enqueue path goes through `ToolRiskResolver.resolve`, which checks `NativeToolCatalog` membership first
+    /// and MCP `ToolAnnotations` for server tools. Arbitrary-code tools are derived from `ToolCapability`, not listed here.
     static func classify(toolName: String) -> HITLRiskTier {
         if ToolCapability.executesArbitraryCode(toolName) { return .destructive }
 
         switch toolName {
         case "delete_file", "batch_move_files",
-             // Split out of read/write multiplexers 2026-07-31 precisely so they could be
-             // labelled and gated as what they are. Each removes something with no undo:
-             // an event, a reminder, a process (SIGKILL), or every tag on a file.
+             // Each of these removes something with no undo: an event, a reminder, a process (SIGKILL), or every tag on a file.
              "delete_calendar_event", "delete_reminder", "kill_process", "replace_finder_tags",
-             // Writes instructions that are injected into the model's context on every future run
-             // of every profile linked to that skill — the approval is per-conversation, the effect
-             // is not, and there is no undo the approving conversation can reach. `.destructive` is
-             // what makes `SessionToolApprovals.allow` refuse a durable "allow for this chat" grant
-             // for it, inside the actor.
-             //
-             // ⚠️ Deliberately NOT added to `ToolCapability.arbitraryCodeExecution`. That set is
-             // build-enforced in BOTH directions by ToolCapabilityTests: it means "hands its own
-             // argument to an interpreter", which `update_skill` does not do, and adding it there
-             // to reach `.destructive` faster would fail the test that keeps the set honest.
+             // Writes instructions injected into every future run of every profile linked to the skill, with no undo.
+             // `.destructive` makes `SessionToolApprovals.allow` refuse a durable "allow for this chat" grant.
              "update_skill":
             return .destructive
         case "write_file", "move_file", "copy_file", "create_folder", "watch_folder":
             return .moderate
         case "read_file", "list_directory", "spotlight_search", "read_file_metadata",
              "get_system_stats", "web_search",
-             // The former Code-only read tools, in the Library since 2026-09-24. Read-only, and
-             // `LocalToolManager` already defaulted them to no confirmation — this tier said
-             // `.moderate`, so the banner and the default told two different stories.
-             // `git` is read-only by construction: status/log/diff/branch -a/stash_list/blame/show,
-             // with mutating arguments refused before dispatch.
+             // Read-only tools; `LocalToolManager` defaults them to no confirmation. `git` is read-only by construction:
+             // mutating arguments are refused before dispatch.
              "project_tree", "glob_files", "find_definition", "file_overview",
              "code_search_text", "code_search_symbol", "code_search_files",
              "diff_files", "git", "get_task_output":
@@ -706,10 +551,8 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
     let risk: HITLRiskTier
     /// A1: structured arguments for an expandable, pretty-printed view (nil if `params` wasn't JSON).
     let arguments: JSONValue?
-    /// [WF-SE3] True when `risk` rests on the MCP server's own `ToolAnnotations` claims — the
-    /// banner appends "(server-declared)" so a third-party assertion never renders
-    /// indistinguishably from a native guarantee. Optional so pre-SE3 persisted confirmations
-    /// (G1 park/resume) decode as nil.
+    /// True when `risk` rests on the MCP server's own `ToolAnnotations` claims; the banner appends "(server-declared)".
+    /// Optional so persisted confirmations written without it decode as nil.
     var riskIsServerDeclared: Bool?
 
     init(
@@ -757,16 +600,9 @@ struct PendingPlanReview: Sendable, Identifiable, Codable, Equatable {
     }
 }
 
-/// Data Model for a Workflow Gate HITL (E1). The user picks one of N options; that choice routes the
-/// workflow to the matching output port (per-option branching, like a Condition node but human-decided).
-/// A span of the arbitration input that a specific rule matched, so the banner can paint it in that
-/// rule's colour.
-///
-/// ⚠️ Offsets are in CHARACTERS, measured against the exact `inputText` carried alongside them —
-/// never against anything the UI re-derives. `WorkflowRunDisplayData` builds its own per-node input
-/// by joining upstreams with `"\n\n"` over layout topology with no liveness filter, while the
-/// executor joins the LIVE upstreams with `"\n"`; the two strings differ in separator width AND in
-/// which upstreams they contain, so an offset from one is meaningless in the other.
+// Why: offsets are characters against the exact `inputText` carried alongside them; the UI's own joined input differs
+// in separator width and in which upstreams it contains
+/// A span of the arbitration input that a specific rule matched, so the banner can paint it in that rule's colour.
 struct RuleMatchSpan: Sendable, Codable, Equatable, Hashable {
     /// The rule label — matches one of `PendingGate.options`, which is also the button title.
     let label: String
@@ -803,10 +639,8 @@ struct PendingGate: Sendable, Identifiable, Codable, Equatable {
 
 // MARK: - Unified HITL Interaction Enum
 
-/// A single enum representing all possible Human-in-the-Loop interaction types.
-/// Only one interaction can be pending at a time per message.
-/// Adding a new HITL type only requires adding a case here — Swift exhaustive
-/// switch enforces handling in all consumers at compile time.
+/// All Human-in-the-Loop interaction types; only one interaction is pending at a time per message.
+/// Adding a type means adding a case here; exhaustive switches enforce handling in every consumer.
 enum PendingInteraction: Sendable, Codable, Equatable, Identifiable {
     case toolConfirmation(PendingToolConfirmation)
     case clarification(PendingClarification)
@@ -856,27 +690,10 @@ struct HITLOrigin: Sendable, Equatable, Codable {
     /// in the right profile. nil when unknown.
     let profileID: UUID?
 
-    /// The id of the agent MESSAGE whose run raised this request — i.e. which RUN is asking.
-    ///
-    /// ⚠️⚠️ WHY A RUN ID AND NOT JUST `conversationID`, WHICH IS ALREADY HERE. `conversationID`
-    /// answers "where does the banner belong"; it cannot answer "who is asking", and those differ
-    /// whenever two root runs share a conversation. `RemoteMirrorService` gates which RUNS it
-    /// mirrors (invariant 46: a run is mirrored only when the source that started it matches the
-    /// remote session), but `evaluateMessageState` then pulled pending items from
-    /// `InteractionCenter.items(for: conversationID)` — CONVERSATION-keyed — so a tool confirmation
-    /// raised by a LOCALLY-started run could have its tool name and parameters posted to a
-    /// third-party chat, simply because a remote run happened to be observed in the same
-    /// conversation. The run gate was correct and the item lookup went around it.
-    ///
-    /// ⚠️ IT IS THE AGENT MESSAGE ID BECAUSE THAT IS WHAT THE MIRROR ALREADY HOLDS.
-    /// `ActiveStreamManager` mints `TraceContext(profile:messageID: agentMessage.id)` for the run,
-    /// and the mirror observes that same `agentMessage` — so the two sides join with no new
-    /// identifier invented and no new plumbing to keep in step.
-    ///
-    /// ⚠️ NIL MEANS "RAISED OUTSIDE A RUN", NOT "UNKNOWN RUN" — and the mirror treats it as
-    /// not-attributable rather than as a mismatch, so such an item is still posted. Excluding nil
-    /// would silently stop mirroring MCP elicitation, whose source→conversation association is made
-    /// in `resolveMCPTool` where no run identity is in scope. See §6 of `architecture_readme.md`.
+    // Why: `conversationID` says where a banner belongs, not who is asking: a conversation-keyed lookup could post a
+    // locally started run's confirmation to a remote chat; this is the agent message id the mirror already holds
+    /// The id of the agent message whose run raised this request, i.e. which run is asking.
+    /// Nil means raised outside a run (e.g. MCP elicitation); the remote mirror treats it as not attributable and posts it.
     let runMessageID: UUID?
 
     init(
@@ -898,8 +715,8 @@ struct HITLOrigin: Sendable, Equatable, Codable {
     }
 }
 
-/// A single pending Human-in-the-Loop request, source-attributed, queued by `InteractionCenter`.
-/// `id` IS the suspension `operationID` — the universal correlation key used to resume.
+/// A single pending Human-in-the-Loop request, source-attributed and queued by `InteractionCenter`.
+/// `id` is the suspension `operationID` that resumes it.
 struct PendingHITL: Identifiable, Sendable, Equatable, Codable {
     let id: UUID                  // == operationID
     let origin: HITLOrigin

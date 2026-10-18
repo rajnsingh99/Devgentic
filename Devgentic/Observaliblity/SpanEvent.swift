@@ -4,7 +4,7 @@
 //  SpanEvent.swift
 //  Devgentic
 //
-//  Created by Antigravity on 19/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -39,13 +39,8 @@ enum SpanEventSeverity: String, Codable, Sendable, DatabaseValueConvertible {
 
 // MARK: - SpanEvent (Row-level log record)
 
-/// A single observable event within a span.
-/// This is the universal log record — each row in `span_events`.
-///
-/// Columns added in migration v2 (`errorCategory`, `errorChainID`, `phase`,
-/// `iterationNumber`, `causedByEventID`, `durationMs`) are all nullable. Writes
-/// are dev-mode-gated in `TraceRecorder` — legacy call sites continue to pass
-/// nil and stay backward-compatible.
+/// A single observable event within a span; each row of `span_events`.
+/// The error, phase, iteration, causal-link and duration columns are nullable; `TraceRecorder` gates writes to dev mode.
 struct SpanEvent: Codable, Identifiable, Sendable {
     var id: Int64?  // Auto-assigned by DB (AUTOINCREMENT)
     let spanID: String
@@ -122,9 +117,7 @@ struct SpanEvent: Codable, Identifiable, Sendable {
 extension SpanEvent: FetchableRecord, PersistableRecord, MutablePersistableRecord {
     static var databaseTableName: String { "span_events" }
 
-    // Persist `timestamp` as REAL seconds-since-1970 (matching the `.double` column) so the
-    // metrics time-window filters on `span_events.timestamp` actually match. See `TraceRecord`
-    // for the full rationale; GRDB 7 spells these as `(for column:)` functions.
+    // Persists `timestamp` as REAL seconds-since-1970 to match the `.double` column, so time-window filters match.
     static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
     static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
 
@@ -153,29 +146,15 @@ enum SpanStatus: String, Codable, Sendable, DatabaseValueConvertible, CaseIterab
     case running
     case completed
     case error
-    /// The user (or the engine's routing) deliberately skipped this work — not a
-    /// failure. Added 2026-08-22 (Run-Report Phase 5): skips used to close spans
-    /// GREEN (`.completed`), making a skipped node indistinguishable from one that
-    /// ran. Stored as rawValue TEXT, so no DB migration — but a PRE-Phase-5 build
-    /// reading a trace containing one of these rows fails the enum decode for that
-    /// trace (accepted: the trace store is 30-day ephemeral diagnostics, and the
-    /// rows age out).
+    /// The user (or the engine's routing) skipped this work; not a failure.
+    /// Stored as rawValue TEXT, so a trace containing it fails the enum decode in a build that lacks the case.
     case skipped
     /// The user stopped the run while this span was open. Distinct from `.error`
     /// (nothing went wrong) and from `.skipped` (nothing was chosen against).
     case cancelled
 
-    /// The span status a finished workflow node's outcome closes with.
-    ///
-    /// [WF-OB6] Extracted as a pure function for the same reason `WorkflowRetryPolicy` was: this
-    /// mapping lived inline in TWO places that disagreed with each other, and neither had a test
-    /// surface. The profile path spelled out four arms; the structural path used a two-way
-    /// `completed ? .completed : .error` ternary that collapsed cancel AND skip into `.error` —
-    /// so a Stop on an Action/Condition/Code/Gate/sub-workflow node was persisted as a node
-    /// FAILURE and docked its success rate in the Workflow Activity panel.
-    ///
-    /// EXHAUSTIVE on purpose: a new `NodeExecutionStatus` case must fail to compile here rather
-    /// than silently inherit "error", which is precisely how cancellation got mis-tagged.
+    /// The span status a finished workflow node's outcome closes with; cancellation and skip are not errors.
+    /// Exhaustive, so a new `NodeExecutionStatus` case must be mapped here at build time.
     static func forNodeOutcome(_ status: NodeExecutionStatus) -> SpanStatus {
         switch status {
         case .completed: .completed
@@ -248,13 +227,8 @@ struct Span: Codable, Identifiable, Sendable {
 extension Span: FetchableRecord, PersistableRecord {
     static var databaseTableName: String { "spans" }
 
-    // Store/read Date columns as REAL seconds-since-1970, matching the `.double` schema
-    // columns and the raw-SQL Double writes in `updateSpan`/`closeOpenSpans`. Without an
-    // explicit strategy, GRDB's Codable bridge defaults to a TEXT date string, which a
-    // `.double`-affinity column keeps as text — and SQLite sorts TEXT above REAL, so every
-    // numeric `startedAt`/`endedAt` comparison (duration math, reconciliation) silently
-    // never matches. (GRDB 7 spells these as `(for column:)` functions, not properties —
-    // a `var` of the same name compiles but is silently ignored.)
+    // Stores Date columns as REAL seconds-since-1970 to match the `.double` columns and raw-SQL writes.
+    // Without it GRDB writes TEXT, which sorts above REAL and breaks numeric comparisons. GRDB 7 spells these as functions.
     static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
     static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
 
@@ -268,15 +242,8 @@ extension Span: FetchableRecord, PersistableRecord {
 enum TraceStatus: String, Codable, Sendable, DatabaseValueConvertible {
     case running
     case completed
-    /// Degraded success: the run produced a usable answer but something went wrong on
-    /// the way (a failed tool call, a circuit-breaker abort, iteration exhaustion).
-    /// Distinct from `.completed` so the trace store stops recording "1 of 5 tool calls
-    /// failed" as a clean run — the message chip already said `completedWithWarnings`
-    /// while the trace said `completed`, and the row carried an `error` summary next to
-    /// a success status. Counted WITH `.completed` in every success-rate rollup (it IS
-    /// a success), just visible separately.
-    /// NB: rows written before 2026-07-19 stored this as `completed`; historical stats
-    /// are unchanged, and this case only appears on runs from this build forward.
+    /// Degraded success: a usable answer, but something went wrong on the way (a failed tool call, an abort, exhaustion).
+    /// Distinct from `.completed` in the trace store; counted with `.completed` in every success-rate rollup.
     case completedWithWarnings
     /// A graceful terminal failure — the run reached a failure outcome without an
     /// exception propagating to the stream boundary (circuit-breaker abort, parse/
@@ -293,20 +260,13 @@ enum TraceStatus: String, Codable, Sendable, DatabaseValueConvertible {
 }
 
 extension TraceStatus {
-    /// Derives the persisted trace status from how a run actually ended. A thrown error
-    /// reaching the stream boundary always wins (it is the most severe signal); otherwise
-    /// the executor-reported terminal outcome decides. Centralized here so the mapping can
-    /// be unit-tested independently of `ActiveStreamManager.finalizeMessage`, its sole
-    /// production caller.
+    /// Derives the persisted trace status from how a run ended: a thrown error wins, otherwise the terminal outcome decides.
+    /// Centralized so the mapping is testable apart from `ActiveStreamManager.finalizeMessage`.
     static func resolve(thrownError: Bool, terminalOutcome: ExecutionOutcome?) -> TraceStatus {
         if thrownError { return .error }
         switch terminalOutcome {
         case .completed: return .completed
-        // Degraded success gets its OWN status. The previous mapping to `.completed`
-        // assumed the early-stop was "already on the span as a classified agent-error
-        // event (circuit-breaker / exhaustion)" — but this outcome also carries plain
-        // tool failures ("1 of 5 tool call(s) failed"), which have no such span event,
-        // so those runs were indistinguishable from clean ones in the trace store.
+        // Degraded success has its own status: it also carries plain tool failures with no span event of their own.
         case .completedWithWarnings: return .completedWithWarnings
         case .failed:    return .failed
         // No timeout TraceStatus yet; the span's error text carries the limit.
@@ -410,11 +370,8 @@ struct TraceRecord: Codable, Identifiable, Sendable {
 extension TraceRecord: FetchableRecord, PersistableRecord {
     static var databaseTableName: String { "traces" }
 
-    // See `Span`'s note: persist Date columns as REAL seconds-since-1970 so the schema's
-    // `.double` `startedAt`/`endedAt` columns actually hold numbers. Otherwise `purgeOlderThan`,
-    // `reconcileOrphanedTraces`, the reliability time-window filters, and duration math all
-    // compare a TEXT date against a Double and silently match nothing. (GRDB 7 spells
-    // these as `(for column:)` functions, not properties.)
+    // Persists Date columns as REAL seconds-since-1970 so the `.double` columns hold numbers (see `Span`).
+    // Otherwise time-window filters and duration math compare TEXT against Double and match nothing.
     static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
     static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
 

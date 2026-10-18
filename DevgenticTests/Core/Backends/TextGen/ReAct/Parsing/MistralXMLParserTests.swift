@@ -4,8 +4,7 @@
 //  MistralXMLParserTests.swift
 //  DevgenticTests
 //
-//  Tests for MistralXMLParser — handles <tool_call> XML wrappers
-//  and [TOOL_CALLS] array markers used by Mistral/Devstral models.
+//  Created by Raj Singh.
 //
 
 import XCTest

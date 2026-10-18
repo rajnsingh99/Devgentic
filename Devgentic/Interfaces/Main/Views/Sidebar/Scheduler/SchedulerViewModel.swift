@@ -4,8 +4,7 @@
 //  SchedulerViewModel.swift
 //  Devgentic
 //
-//  ViewModel for the Task Scheduler sidebar panel.
-//  Observes SchedulerService and provides filtering/actions for the UI.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -14,6 +13,7 @@ import os
 
 private let logger = DGLogger(category: "SchedulerViewModel")
 
+/// The filters offered by the Task Scheduler sidebar panel.
 enum SchedulerFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case active = "Active"
@@ -23,8 +23,8 @@ enum SchedulerFilter: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// ⚠️ `rawValue` stays as the identity/persistence form; this is the display form.
-    /// `Text(x.rawValue)` binds to the non-localizing overload (audit C2).
+    // Why: `Text(x.rawValue)` binds to the non-localizing overload.
+    /// The display form of the filter; `rawValue` stays the identity and persistence form.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .all:       return "All"

@@ -4,19 +4,14 @@
 //  WorkflowEditGuard.swift
 //  Devgentic
 //
-//  Guards navigation away from a workflow canvas that has unsaved edits.
-//  The active canvas registers its dirty-state + save/discard hooks; navigation
-//  sites (conversation switch, interface switch, canvas→execution toggle) route
-//  their transition through `attempt(_:)`, which either runs it immediately (when
-//  the canvas is clean / not a workflow) or defers it behind a Save / Discard /
-//  Cancel confirmation dialog.
-//
-//  Owned by `MainApplicationViewModel` so every navigation site (sidebar, mode
-//  picker, dedicated view) can reach it via `@Environment(MainApplicationViewModel.self)`.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Guards navigation away from a workflow canvas with unsaved edits: the canvas registers its dirty state and
+/// save/discard hooks. Navigation sites route through `attempt(_:)`, which runs at once when clean or defers behind
+/// a Save / Discard / Cancel dialog.
 @Observable @MainActor
 final class WorkflowEditGuard {
 
@@ -33,15 +28,8 @@ final class WorkflowEditGuard {
     @ObservationIgnored var saveHook: (() -> Void)?
     @ObservationIgnored var discardHook: (() -> Void)?
 
-    /// The workflow profile whose canvas installed the current hooks, or nil when none is
-    /// registered.
-    ///
-    /// ⚠️ Exists so an exit point can tell whether the canvas behind `saveHook` is the SAME canvas
-    /// a bulk drain has already persisted (WF-PE1). Without it, quit ran `saveHook()` on top of
-    /// `persistDirtyWorkflowCanvases` with no way to know the two were writing the same
-    /// `WorkflowLayoutSD` row — which is harmless only for as long as both resolve to one shared
-    /// `WorkflowCanvasState`. Recording the identity makes that assumption checkable instead of
-    /// assumed, so a future divergence is caught by a log rather than by a user losing a graph.
+    /// The workflow profile whose canvas installed the current hooks, or nil when none is registered. Lets an exit
+    /// point tell whether the canvas behind `saveHook` is the one a bulk drain already persisted.
     @ObservationIgnored private(set) var registeredProfileID: UUID?
 
     /// The navigation deferred while the prompt is up.

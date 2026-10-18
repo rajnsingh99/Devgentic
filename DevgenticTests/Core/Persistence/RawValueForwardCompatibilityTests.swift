@@ -4,19 +4,7 @@
 //  RawValueForwardCompatibilityTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards the String-raw enums that a newer build can grow a case in.
-//
-//  ⚠️ THE NAIVE FIX HERE IS WORSE THAN DOING NOTHING. A "tolerant" decoder that falls back to some
-//  EXISTING case would make the value render again — and then re-encode as the fallback, DESTROYING
-//  the original rawValue. Since `TimelineEvent` gained its total catch-all, an unknown rawValue is
-//  already survivable (the element is preserved verbatim as `.unknown`), so a lossy fallback would
-//  trade preserved bytes for a pretty label. Every enum below therefore uses a hand-written
-//  `RawRepresentable` with `case other(String)` that carries the value through.
-//
-//  Stdlib's `RawRepresentable where RawValue == String` conformances supply `Codable` and
-//  `Equatable`, so the wire format is byte-identical to the previous `: String` form.
+//  Created by Raj Singh.
 //
 
 import XCTest

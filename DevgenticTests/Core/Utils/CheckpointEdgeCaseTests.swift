@@ -4,9 +4,7 @@
 //  CheckpointEdgeCaseTests.swift
 //  DevgenticTests
 //
-//  Red-Green synthetic edge case tests for checkpoint-aware formatting.
-//  Probes timestamp boundaries, XML special characters, empty histories
-//  after checkpoint, and cascading checkpoint scenarios.
+//  Created by Raj Singh.
 //
 
 import XCTest

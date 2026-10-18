@@ -4,14 +4,7 @@
 //  MLXStoreNetworkTests.swift
 //  DevgenticTests
 //
-//  Batch 1 "Network truthfulness" group of the MLX Model Manager readiness plan.
-//
-//    A8   A swallowed size fetch made `ModelFitAdvisor` return `.comfortable` with a 0-byte
-//         estimate — a RAM safety advisory failing OPEN on the network error that A9 provokes.
-//    A10  Every HF call discarded its `URLResponse`, so 429 / 401 / 500 / offline / genuinely
-//         empty were indistinguishable, and the log blamed a schema bug.
-//    B7   `.urlQueryAllowed` is the wrong character set for a query *value* — it permits
-//         `&`, `=` and `#`, so search text could inject extra query parameters.
+//  Created by Raj Singh.
 //
 
 import XCTest

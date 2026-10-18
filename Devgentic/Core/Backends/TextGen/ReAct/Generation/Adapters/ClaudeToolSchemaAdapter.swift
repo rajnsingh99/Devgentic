@@ -4,7 +4,7 @@
 //  ClaudeToolSchemaAdapter.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

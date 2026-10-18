@@ -4,8 +4,7 @@
 //  DynamicMCPTool.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 26/01/26.
-//  MIGRATION: Updated to native DevgenticTool protocol.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -20,10 +19,9 @@ struct DynamicMCPTool: DevgenticTool {
     let name: String
     let description: String
 
-    /// Carried through from the server's own tool definition rather than invented here — an MCP
-    /// tool's group is whatever its server said it was. Required by `DevgenticTool` since
-    /// 2026-07-31; this type never reaches the Tool Library (the UI reads `ToolDefinition`
-    /// directly from `UnifiedToolStore`), so the value is for completeness and logging.
+    /// The tool's group, carried from the server's own definition rather than invented here.
+    /// This type never reaches the Tool Library (the UI reads `ToolDefinition` from `UnifiedToolStore`), so it serves
+    /// logging.
     var category: String { toolDefinition.category }
 
     /// The source configuration (connection details) for the MCP server.
@@ -89,10 +87,8 @@ struct DynamicMCPTool: DevgenticTool {
                 arguments: arguments.rawDictionary
             )
         } catch let error as MCPManagerError {
-            // A tool that ran and reported failure is NOT a broken connection. Tearing
-            // the server down and respawning it three times would destroy a healthy
-            // session over a bad argument, cost ~7s of backoff, and still end in the
-            // same error. Surface it to the agent immediately so it can correct itself.
+            // A tool that ran and reported failure is not a broken connection: respawning the server would destroy a healthy
+            // session over a bad argument, so surface the error to the agent immediately.
             if case .toolReportedFailure = error {
                 logger.info("""
                     [MCP-TOOL] '\(name)' on '\(source.serverName)' failed at the tool level; \
@@ -106,21 +102,13 @@ struct DynamicMCPTool: DevgenticTool {
         }
     }
 
-    /// Transport-level recovery: the session looks dead, so rebuild it with exponential
-    /// backoff and re-issue the call.
-    ///
-    /// Every exit path here THROWS rather than returning a message. A returned string is
-    /// indistinguishable from a successful result to `ToolExecutionMediator`, which scores
-    /// output as failure only when it is empty or begins with "error" — so returning
-    /// `"Execution Failed: …"` used to be recorded as `.success`, complete with a green
-    /// trace span and a `recordToolReliability(isSuccess: true)`.
+    // Why: every exit throws: `ToolExecutionMediator` scores a returned string as success unless it is empty or
+    // starts with 'error'.
+    /// Transport-level recovery: the session looks dead, so rebuild it with exponential backoff and re-issue the call.
     @MainActor
     private func reconnectAndRetry(arguments: Arguments, initialError: Error) async throws -> String {
-        // ⚠️ NEVER RE-RUN A CANCELLED OR TIMED-OUT CALL (HITL Waiting Contract, decision F). This
-        // wrapper used to treat both as a dead connection, reconnect and RE-EXECUTE the tool up to
-        // three times — with its backoff sleeps swallowing the cancellation — so a Stop or a timeout
-        // could run the server-side action four times (Timeout inventory D-26). A cancelled call
-        // ends; a timed-out one may already have done its work, so it fails rather than repeats.
+        // Never re-run a cancelled or timed-out call: a cancelled call ends; a timed-out one may have done its work, so it
+        // fails rather than repeats.
         if Task.isCancelled || initialError is CancellationError {
             logger.info("[MCP-TOOL] '\(name)' was cancelled. CONSEQUENCE: not reconnected and not re-run.")
             throw CancellationError()
@@ -155,18 +143,14 @@ struct DynamicMCPTool: DevgenticTool {
             // `try`, not `try?`: a Stop during the backoff ends the loop instead of re-running the call.
             try await Task.sleep(for: .seconds(backoffSeconds))
 
-            // Reactive OAuth refresh on the first retry only. If the initial failure was a
-            // 401 / token-expired, refreshing the bundle here means the subsequent `connect`
-            // materializes a fresh access token via `MCPRuntimeSecrets.materialize`. We only
-            // try once — if the refresh itself fails (revoked refresh token, etc.) the user
-            // has to re-authenticate via the form.
+            // Reactive OAuth refresh on the first retry only: after a 401 or expired token, the next `connect` gets a fresh token.
+            // If the refresh itself fails (revoked refresh token), the user must re-authenticate via the form.
             if attempt == 1, case .oauth = serverDef.auth {
                 do {
                     _ = try await MCPOAuthCoordinator.refresh(sourceID: self.source.id)
                 } catch let refreshError {
-                    // Best effort: let the regular reconnect run anyway, since some
-                    // transports recover with a stale token, and the original tool error is
-                    // more useful to surface than the refresh error.
+                    // Best effort: let the regular reconnect run anyway, since some transports recover with a stale token; the
+                    // original tool error is more useful.
                     logger.error("""
                         [MCP-TOOL] OAuth refresh FAILED for '\(source.serverName)' \
                         (source \(source.id)): \(refreshError.localizedDescription). Continuing \

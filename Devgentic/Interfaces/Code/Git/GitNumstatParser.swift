@@ -4,8 +4,7 @@
 //  GitNumstatParser.swift
 //  Devgentic
 //
-//  Pure parser for `git diff [--cached] --numstat -z -M` — the per-file `+N −N` counts in the
-//  Git Changes panel. No process, no I/O.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -32,13 +31,9 @@ struct GitNumstatReport: Equatable {
     /// Records that matched no known shape — the caller logs these with their consequence.
     var malformedRecordCount: Int
 
-    /// Counts keyed by (destination) path, with duplicates resolved.
-    ///
-    /// ⚠️ A path CAN appear twice. Captured from real git 2.54 on a conflicted file: the unstaged
-    /// numstat emits `0 0 conflict.txt` (the unmerged placeholder) and THEN `4 0 conflict.txt`
-    /// (the diff against our side). Last-wins happens to be right for that order, but it is order
-    /// luck, so the rule is explicit: a real count beats a `0 0` placeholder; between two real
-    /// counts the first stands.
+    // Why: git can emit a path twice (an unmerged `0 0` placeholder then the real diff), so resolution must not depend on order
+    /// Counts keyed by destination path, with duplicates resolved.
+    /// A real count beats a `0 0` placeholder; between two real counts the first stands.
     func countsByPath() -> [String: GitLineCounts] {
         var result: [String: GitLineCounts] = [:]
         for entry in entries {
@@ -55,15 +50,8 @@ struct GitNumstatReport: Equatable {
 
 enum GitNumstatParser {
 
-    /// Parses `--numstat -z` stdout.
-    ///
-    /// Two record shapes, both captured from real git:
-    /// - ordinary: `added \t deleted \t path \0`
-    /// - rename:   `added \t deleted \t \0 src \0 dst \0` — the path field is EMPTY and the two
-    ///   paths follow as their own NUL fields.
-    /// `-` in both count columns marks a binary file. The caller passes `-M` so the user's
-    /// `diff.renames` config cannot change which shape a rename arrives in (verified: `-M`
-    /// overrides `diff.renames=false`).
+    /// Parses `--numstat -z` stdout: `added \t deleted \t path \0`, or for renames an empty path then `src \0 dst \0`.
+    /// `-` in both count columns marks a binary file. The caller passes `-M` so `diff.renames` cannot change rename shape.
     static func parse(_ data: Data) -> GitNumstatReport {
         let fields = data.split(separator: 0, omittingEmptySubsequences: false)
             .map { String(decoding: $0, as: UTF8.self) }

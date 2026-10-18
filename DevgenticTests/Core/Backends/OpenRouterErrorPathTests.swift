@@ -4,13 +4,7 @@
 //  OpenRouterErrorPathTests.swift
 //  DevgenticTests
 //
-//  The OpenRouter failure modes the first live test (2026-09-27) never reached: bad key, no
-//  credits, rate limits (per-minute and daily), a withdrawn model, no eligible endpoint, upstream
-//  5xx, an error delivered inside a 200 (body or stream), and a model that rejects tools. Bodies
-//  mirror OpenRouter's documented `{"error": {"code", "message"}}` shape.
-//
-//  Plus the provider-hygiene fixes from the same pass: vendor-key mismatch, OpenRouter response
-//  metadata, and the cloud metadata banner.
+//  Created by Raj Singh.
 //
 
 import XCTest

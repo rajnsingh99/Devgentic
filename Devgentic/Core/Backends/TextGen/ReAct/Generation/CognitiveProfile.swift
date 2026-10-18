@@ -4,11 +4,7 @@
 //  CognitiveProfile.swift
 //  Devgentic
 //
-//  Step 1.1 — Shared domain types for dialect-based routing.
-//  Defines the output format a model produces and the combined profile
-//  used to select the correct generator + parser pair.
-//
-//  Created by Raj Singh on 06/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -72,54 +68,40 @@ enum ModelDialect: String, Codable, CaseIterable, Identifiable, Hashable {
     /// Used with MLXNativeStructuredGenerator / JsonStructuredGenerator.
     case heuristicJson = "Heuristic JSON"
 
-    /// Qwen/Hermes native format: single JSON object per `<tool_call>` wrapper,
-    /// with `name` key first, then `arguments`. Multiple blocks = parallel calls.
-    /// Covers Qwen2.5/3 Instruct, Hermes-2-Pro, Hermes-3, and structurally identical
-    /// fine-tunes. Detected via `ChatTemplateFingerprinter` on the Jinja template.
-    /// Emits `<tool_call>\n{"name": "...", "arguments": {...}}\n</tool_call>`.
+    /// Qwen/Hermes native format: one JSON object per `<tool_call>` wrapper, `name` first, then `arguments`.
+    /// Multiple blocks are parallel calls; covers Qwen2.5/3 Instruct, Hermes-2-Pro, Hermes-3 and identical fine-tunes.
+    /// Detected via `ChatTemplateFingerprinter`; emits `<tool_call>\n{"name": ..., "arguments": {...}}\n</tool_call>`.
     case qwenHermesToolCall = "Qwen/Hermes Tool Call"
 
-    /// Llama-3.1 / 3.2 / 3.3 native JSON format.
-    /// Covers `meta-llama/Llama-3.1-*-Instruct`, `Llama-3.2-*-Instruct`, `Llama-3.3-*-Instruct`.
-    /// Emits `{"name": "...", "parameters": {...}}` — uses `parameters` key (NOT `arguments`).
-    /// Template ENFORCES single-call-only (raises exception for multi-call).
-    /// Optional `<|python_tag|>` prefix, terminates with `<|eot_id|>` or `<|eom_id|>`.
+    /// Llama-3.1/3.2/3.3 native JSON: `{"name": "...", "parameters": {...}}` (the key is `parameters`, not `arguments`).
+    /// Single call only; optional `<|python_tag|>` prefix, terminated by `<|eot_id|>` or `<|eom_id|>`.
     case llama3JsonSingle = "Llama 3 JSON (Single Call)"
 
-    /// Mistral family, tokenizer v3 (Tekken): JSON array of tool calls wrapped in marker.
-    /// Covers Mistral-7B-Instruct-v0.3, Mistral-Nemo, Mixtral-8x22B, Mistral-Small-2409,
-    /// Ministral-8B, Pixtral-Large, older Devstral. Older format (pre-2025-03).
-    /// Emits `[TOOL_CALLS] [{"name": "...", "arguments": {...}, "id": "xxxxxxxxx"}]</s>`.
+    /// Mistral tokenizer v3 (Tekken): a JSON array of tool calls after a `[TOOL_CALLS]` marker.
+    /// Covers Mistral-7B-Instruct-v0.3, Mistral-Nemo, Mixtral-8x22B, Mistral-Small-2409, Ministral-8B, Pixtral-Large.
+    /// Emits `[TOOL_CALLS] [{"name": ..., "arguments": {...}, "id": ...}]</s>`.
     case mistralV3Array = "Mistral v3 (Array)"
 
-    /// Mistral family, tokenizer v11 (2025+): flat marker+name+ARGS syntax.
+    /// Mistral tokenizer v11: flat marker+name+args syntax, `[TOOL_CALLS]list_directory[ARGS]{"path":"/"}`.
     /// Covers Mistral-Small-3.1-24B+, Devstral-Small-2505/2507+, Mistral-Medium-2025+.
-    /// Parallel calls = multiple `[TOOL_CALLS]...[ARGS]...` blocks concatenated.
-    /// Emits `[TOOL_CALLS]list_directory[ARGS]{"path":"/"}`.
+    /// Parallel calls are multiple `[TOOL_CALLS]...[ARGS]...` blocks concatenated.
     case mistralV11Flat = "Mistral v11 (Flat)"
 
-    /// Phi-4-mini Instruct + Fireworks Firefunction-v2.
-    /// Emits `functools[{"name":"X","arguments":{...}}, ...]` — JSON array after
-    /// literal `functools[` marker. Structurally similar to Mistral v3 array shape
-    /// but with a different marker.
+    /// Phi-4-mini Instruct and Fireworks Firefunction-v2: `functools[{"name":"X","arguments":{...}}, ...]`.
+    /// A JSON array after a literal `functools[` marker, shaped like Mistral v3 but with a different marker.
     case phiFunctoolsBracket = "Phi functools[]"
 
-    /// DeepSeek-V3 / DeepSeek-R1 native format. Uses full-width Unicode pipes `｜`
-    /// (U+FF5C) and `▁` (U+2581) in token markers. Emits tool name via `<|tool▁sep|>`
-    /// then JSON args in a `\`\`\`json ... \`\`\`` code fence, wrapped in
-    /// `<|tool▁calls▁begin|>...<|tool▁call▁end|><|tool▁calls▁end|>`.
+    /// DeepSeek-V3 / R1 native format, using full-width pipes `｜` (U+FF5C) and `▁` (U+2581) in token markers.
+    /// The tool name follows `<|tool▁sep|>`, then JSON args in a json code fence, inside `<|tool▁calls▁begin|>…`.
     case deepseekV3JsonFence = "DeepSeek V3 (JSON Fence)"
 
-    /// Pythonic function-call list format. Used by small Llama 3.2 variants
-    /// (1B / 3B Instruct), Salesforce xLAM-2, Team-ACE ToolACE-8B, Llama 4 pythonic.
-    /// Emits `[func_name(arg1="val1", arg2=42), func2(...)]` — Python expression
-    /// syntax (NOT JSON). Parsing requires kwarg extraction + Python-literal handling.
+    /// Pythonic function-call list: `[func_name(arg1="val1", arg2=42), func2(...)]`, Python syntax rather than JSON.
+    /// Used by small Llama 3.2 variants (1B/3B), Salesforce xLAM-2, Team-ACE ToolACE-8B and Llama 4 pythonic.
+    /// Parsing needs kwarg extraction and Python-literal handling.
     case pythonicBracketList = "Pythonic Bracket List"
 
-    /// IBM Granite 3.0 / 3.1 / 3.2 / 3.3 — JSON array wrapped in tool-call marker.
-    /// 3.0 uses `<|tool_call|>` with ASCII pipes; 3.1+ uses `<tool_call>` without.
-    /// Both emit the same body shape: `[{"name":"...","arguments":{...}}, ...]`.
-    /// One parser handles both markers.
+    /// IBM Granite 3.0-3.3: a JSON array `[{"name":"...","arguments":{...}}, ...]` wrapped in a tool-call marker.
+    /// 3.0 uses `<|tool_call|>` with ASCII pipes and 3.1+ uses `<tool_call>`; one parser handles both.
     case graniteLegacyArray = "Granite 3.x (Array)"
 
     /// IBM Granite 4.0 — single-object `<tool_call>{"name":..., "arguments":...}</tool_call>`
@@ -137,10 +119,9 @@ enum ModelDialect: String, Codable, CaseIterable, Identifiable, Hashable {
     /// Explicit `tool_call_id` field is distinctive vs older Command-R.
     case commandR7BAction = "Command-R7B Action"
 
-    /// Qwen3-Coder (30B-A3B, 480B-A35B, etc.) — deep XML format:
-    /// `<tool_call><function=NAME><parameter=KEY>value</parameter>...</function></tool_call>`.
-    /// Fundamentally different from Qwen2.5/3 base (which uses JSON in wrapper).
-    /// Parameter values type-coerced from schema (string/int/float/bool/JSON).
+    /// Qwen3-Coder (30B-A3B, 480B-A35B, ...): deep XML, not the JSON-in-wrapper form of Qwen2.5/3 base.
+    /// `<tool_call><function=NAME><parameter=KEY>value</parameter>...</function></tool_call>`
+    /// Parameter values are type-coerced from the schema (string/int/float/bool/JSON).
     case qwen3CoderDeepXml = "Qwen3-Coder Deep XML"
 
     /// DeepSeek V3.1 — flat variant: name followed by JSON args, NO code fence.
@@ -148,10 +129,8 @@ enum ModelDialect: String, Codable, CaseIterable, Identifiable, Hashable {
     /// Same full-width Unicode token markers as V3 but dropped the code fence rendering.
     case deepseekV31Flat = "DeepSeek V3.1 (Flat)"
 
-    /// DeepSeek V3.2 — brand new `<｜DSML｜...>` XML namespace replacing the old
-    /// begin/end/sep sentinels. Emits `<｜DSML｜function_calls><｜DSML｜invoke name="X">
-    /// <｜DSML｜parameter name="Y" string="true">value</｜DSML｜parameter></｜DSML｜invoke>
-    /// </｜DSML｜function_calls>`. Per-parameter typing via `string="true"` attribute.
+    /// DeepSeek V3.2: a `<｜DSML｜...>` XML namespace; `<｜DSML｜function_calls>` wraps `<｜DSML｜invoke name="X">` blocks.
+    /// Parameters are `<｜DSML｜parameter name="Y" string="true">value</｜DSML｜parameter>`, typed via `string=`.
     case deepseekV32Dsml = "DeepSeek V3.2 (DSML)"
 
     var id: String { rawValue }
@@ -161,33 +140,9 @@ enum ModelDialect: String, Codable, CaseIterable, Identifiable, Hashable {
 
 extension ModelDialect {
 
-    /// One sentence naming THIS dialect's tool-call wire shape, for a corrective alert injected
-    /// into the model's own context after a parse failure.
-    ///
-    /// ⚠️ WHY THIS EXISTS. `LLMRetryStrategy` had exactly one corrective string, and the file had
-    /// no reference to `dialect` anywhere in it:
-    ///
-    ///   "You MUST output a valid JSON response containing `reasoning` and `toolCalls`
-    ///    (an array of tools). No prose or markdown fences (```json)."
-    ///
-    /// That is the `.nativeJSON` / `.heuristicJson` shape. For the other 16 dialects it instructed
-    /// the model to abandon the format it was trained on — and that its OWN parser is the only one
-    /// that accepts — for one that parser rejects. A model that COMPLIED failed again on the next
-    /// pass, so three compliant retries aborted the run on the parse cap. The corrective was
-    /// actively steering the model away from the only output we could read.
-    ///
-    /// ⚠️ These are SHAPE statements, not instructions. The forward-facing twin is
-    /// `NativeToolTemplateGenerator`'s per-dialect `triggerSuffix` ("Respond with …"), appended to
-    /// every request; this one is the after-the-fact reminder ("this model's format is …"). They
-    /// describe the same wire format from opposite ends and MUST move together — if a dialect's
-    /// shape is corrected in one, correct it in the other. They are deliberately not merged:
-    /// `triggerSuffix` is tuned prompt reinforcement carried on the generator instance and covers
-    /// only the 14 chat-template dialects, while this property is intrinsic to the format and must
-    /// answer for all of them.
-    ///
-    /// ⚠️ Exhaustive switch, no `default:` — the same contract `ParserFactory.createParser(for:)`
-    /// holds. A new dialect must BREAK THIS BUILD rather than silently inherit another family's
-    /// shape, which is the defect this property exists to remove.
+    // Why: exhaustive switch, no `default:`, so a new dialect breaks the build instead of inheriting another family's shape.
+    /// One sentence naming this dialect's tool-call wire shape, for a corrective alert injected after a parse failure.
+    /// Shape statements, not instructions; keep in step with `NativeToolTemplateGenerator`'s per-dialect `triggerSuffix`.
     var formatReminder: String {
         switch self {
         case .nativeJSON, .heuristicJson:
@@ -225,22 +180,10 @@ extension ModelDialect {
         }
     }
 
-    /// Whether this dialect carries its tool ARGUMENTS as a JSON payload.
-    ///
-    /// ⚠️ Exists for exactly one caller: `ParseFailureReason.modelCorrectiveAlert`'s
-    /// `.malformedJSON` arm, which offers JSON syntax advice ("escape newlines with \\n, use
-    /// double quotes, strict JSON"). That advice is correct and genuinely useful for the fifteen
-    /// dialects whose arguments ARE JSON — malformed argument JSON is the single most common
-    /// parse failure — and simply wrong for the three where they are not: a `.pythonicBracketList`
-    /// model is supposed to emit `True`/`False`/`None` and may quote with `'`, and the two
-    /// XML-parameter dialects carry argument values as element text with no JSON syntax at all.
-    ///
-    /// ⚠️ A separate exhaustive switch rather than a substring test on `formatReminder`, because
-    /// deriving a structural fact by matching English out of a display string is this codebase's
-    /// recidivist defect. A new dialect must answer this question rather than inherit an answer.
-    ///
-    /// Note the wrapper's own syntax is irrelevant here — `.mistralV11Flat` puts a bare name
-    /// between markers but its `[ARGS]` payload is JSON, so it is `true`.
+    // Why: an exhaustive switch rather than a substring test on `formatReminder`, so a new dialect must answer explicitly.
+    /// Whether this dialect carries its tool arguments as a JSON payload.
+    /// Gates JSON-syntax advice in the malformed-JSON corrective alert; false for pythonic and XML-parameter dialects.
+    /// The wrapper syntax is irrelevant: `.mistralV11Flat` has a bare name between markers but a JSON `[ARGS]` payload.
     var argumentsAreJSON: Bool {
         switch self {
         case .nativeJSON, .heuristicJson, .mistralXML, .reactMarkdown, .qwenHermesToolCall,
@@ -256,12 +199,8 @@ extension ModelDialect {
 
 // MARK: - Chat Template Family
 
-/// Identifies the chat template format a model was trained on.
-/// Used as a Layer 2 fallback when the tokenizer lacks a built-in `chat_template`
-/// and no raw Jinja string was extractable from `tokenizer_config.json`.
-///
-/// Detection is based on special tokens present in the model's tokenizer files
-/// (`added_tokens.json`, `special_tokens_map.json`, `tokenizer_config.json`).
+/// Identifies the chat template format a model was trained on, detected from special tokens in the tokenizer files.
+/// Used as a fallback when the tokenizer has no built-in `chat_template` and no raw Jinja string was extractable.
 enum ChatTemplateFamily: String, Codable, CaseIterable, Hashable {
     /// OpenAI ChatML format — used by Qwen, Hermes, DeepSeek, Yi, and many fine-tunes.
     /// Markers: `<|im_start|>`, `<|im_end|>`
@@ -348,19 +287,14 @@ struct SupportedModalities: OptionSet, Sendable, Codable, Hashable {
 
 // MARK: - Tool Support Caveat
 
-/// Qualifies a model's tool capability for the UI so pickers can explain instead of
-/// silently hiding: blocked models render disabled-with-reason, quality-suspect ones
-/// selectable-with-warning. `nil` = clean, no qualification needed.
-/// Detection-side only — `ProviderConfig` derives its profile from stored fields and
-/// never persists this.
+/// Qualifies a model's tool capability for the UI: blocked models render disabled with a reason, quality-suspect ones
+/// selectable with a warning; `nil` means clean. Detection-side only: never persisted by `ProviderConfig`.
 enum ToolSupportCaveat: String, Codable, Hashable, Sendable {
     /// The daemon's capabilities array lacks "tools": any tools request WILL be
     /// rejected with HTTP 400. A hard protocol block, not a guess.
     case serverRejectsTools
-    /// Reasoning-focused fine-tune (deepseek-r1, qwq, gpt-oss…). When the daemon
-    /// declares tools the model stays selectable — the server accepts the param;
-    /// the caveat flags tool-call *reliability*, a quality concern, not protocol.
-    /// Without a capabilities field the same pattern blocks (can't verify).
+    /// Reasoning-focused fine-tune (deepseek-r1, qwq, gpt-oss...). When the daemon declares tools it stays selectable;
+    /// the caveat flags tool-call reliability. Without a capabilities field the pattern blocks (cannot verify).
     case reasoningFocused
     /// No authoritative capabilities data and no heuristic signal — tool support
     /// can't be verified (legacy daemon without the capabilities field).
@@ -392,19 +326,12 @@ struct CognitiveProfile: Codable, Hashable {
     /// Defaults to `.textOnly` for backward compatibility.
     var modalities: SupportedModalities
 
-    /// Describes how to obtain the correct chat template for this model.
-    /// `.embedded` means the tokenizer handles it natively (most models).
-    /// `.extracted` or `.familyFallback` are used when the tokenizer lacks a template.
-    /// Defaults to `.embedded` for backward compatibility.
+    /// Describes how to obtain the correct chat template: `.embedded` means the tokenizer handles it natively (most models);
+    /// `.extracted` or `.familyFallback` apply when the tokenizer lacks a template. Defaults to `.embedded`.
     var chatTemplateSource: ChatTemplateSource
 
-    /// Custom stop sequences extracted from the model's tokenizer configuration.
-    /// These are special tokens (turn markers, role markers) that the model should
-    /// never generate during a normal response. If the model emits one, it has crossed
-    /// a turn boundary and generation should stop immediately.
-    ///
-    /// Extracted by `MLXTokenizerAnalyzer` from `added_tokens.json` and `special_tokens_map.json`.
-    /// Empty array means no custom stop sequences — rely on framework EOS detection only.
+    /// Custom stop sequences (turn and role markers) extracted by `MLXTokenizerAnalyzer` from the tokenizer configuration.
+    /// Emitting one means the model crossed a turn boundary and generation stops; empty means rely on framework EOS only.
     var stopSequences: [String]
 
     init(capability: ModelCognitiveCapability, dialect: ModelDialect = .nativeJSON, metadata: ModelMetadata? = nil, modalities: SupportedModalities = .textOnly, chatTemplateSource: ChatTemplateSource = .embedded, stopSequences: [String] = [], toolSupportCaveat: ToolSupportCaveat? = nil) {

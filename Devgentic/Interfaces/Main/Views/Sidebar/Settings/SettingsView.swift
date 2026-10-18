@@ -4,22 +4,15 @@
 //  SettingsView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/05/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// Enum to represent the different settings categories for easier navigation and management.
-///
-/// ⚠️ TWO CASES WERE REMOVED AND NEITHER REMOVAL WOULD HAVE BEEN CAUGHT BY ANYTHING. There is no
-/// test over `allCases`, no persisted rawValue and no deep link, so dropping a case is a silent UX
-/// change rather than a build error — the pane simply stops being reachable. The four switches
-/// below are exhaustive with no `default:`, which is the only thing that forces a new case to be
-/// handled everywhere; keep them that way.
-///
-/// - `.account` / `.models` were merged into `.general`: model storage and the HuggingFace token
-///   now live in GeneralSettingsView directly after the Observability section.
-/// - `.notifications` is gone as a category; its content is now a section at the top of General.
+// Why: the switches over this enum are exhaustive with no `default:`; that is the only thing
+// forcing a new case to be handled everywhere.
+/// The different settings categories, for navigation and management.
+/// Model storage and the HuggingFace token live in General, as does the notifications section at its top.
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
     case theme = "Theme"
@@ -34,10 +27,9 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
     var id: String { self.rawValue }
 
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-    /// invisible to the String Catalog extractor and would have shipped untranslated inside
-    /// otherwise-translated chrome. `rawValue` stays for `id`/persistence and logging only.
+    // Why: `Text(x.rawValue)` binds to the non-localizing `StringProtocol` overload, so the label is
+    // invisible to the String Catalog.
+    /// User-facing name, separate from `rawValue`, which is for `id`/persistence and logging only.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .general:          return "General"

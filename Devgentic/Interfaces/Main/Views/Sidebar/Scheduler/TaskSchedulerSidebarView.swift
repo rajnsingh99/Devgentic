@@ -4,8 +4,7 @@
 //  TaskSchedulerSidebarView.swift
 //  Devgentic
 //
-//  Sidebar panel for managing all scheduled tasks.
-//  Follows the PromptLibrarySidebarView pattern with header, search, filter chips, and grouped list.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -13,6 +12,7 @@ import os
 
 private let logger = DGLogger(category: "TaskSchedulerSidebarView")
 
+/// Sidebar panel for managing all scheduled tasks, with a header, search, filter chips and a grouped list.
 struct TaskSchedulerSidebarView: View {
 
     @State private var viewModel = SchedulerViewModel()

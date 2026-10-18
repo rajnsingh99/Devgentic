@@ -2,30 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  TestFixtures.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  One loader for the document-extraction fixtures, and one canary that fails when they are
-//  missing.
-//
-//  ⚠️⚠️ WHY THIS FILE EXISTS. Six extractor test classes each carried an identical private
-//  `fixtureURL` that ended in `fatalError("Missing test fixture: …")`. A `fatalError` kills the
-//  TEST HOST PROCESS, not the test — so one absent resource ended the entire run.
-//
-//  Field-observed 2026-09-20: a `build-for-testing` that raced a cancelled suite produced an
-//  `.xctest` whose `Contents/Resources` was EMPTY, and every incremental build afterwards
-//  considered that bundle up to date. Targeted runs kept passing because none of them need a
-//  fixture. The next full run reached `CSVExtractorTests`, trapped, and stopped at 403 of 7,580
-//  tests — reported as `Failed to create a bundle instance`, which names neither the fixture nor
-//  the cause. The fixture was on disk the whole time.
-//
-//  ⚠️ SKIPPING ALONE WOULD HAVE BEEN WORSE. A missing fixture is a BUILD defect, never an
-//  environment the suite should shrug at — and a silent skip is how it hides: 24 tests quietly
-//  not running, suite green. So the two halves are deliberate:
-//
-//    • `url(_:ext:in:)` throws `XCTSkip`, so one missing resource costs its own tests and nothing
-//      else. The run survives.
-//    • `FixtureAvailabilityTests` FAILS, loudly, naming every fixture that did not resolve. That
-//      is the signal the skips must never be allowed to swallow.
+//  Created by Raj Singh.
 //
 
 import XCTest

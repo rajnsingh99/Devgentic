@@ -4,10 +4,7 @@
 //  CrashCaptureTests.swift
 //  DevgenticTests
 //
-//  Regression coverage for crash capture (§12.1): the DiagnosticReports filename
-//  matcher (which decides what gets harvested into a bundle — over-matching would leak
-//  OTHER apps' crash reports into a user's bug report) and the clean-exit sentinel
-//  state machine (crash vs quit detection at launch).
+//  Created by Raj Singh.
 //
 
 import XCTest

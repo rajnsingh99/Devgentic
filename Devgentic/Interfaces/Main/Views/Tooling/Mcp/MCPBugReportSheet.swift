@@ -4,14 +4,13 @@
 //  MCPBugReportSheet.swift
 //  Devgentic
 //
-//  Modal that previews an `MCPBugReport` and lets the user save it to disk
-//  for attachment to email / GitHub issue / Discord. The whole bundle is
-//  shown raw so the user can see exactly what they'd be sharing.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// Modal that previews an `MCPBugReport` in full and lets the user save it to disk for sharing.
 struct MCPBugReportSheet: View {
 
     let source: ToolSource

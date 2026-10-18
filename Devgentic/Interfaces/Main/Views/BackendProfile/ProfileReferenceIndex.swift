@@ -4,28 +4,7 @@
 //  ProfileReferenceIndex.swift
 //  Devgentic
 //
-//  Created on 08/08/26.
-//
-//  What else in the app points at a given profile.
-//
-//  ⚠️ Register A30. `BackendProfileService.deleteProfile` cascaded to exactly one thing — the
-//  profile's own workflow layout — and left every other reference dangling. The delete confirmation
-//  said only "This action cannot be undone", so a user deleting an agent had no way to know a
-//  nightly scheduled task depended on it.
-//
-//  ⚠️ This enumerates references so the user can be TOLD before deleting. It is not a cascade-delete
-//  list: the two referrers are handled differently on purpose, and the difference is the point.
-//
-//  • **Scheduled tasks** are stopped, not deleted (`SchedulerService.disableTaskWithMissingProfile`).
-//    A task is user-authored work — prompt, cron, conversation binding — and deleting it as a side
-//    effect of deleting a profile is data loss nobody asked for.
-//
-//  • **Workflow nodes are left exactly as they are, deliberately.** `WorkflowValidator` already
-//    reports an unresolvable profile node as a blocking `.error` ("Profile not found — it may have
-//    been deleted."), and `WorkflowExecutor` runs that same validation pre-flight and refuses to
-//    start. So the workflow is already prevented from running with a hole in it, from every entry
-//    point. Clearing the node's `profileID` would be strictly worse: it would degrade the node to
-//    "nothing selected" and destroy the only record of what it used to reference.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -48,21 +27,15 @@ struct ProfileReference: Identifiable, Hashable {
 @MainActor
 enum ProfileReferenceIndex {
 
-    /// Everything that points at `profileID`, excluding the profile itself.
-    ///
-    /// ⚠️ `DownloadRecordSD.profileID` is deliberately NOT included: it is a historical record of a
-    /// download that happened, not a live reference, and a dangling id there breaks nothing.
+    /// Returns everything that points at `profileID`, excluding the profile itself. `DownloadRecordSD.profileID` is not
+    /// included: it is a historical record, not a live reference.
     static func references(to profileID: UUID, in profiles: [BackendProfileModel]) -> [ProfileReference] {
         scheduledTaskReferences(to: profileID) + workflowReferences(to: profileID, in: profiles)
     }
 
-    /// Whether the scheduled-task half of the answer can be trusted.
-    ///
-    /// ⚠️ register B24 — `scheduledTasks` is empty both when there are none AND when
-    /// `loadAllTasks()` has not finished (or threw at launch, which leaves it empty for the whole
-    /// session). Reporting "nothing else uses this profile" in the second case is precisely the
-    /// silence A30 was filed to end, re-created by the fix's own data source. `SchedulerService`
-    /// already tracks `hasLoadedTasks` and consults it everywhere else.
+    /// Whether the scheduled-task half of the answer can be trusted. `scheduledTasks` is empty both when there are none
+    /// and when loading has not finished or failed, so "nothing uses this profile" is only claimed when
+    /// `SchedulerService.hasLoadedTasks` is true.
     static var scheduledTasksAreKnown: Bool {
         SchedulerService.shared.hasLoadedTasks
     }
@@ -89,11 +62,8 @@ enum ProfileReferenceIndex {
             .map { ProfileReference(id: $0.id, kind: .workflow, displayName: $0.displayName) }
     }
 
-    /// The sentence shown in the delete confirmation, or nil when nothing references the profile.
-    ///
-    /// Deliberately states the OUTCOME for each kind rather than just a count: "2 things use this"
-    /// tells the user there is a consequence without telling them what it is, which is the same
-    /// failure as the original "cannot be undone".
+    /// The sentence shown in the delete confirmation, or nil when nothing references the profile. States the outcome
+    /// for each kind of reference rather than just a count.
     static func deletionWarning(for references: [ProfileReference]) -> String? {
         guard !references.isEmpty else { return nil }
 
@@ -112,16 +82,9 @@ enum ProfileReferenceIndex {
         return lines.joined(separator: "\n\n")
     }
 
-    /// The COMPLETE confirmation body for deleting `profile` — the identity line plus whatever
-    /// else breaks. This is the one every delete entry point must use.
-    ///
-    /// ⚠️ register B10 — extracted rather than copied. A30 built this message inline in the sidebar
-    /// alert, and the three detail-view trash buttons kept the pre-fix "This action cannot be
-    /// undone", so the warning landed on the ONE path A26's own note calls the least discoverable.
-    /// Pasting the sidebar's twelve lines into three more views would have made four copies of a
-    /// message that then drift — this module's most-repeated defect. One function, four callers.
-    /// - Parameter tasksAreKnown: injectable so both branches are testable without driving the
-    ///   `SchedulerService` singleton. Defaults to the live answer.
+    /// The complete confirmation body for deleting `profile`: the identity line plus whatever else breaks; every delete
+    /// entry point uses it. `tasksAreKnown` is injectable so both branches are testable without the `SchedulerService`
+    /// singleton; it defaults to the live answer.
     static func deletionMessage(
         for profile: BackendProfileModel,
         in profiles: [BackendProfileModel],
@@ -134,8 +97,7 @@ enum ProfileReferenceIndex {
             parts.append(warning)
         }
 
-        // ⚠️ Only when nothing was found — if references exist we already have something concrete
-        // to show, and hedging on top of it would just dilute the specific warning.
+        // Only when nothing was found: if references exist the specific warning is enough, and hedging would dilute it.
         if !(tasksAreKnown ?? scheduledTasksAreKnown) {
             parts.append(String(
                 localized: "Scheduled tasks could not be checked, so any that use this profile are not listed here."))

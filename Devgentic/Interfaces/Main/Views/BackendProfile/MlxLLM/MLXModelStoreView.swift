@@ -4,7 +4,7 @@
 //  MLXModelStoreView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/02/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -153,13 +153,8 @@ struct MLXModelStoreContent: View {
 
                 // Filter & Storage Toolbar Row
                 HStack(spacing: 10) {
-                    // Quantization picker
-                    //
-                    // ⚠️ Read ONCE into a local. `availableQuantizations` is a computed property,
-                    // and `Menu`'s content builder runs immediately, so reading it here and again
-                    // inside the menu evaluated it twice per body — and on the Installed tab each
-                    // evaluation re-parses every installed repo id. The body re-evaluates on every
-                    // observer tick, so a 20-model library paid for it ~30 times per page load.
+                    // Quantization picker: `availableQuantizations` is read once into a local
+                    // because it is computed and the Menu builder runs immediately.
                     let quantizations = viewModel.availableQuantizations
                     if quantizations.count > 1 || viewModel.quantizationFilter != nil {
                         Menu {
@@ -301,8 +296,7 @@ struct MLXModelStoreContent: View {
             .frame(maxWidth: .infinity)
             .background(showSearchBar ? theme.primaryBackground : Color.clear)
 
-            // Download failures were previously invisible in the store: the card just
-            // reverted to a Download button and the reason went nowhere.
+            // Surfaces a download failure inline so the reason is visible when the card reverts to Download.
             if let downloadError = viewModel.downloadError {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -332,9 +326,7 @@ struct MLXModelStoreContent: View {
                     VStack(spacing: 16) {
                         ProgressView()
                             .controlSize(.large)
-                        // The key extracts, but interpolating `rawValue` left the category
-                        // name in English inside an otherwise-translated sentence. Composing
-                        // from the localized title keeps both halves translatable.
+                        // Composed from the localized category title so both halves of the sentence stay translatable.
                         Text("Fetching \(Text(viewModel.selectedCategory.localizedTitle)) models…")
                             .foregroundColor(theme.secondaryText)
                     }
@@ -377,13 +369,9 @@ struct MLXModelStoreContent: View {
                                 .foregroundColor(theme.secondaryText)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 32)
-                            // No retry button while throttled: retrying is what deepens a
-                            // 429, and the old "Try Reloading" fired another 31 requests
-                            // straight back into the same wall.
+                            // No retry button while throttled: retrying deepens a 429.
                             HStack(spacing: 10) {
-                                // ⚠️ The 401 copy says "Add one in Settings › General" and then
-                                // offered no way to get there — the one screen that knows a
-                                // token is missing was the one screen that could not take it.
+                                // The 401 state offers the token entry sheet, since the copy tells the user to add a token.
                                 if case .unauthorized = error {
                                     TactileButton(
                                         title: "Add Token…",
@@ -394,9 +382,7 @@ struct MLXModelStoreContent: View {
                                         showingTokenEntry = true
                                     }
                                 }
-                                // No retry button while throttled: retrying is what deepens a
-                                // 429, and the old "Try Reloading" fired another 31 requests
-                                // straight back into the same wall.
+                                // No retry button while throttled: retrying deepens a 429.
                                 if !error.isRateLimited {
                                     TactileButton(
                                         title: "Try Again",
@@ -491,15 +477,13 @@ struct MLXModelStoreContent: View {
                     }
                 }
 
-                // Global banner intentionally omitted — per-row
-                // `ModelDownloadStatusView` handles inline progress and the
-                // Downloads sidebar surfaces any active pull cross-backend.
+                // No global banner: per-row `ModelDownloadStatusView` shows progress and the Downloads sidebar shows
+                // active pulls.
             }
         }
         .sheet(isPresented: $showingTokenEntry) {
-            // ⚠️ Retries on SAVE, not on a `.valid` verdict. The token is in the Keychain and in
-            // use either way, and gating the retry on a network check would strand a user whose
-            // check was merely inconclusive — the failure this whole flow exists to avoid.
+            // Retries on save, not on a `.valid` verdict: the token is in use either way and an inconclusive check
+            // must not strand the user.
             HuggingFaceTokenEntrySheet { viewModel.refresh() }
         }
     }
@@ -527,10 +511,8 @@ struct ModelCardView: View {
         viewModel.isInstalled(model)
     }
 
-    /// Starts a download and surfaces the coordinator's verdict. The outcome used to be
-    /// discarded (`_ = await …`), so a refused start — MLX has a single download slot and
-    /// now refuses rather than pre-empting the in-flight pull — left the button looking
-    /// dead with no explanation anywhere in the UI.
+    /// Starts a download and surfaces the coordinator's verdict, so a refused start (MLX has a single
+    /// download slot) is explained in the UI.
     @MainActor
     private func startDownload() async {
         let outcome = await DownloadCoordinator.startMLXDownloadIfNeeded(repoId: model.id)
@@ -548,15 +530,9 @@ struct ModelCardView: View {
         }
     }
 
-    /// Re-pulls an installed model at the publisher's current revision.
-    ///
-    /// ⚠️ Byte-for-byte the path the "Re-download…" overflow item takes
-    /// (`ModelDownloadStatusView.triggerDownload(force: true)`): delete the stale history
-    /// record so the new pull gets its own row, then call the coordinator with `force` so the
-    /// installed-on-disk short-circuit is skipped. WITHOUT `force` this is a guaranteed no-op —
-    /// the install check reads the FILESYSTEM, and the model is by definition already there.
-    ///
-    /// Unlike `startDownload()` this passes `profileID`, so the record says who asked.
+    /// Re-pulls an installed model at the publisher's current revision, as the "Re-download…" overflow item
+    /// does. Deletes the stale history record, then calls the coordinator with `force`; without `force` the
+    /// on-disk install check makes it a no-op.
     @MainActor
     private func startUpdate() async {
         if let record = DownloadHistoryStore.shared.fetchMostRecent(
@@ -588,11 +564,8 @@ struct ModelCardView: View {
     /// Isolated per card: any unparseable metadata degrades gracefully to a neutral assessment
     /// and logs raw inputs (see ModelFitAdvisor) so we can add support for new formats.
     private var fitAssessment: ModelFitAssessment {
-        // `metadata: nil` made `ModelFitAdvisor.parseQuantizationBits` dead code on the
-        // pre-download path, so the verdict fell back to a crude `diskBytes × 1.2` proxy even
-        // though the repo id states the quantization outright. Synthesised metadata lets the
-        // real formula run; it returns nil when the name yields no parameter count, in which
-        // case the disk-size path answers exactly as before.
+        // Synthesised metadata lets `ModelFitAdvisor` use the quantization bits stated in the repo id.
+        // It returns nil when the name yields no parameter count, falling back to the disk-size path.
         ModelFitAdvisor.assess(
             metadata: MLXQuantization.fitMetadata(forRepoId: model.id),
             diskSizeString: model.size,
@@ -608,20 +581,14 @@ struct ModelCardView: View {
         DownloadManager.shared.activeRecord(backend: .mlx, modelIdentifier: model.id)
     }
 
-    /// Actions render as a floating top-right overlay so the badge row can use
-    /// the full card width. We keep them visible when installed, and fade in on
-    /// hover for the idle-remote case — which was the common offender for
-    /// horizontal-space waste. Downloads use a dedicated layout, not the overlay.
-    /// ⚠️ Always true. The actions overlay carries the store's PRIMARY action — Download —
-    /// and gating it on `isHovered` with `.allowsHitTesting(false)` meant there was no
-    /// pointer-free path to it at all: not by keyboard, not by VoiceOver, not by touch.
-    /// Hover now only affects emphasis (see `actionsOpacity`), never reachability.
+    /// Actions render as a floating top-right overlay so the badge row can use the full card width;
+    /// downloads use a dedicated layout. Always true: the overlay carries the primary Download action, so
+    /// hover only affects emphasis, never reachability.
     private var showActionsOverlay: Bool { true }
 
-    /// Hover/focus still de-emphasises the controls visually, but they stay hit-testable
-    /// and in the accessibility tree at all times.
-    /// Horizontal space kept clear for the actions overlay (Set as IC + delete, or the
-    /// Download/Installed control). Sized to the widest of those.
+    /// Controls are de-emphasised on hover/focus but stay hit-testable and in the accessibility tree.
+    /// Horizontal space reserved for the actions overlay (Set as IC, delete, or the Download/Installed
+    /// control).
     private var actionsReserve: CGFloat { 124 }
 
     private var actionsOpacity: Double {
@@ -821,11 +788,7 @@ struct ModelCardView: View {
                     .help(quant.guidance)
                 }
 
-                // ⚠️ Read ONCE. `fitAssessment` is a computed property with no storage, so this
-                // chain used to run the full `ModelFitAdvisor.assess` three times per body — each
-                // re-parsing the repo id AND emitting its own `logger.info("Assessment: …")`. Every
-                // card with a badge therefore logged the same line three times and paid for it,
-                // on every observer tick.
+                // Read once: `fitAssessment` is computed, and each evaluation re-parses the repo id and logs a line.
                 let fit = fitAssessment
                 if fit.verdict == .unknown || (model.size != nil && fit.estimatedRuntimeRAM > 0) {
                     ModelFitBadgeView(assessment: fit)
@@ -925,10 +888,8 @@ struct ModelCardView: View {
                 }
             )
         }
-        // The card had no tap target at all — name, org, downloads, size and heuristic badges
-        // were everything the user got before committing to a multi-gigabyte download.
-        // `.onTapGesture` rather than wrapping in a Button so the card's own controls
-        // (Download, Set as IC, the overflow menu) keep their own hit areas.
+        // Tap opens the detail view. `.onTapGesture` rather than a Button keeps the card's own controls' hit
+        // areas.
         .contentShape(Rectangle())
         .onTapGesture { showingDetail = true }
         .accessibilityAddTraits(.isButton)
@@ -955,8 +916,7 @@ struct ModelCardView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            // Name the bytes reclaimed: the whole reason a user deletes a model is to
-            // recover space, and the alert used to promise removal without saying how much.
+            // Names the bytes reclaimed, since recovering space is why a user deletes a model.
             Text(viewModel.installedSize(of: model).map {
                 "Are you sure you want to delete '\(model.displayName)'? This permanently removes \($0) from your disk."
             } ?? "Are you sure you want to delete '\(model.displayName)'? This will permanently remove the files from your disk.")

@@ -4,23 +4,7 @@
 //  DestructiveActionSplitTests.swift
 //  DevgenticTests
 //
-//  Four tools bundled frequent, harmless reads with irreversible actions behind one `action`
-//  argument: `manage_calendar` (read/search/create + delete), `manage_reminders` (read/create/
-//  complete + delete), `manage_processes` (list_top + kill), `finder_tags` (read/add/remove/search
-//  + set, which discards every existing tag).
-//
-//  A tool carries exactly ONE `requiresConfirmation`, so that single setting had to cover both
-//  halves. Neither option it left was acceptable: prompt on every read and the user learns to
-//  approve without looking — which is how the delete gets approved — or prompt on none and the
-//  delete lands silently. The user could not express "ask before destroying, not before looking".
-//
-//  Splitting is the codebase's own established answer to this shape (`create_file` →
-//  `create_new_file`/`overwrite_file`). These tests pin the three properties the split has to
-//  have, because each can regress independently:
-//    1. the destructive action is GONE from the multiplexer (not merely discouraged),
-//    2. the survivors still do their non-destructive work,
-//    3. the new tools are classified `.destructive`, so the banner does not present a SIGKILL
-//       with the same pencil icon as a rename.
+//  Created by Raj Singh.
 //
 
 import XCTest

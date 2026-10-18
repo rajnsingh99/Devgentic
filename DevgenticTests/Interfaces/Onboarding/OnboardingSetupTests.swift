@@ -4,10 +4,7 @@
 //  OnboardingSetupTests.swift
 //  DevgenticTests
 //
-//  The Setup Assistant's release contract:
-//    • a model download is mandatory — two retries after a failure, then only Skip;
-//    • five tool-capable starter models per engine, smallest first, none above 24 GB;
-//    • an agent lands with the ten starter tools, all enabled and all asking first, and a prompt.
+//  Created by Raj Singh.
 //
 
 import XCTest

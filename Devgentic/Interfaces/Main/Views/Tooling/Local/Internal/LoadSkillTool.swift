@@ -4,9 +4,7 @@
 //  LoadSkillTool.swift
 //  Devgentic
 //
-//  A system tool that loads the full instructions for a specialized skill by name.
-//  Used when the agent detects a task matching one of the available skills listed
-//  in the discovery layer of the system prompt.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -15,10 +13,8 @@ import OSLog
 private let logger = DGLogger(category: "LoadSkillTool")
 
 /// Why a skill that was resolved could not then be read.
-///
-/// ⚠️ Distinct cases on purpose. "Not in the library" means it was deleted between resolution and
-/// this call; "version missing" means a pinned snapshot is gone. The remedies differ and the model
-/// should be able to tell the user which happened.
+/// Distinct cases on purpose: "not in the library" means it was deleted after resolution, "version missing" that a pinned
+/// snapshot is gone; the remedies differ and the model can tell the user which happened.
 enum SkillLoadError: LocalizedError {
     case notInLibrary(String)
     case versionMissing(String, String)
@@ -39,14 +35,8 @@ enum SkillLoadError: LocalizedError {
 }
 
 /// Loads a skill's full body (and optionally its bundled files) from the library.
-/// Registered conditionally in `resolveExecutableTools()` when the profile has skills configured.
-///
-/// Integration:
-/// - The `<available_skills>` block in the system prompt shows skill names + descriptions.
-/// - The agent calls `load_skill(skill_name: "...")` when a task matches a skill description.
-/// - This tool reads the RESOLVED version out of the library — including a pinned one — and
-///   returns its body.
-/// - The agent then follows the loaded instructions to complete the task.
+/// Registered conditionally when the profile has skills configured; the agent calls `load_skill(skill_name:)` when a task
+/// matches a skill description, and reads the resolved (possibly pinned) version.
 struct LoadSkillTool: DevgenticTool {
 
     // MARK: - Properties
@@ -132,17 +122,8 @@ struct LoadSkillTool: DevgenticTool {
 
     // MARK: - Execution
 
-    /// Loads a skill's content from the library.
-    ///
-    /// ⚠️⚠️ THIS BRANCH EXISTS BECAUSE ITS ABSENCE BROKE EVERY SKILL LOAD. When skills moved into
-    /// the library, `SkillResolution` started putting a `skill_…` id in `folderPath` (the boundary
-    /// type still calls it that), and this tool went on handing it to a disk reader — so the loader
-    /// tried to open a file literally named `skill_<uuid>/SKILL.md` and every `load_skill` call
-    /// failed. Nothing caught it: no test covered the resolution-to-load seam. That seam now has
-    /// one (`LoadSkillToolTests.testLoadsFromTheLibraryWhenResolutionSuppliedAVersion`).
-    ///
-    /// ⚠️ Loads the RESOLVED version, not the latest. A profile that pinned an older version must
-    /// read that version's body — reading `latestVersion` here would quietly defeat every pin.
+    // Why: a pinned profile must read its pinned version's body; reading `latestVersion` would defeat every pin.
+    /// Loads a skill's content from the library, using the resolved version rather than the latest.
     @MainActor
     private static func loadPackage(for manifest: SkillManifest,
                                     resourceRoot: inout URL?) throws -> SkillPackage {
@@ -150,12 +131,8 @@ struct LoadSkillTool: DevgenticTool {
             throw SkillLoadError.notResolvedFromLibrary(manifest.name)
         }
 
-        // ⚠️ `try?` FLATTENS the double optional here: `fetchSkill` returns
-        // `Result<SkillSD?, _>`, so `try? ....get()` is `SkillSD?`, not `SkillSD??`. One binding is
-        // correct and two does not compile — worth stating, because the two readings look alike and
-        // the flattening hides the difference between "the store failed" and "no such skill". Both
-        // mean the same thing to this caller, which is why collapsing them is acceptable HERE and
-        // not in the store itself.
+        // `try?` flattens the double optional: `fetchSkill` returns `Result<SkillSD?, _>`, so this is `SkillSD?`.
+        // A store failure and a missing skill mean the same thing to this caller.
         guard let skill = try? SkillStore.shared.fetchSkill(id: manifest.folderPath).get() else {
             throw SkillLoadError.notInLibrary(manifest.name)
         }
@@ -163,10 +140,8 @@ struct LoadSkillTool: DevgenticTool {
             throw SkillLoadError.versionMissing(manifest.name, versionID)
         }
 
-        // ⚠️⚠️ THE FILES REACH DISK HERE, and the returned text says where. A skill may bundle
-        // `scripts/run.py` and instruct the model to execute it; before this, the blob lived only in
-        // the database and that path resolved to nothing — while `scripts/` being present is one of
-        // the triggers that offers the user a shell tool. See `SkillRuntimeFiles`.
+        // The files are written to disk here and the returned text says where, so a bundled `scripts/run.py` the skill
+        // tells the model to run actually exists on disk (see `SkillRuntimeFiles`).
         resourceRoot = SkillRuntimeFiles.materialize(version: version, name: skill.name)
 
         return SkillPackage(
@@ -197,26 +172,23 @@ struct LoadSkillTool: DevgenticTool {
         guard let manifest = manifests.first(where: { $0.name == arguments.skillName }) else {
             let available = manifests.map { Self.label($0.name) }.joined(separator: ", ")
             logger.error("[SKILL_LOAD] MISS: the model asked for '\(SkillToolText.label(arguments.skillName))' and this run resolved \(manifests.count) skill(s): \(available.isEmpty ? "none" : available). CONSEQUENCE: nothing was loaded and the model is told which names it COULD have used — a miss here means the profile does not link that skill, or the model invented the name from the task rather than from <available_skills>.")
-            // ⚠️ The requested name is echoed back so the model can see its own typo, and it is a
-            // MODEL-supplied string — unbounded, and free to contain newlines. Echoed as a label.
+            // The requested name is echoed so the model sees its own typo; it is model-supplied (unbounded, may contain newlines),
+            // so it is echoed as a label.
             return "Error: Skill '\(Self.label(arguments.skillName))' not found. Available skills: \(available)"
         }
 
-        // ⚠️ The version id is the correlation key for everything below — a pinned profile and an
-        // unpinned one loading the "same" skill are different bodies, and only this id tells them apart.
+        // The version id is the correlation key: pinned and unpinned profiles loading the "same" skill get different bodies.
         logger.notice("[SKILL_LOAD] Loading '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "none") includeResources=\(includeResources) declaredTools=\(manifest.allowedTools?.joined(separator: ",") ?? "none") bundledFiles=\(manifest.resourceCount). CONSEQUENCE: the body of THIS version reaches the model — a profile pinning an older version reads that one, so compare this id against the library before concluding an edit did not take.")
 
         do {
             var resourceRoot: URL?
             let package = try await Self.loadPackage(for: manifest, resourceRoot: &resourceRoot)
 
-            // ⚠️ The NAME is a label (it is a heading); the BODY is verbatim. See `label`.
+            // The name is a label (a heading); the body is verbatim. See `label`.
             var result = "# Skill: \(Self.label(package.manifest.name))\n\n\(package.body)"
 
-            // ⚠️ Stated whether or not resource TEXT was requested. The model needs the path to run
-            // a bundled script, and that is independent of wanting the files read into context —
-            // asking for `include_resources` just to make `scripts/run.py` executable would burn the
-            // whole bundle's tokens for a path.
+            // Stated whether or not resource text was requested: the model needs the path to run a bundled script,
+            // independent of wanting the files read into context.
             if let resourceRoot {
                 result += "\n\n---\n\nBundled files for this skill are on disk at:\n\(resourceRoot.path)\n\nPaths named in the instructions above (for example `scripts/run.py`) are relative to that directory. Use the absolute path when running one."
             }
@@ -224,10 +196,8 @@ struct LoadSkillTool: DevgenticTool {
             if includeResources && !package.resources.isEmpty {
                 result += "\n\n---\n\n# Skill Resources\n"
                 for resource in package.resources {
-                    // ⚠️ The PATH is a label (a heading) and is defence-in-depth here: a control
-                    // character in it is now refused at ingest by `isSafeRelativePath`, but a row
-                    // stored before that guard, or by a future write path that skips ingest, would
-                    // otherwise forge a heading from a filename alone. The CONTENT stays verbatim.
+                    // The path is a label (a heading) as defence in depth: a control character in a stored path could forge a heading,
+                    // while the content stays verbatim.
                     result += "\n## \(Self.label(resource.relativePath))\n\(resource.content)\n"
                 }
             }
@@ -236,11 +206,8 @@ struct LoadSkillTool: DevgenticTool {
             return result
         } catch {
             logger.error("[SKILL_LOAD] FAILED to load '\(manifest.name)' [skill \(manifest.folderPath)] version=\(manifest.versionID ?? "none"): \(error.localizedDescription). CONSEQUENCE: the model gets an error string instead of instructions and will most likely proceed WITHOUT the skill — the skill was resolved at run start, so this means it was deleted, un-drafted or re-versioned mid-run, or a pinned version is gone.")
-            // ⚠️ LABELLED TOO, and this site is easy to miss because it looks like app voice rather
-            // than rendering: the name still comes from the manifest, and `SkillLoadError`'s own
-            // messages interpolate it as well. A hostile name reaches the model through the FAILURE
-            // path just as readily as through the success path — found by the test below, which was
-            // written against the success path and landed here.
+            // Labelled too: the name comes from the manifest and `SkillLoadError` messages interpolate it, so a hostile name
+            // would otherwise reach the model through the failure path.
             return "Error loading skill '\(Self.label(manifest.name))': \(Self.label(error.localizedDescription, limit: 400))"
         }
     }

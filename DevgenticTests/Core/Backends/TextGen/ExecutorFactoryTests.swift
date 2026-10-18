@@ -4,11 +4,7 @@
 //  ExecutorFactoryTests.swift
 //  DevgenticTests
 //
-//  Pins ExecutorFactory's profileType → executor routing, specifically that
-//  configured execution limits actually reach the executor. Regression for the
-//  .code fallthrough bug: ProfileType.code had no factory case, fell through
-//  @unknown default to a bare ReActAgentExecutor(), and silently capped every
-//  Code run at the default 15 iterations while the profile carried 20.
+//  Created by Raj Singh.
 //
 
 import XCTest

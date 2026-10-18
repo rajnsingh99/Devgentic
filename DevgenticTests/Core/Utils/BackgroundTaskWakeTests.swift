@@ -4,12 +4,7 @@
 //  BackgroundTaskWakeTests.swift
 //  DevgenticTests
 //
-//  Tier 3's gate: `notify_on_completion`, once-per-task, and what a woken run is asked.
-//
-//  ⚠️ A wake is a full LLM turn against the user's key with NOBODY PRESENT. It is bounded by three
-//  things: the model must opt in, one task cannot wake twice, and the run that starts has no
-//  profile tools (so it cannot start another task). There is deliberately NO per-conversation cap —
-//  see the note in `BackgroundTaskWakeCoordinator` for why it was removed on 2026-09-24.
+//  Created by Raj Singh.
 //
 
 import XCTest

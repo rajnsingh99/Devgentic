@@ -4,14 +4,7 @@
 //  DraftBufferIdentityTests.swift
 //  DevgenticTests
 //
-//  Regression cover for AD1 (Chat_Production_Readiness.md Part D) — the CH1 fix re-opened a
-//  data-loss defect a 2026-07-26 audit had already closed.
-//
-//  ROOT CAUSE: `editedCode == nil` meant two different things. `updateCodeViewerDraft` stored
-//  `nil` whenever the buffer returned to the restore point (as a way to clear the dirty dot),
-//  so `effectiveCode` (`editedCode ?? snippet.code`) reported the PRISTINE CHAT BLOCK for a tab
-//  whose editor was showing the user's text — and the save path reads `effectiveCode` as the
-//  bytes to write.
+//  Created by Raj Singh.
 //
 
 import XCTest

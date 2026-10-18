@@ -4,15 +4,13 @@
 //  ReportInspectorView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//  Redesigned 2026-08-22: hosts the unified RunReportView — ONE report for every
-//  user and every profile type. The old Developer/User fork (DeveloperReportView /
-//  UserFeedbackView) is superseded; density is a toggle inside the report, feedback
-//  and export live inside it too.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Hosts the unified `RunReportView`: one report for every user and profile type, with density, feedback and export
+/// inside the report.
 struct ReportInspectorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme

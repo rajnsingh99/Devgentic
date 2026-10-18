@@ -4,13 +4,12 @@
 //  MLXAdvancedConfig.swift
 //  Devgentic
 //
-//  Created for MLX Advanced Inference Configuration.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// ⚠️ register A39 — this file had no logger while silently rewriting persisted user settings,
-/// so the rewrite was invisible in a support log as well as on screen.
+/// Logger for this file, so rewrites of persisted user settings are visible in a support log.
 private let logger = DGLogger(category: "MLXAdvancedConfig")
 
 /// Data model representing advanced MLX inference parameters
@@ -29,22 +28,10 @@ struct MLXAdvancedConfig: Codable, Equatable {
         self.maxTokens = maxTokens
     }
 
-    /// Backward-compatible decoding: EVERY field falls back to its default rather than throwing.
-    ///
-    /// ⚠️ This used to hard-`decode` four of the five fields, so a blob missing any one of them
-    /// failed the whole decode. That is not a per-field loss: `BackendProfileService.decodeConfig`
-    /// answers a throw with nil and `ProviderAdvancedConfigManager.load` answers nil with
-    /// `?? .default()`, so ONE absent key silently replaced the user's entire advanced panel with
-    /// app defaults — and the panel then presented those defaults as the user's own settings.
-    ///
-    /// The hazard is not hypothetical here: `repetitionContextSize` was already grandfathered in
-    /// this way, which is proof that fields get added to this struct over time. The next one added
-    /// would have reintroduced the same failure.
-    ///
-    /// `try?` per field also absorbs a wrong-typed value (the legacy number-saved-as-Bool shape the
-    /// sibling configs repair explicitly). Falling back to the documented default is preferred over
-    /// those siblings' `bool ? 1.0 : 0.0` coercion — a temperature of 1.0 invented from a `true` is
-    /// a worse answer than the tuned default, and just as silent.
+    // Why: a throw is answered with nil and then `?? .default()`, so one absent key would silently replace the user's whole
+    // advanced panel with defaults.
+    /// Backward-compatible decoding: every field falls back to its default rather than throwing. A wrong-typed value also
+    /// falls back to the documented default instead of being coerced.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let fallback = Self.default()
@@ -66,19 +53,9 @@ struct MLXAdvancedConfig: Codable, Equatable {
         )
     }
 
-    /// Returns a config with repetition settings tuned to the model's tier and quantization.
-    ///
-    /// Lower quantization (fewer bits) and smaller models are more prone to degenerate
-    /// repetition loops. This method applies stronger penalties and larger context windows
-    /// for those cases, while keeping penalties light for high-precision large models.
-    ///
-    /// `profile` picks the ladder, as for Ollama (`OllamaConfigDefaultProfile.forProfileType`).
-    /// The agent ladder is deliberately light: a tool loop has to repeat identifiers verbatim, and
-    /// a strong penalty corrupts them. On the 2026-10-06 device run Qwen2.5-3B-4bit at 1.30 over
-    /// 30 tokens wrote `DevgeticTestbed` three times, each right after the real path had appeared
-    /// in the last 30 tokens, and one of them sent a read outside the project. The loops the strong
-    /// ladder was there to break are caught on that path anyway: identical tool calls by the
-    /// repeated-call guard, text loops by `StreamingCircuitBreaker`.
+    /// Returns a config with repetition settings tuned to the model's tier and quantization: stronger penalties and
+    /// larger windows for low-bit and small models. `profile` picks the ladder; the agent ladder is light because a tool
+    /// loop must repeat identifiers verbatim and a strong penalty corrupts them.
     static func recommended(for metadata: ModelMetadata, profile: OllamaConfigDefaultProfile) -> MLXAdvancedConfig {
         let (penalty, contextSize) = profile == .agent
             ? agentRepetitionSettings(tier: metadata.tier)
@@ -92,13 +69,8 @@ struct MLXAdvancedConfig: Codable, Equatable {
         )
     }
 
-    /// Computes optimal (repetitionPenalty, repetitionContextSize) based on model characteristics.
-    ///
-    /// Heuristic rationale:
-    /// - Low-bit quantization (2-4 bit) compresses weight resolution, making models more likely
-    ///   to get stuck in local probability loops. Stronger penalties break these cycles.
-    /// - Smaller models have less capacity to self-regulate, needing more aggressive intervention.
-    /// - Larger context windows let the penalty consider more prior tokens, catching longer loops.
+    /// Computes (repetitionPenalty, repetitionContextSize) from model characteristics. Low-bit quantization and small
+    /// models loop more easily and get stronger penalties; larger windows catch longer loops.
     private static func optimalRepetitionSettings(
         tier: ModelTier,
         quantization: String?
@@ -146,19 +118,9 @@ struct MLXAdvancedConfig: Codable, Equatable {
     }
 }
 
-/// The UI component to edit the MLX advanced configuration.
-///
-/// Bounds for the integer fields (`repetitionContextSize`, `maxTokens`) are
-/// derived from the active model's `ModelMetadata.contextWindow` instead of
-/// being hardcoded. This way a profile bound to a 4K-context model gets a
-/// tighter cap than one bound to a 128K-context model — without code changes
-/// when new models are added.
-///
-/// Each integer field pairs a `TextField` (for direct entry — typing 256 takes
-/// 3 keystrokes vs 47 stepper clicks at the old bounds) with a `Stepper` (for
-/// fine adjustment). Values typed outside the model-derived range are silently
-/// clamped on commit, with the active range surfaced as a caption underneath
-/// the field so the user can see where the cap came from.
+/// The UI component to edit the MLX advanced configuration. Integer bounds derive from the active model's
+/// `ModelMetadata.contextWindow`; each field pairs a `TextField` with a `Stepper`, out-of-range typed values are
+/// clamped on commit, and the active range is shown as a caption.
 // MARK: - Parameter bounds (register A39)
 
 extension MLXAdvancedConfig {
@@ -168,20 +130,14 @@ extension MLXAdvancedConfig {
     static let maxTokensFloor = 256
     static let repetitionContextFloor = 10
 
-    /// Upper bound for `maxTokens` — half the context window so the prompt itself has room.
-    /// Floor at 512 to keep the field usable even with a pathologically tiny configured window.
-    ///
-    /// ⚠️ Extracted from `MLXSettingsView` so the derivation is assertable. It was a `private var`
-    /// on the view, which meant the bounds that silently rewrote user settings could not be
-    /// tested at all — the same reason `ModelSelectionPolicy` was lifted out of the pickers.
+    /// Upper bound for `maxTokens`: half the context window so the prompt has room, with a floor of 512. A static
+    /// function so the derivation can be tested.
     static func maxTokensCap(forContextWindow contextWindow: Int) -> Int {
         max(512, contextWindow / 2)
     }
 
-    /// Upper bound for `repetitionContextSize`. Beyond ~2K the sampler's scan cost outweighs the
-    /// loop-suppression benefit, so we cap there even when the model could technically attend to
-    /// more. Tied to a quarter of the context window so small-context models don't get a
-    /// disproportionate cap.
+    /// Upper bound for `repetitionContextSize`: a quarter of the context window, capped near 2K where the sampler's scan
+    /// cost outweighs the loop-suppression benefit.
     static func repetitionContextCap(forContextWindow contextWindow: Int) -> Int {
         max(64, min(contextWindow / 4, 2048))
     }
@@ -190,17 +146,12 @@ extension MLXAdvancedConfig {
 struct MLXSettingsView: View {
     @Binding var config: MLXAdvancedConfig
 
-    /// Active model metadata used to derive parameter bounds. Nil when the
-    /// profile has no model selected yet (or the model is unknown to the
-    /// metadata catalog) — the view falls back to the catalog lookup or a
-    /// conservative 8K window so the UI still functions.
+    /// Active model metadata that parameter bounds derive from. Nil when no model is selected or the model is unknown to
+    /// the catalog; the view then falls back to a catalog lookup or a conservative 8K window.
     let modelMetadata: ModelMetadata?
 
-    /// Active model name. Used as a secondary fallback when
-    /// `modelMetadata.contextWindow` is nil — many profiles persist tier and
-    /// quantization but not the context window itself, so we look it up in
-    /// `KnownModelContextWindows` (the same catalog AgentConnect uses at
-    /// runtime). Nil when no model is selected yet.
+    /// Active model name, a secondary fallback when `modelMetadata.contextWindow` is nil: looked up in
+    /// `KnownModelContextWindows`. Nil when no model is selected.
     let modelName: String?
 
     /// Which ladder "Reset to Defaults" restores: the agent one unless hosted in a Bot config.
@@ -208,12 +159,8 @@ struct MLXSettingsView: View {
 
     @Environment(\.appTheme) private var theme
 
-    /// Effective context window (tokens) for bound derivation. Layered
-    /// fallback that mirrors `AgentConnect.swift:124` so the UI ranges match
-    /// the runtime memory-budget calculations:
-    ///   1. `ModelMetadata.contextWindow` if captured during scan
-    ///   2. `KnownModelContextWindows.lookup(modelName)` for known catalog entries
-    ///   3. 8192 as a last-resort safe default
+    /// Effective context window (tokens) for bound derivation, mirroring `AgentConnect`: `ModelMetadata.contextWindow`,
+    /// else `KnownModelContextWindows.lookup(modelName)`, else 8192.
     private var contextWindow: Int {
         if let cw = modelMetadata?.contextWindow { return cw }
         if let name = modelName, let cw = KnownModelContextWindows.lookup(name) { return cw }
@@ -242,23 +189,9 @@ struct MLXSettingsView: View {
 
     // MARK: - Bound enforcement (register A39)
 
-    /// Clamps a value up to the absolute floor, and **deliberately does not clamp the ceiling**.
-    ///
-    /// ⚠️ The upper bound used to be clamped here too, which silently destroyed tuning. The trigger
-    /// was not what the register assumed — `.onChange` watches the VALUE, not the cap, so
-    /// re-pointing the profile at a smaller-context model clamps nothing at that moment. It fired
-    /// on the NEXT editor open, when `ProviderAdvancedConfigManager.load` assigns the stored value
-    /// and the now-smaller cap rewrites it. And it did not stop at the panel: the write reaches
-    /// `AdvancedConfigSyncModifier`, so the profile went dirty on mere open and the next Save
-    /// persisted the reduced number. A user who tuned 8192 for a large-context model got 2048 back
-    /// with no notice, no log, and no way to know it had happened.
-    ///
-    /// The Ollama panel already made the opposite call for `num_ctx` and says why: values over the
-    /// model's window are surfaced as a warning "so the user can choose to keep their setting
-    /// (e.g. switching models for comparison)". This now matches it. Nothing downstream depends on
-    /// the clamp — `AgentConnect` hands the decoded blob straight to `MLXLLMProvider`, so an
-    /// over-cap value was never being corrected at runtime anyway; it was only being corrected in
-    /// the one place the user could still have fixed it themselves.
+    // Why: clamping the ceiling rewrote stored values when the editor opened with a smaller-context model, marking the
+    // profile dirty and persisting the reduced number on the next Save.
+    /// Clamps a value up to the absolute floor and does not clamp the ceiling.
     private func clampFloorOnly(_ value: inout Int, newValue: Int, floor: Int, field: String) {
         guard newValue < floor else { return }
         value = floor
@@ -460,9 +393,7 @@ struct MLXSettingsView: View {
                 Spacer()
                 GlassActionButton(title: "Reset to Defaults", icon: "arrow.counterclockwise", isAccent: false) {
                     withAnimation {
-                        // Prefer the model-aware recommendation when metadata is
-                        // available (e.g. tier-tuned repPenalty for Q4); fall back
-                        // to the generic default otherwise.
+                        // Prefers the model-aware recommendation when metadata is available; falls back to the generic default otherwise.
                         if let metadata = modelMetadata {
                             config = .recommended(for: metadata, profile: defaultProfile)
                         } else {

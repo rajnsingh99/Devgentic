@@ -4,13 +4,12 @@
 //  WorkflowProfilePickerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  Sheet view to select existing profiles (Bot/Agent) to add as nodes on the canvas.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Sheet that lists existing profiles (agent, bot, workflow) to add as nodes on the workflow canvas.
 struct WorkflowProfilePickerView: View {
     let profiles: [BackendProfileModel]
     let workflowProfileID: UUID
@@ -27,44 +26,24 @@ struct WorkflowProfilePickerView: View {
         showsFooter ?? showsHeader
     }
 
-    /// The profile types this picker offers as workflow nodes.
-    ///
-    /// ⚠️ `.imageGen` is excluded BY PRODUCT DECISION (2026-08-16, WF-CS9): image generation is not
-    /// supported as a workflow step, so it is not listed at all — not greyed out, not shown with an
-    /// explanation. The RUNTIME backstops stay regardless of this list and must NOT be deleted on
-    /// the strength of it: a layout SAVED BEFORE this change can still hold such a node, and
-    /// `WorkflowCanvasState.load(from:)` replays the stored blob verbatim with no migration — a
-    /// picker filter cannot reach it.
-    ///
-    /// ⚠️ An ALLOW-list, deliberately not `!= .imageGen`. `ProfileType` has FIVE cases and this
-    /// picker renders FOUR sections, so `.code` profiles — which ARE real persisted rows, created
-    /// the first time the Code interface opens — already passed this filter, counted toward the
-    /// `availableProfiles.isEmpty` gate, and then rendered in NO section: an empty scroll view with
-    /// no explanation. Naming what IS offered closes that hole with the same line, and leaves any
-    /// future sixth `ProfileType` excluded until someone deliberately admits it.
+    // Why: runtime backstops for excluded node types stay: a saved layout can still hold one and the loader replays it
+    // verbatim.
+    /// The profile types this picker offers as workflow nodes. An allow-list rather than `!= .imageGen`, so a profile
+    /// type with no picker section (such as `.code`) is never offered and new types stay excluded.
     static let offerableProfileTypes: Set<ProfileType> = [.agent, .bot, .workflow]
 
-    /// Hoisted out of `availableProfiles` so a test can reach it.
-    ///
-    /// ⚠️ Not tidiness: `availableProfiles` is `private`, which is file-scoped — `@testable`
-    /// elevates *internal*, not private — and this project has no view-inspection harness, so a
-    /// filter reachable only through `body` cannot be asserted at all.
-    /// ⚠️ NO LONGER EXCLUDES PROFILES ALREADY ON THE CANVAS (2026-08-29). That exclusion existed
-    /// because a node REFERENCED a shared profile, so a second node on the same profile meant two
-    /// nodes editing each other's settings. Importing now COPIES into a node-owned row, so adding
-    /// the same profile twice yields two independent nodes — which is the point: two
-    /// differently-tuned Summarizers no longer require two entries in the profile library.
-    ///
-    /// The self-reference exclusion STAYS. A workflow that could add itself as a sub-workflow node
-    /// is a cycle the run would have to refuse anyway, and sub-workflow nodes still reference rather
-    /// than copy.
+    // Why: internal rather than private so a test can assert the filter; a filter reachable only through `body` cannot
+    // be tested.
+    /// Returns the profiles to offer, excluding the current workflow itself (a self-reference would be a cycle).
+    /// Profiles already on the canvas stay offered, since importing copies into a node-owned row; sub-workflow nodes
+    /// still reference.
     static func offeredProfiles(
         from profiles: [BackendProfileModel],
         workflowProfileID: UUID
     ) -> [BackendProfileModel] {
         profiles.filter { profile in
-            // Exclude the current workflow itself (prevent self-reference).
-            // Other workflow profiles are allowed for sub-workflow nesting (P0-4).
+            // Exclude the current workflow itself to prevent self-reference; other workflows are allowed for sub-workflow
+            // nesting.
             profile.id != workflowProfileID
                 && offerableProfileTypes.contains(profile.profileType)
         }

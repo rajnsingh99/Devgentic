@@ -4,12 +4,7 @@
 //  RemoteTextBudgetTests.swift
 //  DevgenticTests
 //
-//  The platform message-length floor — the fix for `/history n` arriving nowhere.
-//
-//  ⚠️ WHY THIS IS NOT A COSMETIC TEST. `render` posts through the UNCHUNKED `sendMessage` /
-//  `postMessage`; chunking lives in `sendChunkedMessage`, which only the mirror's agent-reply path
-//  uses. So before this floor an over-long notice was REJECTED by the platform, not truncated, and
-//  the remote user received nothing at all for a command that had succeeded locally.
+//  Created by Raj Singh.
 //
 
 import XCTest

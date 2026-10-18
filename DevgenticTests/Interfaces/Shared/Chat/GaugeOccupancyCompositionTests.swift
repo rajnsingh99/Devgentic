@@ -4,18 +4,7 @@
 //  GaugeOccupancyCompositionTests.swift
 //  DevgenticTests
 //
-//  `estimatedOccupancyTokens` is the number the composer ring actually shows, and it is a sum
-//  of six terms: history prose, the episodic blob, attachments, tool schemas, knowledge
-//  sources, and prior-turn images. Every term had its own unit test. The SUM had none.
-//
-//  That is the gap that matters, because the failure mode of a sum is a dropped addend, and a
-//  dropped addend is invisible from either side: the term's own test still passes, and the
-//  total is still a plausible number. Four of these six were added at different times, and
-//  each one was previously worth 0 — which is exactly what a dropped term looks like.
-//
-//  These assert MONOTONICITY (adding content raises the total) rather than an exact figure.
-//  An exact expectation would have to restate the arithmetic, which makes the test a mirror of
-//  the implementation and blind to a change in both.
+//  Created by Raj Singh.
 //
 
 import XCTest

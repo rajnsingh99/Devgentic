@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillLoadSeamTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Resolution THROUGH to load — the seam that shipped broken.
-//
-//  ⚠️⚠️ THIS FILE EXISTS BECAUSE 299 GREEN TESTS DID NOT NOTICE THAT `load_skill` COULD NOT LOAD
-//  ANYTHING. When skills moved into the library, `SkillResolution` began putting a `skill_…` id in
-//  `SkillManifest.folderPath`, while `LoadSkillTool` went on handing that field to a disk reader —
-//  so every call tried to open a file named `skill_<uuid>/SKILL.md`.
-//
-//  Nothing caught it because both halves were tested in isolation and both were individually
-//  correct: `LoadSkillToolTests` builds manifests with real temp folders (the LEGACY contract), and
-//  `SkillResolutionTests` asserts on manifest fields without ever dereferencing one. The defect
-//  lived entirely in the space between them.
-//
-//  So every test here starts at a real profile config and ends at the loaded body. If a future
-//  change breaks the contract between those two layers again, these fail and the unit tests do not.
+//  Created by Raj Singh.
 //
 
 import XCTest

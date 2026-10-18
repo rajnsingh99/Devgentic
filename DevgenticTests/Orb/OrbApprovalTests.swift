@@ -4,10 +4,7 @@
 //  OrbApprovalTests.swift
 //  DevgenticTests
 //
-//  Phase 3. The safety-critical half of Orb: what it says when a run parks, and what
-//  "Autonomous" actually grants. The rule these tests exist to defend is that an ASR transcript
-//  must never be what authorizes code execution — so the spoken prompt must not carry the
-//  arguments, and a blanket grant must inherit every restriction the per-tool grants have.
+//  Created by Raj Singh.
 //
 
 import XCTest

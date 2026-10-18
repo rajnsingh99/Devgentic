@@ -4,8 +4,7 @@
 //  SkillsIntegrationTests.swift
 //  DevgenticTests
 //
-//  Integration tests for the Skills pipeline:
-//  ProfileDetails Codable round-trip, system prompt injection, and LoadSkillTool.
+//  Created by Raj Singh.
 //
 
 import XCTest

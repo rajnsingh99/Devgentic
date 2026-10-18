@@ -2,23 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MCPOAuthDiscoveryWellKnownTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Register KC-44 — the RFC 8414 metadata URL was built by APPENDING
-//  `.well-known/oauth-authorization-server` to the whole issuer, so discovery
-//  404'd for every issuer that carries a path.
-//
-//  ⚠️⚠️ THE FAILURE THESE PIN. RFC 8414 §3.1 builds the well-known URI by INSERTING the
-//  segment between the HOST component and the PATH component of the issuer identifier:
-//  `https://as.example.com/realms/acme` must discover at
-//  `https://as.example.com/.well-known/oauth-authorization-server/realms/acme`. Appending
-//  instead asked for `…/realms/acme/.well-known/oauth-authorization-server`, which no
-//  conforming server serves — so Keycloak realms, Auth0 tenants and Okta custom URL spaces
-//  all presented as "no OAuth available". Pure function → table-driven tests.
-//
-//  ⚠️ THE OIDC FALLBACK KEEPS ITS APPEND, deliberately: OpenID Connect Discovery 1.0
-//  publishes configuration at `{issuer}/.well-known/openid-configuration` — the append IS
-//  that spec's construction. The two fallbacks legitimately differ.
+//  Created by Raj Singh.
 //
 
 import XCTest

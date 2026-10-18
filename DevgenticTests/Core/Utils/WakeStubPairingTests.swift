@@ -4,18 +4,7 @@
 //  WakeStubPairingTests.swift
 //  DevgenticTests
 //
-//  The defect: a woken background-task report was DROPPED from the agent's own history.
-//
-//  ⚠️ NOTHING FAILED WHEN THIS WAS BROKEN. `BackgroundTaskWakeCoordinator` built a user message and
-//  handed it to `startMessageStream` without persisting it, so the store held
-//  `user, agent, agent(orphan), user…`. Both history walks bind `pendingUser` on a user row and
-//  consume it on the next agent row; an agent row with no user row in front of it fails the
-//  `let userTurn = pendingUser` binding and is skipped — no throw, no log, no test. The agent told
-//  the user a task had finished and had no record of it one turn later.
-//
-//  The first test below is the whole point of the change: it FAILS on the old shape and passes on
-//  the new one. Everything after it guards a piece that, left unpinned, would let the first one
-//  pass for the wrong reason.
+//  Created by Raj Singh.
 //
 
 import XCTest

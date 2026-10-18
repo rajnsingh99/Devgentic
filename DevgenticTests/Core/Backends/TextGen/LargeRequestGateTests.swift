@@ -4,7 +4,7 @@
 //  LargeRequestGateTests.swift
 //  DevgenticTests
 //
-//  The large-cloud-request confirmation: when it asks, how often, and for which endpoints.
+//  Created by Raj Singh.
 //
 
 import XCTest

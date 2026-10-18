@@ -4,28 +4,7 @@
 //  CompactionCheckpointDeliveryTests.swift
 //  DevgenticTests
 //
-//  A compaction checkpoint must be DURABLY STORED before it is spliced into the live
-//  transcript. These tests pin the order, not the policy.
-//
-//  The bug they close: `MessagingCoordinator.registerCompactionCheckpointSink` used to wrap
-//  `addMessage` in an unawaited `Task` and splice immediately after, with a comment saying the
-//  splice existed "so the NEXT turn's history resolution sees it in memory too". For the width
-//  of that unawaited write, `currentChatMessages` was the ONLY copy of the checkpoint — the
-//  view's array acting as a DATA channel rather than a render window.
-//
-//  Two consequences, both silent:
-//    1. A history resolution reading the store alone in that window returns neither the
-//       compacted turns (removed from the batch) nor the summary standing in for them.
-//    2. It blocks deriving history from `ActiveStreamManager`'s own state, because a checkpoint
-//       is neither a live stream nor the message being sent. `DerivedHistorySourceTests`
-//       demonstrates that loss from the other side.
-//
-//  ⚠️ WHY THE SUSPENDING STORE. A test that just calls `deliverCheckpoint` and then asserts
-//  "both happened" passes under the OLD code too — the detached `Task` also lands, eventually.
-//  That is a policy test and it protects nothing. `SuspendingStore` holds `addMessage` open
-//  until the test releases it, so the assertion "the splice has NOT happened yet" can only pass
-//  when the write is genuinely awaited. Reintroducing a detached `Task` turns
-//  `testSpliceDoesNotHappenUntilTheStoreWriteLands` red.
+//  Created by Raj Singh.
 //
 
 import XCTest

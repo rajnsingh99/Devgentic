@@ -4,10 +4,7 @@
 //  PlanningValidationTests.swift
 //  DevgenticTests
 //
-//  Red-green validation tests for PlanningCapability production fixes.
-//
-//  G4: Subtask tool results now aggregated into synthesis ExecutionSummary
-//  G5: Episode duplication prevented via suppressEpisodeManagement
+//  Created by Raj Singh.
 //
 
 import XCTest

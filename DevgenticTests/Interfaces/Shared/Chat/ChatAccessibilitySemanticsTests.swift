@@ -4,13 +4,7 @@
 //  ChatAccessibilitySemanticsTests.swift
 //  DevgenticTests
 //
-//  What VoiceOver is TOLD, for the parts that are pure logic.
-//
-//  Scope is deliberate: a SwiftUI `.accessibilityLabel` / `.accessibilityHeading` cannot be
-//  read back from a hosted view — measured, not assumed (hosting a view and walking
-//  `accessibilityChildren()` returns `[]`; the tree is built lazily when a real assistive
-//  client attaches). So these tests pin the STRINGS and LEVELS we hand to the modifiers.
-//  That the modifiers are attached to the right views still needs VoiceOver (⌘F5).
+//  Created by Raj Singh.
 //
 
 import XCTest

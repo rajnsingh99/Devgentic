@@ -4,14 +4,13 @@
 //  LeftoverDownloadNotice.swift
 //  Devgentic
 //
-//  Tells the user, once per launch, that unfinished MLX downloads are taking up disk space.
-//  The launch scan (`MLXModelService.scanPartialDownloadsAtLaunch`) decides whether there is
-//  anything worth saying; this only turns its verdict into a toast. The Downloads tab badge
-//  (`MLXModelService.leftoverNeedsAttention`) outlives the toast until the user looks.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Shows a once-per-launch toast that unfinished MLX downloads are taking up disk space.
+/// `MLXModelService.scanPartialDownloadsAtLaunch` decides whether there is anything to report; this renders its verdict.
 struct LeftoverDownloadNoticeModifier: ViewModifier {
     /// Passed in, not read from the environment: this is applied at the app root, OUTSIDE the
     /// `.environment(toastManager)` that the views below it read.

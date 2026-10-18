@@ -4,13 +4,7 @@
 //  WorkflowRunResurrectionTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF6.
-//
-//  A workflow run is persisted twice: a `.running` stub at start, then a finalize upsert at the
-//  end. Deleting the conversation mid-run purges its messages, traces and vector memory and
-//  clears its run history — and then the cancelled stream finalized, the insert path found no
-//  existing row, and re-created one with `conversation: nil`. Content the user explicitly
-//  deleted came back, in a row no UI, no cascade and no cleanup path could ever reach.
+//  Created by Raj Singh.
 //
 
 import XCTest

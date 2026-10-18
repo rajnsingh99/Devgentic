@@ -4,16 +4,7 @@
 //  AdvancedFileSystemTools.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/01/26.
-//  Updated by Agent Engineer on 12/02/26.
-//  UPGRADE:
-//  1. Replaced Hybrid Engine with Production POC (Raw Query + Permission Scoping).
-//  2. Removed Deep Scan fallback for simplification.
-//  3. Added explicit permission checks to trigger TCC prompts for Documents/Downloads.
-//  4. FIX: Handle "null" string from LLM to correctly trigger Global Search.
-//  5. FIX: Added kMDItemFSName to query to ensure Folders are found.
-//  PATCHED: Updated Output to clarify search context.
-//  MIGRATION: Updated to native DevgenticTool protocol and removed OFM dependencies.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -23,10 +14,8 @@ private let logger = DGLogger(category: "AdvancedFileSystemTools")
 
 // MARK: - Hybrid Search Service (Two-Phase Prefiltered)
 
-/// A Production-Grade Search Engine wrapper for macOS.
-/// Uses a Two-Phase search strategy: filename matches first (high signal),
-/// then content matches as fallback (only when name matches are sparse).
-/// This prevents low-relevance content matches from drowning out filename hits.
+/// A Spotlight-backed search wrapper that ranks filename matches ahead of content matches.
+/// Content matches run only when filename matches are sparse, so low-relevance hits do not drown filename hits.
 @MainActor
 class HybridSearchService {
     static let shared = HybridSearchService()
@@ -94,11 +83,10 @@ class HybridSearchService {
             }
         }
 
-        // Phase 1: Filename-only query (high signal)
         let nameQuery = buildNameOnlyQuery(from: term)
         let nameResults = await runQuery(rawQuery: nameQuery, scopes: searchScopes, limit: 10)
 
-        // Phase 2: Content-only query (lower signal) — only runs if name matches are sparse
+        // Content-only query (lower signal); runs only when filename matches are sparse.
         var contentResults: [String] = []
         if nameResults.count < 5 {
             let contentQuery = buildContentOnlyQuery(from: term)
@@ -108,16 +96,8 @@ class HybridSearchService {
             contentResults = rawContentResults.filter { !nameSet.contains($0) }
         }
 
-        // Phase 3: Direct filesystem fallback (scoped searches only).
-        // NSMetadataQuery answers from the Spotlight INDEX, and macOS excludes
-        // volatile locations (/private/tmp, /var/folders, …) from it — a scoped
-        // query there "succeeds" with zero rows even when the files exist, which
-        // reads as authoritative absence (observed: an agent created a folder in
-        // /tmp, searched it, was told nothing was there, and looped until the
-        // circuit breaker fired). Fresh writes racing async index ingestion have
-        // the same shape. So before claiming absence for a CONCRETE scope, verify
-        // against the disk with a bounded filename walk — either way the answer
-        // then reflects the disk, which is what a "successful" search must mean.
+        // Direct filesystem fallback for scoped searches that found nothing: Spotlight excludes volatile locations
+        // such as /private/tmp, so an empty index result is not proof of absence.
         if let specificScope = cleanScope, nameResults.isEmpty, contentResults.isEmpty {
             let scopeURL = URL(fileURLWithPath: specificScope)
             let searchTerm = term
@@ -159,14 +139,9 @@ class HybridSearchService {
 
     // MARK: - Filesystem Fallback Scan
 
-    /// Bounded, index-free fallback: walks `scopeURL` matching FILENAMES against all
-    /// whitespace-separated tokens (case-insensitive substring per token — mirrors the
-    /// kMDItemFSName wildcard query; directories match too). Hidden files and package
-    /// contents are skipped. Hard caps keep the worst case fixed: `maxScanned` entries
-    /// visited, `maxResults` returned, `maxDepth` levels deep.
-    ///
-    /// - Returns: matched paths; empty = scanned and genuinely found nothing;
-    ///   nil = the scope couldn't be enumerated (absence NOT verified).
+    /// Index-free fallback that walks `scopeURL`, matching filenames against all whitespace-separated tokens.
+    /// Skips hidden files and package contents; bounded by `maxScanned`, `maxResults` and `maxDepth`.
+    /// Returns matched paths (empty = nothing found), or nil when the scope could not be enumerated.
     nonisolated static func filesystemScan(
         term: String,
         scopeURL: URL,
@@ -261,7 +236,7 @@ class HybridSearchService {
 
     // MARK: - Query Builders
 
-    /// Phase 1: Searches only filenames (DisplayName + FSName). High signal, low noise.
+    /// Builds a query over filenames only (DisplayName + FSName): high signal, low noise.
     private func buildNameOnlyQuery(from input: String) -> String {
         let tokens = input.split(separator: " ")
         guard !tokens.isEmpty else { return "" }
@@ -274,7 +249,7 @@ class HybridSearchService {
         return applyExclusions(to: subQueries.joined(separator: " && "))
     }
 
-    /// Phase 2: Searches only file content (TextContent). Broader reach, higher noise.
+    /// Builds a query over file content only (TextContent): broader reach, higher noise.
     private func buildContentOnlyQuery(from input: String) -> String {
         let tokens = input.split(separator: " ")
         guard !tokens.isEmpty else { return "" }
@@ -413,9 +388,7 @@ struct SmartSearchTool: DevgenticTool {
 
             if result.isEmpty {
                 var message = "No results found matching '\(arguments.search_term)'."
-                // Absence claims carry their evidence level: an index-only miss and a
-                // disk-verified miss are different answers, and the model must be able
-                // to tell them apart.
+                // Absence claims carry their evidence level, so the model can tell an index-only miss from a disk-verified one.
                 if let note = result.provenanceNote {
                     message += "\n\(note)"
                 }
@@ -500,16 +473,8 @@ struct ReadMetadataTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // Resolved through `FilePathResolver`, like every other File System tool.
-        //
-        // This site handed the raw argument to `URL(fileURLWithPath:)`, which resolves a
-        // RELATIVE path against the process working directory — `/` for a Finder- or
-        // Xcode-launched app. So a bare `report.pdf` meant `<home>/report.pdf` to `read_file`
-        // and `/report.pdf` here: the same string addressing two different files depending on
-        // which tool received it, with no way for a model to know which rule applies.
-        //
-        // Tildes were never the gap — Foundation expands `~` and `~/sub` on its own — which is
-        // why this went unnoticed. It is relative paths that diverged.
+        // Resolved through `FilePathResolver`; a raw `URL(fileURLWithPath:)` anchors relative paths at the process
+        // working directory (`/` for a Finder-launched app), so the same string would address different files per tool.
         let resolvedPath = FilePathResolver.resolve(arguments.path)
         let url = URL(fileURLWithPath: resolvedPath)
         do {
@@ -600,18 +565,8 @@ struct OrganizeBatchTool: DevgenticTool {
             }
             self.destinationFolder = validDest
             
-            // `dryRun` was decoded by that ONE exact spelling, while `sourcePaths` and
-            // `destinationFolder` above each accept a dozen synonyms including snake_case. So a
-            // model emitting a consistently snake_case payload got its paths understood and its
-            // `dry_run` silently dropped — and a dry run that fails to decode does not become a
-            // no-op, it performs the REAL, irreversible move.
-            //
-            // That is the asymmetry worth stating: of the three arguments, the one whose entire
-            // purpose is to PREVENT the destructive operation was the only one that could fail
-            // to arrive, and it failed silently. Every other argument here was already forgiving.
-            //
-            // Strings are accepted too — `"true"` — matching `write_file`'s `append`, because
-            // small models emit stringified booleans.
+            // `dryRun` accepts the same spelling variants as the other arguments, plus stringified booleans ("true").
+            // A dropped `dry_run` would perform the real, irreversible move instead of a no-op.
             var dryRunValue: Bool? = nil
             let dryRunKeys = ["dryRun", "dry_run", "dryrun", "is_dry_run", "isDryRun", "simulate", "preview"]
             for key in dryRunKeys {
@@ -643,20 +598,12 @@ struct OrganizeBatchTool: DevgenticTool {
     
     func call(arguments: Arguments) async throws -> String {
         let isDryRun = arguments.dryRun ?? false
-        /// Where each file went. Accumulated and then never read until 2026-08-01 — it is now the
-        /// body of the `[FSBATCH]` log line, which is the only place the mapping can survive: a
-        /// batch move is irreversible, the sources are gone, and the returned string reports
-        /// COUNTS only. "Which file went where" is precisely the question asked afterwards.
+        /// Where each file went, emitted in the `[FSBATCH]` log line; the returned string reports counts only.
         var operationsLog: [(from: String, to: String)] = []
         var movedCount = 0
         var errors: [String] = []
 
-        // Resolved through `FilePathResolver`, like the other File System tools. Previously the
-        // raw strings went straight to `URL(fileURLWithPath:)`, which anchors a relative path to
-        // the process working directory — `/` in the shipped app. For a tool that MOVES files
-        // that is worse than a failed read: a relative `destinationFolder` pointed at the
-        // read-only volume root, so a batch move failed wholesale with a permissions error that
-        // named a path the caller never asked for.
+        // Resolved through `FilePathResolver`; a raw relative path would anchor at the process working directory (`/`).
         let destURL = URL(fileURLWithPath: FilePathResolver.resolve(arguments.destinationFolder))
         if !isDryRun {
             do {
@@ -702,13 +649,8 @@ struct OrganizeBatchTool: DevgenticTool {
         resultMessage += "Processed \(arguments.sourcePaths.count) files. Moved: \(movedCount). Errors: \(errors.count)."
         if !errors.isEmpty { resultMessage += "\nDetails: \(errors.joined(separator: ", "))" }
 
-        // A batch MOVE leaves no trace once it has happened — the sources are gone and the
-        // returned string lives only in one turn's observation. Logged with the mode stated,
-        // because "did the agent actually move these, or simulate it?" is the first question
-        // asked afterwards, and until now nothing on disk could answer it.
-        // The mapping, capped. This is the only surviving record of WHERE each file went: the
-        // sources no longer exist, and the string returned to the model carries counts alone.
-        // Capped because a batch of several hundred would otherwise produce one unreadable line.
+        // Logs the mode and a capped source-to-destination mapping: a batch move is irreversible and the string
+        // returned to the model carries counts only. The cap keeps a large batch from producing one unreadable line.
         let mappingCap = 20
         let mapping = operationsLog.prefix(mappingCap)
             .map { "\($0.from) -> \($0.to)" }
@@ -731,23 +673,10 @@ struct OrganizeBatchTool: DevgenticTool {
 
 // MARK: - FS Watch Folder
 
+// Why: tool calls reach this singleton concurrently, so every `activeMonitors` access must hold the lock;
+// a lost entry leaks the file descriptor and the monitor can never be stopped.
 /// Tracks the folder monitors `watch_folder` has started.
-///
-/// ⚠️ This type is `@unchecked Sendable` — a promise to the compiler that it is safe to touch from
-/// several threads at once — and until 2026-08-01 that promise was FALSE: `activeMonitors` was a
-/// plain `Dictionary` read and written by all three methods with no synchronisation at all.
-///
-/// It is reachable concurrently. `WatchFolderTool.call` is an ordinary `async` method on a
-/// `Sendable` struct with no actor isolation, so two conversations — or one workflow fanning out
-/// across parallel nodes — call straight into this singleton simultaneously. Under real thread
-/// contention that **crashed the process with SIGSEGV** (60 concurrent `startWatching` calls,
-/// reproduced 2026-08-01); the milder outcome is a silently dropped entry, which is worse than it
-/// sounds: `startWatching` has already `open()`ed a descriptor and armed a dispatch source, and
-/// the map entry is the only handle to it. Lose the entry and the monitor can never be stopped,
-/// its cancel handler never runs, and the descriptor leaks for the life of the app.
-///
-/// A lock rather than an actor because the three methods are synchronous and called from
-/// synchronous tool code; making them `async` would ripple through `WatchFolderTool` for no gain.
+/// A lock (not an actor) guards `activeMonitors` because the methods are synchronous.
 final class WatcherService: @unchecked Sendable {
     static let shared = WatcherService()
 

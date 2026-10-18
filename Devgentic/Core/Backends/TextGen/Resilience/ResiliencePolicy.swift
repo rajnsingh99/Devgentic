@@ -4,30 +4,16 @@
 //  ResiliencePolicy.swift
 //  Devgentic
 //
-//  Phase A of the resilience architecture (audit #5): one provider-aware
-//  vocabulary for retry/abort behavior, resolved ONCE per run at the
-//  AgentConnect seam and carried on AgentInput. Three tiers:
-//    - transport:  HTTP/network-level budgets (5xx, timeouts, 429) — fully
-//      auto-derived from provider class; never user-configured in Phase A.
-//    - cognitive:  malformed-model-output retries (parse failures).
-//    - loop:       tool-execution circuit-breaker caps.
-//
-//  The legacy user-facing RetryPolicy (maxRetries + backoffStrategy) is shimmed
-//  into the cognitive/loop tiers for exact behavior compatibility; Phase B
-//  replaces it with persisted per-tier overrides (nil = the defaults below).
-//  ProviderErrorClassifier is deliberately stateless so the bot flow (audit #9)
-//  can reuse it without the agent loop's counters.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - Provider Class
 
-/// Coarse provider classification driving transport-tier defaults. Cloud APIs
-/// deserve bounded patience (outages are transient, Retry-After is authoritative);
-/// Ollama failures are usually local-config problems (server not running), with
-/// slow cold loads as the one legitimate transient; MLX is in-process — there is
-/// no transport to retry, and model-unload has its own dedicated reload path.
+/// Coarse provider classification driving transport-tier defaults: cloud APIs get bounded patience, Ollama failures are
+/// usually local-config problems (slow cold loads are the one transient), and MLX is in-process with no transport to
+/// retry.
 enum ProviderClass: Sendable, Equatable {
     case cloud
     case ollama
@@ -90,10 +76,9 @@ struct LoopResiliencePolicy: Sendable, Equatable {
 
 // MARK: - Resolved Policy
 
-/// The single resilience vocabulary consumed by executors. Runtime-only — never
-/// persisted. Construct via `resolved(for:legacy:endpointHint:)`; components are
-/// built from the tiers (CognitiveCircuitBreaker ← loop, LLMRetryStrategy ←
-/// transport + cognitive), so no single knob can silently drive unrelated caps.
+/// The single resilience vocabulary consumed by executors; runtime-only, never persisted. Construct via
+/// `resolved(for:legacy:endpointHint:)`; components are built from the tiers so no single knob can silently drive
+/// unrelated caps.
 struct ResolvedResiliencePolicy: Sendable, Equatable {
     let transport: TransportResiliencePolicy
     let cognitive: CognitiveResiliencePolicy
@@ -103,22 +88,15 @@ struct ResolvedResiliencePolicy: Sendable, Equatable {
     /// legacy `RetryPolicy.maxRetries`, so it is a genuine constant — and the UI can safely state it.
     static let defaultMaxConsecutiveDenials = 2
 
-    /// What `Auto` resolves to for the three caps that DO fall back to the legacy single knob.
-    ///
-    /// ⚠️ Register A70. The Advanced panel hardcoded `Auto (3)` for these, but the fallback is the
-    /// profile's own `retryPolicy.maxRetries` — `3` only for a profile that never set one. A
-    /// migrated profile carrying `maxRetries: 5` was told its cap was 3 while the run used 5. The
-    /// label must be computed from the same value the resolver reads, which is what this exposes.
+    /// What `Auto` resolves to for the three caps that fall back to the legacy single knob: the profile's own
+    /// `retryPolicy.maxRetries`. The UI label must be computed from this same value the resolver reads.
     static func autoDefault(legacy: RetryPolicy?) -> Int {
         (legacy ?? RetryPolicy()).maxRetries
     }
 
-    /// Single resolution point. Per-tier precedence (Phase B):
-    ///   explicit user `overrides` field → legacy `RetryPolicy.maxRetries` → provider default.
-    /// Keeping `legacy.maxRetries` as the middle fallback means profiles saved before
-    /// per-tier overrides existed behave exactly as before (their single knob still
-    /// drives all three caps), while a profile that sets one override decouples only
-    /// that cap. The transport tier is provider-class-derived and not user-overridable.
+    /// Single resolution point. Per-tier precedence: explicit user `overrides` field, then legacy `RetryPolicy.maxRetries`,
+    /// then provider default, so an older profile's single knob still drives all three caps while one override decouples
+    /// only that cap. The transport tier is not user-overridable.
     static func resolved(
         for providerClass: ProviderClass,
         overrides: ResilienceOverrides? = nil,
@@ -172,9 +150,8 @@ struct ResolvedResiliencePolicy: Sendable, Equatable {
             loop: LoopResiliencePolicy(
                 maxConsecutiveToolFailures: overrides?.maxConsecutiveToolFailures ?? legacy.maxRetries,
                 maxRepetitiveActions: overrides?.maxRepetitiveActions ?? legacy.maxRetries,
-                // Never coupled to the legacy single knob — fixed default (the breaker's
-                // historical hardcoded value). Named rather than inlined so the "Auto (N)" label
-                // in `LoopSafetySection` reads the same constant instead of restating it (A70).
+                // Never coupled to the legacy single knob; a named fixed default so the 'Auto (N)' label in `LoopSafetySection` reads
+                // the same constant.
                 maxConsecutiveDenials: overrides?.maxConsecutiveDenials ?? Self.defaultMaxConsecutiveDenials
             )
         )
@@ -198,10 +175,8 @@ enum ProviderErrorVerdict: Equatable, Sendable {
 
 enum ProviderErrorClassifier {
 
-    /// Conservative provider signatures for context-window overflow inside 400
-    /// bodies (Anthropic "prompt is too long", OpenAI "context_length_exceeded",
-    /// Gemini token-count INVALID_ARGUMENT). Unmatched 400s stay a generic
-    /// fatal — still honest and bounded, never routed back to parse-retry.
+    /// Conservative provider signatures for context-window overflow inside 400 bodies (Anthropic, OpenAI, Gemini). Unmatched
+    /// 400s stay a generic fatal, never routed back to parse-retry.
     static let contextOverflowSignatures: [String] = [
         "context_length_exceeded",
         "prompt is too long",
@@ -210,15 +185,9 @@ enum ProviderErrorClassifier {
         "input token count",
     ]
 
-    /// Rejection markers that, combined with a tools/function-calling mention,
-    /// indicate the model or endpoint does not support tool calling AT ALL —
-    /// distinct from tool-ARGUMENT validation 400s ("tools[0].function.name is
-    /// invalid"), which mean tools ARE supported and fall through to the generic
-    /// verdict. Real-world sources: OpenAI-compatible gateways ("Unrecognized
-    /// request argument supplied: tools"), Ollama's OpenAI shim ("does not
-    /// support tools"), llama.cpp ("tools param requires --jinja"), LM Studio /
-    /// vLLM ("not supported"), Gemini ("Function calling is not enabled"),
-    /// Anthropic pydantic-style ("tools: Extra inputs are not permitted").
+    /// Rejection markers that, combined with a tools/function-calling mention, indicate the model or endpoint does not
+    /// support tool calling at all, as opposed to tool-argument validation 400s, which mean tools are supported
+    /// (OpenAI-compatible gateways, Ollama, llama.cpp, LM Studio/vLLM, Gemini, Anthropic).
     static let toolsRejectionMarkers: [String] = [
         "does not support",
         "not supported",
@@ -230,10 +199,9 @@ enum ProviderErrorClassifier {
         "requires --jinja",
     ]
 
-    /// True when a 4xx body indicates the endpoint/model rejected tool calling
-    /// wholesale (chat-only model), not a malformed tool definition. Requires
-    /// BOTH a tools/function mention AND a rejection marker so tool-argument
-    /// validation errors keep their generic (accurate) verdict.
+    /// True when a 4xx body indicates the endpoint/model rejected tool calling wholesale (chat-only model), not a malformed
+    /// tool definition; requires both a tools/function mention and a rejection marker so argument-validation errors keep
+    /// their generic verdict.
     static func indicatesToolsUnsupported(_ loweredBody: String) -> Bool {
         let mentionsTools = loweredBody.contains("tool")
             || loweredBody.contains("function call")
@@ -251,10 +219,9 @@ enum ProviderErrorClassifier {
         )
     }
 
-    /// Status+body overload so non-pipeline HTTP errors classify identically —
-    /// Ollama throws `LLMProviderError.httpError(status, body)` rather than
-    /// `CloudProviderError`, and without this its 404s (model not pulled) and
-    /// 500s (runner crash) fell through to the parse-failure path.
+    /// Status+body overload so non-pipeline HTTP errors classify identically: Ollama throws
+    /// `LLMProviderError.httpError(status, body)`, not `CloudProviderError`, and its 404s and 500s must not fall through to
+    /// the parse-failure path.
     static func classify(
         statusCode: Int,
         rawBody: String,
@@ -266,9 +233,8 @@ enum ProviderErrorClassifier {
 
         switch statusCode {
         case 429:
-            // OpenRouter's DAILY free-model cap is a 429 too, but it resets at midnight UTC —
-            // backing off and retrying five times cannot succeed and only delays the answer.
-            // The per-minute cap ("free-models-per-min") stays an ordinary throttle.
+            // OpenRouter's daily free-model cap is a 429 too but resets at midnight UTC, so retrying cannot succeed; the per-minute
+            // cap stays an ordinary throttle.
             if lowered.contains("free-models-per-day") {
                 return .fatal(
                     reason: "You've reached OpenRouter's daily limit for free models (HTTP 429). It resets at midnight UTC; adding credits to your OpenRouter account raises it, or switch to a paid model.\(requestRef)",
@@ -316,18 +282,15 @@ enum ProviderErrorClassifier {
             )
 
         default:
-            // OpenRouter rejects a slug that is not (or is no longer) in its catalog with a 400 —
-            // the usual fate of a `:free` variant that was withdrawn after the profile saved it.
+            // OpenRouter rejects a slug that is not in its catalog with a 400, e.g. a withdrawn `:free` variant.
             if statusCode == 400, lowered.contains("not a valid model id") {
                 return .fatal(
                     reason: "The provider no longer offers this model (HTTP 400) — it may have been withdrawn. Pick another model in this profile.\(requestRef)",
                     category: .providerModelNotFound
                 )
             }
-            // "maximum context length" also appears in max_tokens-config 400s
-            // ("max_tokens is too large: ... maximum context length is N") where
-            // "start a new chat" is the wrong remedy — those fall through to the
-            // generic verdict whose body snippet names the real knob.
+            // 'maximum context length' also appears in max_tokens-config 400s where 'start a new chat' is the wrong remedy; those
+            // fall through to the generic verdict, whose body snippet names the real knob.
             if statusCode == 400,
                !lowered.contains("max_tokens"),
                contextOverflowSignatures.contains(where: { lowered.contains($0) }) {
@@ -336,12 +299,8 @@ enum ProviderErrorClassifier {
                     category: .providerCapabilityMissing
                 )
             }
-            // Tools-rejection (register #1 runtime guard): the endpoint refused
-            // the `tools` payload — a chat-only model/gateway driven through the
-            // Agent loop. Cloud has no pre-flight capability guard (capability
-            // is never populated for cloud configs), so this classification is
-            // where the user learns the real cause instead of an opaque
-            // bad-request.
+            // Tools rejection: the endpoint refused the `tools` payload (a chat-only model or gateway driven through the Agent
+            // loop). Cloud has no pre-flight capability guard, so this classification is where the user learns the real cause.
             if statusCode == 400 || statusCode == 422,
                indicatesToolsUnsupported(lowered) {
                 return .fatal(
@@ -356,14 +315,9 @@ enum ProviderErrorClassifier {
         }
     }
 
-    /// Maps ANY thrown error to a transport verdict when it is a recognized
-    /// transport-level failure: a structured `CloudProviderError`, Ollama's
-    /// `LLMProviderError.httpError`, or any `URLError`. Returns `nil` for errors
-    /// that are NOT transport-level — the agent path then falls through to its
-    /// parse-failure handling, and the bot path surfaces them unchanged.
-    ///
-    /// Shared by `LLMRetryStrategy` (agent loop) and `TransportRetrier` (bot flow)
-    /// so both classify byte-identically — there is one transport vocabulary.
+    /// Maps any thrown error to a transport verdict when it is a recognized transport-level failure (`CloudProviderError`,
+    /// Ollama's `LLMProviderError.httpError`, any `URLError`), else nil. Shared by `LLMRetryStrategy` and `TransportRetrier`
+    /// so both classify identically.
     static func classifyTransport(
         _ error: Error,
         connectionRefusedIsFatal: Bool,
@@ -376,12 +330,11 @@ enum ProviderErrorClassifier {
            case .httpError(let status, let body) = providerError {
             return classify(statusCode: status, rawBody: body)
         }
-        // ⚠️ A refusal is the same answer every time for the same request — retrying spends the
-        // budget and the user's money to be refused again (CR-16).
+        // A refusal is the same answer every time for the same request, so retrying spends the budget to be refused again.
         if let providerError = error as? LLMProviderError, case .refused = providerError {
             return .fatal(reason: providerError.localizedDescription, category: .providerBadRequest)
         }
-        // A stream cut off upstream (CR-26) is a transport failure: the same request normally completes.
+        // A stream cut off upstream is a transport failure: the same request normally completes.
         if let providerError = error as? LLMProviderError, case .streamEndedEarly = providerError {
             return .transient(detail: "the response stream ended before the model finished")
         }
@@ -391,9 +344,8 @@ enum ProviderErrorClassifier {
                 return .transient(detail: ProviderErrorClassifier.timeoutDetail)
 
             case .cannotConnectToHost, .networkConnectionLost, .cannotFindHost, .dnsLookupFailed:
-                // Local servers: connection-refused means "not running" — an
-                // actionable config problem. Cloud: the user's own network may be
-                // flapping; treat as transient.
+                // Local servers: connection-refused means 'not running', an actionable config problem. Cloud: the network may be
+                // flapping, so transient.
                 if connectionRefusedIsFatal {
                     let hint = endpointHint.map { " at \($0)" } ?? ""
                     return .fatal(
@@ -415,13 +367,9 @@ enum ProviderErrorClassifier {
         return nil
     }
 
-    /// Retry-After sanitization shared by both retry paths. Header values flow into
-    /// `Task.sleep`'s trapping `UInt64` conversion, and real-world proxies send "-1",
-    /// past dates, even "inf". Anything non-finite, negative, or absurd is dropped
-    /// (caller falls back to local backoff); sane values are honored up to an hour.
-    /// The transient detail for a request that timed out — ONE spelling, so the fatal path can file
-    /// an exhausted timeout as `.providerTimeout` (it was `.providerServerError`, "Provider 5xx";
-    /// `providerTimeout` had no producer — Timeout inventory D-16) without matching free text.
+    /// Retry-After sanitization shared by both retry paths: header values reach `Task.sleep`'s trapping `UInt64` conversion,
+    /// so non-finite, negative or absurd values are dropped (the caller falls back to local backoff) and sane values are
+    /// honored up to an hour. `timeoutDetail` is the one spelling of a timeout's transient detail.
     static let timeoutDetail = "request timed out"
 
     /// The category for a transient failure that exhausted its retries.

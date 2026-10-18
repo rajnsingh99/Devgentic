@@ -4,32 +4,24 @@
 //  AdvancedPromptEditor.swift
 //  Devgentic
 //
-//  Created by Agent on 20/02/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 import Combine
 
-/// ⚠️ register B7 — this file had no logger while owning an `NSWindow`'s lifetime, so an
-/// orphaned window (and the typed prompt it took with it) left no trace at all.
 private let logger = DGLogger(category: "AdvancedPromptEditor")
 
 // MARK: - Window Manager
 
-/// Manages a single floating NSWindow for the advanced prompt editor. One
-/// instance per consuming view (NOT a singleton) so multiple call sites
-/// can keep their own editor open without trampling each other's
-/// unsaved-changes callbacks. `@MainActor` because every NSWindow API
-/// must be touched on the main thread.
+/// Manages a single floating NSWindow for the advanced prompt editor. One instance per consuming view (not a
+/// singleton) so editors keep their own unsaved-changes callbacks. `@MainActor` because NSWindow requires it.
 @MainActor
 final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
     private var window: NSWindow?
 
-    /// Callbacks to communicate with the SwiftUI view. Set by
-    /// `AdvancedPromptEditorView.onAppear` for the editor that owns this
-    /// instance — and ONLY that editor, because manager instances aren't
-    /// shared.
+    /// Callbacks to the SwiftUI view, set by `AdvancedPromptEditorView.onAppear` for the editor that owns this instance.
     var checkChanges: (() -> Bool)?
     var saveChanges: (() -> Void)?
     var discardChanges: (() -> Void)?
@@ -47,7 +39,7 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
     ) {
         let theme = themeManager.currentTheme
 
-        // ⚠️ register B7 — reuse test
+        // Reuse an existing window instead of creating another.
         if let existingWindow = window {
             commitChanges?()
 
@@ -110,28 +102,15 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
         newWindow.makeKeyAndOrderFront(nil)
     }
 
-    /// Closes the window WITHOUT committing anything.
-    ///
-    /// ⚠️ Only for callers that have already decided the fate of the text: `saveAndClose()` (which
-    /// wrote it back first) and the "Don't Save" branch of the close prompt. `NSWindow.close()`
-    /// does not consult `windowShouldClose(_:)`, so nothing here will ask the user.
+    /// Closes the window without committing anything.
+    /// `NSWindow.close()` skips `windowShouldClose(_:)`, so only callers that already decided the text's fate may use this.
     func closeWindow() {
         window?.close()
         window = nil
     }
 
-    /// Commits the editor's pending text back to its bindings, then closes.
-    ///
-    /// ⚠️ This is the teardown path for NAVIGATION — `onDisappear` when the user leaves the profile.
-    /// It used to call `closeWindow()` directly, and because `NSWindow.close()` bypasses
-    /// `windowShouldClose(_:)`, the Unsaved Changes prompt never appeared: a 3,000-character system
-    /// prompt typed into the floating window was destroyed by clicking the back chevron, silently,
-    /// with the footer still promising that changes sync to the main window.
-    ///
-    /// Committing rather than prompting is deliberate. `onDisappear` runs inside a SwiftUI update,
-    /// and `NSAlert.runModal()` there spins a nested modal loop mid-navigation. Saving the user's
-    /// text is also simply the better default for an implicit close — nothing is lost, and the
-    /// profile's own Save/Revert pill still governs whether it reaches disk.
+    /// Commits the editor's pending text back to its bindings, then closes; the teardown path for navigation (`onDisappear`).
+    /// Commits rather than prompts: `NSAlert.runModal()` inside a SwiftUI update spins a nested modal loop mid-navigation.
     func closeWindowCommittingChanges() {
         commitChanges?()
         closeWindow()
@@ -143,8 +122,7 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
     /// view (so the editor keeps focus). No-op when the window isn't open —
     /// callers can fire this on every name keystroke without checks.
     func updateTitle(agentName: String) {
-        // ⚠️ register B7 — was gated on `isVisible`, which is false while miniaturized, so a
-        // rename went unrecorded and the window resurfaced with a stale title.
+        // Not gated on `isVisible`, which is false while miniaturized, so a rename still updates the title.
         guard let window else { return }
         window.title = Self.title(for: agentName)
     }
@@ -180,12 +158,8 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
 
     nonisolated func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {
-            // ⚠️ register B7 — IDENTITY CHECK. This used to clear state unconditionally, so a
-            // close notification from ANY window this object had ever been the delegate of wiped
-            // the live window's reference and all four callbacks. With the reuse fix above an
-            // orphan should no longer exist, but the guard is what makes that safe rather than
-            // merely likely: nilling `commitChanges` for a live editor silently destroys the
-            // user's typed prompt, which is far too costly to leave resting on an invariant.
+            // Identity check: only the close of the current window clears state, so a stray close notification cannot wipe a live
+            // editor's reference and callbacks and destroy the typed prompt.
             guard let closing = notification.object as? NSWindow, closing === window else {
                 logger.error(
                     "[PROFILE] A prompt-editor window closed that is NOT the one currently tracked. "
@@ -210,10 +184,8 @@ final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
 
 // MARK: - Themed Host
 
-/// Wrapper that watches the @Observable ThemeManager and re-applies the
-/// `\.appTheme` environment whenever the active theme changes — keeping
-/// the floating-window editor in lockstep with the parent app's theme
-/// (the host's `body` re-evaluates when `themeManager.currentTheme` flips).
+/// Wrapper that watches the @Observable ThemeManager and re-applies the `\.appTheme` environment when the theme changes,
+/// keeping the floating-window editor in step with the app.
 private struct AdvancedPromptEditorHost: View {
     @Bindable var themeManager: ThemeManager
     var manager: AdvancedPromptWindowManager
@@ -234,7 +206,7 @@ private struct AdvancedPromptEditorHost: View {
         .environment(\.buttonAccentStyle, themeManager.buttonAccentStyle)
         .environment(themeManager)
         .preferredColorScheme(themeManager.currentTheme.colorScheme)
-        // ⚠️ register B18 — A75 fixed exactly this for the BOT editor and left the agent one.
+        // Keeps the window title in step with the agent name.
         .onChange(of: agentName) { _, newName in manager.updateTitle(agentName: newName) }
     }
 }
@@ -285,10 +257,8 @@ class PromptMentionState {
 // MARK: - Editor UI
 
 struct AdvancedPromptEditorView: View {
-    /// Manager that owns the floating window — callbacks (checkChanges,
-    /// saveChanges, discardChanges) are set on THIS instance so unsaved-
-    /// changes prompts target the right document, even when multiple
-    /// editors are open across the app.
+    /// The manager that owns the floating window; callbacks are set on this instance so unsaved-changes prompts target
+    /// the right document when several editors are open.
     var manager: AdvancedPromptWindowManager
     @Binding var text: String
     var agentName: String
@@ -833,7 +803,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
             self.parent = parent
         }
 
-        // MARK: - Phase 3: Dynamic Syntax Highlighting
+        // MARK: - Dynamic Syntax Highlighting
         
         func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {
             guard editedMask.contains(.editedCharacters) else { return }
@@ -884,7 +854,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
             ]
         }
 
-        // MARK: - Phase 2 (Enhancement Step 2): Keyboard Integration
+        // MARK: - Keyboard Integration
         
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if popover?.isShown == true {

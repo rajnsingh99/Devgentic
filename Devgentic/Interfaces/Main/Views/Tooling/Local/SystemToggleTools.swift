@@ -4,6 +4,8 @@
 //  SystemToggleTools.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import Foundation
 import AppKit
@@ -91,17 +93,9 @@ struct ToggleDarkModeTool: DevgenticTool {
 
 // MARK: - Toggle Do Not Disturb Tool
 
-/// ⚠️ This tool can only TOGGLE Focus. It cannot set it to a known state.
-///
-/// It works by clicking the Focus checkbox in Control Centre through the accessibility API, and
-/// a click flips whatever is currently there. macOS exposes no readable Focus state to query
-/// first, which is why the implementation clicks a checkbox rather than setting a value.
-///
-/// Until 2026-08-01 the schema advertised `'on'`, `'off'` and `'toggle'`, and all three ran
-/// BYTE-IDENTICAL scripts — so asking to turn Focus ON while it was already on turned it OFF, and
-/// the tool reported `Do Not Disturb 'on' executed`. A model that wanted silence got noise, with
-/// a success message. `on` and `off` are now refused rather than quietly mistranslated: an action
-/// the tool cannot perform must not be advertised as one it can.
+/// This tool can only toggle Focus, not set it to a known state: it clicks the Focus checkbox in Control Centre
+/// through the accessibility API, and macOS exposes no readable Focus state. `on` and `off` are refused rather than
+/// mistranslated, since an action the tool cannot perform must not be advertised.
 struct ToggleDoNotDisturbTool: DevgenticTool {
     let name = "toggle_do_not_disturb"
     let category = "System Toggles"
@@ -123,10 +117,8 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         // Use AppleScript to toggle DND via Focus system
         return await MainActor.run {
-            // `on` and `off` are refused BEFORE any script runs. They used to map to the same
-            // click as `toggle`, so half the time they did the opposite of what was asked and
-            // said they had succeeded. Refusing names the real capability and lets the model
-            // decide, instead of silently guessing on its behalf.
+            // `on` and `off` are refused before any script runs, naming the real capability and letting the model decide, since
+            // they would map to the same click as `toggle`.
             switch arguments.action {
             case "toggle":
                 break
@@ -158,9 +150,7 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
                 return "Error: could not toggle Focus — this needs Accessibility permission. \(err)"
             }
 
-            // States what actually happened — a flip — rather than echoing the requested action.
-            // The old wording ("Do Not Disturb 'on' executed") was the success message that made
-            // the wrong-direction bug invisible.
+            // States what actually happened (a flip) rather than echoing the requested action.
             return "Focus toggled. Its state was flipped, not set — check the menu bar to confirm "
                 + "which way it went."
         }
@@ -181,20 +171,8 @@ struct GetWiFiInfoTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // `system_profiler SPAirPortDataType`, not the `airport` binary.
-        //
-        // This tool was **100% broken on any current macOS**: it invoked
-        // `Apple80211.framework/…/airport -I`, and Apple REMOVED that binary. Every call threw
-        // at launch ("The file 'airport' doesn't exist") — so a tool whose description promises
-        // SSID, BSSID, signal strength, channel and security returned nothing but a failure,
-        // every time, on every machine. Earlier work here corrected how the failure was
-        // *reported*; it was still a failure.
-        //
-        // `system_profiler` still ships and still carries what the description advertises —
-        // Card Type, PHY modes, Country Code, and a Current Network Information block with
-        // channel, security and signal. Some fields are withheld unless Location Services is
-        // granted, which is a macOS policy the tool cannot and should not work around; what it
-        // can do is return the data that IS available instead of nothing at all.
+        // Uses `system_profiler SPAirPortDataType`, because Apple removed the `airport` binary. Some fields are withheld
+        // unless Location Services is granted, which is macOS policy; the tool returns the data that is available.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
         process.arguments = ["SPAirPortDataType", "-detailLevel", "basic"]
@@ -243,10 +221,8 @@ struct ManageBluetoothTool: DevgenticTool {
     }
 
 
-    /// The parts of `system_profiler SPBluetoothDataType -json` these two actions need.
-    ///
-    /// `static` and given its own type so it can be tested without a Bluetooth radio, and so the
-    /// two actions demonstrably read the SAME report rather than each rolling its own parse.
+    /// The parts of `system_profiler SPBluetoothDataType -json` these two actions need. A separate type so it can be
+    /// tested without a Bluetooth radio, and so both actions read the same report.
     struct Report: Equatable {
         let poweredOn: Bool
         let discoverable: Bool?
@@ -288,18 +264,8 @@ struct ManageBluetoothTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // The two actions produce DIFFERENT answers.
-        //
-        // Until 2026-08-01 they shared a case — `case "status", "list_devices":` — and both
-        // returned the same ~2 KB `system_profiler` text dump. So a model asking "is Bluetooth
-        // on?" received every paired device's address, chipset and service mask, and had to find
-        // the one word it wanted inside it; and the two actions, advertised as "power state" and
-        // "paired devices", were indistinguishable. Not wrong in the way `toggle_do_not_disturb`
-        // was wrong — the answer was in there — but the caller pays a page of context for a fact
-        // that fits in a line.
-        //
-        // `-json` rather than parsing the human report: the keys are stable, `controller_state`
-        // is a single value, and connected/paired devices arrive already separated.
+        // The two actions produce different answers: `status` returns the power state, `list_devices` the paired devices.
+        // Uses `-json` rather than parsing the human report, since the keys are stable.
         guard arguments.action == "status" || arguments.action == "list_devices" else {
             return "Error: Unknown action '\(arguments.action)'. Use status or list_devices."
         }

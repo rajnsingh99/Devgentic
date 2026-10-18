@@ -4,23 +4,14 @@
 //  OrbPanelController.swift
 //  Devgentic
 //
-//  [Orb MVP] Orb lives in a borderless floating NSPanel, not a full-screen
-//  overlay: the chat interface underneath stays visible and usable, and the orb can
-//  be dragged anywhere on screen. Mirrors the QuickAccessPanelView pattern (floating
-//  level, non-activating, transparent, isReleasedWhenClosed = false).
-//
-//  The panel has two sizes: the profile picker (first run / explicit switch) and the
-//  compact orb. The hosted view reports which one it wants; this controller animates
-//  the frame.
+//  Created by Raj Singh.
 //
 
 import AppKit
 import SwiftUI
 
 /// Which presentation the panel is showing, and therefore how big it is.
-///
-/// Was a Bool (picker vs orb) until Phase 3 needed a third size for the approval banner. An enum
-/// rather than another flag because the next presentation will not be the last one either.
+/// An enum rather than flags because further presentations are expected.
 enum OrbPanelMode: Equatable {
     case picker
     case orb
@@ -58,9 +49,8 @@ final class OrbPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false
         level = .floating
-        // Safe here (unlike the QuickAccess panel, which had to avoid it because it
-        // stole text selection): Orb hosts no text field, so a drag anywhere on the
-        // panel should move it. Buttons still consume their own clicks.
+        // Safe here (the QuickAccess panel must avoid it because it steals text selection): Orb hosts no text field,
+        // so a drag anywhere on the panel should move it. Buttons still consume their own clicks.
         isMovableByWindowBackground = true
         isMovable = true
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
@@ -94,20 +84,15 @@ final class OrbPanelController {
     /// Profile picker: first run, or an explicit switch from the config bubble.
     static let pickerSize = OrbPanelMode.picker.size
 
-    /// Session state, not a preference — deliberately NOT in AppSettings (see its Orb note).
-    /// Internal rather than private so `OrbConfigManager.resetAll()` can clear a panel that a
-    /// crash or a disconnected display stranded off-screen: the panel is borderless with no
-    /// titlebar, so there is otherwise no in-app way to get it back.
-    /// `nonisolated`: OrbConfigManager is main-thread-confined but NOT @MainActor (it is read
-    /// from AppDelegate's nonisolated lifecycle code), and it needs these to clear a stranded
-    /// panel position. A plain `static let` on a @MainActor type inherits that isolation.
+    /// Session state, not a preference: deliberately not in AppSettings. Internal rather than private so
+    /// `OrbConfigManager.resetAll()` can clear a panel stranded off-screen (borderless, no titlebar, no other way
+    /// back). `nonisolated` because OrbConfigManager is not @MainActor and needs these keys.
     nonisolated static let originXKey = "orbPanelOriginX"
     nonisolated static let originYKey = "orbPanelOriginY"
 
     private var panel: OrbPanel?
-    /// ⚠️ Readable so the settings pane can reach a RUNNING session. Several settings are read
-    /// once — at panel open, or when a run parks — and a change made while the orb is open was
-    /// simply invisible to it. Writes stay private: only this controller owns the lifetime.
+    /// Readable so the settings pane can reach a running session; writes stay private, since only this controller owns
+    /// the session's lifetime.
     private(set) var session: OrbSessionController?
     private let logger = DGLogger(category: "OrbPanel")
 
@@ -133,9 +118,8 @@ final class OrbPanelController {
         controller.onRequestAttention = { [weak self] in self?.bringToAttention() }
         session = controller
 
-        // begin() BEFORE building the view: it resolves the remembered profile and
-        // settles the stage, so the panel is created at the right size and the picker
-        // never flashes for a frame on a remembered-profile launch.
+        // Call `begin()` before building the view: it resolves the remembered profile and settles the stage,
+        // so the panel opens at the right size and the picker never flashes.
         controller.begin()
 
         let startsInPicker = controller.stage == .selectingProfile
@@ -152,19 +136,15 @@ final class OrbPanelController {
         panel.setFrameOrigin(restoredOrigin(for: size))
         self.panel = panel
 
-        // orderFrontRegardless, NOT makeKeyAndOrderFront: the orb must not steal
-        // keyboard focus from the chat composer behind it. (Clicking the panel still
-        // makes it key, which is when Esc-to-close becomes available.)
+        // `orderFrontRegardless`, not `makeKeyAndOrderFront`: the orb must not steal keyboard focus from the chat
+        // composer. (Clicking the panel still makes it key, which enables Esc-to-close.)
         panel.orderFrontRegardless()
         logger.info("[ORB_PANEL] Panel OPENED (picker: \(startsInPicker)). CONSEQUENCE: a session controller now exists and the listening loop starts once a profile is chosen.")
     }
 
     func close(reason: String = "unspecified") {
-        // ⚠️ A close on an already-closed panel is a no-op in every line below, but it used to log
-        // one anyway — so a device log could show two CLOSED lines around a single OPEN, which
-        // reads as a lifecycle bug and sends the reader looking for a second presentation that
-        // never happened. `toggle`, Escape, the orb button and `applyOrbHotkeyConfig` can all
-        // reach here, and only the last one checks `isOpen` first.
+        // Closing an already-closed panel is a no-op, so it logs at debug only: several paths reach here, and a second
+        // CLOSED line around one OPEN would read as a lifecycle bug.
         guard panel != nil || session != nil else {
             logger.debug("[ORB_PANEL] Close (\(reason)) with no panel open — nothing to do. CONSEQUENCE: none; this is a duplicate or late close, not a second teardown.")
             return

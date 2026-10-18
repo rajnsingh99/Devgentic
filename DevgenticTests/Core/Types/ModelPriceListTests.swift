@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ModelPriceListTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Each call is priced when its usage is read: the provider's reported cost, else the bundled
-//  `ModelPrices.json` by EXACT model name, else nothing. These pin the bundled file, the lookup's
-//  refusal to guess, the per-call long-context tier, and how a run's costs add up.
+//  Created by Raj Singh.
 //
 
 import XCTest

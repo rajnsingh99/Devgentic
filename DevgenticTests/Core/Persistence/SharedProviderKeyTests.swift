@@ -4,15 +4,7 @@
 //  SharedProviderKeyTests.swift
 //  DevgenticTests
 //
-//  One key per provider (2026-10-03): OpenAI, Anthropic, Google and OpenRouter profiles read a
-//  single shared key (`GlobalProviderKeys`) instead of each keeping its own Keychain copy.
-//
-//  ⚠️ The defect these exist to hold off: one OpenRouter key had become three Keychain items (the
-//  catalog's, a copy in the profile, a Code slot). Every item is its own access prompt when the
-//  app's signature changes, replacing the key in the catalog left the profile sending the old one,
-//  and every profile fetch and view render decrypted the key again — 7 reads of one item in one
-//  launch, each a blocking prompt on the main thread. `ProviderKeyStorageTests` keeps covering the
-//  per-profile path, which OpenAI-compatible profiles still use.
+//  Created by Raj Singh.
 //
 
 import SwiftData

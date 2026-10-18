@@ -4,8 +4,7 @@
 //  AgentConnect.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/01/26.
-//  Updated: Enforced strict Agent vs Bot capability routing.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -20,16 +19,9 @@ private let logToolExecution = DGLogger(category: "ToolExecution")
 @Observable
 class AgentConnect: @unchecked Sendable {
 
-    /// Whether agent delegation (`call_agent` / sub-agents) is available at all. Register B15.
-    ///
-    /// ⚠️ **Deliberately `false`.** The capability was withdrawn from the UI, but the runtime gate
-    /// is the mere PRESENCE of `capabilities.agentDelegation` — there is no `isEnabled` flag — so
-    /// legacy "Supervisor" profiles kept injecting `call_agent` forever with no control and no
-    /// indication. Withdrawing a toggle is only half a decision; this is the other half.
-    ///
-    /// One constant so restoring the feature is one line, not an archaeology exercise. Same shape
-    /// as `PlanningCapability.parallelSubtasksSupported` (register A67), and the same reason: a
-    /// stored preference is ignored, never rewritten.
+    // Why: the runtime gate is the mere presence of `capabilities.agentDelegation`;
+    // a stored preference is ignored, never rewritten.
+    /// Whether agent delegation (`call_agent` / sub-agents) is available at all.
     static let agentDelegationSupported = false
     
     // MARK: - Initialization
@@ -88,41 +80,17 @@ class AgentConnect: @unchecked Sendable {
                         instructions = config.instructions
                         rawTools = config.tools
                         isBotFlow = false
-                        // Dual-read cut-over (v8): references resolve against the global registry,
-                        // and a profile that predates v8 falls back to its blob's manifest copies.
-                        // ⚠️ The registry is authoritative for `description` — the text the model
-                        // ROUTES on — so a skill edited on disk now changes every linked profile at
-                        // once instead of only whichever one last pressed Rescan.
+                        // Skill references resolve against the global registry; a profile without a registry entry uses its manifest copies.
+                        // The registry is authoritative for `description`, the text the model routes on.
                         skillManifests = await MainActor.run {
                             SkillResolution.resolve(for: config, profileName: profile.displayName)?.manifests
                         }
 
                     case .workflow:
-                        // Workflow: each node resolves its own model, tools, and generator.
-                        // Bypass the single-model pipeline entirely. Layout is the source of truth.
-                        // Workflows have no layered per-node prompt for chat context, and the
-                        // engine merges userInput into the FIRST node's task only — so knowledge
-                        // and attachment payloads must ride userInput here or they'd be dropped.
-                        // ⚠️ THE FUSION IS GONE (2026-08-20). This used to build
-                        // `[knowledgeBase, attachments, userInput].joined()` and pass the result as
-                        // `userInput`, because a node had no other route to those payloads. The
-                        // entry-node merge then folded that whole string into `taskDescription`, so
-                        // `<task>` — the first and most heavily attended section of the prompt —
-                        // opened with reference material and buried the real question at the end.
-                        // A 3B model derailed on it five times running and the workflow aborted,
-                        // while the SAME agent profile answered fine in chat, where the identical
-                        // payloads sit in their own labelled sections.
-                        //
-                        // Attachments now travel their own channel to the ENTRY node and render as
-                        // `<attachments>`. Profile knowledge does NOT ride along: `WorkflowConfig`
-                        // has no `knowledgeSources` field, so a workflow profile cannot define any
-                        // — the old `kb` term here was always nil for the workflow arm.
+                        // Workflow: each node resolves its own model, tools, and generator; the layout is the source of truth.
+                        // Attachments travel their own channel to the entry node; a workflow profile defines no knowledge sources.
                         let workflowExecutor = WorkflowExecutor(workflowProfileID: profile.id)
-                        // ⚠️ `chatHistory`/`ragContext` are deliberately NOT passed and no longer
-                        // exist on this signature (register EXA-9): a workflow run is
-                        // conversation-stateless by design and consumed neither at any depth. Both
-                        // are still in scope on this arm for the chat path above; passing them here
-                        // advertised a capability the engine does not have.
+                        // `chatHistory`/`ragContext` are deliberately not passed: a workflow run is conversation-stateless.
                         let wfStream = workflowExecutor.executeWorkflow(
                             userInput: userInput,
                             conversationID: conversationID,
@@ -151,15 +119,7 @@ class AgentConnect: @unchecked Sendable {
                         projectKnowledge = Self.codeProjectKnowledge(config, traceTag: traceContext.traceID)
                         rawTools = config.tools
                         isBotFlow = false
-                        // ⚠️ Code profiles do NOT get skills, and this is a decision, not an
-                        // oversight — but persistence disagrees with it: the `.code` arm of
-                        // ProfileDetails encodes and decodes `skillSelections` like any other, so a
-                        // profile converted from `.agent` can carry skills the runtime then
-                        // discards here in silence. The config
-                        // editor never offers the section for `.code` (its binding matches
-                        // `case .agent` only), so a user in this state has no way to see it.
-                        // Logged rather than honoured: turning it on is a product decision about
-                        // Code mode's ephemeral profile identity, not a bug fix.
+                        // Code profiles get no skills; skills stored on a converted profile are logged and discarded here.
                         skillManifests = nil
                         let unique = CodeModeSkillDiagnostics.inertSkillNames(in: config)
                         if !unique.isEmpty {
@@ -193,21 +153,13 @@ class AgentConnect: @unchecked Sendable {
                     
                     // 3. Memory & Model Initialization
                     let modelTier = llmConfig.modelMetadata?.tier ?? .medium
-                    // EFFECTIVE window (num_ctx-aware for Ollama, 8K local fallback) —
-                    // sizing compaction and native-turn budgets to a 128K assumption on
-                    // a ~4-8K local allocation meant turn arrays never compacted and
-                    // Ollama truncated silently mid-run.
+                    // Uses the effective window (num_ctx-aware for Ollama, 8K local fallback) to size compaction and native-turn budgets.
                     let contextWindow = EffectiveContextWindow.resolve(
                         for: llmConfig, flavour: isBotFlow ? .chat : .agent)
-                    // Empty (not a sentinel) when nothing was retrieved — PromptBuilder
-                    // skips the <semantic_context> layer for empty grounding, so non-RAG
-                    // turns no longer carry a hollow "No static context provided." block.
+                    // Empty when nothing was retrieved; PromptBuilder skips the <semantic_context> layer for empty grounding.
                     let staticGrounding = ragContext ?? ""
 
-                    // Long-term grounding is pre-fetched RAG, injected into the prompt. There is
-                    // no tier branch: the "deep memory tools" axis and its `ToolAugmentedMemory`
-                    // strategy were removed 2026-07-31 with the only tool that populated them
-                    // (`read_session_history`) — see `LongTermMemoryStrategy` for why.
+                    // Long-term grounding is pre-fetched RAG injected into the prompt; there is no tier branch.
                     let longTermMemory: any LongTermMemoryStrategy =
                         StaticGroundingMemory(ragContext: staticGrounding)
 
@@ -224,18 +176,11 @@ class AgentConnect: @unchecked Sendable {
                     // 4. Initialize the Language Model (before tool resolution — delegation needs the model)
                     let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
 
-                    // Extract capabilities for tool injection (delegation)
-                    // ⚠️ register B44 — was `if case .agent … else { nil }`, which dropped `.code`.
-                    // Latent rather than live (a Code session's `AgentCapabilities()` is all-nil,
-                    // so nil and default behaved alike), but it is the same omission as the four
-                    // below and would go live the moment a Code session enabled planning.
+                    // Capabilities for tool injection (delegation), taken from every profile type that carries them, `.code` included.
                     let agentCapabilities: AgentCapabilities? = profile.details.agentCapabilities
 
-                    // 5. Resolve Tools (model passed for delegation tool to reuse)
-                    // An MCP server's `sampling/createMessage` arrives out-of-band on the client
-                    // connection with no conversation attached. Record which profile and model
-                    // should service it for this run, so the approval banner can be raised in the
-                    // right conversation and the call billed to the profile the user chose.
+                    // Records which profile and model service an MCP server's out-of-band `sampling/createMessage` for this run,
+                    // so the approval banner is raised in the right conversation and the call is billed to the chosen profile.
                     let samplingContext = MCPSamplingContext(
                         conversationID: conversationID,
                         providerConfig: llmConfig,
@@ -244,8 +189,7 @@ class AgentConnect: @unchecked Sendable {
                         registeredAt: Date()
                     )
                     await MCPSamplingBroker.shared.register(context: samplingContext)
-                    // ⚠️ Withdrawn when this run ends, on every exit — see `MCPSamplingBroker.unregister`
-                    // (CR-18). A context outliving its run serves sampling with a stale profile and key.
+                    // Withdrawn when this run ends, on every exit; a context outliving its run would serve sampling with a stale profile.
                     defer { Task { await MCPSamplingBroker.shared.unregister(samplingContext) } }
 
                     var activeTools = await self.resolveExecutableTools(
@@ -263,24 +207,15 @@ class AgentConnect: @unchecked Sendable {
                         profileID: profile.id
                     )
 
-                    // 5.5 Inject `final_answer` terminator for all tool-supporting flows.
-                    // Pinned to index 0 so weak local models see it first when scanning the
-                    // tool schema (ordering bias is real on 7-14B models). It's the ONLY
-                    // clean exit from the ReAct loop — without it, local tool-calling models
-                    // emit tool calls indefinitely and trip the circuit breaker (G1).
-                    //
-                    // Scope: Agent / Code / Workflow profiles (all ReAct-based executors).
-                    // Bot profiles are excluded — they run on ChatExecutor with no tool
-                    // dispatch loop, so terminator semantics don't apply.
+                    // Injects `final_answer` at index 0 for Agent/Code/Workflow flows; it is the only clean exit from the ReAct loop.
+                    // Bot profiles are excluded: ChatExecutor has no tool dispatch loop.
                     if !isBotFlow {
                         let finalAnswerTool = self.wrapTool(FinalAnswerTool(), requiresConfirmation: false)
                         activeTools.insert(finalAnswerTool, at: 0)
                     }
 
-                    // 5.6 Code mode: the project-memory tools. Offered on every Code run, for every
-                    // model — no reading gate and no "now available" alert, which is what turned
-                    // memory into a task of its own for small models (2026-10-06 device runs).
-                    // `remember` checks what it is told instead; see `RememberTool.validate`.
+                    // Code mode: the project-memory tools are offered on every Code run, for every model.
+                    // `remember` validates what it is told; see `RememberTool.validate`.
                     let memoryTools = Self.codeMemoryTools(for: profile.details, conversationID: conversationID,
                                                            messageID: traceContext.messageID)
                     if !memoryTools.isEmpty {
@@ -318,16 +253,11 @@ class AgentConnect: @unchecked Sendable {
                     var activeState: SessionGraph? = nil
                     var recentHistory: String? = nil
                     
-                    // #22: native turn-payload budget (~75% of context window as chars).
-                    // Distinct from the small scratchpad budget above — the native path
-                    // sends the full conversation, so it gets the larger slice; the ReAct
-                    // loop compacts oldest tool exchanges past this to bound growth.
+                    // Native turn-payload budget (~75% of the context window as chars); the ReAct loop compacts the oldest tool
+                    // exchanges past it.
                     let nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(forContextWindow: contextWindow)
 
-                    // Resolve history strategy from profile (default: .recentHistory)
-                    // ⚠️ register B44 — LIVE defect: `CodeSessionManager` configures
-                    // `historyStrategy: .pointer`, and `.code` fell into the `else`, so every Code
-                    // session ran on `.recentHistory` instead of the strategy it was built with.
+                    // History strategy comes from the profile (default `.recentHistory`), for every profile type that carries one.
                     let historyStrategy: HistoryStrategy = profile.details.historyStrategy
 
                     // Determine if this is a native provider (supports turn-by-turn history)
@@ -341,16 +271,7 @@ class AgentConnect: @unchecked Sendable {
 
                     var nativeHistoryTurns: [HistoryTurn]? = nil
 
-                    // Vision gate for PRIOR-TURN images. Carrying history images is
-                    // pointless — and actively wasteful of the char budget — when the
-                    // target model can't see them, so the decision is made once here,
-                    // next to `isNativeProvider`, and the converter stays a pure function.
-                    //
-                    // Mirrors the current-turn gate in BackendOrchestrationService, with
-                    // one deliberate difference: that gate is local-only (cloud is left
-                    // to error on its own), whereas this one applies to every provider.
-                    // Spending budget on images a model will ignore costs the user real
-                    // context either way.
+                    // Vision gate for prior-turn images: they are dropped when the target model cannot see them, for every provider.
                     let historyImagesEnabled = isNativeProvider && profile.supportsVisionInput
                     if isNativeProvider && !profile.supportsVisionInput {
                         logger.info("[HISTORY] conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID) Vision gate: prior-turn images omitted for '\(llmConfig.modelName)' (no visionInput modality) — the model will not see images from earlier turns in this conversation")
@@ -366,34 +287,8 @@ class AgentConnect: @unchecked Sendable {
                         // report is measured against the same allocation this spends.
                         let charBudget = PromptFitCheck.historyCharBudget(forContextWindow: contextWindow)
 
-                        // --- IC-Powered History Compaction (Background) ---
-                        // Moved OFF the request path (2026-07-20). The 30s "timeout" around
-                        // the IC call was verified to be a cancellation request, not a
-                        // wall-clock bound (cold load and prompt prefill are uninterruptible),
-                        // so a synchronous compaction could stall this turn unboundedly. The
-                        // only real bound is not entering: this request proceeds with
-                        // uncompacted history (the history builders trim to charBudget), the
-                        // summarization runs in the background, and the checkpoint — persisted
-                        // via the service's sink, never via this stream, which may end first —
-                        // pays off from the next turn on. The trigger fires at ~36% of the
-                        // context window, so skipping one turn's relief costs little.
-                        //
-                        // Gated on the Core Intelligence MASTER toggle as well as the feature
-                        // toggle. Without the master check, turning Core Intelligence OFF still
-                        // loaded the IC model on every long-history turn: the feature key
-                        // defaults to true, and its toggle isn't even rendered while the master
-                        // switch is off — so the user had no way to see or stop it.
-                        // ⚠️ ALWAYS planned now (owner decision 2026-09-27) — no longer gated on the
-                        // Intelligence Core. Compaction is summarized by the IC when it and its History
-                        // Compaction feature are on, otherwise by THIS conversation's own model
-                        // (`HistoryCompactionService.useIntelligenceCore`). With the IC off — the
-                        // default — a long conversation used to be trimmed, never summarized.
-                        //
-                        // ⚠️ SCHEDULED AFTER THE ANSWER, not here. With the conversation's own model
-                        // summarizing, starting now would compete with this very turn for the model —
-                        // on MLX the single slot — and delay the reply. The plan is taken from this
-                        // turn's history; the run starts once the turn's stream has finished, and the
-                        // transcript shows it running (the manual-compaction row).
+                        // Compaction is planned here but runs in the background after this turn's stream finishes, so it never competes
+                        // with the turn for the model; this request proceeds with uncompacted history and the summary applies next turn.
                         if let plan = await HistoryCompactionService.shared.evaluate(
                             chatHistory: effectiveHistory,
                             charBudget: charBudget
@@ -411,18 +306,8 @@ class AgentConnect: @unchecked Sendable {
                             )
                         }
 
-                        // Hybrid history channel policy:
-                        //   - `recentHistory` (episodic XML) → embedded in system prompt
-                        //     for EVERY flow. Carries tool-execution context without
-                        //     priming the model to mimic a prose tool-call format.
-                        //   - `nativeHistoryTurns` (user/assistant prose pairs) → appended
-                        //     as real turn pairs for native providers only. Prose-only now
-                        //     (no `[Used:]` markers) so the model sees natural conversation
-                        //     flow and learns tool-call structure from the in-request
-                        //     iteration scratchpad alone.
-                        //   - MLX (non-native): keeps `recentHistory` only, no turn pairs.
-                        // Native turns are built FIRST so the episodic XML below can leave out the
-                        // `<outcome>` clips of answers these turns already carry in full.
+                        // Episodic XML history goes into the system prompt for every flow; native providers also get prose turn pairs.
+                        // Native turns are built first so the XML can omit the `<outcome>` clips of answers they already carry.
                         var answersCarriedNatively = Set<UUID>()
                         if isNativeProvider {
                             let native = NativeHistoryConverter.buildCarryingProvenance(
@@ -431,10 +316,8 @@ class AgentConnect: @unchecked Sendable {
                                 charBudget: charBudget,
                                 includeImages: historyImagesEnabled,
                                 correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)",
-                                // Same value the episodic build below is given. These two are the
-                                // only emitters of the `get_conversation_history(N)` instruction,
-                                // and they must agree — one gated and one not is how a prompt
-                                // comes to contradict itself.
+                                // Must match the episodic build below: both emit the `get_conversation_history(N)` instruction,
+                                // and a mismatch makes the prompt contradict itself.
                                 toolsAvailable: !isBotFlow
                             )
                             nativeHistoryTurns = native.turns
@@ -450,24 +333,15 @@ class AgentConnect: @unchecked Sendable {
                             effectBudget: ActionEffect.diffBudget(forHistoryCharBudget: charBudget),
                             correlation: "conv:\(conversationID.uuidString.prefix(8)) trace:\(traceContext.traceID)",
                             toolsAvailable: !isBotFlow,
-                            // ⚠️ `.live` HERE and nowhere else. It stats each effect's file to
-                            // decide whether the stored diff still describes it. This is the
-                            // request path — once per send. `ContextWindowGauge` builds the same
-                            // XML to SIZE it, on every recompute, and takes the `.unknown`
-                            // default so the composer never touches the filesystem.
+                            // `.live` only on this request path: it stats each effect's file to check the stored diff is still current.
+                            // `ContextWindowGauge` takes the `.unknown` default so the composer never touches the filesystem.
                             staleness: .live,
                             answersCarriedNatively: answersCarriedNatively
                         )
 
-                        // Only inject get_conversation_history tool if pointer references
-                        // were actually emitted in the built history. This avoids a dead tool
-                        // when history is too short for pointers (e.g. hybrid with <= 3 turns).
+                        // Inject `get_conversation_history` only if pointer references were emitted in the built history.
                         let hasPointers: Bool = {
                             if let turns = nativeHistoryTurns {
-                                // Probes the same lowered text the model will see. Previously a
-                                // `["content"]?` dict subscript; `HistoryTurn.text` is non-optional,
-                                // so the "key absent" case collapses into "empty text" — which
-                                // never contained the marker anyway.
                                 return turns.contains { $0.text.contains("get_conversation_history(") }
                             }
                             return recentHistory?.contains("get_conversation_history(") == true
@@ -480,40 +354,22 @@ class AgentConnect: @unchecked Sendable {
                         }
                     }
 
-                    // ⚠️⚠️ THE authoritative tool list, and the only one logged after the last
-                    // thing that can append. Both earlier lines — `[CODE] Code tool set
-                    // assembled` and the `Tools Enabled` row in the configuration block — fire
-                    // BEFORE `get_conversation_history` is added, and both used to read as
-                    // complete. Field-observed 2026-09-20: a Code run logged "Tool resolution
-                    // complete — 19 tools" with `get_conversation_history` absent, while the
-                    // prompt it built told the model "Call get_conversation_history(N) for
-                    // details." Delivery was fine — `activeTools` is consumed further down — so
-                    // the only thing wrong was the log, which is the thing an operator has.
+                    // The authoritative tool list: logged after the last thing that can append (`get_conversation_history`).
                     logger.info("[TOOLS] Final loadout for \(profile.profileType.rawValue) run — \(activeTools.count) tool(s): [\(activeTools.map(\.name).joined(separator: ", "))]. CONSEQUENCE: this is exactly what the model is offered; anything named in the prompt but missing here cannot be called.")
-                    // ⚠️ Name what the instructions promise but the loadout lacks. The line above only
-                    // lists what IS offered, so "use fs_smart_search first" — a tool renamed away
-                    // nine days earlier — went unremarked on every run (2026-10-04).
+                    // Names what the instructions mention but the loadout lacks; the line above lists only what is offered.
                     for reference in InstructionToolReferences.check(
                         instructions: instructions, enabledToolNames: Set(activeTools.map(\.name))
                     ) {
                         logger.warning("[TOOLS] Instructions reference '\(reference.name)' — \(reference.message) CONSEQUENCE: the model is told to use a tool it cannot call; expect a wasted step or a guess.")
                     }
                     
-                    // Extract resilience config from agent profile
-                    // ⚠️ register B44 — THE live defect, and it sat 85 lines above A7's own
-                    // `.code` fix in this same function. `.code` fell into the `else`, so a Code
-                    // session got `ErrorRecovery()` (`onToolFailure: .abort`) in place of the
-                    // `.fallbackPrompt` `CodeSessionManager` configures, and `resilienceOverrides`
-                    // was nil so its Loop Safety caps were discarded too — with nothing logged.
+                    // Resilience config from the profile, `.code` included.
                     let retryPolicy = profile.details.retryPolicy
                     let errorRecovery = profile.details.errorRecovery
                     let resilienceOverrides = profile.details.resilienceOverrides
 
-                    // Resolve the three-tier resilience policy ONCE, here, where the
-                    // provider class is known. Transport budgets are provider-derived
-                    // (cloud: bounded patience; Ollama: connection-refused is fatal
-                    // with guidance; MLX: fast-fail); cognitive/loop caps take the
-                    // user's per-tier overrides, falling back to the legacy RetryPolicy.
+                    // Resolves the three-tier resilience policy once, where the provider class is known: transport budgets are
+                    // provider-derived; cognitive/loop caps take the user's per-tier overrides.
                     let resiliencePolicy = ResolvedResiliencePolicy.resolved(
                         for: ProviderClass(apiProvider: llmConfig.apiProvider),
                         overrides: resilienceOverrides,
@@ -521,9 +377,7 @@ class AgentConnect: @unchecked Sendable {
                         endpointHint: llmConfig.baseURL
                     )
 
-                    // Resolve IC-powered response synthesis: strictly opt-in, per provider
-                    // family (see SynthesisOptIn). Nothing else may turn it on — tool
-                    // failures and circuit-breaker aborts no longer force it.
+                    // IC response synthesis is strictly opt-in per provider family (see SynthesisOptIn); nothing else turns it on.
                     let icAvailable = await IntelligenceCoreService.shared.hasModelSelected
                     let icEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
                     let synthDecision = SynthesisOptIn.resolved(
@@ -534,9 +388,7 @@ class AgentConnect: @unchecked Sendable {
                     let responseSynthesisEnabled = synthDecision.optedIn
                     logger.info("[SYNTH] provider-family: \(synthDecision.family.rawValue), opted-in: \(synthDecision.optedIn) (\(synthDecision.reason)) → \(synthDecision.optedIn ? "IC synthesis pass" : "raw passthrough"), traceID: \(traceContext.traceID), conversationID: \(conversationID.uuidString.prefix(8))")
 
-                    // Only a `.code` profile has a user-chosen folder, so only it is confined.
-                    // Every other type resolves to nil, which `WorkspaceBoundaryDecision` reads as
-                    // "no boundary" and leaves behaving exactly as before.
+                    // Only a `.code` profile has a user-chosen folder, so only it is confined; other types resolve to nil (no boundary).
                     let codeWorkspaceRoot: String? = {
                         guard case .code(let codeConfig) = profile.details else { return nil }
                         return codeConfig.projectPath
@@ -544,18 +396,12 @@ class AgentConnect: @unchecked Sendable {
                     if let codeWorkspaceRoot {
                         logger.info("[WORKSPACE] Code run confined to \(codeWorkspaceRoot) — conv \(conversationID.uuidString.prefix(8)). CONSEQUENCE: relative tool paths resolve against this folder instead of the home directory; writes outside it are refused and reads outside it ask the user first.")
                     } else if case .code = profile.details {
-                        // ⚠️ The state the original escape ran in. A Code profile with no folder is
-                        // UNCONFINED — every filesystem tool sees the whole disk and relative paths
-                        // fall back to the home directory. It should be unreachable now
-                        // (`prepareCodeProfileForSend` refuses, and the composer blocks on a missing
-                        // folder), so if this ever prints, one of those guards has a hole.
+                        // A Code profile with no folder is unconfined (filesystem tools see the whole disk); this should be unreachable.
                         logger.error("[WORKSPACE] Code run has NO project folder — conv \(conversationID.uuidString.prefix(8)). CONSEQUENCE: this run is UNCONFINED — no path is checked, nothing is refused, and a relative path resolves against the home directory. A send should have been refused before reaching here.")
                     }
 
-                    // Working memory (the scratchpad the text-tools path carries — MLX, and Ollama
-                    // models without tool calling) gets WHATEVER ROOM THE FIXED PROMPT LEAVES. Built
-                    // here, after history and every context block exist, because those are exactly
-                    // what it must be sized around. See `MemoryBudgetConfig.derive`.
+                    // Working memory (the scratchpad of the text-tools path) gets whatever room the fixed prompt leaves, so it is built
+                    // after history and every context block exist. See `MemoryBudgetConfig.derive`.
                     let reservedPromptChars = (instructions?.count ?? 0)
                         + (projectKnowledge?.count ?? 0)
                         + (recentHistory?.count ?? 0)
@@ -581,11 +427,8 @@ class AgentConnect: @unchecked Sendable {
                         knowledgeBaseContext: knowledgeBaseContext,
                         toolGuidanceContext: toolGuidanceContext,
                         chatHistory: chatHistory,
-                        // Vision BOTS re-attach prior-turn images (ChatExecutor reads
-                        // chatHistory). Gated on vision alone — NOT tool capability —
-                        // because a vision model can see images regardless of whether it
-                        // supports tools (qwen2.5vl etc. are vision-but-.none → Bot-only).
-                        // Non-vision → false → history images omitted (safe on model swap).
+                        // Vision bots re-attach prior-turn images; gated on vision alone, not tool capability.
+                        // Non-vision models omit history images.
                         botHistoryImagesEnabled: isBotFlow && profile.supportsVisionInput,
                         conversationID: conversationID,
                         tools: activeTools,
@@ -626,18 +469,8 @@ class AgentConnect: @unchecked Sendable {
                     
                     try Task.checkCancellation()
 
-                    // Execution timeout from the profile's agent configuration.
-                    //
-                    // ⚠️ `.code` carries an `AgentConfig` too and MUST be matched. It used to fall
-                    // into an `else`, so a Code session's persisted `executionTimeout` (300 s, set
-                    // by `CodeSessionManager`) was silently discarded and the run had NO wall-clock
-                    // bound at all (register A7).
-                    //
-                    // ⚠️ register B44 — A7's fix was an exhaustive `switch` written HERE, at the one
-                    // site the row named, while four more sites in this same file kept the `if case
-                    // .agent … else` shape and kept dropping `.code`. Fixing the site rather than
-                    // the class is why the trap survived. The switch now lives once, in
-                    // `ProfileDetails.agentConfig`, and every agent-setting accessor derives from it.
+                    // Execution timeout from the profile's agent configuration, read through `ProfileDetails.agentConfig`,
+                    // which covers every profile type that carries an `AgentConfig` (`.code` included).
                     let executionTimeout: TimeInterval? = TimeLimit.usable(profile.details.executionTimeout,
                                                                            "Profile '\(profile.displayName)' execution timeout")
 
@@ -663,20 +496,13 @@ class AgentConnect: @unchecked Sendable {
                         logger.info("[CODE] Executor handoff — executor: \(executor.executorLabel), traceID: \(traceContext.traceID), spanID: \(traceContext.spanID), conversationID: \(conversationID.uuidString.prefix(8))")
                     }
 
-                    // ⚠️ OWNER-CHAIN PARK CREDIT (HITL Waiting Contract, decision A). Every turn gets a
-                    // scope, bounded or not, and the executor's stream is CREATED inside it so its
-                    // producer task inherits the chain. Then this turn's banners pause only this
-                    // turn's clocks (its budget, its tool timeouts) — never another run's — and an
-                    // out-of-chain MCP question can still find this turn as the conversation's open
-                    // bound. It used to be credited per conversation (Timeout inventory D-18).
-                    // (The workflow-node path below needs none of this: its stream is created inside
-                    // the node's own scope by `WorkflowExecutor`.)
+                    // Every turn gets an owner-chain scope and its stream is created inside it so the producer task inherits the chain;
+                    // approval banners then pause only this turn's clocks, never another run's.
                     let turnScope = UUID()
                     await ExecutionSuspensionService.shared.registerScope(turnScope, conversationID: conversationID)
                     defer { Task { await ExecutionSuspensionService.shared.unregisterScope(turnScope) } }
-                    // Nesting (owner decision 2026-09-27): a limited turn is an outer budget, so a tool
-                    // call inside it is shortened to fit and fires first, leaving
-                    // `ExecutionBudget.reserve` for the model to reply.
+                    // Nesting: a limited turn is an outer budget, so a tool call inside it is shortened to fit and fires first,
+                    // leaving `ExecutionBudget.reserve` for the model to reply.
                     let turnFrame: ExecutionBudget.Frame? = if let executionTimeout {
                         await ExecutionBudget.frame(
                             owner: "the turn's \(ToolExecutionMediator.describe(executionTimeout)) limit",
@@ -691,23 +517,12 @@ class AgentConnect: @unchecked Sendable {
                     let finalOutputAccumulator: String
 
                     if let timeout = executionTimeout {
-                        // Enforce execution timeout via Task race.
-                        // The typed TaskGroup returns the accumulated output from whichever
-                        // task completes first, avoiding shared mutable state across tasks.
+                        // Enforces the execution timeout via a Task race; the typed TaskGroup returns the accumulated output of
+                        // whichever task completes first.
                         let timeoutSubject = "Conversation \(conversationID.uuidString.prefix(8)) (\(profile.profileType.rawValue))"
                         finalOutputAccumulator = try await withThrowingTaskGroup(of: String.self) { group in
-                            // Timeout sentinel.
-                            //
-                            // ⚠️⚠️ This raced a bare `Task.sleep(for: .seconds(timeout))` until now,
-                            // which charged HITL wait time against the execution budget. Tool
-                            // confirmations park INSIDE this raced task (`ToolExecutionLoop` awaits
-                            // `ExecutionSuspensionService.suspend`), so the clock ran while the user
-                            // read an approval banner — a run could die at 300 s having computed for
-                            // 90. `WorkflowExecutor.computeTimeoutSentinel` fixed exactly this for
-                            // workflow nodes on 2026-08-13 and its own doc comment called the profile
-                            // path's plain sleep "a live defect", but the fix never crossed over.
-                            // Both paths now call the same sentinel, which bounds COMPUTE and extends
-                            // itself by whatever was parked.
+                            // Timeout sentinel: bounds compute time and extends itself by however long tool confirmations were parked,
+                            // since they suspend inside this raced task.
                             group.addTask {
                                 try await ComputeTimeoutSentinel.sleepUntilComputeExceeded(
                                     limit: timeout,
@@ -767,8 +582,8 @@ class AgentConnect: @unchecked Sendable {
                             evidence: memoryEvidence, userRequest: userInput, answer: finalOutputAccumulator,
                             projectPath: projectPath, conversationID: conversationID, messageID: answerID
                         ) { messages in
-                            // ⚠️ CR-9: a background run of its own on the local lock, not this finished
-                            // turn's identity — see `LocalInferenceCoordinator.runBackgroundLocal`.
+                            // A background run of its own on the local lock, not this finished turn's identity; see
+                            // `LocalInferenceCoordinator.runBackgroundLocal`.
                             try await LocalInferenceCoordinator.shared.runBackgroundLocal(
                                 feature: "Project memory suggestions", conversationID: conversationID, config: modelConfig
                             ) {
@@ -795,12 +610,9 @@ class AgentConnect: @unchecked Sendable {
     
     // MARK: - Workflow Node Streaming
 
-    /// Workflow-aware streaming that bypasses RAG, history, compaction, and episode management.
-    /// Uses the same generator/parser the agent or bot path would — workflow specifics
-    /// are applied via `SemanticContext.workflowContext`, which `buildStandardMessages`
-    /// reads to derive the per-node user-message prefix and force `.workflow` layer
-    /// config. Any improvement to a dialect's generator, parser, or native tool
-    /// injection is inherited automatically.
+    /// Streams a workflow node's response, bypassing RAG, history, compaction, and episode management.
+    /// Uses the same generator/parser as the agent or bot path; workflow specifics come from
+    /// `SemanticContext.workflowContext`.
     func streamWorkflowNodeResponse(
         for profile: BackendProfileModel,
         workflowContext: WorkflowExecutionContext,
@@ -826,7 +638,7 @@ class AgentConnect: @unchecked Sendable {
                     let rawTools: [Tool]
                     let isBotFlow: Bool
                     var skillManifests: [SkillManifest]?
-                    // Code only: the project folder that confines this node's file tools (CR-56).
+                    // Code only: the project folder that confines this node's file tools.
                     var nodeWorkspaceRoot: String?
 
                     switch profile.details {
@@ -842,11 +654,8 @@ class AgentConnect: @unchecked Sendable {
                         instructions = config.instructions
                         rawTools = config.tools
                         isBotFlow = false
-                        // Dual-read cut-over (v8): references resolve against the global registry,
-                        // and a profile that predates v8 falls back to its blob's manifest copies.
-                        // ⚠️ The registry is authoritative for `description` — the text the model
-                        // ROUTES on — so a skill edited on disk now changes every linked profile at
-                        // once instead of only whichever one last pressed Rescan.
+                        // Skill references resolve against the global registry; a profile without a registry entry uses its manifest copies.
+                        // The registry is authoritative for `description`, the text the model routes on.
                         skillManifests = await MainActor.run {
                             SkillResolution.resolve(for: config, profileName: profile.displayName)?.manifests
                         }
@@ -857,10 +666,7 @@ class AgentConnect: @unchecked Sendable {
                         projectKnowledge = Self.codeProjectKnowledge(config, traceTag: "workflow-node")
                         rawTools = config.tools
                         isBotFlow = false
-                        // ⚠️ READINESS CR-56 (2026-10-12). The chat path confines a Code run to
-                        // its project folder; this node path never passed the folder on, so a Code
-                        // profile used as a workflow node ran UNCONFINED — relative paths resolved
-                        // against the home directory and writes anywhere were allowed.
+                        // A Code profile used as a workflow node is confined to its project folder, as on the chat path.
                         nodeWorkspaceRoot = config.projectPath
                         if let root = config.projectPath {
                             logger.info("[WORKSPACE] Workflow node '\(workflowContext.nodeName)' (Code profile) confined to \(root) — conv \(conversationID.uuidString.prefix(8)). CONSEQUENCE: relative tool paths resolve against this folder; writes outside it are refused and reads outside it ask the user (or are refused when nobody can answer).")
@@ -882,16 +688,8 @@ class AgentConnect: @unchecked Sendable {
 
                     logger.info("[Workflow] Pipeline: skipping RAG, history, compaction, episode management")
 
-                    // 2. Resolve generator strategy (dialect-specific).
-                    //
-                    // No workflow-specific wrapper: workflow behavior is applied via
-                    // `SemanticContext.workflowContext` (set by the executor below),
-                    // which `buildStandardMessages` reads to:
-                    //   • force `PromptLayerConfig.workflow` (skip RAG/episodic/profile)
-                    //   • derive the per-node user-message prefix
-                    // Each dialect's own generator handles its native tool injection,
-                    // trigger suffix, response schema, and parser — so workflow
-                    // automatically inherits every agent/bot improvement.
+                    // Resolves the dialect-specific generator. Workflow behavior is applied via `SemanticContext.workflowContext`,
+                    // so nodes inherit each dialect's native tool injection, trigger suffix, schema, and parser.
                     let generator = try self.resolveCognitiveGenerator(
                         llmConfig: llmConfig,
                         isBotFlow: isBotFlow
@@ -902,7 +700,6 @@ class AgentConnect: @unchecked Sendable {
 
                     // 6. Resolve tools (still needed for agent nodes)
                     let longTermMemory: any LongTermMemoryStrategy = StaticGroundingMemory(ragContext: "")
-                    // ⚠️ register B44 — the fifth copy, in closure form. Same omission.
                     let agentCapabilities: AgentCapabilities? = profile.details.agentCapabilities
 
                     let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider, modelName: llmConfig.modelName)
@@ -913,10 +710,8 @@ class AgentConnect: @unchecked Sendable {
                         modelName: llmConfig.modelName
                     )
 
-                    // An MCP server's `sampling/createMessage` arrives out-of-band on the client
-                    // connection with no conversation attached. Record which profile and model
-                    // should service it for this run, so the approval banner can be raised in the
-                    // right conversation and the call billed to the profile the user chose.
+                    // Records which profile and model service an MCP server's out-of-band `sampling/createMessage` for this run,
+                    // so the approval banner is raised in the right conversation and the call is billed to the chosen profile.
                     let samplingContext = MCPSamplingContext(
                         conversationID: conversationID,
                         providerConfig: llmConfig,
@@ -925,8 +720,7 @@ class AgentConnect: @unchecked Sendable {
                         registeredAt: Date()
                     )
                     await MCPSamplingBroker.shared.register(context: samplingContext)
-                    // ⚠️ Withdrawn when this run ends, on every exit — see `MCPSamplingBroker.unregister`
-                    // (CR-18). A context outliving its run serves sampling with a stale profile and key.
+                    // Withdrawn when this run ends, on every exit; a context outliving its run would serve sampling with a stale profile.
                     defer { Task { await MCPSamplingBroker.shared.unregister(samplingContext) } }
 
                     var activeTools = await self.resolveExecutableTools(
@@ -944,21 +738,14 @@ class AgentConnect: @unchecked Sendable {
                         profileID: profile.id
                     )
 
-                    // 6.5 Inject `final_answer` terminator for workflow nodes that run on
-                    // ReAct (agent/code profiles). Mirrors the streaming chat path —
-                    // workflow node output relies on `finalAgentThought`, which is
-                    // populated cleanly when the model calls `final_answer`.
+                    // Injects the `final_answer` terminator for ReAct workflow nodes (agent/code);
+                    // node output relies on `finalAgentThought`, which is populated when the model calls it.
                     if !isBotFlow {
                         let finalAnswerTool = self.wrapTool(FinalAnswerTool(), requiresConfirmation: false)
                         activeTools.insert(finalAnswerTool, at: 0)
                     }
 
-                    // 7. Build AgentInput — workflow-aware, no history/RAG/compaction
-                    //
-                    // ⚠️ ONE CHANNEL (2026-08-29). This used to branch on `isFirstNode` between
-                    // `taskDescription` and `upstreamInput` — the two-channel model. The executor
-                    // now resolves that question at the graph, so the node's input is simply its
-                    // input, and this seam has nothing left to decide.
+                    // Builds the node's AgentInput: workflow-aware, no history/RAG/compaction. The node's input is simply its input.
                     let userInputForNode = workflowContext.input
 
                     // EFFECTIVE window — see the main-path note; workflow nodes get the
@@ -970,31 +757,19 @@ class AgentConnect: @unchecked Sendable {
                     // bounds liveConversationTurns growth on workflow agent nodes too.
                     let nativeContextBudgetChars = PromptFitCheck.nativePayloadCharBudget(forContextWindow: contextWindow)
 
-                    // Resilience config
-                    // ⚠️ register B44 — THE live defect, and it sat 85 lines above A7's own
-                    // `.code` fix in this same function. `.code` fell into the `else`, so a Code
-                    // session got `ErrorRecovery()` (`onToolFailure: .abort`) in place of the
-                    // `.fallbackPrompt` `CodeSessionManager` configures, and `resilienceOverrides`
-                    // was nil so its Loop Safety caps were discarded too — with nothing logged.
                     let retryPolicy = profile.details.retryPolicy
                     let errorRecovery = profile.details.errorRecovery
                     let resilienceOverrides = profile.details.resilienceOverrides
 
-                    // Image payload (Phase 3): upstream image artifacts become native
-                    // image blocks so vision-capable bot nodes "see" them. Reference-
-                    // backed — the provider resolves+encodes at send time (a failed
-                    // resolve throws there and fails the node, never a silent drop).
+                    // Upstream image artifacts become native image blocks so vision-capable bot nodes see them; the provider resolves
+                    // and encodes at send time, and a failed resolve fails the node.
                     let workflowImagePayload: Payload? = {
                         let imageArtifacts = workflowContext.upstreamArtifacts.filter { $0.kind == .image }
                         guard !imageArtifacts.isEmpty else { return nil }
                         return imageArtifacts.map { .image(ImagePayload(reference: $0.reference, mimeType: $0.mimeType, alt: $0.label)) }
                     }()
 
-                    // Per-NODE MCP guidance. `rawTools` is this node's profile's configured tool
-                    // list, so the gate follows the node rather than the workflow profile (which
-                    // holds no tools of its own). A node with no MCP tools gets no `<tool_guidance>`
-                    // section at all — which is the whole point: the failing report had an agent
-                    // with three built-in tools receiving ~2,000 chars about 41 MCP tools.
+                    // Per-node MCP guidance: gated on this node's own tool list, so a node with no MCP tools gets no `<tool_guidance>`.
                     let nodeToolSourceIDs = Set((rawTools ?? []).filter(\.isEnabled).map(\.sourceId))
                     var nodeToolGuidance: String? = nil
                     if !nodeToolSourceIDs.isEmpty {
@@ -1061,11 +836,7 @@ class AgentConnect: @unchecked Sendable {
                     input.largeRequestConfirmChars = LargeRequestGate.confirmChars(
                         provider: llmConfig.apiProvider, baseURL: llmConfig.baseURL)
 
-                    // ⚠️ Tool NAMES, not just a count. This said only "tools=3" — which cannot
-                    // answer "which three?" from a field log, and that question came up twice
-                    // while diagnosing a node. The sampling config is deliberately NOT repeated
-                    // here: the ReAct banner below already prints the provider's full
-                    // `generationConfig`, and a second copy would be noise, not coverage.
+                    // Logs tool names, not just a count. The sampling config is not repeated: the ReAct banner below prints it.
                     let toolNames = activeTools.map(\.name).sorted().joined(separator: ", ")
                     logger.info("[Workflow] AgentInput node='\(workflowContext.nodeName)': tools=\(activeTools.count) [\(toolNames)], generator=\(type(of: generator)), model=\(llmConfig.modelName)")
 
@@ -1073,10 +844,7 @@ class AgentConnect: @unchecked Sendable {
                     let executor = ExecutorFactory.create(for: profile)
                     logger.info("[Workflow] Executor: \(executor.executorLabel) for '\(workflowContext.nodeName)'")
 
-                    // EvaluationLogger bridge — the same three lines the chat path has had all
-                    // along (streamAgentResponse). Without it, a workflow node's thought /
-                    // toolCall / stateChange records never became span events, so the SAME
-                    // profile recorded its reasoning in chat and NOTHING inside a workflow.
+                    // EvaluationLogger bridge, as on the chat path: records thought/toolCall/stateChange as span events.
                     let evalSessionID = UUID()
                     if !activeTools.isEmpty {
                         EvaluationLogger.shared.startSession(id: evalSessionID, availableTools: activeTools)
@@ -1125,16 +893,8 @@ class AgentConnect: @unchecked Sendable {
     ) throws -> any CognitiveGenerator {
         
         switch llmConfig.apiProvider {
-        // NOTE (register #1): the cloud arms intentionally have NO pre-flight
-        // chat-only guard. `cognitiveCapability` is populated only by the LOCAL
-        // analyzers (Ollama /api/show, MLXTokenizerAnalyzer) — cloud model
-        // selection leaves it at the default `.none`, so guarding on it here
-        // would 405 every existing cloud profile. The runtime guard lives in
-        // ProviderErrorClassifier.classify(statusCode:rawBody:): a 400/422 whose
-        // body rejects tool definitions classifies fatal with an actionable
-        // "doesn't support tool calling" message. The silent-ignore shape
-        // (endpoint accepts `tools` but the model never calls one) is the
-        // register-#3 zero-tool-call detector, tracked separately.
+        // Cloud arms have no pre-flight chat-only guard: `cognitiveCapability` is set only by local analyzers, so guarding
+        // would reject every cloud profile. A 400/422 rejecting tools is classified fatal by ProviderErrorClassifier.
         case .anthropic:
             return NativeStructuredGenerator(
                 toolAdapter: ClaudeToolSchemaAdapter(),
@@ -1148,9 +908,7 @@ class AgentConnect: @unchecked Sendable {
             )
 
         case .openAI, .openRouter, .openAICompatible:
-            // OpenRouter and custom OpenAI-compatible endpoints speak the OpenAI
-            // chat schema, so they share the OpenAI tool encoding and native turn
-            // adapter.
+            // OpenRouter and custom OpenAI-compatible endpoints share the OpenAI tool encoding and native turn adapter.
             return NativeStructuredGenerator(
                 toolAdapter: NativeJSONSchemaAdapter(),
                 toolTurnAdapter: OpenAIToolTurnAdapter()
@@ -1162,33 +920,8 @@ class AgentConnect: @unchecked Sendable {
             // Primary Routing Dimension: Structural Capability
             switch cognitiveProfile.capability {
             case .none:
-                // ⚠️ This used to THROW a 405 and refuse the run outright (register G94). It was the
-                // second of two enforcements of the same heuristic, and it made a promise the app
-                // had already made to the user unkeepable: the MLX picker (since deleted) told them the check
-                // "is a name-based heuristic and is often wrong for new or re-quantized models — if
-                // you know it supports tools, keep it selected", and that same file states
-                // "Tool-capability is LABELLED, not enforced". Keeping the model selected then
-                // produced a profile that could not be saved (G92) and could not be run (here).
-                //
-                // A capability classification may LABEL, never GATE. The verdict can be wrong in the
-                // permissive direction too — MLX Tier 0 forces `.none` on the model NAME alone
-                // (deepseek-r1, qwq, gpt-oss, magistral) ahead of any tokenizer evidence, so a model
-                // with tool tokens and a tool-aware chat template is refused on its name.
-                //
-                // So: proceed, and let the attempt report the truth. A model that genuinely cannot
-                // call tools fails visibly — the local dialects degrade to text, and a server that
-                // rejects a tools param answers 400, which
-                // `ProviderErrorClassifier.classify(statusCode:rawBody:)` already turns into a named
-                // error. That is the same policy the cloud arms above follow deliberately, and the
-                // same one the former Ollama picker documented ("the runtime gate reports the
-                // failure honestly rather than trapping the picker"). User decision, 2026-08-06.
-                //
-                // ⚠️ The refusal CANNOT be made selective today even where it would be justified:
-                // `CognitiveProfile.toolSupportCaveat` distinguishes an authoritative
-                // `.serverRejectsTools` (the Ollama daemon declared no tools — a tools request WILL
-                // 400) from a heuristic `.reasoningFocused`, but `ProviderConfig.cognitiveProfile`
-                // never passes it, so it is always nil on a persisted profile. Persisting it is the
-                // prerequisite for ever reinstating a gate here — do not reinstate one without it.
+                // A capability classification labels, never gates: the run proceeds and a model that cannot call tools fails visibly.
+                // Do not reinstate a gate: `ProviderConfig.cognitiveProfile` never persists `toolSupportCaveat`.
                 if !isBotFlow {
                     logger.warning(
                         "[AGENT] Running an AGENT turn on \(llmConfig.apiProvider.rawValue) model "
@@ -1202,9 +935,8 @@ class AgentConnect: @unchecked Sendable {
                 return JsonStructuredGenerator()
                 
             case .singleAction:
-                // Secondary Dimension: Dialect matching for single-action text constraints.
-                // Default is ReAct Markdown — the most universal format for weak/unknown models
-                // that have basic tool awareness but no proven structured-output training.
+                // Dialect matching for single-action text constraints; the default is ReAct Markdown, the most universal format
+                // for weak or unknown models.
                 switch cognitiveProfile.dialect {
                 case .mistralXML:
                     return XMLStructuredGenerator()
@@ -1213,12 +945,8 @@ class AgentConnect: @unchecked Sendable {
                 }
                 
             case .parallelActions:
-                // Ollama: API layer abstracts the model's native format — always use NativeStructuredGenerator.
-                // MLX: No intermediary API — must match the model's trained output dialect via chat_template.
-                //
-                // Native-template dialects all share one generator (NativeToolTemplateGenerator)
-                // parameterized by `(expectedDialect, triggerSuffix, logTag)`. The dialect-specific
-                // parsing lives in the parser (routed via CognitiveParsePipeline).
+                // Ollama: the API abstracts the model's native format, so always use NativeStructuredGenerator.
+                // MLX: no intermediary API; the generator must match the model's trained dialect via chat_template.
                 if llmConfig.apiProvider == .mlx {
                     switch cognitiveProfile.dialect {
                     case .qwenHermesToolCall:
@@ -1278,9 +1006,7 @@ class AgentConnect: @unchecked Sendable {
                         return NativeToolTemplateGenerator.deepseekV32()
 
                     case .mistralXML:
-                        // Legacy hybrid-XML path — pre-dates the native-template refactor.
-                        // Retained for models misclassified as mistralXML before the fingerprinter
-                        // could route them more precisely. Emits <tool_call><content>/<tool_name>/<arguments>.
+                        // Legacy hybrid-XML path for models classified as mistralXML; emits <tool_call><content>/<tool_name>/<arguments>.
                         logger.info("🧩 Resolved Generator Strategy: XMLNativeStructuredGenerator for model: \(llmConfig.modelName)")
                         return XMLNativeStructuredGenerator()
 
@@ -1345,20 +1071,8 @@ class AgentConnect: @unchecked Sendable {
                 throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL: \(baseURLString)"])
             }
             
-            // Extract options for Ollama.
-            //
-            // ⚠️⚠️ Delegated to `OllamaRequestOptions` rather than resolved here. The preset
-            // fallback and the num_ctx auto-default used to live inline in this function, which
-            // meant `EffectiveContextWindow` — the resolver behind the gauge, the compaction
-            // budget, the native-turn budget and the pre-send fit check — could not see them. It
-            // read `advancedConfiguration` (nil for any profile whose Advanced panel was never
-            // opened) and answered 16384 while this block sent 8192. Everything downstream priced
-            // a window twice the real one. Whatever this block decides, the budgets now decide
-            // identically, because they call the same function.
-            //
-            // `isBotFlow` picks the ladder: `OllamaAdvancedConfig.default()` is the AGENT preset,
-            // and handing it to a Bot pins a conversational profile to temperature 0.1 with a
-            // fixed seed, so every repeated prompt returns a byte-identical reply.
+            // Ollama options are resolved by `OllamaRequestOptions`, so the request and the context budgets share one resolver.
+            // `isBotFlow` picks the ladder: the agent preset would pin a bot to temperature 0.1 with a fixed seed.
             let flavour: OllamaConfigDefaultProfile = isBotFlow ? .chat : .agent
             let resolvedOptions = OllamaRequestOptions.resolve(
                 stored: llmConfig.advancedConfiguration,
@@ -1431,10 +1145,8 @@ class AgentConnect: @unchecked Sendable {
                 timeout: 300.0,
                 options: options,
                 rateLimitKey: rlKey,
-                // OpenRouter attribution. Both headers are static project identifiers —
-                // nothing about the user, the machine or the prompt is conveyed — and sending
-                // the pair is what lists the app on OpenRouter's public app rankings.
-                // `HTTP-Referer` was omitted while there was no public homepage; there is one now.
+                // OpenRouter attribution: both headers are static project identifiers;
+                // nothing about the user, machine or prompt is sent.
                 extraHeaders: [
                     "X-Title": "Devgentic",
                     "HTTP-Referer": GlobalConstants.homepageURL,
@@ -1448,10 +1160,8 @@ class AgentConnect: @unchecked Sendable {
             )
 
         case .openAICompatible:
-            // Any OpenAI-compatible endpoint (LM Studio, vLLM, llama.cpp server,
-            // Groq, DeepSeek, …). Base URL is REQUIRED (no canonical default);
-            // the API key is OPTIONAL (local servers usually need none — a nil
-            // key simply omits the Authorization header in OpenAILLMProvider).
+            // Any OpenAI-compatible endpoint (LM Studio, vLLM, llama.cpp server, Groq, DeepSeek, ...). Base URL is required;
+            // the API key is optional, and a nil key omits the Authorization header in OpenAILLMProvider.
             guard let baseURLString = llmConfig.baseURL,
                   !baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   let baseURL = URL(string: baseURLString) else {
@@ -1476,15 +1186,8 @@ class AgentConnect: @unchecked Sendable {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Gemini API Key is required."])
             }
 
-            // Use the native Gemini API SHAPE exclusively to prevent 429 schema compatibility
-            // errors — that decision is about the request format, not about the host.
-            //
-            // ⚠️ register B21 (twin of the imageGen finding). The host was hardcoded here too, so a
-            // Google profile pointed at a corporate gateway listed its models through the gateway
-            // (`GeminiService.verifyAndFetchModels` honours `baseURL`) and then sent every actual
-            // completion — and its gateway-scoped key — to `generativelanguage.googleapis.com`.
-            // One profile, two hosts, and the credential went to the one the user configured away
-            // from. The path suffix is unchanged; only the root is now the configured one.
+            // Uses the native Gemini API shape exclusively (avoids 429 schema errors); the host is the configured base URL,
+            // so a gateway-scoped key is only sent to the configured gateway.
             let googleBaseURL = ProviderDefaults
                 .resolvedBaseURL(configured: llmConfig.baseURL, fallback: ProviderDefaults.geminiBaseURL)
                 .appendingPathComponent("models/\(llmConfig.modelName)")
@@ -1492,11 +1195,8 @@ class AgentConnect: @unchecked Sendable {
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
             } else {
-                // [advanced-config default] See the Ollama arm. The Gemini panel shows Max Output
-                // Tokens 2048 and a full set of safety thresholds on an unconfigured profile; none
-                // of it was sent, so the model used the account defaults while the UI claimed
-                // otherwise — and for the safety controls specifically, "claimed otherwise" means a
-                // user believed they had loosened or tightened filtering when they had not.
+                // Advanced-config default (see the Ollama arm): the panel shows these values on an unconfigured profile,
+                // so they are sent rather than leaving the account defaults in effect.
                 options = AdvancedConfigEncoder.encode(GeminiAdvancedConfig.default())
                 logger.info("""
                     [PROFILE] No stored advanced configuration for Gemini model \
@@ -1510,10 +1210,8 @@ class AgentConnect: @unchecked Sendable {
             
         case .mlx:
             let modelName = llmConfig.modelName
-            // `ensureLoaded()` rather than a fire-and-forget refresh: the scan is now
-            // off-actor, so reading the list straight after asking for a refresh can observe
-            // an empty one — indistinguishable from "the model isn't installed", which would
-            // fail the turn with a 404 for a model that is present.
+            // `ensureLoaded()` rather than a fire-and-forget refresh: the scan is off-actor, so an immediate read could see an
+            // empty list and fail the turn with a 404 for an installed model.
             await MLXModelService.shared.ensureLoaded()
             let modelPath: URL? = await MainActor.run {
                 MLXModelService.shared.installedModel(named: modelName)?.localPath
@@ -1523,9 +1221,7 @@ class AgentConnect: @unchecked Sendable {
             }
             try await MLXService.shared.loadModel(from: path)
 
-            // Decode MLX advanced parameters from the stored configuration.
-            // If the user hasn't customized settings, use model-aware recommended defaults
-            // based on tier and quantization (e.g., 3-bit models get stronger repetition penalty).
+            // MLX advanced parameters come from the stored configuration, else model-aware defaults by tier and quantization.
             let mlxConfig: MLXAdvancedConfig = {
                 if let advDict = llmConfig.advancedConfiguration {
                     let rawDict = advDict.mapValues { $0.rawValue }
@@ -1556,14 +1252,8 @@ class AgentConnect: @unchecked Sendable {
     
     // MARK: - Tool Resolution
     
-    /// `internal` rather than `private` ONLY so the no-cross-source-fallback invariant below can
-    /// be tested directly. It has no other callers outside this type; the tool-shadowing rule it
-    /// enforces is a security boundary, and a source scan is too weak a guard for one.
     /// Names a configured tool may never take, because `AgentConnect` injects a tool under each.
-    ///
-    /// ⚠️ Derived from `NativeToolCatalog.injectedToolNames` — THE list of injected tools — never
-    /// written out here. A second hand-kept list is how an injected tool gets added without being
-    /// reserved, which is the exact shape of CR-2.
+    /// Derived from `NativeToolCatalog.injectedToolNames`, never written out by hand; internal so tests can reach it.
     static var reservedInjectedToolNames: Set<String> { NativeToolCatalog.injectedToolNames }
 
     /// What `deduplicatingToolNames` kept and why it dropped the rest.
@@ -1575,11 +1265,9 @@ class AgentConnect: @unchecked Sendable {
         var shadowingReserved: [String] = []
     }
 
-    /// One name, one tool — with injected names reserved against configured tools.
-    ///
-    /// Pure so the rule is testable without a tool store. `firstConfiguredIndex` splits the list:
-    /// tools before it were injected by `resolveExecutableTools` itself (`ask_user`, `load_skill`)
-    /// and keep their reserved names; a tool at or after it is user-configured and may not take one.
+    /// Deduplicates tool names, reserving injected names against configured tools.
+    /// `firstConfiguredIndex` splits the list: tools before it were injected by `resolveExecutableTools` (`ask_user`,
+    /// `load_skill`) and keep their names; a tool at or after it is user-configured and may not take one.
     static func deduplicatingToolNames(
         _ tools: [AgentTool],
         firstConfiguredIndex: Int,
@@ -1620,32 +1308,16 @@ class AgentConnect: @unchecked Sendable {
 
         var activeTools: [AgentTool] = []
 
-        // -----------------------------------------------------------------
-        // 1. Core System Tools (Inherently Safe & Required for ALL models)
-        // -----------------------------------------------------------------
-        // Note: VectorSearchTool (recall_conversation_history) was removed here.
-        // It was redundant — the same HNSW vector store is already queried by the
-        // RAG pipeline pre-request (contextualRAG / directInjection), and recent
-        // turns are auto-injected via EpisodicHistoryFormatter XML. Keeping the
-        // tool wasted a tool slot and caused small models to call it reflexively.
-        // Small/tiny local models fumble the optional `options`/`multiline` fields (truncating the
-        // question to dump content into options, emitting `multiline` as a string), so advertise only
-        // `question` to them. Capable models keep the richer one-tap-choices schema.
+        // Small/tiny local models fumble the optional `options`/`multiline` fields, so only `question` is advertised to them.
         let askUserRichFields = !(modelTier == .small || modelTier == .tiny)
         activeTools.append(wrapTool(AskUserTool(richFields: askUserRichFields), requiresConfirmation: false))
 
-        // -----------------------------------------------------------------
-        // 2.5. Skill Loading Tool (conditional — only when skills are configured)
-        // -----------------------------------------------------------------
         if let manifests = skillManifests, !manifests.isEmpty {
             let loadSkillTool = LoadSkillTool(manifests: manifests)
             activeTools.append(wrapTool(loadSkillTool, requiresConfirmation: false))
             logger.info("Registered load_skill tool with \(manifests.count) available skill(s)")
         }
 
-        // -----------------------------------------------------------------
-        // 3. User-Configured / External Tools (Standard resolution)
-        // -----------------------------------------------------------------
         let allToolSources = await UnifiedToolStore.shared.sources
 
         // Everything from here on is a user-configured tool; everything before is injected.
@@ -1653,33 +1325,12 @@ class AgentConnect: @unchecked Sendable {
 
         var unresolved: [String] = []
         for toolConfig in profileTools where toolConfig.isEnabled {
-            // Resolve by SOURCE, not by name — and ONLY within that source.
-            //
-            // This used to try `resolveNativeTool(toolName:)` unconditionally and only fall
-            // through to MCP when the name missed. Because MCP servers choose their own
-            // tool names, any server exposing a name that collides with a built-in — a
-            // filesystem server offering `read_file`, say — had its calls silently
-            // dispatched to Devgentic's LOCAL implementation instead, ignoring
-            // `toolConfig.sourceId` entirely. The user enabled one tool and a different
-            // one ran, with matching arguments making the swap invisible.
-            //
-            // `sourceId` is the whole answer, in both directions: it says which
-            // implementation the user chose, and a same-named tool from anywhere else is a
-            // different program with different limits. See the resolver below for why the
-            // remaining `??` fallbacks were removed too.
+            // Resolve by source, and only within that source: MCP servers choose their own tool names, so a same-named
+            // tool from another source is a different program.
             let isBuiltIn = toolConfig.sourceId == ToolSource.builtInSourceID
 
-            // Skip tools from a disabled server BEFORE any resolution attempt.
-            //
-            // This once carried the load of a correctness guard: while the resolver below fell
-            // back across sources, returning nil from `resolveMCPTool` was not enough, because
-            // the caller then ran the same-named built-in — the shadowing bug in reverse,
-            // reachable by simply switching a server off. That fallback is gone, so
-            // `resolveMCPTool`'s own `source.isEnabled` guard would now produce the same
-            // OUTCOME. This stays for the DIAGNOSTIC: a server the user deliberately switched
-            // off is not a dropped capability, and it must not be reported as one. Falling
-            // through would add the tool to `unresolved` and emit the ⚠️ NOT RESOLVED error,
-            // burying real drops in noise every turn.
+            // Skip tools from a disabled server before resolving: a deliberately disabled server is not a dropped capability
+            // and must not be reported as one.
             if !isBuiltIn,
                let source = allToolSources.first(where: { $0.id == toolConfig.sourceId }),
                !source.isEnabled {
@@ -1691,29 +1342,8 @@ class AgentConnect: @unchecked Sendable {
                 continue
             }
 
-            // Resolve STRICTLY within the declared source — no cross-source fallback.
-            //
-            // ⚠️ Both arms used to end in `?? <the other resolver>`, which left the shadowing bug
-            // half-open in each direction. Branching on `isBuiltIn` fixed the common case (a name
-            // that exists on BOTH sides resolves to the declared one), but the fallbacks still
-            // fired whenever the declared side MISSED:
-            //   • non-built-in ?? native — a server that is enabled yet no longer exposes the name
-            //     (tool renamed or removed upstream), or a server row that is GONE entirely, had
-            //     its calls quietly executed by Devgentic's same-named local implementation. The
-            //     `!source.isEnabled` skip above does not cover this: it only fires when the source
-            //     row still exists, so a REMOVED server was the sharpest form of the substitution.
-            //   • built-in ?? MCP — a built-in deleted or renamed between releases resolved to
-            //     whatever MCP server happened to expose the old name.
-            // In both cases the user enabled one tool and a different implementation ran, with
-            // matching arguments making the swap invisible. "The source you chose is unavailable,
-            // so run something else with the same name" is never the safe default for a tool call.
-            // Dropping the capability is, and the drop is reported loudly below.
-            // ⚠️ BUILT-INS RESOLVE THROUGH THE RENAME MAP, which is NOT the cross-source fallback
-            // removed above. That one guessed at an implementation by NAME and let an MCP server
-            // shadow a built-in. This is a DECLARED mapping between two versions of our own
-            // catalogue — `batch_command` → `run_command` + `start_background_task` — where the
-            // replacement is known because we performed the split. Without it, withdrawing a name
-            // silently removes the capability from every profile that had it.
+            // Resolves strictly within the declared source, with no cross-source fallback: a missing tool is dropped and reported.
+            // Built-ins resolve through the declared rename map between catalogue versions.
             let resolved: AgentTool? = isBuiltIn
                 ? self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage)
                 : self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources, conversationID: conversationID)
@@ -1722,21 +1352,11 @@ class AgentConnect: @unchecked Sendable {
                 activeTools.append(agentTool)
                 logger.debug("[TOOLRESOLVE] \(isBuiltIn ? "native" : "MCP") '\(toolConfig.name)' enabled from source \(toolConfig.sourceId) (confirm: \(toolConfig.requiresConfirmation)) [conv \(conversationID)]")
             } else {
-                // A SILENT CAPABILITY DROP — the loudest thing in this function.
-                //
-                // The profile asked for this tool and the agent will run without it. Nothing
-                // surfaces in the UI, and the stale entry stays in the profile forever (the Tool
-                // Library renders from `UnifiedToolStore`, so a name with no matching source has
-                // no row to un-tick). Before 2026-07-31 this was one `warning` with the bare name:
-                // no profile, no conversation, no statement of the consequence — unusable for
-                // working out why an agent "forgot" how to do something.
+                // A silent capability drop: the profile asked for this tool and the agent runs without it; it is collected
+                // into `unresolved` and reported loudly below.
                 unresolved.append(toolConfig.name)
 
-                // Name the OTHER side explicitly when it would have matched. That case is exactly
-                // what the removed fallback used to swallow, and it is the one the user can act
-                // on: a same-named implementation exists, it is simply not the one this profile
-                // declared. Saying so is the difference between "re-add it from the Tool Library"
-                // and a fruitless hunt for a tool that looks present everywhere.
+                // Names the other side explicitly when it would have matched, so the user can re-add the tool from the Tool Library.
                 let shadowCandidate: String? = isBuiltIn
                     ? (allToolSources.first { $0.id != ToolSource.builtInSourceID && $0.tools.contains { $0.name == toolConfig.name } }
                         .map { "MCP server '\($0.serverName)' (\($0.id))" })
@@ -1770,22 +1390,8 @@ class AgentConnect: @unchecked Sendable {
             logger.error("[TOOLRESOLVE] \(unresolved.count) of \(profileTools.filter(\.isEnabled).count) enabled tool(s) unresolved: \(unresolved.sorted().joined(separator: ", ")) [conv \(conversationID)]")
         }
 
-        // Enforce name uniqueness before anything reaches a provider.
-        //
-        // Tool names are the model's only handle on a tool, and MCP servers pick their own.
-        // Two enabled tools sharing a name — two servers exposing `search`, or a server
-        // shadowing a built-in — were emitted as duplicate entries in the request payload.
-        // Anthropic rejects that outright (400, "duplicate tool name"), so ONE colliding
-        // MCP server broke every request in the conversation rather than just its own tool.
-        // Keep the first occurrence (built-ins resolve first) and drop the rest loudly.
-        //
-        // ⚠️⚠️ INJECTED NAMES ARE RESERVED, not merely "first wins". `final_answer`, `remember`,
-        // `forget`, `recall` and `get_conversation_history` are appended by the CALLER after this
-        // function returns, so a configured tool already holding one of those names survived this
-        // filter — `DynamicMCPTool.name` is the server's raw name, nothing namespaces it — and the
-        // caller then added a second. Anthropic 400d every request; every other provider TRAPPED in
-        // `ToolExecutionLoop`'s lookup on the first tool batch (readiness CR-2). The injected copy
-        // must win: the run's own protocol (`final_answer`, project memory) depends on it.
+        // Enforces name uniqueness before anything reaches a provider (Anthropic rejects duplicate tool names outright).
+        // Keeps the first occurrence, built-ins first; injected names are reserved and win over configured tools.
         let deduplicated = Self.deduplicatingToolNames(activeTools, firstConfiguredIndex: firstConfiguredToolIndex)
         activeTools = deduplicated.kept
         let duplicates = deduplicated.duplicates
@@ -1811,21 +1417,8 @@ class AgentConnect: @unchecked Sendable {
                 """)
         }
 
-        // -----------------------------------------------------------------
-        // 4. Agent Delegation Tool (when capability is ON)
-        // -----------------------------------------------------------------
-        // ⚠️ register B15 — agent delegation is WITHDRAWN, and the runtime now enforces that
-        // rather than obeying whatever the stored blob says. The toggle was removed from the UI
-        // long ago (A66), but the gate here is the mere PRESENCE of `capabilities.agentDelegation`
-        // — there is no `isEnabled` flag — so every profile carrying that config (old "Supervisor"
-        // profiles were converted to it) went on injecting `call_agent` on every run, with
-        // nothing on screen to say so.
-        //
-        // Enforced at CONSUMPTION with one named constant, exactly like
-        // `PlanningCapability.parallelSubtasksSupported` (register A67): one line to flip when
-        // sub-agents are worth reviving. The stored config is logged and IGNORED, never rewritten
-        // — a migration would destroy a preference the user expressed for a feature the team
-        // intends to restore, and that is a one-way door.
+        // Agent delegation is withdrawn: the stored config is logged and ignored, never rewritten,
+        // while `agentDelegationSupported` is false.
         if !Self.agentDelegationSupported, agentCapabilities?.agentDelegation != nil {
             logger.notice("""
                 [PROFILE] Ignoring the stored Agent Delegation configuration — the capability is \
@@ -1861,10 +1454,8 @@ class AgentConnect: @unchecked Sendable {
     
     // MARK: - Tool Wrapping
     
-    /// Wraps a concrete DevgenticTool into an AgentTool with type-erased execution closure.
-    /// Thin alias for `AgentToolFactory.wrap`, kept because the injected control-plane tools
-    /// (`ask_user`, `final_answer`, `get_conversation_history`, `load_skill`,
-    /// `remember`) are built here with run-scoped data and read better unqualified.
+    /// Wraps a DevgenticTool into an AgentTool with a type-erased execution closure.
+    /// Thin alias for `AgentToolFactory.wrap`, used for the injected control-plane tools built with run-scoped data.
     private func wrapTool<T: DevgenticTool>(_ tool: T, requiresConfirmation: Bool, timeout: TimeInterval? = nil, timeoutMessage: String? = nil) -> AgentTool {
         AgentToolFactory.wrap(tool, requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
     }
@@ -1884,8 +1475,8 @@ class AgentConnect: @unchecked Sendable {
         let remember = RememberTool(projectPath: projectPath, conversationID: conversationID, messageID: messageID)
         let forget = ForgetTool(projectPath: projectPath, conversationID: conversationID, messageID: messageID)
         let recall = RecallTool(projectPath: projectPath)
-        // ⚠️ Through `ReportOnlyRun`, here where the tools are built, so no caller can hand an
-        // unwatched run `remember`/`forget` (CR-17). An attended run is unchanged.
+        // Goes through `ReportOnlyRun` here so no caller can hand an unwatched run `remember`/`forget`;
+        // attended runs are unchanged.
         return ReportOnlyRun.allowedInjectedTools([
             AgentToolFactory.wrap(remember, requiresConfirmation: CodeToolPreset.injectedToolRequiresConfirmation(remember.name)),
             AgentToolFactory.wrap(forget, requiresConfirmation: CodeToolPreset.injectedToolRequiresConfirmation(forget.name)),
@@ -1893,13 +1484,10 @@ class AgentConnect: @unchecked Sendable {
         ])
     }
 
-    /// A Code run's project knowledge: the project's `AGENTS.md` and memory listing, read from
-    /// disk now — so an edit to either, or a `remember` in the previous conversation, is in this run
-    /// without the profile being rewritten. Nil when the project has neither, or the run has no folder.
-    ///
-    /// ⚠️ Its own layer (`AgentInput.projectKnowledge`), never glued onto the instructions: the
-    /// instructions head the system message, and this text changes whenever a memory is saved or a
-    /// stale mark flips — which would make every later token of the prompt unreusable (layout B).
+    // Why: kept as its own layer (`AgentInput.projectKnowledge`), not appended to the instructions;
+    // its text changes with every saved memory.
+    /// A Code run's project knowledge: the project's `AGENTS.md` and memory listing, read from disk on each run.
+    /// Nil when the project has neither, or the run has no folder.
     static func codeProjectKnowledge(_ config: AgentConfig, traceTag: String) -> String? {
         guard let projectPath = config.projectPath else { return nil }
         let knowledge = CodeSystemPrompt.projectKnowledge(forProject: projectPath, apiProvider: config.llmConfig.apiProvider)
@@ -1914,12 +1502,8 @@ class AgentConnect: @unchecked Sendable {
 
     // MARK: - Native Tool Resolution
     
-    /// Resolves a native tool by name.
-    ///
-    /// A lookup, not a switch. This was a ~100-line `switch` that was the second of two
-    /// hand-maintained tool lists — see `NativeToolCatalog` for what that cost. The catalogue is
-    /// now the only place a native tool is declared; this decides nothing except which
-    /// per-profile settings to hand it.
+    /// Resolves a native tool by name through `NativeToolCatalog`, the only place a native tool is declared.
+    /// Decides only which per-profile settings to hand the tool.
     func resolveNativeTool(toolName: String, conversationID: UUID, requiresConfirmation: Bool, timeout: TimeInterval? = nil, timeoutMessage: String? = nil) -> AgentTool? {
         guard let entry = NativeToolCatalog.entry(named: toolName) else { return nil }
         return entry.agentTool(
@@ -1936,10 +1520,7 @@ class AgentConnect: @unchecked Sendable {
             return nil
         }
 
-        // A disabled server contributes nothing. Its rows stay in the Tool Library so the
-        // user can switch it back on, so this is the seam that makes the toggle mean
-        // something — without it, disabling a server would stop it CONNECTING while its
-        // tools still registered and then failed at call time.
+        // A disabled server contributes nothing; its rows stay in the Tool Library so the user can switch it back on.
         guard source.isEnabled else {
             logger.info("""
                 [TOOLRESOLVE] '\(toolConfig.name)' skipped — its server '\(source.serverName)' \
@@ -1949,13 +1530,8 @@ class AgentConnect: @unchecked Sendable {
             return nil
         }
 
-        // Tie this source to the conversation now, while we still know both. A server's
-        // sampling / elicitation request arrives later, out-of-band, carrying neither — this
-        // is what lets it be raised in the conversation that actually caused it.
-        // Hop to the main actor — this resolver is nonisolated and both brokers own
-        // main-actor state. Fire-and-forget is correct here: the association only has to be
-        // in place before the server issues a request, which cannot happen until after the
-        // tool is registered and a turn starts.
+        // Ties this source to the conversation now: a server's later sampling/elicitation request carries neither.
+        // Fire-and-forget on the main actor is fine; the association only has to exist before the server issues a request.
         let sourceID = source.id
         Task { @MainActor in
             MCPSamplingBroker.shared.noteActivity(sourceID: sourceID, conversationID: conversationID)
@@ -1979,11 +1555,7 @@ class AgentConnect: @unchecked Sendable {
     // MARK: - Logging Helper
     
     /// The `Metadata:` line of the configuration banner.
-    ///
-    /// ⚠️ Cloud models used to print "Medium tier, unknown quant, unknown family" — local-model
-    /// vocabulary that read as a misdetection. Quantization and family are only ever filled in by
-    /// the local analyzers; a cloud model's tier is the fixed default the pickers seed (it gates
-    /// only local-path behaviour), so say that instead of implying something failed.
+    /// Quantization and family come only from local analyzers; a cloud model's tier is the seeded default and is labelled so.
     static func metadataSummary(for config: ProviderConfig) -> String {
         let meta = config.modelMetadata
         let window = meta?.contextWindow.map { "\($0.formatted()) token window" } ?? "window unknown"
@@ -2040,10 +1612,8 @@ class AgentConnect: @unchecked Sendable {
         logger.notice("\(logMsg)")
     }
 
-    /// Returns the dialect label used in the startup config log. Cloud providers always
-    /// speak native JSON; local providers (MLX/Ollama) route by the dialect stored on
-    /// ProviderConfig, so we surface that value directly. `.none` capability has no
-    /// dialect in play — it runs through the heuristic JSON fallback.
+    /// Returns the dialect label used in the startup config log: cloud providers speak native JSON, local providers
+    /// surface the dialect stored on `ProviderConfig`, and `.none` capability uses the heuristic JSON fallback.
     private func effectiveDialect(_ config: ProviderConfig) -> String {
         switch config.apiProvider {
         case .anthropic, .google, .openAI, .openRouter, .openAICompatible:

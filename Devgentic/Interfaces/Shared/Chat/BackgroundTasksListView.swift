@@ -4,22 +4,14 @@
 //  BackgroundTasksListView.swift
 //  Devgentic
 //
-//  Every command this conversation has run, in one place — the persistent list the timeline card
-//  cannot be, because a card is pinned to the turn that produced it and a build you started six
-//  turns ago is scrolled away.
-//
-//  ⚠️ DELIBERATELY NOT a `CodeViewerTab`. That type is a SOURCE-EDITOR tab: `editedCode`,
-//  `lastSavedBuffer`, `lastSavedDisk`, `preWriteDisk`, dirty tracking and save-drift guards, with
-//  five test suites around its subtleties (phantom-dirty state, rejected writes, baselines). A
-//  task list has none of those and would carry every one of them as dead weight, while making a
-//  fragile type polymorphic to do it. This view owns its own state and reads the registry directly;
-//  where it is PRESENTED — a Code Viewer tab, its own panel, a sheet — is a separate decision that
-//  does not change a line of it.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// Every command this conversation has run, in one persistent list that a turn-pinned timeline card cannot be.
+/// Owns its own state and reads the registry directly; deliberately not a `CodeViewerTab` (a source-editor tab).
 struct BackgroundTasksListView: View {
 
     let conversationID: UUID
@@ -42,13 +34,9 @@ struct BackgroundTasksListView: View {
     @State private var isFinishedExpanded: Bool = true
     @State private var now = Date()
 
-    /// Full log text, by task id, for the rows that are currently EXPANDED.
-    ///
-    /// ⚠️ This cache is the whole reason the read moved out of `output(_:)`. That function is a
-    /// `@ViewBuilder`, so `String(contentsOf:)` sitting in it ran on EVERY body evaluation — once
-    /// per tick, per re-render, per parent redraw — re-reading an entire build log each time.
-    /// Loaded when a row opens, refreshed only while that row is open AND its task is live, and
-    /// dropped when it closes: a collapsed row costs nothing, which is the point.
+    // Why: reading the log inside the `@ViewBuilder` would re-read the whole file on every body evaluation
+    /// Full log text, by task id, for the rows that are currently expanded; loaded on open, refreshed only while that row is
+    /// open and its task is live, and dropped on close.
     @State private var logs: [String: String] = [:]
 
     /// Refreshes while anything is live. A conversation of finished tasks stops ticking — the
@@ -205,15 +193,8 @@ struct BackgroundTasksListView: View {
         tasks = chatHistoryViewModel.backgroundTaskItems(for: conversationID)
     }
 
-    /// Pulls one task's FULL log into the cache.
-    ///
-    /// Deliberately the whole file rather than the registry's bounded tail: this view is where
-    /// someone comes to actually read a build log, and 200 lines is not that. The bound that makes
-    /// this affordable is WHEN it runs — on open, and then only while open — not how much it reads.
-    ///
-    /// A row from an earlier launch reads its log FILE directly — the registry never heard of it.
-    /// Once retention has swept that file (7 days), the output tail saved on the card is what is
-    /// left, and the text says so rather than showing "No output." for a command that printed.
+    /// Pulls one task's full log into the cache: the whole file, not the registry's bounded tail, since logs are read here.
+    /// A row from an earlier launch reads its log file directly; once retention swept it, the saved output tail is shown.
     private func loadLog(_ itemID: String) {
         guard let item = tasks.first(where: { $0.id == itemID }) else { return }
         logs[itemID] = Self.logText(for: item, conversationID: conversationID)
@@ -243,11 +224,8 @@ struct BackgroundTasksListView: View {
         }
     }
 
-    /// Expands and scrolls to the focused task, when there is one.
-    ///
-    /// ⚠️ Only ADDS to `expanded`. Replacing the set would collapse whatever the user had already
-    /// opened every time they clicked a different card — the panel is persistent, so its state is
-    /// theirs, not the caller's to reset.
+    /// Expands and scrolls to the focused task, if any. Only adds to `expanded`: replacing the set would collapse
+    /// rows the user opened, since the panel's state is theirs.
     private func reveal(in proxy: ScrollViewProxy) {
         guard let focusTaskID, focusTaskID != revealedFocus,
               tasks.contains(where: { $0.id == focusTaskID }) else { return }
@@ -447,8 +425,7 @@ struct BackgroundTasksListView: View {
 
     @ViewBuilder
     private func output(_ task: BackgroundTaskListItem) -> some View {
-        // ⚠️ CACHE ONLY — never `readLog` here. This is a `@ViewBuilder`; anything in it runs on
-        // every body evaluation. See `logs`.
+        // Cache only: never `readLog` here, since a `@ViewBuilder` runs on every body evaluation. See `logs`.
         let text = logs[task.id] ?? ""
         ScrollView {
             Text(text.isEmpty ? "No output." : text)

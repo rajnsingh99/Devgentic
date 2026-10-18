@@ -4,8 +4,7 @@
 //  OutputSanitizerTests.swift
 //  DevgenticTests
 //
-//  Tests for OutputSanitizer — Stage 0 of the Dialect-Anchored Cascade.
-//  Strips think blocks, BOM artifacts, code fences, and orphan tags.
+//  Created by Raj Singh.
 //
 
 import XCTest

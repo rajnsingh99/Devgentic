@@ -4,19 +4,7 @@
 //  StreamedChunkMergeTests.swift
 //  DevgenticTests
 //
-//  ASM-1 (chat hardening round 3, 2026-07-19): a mid-run `.error` event replaces
-//  message content with a structured error card — but if the producer keeps going
-//  and streams prose afterwards (a workflow where one node fails and a terminal
-//  node succeeds; a planning run where one subtask fails), the next chunk was
-//  appended onto the CARD's textContent and the whole thing rewritten as
-//  markdown: "Execution Failed: Connection refusedHere is the summary…". The
-//  category icon and suggestion affordance were destroyed, and the merged string
-//  is what got persisted and RAG-indexed.
-//
-//  `ChatMessage.resolveStreamedChunkMerge` is the extracted pure merge decision
-//  (same pattern as `resolveFinalizedContent`): on `.error` + chunk it must start
-//  the answer fresh and demote the error to a `.warning(.midRunError)` timeline
-//  event so the failure stays discoverable.
+//  Created by Raj Singh.
 //
 
 import XCTest

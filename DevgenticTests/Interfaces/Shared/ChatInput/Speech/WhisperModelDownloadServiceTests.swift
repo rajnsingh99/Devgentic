@@ -4,10 +4,7 @@
 //  WhisperModelDownloadServiceTests.swift
 //  DevgenticTests
 //
-//  Tests for WhisperModelDownloadService's cache detection logic,
-//  model ID matching, partial download filtering, and state guards.
-//  Network-dependent tests (actual download/delete) are not included
-//  here — these focus on the deterministic, filesystem-based logic.
+//  Created by Raj Singh.
 //
 
 import XCTest

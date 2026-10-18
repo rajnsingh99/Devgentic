@@ -4,7 +4,7 @@
 //  UserBubbleContentView.swift
 //  Devgentic
 //
-//  Extracted from ChatBubbleView for decomposition.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

@@ -4,9 +4,7 @@
 //  LocalModelRefresherTests.swift
 //  DevgenticTests
 //
-//  Tests for LocalModelRefresher.planRefresh — the pure digest diff that decides
-//  which cached LocalModels survive a refresh and which need a fresh /api/show
-//  detection pass.
+//  Created by Raj Singh.
 //
 
 import XCTest

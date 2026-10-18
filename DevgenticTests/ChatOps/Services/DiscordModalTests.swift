@@ -4,14 +4,7 @@
 //  DiscordModalTests.swift
 //  DevgenticTests
 //
-//  Slice 4.2: Discord's structured input, and the per-operation correlation it buys.
-//
-//  ⚠️ A MODAL CANNOT BE OPENED PROACTIVELY, which is why this feature is shaped the way it is.
-//  Opening one is an interaction RESPONSE — it needs a live interaction id and token, valid about
-//  three seconds — and a clarification is raised asynchronously by the agent with no interaction in
-//  flight. So the prompt must first carry a button; the tap creates the interaction the modal is
-//  opened against. Clarification was the one HITL kind rendered with no affordance at all, which is
-//  exactly why its answer could previously only be matched by a provider-wide cursor.
+//  Created by Raj Singh.
 //
 
 import XCTest

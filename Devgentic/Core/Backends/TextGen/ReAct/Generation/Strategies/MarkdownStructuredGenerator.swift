@@ -4,14 +4,7 @@
 //  MarkdownStructuredGenerator.swift
 //  Devgentic
 //
-//  Step 2.2: Dialect-specific generator for the .reactMarkdown dialect.
-//  Injects the classic Thought / Action / Action Input ReAct template.
-//  Calls model.generate() (text mode) and delegates to ReActMarkdownParser.
-//
-//  Target: Models fine-tuned with ReAct-style prompting (e.g., Llama variants
-//  with [available_tools] injection in their Go template).
-//
-//  Created by Raj Singh on 06/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

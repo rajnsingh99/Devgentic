@@ -4,8 +4,7 @@
 //  OllamaConnect.swift
 //  Devgentic
 //
-//  Refactored to pure API Client.
-//  Handles server status, model management, and VRAM memory lifecycle.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -32,17 +31,13 @@ struct OllamaShowResponse: Codable {
     let parameters: String?
     let template: String?
     let details: OllamaModelDetails?
-    /// Authoritative capability list reported by Ollama 0.3.4+.
-    /// When present and missing `"tools"`, the server WILL return HTTP 400 if
-    /// we pass the `tools` parameter — that's the signal we use to force
-    /// `capability = .none` in `cognitiveProfile(modelName:)`. Absent on older
-    /// Ollama releases; in that case the heuristic fallback path runs.
+    /// Authoritative capability list reported by Ollama 0.3.4+; nil on older releases, where the heuristic path runs.
+    /// When present without `"tools"`, the server rejects the `tools` parameter with HTTP 400, so
+    /// `cognitiveProfile(modelName:)` forces `.none`.
     let capabilities: [String]?
-    /// Architectural metadata block returned only when `/api/show` is called
-    /// with `verbose: true`. Carries GGUF metadata keys like
-    /// `{family}.context_length`, `general.parameter_count`, etc. Nil when
-    /// `verbose` was omitted or the Ollama version doesn't support it.
-    /// Consumed by `buildMetadata()` to populate `ModelMetadata.contextWindow`.
+    /// Architectural metadata (GGUF keys such as `{family}.context_length`), returned only when `/api/show` is called
+    /// with `verbose: true`. Nil when `verbose` was omitted or the Ollama version does not support it;
+    /// `buildMetadata()` reads it for `ModelMetadata.contextWindow`.
     let modelInfo: [String: JSONValue]?
 
     enum CodingKeys: String, CodingKey {
@@ -60,9 +55,8 @@ struct OllamaShowResponse: Codable {
     /// Sending `think: true` to a model that doesn't support it returns HTTP 400,
     /// so this is used at model-selection time to seed `ProviderConfig.thinkingEnabled`.
     var supportsThinking: Bool {
-        // Authoritative: the daemon declares `thinking` directly (Ollama 0.9+).
-        // Renderer-based models (gemma4, qwen3.5, kimi) have no template markers
-        // to sniff — the declaration is the only signal they emit.
+        // Authoritative: the daemon declares `thinking` directly (Ollama 0.9+). Renderer-based models have no template
+        // markers to sniff, so the declaration is the only signal.
         if capabilities?.contains("thinking") == true { return true }
 
         let templateStr = template?.lowercased() ?? ""
@@ -94,50 +88,21 @@ struct OllamaShowResponse: Codable {
         return false
     }
 
-    /// Backward-compatible computed property — delegates to `cognitiveProfile(modelName:)`
-    /// with an empty model name. Callers that have the model name available should prefer
-    /// the method form because it enables reasoning-only detection for distilled fine-tunes
-    /// (deepseek-r1 family reports family="qwen2" which would otherwise bypass the gate).
+    /// Computed form of `cognitiveProfile(modelName:)` with an empty model name. Prefer the method form when the name
+    /// is known: it enables reasoning-only detection for distilled fine-tunes whose family hides behind a base family.
     var cognitiveProfile: CognitiveProfile {
         cognitiveProfile(modelName: "")
     }
 
-    /// Returns the full CognitiveProfile (capability + dialect) for this Ollama model.
-    ///
-    /// Resolution, with `toolSupportCaveat` qualifying every non-clean verdict so
-    /// pickers can explain instead of silently hiding:
-    ///
-    /// **Capabilities field present** (Ollama 0.3.4+ — authoritative both ways):
-    /// 1. Lacks `"tools"` → `.none` + `.serverRejectsTools`. The server WILL reject
-    ///    any tools-param request with HTTP 400; no heuristic may second-guess this.
-    /// 2. Contains `"tools"` → `.parallelActions`. That IS the server's contract —
-    ///    it accepts the tools param and normalizes calls to standard JSON regardless
-    ///    of template internals. Renderer-based models (gemma4, qwen3.5, kimi-k2:
-    ///    template is just `{{ .Prompt }}`, unknown family) carry no heuristic signal,
-    ///    so falling through would misclassify them. Reasoning-focused fine-tunes
-    ///    (deepseek-r1, qwq, gpt-oss) additionally get `.reasoningFocused` — they stay
-    ///    selectable (the server accepts tools) but pickers surface a reliability
-    ///    warning; hiding them was a quality judgment expressed as a protocol gate.
-    ///
-    /// **No capabilities field** (legacy daemons):
-    /// 3. Reasoning-only pattern match → `.none` + `.reasoningFocused`. Without the
-    ///    authoritative field we can't verify the server accepts tools for these
-    ///    distilled fine-tunes (deepseek-r1:14b reports the tool-capable BASE family
-    ///    qwen2), so they stay blocked — but visibly, with the reason attached.
-    /// 4. Template/family heuristics, unchanged. A no-signal `.none` result carries
-    ///    `.undetected` so the UI can say "can't verify" rather than nothing.
-    ///
-    /// - Parameter modelName: The Ollama model identifier (e.g. `"deepseek-r1:14b"`).
-    ///   Pass `""` if unavailable — reasoning-only detection will still run against
-    ///   family/families, but will miss distilled fine-tunes that hide behind a base family.
+    /// Returns the full `CognitiveProfile` (capability and dialect) for this Ollama model. A present `capabilities`
+    /// field is authoritative (no `"tools"` gives `.none`, else `.parallelActions`); without it, name and template
+    /// heuristics apply. `modelName` may be empty, which can miss distilled reasoning fine-tunes.
     func cognitiveProfile(modelName: String) -> CognitiveProfile {
         let metadata = buildMetadata()
         let familyStr = details?.family?.lowercased() ?? ""
         let familiesArr = details?.families?.map { $0.lowercased() } ?? []
 
-        // Vision modality is independent of tool capability — a vision model may not do
-        // tools, and a tool model may not do vision — so it's computed once here and
-        // threaded into every return path below (incl. the `.none` short-circuits).
+        // Vision modality is independent of tool capability, so it is computed once and threaded into every return path.
         let modalities = Self.detectVisionModalities(capabilities: capabilities, details: details)
 
         let isReasoningFocused = ModelCapabilityHeuristics.isReasoningOnly(
@@ -152,12 +117,8 @@ struct OllamaShowResponse: Codable {
                 return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities, toolSupportCaveat: .serverRejectsTools)
             }
 
-            // Authoritative allow. Heuristics may still contribute a specific dialect
-            // (e.g. <tool_call> templates → .mistralXML), but a no-signal template must
-            // not demote the model. `.nativeJSON` is the honest default label: Ollama's
-            // API returns tool calls as standard JSON whatever the template looks like.
-            // Reasoning-focused fine-tunes stay selectable (the server accepts tools)
-            // and carry the reliability caveat for pickers to surface.
+            // Authoritative allow: heuristics may still contribute a dialect, but a no-signal template must not demote the
+            // model; `.nativeJSON` is the default label because Ollama returns tool calls as standard JSON.
             let heuristic = computeHeuristicProfile(metadata: metadata)
             let dialect: ModelDialect = heuristic.dialect == .heuristicJson ? .nativeJSON : heuristic.dialect
             let caveat: ToolSupportCaveat? = isReasoningFocused ? .reasoningFocused : nil
@@ -167,10 +128,8 @@ struct OllamaShowResponse: Codable {
 
         // --- No capabilities field: legacy daemon, heuristics only ---
 
-        // Reasoning-only pattern match. Without the authoritative field we can't verify
-        // the server accepts tools for these distilled fine-tunes (family reports the
-        // tool-capable BASE architecture, e.g. qwen2 for deepseek-r1:14b) — blocked,
-        // but with the reason attached so pickers can explain it.
+        // Reasoning-only pattern match: without the authoritative field the server's tool acceptance cannot be verified
+        // for these fine-tunes, so they stay blocked with the reason attached.
         if isReasoningFocused {
             logger.info("cognitiveProfile: reasoning-only pattern matched for name='\(modelName)' family='\(familyStr)' (no capabilities field) — forcing .none")
             return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities, toolSupportCaveat: .reasoningFocused)
@@ -186,13 +145,8 @@ struct OllamaShowResponse: Codable {
         return profile
     }
 
-    /// Vision-input detection for an Ollama model, in priority order:
-    /// 1. AUTHORITATIVE — the `/api/show` `capabilities` array contains `"vision"`
-    ///    (Ollama ~0.3.4+; the same array we already trust for tool-capability gating).
-    /// 2. FALLBACK (older daemons with no `capabilities` field) — a bundled CLIP vision
-    ///    projector reported in `details.families` (`OllamaModelDetails.supportsVision`).
-    /// When `capabilities` IS present but lacks `"vision"`, that's an authoritative NO —
-    /// we do NOT fall back (avoids a false positive from a stray projector entry).
+    /// Detects vision input for an Ollama model. Authoritative when the `capabilities` array is present: it contains
+    /// `"vision"` or not, with no fallback. Older daemons fall back to a bundled CLIP projector in `details.families`.
     static func detectVisionModalities(capabilities: [String]?, details: OllamaModelDetails?) -> SupportedModalities {
         if let caps = capabilities {
             return caps.contains("vision") ? .visionCapable : .textOnly
@@ -223,9 +177,8 @@ struct OllamaShowResponse: Codable {
         // [available_tools] is a ReAct-style injection marker
         let hasReActMarker = templateStr.contains("[available_tools]")
 
-        // Secondary dialect signals: chat-format structure that reveals the model's
-        // trained output dialect even when explicit tool injection points are absent.
-        // Used as tiebreakers for singleAction models that only have modelfile hints.
+        // Secondary dialect signals: chat-format structure that reveals the trained output dialect when tool markers are
+        // absent; tiebreakers for singleAction models.
         let hasMistralChatStructure = templateStr.contains("[inst]") || templateStr.contains("[/inst]")
         let hasReActStructureHints  = (templateStr.contains("thought:") && templateStr.contains("action:")) ||
                                       (modelfileStr.contains("thought:") && modelfileStr.contains("action:"))
@@ -249,11 +202,8 @@ struct OllamaShowResponse: Codable {
             capability = .none
         }
 
-        // --- DIALECT DETECTION ---
-        //
-        // Primary signals (tool markers) are consumed by capability detection above,
-        // so for singleAction models they are guaranteed false. Secondary signals
-        // (chat-format structure) provide dialect inference for that tier.
+        // Dialect detection. Primary tool-marker signals are consumed by capability detection, so for singleAction models
+        // they are false; secondary chat-format signals infer the dialect for that tier.
 
         let dialect: ModelDialect
         if capability == .none {
@@ -282,10 +232,8 @@ struct OllamaShowResponse: Codable {
         return CognitiveProfile(capability: capability, dialect: dialect, metadata: metadata)
     }
 
-    /// Populates `ModelMetadata` from the `/api/show` details. Extracted so both
-    /// the short-circuit paths (capabilities-authoritative, reasoning-only) and the
-    /// heuristic path produce fully-populated metadata instead of defaulting the
-    /// tier/quant/family fields to nil when the model is force-classified as `.none`.
+    /// Populates `ModelMetadata` from the `/api/show` details, so the short-circuit paths and the heuristic path all
+    /// return full metadata.
     private func buildMetadata() -> ModelMetadata {
         var metadata = ModelMetadata(tier: .small) // Default
 
@@ -303,23 +251,16 @@ struct OllamaShowResponse: Codable {
             metadata.parameterCount = detailObj.parameterSize
         }
 
-        // Extract context window from GGUF model_info when available
-        // (Ollama returns this only when /api/show is called with verbose: true).
-        // Drives the UI's `numCtx` upper bound and the runtime memory-budget
-        // calculation in AgentConnect.
+        // Context window from the GGUF `model_info`, available only when `/api/show` is called with `verbose: true`.
+        // Drives the UI's `numCtx` upper bound and the memory-budget calculation in AgentConnect.
         metadata.contextWindow = inferredContextWindow
 
         return metadata
     }
 
-    /// Extracts the context length from `model_info[*.context_length]`. GGUF
-    /// metadata uses the architecture name as a prefix (e.g.
-    /// `llama.context_length` for Llama models, `mistral.context_length` for
-    /// Mistral). Tries the family-prefixed key first; falls back to a
-    /// suffix scan for non-standard architectures or multi-family models
-    /// where `details.family` doesn't match the GGUF architecture identifier.
-    /// Returns nil when `model_info` is missing (older Ollama, non-verbose
-    /// response) or no `*.context_length` key is present.
+    /// Extracts the context length from `model_info[*.context_length]`: tries the family-prefixed key first, then a
+    /// suffix scan for non-standard architectures. Returns nil when `model_info` is missing or has no
+    /// `*.context_length` key.
     private var inferredContextWindow: Int? {
         guard let info = modelInfo else { return nil }
         let family = details?.family?.lowercased() ?? ""
@@ -348,9 +289,6 @@ struct OllamaModelDetails: Codable, Hashable {
         return family?.lowercased() == "clip" || families?.contains("clip") ?? false
     }
     
-    // Note: supportsToolUse was relocated to OllamaShowResponse because
-    // it requires access to the model 'template' property to accurately evaluate.
-
     /// Parses `parameterSize` (e.g. "7B", "70B", "1.5B", "400M") into a sortable numeric value in billions.
     var parameterSizeValue: Double {
         guard let raw = parameterSize?.uppercased() else { return 0 }
@@ -421,10 +359,8 @@ struct OllamaConnect {
         }
     }
 
-    /// Daemon version from `/api/version`. Used to invalidate cached model detection:
-    /// a daemon upgrade can change what `/api/show` reports (capabilities, template)
-    /// for the SAME model digest. Returns nil on any failure — absence just means
-    /// digest-only revalidation.
+    /// Daemon version from `/api/version`, for invalidating cached model detection (an upgrade can change what
+    /// `/api/show` reports). Returns nil on any failure, meaning digest-only revalidation.
     static func fetchDaemonVersion(baseURL: String) async -> String? {
         do {
             let (data, response) = try await performRequest(endpoint: "/api/version", method: "GET", baseURL: baseURL, timeout: 5.0)
@@ -439,11 +375,8 @@ struct OllamaConnect {
     }
 
     static func fetchModelDetails(name: String, baseURL: String) async throws -> OllamaShowResponse {
-        // `verbose: true` requests the GGUF `model_info` block in addition to
-        // the basic fields. Used to extract `{family}.context_length` for
-        // populating `ModelMetadata.contextWindow`. Older Ollama versions
-        // (pre-0.3.x) silently ignore the param — `model_info` simply stays
-        // nil in the decoded response and we fall back to the catalog/default.
+        // `verbose: true` requests the GGUF `model_info` block (for `{family}.context_length`). Older Ollama versions
+        // ignore it, leaving `model_info` nil, and the catalog/default applies.
         let (data, response) = try await performRequest(
             endpoint: "/api/show",
             method: "POST",
@@ -518,10 +451,8 @@ struct OllamaConnect {
     /// progress line for every chunk it writes, so five quiet minutes means the transfer is dead.
     static let pullIdleTimeout: TimeInterval = 300
 
-    /// The cap on the WHOLE pull. ⚠️ Timeout inventory D-27: this was 1800 s, so every pull longer
-    /// than 30 minutes failed however well it was progressing — a 40 GB model on an ordinary
-    /// connection could never finish. The idle timeout above is the real liveness check; this is
-    /// only a backstop against a connection that trickles forever (7 days, URLSession's default).
+    /// The cap on the whole pull; the idle timeout above is the real liveness check. This is only a backstop (7 days)
+    /// against a connection that trickles forever, and must stay long enough for very large models.
     static let pullResourceTimeout: TimeInterval = 7 * 24 * 60 * 60
 
     static func pullSessionConfiguration() -> URLSessionConfiguration {

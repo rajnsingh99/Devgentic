@@ -4,15 +4,7 @@
 //  ChatOpsDisconnectTruthTests.swift
 //  DevgenticTests
 //
-//  Register KC-33. A failed Keychain read collapses `config.botToken` to nil, which used to make
-//  the disconnect farewell silently skip AND leave the bridge reporting a clean, verified
-//  disconnect — while the farewell was the user's only notice that the bot was gone. The fix:
-//  every disconnect captures the credential state BEFORE the reset, logs the summary's truth
-//  (KC-12), and on an unreadable credential leaves the bridge in `.error`, never `.disconnected`.
-//
-//  No farewell path is exercised here: a locked Keychain yields a nil token (farewell skipped),
-//  and the healthy path deliberately stores a token without an authorized chat id for the same
-//  reason — these tests must never touch the network.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,18 +4,7 @@
 //  ProfileEnumLocalizationTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Register A63 — the Execution card's option labels and the file-context strategy labels were
-//  `String` `displayName`s, so `Text(x.displayName)` bound to the non-localizing `StringProtocol`
-//  overload and the String Catalog extractor never saw them. Section headers around them WERE
-//  extracted, so a translated build would have rendered translated chrome over English options.
-//
-//  ⚠️ The real guard here is the COMPILER, not an assertion. `localizable(_:)` takes a
-//  `LocalizedStringKey`, so retyping any of these properties back to `String` stops the file
-//  compiling. That is deliberate: the sibling suite `MLXLocalizedTitleTests` records that its
-//  first version asserted `XCTAssertNotNil` on a non-optional `LocalizedStringKey` — which can
-//  never fail — and stayed green through the exact bug it existed to catch.
+//  Created by Raj Singh.
 //
 
 import XCTest

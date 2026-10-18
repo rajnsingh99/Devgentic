@@ -4,7 +4,7 @@
 //  KeyboardShortcutsReferenceView.swift
 //  Devgentic
 //
-//  Interactive searchable cheatsheet of all keyboard shortcuts in Devgentic.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

@@ -4,37 +4,14 @@
 //  OrbAmbientRunWatcher.swift
 //  Devgentic
 //
-//  [Phase 6 · F3] Announces runs the user started by TYPING, while the orb is open.
-//
-//  WHY THIS IS THE FEATURE THAT JUSTIFIES THE ORB. Between commands, an open Orb panel does
-//  nothing — it is a listening indicator with no reason to be on screen. But the runs a developer
-//  actually cares about are usually the ones they launched in the main window and then walked away
-//  from. This is the only thing Orb does that is worth having open while you work.
-//
-//  ⚠️ IT IS ALSO THE ONLY THING THAT SPEAKS UNPROMPTED, so every decision here is biased toward
-//  staying quiet. Default off; opt-in threshold; four independent reasons to say nothing; and a
-//  hard rule that a dropped announcement is always preferable to an interruption.
-//
-//  THE FOUR SILENCE RULES, each from a specific failure it would otherwise cause:
-//   1. NO OBSERVED START, NO ANNOUNCEMENT. A run this object did not see begin has no duration, so
-//      it cannot pass the threshold. This covers any run already in flight when the panel opened.
-//      ⚠️ IT DOES NOT COVER RESUME OR REDO, and the comment here used to claim it did.
-//      `startMessageStream` fires `didStartStream` unconditionally — including on the `updating:`
-//      path that Resume and Regenerate use — so the start IS observed. Combined with
-//      `messageSource` being transient (a resumed scheduled run decodes as `.localUI`), rule 3
-//      could not recognise it. Rule 5 below is what actually covers that case.
-//   2. NOT ORB'S OWN. He already announces those; saying it twice is worse than not at all.
-//   3. NOT SCHEDULED. `MessageSource.scheduled` exists for exactly this: "the task you started
-//      just finished" is a lie when nobody started it, and the user may be asleep.
-//   4. NOT WHILE SPEAKING OR LISTENING. Enforced in `speakAmbient`, not here.
-//   5. NOT A RESUMED OR REGENERATED RUN. Its message was created long before this start, and its
-//      true origin is unrecoverable — `messageSource` does not persist, so a scheduled task
-//      resumed the next morning looks exactly like something the user just typed. "The task you
-//      started just finished" is a guess there, and rule 3 exists precisely to avoid that guess.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Announces runs the user started by typing in the main window while the orb is open.
+/// The only thing that speaks unprompted, so every rule favours silence: default off, opt-in threshold, and a dropped
+/// announcement is always preferable to an interruption.
 @MainActor
 final class OrbAmbientRunWatcher: ActiveStreamMirrorDelegate {
 
@@ -43,12 +20,8 @@ final class OrbAmbientRunWatcher: ActiveStreamMirrorDelegate {
     private let logger = DGLogger(category: "OrbAmbient")
     var correlationTag: String = ""
 
-    /// ⚠️ This object's OWN start times, not the manager's.
-    ///
-    /// `ActiveStreamManager.streamStartedAt` is private, and it is `removeValue`d one line BEFORE
-    /// the mirror fan-out — so by the time `didEndStream` arrives the manager has already
-    /// forgotten when the run began. `ChatMessage.timestamp` is no substitute either: it is a
-    /// `let` from message creation, which Redo and Resume make hours stale.
+    /// This object's own start times: `ActiveStreamManager.streamStartedAt` is private and cleared before the fan-out.
+    /// `ChatMessage.timestamp` is no substitute: it is fixed at message creation and stale after Redo or Resume.
     private var startedAt: [UUID: Date] = [:]
 
     /// Bounds the map if a run somehow never ends (a crash mid-stream, a cancelled task that
@@ -69,14 +42,8 @@ final class OrbAmbientRunWatcher: ActiveStreamMirrorDelegate {
 
     func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage,
                              startedBy: MessageSource, for conversationID: UUID) {
-        // ⚠️ Only a timestamp is recorded here. `message.messageSource` is ALWAYS `.localUI` at this
-        // point — every caller assigns it after `startMessageStream` returns — so classification
-        // has to wait for the end event.
-        //
-        // ⚠️ `startedBy` NOW CARRIES THE ANSWER, and this watcher deliberately ignores it: its
-        // classification reads the AGENT message at `didEndStream` (see `announce`), and switching
-        // to the start value would change which runs Orb speaks. The parameter exists for
-        // `RemoteMirrorService`, which must decide at START whether a run may leave the machine.
+        // Only a timestamp is recorded: `message.messageSource` is always `.localUI` here, so classify at the end event.
+        // `startedBy` is ignored here; classification reads the agent message at `didEndStream`.
         guard OrbConfigManager.shared.ambientAnnouncements else { return }
         if startedAt.count >= Self.maxTrackedRuns, let oldest = startedAt.min(by: { $0.value < $1.value })?.key {
             startedAt.removeValue(forKey: oldest)
@@ -86,9 +53,8 @@ final class OrbAmbientRunWatcher: ActiveStreamMirrorDelegate {
     }
 
     func activeStreamManager(_ manager: ActiveStreamManager, didEndStream message: ChatMessage) {
-        // ⚠️ Cheap exclusions FIRST. `didStartStream` records nothing when announcements are off
-        // or for Orb's own runs, so the "start was never seen" branch below fired on every
-        // single turn and reported a misleading cause for something that was never a candidate.
+        // Cheap exclusions first: `didStartStream` records nothing when announcements are off or for Orb's own runs,
+        // so the "start was never seen" branch must not report a cause for runs that were never candidates.
         guard OrbConfigManager.shared.ambientAnnouncements else {
             // A start WAS recorded means announcements were on when the run began and were
             // switched off mid-run — the only case worth a line, and only then.
@@ -124,9 +90,7 @@ final class OrbAmbientRunWatcher: ActiveStreamMirrorDelegate {
             elapsed: elapsed,
             threshold: threshold
         ) else {
-            // ⚠️ Four different rules return nil here. Collapsing them into a silent `return` made
-            // "why didn't Orb say anything?" unanswerable from a log — and three of the four
-            // are correct behaviour the reader needs to be able to recognise as such.
+            // Several different rules return nil here; log the reason so "why didn't Orb say anything?" is answerable.
             logger.info("[ORB_AMBIENT]\(self.correlationTag) Not announcing run \(message.id.uuidString.prefix(4)) — \(Self.silenceReason(source: message.messageSource, outcome: message.terminalOutcome, elapsed: elapsed, threshold: threshold)). CONSEQUENCE: nothing is spoken; this is the policy working, not a failure.")
             return
         }

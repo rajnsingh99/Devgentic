@@ -4,20 +4,7 @@
 //  ReasoningQualityFilter.swift
 //  Devgentic
 //
-//  Quality gate for parser-extracted reasoning text. Suppresses template-stub
-//  patterns that small instruction-tuned models (especially at Q4 quantization)
-//  emit verbatim into content slots — strings like "Executing tool list_directory..."
-//  that look like reasoning but carry no semantic content beyond the tool name.
-//
-//  Recording these into the working-memory scratchpad wastes context budget AND
-//  reinforces the stub pattern across iterations: the model sees its own past
-//  stubs in the prior-turns scratchpad and doubles down on them. Surfacing them
-//  in the chat UI also produces meaningless reasoning rows that compete with the
-//  actual final answer for user attention.
-//
-//  Use at every parser site that promotes model-emitted text to `step.reasoning`.
-//  When the filter returns `""`, the executor's `if !step.reasoning.isEmpty`
-//  guard short-circuits both the recordReasoning() and the .reasoning event yield.
+//  Created by Raj Singh.
 //
 
 import Foundation

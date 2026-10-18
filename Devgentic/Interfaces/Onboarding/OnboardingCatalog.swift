@@ -4,25 +4,7 @@
 //  OnboardingCatalog.swift
 //  Devgentic
 //
-//  What the Setup Assistant offers: five starter models per local engine, ten starter tools, and
-//  the default system prompts. Hardcoded on purpose — onboarding must work before anything has
-//  been fetched, and every entry here was checked by hand.
-//
-//  ⚠️ Curation rules for anyone editing the model lists:
-//    1. Every id must EXIST and be ungated. Checked live on 2026-10-11 (HF API for MLX, the Ollama
-//       registry manifest for Ollama), with exact byte sizes read from those responses.
-//       This list is self-contained: it does not read `CuratedMLXCatalog` (the Model Store's list).
-//    2. Tool calling only. Every Ollama tag here lists `tools`. Every MLX repo's template renders
-//       `tools`, and mlx-swift-lm 3.32.3 parses its call format natively (`qwen3_5`, `gemma4`).
-//    3. ⚠️ MLX repos are the LMSTUDIO-COMMUNITY uploads, not mlx-community. Same weights, but the
-//       mlx-community copies of Qwen3.5/3.6 and Gemma 4 ship the template ONLY as a
-//       `chat_template.jinja` sidecar, which `MLXTokenizerAnalyzer` does not read (it reads
-//       `tokenizer_config.json["chat_template"]`). Those copies route to "no tools". The
-//       lmstudio-community copies embed the template in `tokenizer_config.json` and route to
-//       Qwen3-Coder XML / native. Switch back only after the analyzer reads the sidecar.
-//    4. Smallest first, and nothing above `maxDownloadBytes`.
-//    5. The two lists mirror each other on purpose: the same five models whichever engine is
-//       picked, so the choice of engine never changes which model someone gets.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -40,9 +22,8 @@ struct OnboardingStarterModel: Identifiable, Hashable, Sendable {
     /// Where it sits on the ladder: "Tiny", "Small", …
     let sizeClass: String
     let summary: String
-    /// Exact download size in bytes: every file in the HF repo (MLX) or every layer in the Ollama
-    /// manifest, read on 2026-10-11. Hardcoded on purpose — onboarding shows it before anything is
-    /// fetched. A re-upload changes it; re-read it whenever an id here changes.
+    /// Exact download size in bytes: every file in the HF repo (MLX) or every layer in the Ollama manifest.
+    /// Hardcoded so onboarding can show it before anything is fetched; re-read it whenever an id changes.
     let downloadBytes: Int64
     /// The smallest Mac (unified memory, GB) this is a sensible choice for. Describes, never gates:
     /// a bigger model on a smaller Mac is shown with a warning, not hidden.
@@ -200,11 +181,8 @@ enum OnboardingToolPreset {
                               purpose: String(localized: "Read or set the clipboard"), iconName: "doc.on.clipboard"),
     ]
 
-    /// Builds the profile's tool list. Description and schema come from `NativeToolCatalog`, never
-    /// restated here, so the preset cannot drift from what each tool actually is.
-    ///
-    /// A name the catalogue does not know is a programming error: it asserts in debug, and in
-    /// release is logged and left out rather than saved as a tool that fails to resolve at run time.
+    /// Builds the profile's tool list; description and schema come from `NativeToolCatalog`, never restated here.
+    /// A name the catalogue does not know asserts in debug and is logged and omitted in release.
     static func makeTools(enabled enabledNames: Set<String>, autoApproved: Set<String>) -> [Tool] {
         tools.compactMap { starter in
             guard let entry = NativeToolCatalog.entry(named: starter.id) else {

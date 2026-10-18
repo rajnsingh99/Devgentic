@@ -4,9 +4,7 @@
 //  ICModelResidencyTests.swift
 //  DevgenticTests
 //
-//  READINESS CR-32: the Intelligence Core model loaded twice when two features overlapped, and kept
-//  answering with the OLD model after the selection changed. These drive the real `ICModelResidency`
-//  with a fake model and a gated loader — no MLX.
+//  Created by Raj Singh.
 //
 
 import XCTest
@@ -108,7 +106,7 @@ final class ICModelResidencyTests: XCTestCase {
         let harness = Harness()
         let residency = makeResidency(selection, harness)
 
-        let a = try await residency.prepare(caller: .morningBrief)
+        let a = try await residency.prepare(caller: .briefing)
         XCTAssertEqual(a.name, "ic-a")
 
         selection.set("ic-b")
@@ -176,7 +174,7 @@ final class ICModelResidencyTests: XCTestCase {
         let selection = Selection("ic-a")
         let harness = Harness()
         let residency = makeResidency(selection, harness)
-        _ = try await residency.prepare(caller: .morningBrief)
+        _ = try await residency.prepare(caller: .briefing)
 
         selection.set("")
         do {

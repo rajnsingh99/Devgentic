@@ -4,10 +4,7 @@
 //  OnboardingFeaturesTests.swift
 //  DevgenticTests
 //
-//  The Features, Permissions and Privacy steps:
-//    • the switches apply at once through the same path as Settings, and Cancel puts them back;
-//    • only the permissions the user's choices need are offered, all optional, with live status;
-//    • the update question has no pre-selected answer, and answers apply only on completion.
+//  Created by Raj Singh.
 //
 
 import XCTest

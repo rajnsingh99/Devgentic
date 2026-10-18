@@ -4,18 +4,7 @@
 //  MLXModelRevision.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for G8.
-//
-//  A HuggingFace repo is a git repository. Downloading without a `revision:` uses HubApi's
-//  default `"main"` — whatever the branch tip was at the moment the user clicked Download. Two
-//  people installing the same model id on different days can get different weights with no way
-//  to tell, and an installed copy goes stale forever when the publisher re-quantizes or fixes a
-//  broken chat template (both common in mlx-community).
-//
-//  ⚠️ Both halves of the answer already existed and neither was read. HubApi records the exact
-//  commit it fetched into `<repo>/.cache/huggingface/download/*.metadata`, and HuggingFace
-//  reports the current one as `sha` in the same API response the store already calls. Checking
-//  is a string comparison.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -23,17 +12,15 @@ import os
 
 private let logger = DGLogger(category: "MLXModelRevision")
 
+/// Reads the commit a downloaded MLX model was fetched at and compares it with the published `sha`.
+/// Lets the app tell whether an installed copy is current or the repo's branch tip has moved.
 enum MLXModelRevision {
 
     /// Where HubApi keeps its per-file download metadata, relative to a model folder.
     private static let metadataSubpath = ".cache/huggingface/download"
 
     /// The commit hash a model was downloaded at, or nil when it can't be determined.
-    ///
-    /// HubApi writes one `<filename>.metadata` per downloaded file, each containing
-    /// `commitHash\netag\ntimestamp`. All files from one snapshot share a commit, so any of
-    /// them answers — but they are read in a stable order and disagreement is logged, because
-    /// a mismatch means the folder holds files from two different snapshots.
+    /// Reads each file's `.metadata` in a stable order and logs disagreement between snapshots.
     static func installedRevision(atModelFolder folder: URL) -> String? {
         let metadataDir = folder.appendingPathComponent(metadataSubpath)
         guard let files = try? FileManager.default.contentsOfDirectory(
@@ -45,11 +32,8 @@ enum MLXModelRevision {
         }
         guard !metadataFiles.isEmpty else { return nil }
 
-        // Counted, not just collected: when a folder holds files from two snapshots, the
-        // commit that most files agree on is the one the model actually IS. HubApi rewrites a
-        // file's `.metadata` when it re-fetches it, but never PRUNES the metadata of a file
-        // that has left the repo (a renamed or re-sharded weight), so a stale minority can
-        // linger indefinitely.
+        // Why: stale metadata of files that left the repo is never pruned, so a minority of old hashes can linger
+        // Counts commits across metadata files; the one most files agree on is the model's revision.
         var counts: [String: Int] = [:]
         for file in metadataFiles {
             guard let contents = try? String(contentsOf: file, encoding: .utf8) else { continue }
@@ -66,12 +50,8 @@ enum MLXModelRevision {
         let ranked = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
         let summary = ranked.map { "\(shortForm($0.key))×\($0.value)" }.joined(separator: ", ")
 
-        // ⚠️ An even split is genuinely unanswerable, so say so rather than pick. The previous
-        // version took `sorted().first` — the lexicographically LOWEST hash, which carries no
-        // meaning at all — and a wrong pick here does not degrade gracefully: it is compared
-        // against the published `sha`, so it can assert "Update available" forever on a model
-        // that is current, or hide a real update. `.unknown` is the honest verdict, and the
-        // one `UpdateStatus` already models for exactly this reason.
+        // Why: a wrong pick can assert "Update available" forever or hide a real update
+        // An even split is unanswerable, so report `.unknown` instead of picking a hash.
         guard ranked[0].value > ranked[1].value else {
             logger.error("[MLXSTORE] \(folder.lastPathComponent) has NO majority revision — its metadata splits evenly across \(counts.count) commits (\(summary)). CONSEQUENCE: reporting no revision, so the update check answers .unknown instead of comparing against an arbitrarily chosen commit. Re-download to make the folder consistent.")
             return nil
@@ -100,11 +80,8 @@ enum MLXModelRevision {
         case upToDate(revision: String)
         /// The publisher has pushed a newer commit.
         case updateAvailable(installed: String, latest: String)
-        /// Can't tell — no local metadata, or the remote didn't report a `sha`.
-        ///
-        /// ⚠️ Deliberately distinct from `upToDate`. Reporting "up to date" when the answer is
-        /// unknown is the same failure shape as A8's fit advisory claiming `.comfortable` for a
-        /// model whose size it never learned.
+        /// Can't tell: no local metadata, or the remote didn't report a `sha`.
+        /// Distinct from `upToDate`, which must never be reported when the answer is unknown.
         case unknown(reason: String)
 
         var needsUpdate: Bool {

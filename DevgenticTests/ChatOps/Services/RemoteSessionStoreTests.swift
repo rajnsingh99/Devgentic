@@ -4,15 +4,7 @@
 //  RemoteSessionStoreTests.swift
 //  DevgenticTests
 //
-//  C4 of the ChatOps remote-interface plan: the conversation cursor, collected into one store.
-//
-//  ⚠️ C4 IS THE FIRST COMMIT THAT TOUCHES A LIVE CODE PATH. C0–C3 added dormant code; this one
-//  rewrites three properties that 30 call sites already read. So the tests that matter are not
-//  about the new API's ergonomics — they are about an installed user's cursor surviving the change.
-//
-//  ⚠️ EVERY TEST USES AN INJECTED `UserDefaults` SUITE. Reading or writing `.standard` here would
-//  mean a test run could move the developer's own ChatOps cursor, and a crash mid-test would leave
-//  it moved.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,11 +4,7 @@
 //  AddMCPServerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 26/01/26.
-//  Updated on 04/02/26 for Modern Dashboard UI.
-//  Refactored on 30/04/26 for in-window stack navigation. Layout now mirrors
-//  CreateScheduledTaskView / AgentConfigDetailView (DynamicIslandBar + SettingsCard
-//  stack) and refined for Tactile Dark Glass guidelines with inline Diagnostics verification.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -17,6 +13,8 @@ private let logger = DGLogger(category: "AddMCPServerView")
 
 // MARK: - Local UI Models
 
+/// Form for adding or editing an MCP server, using in-window stack navigation (DynamicIslandBar plus
+/// SettingsCard stack). Verifies the connection inline with diagnostics before save.
 private enum ConnectionType: String, CaseIterable, Identifiable {
     case localProcess = "Local Process"
     case remoteURL = "Remote URL"
@@ -29,10 +27,8 @@ private enum ConnectionType: String, CaseIterable, Identifiable {
         }
     }
 
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-    /// invisible to the String Catalog extractor and would have shipped untranslated inside
-    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
+    /// User-facing name, separate from `rawValue`: `Text(x.rawValue)` binds to the non-localizing overload
+    /// and escapes the String Catalog. `rawValue` is for persistence and logging only.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .localProcess: return "Local Process"
@@ -47,8 +43,7 @@ private struct KeyValueItem: Identifiable, Hashable {
     var value: String = ""
 }
 
-/// User-facing auth picker. Maps onto `MCPAuthenticationScheme` at save time.
-/// `oauth` is shown but disabled until Phase 2 lands the full client.
+/// User-facing auth picker; maps onto `MCPAuthenticationScheme` at save time.
 private enum AuthFormScheme: String, CaseIterable, Identifiable, Hashable {
     case none = "None"
     case bearer = "Bearer"
@@ -57,9 +52,8 @@ private enum AuthFormScheme: String, CaseIterable, Identifiable, Hashable {
 
     var id: Self { self }
 
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so the picker's segment titles were
-    /// invisible to the String Catalog extractor. `rawValue` stays for identity/logging only.
+    /// User-facing name, separate from `rawValue`, which binds to the non-localizing `Text` overload and
+    /// escapes the String Catalog. `rawValue` is for identity and logging only.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .none:         return "None"
@@ -86,12 +80,9 @@ private struct ServerConfigFormData: Hashable {
     var transport: MCPTransportMode = .streamableHTTP
     var authSecret: String = ""              // bearer token or API key value
 
-    /// Scopes whose stored secret could not be READ when this form was hydrated. Register KC-1.
-    ///
-    /// ⚠️ NOT the same as "empty". An empty field means the user has no secret configured; a scope
-    /// in here means one exists and we could not look at it, so the blank field on screen is a lie.
-    /// The persistence layer refuses to delete these regardless (`MCPSecretStore.clear`); this set
-    /// exists so the UI stops telling the user the secret is gone.
+    /// Scopes whose stored secret could not be read when this form was hydrated.
+    /// Not the same as empty: a scope here means a secret exists but is unreadable, and
+    /// `MCPSecretStore.clear` refuses to delete it.
     var unreadableScopes: Set<String> = []
     var apiKeyHeaderName: String = "X-API-Key"
 
@@ -111,9 +102,8 @@ private enum ConfigMode: String, CaseIterable, Identifiable {
 
     var id: Self { self }
 
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so the segment titles were invisible to
-    /// the String Catalog extractor. `rawValue` stays for identity/logging only.
+    /// User-facing name, separate from `rawValue`, which binds to the non-localizing `Text` overload and
+    /// escapes the String Catalog. `rawValue` is for identity and logging only.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .wizard: return "Visual"
@@ -326,10 +316,9 @@ struct AddMCPServerView: View {
     // Edit Mode Properties
     var existingSource: ToolSource? = nil
 
-    /// Save callback for "Add to Library". Last param is the OAuth credential
-    /// bundle when scheme = `.oauth` (otherwise nil). The outcome tells a
-    /// duplicate from a failed save (register KC-5), so the form never
-    /// dismisses over a sign-in that was not stored.
+    /// Save callback for "Add to Library"; the last parameter is the OAuth credential bundle when scheme is
+    /// `.oauth`, else nil. The outcome tells a duplicate from a failed save, so the form never dismisses
+    /// over a sign-in that was not stored.
     var onToolAdded: ((String, ServerDefinition, MCPRuntimeSecrets, [ToolDefinition], MCPOAuthCredentialBundle?) -> MCPAddOutcome)?
     var onToolUpdated: ((UUID, String, ServerDefinition, MCPRuntimeSecrets, [ToolDefinition]) -> Void)? = nil
 
@@ -388,10 +377,8 @@ struct AddMCPServerView: View {
         }
     }
 
-    /// True when the name collides with a different server. Adding always checked this;
-    /// renaming did not, so an edit could produce two servers sharing a name — and that
-    /// name is the user's only handle on a server in the sidebar, in tool categories, and
-    /// in every log line.
+    /// True when the name collides with a different server, checked on both add and rename.
+    /// The name is the user's only handle on a server in the sidebar, tool categories and logs.
     private var isNameConflicting: Bool {
         UnifiedToolStore.shared.isServerNameTaken(formData.serverName, excluding: existingSource?.id)
     }
@@ -466,18 +453,12 @@ struct AddMCPServerView: View {
         }
         .task { setupView() }
         .onDisappear {
-            // Cancel any in-flight connect first. Cancellation propagates through
-            // `Task.sleep` and `withTimeout`'s task group inside MCPClientService.connect,
-            // which lands in its catch block and tears down the shell process.
-            // Then we wait for that task to fully unwind before calling disconnect —
-            // this covers the narrow window where the session may have just been
-            // registered in `activeSessions` immediately before cancellation.
+            // Cancels any in-flight connect first (tearing down the shell process), then waits for it to unwind
+            // before disconnecting, covering a session registered just before cancellation.
             let inflight = connectTask
             connectTask = nil
-            // Also abort any in-flight OAuth flow. The browser tab will redirect
-            // to a now-dead loopback listener and the user sees a connection-
-            // refused page — acceptable; the alternative is leaving the listener
-            // bound for 5 minutes after the form closes.
+            // Also aborts any in-flight OAuth flow; the browser tab hits a dead loopback listener, which beats
+            // leaving it bound for 5 minutes.
             oauthTask?.cancel()
             oauthTask = nil
             Task {
@@ -569,10 +550,8 @@ struct AddMCPServerView: View {
 
     // MARK: - Transport & Mode Row
 
-    /// Two tactile segmented controls inline above the dynamic content. They drive
-    /// what's rendered below (transport → local-process vs remote card;
-    /// mode → visual cards vs JSON editor) with clean glass pills rather than
-    /// saturated native accent tabs.
+    /// Two tactile segmented controls above the dynamic content: transport (local process or remote card)
+    /// and mode (visual cards or JSON editor).
     private var transportAndModeRow: some View {
         HStack(alignment: .top, spacing: 16) {
             controlColumn(label: "TRANSPORT") {
@@ -832,7 +811,7 @@ struct AddMCPServerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Shown in place of the usual caption when a stored secret could not be READ. Register KC-1.
+    /// Shown in place of the usual caption when a stored secret could not be read.
     @ViewBuilder
     private var unreadableSecretNotice: some View {
         HStack(alignment: .top, spacing: 6) {
@@ -950,13 +929,11 @@ struct AddMCPServerView: View {
                     issuer: issuer,
                     scopes: scopes,
                     clientName: "Devgentic — \(formData.serverName.isEmpty ? "MCP" : formData.serverName)",
-                    // RFC 8707: the MCP server itself is the resource these tokens are for.
-                    // Binding the audience here is what stops a token minted for this server
-                    // being replayed against another resource on the same issuer.
+                    // RFC 8707: the MCP server is the resource these tokens are for; binding the audience stops replay
+                    // against another resource on the same issuer.
                     resource: URL(string: formData.url.trimmingCharacters(in: .whitespaces)),
-                    // Register KC-14: the bundle records WHICH URL the form held at sign-in
-                    // time. `MCPOAuthBinding` enforces the match at attach, persist and save,
-                    // so a URL edited after this moment cannot inherit these tokens.
+                    // The bundle records which URL the form held at sign-in; `MCPOAuthBinding` enforces the match at
+                    // attach, persist and save.
                     serverURL: URL(string: formData.url.trimmingCharacters(in: .whitespaces))
                 )
                 try Task.checkCancellation()
@@ -1321,17 +1298,14 @@ struct AddMCPServerView: View {
             if let cmd = def.command {
                 formData.connectionType = .localProcess
                 formData.command = cmd
-                // Quote-aware: a plain join here meant opening an existing server for edit
-                // and pressing Save re-split any space-bearing argument into two, silently
-                // corrupting a config the user never touched.
+                // Quote-aware join, so editing and saving does not re-split a space-bearing argument into two.
                 formData.arguments = MCPArgumentTokenizer.join(def.args ?? [])
-                // Materialize env values from Keychain so the form shows what
-                // the user previously entered. Missing values come back as
-                // empty strings — the user can retype if they want.
+                // Materializes env values from Keychain so the form shows what the user entered; missing values come
+                // back as empty strings.
                 if let keys = def.envKeys, !keys.isEmpty {
                     formData.environmentVariables = keys.map { key in
-                        // ⚠️ `read`, not `retrieve` — a failed read must not render as an empty
-                        // field the user would then save over. Register KC-1.
+                        // `read`, not `retrieve`: a failed read must not render as an empty field the user would then save
+                        // over.
                         switch MCPSecretStore.shared.read(.envValue(key: key), sourceID: source.id) {
                         case .found(let value):
                             return KeyValueItem(key: key, value: value)
@@ -1358,8 +1332,7 @@ struct AddMCPServerView: View {
                     case .found(let value): formData.authSecret = value
                     case .notFound:         formData.authSecret = ""
                     case .failed:
-                        // Register KC-1: leave the field blank but REMEMBER why, so the
-                        // UI can say "unreadable" instead of implying "not set".
+                        // Leaves the field blank but remembers why, so the UI says "unreadable" rather than "not set".
                         formData.authSecret = ""
                         formData.unreadableScopes.insert(MCPSecretScope.bearerToken.rawScope)
                     }
@@ -1370,17 +1343,15 @@ struct AddMCPServerView: View {
                     case .found(let value): formData.authSecret = value
                     case .notFound:         formData.authSecret = ""
                     case .failed:
-                        // Register KC-1: leave the field blank but REMEMBER why, so the
-                        // UI can say "unreadable" instead of implying "not set".
+                        // Leaves the field blank but remembers why, so the UI says "unreadable" rather than "not set".
                         formData.authSecret = ""
                         formData.unreadableScopes.insert(MCPSecretScope.apiKeyHeaderValue.rawScope)
                     }
                 case .oauth(let issuer):
                     formData.authScheme = .oauth
                     formData.oauthIssuer = issuer.absoluteString
-                    // Hydrate the in-memory bundle so the form shows the
-                    // current "Signed in as …" state and lets the user
-                    // re-auth or change scheme without retyping the issuer.
+                    // Hydrates the in-memory bundle so the form shows the current "Signed in as ..." state and lets the
+                    // user re-auth or change scheme.
                     if let existingBundle = MCPOAuthCoordinator.loadBundle(sourceID: source.id) {
                         self.oauthBundle = existingBundle
                         formData.oauthScopes = existingBundle.grantedScopes.joined(separator: " ")
@@ -1442,8 +1413,8 @@ struct AddMCPServerView: View {
     }
 
     private func saveAndDismiss() {
-        // Renaming used to bypass the duplicate check that adding always performed, so an
-        // edit could leave two servers sharing a name.
+        // Renaming runs the same duplicate check as adding, so an edit cannot leave two servers sharing a
+        // name.
         guard !isNameConflicting else {
             logger.warning("""
                 [MCP-CONFIG] Refused to save '\(formData.serverName)': another server already uses \
@@ -1453,10 +1424,8 @@ struct AddMCPServerView: View {
             return
         }
 
-        // Unverified save (existing servers only). Keep whatever tools we already know
-        // about rather than blanking the server: the config may be being fixed precisely
-        // BECAUSE the server is unreachable, and wiping its tools would break every profile
-        // referencing them for no reason.
+        // Unverified save (existing servers only): keeps the tools already known rather than blanking the
+        // server, since the config may be edited precisely because the server is unreachable.
         let config: ServerDefinition
         let tools: [ToolDefinition]
         if let verified = verifiedConfig, let discovered = discoveredTools {
@@ -1478,13 +1447,8 @@ struct AddMCPServerView: View {
         let secrets = buildRuntimeSecrets()
 
         if let existing = existingSource, let onToolUpdated = onToolUpdated {
-            // ⚠️ Register KC-14. The binding gate runs BEFORE the bundle persist below, so a
-            // refusal leaves nothing half-written: the bundle that will be in effect after
-            // this save must be bound to the URL being saved. A fresh sign-in binds to
-            // whatever the URL field held at sign-in time; a stored bundle must still match.
-            // `serverDefinition` is nil when the stored blob cannot be decoded, which the
-            // gate treats as "previous binding unknown" and fails closed for a legacy stored
-            // bundle (KC-37's lesson — never read an undecodable blob as "unchanged").
+            // The binding gate runs before the bundle persist, so a refusal leaves nothing half-written.
+            // A nil `serverDefinition` (undecodable blob) fails closed for a legacy stored bundle.
             switch MCPOAuthBinding.editDecision(
                 isOAuth: config.auth.isOAuth,
                 newURL: config.url,
@@ -1504,9 +1468,8 @@ struct AddMCPServerView: View {
                 activeError = error
                 return
             }
-            // ⚠️ Register KC-5. A re-authenticated OAuth bundle is persisted BEFORE the update, so
-            // a Keychain refusal is shown instead of swallowed by `try?` and nothing is
-            // half-applied. An unchanged bundle (a plain rename) is not rewritten.
+            // A re-authenticated OAuth bundle is persisted before the update, so a Keychain refusal is shown
+            // instead of swallowed. An unchanged bundle (a plain rename) is not rewritten.
             do {
                 try MCPServerAddFlow.persistIfChanged(
                     oauthBundle,
@@ -1533,10 +1496,8 @@ struct AddMCPServerView: View {
             Task { await MCPClientService.shared.disconnect(sourceId: tempSourceId) }
             onDismiss?()
         } else if let onToolAdded = onToolAdded {
-            // ⚠️ Register KC-14, add path. Same invariant as the edit gate: a fresh sign-in
-            // must be bound to the URL being saved — the URL field may have been edited
-            // AFTER the sign-in, and a bundle bound to the old one must not ride along.
-            // Nothing is stored under the not-yet-chosen id, so the stored side cannot bind.
+            // Add path: same invariant as the edit gate; the URL may have been edited after sign-in, so a bundle
+            // bound to the old URL must not ride along.
             switch MCPOAuthBinding.editDecision(
                 isOAuth: config.auth.isOAuth,
                 newURL: config.url,
@@ -1557,8 +1518,8 @@ struct AddMCPServerView: View {
             case .duplicate:
                 isShowingDuplicateAlert = true
             case .failed(let error):
-                // Register KC-5: stay on the form so the user sees what happened and can retry;
-                // `oauthBundle` is still held, so a retry needs no second browser round trip.
+                // Stays on the form so the user sees what happened; `oauthBundle` is still held, so a retry needs no
+                // second browser round trip.
                 activeError = error
             }
         }
@@ -1587,9 +1548,8 @@ struct AddMCPServerView: View {
                     let name = formData.apiKeyHeaderName.trimmingCharacters(in: .whitespaces)
                     return .apiKeyHeader(headerName: name.isEmpty ? "X-API-Key" : name)
                 case .oauth:
-                    // Use the issuer the user actually signed in against —
-                    // form-typed `oauthIssuer` may have been canonicalized by
-                    // discovery, so prefer the bundle's issuer when present.
+                    // Uses the issuer the user signed in against: discovery may have canonicalized the typed
+                    // `oauthIssuer`.
                     if let bundle = oauthBundle {
                         return .oauth(issuer: bundle.issuer)
                     }
@@ -1631,10 +1591,8 @@ struct AddMCPServerView: View {
                     bundle.authorizationHeader = (name.isEmpty ? "X-API-Key" : name, value)
                 }
             case .oauth:
-                // For the in-memory test path we attach the access token as a
-                // bearer header directly. The full bundle (refresh token,
-                // expiry, registration metadata) is persisted to Keychain at
-                // save time; until then `secrets` carries enough for connect.
+                // The in-memory test attaches the access token as a bearer header; the full bundle is persisted to
+                // Keychain at save time.
                 if let oauthBundle {
                     bundle.authorizationHeader = ("Authorization", "Bearer \(oauthBundle.accessToken)")
                 }
@@ -1644,8 +1602,8 @@ struct AddMCPServerView: View {
         return bundle
     }
 
-    /// Drops any prior verified state. Called whenever the form changes so the
-    /// Save pill never fires with config that no longer matches what the user sees.
+    /// Drops any prior verified state whenever the form changes, so Save never fires with a config that no
+    /// longer matches.
     private func invalidateVerifiedState() {
         guard hasVerifiedConnection || activeError != nil else { return }
         discoveredTools = nil
@@ -1666,9 +1624,8 @@ struct AddMCPServerView: View {
     }
 
     private func parseJSONAndUpdateForm() {
-        // Parsing lives in `MCPConfigPaste` so it can be tested: this is the one parse in the
-        // subsystem that can silently discard credentials, and while it was a private method
-        // on this view nothing could reach it. The view keeps only the form mapping.
+        // Parsing lives in `MCPConfigPaste` so it can be tested, since it is the one parse that can silently
+        // discard credentials.
         do {
             let parsed = try MCPConfigPaste.parse(configInput)
             let name = parsed.serverName
@@ -1710,9 +1667,8 @@ struct AddMCPServerView: View {
                     newForm.authScheme = .oauth
                 }
 
-                // A pasted `headers` map carrying an Authorization bearer is the other
-                // common README shape. Map what we can represent; anything else is
-                // reported by the parser rather than dropped in silence.
+                // A pasted `headers` map carrying an Authorization bearer is another common README shape;
+                // unrepresentable parts are reported by the parser.
                 if let bearer = parsed.inferredBearerToken {
                     newForm.authScheme = .bearer
                     newForm.authSecret = bearer

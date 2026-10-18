@@ -4,15 +4,7 @@
 //  MCPDiscoverView.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — the Discover half of the Tool Library.
-//
-//  Browsing the official MCP Registry. Search is server-side; results are never mirrored
-//  locally. Every row states LOCAL or REMOTE first, because that single fact decides whether
-//  code runs on this machine or the user's data leaves it.
-//
-//  Nothing here connects anything. Selecting a row opens a review sheet showing the exact
-//  command, the values the server needs, and what it will do — and only an explicit
-//  confirmation there creates a server. The registry lists servers; it does not review them.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -23,13 +15,10 @@ private let logger = DGLogger(category: "MCPDiscoverView")
 // MARK: - Localized chip titles
 
 extension ToolDiscoverFilter {
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so the filter chips were invisible to the
-    /// String Catalog extractor and would have shipped untranslated inside otherwise-translated
-    /// chrome. `rawValue` stays as the `Identifiable` id and for logging only.
-    ///
-    /// Declared here rather than next to the enum in `ToolLibraryNavigation.swift` because this
-    /// is the only surface that renders these as labels.
+    // Why: `Text(x.rawValue)` binds to the non-localizing `StringProtocol` overload, which hides the chips from the String
+    // Catalog extractor and ships them untranslated.
+    /// User-facing name for the filter chip; `rawValue` stays as the `Identifiable` id and for logging only.
+    /// Declared here since this is the only surface that renders these as labels.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .all:    return "All"
@@ -39,6 +28,9 @@ extension ToolDiscoverFilter {
     }
 }
 
+/// The Discover half of the Tool Library: browses the official MCP Registry; search is server-side, never mirrored.
+/// Every row states Local or Remote first, since that decides whether code runs here or the user's data leaves.
+/// Nothing here connects anything: selecting a row opens a review sheet, and only explicit confirmation creates a server.
 struct MCPDiscoverView: View {
 
     /// Called when the user confirms a plan. The host performs the actual add so this view
@@ -56,9 +48,7 @@ struct MCPDiscoverView: View {
         Set(MCPToolStore.shared.sources.map { $0.serverName.lowercased() })
     }
 
-    /// One search field, not two. The view used to carry its own "Search the MCP registry…"
-    /// box directly beneath the island bar's "Search tools…" — two inputs, stacked, for one
-    /// job. The island bar now drives this, and its placeholder changes to match.
+    /// One search field, not two: the island bar drives this view's search and its placeholder changes to match.
     private var searchText: String { ToolLibraryNavigationState.shared.searchText }
 
     private var filter: ToolDiscoverFilter { ToolLibraryNavigationState.shared.discoverFilter }
@@ -104,10 +94,8 @@ struct MCPDiscoverView: View {
 
     // MARK: - Header
 
-    /// All / Local / Remote, occupying the space the duplicate search box used to.
-    ///
-    /// Local vs Remote leads because it is the one fact that decides whether code runs on
-    /// this machine or the user's data leaves it.
+    /// All / Local / Remote filter chips.
+    /// Local vs Remote leads because it decides whether code runs on this machine or the user's data leaves it.
     private var filterChips: some View {
         HStack(spacing: 8) {
             ForEach(ToolDiscoverFilter.allCases) { option in
@@ -139,9 +127,8 @@ struct MCPDiscoverView: View {
             if isLoading {
                 ProgressView().controlSize(.mini).scaleEffect(0.6)
             }
-            // Says what the number actually covers. The registry's own search matches names
-            // only, so description matches come from the locally-loaded slice — claiming a
-            // flat count while still loading would overstate what was searched.
+            // Says what the number covers: the registry's own search matches names only, so description matches come from the
+            // locally-loaded slice; claiming a flat count while still loading would overstate what was searched.
             Text(resultSummary)
                 .font(.system(size: 11))
                 .foregroundColor(theme.tertiaryText)
@@ -317,8 +304,7 @@ private struct MCPDiscoverCard: View {
             }
 
             HStack(spacing: 5) {
-                // Local vs remote leads, deliberately: it is the one fact that decides
-                // whether code runs here or data goes there.
+                // Local vs remote leads: it is the one fact that decides whether code runs here or data goes there.
                 badge(server.isRemote ? "Remote" : "Local", tint: server.isRemote ? .blue : .orange)
                 if !runtime.isEmpty { badge(runtime, tint: theme.secondaryText) }
                 if let version = server.primaryPackage?.version ?? server.version {

@@ -4,22 +4,15 @@
 //  MainApplicationViewModel+ChatOps.swift
 //  Devgentic
 //
-//  The one production conformance to the ChatOps host seam.
-//
-//  Every member here is a forward to what the three bridges already call today, so adopting the
-//  seam changes no behaviour — it only gives the call a name that a test can stand behind. The one
-//  member that is more than a forward is `cancelRun`, which bundles a three-step ordering the
-//  bridges currently open-code; see its doc comment for why that is a fix and not a refactor.
-//
-//  ⚠️ This extension is the ONLY place the seam meets the god object. Nothing here may grow logic:
-//  if a forward starts making a decision, that decision belongs in `ChatOpsCommandService`, which
-//  is testable, rather than here, which is not.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - RemoteRunControlling
 
+/// The production conformance to the ChatOps host seam (`RemoteRunControlling`); each member forwards to existing code.
+/// Keep logic out of this extension: decisions belong in `ChatOpsCommandService`, which is testable.
 extension MainApplicationViewModel: RemoteRunControlling {
 
     func hasActiveRun(inConversation conversation: UUID) -> Bool {
@@ -36,11 +29,9 @@ extension MainApplicationViewModel: RemoteRunControlling {
         interactionCenter.current(for: conversation)?.kind.staleNoun
     }
 
-    /// [WF-SE10] `hasActiveRun` is read BEFORE the cancel because cancelling destroys the evidence
-    /// — the bridges' reply text ("cancelled the active run" vs "no run was active") depends on it.
-    /// `ExecutionSuspensionService.cancel` runs after the stream cancel as belt-and-braces for a
-    /// parked interaction with no live stream task; after a stream cancel it finds nothing and
-    /// no-ops. See `RemoteRunControlling.cancelRun` for why these three steps are one method.
+    /// `hasActiveRun` is read before the cancel because cancelling destroys the evidence the bridges' reply text depends on.
+    /// `ExecutionSuspensionService.cancel` runs after the stream cancel for a parked interaction with no live stream task;
+    /// after a stream cancel it finds nothing and no-ops.
     @discardableResult
     func cancelRun(inConversation conversation: UUID) async -> Bool {
         let hadActiveRun = activeStreamManager.hasActiveStream(inConversation: conversation)

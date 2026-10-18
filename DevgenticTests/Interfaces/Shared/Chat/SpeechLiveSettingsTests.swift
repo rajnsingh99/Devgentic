@@ -4,17 +4,7 @@
 //  SpeechLiveSettingsTests.swift
 //  DevgenticTests
 //
-//  [CF-18] Rate and voice are baked into an `AVSpeechUtterance` at creation, so changing either
-//  mid-playback reached only the NEXT segment — and because `parseSegments` splits only on ```
-//  fences, a message with no code block is ONE segment, i.e. one utterance for the whole answer.
-//  For that message, the common one, the speed and voice controls did nothing at all while the
-//  island showed the new setting in its accent colour.
-//
-//  The fix re-speaks the REMAINDER of the in-flight utterance with the new setting, using the
-//  word boundary reported by `willSpeakRangeOfSpeechString`. `remainder(of:spokenUpTo:)` is the
-//  pure half of that and is what these tests pin: it takes a UTF-16 offset (the synthesizer hands
-//  over an `NSRange`), so the interesting cases are the boundaries and any string where UTF-16
-//  offsets and `Character` counts disagree.
+//  Created by Raj Singh.
 //
 
 import XCTest

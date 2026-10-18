@@ -4,11 +4,12 @@
 //  ModelCatalogCardView.swift
 //  Devgentic
 //
-//  Model card displaying metadata, capability tags, memory fit, and selection action.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A model card showing metadata, capability tags, memory fit and a selection action.
 struct ModelCatalogCardView: View {
 
     let model: CatalogModelItem

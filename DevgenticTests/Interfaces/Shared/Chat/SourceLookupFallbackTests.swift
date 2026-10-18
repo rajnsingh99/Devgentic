@@ -4,11 +4,7 @@
 //  SourceLookupFallbackTests.swift
 //  DevgenticTests
 //
-//  Covers the store-backed fallbacks for the Code Viewer's three source lookups. The
-//  loaded message window is paginated (~20 newest); when a snippet's source message has
-//  scrolled out of it, diff/apply/linking previously dead-ended silently. Now they fall
-//  back to persistence — these tests drive the fallbacks with an empty window and a
-//  canned store.
+//  Created by Raj Singh.
 //
 
 import XCTest

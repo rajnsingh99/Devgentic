@@ -4,13 +4,12 @@
 //  FileContextStrategyPicker.swift
 //  Devgentic
 //
-//  Created on 29/03/26.
-//
-//  Reusable SwiftUI component for selecting a FileContextStrategy in profile editors.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A picker for choosing a `FileContextStrategy` in profile editors.
 struct FileContextStrategyPicker: View {
     @Binding var strategy: FileContextStrategy?
     let profileType: ProfileType
@@ -49,10 +48,7 @@ struct FileContextStrategyPicker: View {
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle")
                         .accessibilityHidden(true)
-                    // ⚠️ register A63 — the FORMAT string was already an extractable key, but both
-                    // interpolated values were English-only runtime strings, so a translated build
-                    // rendered a half-English sentence. `LocalizedStringKey` interpolates a `Text`,
-                    // which keeps the key extractable AND localizes the substitutions.
+                    // `LocalizedStringKey` interpolation of a `Text` keeps the key extractable and localizes both substituted values.
                     Text("Custom override. Default for \(Text(profileType.localizedTitle)) is \(Text(defaultStrategy.localizedTitle)).")
                 }
                 .font(theme.fontCaption2)

@@ -4,14 +4,7 @@
 //  ExecutionLimitDeliveryTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Regression tests for the silently-dropped execution limits (register A7, A8).
-//
-//  ⚠️ Both defects dropped a limit the user had CONFIGURED, with nothing in the log to say so.
-//  A7 left Code sessions with no wall-clock bound at all; A8 discarded model-generated plan steps
-//  so an agent reported completion on work it never attempted. Neither produced an error — the
-//  only symptom was a run that behaved wrongly.
+//  Created by Raj Singh.
 //
 
 import XCTest

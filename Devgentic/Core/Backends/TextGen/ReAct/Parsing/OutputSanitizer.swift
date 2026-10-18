@@ -4,11 +4,7 @@
 //  OutputSanitizer.swift
 //  Devgentic
 //
-//  Stage 0 of the Dialect-Anchored Cascade.
-//  Strips common LLM output artifacts that confuse downstream parsers.
-//  Runs unconditionally on every response before any dialect-specific parser.
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -26,26 +22,14 @@ struct SanitizedOutput: Sendable {
 /// Never throws — always returns a cleaned string (possibly empty).
 struct OutputSanitizer: Sendable {
 
-    /// Special tokens that OPEN a tool call and that a parser or drift probe reads, kept by
-    /// `sanitize(_:preservingCallMarkers:)` when the caller is about to parse for calls.
-    ///
-    /// ⚠️ Stripping `<|python_tag|>` before the cascade made `PythonicTagProbe` unable to ever
-    /// fire and hid the call from every check that decides whether to look for one: a valid
-    /// Llama 3.1 call after a paragraph of prose was shown to the user as the answer on 6
-    /// dialects (2026-10-05 probe). Only tokens something downstream READS belong here — the
-    /// other call tokens (`<|tool_call|>`, `<|START_ACTION|>`) are still stripped, so their
-    /// parsers must recover the payload WITHOUT them, and `AttemptedToolCallGrammar` reads them
-    /// from the unsanitized text. ⚠️ That was not true for `<|START_ACTION|>` until CR-50: the
-    /// Command-R7B parser required its marker and silently lost every call's arguments.
+    // Why: stripping `<|python_tag|>` before the cascade would hide a valid Llama 3.1 call from every check that looks for one.
+    /// Call-opening tokens that a parser or drift probe reads; kept when `preservingCallMarkers` is set.
+    /// Only tokens something downstream reads belong here; the other call tokens are stripped and their parsers cope.
     static let parsedCallMarkerTokens: Set<String> = ["<|python_tag|>"]
 
-    /// Sanitizes raw LLM output by removing known artifact patterns.
-    /// - Parameters:
-    ///   - raw: The unmodified text returned by the model.
-    ///   - preservingCallMarkers: keep `parsedCallMarkerTokens` (the parse cascade sets this).
-    ///   - keepingCodeFences: skip step 3. For the text SHOWN as a final answer only — parsers
-    ///     must keep reading fence-free text (see `CognitiveParsePipeline.restoringCodeFences`).
-    /// - Returns: A structure containing cleaned text and extracted thoughts.
+    /// Sanitizes raw LLM output by removing known artifact patterns; returns cleaned text and extracted thoughts.
+    /// `preservingCallMarkers` keeps `parsedCallMarkerTokens` (the parse cascade sets it).
+    /// `keepingCodeFences` skips fence stripping; use it only for text shown as a final answer, never for parsing.
     static func sanitize(_ raw: String, preservingCallMarkers: Bool = false, keepingCodeFences: Bool = false) -> SanitizedOutput {
         var text = raw
 
@@ -62,18 +46,15 @@ struct OutputSanitizer: Sendable {
             text = stripCodeFences(text)
         }
 
-        // 4. Strip special token markers (<|eot_id|>, <|end_of_text|>, <|im_end|>, etc.).
-        //    These are tokenizer control tokens that leak into generated text
-        //    when stop sequences aren't configured or the model over-generates.
+        // Strips special token markers (<|eot_id|>, <|end_of_text|>, <|im_end|>...), tokenizer control tokens that leak
+        // when stop sequences are not configured or the model over-generates.
         text = stripSpecialTokenMarkers(text, keeping: preservingCallMarkers ? parsedCallMarkerTokens : [])
 
         // 5. Strip wrapper tags (<output>...</output>, <response>...</response>).
         //    Some models wrap their entire response in these tags.
         text = stripWrapperTags(text)
 
-        // 6. Deduplicate repeated top-level JSON blocks.
-        //    Small models sometimes emit the same JSON response twice in a single generation.
-        //    Keeps only the first block to prevent downstream parse confusion.
+        // Deduplicates repeated top-level JSON blocks: small models sometimes emit the same JSON response twice.
         text = deduplicateRepeatedBlocks(text)
 
         // 7. Strip trailing orphan XML close tags that aren't part of a matched pair.
@@ -106,18 +87,9 @@ struct OutputSanitizer: Sendable {
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Sanitizes model reasoning/thought text for display in the UI thought process.
-    ///
-    /// Small models frequently regurgitate prompt scaffold XML tags (episodic memory,
-    /// working memory, negative constraints, etc.) in their reasoning output. These
-    /// internal infrastructure tags should never be shown to the user.
-    ///
-    /// Strips: `<episodic_memory>`, `<working_memory>`, `<negative_constraints>`,
-    /// `<recent>`, `<turn>`, `<action>`, `<user_correction>`, `<params>`,
-    /// plus their closing tags and self-closing variants. Also strips orphan
-    /// markdown code fences (e.g. bare ` ```json `) — reasoning is short inline
-    /// text that rarely contains legitimate code blocks, and qwen-coder-style
-    /// models frequently leak an opener fence when emitting native tool calls.
+    /// Sanitizes model reasoning text for display, stripping prompt-scaffold XML tags small models regurgitate.
+    /// Tags: `<episodic_memory>`, `<working_memory>`, `<negative_constraints>`, `<recent>`, `<turn>`, `<action>`,
+    /// `<user_correction>`, `<params>` (open, close and self-closing), plus orphan code fences leaked by native tool calls.
     static func sanitizeForUI(_ text: String) -> String {
         guard !text.isEmpty else { return text }
         var result = text
@@ -148,10 +120,8 @@ struct OutputSanitizer: Sendable {
         // Also strip special token markers that may appear in thoughts
         result = stripSpecialTokenMarkers(result)
 
-        // Strip orphan markdown code fences — native-tool-calling models like
-        // qwen-coder often leak an opener (```json) when their trained format
-        // wraps tool calls in fences but the structured tool_calls are extracted
-        // out by the provider, leaving just the fence marker in reasoning text.
+        // Strips orphan code fences: native-tool-calling models (e.g. qwen-coder) leak an opener once the provider extracts
+        // the tool calls, leaving a bare fence marker in the reasoning text.
         result = stripCodeFences(result)
 
         // Collapse multiple blank lines into one
@@ -191,16 +161,11 @@ struct OutputSanitizer: Sendable {
         return (stripped, finalThought)
     }
 
-    /// Drops INVISIBLE and GARBAGE scalars from the very start of the string — and nothing else.
-    ///
-    /// ⚠️⚠️ NOT "everything outside printable ASCII" (readiness CR-5, 2026-10-10). That was the rule,
-    /// and it deleted the opening of every reply that did not start in English: "Привет мир" became
-    /// " мир", "Übersicht" became "bersicht", "✅ Done" lost its emoji — and an all-CJK reply became "",
-    /// which the cascade reports as `.emptyOutput` and answers with a corrective retry, every time.
-    /// What a leading artifact actually IS: a BOM or other format character (`Cf`: U+FEFF, zero-width
-    /// space/joiners, word joiner), a control character other than tab/newline (`Cc`, e.g. NUL), or the
-    /// U+FFFD replacement character a broken decode leaves behind. Letters, digits, punctuation and
-    /// emoji in ANY script are text.
+    // Why: not "everything outside printable ASCII": that deleted the opening of non-English replies
+    // and turned all-CJK replies into empty output.
+    /// Drops invisible and garbage scalars from the very start of the string, and nothing else.
+    /// A leading artifact is a format char (BOM, zero-width), a control char other than tab/newline, or U+FFFD.
+    /// Letters, digits, punctuation and emoji in any script are text and are kept.
     private static func stripLeadingArtifacts(_ text: String) -> String {
         let scalars = text.unicodeScalars
         var index = scalars.startIndex
@@ -279,16 +244,8 @@ struct OutputSanitizer: Sendable {
         return result
     }
 
-    /// Removes a top-level JSON block that REPEATS the one before it, byte for byte.
-    ///
-    /// Small models sometimes emit the same object twice in one generation; this keeps one copy.
-    ///
-    /// ⚠️ READINESS CR-53 (2026-10-12). It used to keep only the FIRST block whenever a second
-    /// `{` followed it, identical or not, and logged at debug only. Two DIFFERENT consecutive calls
-    /// (`{"name":"read_file",…}` then `{"name":"list_dir",…}`, the shape several JSON dialects
-    /// emit for a parallel batch) lost every call after the first, silently. Only an exact repeat
-    /// is dropped now, and that is logged. The scan is string-aware (`BalancedJSONScanner`); the old
-    /// previous-character test misread a string ending in an escaped backslash (`"C:\\"`).
+    /// Removes a top-level JSON block that repeats the previous one byte for byte (small models sometimes emit it twice).
+    /// Only an exact repeat is dropped (and logged); different consecutive calls both survive. The scan is string-aware.
     static func deduplicateRepeatedBlocks(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{") else { return text }
@@ -318,14 +275,9 @@ struct OutputSanitizer: Sendable {
         return kept.joined(separator: "\n") + remainder
     }
 
-    /// Strips a common close tag at the very end of the string — only when it is an ORPHAN.
-    ///
-    /// ⚠️ It used to strip any trailing match, so the `</tool_call>` CLOSING a well-formed
-    /// `<tool_call>…</tool_call>` at the end of a reply was removed too. Everything downstream then
-    /// saw an unclosed call: `StandardXMLProbe` (needs both tags) found no drift, and Mistral XML's
-    /// own parser could not match its own wrapper — a valid call after a paragraph of prose was
-    /// shown to the user as the answer on 6 dialects (2026-10-05 probe). `</s>` is an end-of-
-    /// sequence token, never half of a pair, so it is always stripped.
+    // Why: stripping a well-formed trailing `</tool_call>` makes downstream probes and parsers see an unclosed call.
+    /// Strips a common close tag at the very end of the string, only when it is an orphan.
+    /// A closing `</tool_call>` of a well-formed pair is kept; `</s>` is an end-of-sequence token, so it is always stripped.
     private static func stripTrailingOrphanTags(_ text: String) -> String {
         guard let regex = try? NSRegularExpression(
             pattern: #"\s*</(s|tool_call|tools|tool|output|response|function_call)>\s*$"#,

@@ -4,13 +4,7 @@
 //  RemoteViewValueTests.swift
 //  DevgenticTests
 //
-//  C2 of the ChatOps remote-interface plan: the value objects.
-//
-//  The strongest test here is the first one. `CallbackToken` does not define the wire grammar — it
-//  types the one already shipped, whose reader is `ChatOpsCommand.parseCallbackData` and whose
-//  strings are already sitting in users' chat scrollback. So the test that matters is not "does
-//  `wire` look right" but "does the REAL parser still understand every token we can mint". That is
-//  a wiring test: it fails the moment the two drift, in either direction.
+//  Created by Raj Singh.
 //
 
 import XCTest

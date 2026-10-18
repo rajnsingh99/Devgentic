@@ -4,17 +4,7 @@
 //  ClassifierPromptEscapingTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF-SE2 — the AI Classifier's
-//  raw XML interpolation of untrusted upstream text. Split into its own file from
-//  ClassificationTokenMapperTests.swift after that class exhibited intermittent test-discovery
-//  truncation in this environment (methods present in the linked binary per `nm`, absent from
-//  `xcodebuild test`'s run listing) — isolating narrows whether the cause is per-file or
-//  per-method.
-//
-//  `evaluateConditionWithLLM`'s happy path needs a real installed MLX model and is untestable
-//  end-to-end (see `WorkflowExecutorIntegrationTests`'s own note on this).
-//  `WorkflowExecutor.classifierUserPrompt` is the pure extraction that makes the actual
-//  interpolation site reachable from a test.
+//  Created by Raj Singh.
 //
 
 import XCTest

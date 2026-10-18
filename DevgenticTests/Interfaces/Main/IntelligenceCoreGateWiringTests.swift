@@ -4,21 +4,7 @@
 //  IntelligenceCoreGateWiringTests.swift
 //  DevgenticTests
 //
-//  The Core Intelligence toggle turned the UI on and nothing else.
-//
-//  `MainApplicationViewModel.isIntelligenceCoreEnabled` was a STORED var. Eleven consumers —
-//  MorningBriefService, UserPersonalService, AgentConnect, BackendOrchestrationService and both
-//  Welcome widgets among them — gate on `UserDefaults.bool(forKey: isIntelligenceCoreEnabledKey)`.
-//  The only thing that wrote that key was `SettingsCoordinator.didChangeIntelligenceCoreEnabled`,
-//  which had ZERO callers, and the `AnyCancellable` meant to bridge them was declared and never
-//  assigned. So the settings pane revealed its model picker and debug card while every gate still
-//  read false, and Run Morning Brief logged:
-//
-//      [Morning Brief] Gate check FAILED — IC enabled: false, Brief enabled: true, Model selected: true
-//
-//  ⚠️ These are source tests because `MainApplicationViewModel` cannot be constructed in a unit
-//  test — its init builds the app's service graph. The invariant is structural anyway: the control
-//  must write the same store the gates read, with no second copy in between.
+//  Created by Raj Singh.
 //
 
 import XCTest
@@ -100,9 +86,9 @@ final class IntelligenceCoreGateWiringTests: XCTestCase {
     /// The gates and the toggle must name the SAME key — the whole invariant in one assertion.
     func testEveryGateReadsTheKeyTheToggleWrites() throws {
         for path in [
-            "Devgentic/Intelligence/MorningBrief/MorningBriefService.swift",
+            "Devgentic/Intelligence/Briefing/BriefingService.swift",
             "Devgentic/Intelligence/UserPersonal/UserPersonalService.swift",
-            "Devgentic/Interfaces/Main/Views/WelcomeWidgets/MorningBriefWidget.swift",
+            "Devgentic/Interfaces/Main/Views/WelcomeWidgets/BriefingWidget.swift",
             "Devgentic/Interfaces/Main/Views/WelcomeWidgets/UserPersonalWidget.swift",
         ] {
             XCTAssertTrue(try Self.source(path)

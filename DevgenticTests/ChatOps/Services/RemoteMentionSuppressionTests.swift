@@ -2,24 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RemoteMentionSuppressionTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  BR-3 and EG-3 — the same defect filed twice against the same file:line. The text this bot posts is
-//  not the app's text: it is the agent's answer, the user's own prompt echoed back, and conversation
-//  titles auto-derived from a first message. Discord resolves `@everyone`, `@here`, `<@user>` and
-//  `<@&role>` out of the message BODY by default, and a repo-wide search for `allowed_mentions`
-//  returned nothing at all — so any of those strings appearing anywhere in model output made the bot
-//  mass-ping the server.
-//
-//  ⚠️⚠️ THE FIX IS NOT AN ESCAPER, AND THAT IS THE LOAD-BEARING DECISION. Escaping `@` would have been
-//  this codebase's FIFTH content-corruption bug: the bot posts code, and `@MainActor`, `@Observable`,
-//  `@escaping`, `@media`, decorators and email addresses would all have been mangled to stop a ping.
-//  `allowed_mentions` is Discord's own control — the text renders exactly as written and notifies
-//  nobody.
-//
-//  ⚠️ SCOPE EXTENDED TO SLACK, because the identical vector was live there on a path the earlier fix
-//  missed. `<!channel>` notifies every member regardless of `link_names`; `promptDraft` was hardened
-//  against it on 2026-09-11 but the AGENT REPLY path crosses only `credentialsOnly`.
+//  Created by Raj Singh.
 //
 
 import XCTest

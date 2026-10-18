@@ -4,19 +4,7 @@
 //  OrbAccessibilityTests.swift
 //  DevgenticTests
 //
-//  The orb as a CONTROL rather than a decoration.
-//
-//  ⚠️ WHAT WAS WRONG. The orb is the whole feature's only affordance — click-to-speak, send-now,
-//  and the only way to interrupt an answer — and to VoiceOver it was an unlabelled shape carrying
-//  an `onTapGesture`. Its state (STANDBY vs LISTENING vs WAITING ON YOU) was carried by colour and
-//  an unlabelled capsule, and every recovery action, including "Repair Audio…" for a wedged
-//  `coreaudiod`, lived exclusively behind a right-click, which needs a pointer.
-//
-//  ⚠️ WHAT IS STILL TRUE, so nobody reads this file as a clean bill of health: the panel is a
-//  `.nonactivatingPanel` that deliberately does NOT take focus (it must not steal it from the chat
-//  composer behind it — see `OrbPanelController.show`). Full keyboard-only operation would mean
-//  reversing that decision, which is a product call, not a bug fix. VoiceOver reaches the orb and
-//  all of its actions; the keyboard reaches them once the panel is key.
+//  Created by Raj Singh.
 //
 
 import XCTest

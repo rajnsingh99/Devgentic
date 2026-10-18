@@ -4,20 +4,7 @@
 //  ContentBlobHardeningTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards `ChatMessageSD.contentData` — the highest-stakes blob in the app, because it IS the
-//  conversation.
-//
-//  Three separate defects were closed here, and they need separate tests because they fail
-//  differently:
-//    1. FORWARD COMPAT — `MessageContent.init(from:)` ended in
-//       `default: throw … "Invalid MessageContent type"`, so one case added by a newer build turned
-//       the message into a Decode Error card. Now `.unknown` preserves it verbatim.
-//    2. WRITE-BACK — a genuinely corrupt blob still yields the Decode Error card, and BOTH writers
-//       re-encoded that card over the original bytes. Now guarded by `canPersistContent`.
-//    3. ENCODE FAILURE — `(try? encode(x)) ?? Data()` wrote an EMPTY blob over good data; empty is
-//       itself undecodable, so a transient failure became permanent.
+//  Created by Raj Singh.
 //
 
 import XCTest

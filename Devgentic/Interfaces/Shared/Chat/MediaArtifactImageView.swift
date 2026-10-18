@@ -4,10 +4,7 @@
 //  MediaArtifactImageView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Rich image rendering component for MediaArtifact images in chat.
-//  Displays generated images with metadata overlay and context menu.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -16,32 +13,10 @@ import os
 
 private let logger = DGLogger(category: "MediaArtifactImage")
 
-/// ⚠️ [views/bm-1] OPEN, and this is the decision procedure — not a fix waiting to be written,
-/// a measurement waiting to be taken.
-///
-/// The row says this view decodes and retains a FULL-RESOLUTION bitmap for a display bounded at
-/// `ChatUIConstants.imageMaxWidth`. True, and deliberate: `loadedImage` is the SINGLE bitmap
-/// serving the inline draw, the lightbox, Copy Image and Save, so downsampling it would degrade
-/// three lossless consumers to pay for one bounded one. `AttachedImageCardView` can downsample
-/// precisely because it keeps a SEPARATE full-size bitmap for those.
-///
-/// Whether the retention is worth closing turns on ONE unknown: how large the images actually
-/// are. Verified in source — MLX derives every aspect ratio from a 1024 base and DALL·E 3 emits
-/// at most 1792x1024, so against a ~1000px display cap both save around 5% of pixels, which is
-/// nothing. Gemini is the exception: its request body carries no size at all and the model name
-/// is user-configured, so its output resolution is whatever the model returns.
-///
-/// TO CLOSE THIS: generate one image per provider INCLUDING Gemini, then read the real dimensions
-/// off the stored file (`sips -g pixelWidth -g pixelHeight` under
-/// `~/Library/Application Support/Devgentic/MediaCache`). If Gemini's longest side is <= 1024 the
-/// row is closed as overstated. If it is materially larger, the fix is a NEW
-/// `ImageDownsampler.inline(from:maxDimension:)` wrapping through `NSBitmapImageRep` the way
-/// `fullSize` does — NOT `thumbnail`, whose `NSImage(cgImage:size:)` reports scaled
-/// `pixelsWide/High` and would break the lightbox's true-pixel caption — plus a deferred
-/// full-size decode for the three lossless consumers.
-///
-/// Checked 2026-09-13: `MediaCache` does not exist on this machine, so no generated image has
-/// ever been stored here and the measurement could not be taken.
+// Why: downsampling `loadedImage` would degrade three lossless consumers to save memory for one bounded
+// display.
+/// Renders a generated image artifact, decoding one full-resolution bitmap that serves the inline draw,
+/// the lightbox, Copy Image and Save.
 struct MediaArtifactImageView: View {
     let artifact: MediaArtifact
     @Environment(\.appTheme) private var theme
@@ -49,15 +24,11 @@ struct MediaArtifactImageView: View {
     @State private var loadedData: Data?
     @State private var isHovering = false
     @State private var loadError: String?
-    /// [CF-26] Whether the current `loadError` could ever change on a retry.
-    ///
-    /// A `.remoteURL` that is not a file URL never resolves — `MediaReference.resolve()` refuses
-    /// it unconditionally — so the Retry button beside the card was guaranteed to fail, forever.
+    /// Whether the current `loadError` could change on a retry.
+    /// A non-file `.remoteURL` never resolves, so Retry would fail forever.
     @State private var loadErrorIsRetriable = true
-    /// ⚠️ [CF-40] Bumped by Retry so the error card's VoiceOver announcement carries a NEW
-    /// identity per attempt. Without it a retry that fails the same way produced the identical
-    /// sentence, which the announcer's repeat suppression swallowed for its whole window — so
-    /// pressing Retry appeared to do nothing at all to a VoiceOver user.
+    /// Bumped by Retry so the error card's VoiceOver announcement has a new identity per attempt, defeating
+    /// repeat suppression.
     @State private var loadAttempt = 0
     @State private var showLightbox = false
     @State private var saveError: String?
@@ -93,11 +64,8 @@ struct MediaArtifactImageView: View {
                                     .transition(.opacity.combined(with: .move(edge: .bottom)))
                             }
                         }
-                        // Hover toolbar, ported from the retired legacy renderer: the
-                        // context menu is complete but undiscoverable, and mouse users
-                        // shouldn't need to know to right-click. Mouse-only sugar — the
-                        // context menu and accessibility actions remain the reachable
-                        // routes (a hover-gated control must never be the ONLY route).
+                        // Hover toolbar: mouse-only sugar over the context menu; the context menu and accessibility actions
+                        // remain the reachable routes.
                         .overlay(alignment: .topTrailing) {
                             if isHovering {
                                 hoverToolbar
@@ -127,8 +95,7 @@ struct MediaArtifactImageView: View {
                     .lineLimit(2)
             }
 
-            // A save used to leave no trace whether it worked or not. Failures raise an
-            // alert; successes say where the file went, then get out of the way.
+            // Failures raise an alert; successes say where the file went, then get out of the way.
             if let savedURL {
                 Label("Saved to \(savedURL.lastPathComponent)", systemImage: "checkmark.circle.fill")
                     .font(.caption)
@@ -142,9 +109,8 @@ struct MediaArtifactImageView: View {
                     }
             }
         }
-        // Keyed to the artifact: a bare `.task` runs once per view identity, so when SwiftUI
-        // reused this view for a DIFFERENT artifact (same position in a rebuilt list) it kept
-        // showing the previous picture forever. ImageView already hit and fixed this.
+        // Keyed to the artifact: a bare `.task` runs once per view identity and would keep showing the
+        // previous picture when SwiftUI reuses the view.
         .task(id: artifact.id) {
             await loadImage()
         }
@@ -160,9 +126,8 @@ struct MediaArtifactImageView: View {
     private var imageAccessibilityLabel: String {
         var spoken = String(localized: "Generated image")
         if let label = artifact.label, !label.isEmpty { spoken = String(localized: "Image: \(label)") }
-        // The model/provider overlay only exists while the mouse hovers, so this was the
-        // one thing about a generated image a non-mouse user could never learn. It's
-        // appended rather than given its own element: it's provenance, not a control.
+        // Appended to the spoken label: the model/provider overlay shows only on hover, so non-mouse users
+        // would never learn it.
         if !generationProvenance.isEmpty {
             spoken += ". \(generationProvenance)"
         }
@@ -180,15 +145,8 @@ struct MediaArtifactImageView: View {
     // MARK: - Image Loading
 
     private func loadImage() async {
-        // Clear the DERIVED state first. `.task(id: artifact.id)` re-runs this when the view is
-        // reused for a different artifact — which happens on every variant flip, since the
-        // switch branch in `AgentBubbleContentView.contentView` is keyed only by the message
-        // while `contentToDisplay` follows `currentAgentContent`. Without this reset the old
-        // bitmap survived: `body` gives `loadedImage` precedence over `loadError`, so a new
-        // artifact that fails to resolve kept showing the PREVIOUS picture with no error card
-        // and no Retry — and `Save to Downloads` / `Copy Image` exported the previous
-        // artifact's bytes, because `loadedData` was equally stale.
-        // (`errorPlaceholder`'s Retry already does exactly this; the artifact-change path did not.)
+        // Clears the derived state first: `body` gives `loadedImage` precedence over `loadError`, so a stale
+        // bitmap or bytes would survive an artifact change, showing and exporting the previous image.
         loadedImage = nil
         loadedData = nil
         loadError = nil
@@ -196,9 +154,8 @@ struct MediaArtifactImageView: View {
 
         let reference = Self.resolvableReference(for: artifact.reference)
 
-        // [CF-26] A genuinely remote reference is a dead end, not a failure: `resolve()` throws
-        // for it every single time. Say so in the user's language and drop the Retry, rather
-        // than showing "Convert to diskPath first" with a button that re-runs the same refusal.
+        // A genuinely remote reference is a dead end, not a failure: `resolve()` throws for it every time, so
+        // the card says so and drops Retry.
         guard !Self.isUnresolvable(reference) else {
             loadError = String(localized: "This image is stored as a link to a remote address, and Devgentic never downloads images from the web.")
             loadErrorIsRetriable = false
@@ -208,11 +165,8 @@ struct MediaArtifactImageView: View {
 
         do {
             let data = try await reference.resolve()
-            // Decoding a full-size bitmap is expensive, so it goes off-main to keep a large
-            // artifact from stalling the bubble it's rendering into. [CF-23] That needs
-            // `ImageDownsampler.fullSize`, not `NSImage(data:)` — the latter only parses
-            // headers here and materialises the pixels on FIRST DRAW, back on the main thread,
-            // so this hop was moving nothing that cost anything.
+            // Decodes off-main with `ImageDownsampler.fullSize`; `NSImage(data:)` only parses headers and
+            // materialises pixels on first draw.
             let image = await Task.detached(priority: .userInitiated) { ImageDownsampler.fullSize(from: data) }.value
             guard !Task.isCancelled else { return }
 
@@ -222,37 +176,22 @@ struct MediaArtifactImageView: View {
                 self.loadError = nil
             } else {
                 self.loadError = String(localized: "Could not decode image data")
-                // ⚠️ [bm-4] Retry is pointless for `.ephemeralData`: the bytes are already in
-                // memory and a retry re-reads the SAME ones, so the decode must fail again.
-                // Offering the button invited an endless loop on a card that can never recover.
-                // Deliberately NOT done by widening `isUnresolvable` to cover `.ephemeralData` —
-                // that would skip the decode ATTEMPT entirely and show "stored image is missing"
-                // copy for bytes that are present but undecodable (and it is pinned false by
-                // `MediaArtifactReferenceRepairTests`). A disk/store-backed reference keeps its
-                // retry: for those the bytes are re-read, so a transient failure can recover.
+                // Retry is pointless for `.ephemeralData`: the bytes are in memory and a retry re-reads the same ones.
+                // `isUnresolvable` is not widened for this, since that would skip the decode attempt entirely.
                 if case .ephemeralData = reference { self.loadErrorIsRetriable = false }
                 logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(reference)), \(self.artifact.mimeType), \(data.count) bytes) resolved but did NOT decode. CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place.")
             }
         } catch {
             guard !Task.isCancelled else { return }
             self.loadError = error.localizedDescription
-            // A `.diskPath` reference that no longer resolves is exactly the durability
-            // failure the logging standard exists for: without this line, "my generated
-            // images disappeared" leaves no trace beyond an error card the user scrolls past.
+            // A `.diskPath` reference that fails to resolve is a durability failure, so it is logged.
             logger.error("[MEDIA] Artifact \(self.artifact.id.uuidString.prefix(8)) (\(Self.referenceKind(reference)), \(self.artifact.mimeType)) FAILED to resolve: \(error.localizedDescription). CONSEQUENCE: the picture is missing from the transcript and the error card is shown in its place (retry offered).")
         }
     }
 
-    /// [CF-26] The reference `loadImage` actually reads from, which is not always the one the
-    /// artifact carries.
-    ///
-    /// `MediaReference.resolve()` refuses `.remoteURL` unconditionally, so a `file://` URL that
-    /// arrived labelled remote rendered a developer-facing "Convert to diskPath first" card next to
-    /// a Retry that re-ran the same refusal — for a picture sitting readable on disk. A `file://`
-    /// URL is a disk path however it got labelled; read it as one.
-    ///
-    /// The repair lives here rather than in `MediaReference` because that type is Core and
-    /// serves the whole pipeline, where "remote is never auto-fetched" is a deliberate rule.
+    /// The reference `loadImage` actually reads from, which is not always the one the artifact carries.
+    /// A `file://` URL labelled remote is read as a disk path; the repair lives here because
+    /// `MediaReference` never auto-fetches remote.
     nonisolated static func resolvableReference(for reference: MediaReference) -> MediaReference {
         if case .remoteURL(let url) = reference, url.isFileURL {
             return .diskPath(url)
@@ -260,16 +199,14 @@ struct MediaArtifactImageView: View {
         return reference
     }
 
-    /// [CF-26] Whether this reference can never produce bytes, so the card must not offer a
-    /// Retry. Only a non-file `.remoteURL` qualifies — everything else can succeed on a later
-    /// read (a file can come back). Expects a reference already passed through
-    /// `resolvableReference(for:)`.
+    /// Whether this reference can never produce bytes, so the card must not offer Retry: only a non-file
+    /// `.remoteURL`. Expects a reference already passed through `resolvableReference(for:)`.
     nonisolated static func isUnresolvable(_ reference: MediaReference) -> Bool {
         if case .remoteURL(let url) = reference { return !url.isFileURL }
         return false
     }
 
-    /// Reference kind for logs — the URL itself is deliberately not logged (user paths).
+    /// Reference kind for logs; the URL itself is not logged, since it carries user paths.
     private static func referenceKind(_ reference: MediaReference) -> String {
         switch reference {
         case .diskPath:      return "diskPath"
@@ -280,13 +217,8 @@ struct MediaArtifactImageView: View {
 
     // MARK: - Subviews
 
-    /// Sized off the shared constants, not a bespoke 256×256 square.
-    ///
-    /// `ChatUIConstants.imagePlaceholderMinHeight` exists so "the bubble doesn't jump when the
-    /// picture arrives", but the app's primary image renderer ignored it and reserved a fixed
-    /// square instead — so the bubble jumped anyway, and tuning the constant had no effect
-    /// where it mattered most. `maxWidth` matches the loaded image's own frame (:34), so the
-    /// placeholder and the picture occupy the same width.
+    /// Sized off the shared constants so the bubble does not jump when the picture arrives.
+    /// `maxWidth` matches the loaded image's own frame.
     private var loadingPlaceholder: some View {
         RoundedRectangle(cornerRadius: 12)
             .fill(theme.secondaryBackground)
@@ -302,15 +234,9 @@ struct MediaArtifactImageView: View {
             )
     }
 
-    /// The shared error card, not a bespoke one. The old placeholder was a fixed
-    /// 256×128 tile that truncated the reason to TWO lines with no expand, no copy, and
-    /// no way to retry — a dead end that also announced nothing. ErrorMessageView brings
-    /// copy + the VoiceOver announcement for free.
-    ///
-    /// [CF-26] Retry is offered only where a retry can work. A resolve against disk is
-    /// genuinely retriable (a file can be back on the next read); a non-file `.remoteURL` is
-    /// refused by `MediaReference.resolve()` every time, so that card says the image is
-    /// unavailable and carries no button.
+    /// The shared error card (`ErrorMessageView`), which provides copy and a VoiceOver announcement.
+    /// Retry is offered only where it can work: a disk resolve is retriable, a non-file `.remoteURL` is
+    /// refused every time.
     private func errorPlaceholder(_ error: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ErrorMessageView(
@@ -323,7 +249,7 @@ struct MediaArtifactImageView: View {
             )
             if loadErrorIsRetriable {
                 RetryMessageButton {
-                    loadAttempt += 1  // [CF-40] a new attempt is a new announcement identity
+                    loadAttempt += 1  // a new attempt is a new announcement identity
                     loadError = nil   // back to the loading placeholder while we re-resolve
                     loadedImage = nil
                     Task { await loadImage() }
@@ -353,9 +279,6 @@ struct MediaArtifactImageView: View {
         .padding(.vertical, 4)
         // MARK: Liquid Glass
         .glassEffect(.regular, in: .rect(cornerRadius: 6))
-        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-        // .background(.ultraThinMaterial)
-        // .clipShape(RoundedRectangle(cornerRadius: 6))
         .padding(8)
     }
 
@@ -425,12 +348,8 @@ struct MediaArtifactImageView: View {
 
     // MARK: - Actions
 
-    /// Saves the original bytes to Downloads.
-    ///
-    /// Previously force-unwrapped the Downloads directory (a crash, to save a picture),
-    /// re-encoded every artifact to PNG regardless of `mimeType` (recompressing a JPEG and
-    /// misnaming the result), and dropped write failures with `try?` — so a save that never
-    /// happened looked exactly like one that did.
+    /// Saves the original bytes to Downloads, keeping the artifact's `mimeType` and surfacing write
+    /// failures.
     private func saveToDownloads() {
         guard let data = loadedData else { return }
         saveError = nil
@@ -463,8 +382,7 @@ struct MediaArtifactImageView: View {
         guard let data = loadedData else { return }
         let panel = ImageExport.savePanel(baseName: baseName, data: data, declaredMimeType: artifact.mimeType)
         panel.begin { response in
-            // A plain cancel is not a failure and stays quiet; `.OK` with no URL is, and
-            // used to exit through the same silent return.
+            // A plain cancel is not a failure and stays quiet; `.OK` with no URL is a failure.
             guard response == .OK else { return }
             guard let url = panel.url else {
                 logger.error("[MEDIA] Save-As for artifact \(self.artifact.id.uuidString.prefix(8)) was CONFIRMED but the panel returned no URL. CONSEQUENCE: nothing was written and the user saw no error.")

@@ -4,16 +4,13 @@
 //  WebSearchConfig.swift
 //  Devgentic
 //
-//  Which provider `web_search` uses, plus the non-secret settings some providers need.
-//
-//  Secrets never live here — API keys are in the Keychain via `WebSearchKeyStore`. This holds the
-//  choice of provider, Google's Search Engine ID (an identifier, not a credential) and the
-//  SearXNG base URL. A struct over an injectable `UserDefaults` so tests never touch the real
-//  domain.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Which provider `web_search` uses, plus non-secret settings: Google's Search Engine ID and the SearXNG base URL.
+/// API keys live in the Keychain via `WebSearchKeyStore`; an injectable `UserDefaults` keeps tests off the real domain.
 struct WebSearchConfig: @unchecked Sendable {
 
     static let providerKey = "webSearch.provider"
@@ -27,10 +24,8 @@ struct WebSearchConfig: @unchecked Sendable {
     }
 
     /// The provider used when the user has not chosen one.
-    ///
-    /// Defaulting is safe: every provider except SearXNG needs a credential before it sends
-    /// anything, and Google (the default) needs a key AND an engine ID, so nothing leaves the
-    /// machine until the user has configured it.
+    /// Safe default: every provider except SearXNG needs a credential first, and Google needs a key and an engine ID,
+    /// so nothing leaves the machine until the user configures it.
     static let defaultProvider: WebSearchProvider = .google
 
     /// The selected provider; `defaultProvider` until the user picks another.

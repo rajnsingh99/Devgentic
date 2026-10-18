@@ -4,17 +4,7 @@
 //  NativeSeedingIntegrationTests.swift
 //  DevgenticTests
 //
-//  Regression tests for capability-seeded working memory on the native (G12)
-//  turn path. PlanningCapability and SelfReflectionCapability seed pre-run
-//  observations (dependency results / prior-trial output) into workingMemory;
-//  the native path excludes the scratchpad from compileMessages, so the seeds
-//  must reach the model via the kickoff user turn instead. Unseeded runs must
-//  keep the kickoff turn byte-identical to the raw user input (KV-cache prefix).
-//
-//  MockLLMProvider doesn't override generateCognitiveStep(nativeMessages:), so
-//  the native turn array arrives through the protocol's default downgrade into
-//  receivedCognitiveMessages — string content (system, kickoff user) survives
-//  the coercion verbatim, which is exactly what these tests assert on.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,18 +4,7 @@
 //  BlobVersioningTests.swift
 //  DevgenticTests
 //
-//  Created on 05/08/26.
-//
-//  Guards the blob version-discriminator mechanism (SWIFTDATA_GAP_REGISTER.md G19).
-//
-//  The thing being defended is subtle: a future migration must be able to ASK a blob what shape it
-//  is, instead of trying shapes until one decodes. A guess that succeeds incorrectly is silent data
-//  loss, and JSON decoding succeeds incorrectly all the time.
-//
-//  These tests care most about the two hazards the implementation is shaped around:
-//    1. Stamping must not re-encode the payload (JSONSerialization's writer is lossy on doubles).
-//    2. Stamping must be idempotent (`MessageContent.unknown` re-emits a preserved payload verbatim,
-//       version key included).
+//  Created by Raj Singh.
 //
 
 import XCTest

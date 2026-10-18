@@ -4,13 +4,7 @@
 //  MLXDiskCapacityTests.swift
 //  DevgenticTests
 //
-//  Milestone M1 — "Don't fill the user's disk".
-//
-//    G1  The exact download size was already fetched and used only as an ETA denominator;
-//        nothing compared it to free space. The store's own top-30 MLX listing includes a
-//        657 GB repo, so on a 512 GB laptop the pull filled the startup volume.
-//    G3  Installed models were mapped with `size: nil`, so the app could not report the
-//        76 GB it was occupying, or which model was the large one.
+//  Created by Raj Singh.
 //
 
 import XCTest

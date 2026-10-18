@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  What a run declares it will use (plan §3.2): profile → models, workflow walk, origin derivation.
+//  ManifestModelResolverTests.swift
+//  DevgenticTests
+//
+//  Created by Raj Singh.
 //
 
 import XCTest

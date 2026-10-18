@@ -4,10 +4,7 @@
 //  ParserFactory.swift
 //  Devgentic
 //
-//  Step 3 (final): Factory that maps a ModelDialect to the correct concrete parser.
-//  Used by dialect-specific generators to obtain their matching parser.
-//
-//  Created by Raj Singh on 06/03/26.
+//  Created by Raj Singh.
 //
 
 import OSLog

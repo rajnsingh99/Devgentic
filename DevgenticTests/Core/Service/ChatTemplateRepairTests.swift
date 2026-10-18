@@ -4,10 +4,7 @@
 //  ChatTemplateRepairTests.swift
 //  DevgenticTests
 //
-//  Cover for the known-corruption template register. The corrupt bytes below are the REAL segment
-//  shipped in mlx-community/Qwen2.5-3B-Instruct-4bit's tokenizer_config.json (verified against the
-//  artifact on 2026-08-21), whose doubled-brace tool-call example taught the model to emit
-//  `{{"name": ...}}` — invalid JSON the framework then silently discarded as "empty response".
+//  Created by Raj Singh.
 //
 
 import XCTest

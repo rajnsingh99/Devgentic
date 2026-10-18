@@ -4,8 +4,7 @@
 //  ReActMarkdownParserTests.swift
 //  DevgenticTests
 //
-//  Tests for ReActMarkdownParser — handles the classic
-//  Thought / Action / Action Input format used by Llama and similar models.
+//  Created by Raj Singh.
 //
 
 import XCTest

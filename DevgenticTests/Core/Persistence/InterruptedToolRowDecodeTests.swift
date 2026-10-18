@@ -4,19 +4,7 @@
 //  InterruptedToolRowDecodeTests.swift
 //  DevgenticTests
 //
-//  [CF-44] A force-quit mid-tool leaves `isExecuting == true` on disk, because `flushInFlight`
-//  persists the in-flight message at every tool boundary while the only repair —
-//  `closeDanglingToolRows` — is reached exclusively from `ActiveStreamManager.finalizeMessage`,
-//  which a force-quit never reaches. The row then renders an animating spinner forever, with no
-//  output and no way to expand it. Decode is the one place every reader passes through, so the
-//  repair goes there.
-//
-//  ⚠️ The control below is the important test. The repair is restricted to `.streaming` and must
-//  NEVER touch `.parkedHITL`: `resumeRun` rebuilds a parked run with
-//  `TimelineTurnReconstructor.reconstruct`, which identifies the parked tool by exactly
-//  `isExecuting || output == nil`, and refuses the resume when that comes back nil. Closing a
-//  parked row at decode would turn a resumable park into a permanently unresumable one —
-//  strictly worse than the spinner the row was filed for.
+//  Created by Raj Singh.
 //
 
 import XCTest

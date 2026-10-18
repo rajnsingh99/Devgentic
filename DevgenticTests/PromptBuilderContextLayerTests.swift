@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PromptBuilderContextLayerTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 11/07/26.
-//
-//  Covers the 2026-07 file-context redesign contract in PromptBuilder:
-//  - <knowledge_base> renders as a system layer iff a payload is present
-//  - attachmentContext leads the USER message, never the system message
-//  - the native path can exclude attachments (kickoff turn delivers them)
+//  Created by Raj Singh.
 //
 
 import XCTest

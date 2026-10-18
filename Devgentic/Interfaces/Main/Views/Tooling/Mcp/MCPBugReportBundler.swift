@@ -4,14 +4,7 @@
 //  MCPBugReportBundler.swift
 //  Devgentic
 //
-//  Builds the JSON bundle a user attaches when reporting an MCP issue.
-//  Pulls the per-source log buffer from `MCPLogStore`, the (already-secret-
-//  free) server definition, the live connection state, and lightweight
-//  system info. URL/args fields are run through `MCPRedaction` once more
-//  on the way out as a defensive belt-and-braces measure.
-//
-//  No secret material is ever included — env values, tokens, OAuth bundles
-//  all live in Keychain and are never read here.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,17 +4,16 @@
 //  ConditionNodeInspectorView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 11/04/26.
-//
-//  Configuration sheet for Condition nodes — card-based layout.
-//  Pattern matching rules → AI Classifier → 'When Routing Can't Decide'.
-//  Uses SettingsCard components for visual consistency with Bot/Agent config views.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 private let inspectorLogger = DGLogger(category: "ConditionNodeInspector")
 
+/// Configuration sheet for Condition nodes: pattern-matching rules, an AI classifier and the 'When
+/// Routing Can't Decide' policy. Uses SettingsCard components for consistency with the Bot/Agent config
+/// views.
 struct ConditionNodeInspectorView: View {
     @Binding var node: WorkflowNode
     @Environment(\.closeNodeInspector) private var closeInspector
@@ -31,7 +30,7 @@ struct ConditionNodeInspectorView: View {
     @State private var llmPrompt: String = ""
     @State private var llmModelName: String? = nil
 
-    /// The unified "when routing can't decide" setting (2026-08-17 redesign).
+    /// The unified "when routing can't decide" setting.
     @State private var decisionPolicy: RouterDecisionPolicy = .ask(fallback: .failNode)
     /// The nested "if nobody can answer" control, held separately so switching away from Ask and
     /// back does not lose the user's fallback choice mid-edit.
@@ -39,9 +38,7 @@ struct ConditionNodeInspectorView: View {
     @State private var installedModels: [MLXModelItem] = []
     @State private var showGuide: Bool = false
 
-    /// ⚠️ Raised from 500 on 2026-08-17. The pre-filled default template plus any real editing
-    /// does not fit under the old cap, and a field that silently truncates the text it just
-    /// pre-filled is worse than no pre-fill.
+    /// Maximum classifier prompt length; large enough for the pre-filled default template plus real edits.
     private let maxPromptLength = 1200
     var showsHeader: Bool = true
 
@@ -94,11 +91,8 @@ struct ConditionNodeInspectorView: View {
         .onChange(of: llmFallbackEnabled) { persistIfEmbedded() }
         .onChange(of: llmPrompt) { persistIfEmbedded() }
         .onChange(of: llmModelName) { persistIfEmbedded() }
-        // ⚠️ `.task`, not `.onAppear`: A15 made the model scan asynchronous, so a synchronous
-        // read right after a fire-and-forget refresh snapshots the EMPTY pre-scan list into
-        // `@State` with nothing observing it afterwards. Opening this inspector before the
-        // launch scan landed showed "No MLX models found" until it was closed and reopened.
-        // Same fix the former `MLXModelPickerView` carried.
+        // `.task`, not `.onAppear`: the model scan is asynchronous, so a synchronous read would snapshot the
+        // empty pre-scan list into `@State` with nothing observing it afterwards.
         .task {
             await loadInstalledModels()
         }
@@ -244,14 +238,11 @@ struct ConditionNodeInspectorView: View {
         )
     }
 
-    // MARK: - 2. Routing Decision Card (unified, 2026-08-17)
+    // MARK: - Routing Decision Card
 
-    /// ONE card for what the Router does when it cannot pick exactly one branch. The two triggers
-    /// are mutually exclusive by construction (either zero rules matched or several did), so one
-    /// setting is coherent rather than a false merge.
-    ///
-    /// ⚠️ Named for what it COVERS. "Unmatched Input" became a lie the moment the same setting also
-    /// governed input that matched too MANY rules — the opposite of unmatched.
+    /// One card for what the Router does when it cannot pick exactly one branch.
+    /// The two triggers (zero rules matched, several matched) are mutually exclusive, so the card is named
+    /// for what it covers.
     private var routingDecisionCard: some View {
         SettingsCard(title: "When Routing Can't Decide", icon: "arrow.triangle.branch", theme: theme) {
             VStack(alignment: .leading, spacing: 14) {
@@ -279,11 +270,8 @@ struct ConditionNodeInspectorView: View {
                     .frame(width: 220)
                 }
 
-                // ⚠️ Shown only for Ask, because it only means anything there — and it is REQUIRED
-                // rather than implicit: an unattended run (scheduled, or started from a chat bridge)
-                // renders no banner anyone can see, so it never parks. Before the redesign that
-                // degrade was hardcoded to "first match" and invisible; a 3am workflow author had no
-                // way to see what would actually happen.
+                // Shown only for Ask, and required: an unattended run (scheduled, chat bridge) renders no banner, so
+                // it never parks.
                 if case .ask = decisionPolicy {
                     Rectangle()
                         .fill(theme.dividerColor.opacity(0.6))
@@ -322,8 +310,7 @@ struct ConditionNodeInspectorView: View {
         }
     }
 
-    /// ⚠️ Every caption names BOTH triggers, because one setting now governs both and a caption
-    /// mentioning only one would repeat the mistake the old "Unmatched Input" label made.
+    /// Every caption names both triggers, since one setting governs both.
     private var decisionDescription: String {
         switch decisionPolicy {
         case .ask:
@@ -357,8 +344,7 @@ struct ConditionNodeInspectorView: View {
             VStack(alignment: .leading, spacing: 12) {
                 // Counter
                 HStack {
-                    // ⚠️ NOT "first match wins": `decided = distinctMatched.count == 1 ? distinctMatched[0]
-                    // : nil`, so several matches fall through to "When Routing Can't Decide".
+                    // Not "first match wins": several matches fall through to "When Routing Can't Decide".
                     Text("Rules are evaluated top-to-bottom. Exactly one match routes to that rule's port; if several match, the setting below decides.")
                         .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText)
@@ -443,18 +429,8 @@ struct ConditionNodeInspectorView: View {
                 .font(theme.fontFootnote)
                 .frame(width: 90)
 
-                // Operator picker
-                //
-                // [INS-10] The options are `allCases` PLUS the rule's own operator when that is not
-                // in `allCases`. `ConditionOp.other(_)` is a real, reachable case — it holds a newer
-                // build's operator (WF-PE3). With no matching tag the Picker rendered BLANK, so such
-                // a rule showed an empty operator with nothing to explain it, on a rule the engine
-                // treats as inert.
-                //
-                // ⚠️ Offering it does NOT rewrite it: re-selecting the same value is a no-op, and
-                // choosing a real operator is the user's explicit decision. That is the house
-                // pattern for preserved-but-unknown values (`WorkflowNodeKind.unsupported`,
-                // `StickyNoteColor.other`) — show it honestly, never silently replace it.
+                // Operator picker: options are `allCases` plus the rule's own operator when it is not in `allCases`
+                // (`ConditionOp.other(_)` holds a newer build's operator); offering it does not rewrite it.
                 Picker("", selection: rule.op) {
                     ForEach(Self.operatorOptions(including: rule.wrappedValue.op), id: \.self) { op in
                         Text(op.displayName).tag(op)
@@ -521,10 +497,8 @@ struct ConditionNodeInspectorView: View {
                 )
             }
 
-            // Match value field (hidden for isEmpty/isNotEmpty — those don't need a value)
-            // ⚠️ Mirrors `WorkflowValidation`'s `requiresValue` switch. Two copies of one
-            // predicate, in inverted form, in different files — adding an operator means editing
-            // both or the value box and the validator disagree.
+            // Match value field, hidden for isEmpty/isNotEmpty.
+            // Mirrors `WorkflowValidation`'s `requiresValue`; adding an operator means editing both.
             if rule.wrappedValue.op != .isEmpty && rule.wrappedValue.op != .isNotEmpty {
                 TextField(
                     "",
@@ -583,10 +557,8 @@ struct ConditionNodeInspectorView: View {
                     Toggle("", isOn: $llmFallbackEnabled)
                         .toggleStyle(.switch)
                         .controlSize(.small)
-                        // ⚠️ Pre-fill on ENABLE only, and only into an empty field — never over
-                        // text the user wrote. An empty prompt is also a genuine runtime fault the
-                        // classifier guards on, so seeding it here is what makes the field's
-                        // pre-filled state and the engine's expectation agree.
+                        // Pre-fills on enable only, and only into an empty field, never over the user's text.
+                        // An empty prompt is a runtime fault the classifier guards on.
                         .onChange(of: llmFallbackEnabled) { _, enabled in
                             if enabled, llmPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 llmPrompt = ConditionNodeConfig.defaultRoutingPrompt
@@ -675,9 +647,8 @@ struct ConditionNodeInspectorView: View {
                             }
                         }
 
-                        // ⚠️ The placeholder is the whole point: it expands to the CURRENT rule
-                        // labels every run, so adding or renaming a rule never rewrites this text
-                        // and never leaves it stale.
+                        // The placeholder expands to the current rule labels every run, so renaming a rule never leaves this
+                        // text stale.
                         Text("\(ConditionNodeConfig.rulesPlaceholder) is replaced with your rule labels each run — edit the wording freely, but keep the placeholder so the model always sees the current branches.")
                             .font(theme.fontCaption2)
                             .foregroundColor(theme.tertiaryText)
@@ -731,15 +702,8 @@ struct ConditionNodeInspectorView: View {
         installedModels = service.installedModels
     }
 
-    /// Which route target a policy names that no longer exists on this node, and what to write
-    /// instead (register INS-7).
-    ///
-    /// ⚠️ Pure and `static`: a repair that CHANGES the author's stored routing decision must be
-    /// provable from a test, and the `if case` chain it replaces lived inside `saveAndDismiss`,
-    /// which a test cannot reach.
-    ///
-    /// ⚠️ EXHAUSTIVE, with no `default:` — a new `RouterDecisionPolicy` case must break this build
-    /// rather than silently persist a target nothing checks.
+    /// Which route target a policy names that is missing from this node, and what to write instead.
+    /// Pure and `static` so the repair is testable; exhaustive, so a new policy case breaks the build.
     enum DanglingRouteRepair: Equatable {
         case none
         /// The policy itself pointed at `ruleID`; write `.failNode`.
@@ -748,11 +712,8 @@ struct ConditionNodeInspectorView: View {
         case askFallback(ruleID: UUID)
     }
 
-    /// The operator menu's options: every operator this build can evaluate, plus `current` when it is
-    /// not one of them, so a preserved-but-unevaluable operator has a tag to bind to instead of
-    /// rendering as an empty dropdown (register INS-10).
-    ///
-    /// The unavailable operator sorts LAST — it is not something to pick, only something to see.
+    /// The operator menu's options: every evaluable operator plus `current` when it is not one of them, so
+    /// it has a tag to bind to. The unavailable operator sorts last.
     nonisolated static func operatorOptions(including current: ConditionOp) -> [ConditionOp] {
         ConditionOp.allCases.contains(current)
             ? ConditionOp.allCases
@@ -772,10 +733,8 @@ struct ConditionNodeInspectorView: View {
     }
 
     /// One line per silent repair, naming what the user loses.
-    ///
-    /// ⚠️ `when` is supplied by the caller because the two repairs do NOT share a consequence: the
-    /// policy repair applies to every undecided input, the ask-fallback repair only to runs where
-    /// nobody answers.
+    /// `when` comes from the caller: the policy repair affects every undecided input, the ask-fallback only
+    /// unanswered runs.
     private func logDanglingRepair(target ruleID: UUID, what: String, when: String) {
         inspectorLogger.notice("[WF_CANVAS] Router '\(node.displayName)' [node \(node.id.uuidString.prefix(8))]: the \(what) pointed at rule \(ruleID.uuidString.prefix(8)), which was deleted in this editing session — saving 'fail the node' instead. CONSEQUENCE: \(when) now FAILS onto this node's error port rather than routing to the branch you had chosen; pick a new target in 'When Routing Can't Decide' if that is not what you want.")
     }
@@ -797,20 +756,8 @@ struct ConditionNodeInspectorView: View {
     }
 
     private func saveAndDismiss() {
-        // [INS-6] The de-dup is `ConditionNodeConfig.deduplicatedLabel`, which REPLACES the label's
-        // tail with the suffix instead of appending-then-truncating. The old inline form no-opped for
-        // any already-10-character label, writing the duplicate through to the validator as a
-        // blocking error.
-        //
-        // ⚠️ A rewrite here RENAMES AN OUTPUT PORT — rule labels are ports, and
-        // `WorkflowEdge.sourcePortLabel` matches them by exact string.
-        //
-        // ⚠️ And `portRenameMap` REFUSES this particular rename, every time, by construction: the
-        // duplicate's twin KEEPS the shared label, and the map drops any rename away from a label
-        // another rule still carries ("an edge on it may belong to the keeper"). That refusal is
-        // CORRECT — an edge on a shared label genuinely has no single owner — but it means the edge
-        // stays on the surviving rule rather than following the renamed one. The log says that
-        // rather than promising a re-point that cannot happen.
+        // De-dup uses `ConditionNodeConfig.deduplicatedLabel`. Rule labels are output ports, so a rewrite
+        // renames one; `portRenameMap` refuses this rename, so the edge stays on the surviving rule.
         persistConfigToNode()
         closeInspector()
     }
@@ -833,8 +780,7 @@ struct ConditionNodeInspectorView: View {
             seen.insert(deduped)
         }
 
-        // ⚠️ Start from the config we LOADED, never a fresh one: building from scratch silently
-        // drops any field this view does not edit.
+        // Starts from the loaded config, never a fresh one, which would drop fields this view does not edit.
         var config = loadedConfig
         config.rules = cleanedRules
         config.llmFallbackEnabled = llmFallbackEnabled
@@ -843,10 +789,8 @@ struct ConditionNodeInspectorView: View {
 
         var policyToWrite = decisionPolicy
         if case .ask = policyToWrite { policyToWrite = .ask(fallback: askFallback) }
-        // ⚠️ A route target whose rule was deleted IN THIS EDITING SESSION falls back to failNode
-        // rather than persisting a dangling id — the validator would flag it, but not writing it
-        // is better than writing-then-flagging. [INS-7] Logged, because it changes the author's
-        // stored routing decision; extracted so it can be truth-tabled.
+        // A route target whose rule was deleted in this editing session falls back to failNode rather than
+        // persisting a dangling id. Logged, since it changes the author's stored routing decision.
         switch Self.danglingRouteRepair(in: policyToWrite, against: cleanedRules) {
         case .none:
             break
@@ -861,8 +805,7 @@ struct ConditionNodeInspectorView: View {
 
         node.kind = .condition(config)
 
-        // [INS-11] Never materialise `nodeConfig` here: this panel edits no per-node config, and
-        // turning `nil` into `.some(defaults)` defeats `replaceNode`'s equality guard, so a Save
-        // that changed nothing would dirty the canvas and burn an undo slot.
+        // Never materialise `nodeConfig` here: turning `nil` into defaults defeats `replaceNode`'s equality
+        // guard and dirties the canvas.
     }
 }

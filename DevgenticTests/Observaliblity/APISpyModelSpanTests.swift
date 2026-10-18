@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  APISpyModelSpanTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Phase-2 verification: with a span scope, every blocking model call through
-//  APISpyModel becomes a real `.llmCall` span carrying per-call duration and token
-//  counts in `spans.metadataJSON`, parented under whatever the executor last put in
-//  the scope. Uses the REAL TraceRecorder.shared / TraceStore.shared — safe because
-//  the Phase-1 XCTest redirect points them at a throwaway temp store.
+//  Created by Raj Singh.
 //
 
 import XCTest

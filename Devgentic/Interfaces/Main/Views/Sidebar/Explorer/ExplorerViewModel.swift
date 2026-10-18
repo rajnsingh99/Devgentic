@@ -37,21 +37,13 @@ final class ExplorerViewModel {
                 rootItems = []
                 expandedItemIDs = []
                 errorMessage = nil
-                // ⚠️ The `@` index belongs to the folder — drop it with the folder. It used to be
-                // only REPLACED when a new folder finished indexing, so a root going to none (Chat
-                // with no folder, Code Home) kept offering the previous folder's files: Code's
-                // `java` project showed up in Chat's `@` picker. Also stop a pending file-change
+                // The `@` index belongs to the folder: drop it with the folder, and cancel a pending file-change
                 // refresh for the old folder, which would append its files back.
                 allSuggestableFiles = []
                 fileSystemDebounceTask?.cancel()
 
-                // Publish as an MCP root. Roots are not a Code-mode feature — the folder open
-                // here is "the folder this app is working in" for chat and workflow too, and
-                // is the only workspace boundary those interfaces can offer a server.
-                //
-                // Published even when it fails to open below: an MCP server's access rests on
-                // ordinary file permissions, not on this app's security-scoped grant, so the
-                // boundary is still the right thing to state.
+                // Publish as an MCP root: the open folder is the workspace boundary for chat and workflow too.
+                // Published even if opening fails below, since a server's access rests on file permissions, not this app's grant.
                 let published = selectedRootURL
                 Task { await MCPRootsProvider.setExplorerRoot(published) }
             }
@@ -60,9 +52,7 @@ final class ExplorerViewModel {
                 let hasSecurityScope = newURL.startAccessingSecurityScopedResource()
                 if hasSecurityScope {
                     logger.info("Successfully started accessing security-scoped resource (didSet for selectedRootURL) for: \(newURL.path)")
-                    // ⚠️ Only CHAT's folder is the remembered one. Code shows its project here
-                    // too, and saving that overwrote Chat's folder — switching back to Chat then
-                    // showed the Code project.
+                    // Only Chat's folder is remembered; Code shows its project here too and must not overwrite it.
                     if scope == .chat { saveBookmark(for: newURL) }
                 } else {
                     logger.info("Selected URL is not security-scoped or does not require scoped access: \(newURL.path)")
@@ -133,12 +123,8 @@ final class ExplorerViewModel {
     @ObservationIgnored private static let lastOpenedFolderBookmarkKey = "explorerLastOpenedFolderBookmark"
 
     // MARK: - Whose folder is showing
-    //
-    // The Explorer is shared by Chat and Code, but each owns a different folder:
-    //  • Chat — the folder the user opened here; remembered across launches (the bookmark).
-    //  • Code — the Code session's project (`CodeSessionManager.projectPath`), or none on Home.
-    // Both used to write ONE root, so Code's project leaked into Chat and Chat's folder into a
-    // Code session. `MainApplicationViewModel.syncExplorerToInterfaceMode` picks the owner.
+    // Which interface owns the Explorer's root: Chat (the folder the user opened, kept via its bookmark) or Code
+    // (the session's project, none on Home); `MainApplicationViewModel.syncExplorerToInterfaceMode` picks the owner.
 
     enum Scope: Equatable { case chat, code }
 
@@ -290,17 +276,8 @@ final class ExplorerViewModel {
             path = item.url.deletingLastPathComponent().path
         }
         
-        // TWO interpreters nest here, and the path has to survive both.
-        //
-        // `do script` hands its string to a SHELL, and that string is itself an AppleScript
-        // literal. Previously the path went in raw inside escaped double quotes: a folder named
-        // `a"; rm -rf ~; #` closed the AppleScript literal AND the shell quoting. The path comes
-        // from disk, so a crafted filename in any downloaded archive or cloned repo was enough —
-        // no model involvement needed.
-        //
-        // Inner layer: POSIX single-quote the path, which makes every character literal to the
-        // shell (`'` itself is closed, escaped and reopened). Outer layer: escape the resulting
-        // string for the AppleScript literal.
+        // Two interpreters nest: `do script` hands its string to a shell, and that string is an AppleScript literal.
+        // POSIX single-quote the path for the shell, then escape the result for the AppleScript literal.
         let shellQuotedPath = "'" + path.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
         let escapedCommand = AppleScriptEscaping.escapeStringLiteral("cd \(shellQuotedPath)")
         let scriptSource = """
@@ -1046,9 +1023,8 @@ final class ExplorerViewModel {
             folderURL = url.deletingLastPathComponent()
         }
 
-        // Scan only the specific subfolder — unless it lies inside build output. The
-        // enumerator starts AT this folder, so it never sees the excluded ancestor and
-        // would re-admit e.g. a freshly compiled `out/…/January2026.class`.
+        // Scan only the subfolder unless it lies inside build output; the enumerator starts at this folder, so it
+        // never sees an excluded ancestor and would re-admit compiled files.
         let subfolderFiles: [FileSystemItem]
         if let root = selectedRootURL, SuggestableFileFilter.isInsideExcludedDirectory(folderURL, root: root) {
             subfolderFiles = []

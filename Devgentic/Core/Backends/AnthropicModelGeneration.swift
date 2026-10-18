@@ -4,29 +4,7 @@
 //  AnthropicModelGeneration.swift
 //  Devgentic
 //
-//  Created on 07/08/26.
-//
-//  Classifies an Anthropic model id into the request contract it accepts.
-//
-//  ⚠️ WHY THIS EXISTS. `ClaudeLLMProvider` used to build one request shape for every Claude model,
-//  and that shape is now rejected by every current flagship:
-//
-//    • `thinking: {type: "enabled", budget_tokens: N}` returns 400 on Opus 4.7+ / Sonnet 5 /
-//      Fable 5 / Mythos 5. `{type: "adaptive"}` replaced it, with depth controlled by
-//      `output_config.effort` rather than a token count.
-//    • `temperature` / `top_p` / `top_k` are REMOVED on those same models and return 400 —
-//      not merely ignored, and not conditional on thinking being enabled.
-//
-//  Both remain valid on Opus 4.6 / Sonnet 4.6 and older, so this cannot be a flag day: the
-//  provider has to emit whichever contract the *selected* model accepts. That decision is
-//  isolated here so it is unit-testable without a network call, and so a future model only
-//  needs a case added in one place.
-//
-//  ⚠️ An unrecognised id classifies as `.adaptiveAlwaysOn` (the newest contract) ON PURPOSE. Model ids
-//  arrive from the live `/v1/models` listing, so the ids this table does not know are the ones
-//  released after it was written — newer, not older. Guessing "new" degrades gracefully (a
-//  genuinely ancient model simply loses thinking and sampling); guessing "old" hard-400s every
-//  request to a model the user just picked from the app's own list.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -34,39 +12,20 @@ import Foundation
 /// The Anthropic request contract a given model accepts.
 enum AnthropicModelGeneration: String, Sendable, Hashable {
 
-    /// Opus 4.7+ / 4.8 / 5, Sonnet 5, Haiku 5.5.
-    /// Adaptive thinking only; `budget_tokens` and all sampling parameters return 400.
-    /// Supports the full effort ladder including `xhigh`, and accepts an explicit
-    /// `{"type": "disabled"}` to turn thinking off (on Opus 5 / Haiku 5.5 only at effort `high` or
-    /// below — which is why the disabled shape is sent with NO effort; see `ClaudeLLMProvider`).
+    /// Opus 4.7+ / 4.8 / 5, Sonnet 5, Haiku 5.5: adaptive thinking only; `budget_tokens` and sampling parameters return 400.
+    /// Supports the full effort ladder including `xhigh`, and accepts `{"type": "disabled"}` (on Opus 5 / Haiku 5.5 only at
+    /// effort `high` or below, so the disabled shape is sent with no effort; see `ClaudeLLMProvider`).
     case adaptive
 
-    /// Fable 5 / Mythos 5 / Opus 5.5+ — and any unrecognised id. Identical to `.adaptive` in every respect but one, and that one is a
-    /// hard 400 rather than a degraded response: **thinking is always on**, so an explicit
-    /// `{"type": "disabled"}` is REJECTED at any effort. The parameter must be omitted, or sent
-    /// as `{"type": "adaptive"}` — the API treats those two as equivalent.
-    ///
-    /// ⚠️ This case exists because the tier it was folded into is the one whose members mostly
-    /// DO accept `disabled`. Classifying by tier and then testing the tier through its most
-    /// permissive member is how the 400 got shipped: `{"type": "disabled"}` is legal on Opus 5
-    /// and Sonnet 5 and illegal here, and nothing in the shared behaviour distinguishes them.
-    ///
-    /// ⚠️ Opus 5.5 joined this tier and was shipped in `.adaptive` first (readiness CR-1): the
-    /// version rule `major >= 5 → .adaptive` predates it, so every freshly created Opus 5.5 profile
-    /// — `extendedThinking: false` by default — sent `disabled` and 400d on every request.
-    ///
-    /// ⚠️ It is also the default for an id this table cannot read. Of the three adaptive shapes it
-    /// is the only one that cannot 400 on ANY adaptive-era model: it never sends `disabled` or
-    /// `between_tools`, and adaptive is accepted everywhere. The cost of guessing wrong is that a
-    /// thinking-off toggle on an unknown model runs with thinking — degraded, never broken.
+    // Why: testing the tier through its most permissive member sends `disabled` to models that reject it (a 400)
+    /// Fable 5 / Mythos 5 / Opus 5.5+, and any unrecognised id. Like `.adaptive`, but thinking is always on:
+    /// `{"type": "disabled"}` is a 400 at any effort; omit the parameter or send `{"type": "adaptive"}`.
+    /// Also the default for an unreadable id: it never sends `disabled` or `between_tools`, so it cannot 400.
     case adaptiveAlwaysOn
 
-    /// Sonnet 5.5+. Like `.adaptive`, except thinking is turned off with
-    /// `{"type": "between_tools"}`, and `{"type": "disabled"}` returns 400.
-    ///
-    /// ⚠️ `between_tools` takes NO other field (`display`, `budget_tokens`, `block_binding` alongside
-    /// it are each a 400) and is rejected at effort `xhigh`/`max`, so it is sent bare with no
-    /// `output_config` — the API default (`high`) is accepted with it.
+    // Why: `between_tools` takes no other field and is rejected at effort `xhigh`/`max`: send it bare, with no `output_config`
+    /// Sonnet 5.5+. Like `.adaptive`, except thinking is turned off with `{"type": "between_tools"}`;
+    /// `{"type": "disabled"}` returns 400.
     case adaptiveBetweenTools
 
     /// Opus 4.6 / Sonnet 4.6. Adaptive thinking is the recommended on-mode, `budget_tokens` is
@@ -109,16 +68,9 @@ enum AnthropicModelGeneration: String, Sendable, Hashable {
         case notOffered
     }
 
-    /// The thinking-off shape this generation accepts.
-    ///
-    /// ⚠️ One property, read by BOTH the request builder and the Advanced panel. Two booleans read
-    /// separately is how the panel could offer a toggle whose "off" the request then sent in a
-    /// shape the model rejects.
-    ///
-    /// ⚠️ `.notOffered` means the off value must be OMITTED, not that omitting it is merely tidier.
-    /// Sending `disabled` to a model that removed it is a 400 on every request — and since
-    /// `AnthropicAdvancedConfig.default()` ships `extendedThinking: false`, that is the shape a
-    /// freshly created profile sends before the user has touched a single control.
+    // Why: `.notOffered` means the off value must be omitted: sending `disabled` to a model that removed it is a 400 on every
+    // request, including a freshly created profile whose default is thinking off
+    /// The thinking-off shape this generation accepts; read by both the request builder and the Advanced panel.
     var thinkingOffShape: ThinkingOffShape {
         switch self {
         case .adaptiveAlwaysOn: return .notOffered
@@ -142,8 +94,7 @@ enum AnthropicModelGeneration: String, Sendable, Hashable {
         }
     }
 
-    /// The effort levels this generation accepts, lowest first.
-    /// ⚠️ `xhigh` was introduced with Opus 4.7 — sending it to a 4.6 model is rejected.
+    /// The effort levels this generation accepts, lowest first; `xhigh` (from Opus 4.7) is rejected by 4.6 models.
     var supportedEffortLevels: [String] {
         switch self {
         case .adaptive, .adaptiveAlwaysOn, .adaptiveBetweenTools: return ["low", "medium", "high", "xhigh", "max"]
@@ -161,9 +112,8 @@ enum AnthropicModelGeneration: String, Sendable, Hashable {
         let normalized = normalize(modelName)
         guard !normalized.isEmpty else { return .adaptiveAlwaysOn }
 
-        // 2.x / 3.x families never had adaptive thinking or the effort parameter. These are
-        // matched first because their version digits sit BEFORE the family token
-        // (`claude-3-5-sonnet-…`), which the positional parse below would otherwise misread.
+        // 2.x / 3.x families never had adaptive thinking or the effort parameter. Matched first because their version
+        // digits precede the family token (`claude-3-5-sonnet-…`), which the positional parse below would misread.
         if normalized.hasPrefix("claude-2")
             || normalized.contains("claude-3")
             || normalized.contains("instant") {
@@ -171,9 +121,7 @@ enum AnthropicModelGeneration: String, Sendable, Hashable {
         }
 
         // Fable and Mythos are 5-tier by definition and carry no numeric version in the id.
-        // ⚠️ NOT `.adaptive`: thinking is always on for these two and `{type: "disabled"}` is a
-        // 400. Everything else about the contract is identical, which is exactly why folding them
-        // in went unnoticed.
+        // Not `.adaptive`: thinking is always on for these two and `{type: "disabled"}` is a 400.
         if normalized.contains("fable") || normalized.contains("mythos") {
             return .adaptiveAlwaysOn
         }
@@ -185,9 +133,8 @@ enum AnthropicModelGeneration: String, Sendable, Hashable {
         }
 
         if version.major >= 5 {
-            // ⚠️ 5.5 split the 5 tier by FAMILY: Opus 5.5 cannot turn thinking off at all, Sonnet
-            // 5.5 turns it off with `between_tools`, and Opus 5 / Sonnet 5 / Haiku 5.5 still take
-            // `disabled`. A rule on the version alone shipped CR-1.
+            // 5.5 split the 5 tier by family: Opus 5.5 cannot turn thinking off, Sonnet 5.5 uses `between_tools`, and
+            // Opus 5 / Sonnet 5 / Haiku 5.5 still take `disabled`, so a rule on the version alone is wrong.
             let atLeast55 = version.major > 5 || version.minor >= 5
             switch (family(of: normalized), atLeast55) {
             case ("opus", true): return .adaptiveAlwaysOn
@@ -219,8 +166,7 @@ enum AnthropicModelGeneration: String, Sendable, Hashable {
         normalized.split(separator: "-").map(String.init).first { ["opus", "sonnet", "haiku"].contains($0) }
     }
 
-    /// The effort the API applies when none is sent. ⚠️ Not `high` everywhere: Opus 5.5 and
-    /// Haiku 5.5 default to `medium`, so a label or log that says "default (high)" there is wrong.
+    /// The effort the API applies when none is sent; Opus 5.5 and Haiku 5.5 default to `medium`, not `high`.
     static func defaultEffort(for modelName: String) -> String {
         let normalized = normalize(modelName)
         guard let version = parseVersion(normalized),
@@ -229,16 +175,9 @@ enum AnthropicModelGeneration: String, Sendable, Hashable {
         return "medium"
     }
 
-    /// Reads the version components that follow the family token.
-    ///
-    /// `claude-opus-4-8`            → (4, 8)
-    /// `claude-opus-5`             → (5, 0)
-    /// `claude-opus-4-5-20251101`  → (4, 5)   — the 8-digit date terminates the scan
-    /// `claude-sonnet-4-20250514`  → (4, 0)
-    ///
-    /// ⚠️ A component longer than two digits is a DATE STAMP, not a version. Without that cut,
-    /// `claude-opus-4-5-20251101` would parse a minor version of 20251101 and classify as
-    /// adaptive — silently stripping the sampling parameters that model still accepts.
+    // Why: a component longer than two digits is a date stamp; parsed as a minor version it would misclassify the model
+    /// Reads the version components following the family token: `claude-opus-4-8` → (4, 8), `claude-opus-5` → (5, 0),
+    /// `claude-opus-4-5-20251101` → (4, 5). A date stamp terminates the scan.
     private static func parseVersion(_ normalized: String) -> (major: Int, minor: Int)? {
         let families = ["opus", "sonnet", "haiku"]
         let parts = normalized.split(separator: "-").map(String.init)

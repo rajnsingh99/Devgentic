@@ -4,17 +4,7 @@
 //  ReflexionCapabilityIntegrationTests.swift
 //  DevgenticTests
 //
-//  End-to-end integration tests for SelfReflectionCapability (Reflexion architecture).
-//  Verifies the trial loop, ReflectionEvaluator LLM evaluation, cross-trial
-//  memory seeding (G5), and accumulated critique flow.
-//
-//  Mock: LLMProvider (scripted ReAct steps + scripted reflection JSON)
-//  Real: SelfReflectionCapability → ReActAgentExecutor → ToolExecutionLoop → WindowedLinearMemory
-//
-//  Sequence contract:
-//  - MockLLMProvider.steps[] is consumed by generateCognitiveStep() across all trial ReAct loops.
-//  - MockLLMProvider.generateResponses[] is consumed by generate() in ReflectionEvaluator.
-//  - Reflection is skipped on the last trial (guard trial < maxTrials).
+//  Created by Raj Singh.
 //
 
 import XCTest

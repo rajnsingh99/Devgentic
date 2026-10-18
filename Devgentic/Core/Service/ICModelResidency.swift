@@ -4,30 +4,14 @@
 //  ICModelResidency.swift
 //  Devgentic
 //
-//  Which Intelligence Core model is resident, and the ONE load that may be in flight.
-//
-//  ⚠️⚠️ READINESS CR-32 (2026-10-11). `IntelligenceCoreService.load` asked only "is SOME model
-//  loaded?" and then suspended twice (resolving the path, then the multi-second MLX load). Actor
-//  reentrancy let a second caller in during either suspension; it also saw nothing loaded and started
-//  its own load — two copies in memory, two load times paid. The in-turn callers (query rewriting,
-//  response synthesis) take no local lock, so they overlap a background compaction or Morning Brief.
-//  And it never compared WHICH model was loaded, so after a selection change the old model kept
-//  answering: "Set as IC" in the Model Store wrote the setting without unloading, an unload that
-//  arrived during a load found nothing to free and the load then installed the old model, and every
-//  new request cancelled the idle free — in an active session, indefinitely.
-//
-//  Now: the selection is re-read on every pass, a request for the model being loaded JOINS that load,
-//  a resident model whose name no longer matches the selection is freed (once no generation is using
-//  it) and the selected one loaded, and an immediate teardown that arrives mid-load is honoured once
-//  the work that load serves has finished. Comparing against the setting itself covers every writer
-//  of it — no screen has to remember to unload.
-//
-//  Generic over the model so the concurrency is testable without MLX; the residency DECISION table
-//  (leases, idle debounce) stays in `ICReleasePolicy`.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Which Intelligence Core model is resident, and the one load that may be in flight.
+/// A request for the model being loaded joins that load; a resident model not matching the selection is freed first.
+/// Generic over the model so the concurrency is testable without MLX; the decision table stays in `ICReleasePolicy`.
 actor ICModelResidency<Model: Sendable> {
 
     /// Loads the named model. Throws when nothing is selected or the model can't be found or loaded.
@@ -182,8 +166,8 @@ actor ICModelResidency<Model: Sendable> {
         case .freeNow:
             cancelIdleRelease()
             if resident == nil, let load = inFlight {
-                // ⚠️ Freeing "nothing" here used to clear the request, and the load then installed the
-                // model it was asked to drop. Keep the request; `endGeneration` honours it.
+                // Freeing nothing here must not clear the request: the load would then install the model it was asked to drop.
+                // Keep the request; `endGeneration` honours it.
                 logger.notice("[IC Release] \(reason) requested by \(caller.rawValue) while load \(load.id) of '\(load.name)' is in flight. CONSEQUENCE: freed as soon as the request that load serves finishes.")
                 return
             }

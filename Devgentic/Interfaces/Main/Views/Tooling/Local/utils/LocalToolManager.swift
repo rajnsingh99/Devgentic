@@ -2,12 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  LocalToolManager.swift
-//  LocalServer
+//  Devgentic
 //
-//  Created by Raj Singh on 20/09/25.
-//  Updated on 19/02/26 to support native DevgenticTool architecture.
-//  MIGRATION: Removed OFM dependencies, simplified NativeToolWrapper.
-//  Updated for Phase 5: Bridged category grouping.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -25,31 +22,18 @@ enum ToolConfirmationDefaults {
         readOnlyTools.contains(name) || ownWorkOnlyTools.contains(name)
     }
 
-    /// Tools that CHANGE state but start without confirmation, because the only state they can
-    /// touch is work this same agent started in this same conversation.
-    ///
-    /// ⚠️ Kept APART from `readOnlyTools` on purpose, and not a claim that these are read-only —
-    /// `HITLRiskTier` still calls them `.moderate`, which is true. The two are different reasons for
-    /// the same default, and `ToolCategoryGroupingTests` checks each against its own rule.
-    ///
-    /// `stop_background_task` (2026-09-26, user decision): it can only stop a task its own
-    /// conversation launched — the registry keys every lookup by conversation — so it cannot reach
-    /// another conversation's work or any other process on the machine. Asking before the agent
-    /// stops its own dev server is a prompt people approve without reading, which trains exactly
-    /// the habit confirmation exists to prevent. The Code preset already ran it without asking.
+    // Why: confirming before an agent stops its own dev server is a prompt people approve without reading, which defeats
+    // the purpose of confirmation.
+    /// Tools that change state but start without confirmation: they can only touch work this agent started here.
+    /// Kept apart from `readOnlyTools`: these are not read-only (`HITLRiskTier` calls them `.moderate`).
+    /// `stop_background_task` can only stop a task its own conversation launched (the registry keys lookups by conversation).
     static let ownWorkOnlyTools: Set<String> = [
         "stop_background_task",
     ]
 
     static let readOnlyTools: Set<String> = {
         // Strictly read-only tools: they alter no state and execute no caller-supplied code.
-        //
-        // `fs_watch_folder` was in this list until 2026-08-01 and does not belong: its `start`
-        // action opens a file descriptor and arms a dispatch source that lives until something
-        // stops it, which is state by any reading. `HITLRiskTier.classify` has always called it
-        // `.moderate`, alongside `write_file` and `move_file`, so the app was describing the same
-        // tool two different ways depending on which code path you asked. Only `list` is
-        // read-only, and the list is per-TOOL, not per-action.
+        // The list is per tool, not per action, so `fs_watch_folder` (whose `start` arms a dispatch source) is excluded.
         let safeTools: Set<String> = [
             "list_directory",
             "read_file",
@@ -69,9 +53,7 @@ enum ToolConfirmationDefaults {
             // Changes no state on this machine; the query leaving the device IS the feature, and
             // the user opted in by choosing a provider in Settings → Web Search.
             "web_search",
-            // `stop_background_task` is NOT here: it changes state. See `ownWorkOnlyTools`.
-            // (`codebase_map`, `git_tool`, `command_output` and `command_stop` were names of tools
-            // that no longer exist.)
+            // `stop_background_task` is not here: it changes state. See `ownWorkOnlyTools`.
         ]
         return safeTools
     }()
@@ -93,11 +75,7 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
         return nativeTool.description
     }
     
-    // "Step 3" — completed 2026-07-31. `category` is now a `DevgenticTool` requirement, so this
-    // reads it directly instead of digging it out with `Mirror`. The reflection was a migration
-    // shim that outlived its migration: it could not fail, so a tool that omitted the property
-    // silently became "System Automation" and nothing said so. Verified before removal that no
-    // registered tool relied on that fallback.
+    // `category` is a `DevgenticTool` requirement, so it is read directly rather than through `Mirror`.
     var category: String {
         return nativeTool.category
     }
@@ -107,11 +85,8 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
         return nativeTool.parameterSchema
     }
     
-    /// The DEFAULT confirmation setting a tool carries when it first appears in the Tool Library.
-    ///
-    /// A default, not a gate: `Tool.requiresConfirmation` on the profile is what the executor
-    /// reads, and the user's choice always wins. This only decides where a freshly-offered tool
-    /// starts.
+    /// The default confirmation setting a tool carries when it first appears in the Tool Library.
+    /// A default, not a gate: the executor reads `Tool.requiresConfirmation` on the profile, and the user's choice wins.
     var requiresConfirmation: Bool {
         !ToolConfirmationDefaults.startsWithoutConfirmation(nativeTool.name)
     }
@@ -148,18 +123,14 @@ final class LocalToolManager {
     private var toolRegistry: [String: ExecutableTool] = [:]
     
     private init() {
-        // Built from `NativeToolCatalog`, which is also what `AgentConnect.resolveNativeTool`
-        // reads. Before 2026-07-31 this was ~90 lines of `registerNative(…)` — a second
-        // hand-maintained copy of the tool list, and the source of every tool bug the audit
-        // found. Registration is now a PROJECTION: a tool appears here because its catalogue
-        // entry says `.library`, not because someone remembered to add a line.
+        // Built from `NativeToolCatalog`, which `AgentConnect.resolveNativeTool` also reads: registration is a projection, so a
+        // tool appears here because its catalogue entry says `.library`, not because a line was added by hand.
         for entry in NativeToolCatalog.libraryTools {
             let tool = entry.executable()
             toolRegistry[tool.name] = tool
         }
-        // Tagged + broken down so one startup line proves WHICH projection ran, not just that
-        // one did. A bare count cannot distinguish "the catalogue shrank" from "the projection
-        // filtered wrongly" — the exact ambiguity that let 25 tools sit invisible for months.
+        // Tagged and broken down so one startup line proves which projection ran: a bare count cannot distinguish a shrunk
+        // catalogue from a wrongly filtering projection.
         let lib = NativeToolCatalog.entries.filter { $0.visibility == .library }.count
         let exceptCode = NativeToolCatalog.hiddenFromCodeLibrary.count
         let codeOnly = NativeToolCatalog.codeOnlyTools.count
@@ -177,9 +148,6 @@ final class LocalToolManager {
         return Array(toolRegistry.values)
     }
 
-    // `execute(name:arguments:)` was removed 2026-07-31: it was called by nothing. Every real
-    // tool call goes through `AgentTool.run` at `ToolExecutionMediator`, resolved by
-    // `AgentConnect.resolveNativeTool`. Its presence made this type read as a second execution
-    // engine competing with that one, when it is a CATALOGUE — it answers "what tools exist and
-    // how should they be displayed", not "run this".
+    // This type is a catalogue (what tools exist and how they display), not an execution engine: every real tool call goes
+    // through `AgentTool.run` at `ToolExecutionMediator`, resolved by `AgentConnect.resolveNativeTool`.
 }

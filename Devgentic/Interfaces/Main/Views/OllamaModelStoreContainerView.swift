@@ -4,16 +4,13 @@
 //  OllamaModelStoreContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  Inline wrapper for the Ollama model store that renders within
-//  the single-window interface. Uses DynamicIslandBar for back
-//  navigation, search, and refresh. Content is centered at
-//  maxWidth: 1000 to match the DynamicIslandBar width.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Inline wrapper for the Ollama model store inside the single-window interface, with back navigation,
+/// search and refresh. Content is centered at maxWidth 1000 to match the DynamicIslandBar.
 struct OllamaModelStoreContainerView: View {
 
     /// The profile that opened the store. See `OllamaModelStoreContent.profileID`.
@@ -23,17 +20,12 @@ struct OllamaModelStoreContainerView: View {
         self.profileID = profileID
     }
 
-    /// View model is owned by `DestinationCoordinator` so it survives the view
-    /// re-creation cascade when the user toggles between chat and non-chat
-    /// destinations. Previously `@State private var viewModel = ...` got
-    /// recreated on every navigation, losing search text / sort / scroll and
-    /// (pre-defensive-patch) firing a full server probe each time.
+    /// The view model is owned by `DestinationCoordinator` so it survives view re-creation when toggling
+    /// destinations. Search text, sort and scroll are kept, and no server probe fires on each navigation.
     @Environment(DestinationCoordinator.self) private var coordinator
 
-    /// Tracks whether the current load cycle was triggered by the user tapping refresh.
-    /// We can't derive this from `viewModel.isLoading` because that flag also flips true
-    /// during background `OllamaService` polls — tying the refresh-button spinner directly
-    /// to `isLoading` made the button pulse whenever the service polled in the background.
+    /// Whether the current load cycle was triggered by the refresh button.
+    /// Not derived from `viewModel.isLoading`, which also flips during background `OllamaService` polls.
     @State private var isManualRefreshing = false
     @State private var isSearchExpanded = false
 
@@ -42,12 +34,8 @@ struct OllamaModelStoreContainerView: View {
 
         VStack(spacing: 0) {
             DynamicIslandBar {
-                // NOTE: `isSearching` is intentionally NOT wired to `viewModel.isLoading`.
-                // Ollama's local-model filter is synchronous/client-side; typing does
-                // not kick off an async query. Meanwhile `viewModel.isLoading` bridges
-                // `OllamaService.isLoadingModels`, which also flips true during
-                // background server-status polls — surfacing that as a "search in
-                // progress" spinner made the magnifying glass appear stuck.
+                // `isSearching` is not wired to `viewModel.isLoading`: the local-model filter is synchronous,
+                // and `isLoading` also flips during background server polls, which made the magnifier look stuck.
                 IslandExpandableSearchHeader(
                     title: "Ollama Models",
                     icon: "shippingbox.fill",
@@ -140,9 +128,8 @@ struct OllamaModelStoreContainerView: View {
             }
         }
         .onChange(of: viewModel.isLoading) { _, newValue in
-            // Clear the manual-refresh spinner as soon as the service reports
-            // loading has finished. Guarantees the spinner resolves even if the
-            // refresh completes faster than any timeout we could pick.
+            // Clears the manual-refresh spinner as soon as the service reports loading has finished,
+            // so it resolves even when the refresh completes faster than any timeout.
             if !newValue {
                 isManualRefreshing = false
             }

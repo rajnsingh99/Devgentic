@@ -4,18 +4,7 @@
 //  SecureKeyStorageAddResultTests.swift
 //  DevgenticTests
 //
-//  Register KC-9. A first-time credential write used to end in
-//  `return SecItemAdd(newQuery as CFDictionary, nil)` — the ONE branch of `save` whose result
-//  was returned without a log line, so the common pairing failure (nothing stored yet, the
-//  update misses, the ADD is the only real write, and the Keychain refuses it) happened in
-//  complete silence while the caller reported success.
-//
-//  The fix logs BOTH outcomes of the add through one pure function, `addResultMessage`, and a
-//  sink seam receives exactly what the logger receives. The message text is asserted directly
-//  (a real `SecItemAdd` cannot be forced to fail deterministically, so the failure text cannot
-//  be driven end to end); the WIRING is asserted on the real Keychain through the
-//  `bypassingTestHostRedirect` opt-in — the same shape `SecureKeyStorageTestHostRedirectTests`
-//  uses — because under the XCTest host the redirect would return before the add branch.
+//  Created by Raj Singh.
 //
 
 import XCTest

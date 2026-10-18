@@ -4,7 +4,7 @@
 //  ChatExecutor.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 07/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -12,10 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "ChatExecutor")
 
-/// Thread-safe one-slot holder for a stream's real token usage. Written once from the SSE
-/// reader task's `onUsage` callback, read by `ChatExecutor` after the stream completes (the
-/// stream's clean finish synchronizes the two). `nil` when the provider didn't report usage,
-/// in which case the caller falls back to an estimate (#10b).
+/// Thread-safe one-slot holder for a stream's real token usage, written once from the SSE reader's `onUsage` callback.
+/// Read after the stream completes; nil when the provider did not report usage, so the caller estimates.
 private final class StreamUsageBox: @unchecked Sendable {
     private let lock = NSLock()
     private var _value: TokenUsage?
@@ -56,21 +54,16 @@ actor ChatExecutor: Executor {
                     // being dropped, and the bot path appears in the trace tree (Gap #9).
                     await TraceRecorder.shared.beginSpan(context: traceSpan, name: "chat_call", kind: .llmCall)
                     var chatSucceeded = false
-                    // The NARROW model-call duration (callStart → response), declared in the
-                    // span's metadata because the Run Report's Model lane counts declared
-                    // measurements, not span wall-clock: this span brackets message assembly and
-                    // the whole retry loop, so its own duration over-reads. Without this the bot
-                    // path contributed NOTHING to the Model lane and its real model time landed
-                    // in "Unattributed" — 12.0s of a 14.0s run, observed on-device 2026-08-23.
+                    // The narrow model-call duration (call start to response), declared in the span's metadata.
+                    // The Run Report's Model lane counts declared measurements; this span's own duration also covers assembly and retries.
                     var modelCallMs: Int? = nil
                     defer {
                         // End time captured HERE, before the fire-and-forget hop — the real end
                         // survives losing the race against endTrace's clamp (earliest-wins).
                         let endedAt = Date()
                         let s: SpanStatus = chatSucceeded ? .completed : .error
-                        // nil when the call never reached the model (assembly threw, or the
-                        // consumer was torn down first) — the lane then honestly counts nothing
-                        // rather than charging teardown time to the model.
+                        // nil when the call never reached the model (assembly threw or the consumer was torn down),
+                        // so the lane counts nothing rather than charging teardown time to the model.
                         let meta = modelCallMs.map {
                             ["model": model.modelName, "duration_ms": "\($0)"]
                         }
@@ -93,21 +86,18 @@ actor ChatExecutor: Executor {
                     // We combine instructions, RAG context, history, and the user query.
                     let assemblyStart = Date()
                     let messages = self.buildMessages(input: input)
-                    // Input-lane clock (Run-Report Phase 3): the bot path's assembly is one
-                    // synchronous build — small, but measured rather than guessed.
+                    // Input-lane clock: the bot path's assembly is one synchronous build, measured rather than guessed.
                     await TraceRecorder.shared.emitMetric(
                         span: traceSpan, key: "input_assembly",
                         valueMs: Int(Date().timeIntervalSince(assemblyStart) * 1000))
                     await TraceRecorder.shared.emitLLMRequest(span: traceSpan, model: model.modelName, messageCount: messages.count)
-                    // The model-time clock starts AFTER message assembly — it used to start
-                    // before buildMessages, so the bot lane charged prompt-building (history
-                    // render, RAG splice) to the model and the Model lane over-read.
+                    // The model-time clock starts after message assembly, so prompt building is not charged to the Model lane.
                     let callStart = Date()
 
                     logger.info("--- 🤖 CHAT EXECUTOR START 🤖 ---")
                     logger.info("Model: \(model.modelName)")
                     if let instructions = input.instructions {
-                        logger.info("Instructions: \(instructions.count) chars") // CR-57: instructions are content
+                        logger.info("Instructions: \(instructions.count) chars") // instructions are content
                     }
 
                     onTraceUpdate(AgentTraceLog(
@@ -123,18 +113,12 @@ actor ChatExecutor: Executor {
                     var didSetFinalizing = false
                     var fullResponse = ""
 
-                    // Transport resilience (audit gap #9): the bot path previously had
-                    // NO retry/throttle handling — a single 429 or network blip surfaced
-                    // a raw error card. We now bound transport failures with backoff and
-                    // emit honest, classified fatal messages, reusing the SAME classifier
-                    // as the agent path (`TransportRetrier` ↔ `LLMRetryStrategy`). Retries
-                    // only happen BEFORE the first token is emitted — once streaming has
-                    // started we can't cleanly re-attempt without double-rendering.
+                    // Transport resilience: bounded backoff and classified fatal messages, same classifier as the agent path.
+                    // Retries happen only before the first token; afterwards a re-attempt would double-render.
                     var retrier = TransportRetrier(transport: input.resiliencePolicy.transport)
 
-                    // Throws on cancellation: a swallowed CancellationError during a long
-                    // Retry-After backoff made Stop fire another provider request instead
-                    // of aborting — propagating reaches the CancellationError catch below.
+                    // Throws on cancellation: swallowing a `CancellationError` during a long Retry-After backoff would make Stop fire
+                    // another request.
                     let applyRetryStep: @Sendable (TransportRetrier.RetryStep) async throws -> Void = { step in
                         if let penalty = step.drainPenalty {
                             await GlobalRateLimiter.shared.drainAndPenalize(
@@ -147,39 +131,25 @@ actor ChatExecutor: Executor {
                         }
                     }
 
-                    // Multimodal branch (Phase 3 — native image input): when the
-                    // message carries image blocks, route through the non-streaming
-                    // `generate(payload:)` so vision-capable providers (Claude/OpenAI/
-                    // Gemini) receive the image natively. Text-only providers downgrade
-                    // gracefully (image dropped, text kept). Token streaming is traded
-                    // for image support on these turns. A failed image resolve throws
-                    // here and is surfaced as an error (never a silent drop).
+                    // Multimodal branch: image blocks route through non-streaming `generate(payload:)` so vision providers see them.
+                    // Text-only providers drop the image; a failed image resolve throws rather than dropping silently.
                     let currentImageBlocks: [MessageBlock] = (input.userPayload ?? []).filter {
                         if case .image = $0 { return true } else { return false }
                     }
-                    // Vision bots also re-attach PRIOR-turn images so the picture stays
-                    // "in view" across follow-ups (agents do this via nativeHistoryTurns;
-                    // a .none-capability bot's history is episodic XML with no per-turn
-                    // structure, so these ride the current user turn instead). Gated on
-                    // vision + format; non-vision → flag is false → nothing added.
-                    // TRADEOFF (accepted): any image in the conversation makes every
-                    // subsequent turn non-streaming (the multimodal API is atomic).
+                    // Vision bots also re-attach prior-turn images so the picture stays in view across follow-ups; non-vision adds nothing.
+                    // Tradeoff: any image in the conversation makes every later turn non-streaming.
                     let (historyImageBlocks, historyImagesOmitted, historyImagesTranscoded) = input.botHistoryImagesEnabled
                         ? Self.buildHistoryImageBlocks(from: input.chatHistory, correlation: "trace:\(traceSpan.traceID)")
                         : ([], 0, 0)
                     let imageBlocks: [MessageBlock] = historyImageBlocks + currentImageBlocks
 
-                    // Captures the provider's real token usage from the stream's terminal
-                    // usage event (#10b); stays nil for the atomic image path and for
-                    // providers that don't report usage (then we estimate below).
+                    // Captures the provider's real token usage from the stream's terminal usage event; nil for the image path or
+                    // non-reporting providers.
                     let usageBox = StreamUsageBox()
 
                     if !imageBlocks.isEmpty {
-                        // [VISION] The bot-path counterpart to the native "Seeded" and the
-                        // legacy "[MULTIMODAL]" lines — the confirmation that THIS bot
-                        // request carries images and via the atomic (non-streaming)
-                        // generate(payload:) route. Without it the bot flow's only success
-                        // evidence was absence-of-error.
+                        // The bot-path counterpart to the native 'Seeded' and legacy '[MULTIMODAL]' lines, confirming the request carries
+                        // images via `generate(payload:)`.
                         logger.info("[VISION] trace:\(traceSpan.traceID) bot request carrying \(currentImageBlocks.count) current-turn + \(historyImageBlocks.count) prior-turn image(s)\(historyImagesOmitted > 0 ? ", \(historyImagesOmitted) history omitted (unsupported format)" : "")\(historyImagesTranscoded > 0 ? ", \(historyImagesTranscoded) history transcoded → jpeg" : "") → \(String(describing: type(of: model))) via generate(payload:) (atomic, non-streaming)")
                         // Atomic call — safe to retry the whole request.
                         let providerMessages = Self.appendImages(to: messages, imageBlocks: imageBlocks)
@@ -192,13 +162,11 @@ actor ChatExecutor: Executor {
                             } catch is CancellationError {
                                 throw CancellationError()
                             } catch {
-                                // A user cancel surfaces as URLError(.cancelled), which is
-                                // NOT a Swift CancellationError — normalize it so we exit
-                                // cleanly instead of treating it as a retryable transient.
+                                // A user cancel surfaces as `URLError(.cancelled)`, not `CancellationError`; normalize it so we exit instead of
+                                // retrying.
                                 if Task.isCancelled { throw CancellationError() }
-                                // Throws TransportFatalError (→ outer catch) when the
-                                // budget is spent or the failure is deterministic;
-                                // rethrows non-transport errors unchanged.
+                                // Throws `TransportFatalError` when the budget is spent or the failure is deterministic; rethrows non-transport errors
+                                // unchanged.
                                 let step = try retrier.nextStep(for: error)
                                 try await applyRetryStep(step)
                             }
@@ -210,21 +178,14 @@ actor ChatExecutor: Executor {
                         ))
                         continuation.yield(.content(result))
                     } else {
-                        // Stream thoughts & content. Pre-first-token failures retry;
-                        // once any chunk has been yielded we surface the error rather
-                        // than re-stream and double-render.
-                        // IMPORTANT: ChatExecutor currently uses the base LLMProvider.stream method
-                        // until streamChat is formally added to the protocol.
+                        // Streams thoughts and content: pre-first-token failures retry, but once a chunk was yielded the error surfaces.
+                        // Uses the base `LLMProvider.stream` until `streamChat` is added to the protocol.
                         streamLoop: while true {
                             try Task.checkCancellation()
                             var emittedThisAttempt = false
                             do {
-                                // The conversation names the MLX prompt cache (`MLXPromptCache`), so a
-                                // Bot conversation's next message reuses the prompt this one shares
-                                // with it (layout B keeps that prefix stable). Set around THIS call
-                                // only, and never for a workflow node: one-shot calls that share a
-                                // run's conversation would only evict each other. Read when the
-                                // stream starts; non-MLX providers ignore it.
+                                // The conversation names the MLX prompt cache, so a Bot conversation's next message reuses the shared prompt prefix.
+                                // Set around this call only and never for a workflow node; non-MLX providers ignore it.
                                 let promptCacheKey = Self.promptCacheKey(for: input)
                                 let stream = MLXPromptCacheScope.$key.withValue(promptCacheKey) {
                                     model.streamWithUsage(messages: messages, tools: nil, onUsage: { usageBox.value = $0 })
@@ -264,17 +225,13 @@ actor ChatExecutor: Executor {
                         }
                     }
 
-                    // Honest completion logging: a torn-down consumer ends the provider stream
-                    // QUIETLY (no throw), so this path also runs when the task was cancelled
-                    // mid-stream — Stop, a node timeout, or a per-node skip. Logging that as
-                    // "COMPLETE" with a Final Response dump narrated a discarded partial answer
-                    // as a success, seconds before the engine logged the same text as
-                    // "PARTIAL OUTPUT DISCARDED" (observed on-device, 2026-08-22).
+                    // A torn-down consumer ends the provider stream quietly, so this path also runs when the task was cancelled mid-stream;
+                    // log it as discarded, not as a complete response.
                     if Task.isCancelled {
                         logger.notice("--- 🚫 CHAT EXECUTOR TORN DOWN (cancelled mid-stream) 🚫 — \(fullResponse.count) chars of partial output DISCARDED; the consumer is gone (Stop, node timeout, or per-node skip). CONSEQUENCE: nothing below reaches the run — its outcome was decided by whoever cancelled this task, and the events yielded from here land in a dead stream.")
                     } else {
                         logger.info("--- 🏁 CHAT EXECUTOR COMPLETE 🏁 ---")
-                        logger.info("Final Response: \(fullResponse.count) chars") // CR-57: the reply is content; full text at debug only
+                        logger.info("Final Response: \(fullResponse.count) chars") // the reply is content; full text at debug only
                         logger.debug("Final Response: \(fullResponse)")
                         logger.info("-----------------------------------")
                     }
@@ -283,9 +240,8 @@ actor ChatExecutor: Executor {
                     await TraceRecorder.shared.emitLLMResponse(span: traceSpan, durationMs: callMs, preview: fullResponse)
                     chatSucceeded = true
 
-                    // Emit token usage — prefer the provider's real counts captured from the
-                    // stream's terminal usage event (#10b); fall back to a chars÷4 estimate for
-                    // providers that don't report usage (e.g. MLX) or the atomic image path.
+                    // Emit token usage: prefer the provider's real counts from the terminal usage event, else a chars/4 estimate (e.g.
+                    // MLX, image path).
                     let inputChars = messages.reduce(0) { $0 + ($1["content"]?.count ?? 0) }
                     continuation.yield(.tokenUsage(
                         usageBox.value ?? .estimated(inputChars: inputChars, outputChars: fullResponse.count)
@@ -301,25 +257,19 @@ actor ChatExecutor: Executor {
                         content: "Response Complete"
                     ))
 
-                    // Authoritative terminal signal — parity with every other executor (#9b).
-                    // The ActiveStreamManager safety nets remain as backstops, but the bot path
-                    // now reports its own outcome explicitly instead of relying on inference.
+                    // Authoritative terminal signal, matching every other executor; the ActiveStreamManager safety nets remain as backstops.
                     continuation.yield(.executionFinished(outcome: .completed))
                     continuation.finish()
 
                 } catch is CancellationError {
                     logger.info("ChatExecutor stream cancelled.")
-                    // Best-effort terminal signal; if the consumer was already torn down by the
-                    // stop-button race, ActiveStreamManager's Task.isCancelled net stamps
-                    // `.cancelled` instead (#9b parity).
+                    // Best-effort terminal signal; if the consumer was already torn down, ActiveStreamManager's cancellation net stamps
+                    // `.cancelled`.
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch let fatal as TransportFatalError {
-                    // A bounded-transport give-up / deterministic provider failure carries
-                    // an honest category — record classified telemetry so the bot path is
-                    // observable identically to the agent path (which emits the same on its
-                    // `.fatal` arm). Without this the category was dropped and bot fatals
-                    // appeared uncategorized in traces.
+                    // A bounded-transport give-up or deterministic provider failure carries a category; record classified telemetry as the
+                    // agent path does.
                     let classified = ClassifiedAgentError.synthetic(
                         category: fatal.category,
                         origin: "ChatExecutor.transport",
@@ -347,27 +297,13 @@ actor ChatExecutor: Executor {
 
     // MARK: - Multimodal
 
-    /// Builds provider messages from the legacy text messages and appends image
-    /// blocks to the final user turn (the user's text already lives in `messages`).
-    /// Image bytes stay reference-backed here — the provider resolves+encodes them.
-    /// Recent window of prior-turn messages scanned for re-attachable images. 20
-    /// messages ≈ 10 turn pairs, matching `NativeHistoryConverter`'s default agent
-    /// history window — the image window tracks the text window rather than dumping
-    /// every image from a long conversation (a recency bound, not a per-image tier).
+    /// Recent window of prior-turn messages scanned for re-attachable images: 20 messages is ~10 turn pairs,
+    /// matching `NativeHistoryConverter`'s default window (a recency bound, not a per-image tier).
     private static let historyImageWindow = 20
 
-    /// Collects prior-turn images from a vision bot's chat history for re-attachment.
-    /// Keeps the picture "in view" across follow-up turns.
-    ///
-    /// - Bounded to the most recent `historyImageWindow` messages.
-    /// - Format-validated via `VisionImageFormat` — HEIC/GIF/TIFF/BMP are OMITTED, never
-    ///   guessed, so a bad format can't 400 the conversation on every subsequent turn.
-    /// - Bytes-first (`.ephemeralData` over `.diskPath`) — survives relaunch; no stale URL.
-    ///
-    /// Images attach to USER turns only. `chatHistory` already excludes the current
-    /// message (deduped upstream), so there is no overlap with the current-turn payload.
-    /// Returns the blocks in chronological order and the count omitted for bad format.
-    /// `internal` (not `private`) so the pure collection logic is directly unit-testable.
+    /// Collects prior-turn images from a vision bot's history for re-attachment, plus the count omitted for bad format.
+    /// Bounded to `historyImageWindow` messages, user turns only; HEIC/GIF/TIFF/BMP are omitted via `VisionImageFormat`.
+    /// `internal` so the pure collection logic is unit-testable.
     nonisolated static func buildHistoryImageBlocks(
         from history: [ChatMessage],
         window: Int = historyImageWindow,
@@ -379,11 +315,8 @@ actor ChatExecutor: Executor {
         for message in history.suffix(window) where message.sender == .user {
             guard let files = message.attachedImageFiles, !files.isEmpty else { continue }
             for file in files {
-                // Bytes-first + byte-TRUTHFUL: resolve from the persisted blob by its real
-                // container — pass jpeg/png/webp through, transcode HEIC/etc → JPEG (so a
-                // prior-turn HEIC keeps working across follow-ups instead of vanishing the
-                // turn after the current-turn path showed it), omit only the undecodable.
-                // Byte-based, so a mislabeled .jpg-that-is-HEIC can't replay a 400 here.
+                // Bytes-first and byte-truthful: resolve from the persisted blob by its real container, passing jpeg/png/webp through,
+                // transcoding HEIC and similar to JPEG, and omitting only the undecodable.
                 if !file.binaryData.isEmpty {
                     if let sendable = VisionImageFormat.resolveSendable(data: file.binaryData) {
                         blocks.append(.image(ImagePayload(reference: .ephemeralData(sendable.data), mimeType: sendable.mimeType, alt: file.name)))
@@ -394,9 +327,8 @@ actor ChatExecutor: Executor {
                     }
                     continue
                 }
-                // Rare .diskPath-only state (no persisted bytes): can't sniff or transcode
-                // without a read here, so fall back to the extension for the passthrough
-                // decision and omit an unsupported format.
+                // Rare disk-path-only state (no persisted bytes): cannot sniff without a read, so use the extension and omit an
+                // unsupported format.
                 if let mime = VisionImageFormat.mimeType(forExtension: file.fileExtension) {
                     blocks.append(.image(ImagePayload(reference: .diskPath(file.url), mimeType: mime, alt: file.name)))
                 } else {
@@ -422,10 +354,6 @@ actor ChatExecutor: Executor {
 
     // MARK: - Message Construction
 
-    /// Builds the messages array using the unified `PromptBuilder`.
-    /// Bot uses `.bot` layer config: task, instructions, environment, RAG, episodic history.
-    /// The user's current query is passed as `userMessagePrefix` so it appears as the
-    /// final user message — maintaining natural conversational flow.
     /// The MLX prompt-cache key a Bot call runs under: its conversation, or nil for a workflow node.
     nonisolated static func promptCacheKey(for input: AgentInput) -> String? {
         input.workflowContext == nil ? input.conversationID.uuidString : nil
@@ -452,10 +380,8 @@ actor ChatExecutor: Executor {
 
     // MARK: - Workflow Message Building
 
-    /// Builds workflow bot messages using the unified `PromptBuilder` with `.workflow` config.
-    /// The per-node user-message prefix is auto-derived from `workflowContext` inside
-    /// `buildStandardMessages` via `SemanticContext.workflowContext` — no per-call
-    /// duplication of the first-node / no-input / `<input>` branching logic.
+    /// Builds workflow bot messages with `PromptBuilder` and the `.workflow` config.
+    /// The per-node user-message prefix is derived from `workflowContext` inside `buildStandardMessages`.
     nonisolated private func buildWorkflowMessages(
         input: AgentInput,
         workflowContext: WorkflowExecutionContext
@@ -475,10 +401,9 @@ actor ChatExecutor: Executor {
 
     // MARK: - SemanticContext Construction
 
-    /// Builds a lightweight SemanticContext from AgentInput for Bot/Workflow-Bot usage.
-    /// Bot-irrelevant fields (tools, working memory, guardrails, skills) are empty/nil.
-    /// When `workflowContext` is non-nil, `buildStandardMessages` auto-derives the
-    /// per-node user-message prefix from it — no per-call-site duplication.
+    /// Builds a lightweight `SemanticContext` from `AgentInput` for Bot/Workflow-Bot use; bot-irrelevant fields are empty
+    /// or nil.
+    /// When `workflowContext` is non-nil, `buildStandardMessages` derives the per-node user-message prefix from it.
     nonisolated private func buildSemanticContext(
         from input: AgentInput,
         workflowContext: WorkflowExecutionContext? = nil

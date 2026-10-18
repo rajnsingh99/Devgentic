@@ -4,20 +4,7 @@
 //  AttachedImageCardView.swift
 //  Devgentic
 //
-//  Thumbnail card for a user-ATTACHED image in the user bubble — the sibling of
-//  `FileAttachmentCardView` for pictures.
-//
-//  ATT-2 (chat hardening round 3): attached images were persisted at full fidelity
-//  (`AttachedImageFile.binaryData`) but had ZERO render sites — every image a user
-//  sent was invisible in the transcript, live and after reload, while the model saw
-//  it. This card renders from the persisted bytes, NOT the file URL: the URL goes
-//  stale the moment the source file moves or is deleted (and sandbox scope may not
-//  survive relaunch), whereas the stored bytes are the transcript's durable copy.
-//
-//  Cost posture: the row shows a bounded `ImageDownsampler` thumbnail (decoded
-//  off-main, keyed by file identity); the FULL image is decoded only when the user
-//  opens the lightbox, and released again when it closes (CF-25). Copy decodes into
-//  a local and keeps nothing.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -26,6 +13,8 @@ import os
 
 private let logger = DGLogger(category: "AttachedImage")
 
+/// Thumbnail card for a user-attached image in the user bubble; the picture counterpart of `FileAttachmentCardView`.
+/// Renders from the persisted bytes, not the file URL, which can go stale. The full image decodes only in the lightbox.
 struct AttachedImageCardView: View {
     let file: AttachedImageFile
     @Environment(\.appTheme) private var theme
@@ -60,9 +49,7 @@ struct AttachedImageCardView: View {
                     .accessibilityLabel("Attached image: \(file.name)")
                     .accessibilityAddTraits([.isImage, .isButton])
                     .accessibilityHint("Opens the image at full size")
-                    // `.onTapGesture` isn't bridged to an accessibility action (same
-                    // fix as MediaArtifactImageView) — without this the hint promises
-                    // an action VO-Space can't perform.
+                    // `.onTapGesture` is not bridged to an accessibility action, so VoiceOver needs this explicit one.
                     .accessibilityAction { openLightbox() }
                     .contextMenu { contextMenuItems }
             } else if decodeFailed {
@@ -87,9 +74,7 @@ struct AttachedImageCardView: View {
                     .accessibilityLabel("Loading attached image: \(file.name)")
             }
         }
-        // Keyed to the file: SwiftUI reuses this view for a DIFFERENT attachment at the
-        // same list position; a bare `.task` would keep showing the previous picture
-        // (the exact bug MediaArtifactImageView documents).
+        // Keyed to the file: SwiftUI reuses this view for a different attachment at the same list position.
         .task(id: file.id) {
             let data = file.binaryData
             // Request 2× the point size so the chip is sharp on Retina displays.
@@ -104,18 +89,11 @@ struct AttachedImageCardView: View {
                        altText: file.name,
                        data: file.binaryData,
                        mimeType: "image/\(ImageExport.fileExtension(for: file.binaryData))",
-                       // [bm-8] The SAVE name only — the same value this card's own
-                       // context-menu Save has always used, so the two routes agree. `altText`
-                       // keeps the full filename for the title and the spoken label.
+                       // The save name only, matching the context-menu Save; `altText` keeps the full filename.
                        fileBaseName: (file.name as NSString).deletingPathExtension,
-                       // [CF-25] The full-size bitmap belongs to the open sheet and nothing
-                       // else — the chip renders from `thumbnail`. Holding it past dismissal
-                       // retained ~45 MB per opened 12 MP photo in a row the user had scrolled
-                       // away from, on top of `binaryData` already resident for the message.
+                       // The full-size bitmap belongs to the open sheet and is released on dismissal.
                        onDismiss: { fullImage = nil })
-        // One alert for all three context-menu actions. It used to cover Save only, so
-        // "View Full Size" and "Copy Image" failed with no feedback whatsoever — see
-        // `openLightbox` / `copyImage`.
+        // One alert for all three context-menu actions (see `openLightbox` / `copyImage`).
         .alert(actionError?.title ?? "", isPresented: .constant(actionError != nil)) {
             Button("OK") { actionError = nil }
         } message: {
@@ -123,13 +101,8 @@ struct AttachedImageCardView: View {
         }
     }
 
-    /// Full-size decode is deferred to here — thumbnails are the only cost while
-    /// scrolling.
-    ///
-    /// [CF-25] The decoded bitmap lives only as long as the lightbox does: `fullImage` is
-    /// cleared when the sheet dismisses, so a transcript row that has been opened once no
-    /// longer carries ~45 MB of pixels for the life of the conversation view. Re-opening pays
-    /// the decode again, which is a few hundred milliseconds off-main, once, on a click.
+    /// Defers the full-size decode to here; thumbnails are the only cost while scrolling.
+    /// `fullImage` is cleared when the sheet dismisses, so reopening pays the off-main decode again.
     private func openLightbox() {
         if fullImage != nil {
             showLightbox = true
@@ -137,9 +110,7 @@ struct AttachedImageCardView: View {
         }
         let data = file.binaryData
         Task {
-            // [CF-23] `ImageDownsampler.fullSize`, not `NSImage(data:)`: the latter only reads
-            // headers here and decodes on first DRAW, which is the main thread — so this hop
-            // was moving the cheap 0.2 ms and leaving the 60 ms where it hurt.
+            // `ImageDownsampler.fullSize`, not `NSImage(data:)`: the latter defers decoding to the first draw, on the main thread.
             let image = await Task.detached(priority: .userInitiated) { ImageDownsampler.fullSize(from: data) }.value
             guard let image else {
                 // Was a bare `return`. The user CLICKED this — nothing opening, with no alert
@@ -186,9 +157,7 @@ struct AttachedImageCardView: View {
         }
         let data = file.binaryData
         Task {
-            // [CF-23] Same eager decode as `openLightbox` — the pasteboard write reads the
-            // pixels, so a lazily-decoded NSImage would have paid for them on the main thread
-            // the moment this returned.
+            // Same eager decode as `openLightbox`: the pasteboard write reads the pixels, which must not be decoded on main.
             let image = await Task.detached(priority: .userInitiated) { ImageDownsampler.fullSize(from: data) }.value
             guard let image else {
                 // The clipboard is NOT cleared on failure, so a silent return here left the
@@ -201,11 +170,8 @@ struct AttachedImageCardView: View {
                 return
             }
             ImageExport.copyToPasteboard(image)
-            // [CF-25] Deliberately NOT stored in `fullImage`. A copy needs the bitmap for the
-            // length of the pasteboard write (which takes its own copy of the bytes), not for
-            // the life of the row — and this row sits in a `LazyVStack` that keeps the state of
-            // every instantiated row while the conversation is on screen. Storing it here is
-            // what made "copy ten photos" cost half a gigabyte of pixels nobody was looking at.
+            // Not stored in `fullImage`: a copy needs the bitmap only for the pasteboard write,
+            // and `LazyVStack` keeps state for every instantiated row.
         }
     }
 

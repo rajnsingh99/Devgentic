@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  DeletedConversationWriteTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-61: deleting a conversation mid-stream must not leave its turn behind.
-//
-//  ⚠️ THE DEFECT. Deleting a conversation cancels its run; the run's cancellation path still
-//  finalizes, and `addMessages` found no conversation and INSERTED the turn anyway, with
-//  `conversation == nil` — an orphan row no cascade will ever remove, holding content the user just
-//  deleted. 500 ms later the reply was re-indexed into the vector store too.
+//  Created by Raj Singh.
 //
 
 import XCTest

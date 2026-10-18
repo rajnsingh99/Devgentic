@@ -4,39 +4,23 @@
 //  SessionToolApprovals.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "SessionToolApprovals")
 
-/// Allowlist of tools the user chose **"Allow for this chat"** for on a HITL banner.
-///
-/// Scope is the conversation, and inside a workflow it narrows further to the **node** that asked.
-/// A choice in one conversation never affects another, and it deliberately does NOT touch the
-/// shared agent profile — so an approval can't leak the way a profile-wide auto-approve flip
-/// would. Unlike a one-time "Allow", the grant covers every later call of the same tool in the
-/// same scope, including across app restarts and resumed runs, so the user isn't re-prompted for
-/// a tool they already trusted here.
-///
-/// **Why the node is part of the scope.** Every node of a workflow run shares one conversationID,
-/// so a conversation-wide grant meant that approving a tool in one node silently auto-approved
-/// the same tool in every other node — including nodes the user had deliberately configured to
-/// ask. Nodes are independent steps with independent tool configuration, so an approval given to
-/// one is not an answer for another: the same tool, with the same arguments, called from a
-/// different node asks again if that node is configured to ask. (Decision recorded 2026-07-31.)
-///
-/// Durability: mirrored to `UserDefaults` so it survives a quit/relaunch. Entries are dropped
-/// only when the conversation itself is deleted (`clear`) — NOT at the end of each run.
+// Why: the node is part of the scope: nodes share one conversationID, so a conversation-wide grant would approve other nodes.
+/// Allowlist of tools the user chose "Allow for this chat" for on a HITL banner.
+/// Scoped to the conversation, and inside a workflow to the node that asked; it never touches the shared agent profile.
+/// Mirrored to `UserDefaults` so grants survive relaunch; entries drop only when the conversation is deleted (`clear`).
 actor SessionToolApprovals {
 
     static let shared = SessionToolApprovals()
 
     /// One approval scope: a conversation, and within a workflow the node that raised the prompt.
-    ///
-    /// `nodeID` is nil for ordinary chat/code runs, which have no node dimension — those keep
-    /// exactly the conversation-wide behaviour they have always had.
+    /// `nodeID` is nil for ordinary chat/code runs, which have no node dimension.
     struct Scope: Hashable, Sendable {
         let conversationID: UUID
         let nodeID: UUID?
@@ -47,8 +31,7 @@ actor SessionToolApprovals {
         }
 
         /// `<conversation>` for a chat grant, `<conversation>|<node>` for a workflow-node grant.
-        /// The un-suffixed form is also the v1 on-disk key, so previously persisted grants
-        /// hydrate as conversation-scoped rather than being silently dropped.
+        /// The un-suffixed form doubles as the on-disk key for conversation-scoped grants.
         var storageKey: String {
             guard let nodeID else { return conversationID.uuidString }
             return "\(conversationID.uuidString)|\(nodeID.uuidString)"
@@ -71,31 +54,16 @@ actor SessionToolApprovals {
     private let defaults: UserDefaults
     private var allowed: [Scope: Set<String>] = [:]
 
-    /// Conversations the user put in a blanket "approve everything" mode — Orb's Autonomous
-    /// voice setting.
-    ///
-    /// ⚠️ IN-MEMORY ONLY, never persisted, unlike the per-tool grants above. A per-tool grant is
-    /// a deliberate answer to a specific question the user read on a banner; a blanket grant is a
-    /// standing mode, and one that survived relaunch would keep approving long after the intent
-    /// behind it was forgotten. It is re-established from the Orb setting each time a voice
-    /// conversation starts, so turning the setting off genuinely turns it off.
-    ///
-    /// ⚠️ Deliberately checked INSIDE `isAllowed` rather than short-circuiting at the call site,
-    /// so it inherits the `canReachAHuman` gate below: a blanket grant given on a live voice
-    /// session must not serve a scheduled run nobody can answer.
-    /// ⚠️⚠️ KEYED ON (conversation, ORIGIN), NOT ON THE CONVERSATION ALONE. It used to be a bare
-    /// `Set<UUID>`, and Orb publishes its conversation to ChatOps on purpose — so a message from
-    /// a paired phone inherited an "approve everything" grant the user had made by VOICE, and ran
-    /// `execute_shell` with no prompt on ANY surface: the banner is skipped, so no `PendingHITL`
-    /// exists and the mirror has nothing to post either. Both halves were deliberate in isolation
-    /// (autonomous includes `execute_shell` by owner decision; a ChatOps run legitimately satisfies
-    /// `canReachAHuman`); nobody owned their composition. A grant must not cross a surface boundary.
+    // Why: a grant must not cross a surface boundary: a bare conversation key let a paired phone inherit a voice grant.
+    /// Conversations the user put in a blanket "approve everything" mode (Orb's Autonomous voice setting).
+    /// In-memory only, unlike per-tool grants: a standing mode that survived relaunch would outlive the intent behind it.
+    /// Checked inside `isAllowed` to inherit the `canReachAHuman` gate; keyed on (conversation, origin).
     private var autonomousConversations: Set<AutonomousGrant> = []
 
     /// One conversation, for runs started from ONE surface.
     struct AutonomousGrant: Hashable, Sendable {
         let conversationID: UUID
-        /// ⚠️ The surface that was granted it — compared against `WorkflowRunAttendance.origin`.
+        /// The surface that was granted it, compared against `WorkflowRunAttendance.origin`.
         let origin: MessageSource
     }
 
@@ -112,17 +80,10 @@ actor SessionToolApprovals {
         }
     }
 
+    // Why: enforce in the model, not only in views: a caller that skipped the check would persist a permanent grant
+    // to delete or run shell.
     /// Marks `toolName` as allowed for this scope for the lifetime of the conversation.
-    /// ⚠️ `risk` IS REQUIRED, AND DESTRUCTIVE IS REFUSED HERE.
-    ///
-    /// This grant is DURABLE: it survives the run and the app restart. Until now the only thing
-    /// stopping a destructive tool from getting one was `if confirmation.risk != .destructive`
-    /// written inside two SwiftUI views — a View convention standing in for what has to be a model
-    /// invariant. Any third caller that forgot the check would have persisted a permanent grant to
-    /// delete or run shell.
-    ///
-    /// This is defence for the NEXT caller. It changes no current behaviour: both existing sites
-    /// already guard, so nothing that reaches here today is refused.
+    /// `risk` is required and a destructive tool is refused here, since the grant is durable (survives the run and restart).
     func allow(toolName: String, risk: HITLRiskTier, conversationID: UUID, nodeID: UUID? = nil) {
         guard risk != .destructive else {
             logger.error("[HITL] REFUSED a durable 'allow for this chat' grant for destructive tool '\(toolName)' (conv \(conversationID.uuidString.prefix(8))). CONSEQUENCE: no grant was stored — this tool will ask again every time, which is the intended behaviour for something irreversible. The caller should not have offered the option.")
@@ -132,21 +93,10 @@ actor SessionToolApprovals {
         persist()
     }
 
+    // Why: autonomous includes `execute_shell` by design; safety comes from its shape (typed picker, in-memory, one
+    // conversation, `canReachAHuman` gate), so do not add a risk filter.
     /// Puts a conversation into (or out of) blanket-approval mode. See `autonomousConversations`.
-    ///
-    /// ⚠️ AUTONOMOUS MEANS AUTONOMOUS — INCLUDING `execute_shell`. Confirmed as intended by the
-    /// project owner 2026-09-05: this is the "approve everything in this conversation" switch, and
-    /// a version that quietly withheld the destructive tools would be a worse lie than no switch
-    /// at all. What keeps it safe is its SHAPE, not a tool filter: it is chosen deliberately from
-    /// a typed settings picker (never by voice), held in memory only so it cannot survive a
-    /// relaunch, scoped to one conversation, and gated above on `canReachAHuman` so it can never
-    /// serve a scheduled run. Do not add a risk filter here.
-    ///
-    /// The spoken approval channel (`OrbApprovalPolicy`) is a DIFFERENT question and is
-    /// deliberately far narrower — see its header.
-    /// - Parameter origin: the surface this grant is FOR. ⚠️ REQUIRED, not defaulted: a default
-    ///   would let a new caller grant blanket approval to every surface by omission, which is the
-    ///   defect this parameter exists to close.
+    /// `origin` is required, not defaulted: a default would let a new caller grant approval to every surface by omission.
     func setAutonomous(_ enabled: Bool, conversationID: UUID, origin: MessageSource) {
         let grant = AutonomousGrant(conversationID: conversationID, origin: origin)
         let changed = enabled
@@ -156,11 +106,8 @@ actor SessionToolApprovals {
         logger.notice("[HITL] Autonomous approval \(enabled ? "ENABLED" : "disabled") for conversation \(conversationID.uuidString.prefix(8)), origin '\(origin.rawValue)'. CONSEQUENCE: while enabled, every tool in this conversation started FROM THAT SURFACE is approved without a prompt; a run of any other origin still asks. The grant is in-memory only and does not survive relaunch.")
     }
 
-    /// Whether ANY surface holds a blanket grant on this conversation.
-    ///
-    /// ⚠️ ORIGIN-AGNOSTIC ON PURPOSE — this is a UI/reporting question ("is this conversation in
-    /// autonomous mode"), not the authorization one. The gate is `isAllowed`, which compares the
-    /// grant's origin against the run's.
+    /// Whether any surface holds a blanket grant on this conversation.
+    /// Origin-agnostic on purpose: this answers a UI/reporting question; authorization is `isAllowed`, which compares origin.
     func isAutonomous(conversationID: UUID) -> Bool {
         autonomousConversations.contains { $0.conversationID == conversationID }
     }
@@ -170,27 +117,11 @@ actor SessionToolApprovals {
         autonomousConversations.contains(AutonomousGrant(conversationID: conversationID, origin: origin))
     }
 
-    /// Whether the user already chose "Allow for this chat" for this tool **in this scope**.
-    ///
-    /// Deliberately an exact scope match, with no fall back to the conversation-wide grant when a
-    /// `nodeID` is supplied: falling back is precisely the leak this scope exists to close.
-    ///
-    /// ⚠️ REACHABLE-HUMAN RUNS ONLY [WF-SE6]. `WorkflowRunAttendance.canReachAHuman` is read off
-    /// TaskLocals, and this actor method runs on the CALLER's task, so the check reads the run
-    /// that is asking with no plumbing (an `await` hops executors but never leaves the task).
-    ///
-    /// Before this, a grant given on a live banner — labelled "Allow for this **chat**" — was
-    /// served to SCHEDULED runs too: a scheduled task reuses one conversationID and one canvas
-    /// nodeID on every fire, so a single click became a permanent unattended auto-approve with no
-    /// revocation short of deleting the conversation. Unattended approval is now an EXPLICIT
-    /// per-node configuration (`WorkflowNodeConfig.unattendedAutoApprove`), never a banner side
-    /// effect.
-    ///
-    /// ⚠️ A CHATOPS run still gets the grant, deliberately: it IS "this chat" with a human who
-    /// can be reached, and its confirmations are mirrored with working Approve/Deny. Only a run
-    /// nobody can answer is refused.
-    /// ⚠️ The blanket grant is matched against `WorkflowRunAttendance.origin`, so it serves only
-    /// runs from the surface it was granted on. See `autonomousConversations`.
+    // Why: a banner grant must not serve scheduled runs nobody can answer; unattended approval is explicit per-node config.
+    // ChatOps runs still get it (a human is reachable); blanket grants match `WorkflowRunAttendance.origin`.
+    /// Whether the user already chose "Allow for this chat" for this tool in this scope.
+    /// An exact scope match, with no fallback to the conversation-wide grant when a `nodeID` is supplied.
+    /// Reachable-human runs only: `WorkflowRunAttendance.canReachAHuman` is read from TaskLocals on the caller's task.
     func isAllowed(toolName: String, conversationID: UUID, nodeID: UUID? = nil) -> Bool {
         guard WorkflowRunAttendance.canReachAHuman else {
             if allowed[Scope(conversationID: conversationID, nodeID: nodeID)]?.contains(toolName) == true {
@@ -203,8 +134,7 @@ actor SessionToolApprovals {
             logger.notice("[HITL] '\(toolName)' auto-approved by AUTONOMOUS mode (conv \(conversationID.uuidString.prefix(8)), origin '\(origin.rawValue)'). CONSEQUENCE: no prompt was shown and the user did not see this tool's arguments.")
             return true
         }
-        // ⚠️ A grant EXISTS for this conversation but for a different surface. Said out loud,
-        //   because "why did my phone get a prompt when the Mac does not" is otherwise unanswerable.
+        // A grant exists for this conversation but for a different surface: logged so "why did my phone prompt" is answerable.
         if autonomousConversations.contains(where: { $0.conversationID == conversationID }) {
             logger.notice("[HITL] Autonomous grant NOT served to a '\(origin.rawValue)' run of conversation \(conversationID.uuidString.prefix(8)) — the grant belongs to another surface. CONSEQUENCE: this tool asks for approval as normal; a standing 'approve everything' chosen on one surface deliberately does not carry to another.")
         }
@@ -214,8 +144,7 @@ actor SessionToolApprovals {
     /// Drops all allowances for a conversation — every node scope within it included, since the
     /// conversation is what is being deleted.
     func clear(conversationID: UUID) {
-        // ⚠️ EVERY surface's grant on this conversation — the conversation is being deleted, so no
-        //   origin retains a claim on it.
+        // Every surface's grant on this conversation: it is being deleted, so no origin retains a claim.
         autonomousConversations = autonomousConversations.filter { $0.conversationID != conversationID }
         let doomed = allowed.keys.filter { $0.conversationID == conversationID }
         guard !doomed.isEmpty else { return }

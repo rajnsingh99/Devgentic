@@ -4,8 +4,7 @@
 //  DiffLineView.swift
 //  Devgentic
 //
-//  Diff row rendering shared by the approval banner (`FileChangePreviewView`) and the Git Changes
-//  panel. Lifted verbatim from `FileChangePreviewView` — moving it changed no pixels there.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

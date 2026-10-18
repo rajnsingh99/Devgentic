@@ -4,14 +4,7 @@
 //  SaveAsLinkingTests.swift
 //  DevgenticTests
 //
-//  Save-As now makes the tab ADOPT the file it wrote (design §7, §12 D3).
-//
-//  Before this, Save-As set only `lastSavedBuffer`: the tab stayed unlinked, so every
-//  subsequent ⌘S re-opened the save panel, and model-generated content never gained a real
-//  path. Setting `lastSavedDisk` is the load-bearing half — the drift guard resolves
-//  `lastSavedDisk ?? sourceFile.content`, and a Save-As'd tab has no source file, so
-//  linking WITHOUT the baseline would leave later saves to that path with no drift
-//  protection at all.
+//  Created by Raj Singh.
 //
 
 import XCTest

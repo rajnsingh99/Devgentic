@@ -4,10 +4,7 @@
 //  HistoryCompactionServiceTests.swift
 //  DevgenticTests
 //
-//  Tests for HistoryCompactionService trigger logic, adaptive batch sizing,
-//  checkpoint creation, and format-for-IC helpers.
-//  Note: Tests that require IC inference are excluded — these test the
-//  deterministic logic surrounding the IC call, not the IC model itself.
+//  Created by Raj Singh.
 //
 
 import XCTest

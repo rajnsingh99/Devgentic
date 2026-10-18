@@ -4,21 +4,13 @@
 //  RemoteCommandAge.swift
 //  Devgentic
 //
-//  A remote command that arrives long after it was sent is NOT run (Timeout inventory D-23, owner
-//  decision 2026-09-27 — the same rule as a missed scheduled run: skip it and say so).
-//
-//  ⚠️ Why: Telegram keeps undelivered updates for 24 h, and Discord/Slack replay recent events on
-//  reconnect. A Mac that slept through the evening woke up and ran "deploy it" sent eight hours
-//  earlier — work the operator had long stopped expecting, with nobody watching.
-//
-//  ⚠️ Only commands that START or CHANGE work are gated. Answers to a question that is still open
-//  (approve/deny, gate choice, clarification) are accepted at any age: the question is live, and
-//  the contract never puts a human on a timer. Read-only commands (/status, /conversations …)
-//  answer with the CURRENT state, so their age does not matter.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// A remote command that arrives long after it was sent is not run: it is skipped and the sender told.
+/// Only commands that start or change work are gated; answers to an open question and read-only commands are accepted.
 enum RemoteCommandAge {
 
     /// Older than this, a work-starting command is skipped.

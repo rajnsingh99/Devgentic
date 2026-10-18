@@ -4,9 +4,7 @@
 //  OnboardingDownloadPollTests.swift
 //  DevgenticTests
 //
-//  Timeout inventory D-24: the onboarding download poll never ended on failure or cancel — the
-//  record left the active map in the same turn, so the terminal arms could not fire and the poll
-//  spun every 250 ms with a stale stage. D-25's launch-instant guard is pinned here too.
+//  Created by Raj Singh.
 //
 
 import XCTest

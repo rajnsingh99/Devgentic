@@ -2,21 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  AbortTriggerTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  `AbortTrigger` exists because three facts about an abort used to live in three `var`s
-//  declared ~80 lines from the code that produced them, and TWO of the three went dead with
-//  nothing noticing:
-//
-//    • `abortBypassesRecoveryPolicy` — declared `false`, read once, NEVER assigned `true`. The
-//      `ask_user` idle exemption its own comment described had never fired.
-//    • `abortCategory` — declared `.cbRepetitiveAction`, never reassigned. Every circuit-breaker
-//      abort, including consecutive tool FAILURES and user DENIALS, was filed as
-//      "Repetitive Action" in the error dashboards.
-//
-//  ⚠️ These tests assert the INVARIANTS that make that class of rot impossible, not the current
-//  policy values. Changing a default (e.g. making denials hard-stop) should NOT turn this file
-//  red — that is a product decision. What must fail is a trigger losing its identity.
+//  Created by Raj Singh.
 //
 
 import XCTest

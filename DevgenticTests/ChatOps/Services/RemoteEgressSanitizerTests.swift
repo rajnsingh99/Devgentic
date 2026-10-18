@@ -4,7 +4,7 @@
 //  RemoteEgressSanitizerTests.swift
 //  DevgenticTests
 //
-//  Slice 6: the credential floor on everything leaving for a chat service.
+//  Created by Raj Singh.
 //
 
 import XCTest

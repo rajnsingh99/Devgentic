@@ -4,7 +4,7 @@
 //  CommandPaletteModel.swift
 //  Devgentic
 //
-//  Data model and item definitions for the universal Command Palette (⌘K).
+//  Created by Raj Singh.
 //
 
 import Foundation

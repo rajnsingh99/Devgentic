@@ -4,26 +4,19 @@
 //  FileContextStrategy.swift
 //  Devgentic
 //
-//  Created on 29/03/26.
-//
-//  Controls how attached files and knowledge sources are DELIVERED to the
-//  model: inject the content into the prompt, or hand the agent file paths
-//  for tool-based access. Each profile has a strategy (explicit or
-//  smart-defaulted by profile type); `resolve(_:for:)` is the single
-//  resolution seam and heals persisted values a type can't honor.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - File Context Strategy
 
+/// How attached files and knowledge sources are delivered to the model: injected into the prompt or by file paths.
+/// `resolve(_:for:)` is the single resolution seam and heals persisted values a profile type cannot honor.
 enum FileContextStrategy: String, Codable, CaseIterable, Sendable, Hashable {
 
-    /// DEPRECATED (2026-07 redesign): not selectable and never returned by `resolve(_:for:)` —
-    /// kept only so previously-persisted profiles keep decoding; persisted values heal to the
-    /// type default at read time. RAG is becoming a standard conversation-memory feature
-    /// (not a file strategy), and knowledge sources move to a dedicated `<knowledge_base>`
-    /// system-prompt layer.
+    /// Deprecated: not selectable and never returned by `resolve(_:for:)`.
+    /// Kept so persisted profiles that stored it still decode; the value heals to the type default at read time.
     case contextualRAG = "contextual_rag"
 
     /// File content is extracted and injected directly into the prompt context window.
@@ -37,10 +30,8 @@ enum FileContextStrategy: String, Codable, CaseIterable, Sendable, Hashable {
     case stateless = "stateless"
 
     // MARK: - Display Properties
-    //
-    // ⚠️ register A63 — `displayName` and `description` are now `localizedTitle` /
-    // `localizedDescription` (`LocalizedStringKey`) in `ProfileEnumLocalizedTitles.swift`. This
-    // file is Foundation-only by design, so a SwiftUI type cannot live here.
+    // `displayName` and `description` live as `localizedTitle` / `localizedDescription` in
+    // `ProfileEnumLocalizedTitles.swift`; this file is Foundation-only so a SwiftUI type cannot live here.
 
 
 
@@ -58,11 +49,8 @@ enum FileContextStrategy: String, Codable, CaseIterable, Sendable, Hashable {
     static func defaultStrategy(for profileType: ProfileType) -> FileContextStrategy {
         switch profileType {
         case .bot:      return .directInjection
-        // Agents have file tools, so handing them PATHS beats handing them prose: the
-        // agent reads exactly what it needs, and — the reason this changed (2026-07-25) —
-        // it learns where the file actually lives. Under injection it saw only a basename
-        // and, asked to edit an attachment, emitted that bare name as the write path,
-        // which resolves to HOME. Injection remains selectable for read-and-explain work.
+        // Agents have file tools: paths let them read exactly what they need and learn where the file lives.
+        // Injection exposes only a basename (a bare write path resolves to HOME); still selectable for read-and-explain.
         case .agent:    return .stateless
         case .workflow:  return .directInjection
         case .imageGen: return .stateless
@@ -72,13 +60,9 @@ enum FileContextStrategy: String, Codable, CaseIterable, Sendable, Hashable {
 
     // MARK: - Availability
 
-    /// Strategies a profile type can actually honor — the strategy governs how FILES are
-    /// delivered (inject content vs tool-based access), nothing else.
-    /// - `.contextualRAG` is deprecated and available to no type.
-    /// - Bot allows only `.directInjection`: bots run with no tools (ChatExecutor passes
-    ///   `availableTools: []`), so `.stateless`'s read_file note would point at a tool
-    ///   that doesn't exist. One option → BotConfigDetailView shows no picker.
-    /// - Workflow / imageGen / code are pinned to their defaults (no picker exists for them).
+    /// Strategies a profile type can actually honor.
+    /// Bot allows only `.directInjection` (bots run with no tools); Workflow, imageGen and code are pinned to their defaults.
+    /// `.contextualRAG` is deprecated and available to no type.
     static func availableStrategies(for profileType: ProfileType) -> [FileContextStrategy] {
         switch profileType {
         case .bot:      return [.directInjection]

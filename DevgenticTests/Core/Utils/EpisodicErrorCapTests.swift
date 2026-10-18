@@ -4,12 +4,7 @@
 //  EpisodicErrorCapTests.swift
 //  DevgenticTests
 //
-//  Tool failure text was capped at 150 chars — shorter than most compiler errors and nearly
-//  every stack trace — and clipped with a bare "..." that said nothing about how much was
-//  lost. The model routinely adapted to a cause it could not read.
-//
-//  Error text is the one thing in episodic memory that cannot be re-derived: a successful
-//  read can be repeated, a failure often cannot.
+//  Created by Raj Singh.
 //
 
 import XCTest

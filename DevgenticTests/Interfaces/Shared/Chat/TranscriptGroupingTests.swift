@@ -4,8 +4,7 @@
 //  TranscriptGroupingTests.swift
 //  DevgenticTests
 //
-//  A background task's report drawn inside the turn above it (2026-09-27, user decision) — not as
-//  a new exchange with its own divider, header and action bar. Display only: storage is untouched.
+//  Created by Raj Singh.
 //
 
 import XCTest

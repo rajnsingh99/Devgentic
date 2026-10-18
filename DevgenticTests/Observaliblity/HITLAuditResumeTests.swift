@@ -4,9 +4,7 @@
 //  HITLAuditResumeTests.swift
 //  DevgenticTests
 //
-//  G1 Piece 2 — when a parked-then-interrupted HITL is successfully resumed, its durable audit row is
-//  flipped from "interrupted" to "resumed" so the log reflects the recovery instead of over-counting it.
-//  Verifies the flip, the guard (never clobber a genuine approve/deny outcome), and the no-op cases.
+//  Created by Raj Singh.
 //
 
 import XCTest

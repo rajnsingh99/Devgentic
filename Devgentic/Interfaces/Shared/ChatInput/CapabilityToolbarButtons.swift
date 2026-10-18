@@ -4,18 +4,14 @@
 //  CapabilityToolbarButtons.swift
 //  Devgentic
 //
-//  Composer-level quick access to an agent profile's Planning and Self-Reflection
-//  capabilities: two icon buttons beside the backend selector. Each shows the
-//  capability's on/off state at a glance and opens a popover to enable/disable and
-//  configure it. Changes persist to the profile immediately, so the next send
-//  honors them (getRequestConfig() re-reads the profile from the store by ID).
-//
-//  Only rendered for `.agent` profiles — planning/reflection are agent-only
-//  capabilities (bot/workflow/imageGen don't stack them; code mode runs plain ReAct).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Composer quick access to an agent profile's Planning and Self-Reflection capabilities: two icon buttons beside the
+/// backend selector showing on/off state and opening a popover to configure. Changes persist to the profile
+/// immediately; rendered only for `.agent` profiles.
 struct CapabilityToolbarButtons: View {
     /// The composer's selected profile. A binding so a toggle updates the composer's
     /// state (instant chip refresh) in addition to persisting to the store.
@@ -58,16 +54,9 @@ struct CapabilityToolbarButtons: View {
         }
     }
 
-    /// A binding into the profile's `AgentCapabilities`. Reads derive from the current
-    /// profile; writes apply the capability delta to a FRESHLY READ row and persist — so a change
-    /// is reflected instantly and effective next send, without carrying stale fields to disk.
-    ///
-    /// ⚠️ This used to write `profile` — the composer's cached snapshot — back wholesale. That
-    /// snapshot is refreshed only when `selectedProfileID` changes, and the chat view is never torn
-    /// down ("always alive, visibility toggled via opacity"), so it goes stale the moment the user
-    /// edits the same profile in the editor. Toggling a chip then reverted their instructions,
-    /// model and tool edits on disk — silently, with the editor still showing the newer values.
-    /// A whole-snapshot write also resurrected a profile the user had just deleted.
+    /// A binding into the profile's `AgentCapabilities`: reads derive from the current profile, and writes apply the
+    /// capability delta to a freshly read row and persist. Writing the composer's cached snapshot back wholesale would
+    /// revert edits made in the editor and could resurrect a deleted profile.
     private var capabilitiesBinding: Binding<AgentCapabilities> {
         Binding(
             get: { agentConfig?.capabilities ?? AgentCapabilities() },
@@ -111,16 +100,8 @@ struct CapabilityToolbarButtons: View {
                 updated.details = .agent(cfg)
 
                 do {
-                    // ⚠️ register B16 — the advisories are LOGGED here rather than discarded.
-                    // `ProfileValidator` recomputes "the selected model does not support tool
-                    // calling" on every one of these writes, and the chip is one of the surfaces
-                    // that turns tool-using capabilities ON, so it is exactly the moment the
-                    // warning is earned. It is deliberately NOT a toast: a chip toggle is a
-                    // one-click, instantly reversible action in the middle of typing, and a
-                    // banner over the composer for a condition the user may already know about
-                    // would be the nagging A34 explicitly rejected. The send path carries the
-                    // user-facing version of this via `AdvisoryCenter` (register B14), where the
-                    // consequence actually lands.
+                    // The advisories are logged rather than discarded, and deliberately not toasted: a chip toggle is instant and
+                    // reversible, and the send path surfaces the user-facing version through `AdvisoryCenter`.
                     let advisories = try BackendProfileStore.shared.saveProfile(updated)
                     for advisory in advisories where advisory.severity == .advisory {
                         logger.notice(
@@ -133,8 +114,7 @@ struct CapabilityToolbarButtons: View {
                     // reflects disk and the next toggle starts from current bytes.
                     profile = updated
                 } catch {
-                    // Non-fatal, but the cache is deliberately NOT updated: the chip must not
-                    // claim a state that is not on disk.
+                    // Non-fatal, but the cache is not updated: the chip must not claim a state that is not on disk.
                     logger.warning(
                         "[PROFILE] Failed to persist capability change for \(cached.id): "
                         + "\(error.localizedDescription). CONSEQUENCE: the chip stays in its "

@@ -4,7 +4,7 @@
 //  ChatOpsConfig.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -35,23 +35,9 @@ enum ChatOpsSecurityTier: String, Codable, CaseIterable, Identifiable {
 
 // MARK: - Tool Approvals
 
-/// Whether a remote-started run stops for tool approval.
-///
-/// ⚠️⚠️ THE MOST PRIVILEGED SETTING IN CHATOPS, AND ITS SAFETY IS ITS SHAPE — the same argument
-/// `OrbToolApprovals` rests on, which this deliberately mirrors. `.autonomous` means a message
-/// from a phone runs `execute_shell` with no prompt on ANY surface: the banner is skipped, so no
-/// `PendingHITL` exists and the mirror has nothing to post either. What keeps that defensible:
-///
-///   • `.ask` is the DEFAULT, and it already works — the mirror posts tappable Approve/Deny.
-///   • Chosen from the Mac's Settings pane and NOWHERE ELSE. ⚠️ There is deliberately no remote
-///     verb for it: a command that grants its own sender unattended shell is not a setting, it is
-///     a privilege escalation. `ChatOpsCommand` must never gain one.
-///   • Revealed only at the `.full` tier, and `isAutonomous(for:)` re-checks that — so dropping the
-///     tier revokes it even though the stored value stays put.
-///   • Per platform, so a private Telegram DM and a shared Slack channel can differ.
-///   • Single-user: only the account that completed pairing can reach it (invariant 38).
-///   • The GRANT it produces is in-memory and re-applied every turn, so a relaunch fails safe to
-///     Ask — and the user can still answer the mirrored buttons.
+// Why: no remote verb may grant it: a command that gives its own sender unattended shell is a privilege escalation.
+/// Whether a remote-started run stops for tool approval. `.ask` is the default; `.autonomous` skips the prompt
+/// for every tool, including `execute_shell`, so it is chosen only in the Mac's Settings pane, per platform, at `.full`.
 enum ChatOpsToolApprovals: String, Codable, CaseIterable, Identifiable {
     /// Mirror the request and wait for a tap. The default.
     case ask
@@ -102,23 +88,15 @@ enum ChatOpsConnectionState: Equatable {
         }
     }
 
-    /// Whether this state means "paired, but every remote command will be refused".
-    ///
-    /// ⚠️ Distinct from `.error` in general: a terminal token failure is also `.error`, and that one
-    /// is not fixed by re-pairing. Callers that want to offer re-pairing check this.
+    /// Whether this state means paired, but every remote command will be refused.
+    /// Distinct from other `.error` states, which re-pairing does not fix; callers offering re-pairing check this.
     var needsRepairing: Bool {
         if case .error(let message) = self { return message == ChatOpsPairingRestore.needsRepairingMessage }
         return false
     }
 
     /// The status a user should read, given whether the listener is switched on.
-    ///
-    /// ⚠️⚠️ `.connected` MEANS "A PAIRING EXISTS", NOT "MESSAGES ARE ARRIVING" — and once the
-    /// restore stopped conflating the two (see `ChatOpsConfigManager.init`), a paired provider whose
-    /// listener the user had switched off started reading "Connected". That is a smaller lie than
-    /// the one it replaced, which greyed out the only control that could switch it back on, but it
-    /// is still a lie: nothing is being received. The caller knows `isEnabled`; the vocabulary lives
-    /// here, so it is composed here rather than at three call sites that could drift.
+    /// `.connected` means a pairing exists, not that messages arrive, so a switched-off listener reads as paired but off.
     func statusText(listenerEnabled: Bool) -> String {
         guard case .connected = self, !listenerEnabled else { return statusText }
         return "Paired — listener off"
@@ -127,31 +105,7 @@ enum ChatOpsConnectionState: Equatable {
 
 // MARK: - ChatOps Configuration
 
-/// What a provider's connection state should be at launch, given what is actually on disk.
-///
-/// ⚠️⚠️ WHY THIS IS A FUNCTION AND NOT THREE INLINE `if`s. The restore used to read
-/// `if let chatID = authorizedChatID, botToken != nil { connectionState = .connected(chatID:) }` —
-/// credentials plus an ADDRESS — and said nothing about whether anyone is authorized to USE it.
-/// Per-sender authorization (invariant 38) then made `authorizedUserID` load-bearing: it is written
-/// only by a pairing service and nothing backfills it, so a pairing made before that build restores
-/// with `authorizedUserID == nil` and `senderIsAuthorized` refuses EVERY inbound message. The UI,
-/// reading `.connected`, painted a green dot over a bridge that could not answer anything, and the
-/// remote user got silence. A green light over a dead path is worse than a red one.
-///
-/// ⚠️ THE REGISTER CALLED THIS AN "ACCEPTED COST" BECAUSE "THE LOG LINE SAYS SO EXPLICITLY". That was
-/// wrong, and this function is the correction: a log line is not an affordance. The user is not
-/// reading Console; they are looking at a green dot and wondering why their phone is ignored.
-/// What a credential read actually told us. Register KC-10.
-///
-/// ⚠️⚠️ `.absent` AND `.unreadable` MUST NOT COLLAPSE. The four ChatOps getters returned `String?`
-/// via `SecureKeyStorage.retrieve`, which maps both to nil — so a locked Keychain, or a denied ACL
-/// prompt on the first launch after an update re-signed the binary, rendered as **"you have never
-/// paired"**. All three bridges declined to start and the Settings pane offered "Start Pairing" for
-/// a pairing that was intact the whole time. The user's only visible option was to redo a pairing
-/// they never undid — on all three platforms.
-/// What a credential wipe actually deleted. Register KC-12: "credentials cleared" used to be
-/// logged unconditionally over `OSStatus` values nobody looked at, so a Keychain that refused the
-/// delete reported a disconnected bridge while the bot token stayed stored and usable.
+/// What a credential wipe actually deleted, so a disconnect cannot report success while a token is still stored.
 struct ChatOpsCredentialClearSummary: Equatable, Sendable {
 
     /// One credential whose Keychain delete did not succeed.
@@ -170,13 +124,15 @@ struct ChatOpsCredentialClearSummary: Equatable, Sendable {
     var failedLabels: [String] { failures.map(\.label) }
 }
 
+// Why: `.absent` and `.unreadable` must never collapse: a locked Keychain would read as "never paired" and offer pairing again.
+/// What a credential read actually told us.
 enum ChatOpsCredentialState: Equatable {
     case present
     case absent
     case unreadable(OSStatus)
 
-    /// Folds a set of reads into one verdict. ⚠️ `unreadable` DOMINATES: Slack needs two tokens, and
-    /// "one token present, the other unreadable" is not a partial pairing — it is an outage.
+    // Why: `unreadable` dominates: one Slack token present and the other unreadable is an outage, not a partial pairing.
+    /// Folds a set of credential reads into one verdict.
     static func combining(_ states: [ChatOpsCredentialState]) -> ChatOpsCredentialState {
         if let failure = states.first(where: { if case .unreadable = $0 { return true }; return false }) {
             return failure
@@ -187,27 +143,24 @@ enum ChatOpsCredentialState: Equatable {
 
 enum ChatOpsPairingRestore {
 
-    /// ⚠️ MATCHED EXACTLY by `ChatOpsConnectionState.needsRepairing`, which is how the Settings pane
-    /// tells this apart from a terminal token failure (also `.error`, but NOT fixed by re-pairing).
-    /// One literal, one place.
+    /// Shown for a pairing that records no authorized account; matched exactly by `ChatOpsConnectionState.needsRepairing`,
+    /// which is how the Settings pane tells it apart from a terminal token failure.
     static let needsRepairingMessage =
         "This pairing predates per-sender authorization and records no account, so every remote command is refused. Start pairing again to fix it."
 
-    /// ⚠️ DELIBERATELY NOT `needsRepairingMessage`. Re-pairing is the wrong advice here and would
-    /// overwrite a working credential with a new one for no reason; the fix is to make the Keychain
-    /// readable. Kept distinct so `needsRepairing` does not match it and offer the pairing button.
+    // Why: kept distinct from `needsRepairingMessage` so `needsRepairing` does not match it and offer the pairing button.
+    /// Shown when stored credentials cannot be read from the Keychain; the fix is to unlock the Keychain, not to re-pair.
     static let unreadableMessage =
         "Your ChatOps credentials are stored but could not be read from the Keychain, so the bridge cannot start. Nothing has been lost — unlock your Keychain, or re-grant access after an app update, and reopen this pane. Do not re-pair: that would replace a credential that is still intact."
 
-    /// - Parameter credentials: whether the tokens are present, absent, **or unreadable**.
-    /// - Parameter authorizedUserID: the account recorded at pairing. ⚠️ NIL IS THE UPGRADE CASE,
-    ///   not a corrupt install — it is what every pairing made before invariant 38 looks like.
+    /// Returns a provider's connection state at launch from what is on disk: credentials, address and authorized sender.
+    /// - Parameter credentials: whether the tokens are present, absent, or unreadable.
+    /// - Parameter authorizedUserID: the account recorded at pairing; nil is a pairing from before sender checks.
     static func state(credentials: ChatOpsCredentialState,
                       addressPresent: Bool,
                       authorizedUserID: String?,
                       chatID: Int64) -> ChatOpsConnectionState {
-        // ⚠️ FIRST, and before `addressPresent`. An unreadable Keychain must never be reported as
-        // `.disconnected`, which is the state that renders as "never paired".
+        // Checked first, before `addressPresent`: an unreadable Keychain must never read as `.disconnected` (never paired).
         if case .unreadable = credentials { return .error(unreadableMessage) }
         guard credentials == .present, addressPresent else { return .disconnected }
         guard authorizedUserID != nil else { return .error(needsRepairingMessage) }
@@ -222,11 +175,8 @@ final class ChatOpsConfigManager {
 
     static let shared = ChatOpsConfigManager()
 
-    /// ⚠️ TEST SEAM (registers KC-11 / KC-12). The backend behind every credential read/write, so
-    /// the FAILED save/delete branches — the entire point of the explicit store/clear methods
-    /// below — are reachable from a test. Mirrors `HuggingFaceTokenStore.setBackingForTesting`;
-    /// production never reassigns it. Under the XCTest host the default already routes to
-    /// `TestHostKeychain`, which cannot fail — which is precisely why this seam is needed.
+    // Why: the test host's default Keychain cannot fail, so the failed save and delete branches need this seam.
+    /// The backend behind every credential read and write; production never reassigns it, tests replace it.
     nonisolated(unsafe) private(set) var keychain: any KeychainAccessing = SecureKeyStorage()
 
     /// Swaps the Keychain backend. Test-only — pass nil to restore the real one.
@@ -237,17 +187,9 @@ final class ChatOpsConfigManager {
     private let logger = DGLogger(category: "ChatOpsConfig")
     nonisolated private static let keychainService = Bundle.main.bundleIdentifier ?? "app.devgentic.macos"
 
-    // MARK: - Credential read cache (registers KC-29 + KC-47)
-    //
-    // The four credential getters used to issue an uncached synchronous `SecItemCopyMatching` on
-    // EVERY access — and the Settings pane evaluates several credentials per keystroke while the
-    // notification-dispatch path reads them as well. One memoized value per account fixes that,
-    // with the rule that makes it safe:
-    //
-    // ⚠️ A FAILED read is NEVER memoized. That is KC-8's bug shape — HuggingFaceTokenStore
-    // memoized "no token" for the whole process lifetime off one locked-Keychain read. Only a
-    // definitive `.found` / `.notFound` enters the cache; a `.failed` leaves no entry, so the
-    // next getter call retries the Keychain and a recovered Keychain is observed immediately.
+    // MARK: - Credential read cache
+    // One memoized value per account; only a definitive found or not-found enters the cache.
+    // A failed read is never memoized, so the next getter call retries and a recovered Keychain is seen at once.
 
     private var credentialCache: [String: String?] = [:]
 
@@ -279,16 +221,9 @@ final class ChatOpsConfigManager {
         credentialCache.removeAll()
     }
 
-    /// Reads one ChatOps credential, distinguishing "not stored" from "could not look". Register KC-10.
-    ///
-    /// ⚠️ Used by the RESTORE path, not by the four getters. The getters still return `String?` —
-    /// they are reached from SwiftUI view bodies, and recording a failure from there would mean
-    /// mutating observable state during a view update. The restore path runs in `init`, where it is
-    /// safe, and it is the only place `connectionState` is derived.
-    ///
-    /// ⚠️ TEST SEAM: `nonisolated static` with an injected `keychain`. The manager is a singleton
-    /// with a `private init`, so the restore cannot be re-run from a test; making the derivation
-    /// static is what lets the `.failed → .unreadable` mapping be exercised at all.
+    // Why: `nonisolated static` with an injected keychain so the failed-to-unreadable mapping is testable without the singleton.
+    /// Reads one ChatOps credential, distinguishing not stored from could not look.
+    /// Used by the restore path; the getters return `String?` because they run in view bodies and cannot record a failure.
     nonisolated static func credentialState(
         _ account: String,
         keychain: KeychainAccessing,
@@ -311,12 +246,8 @@ final class ChatOpsConfigManager {
         }
     }
 
-    /// Folds the per-provider credential reads into the three restore verdicts.
-    ///
-    /// ⚠️ EXTRACTED SO THE WIRING IS TESTABLE, not for tidiness. Mutation-checking found that a
-    /// test of `ChatOpsPairingRestore.state` alone stays green when `init` goes back to
-    /// `botToken != nil ? .present : .absent` — i.e. it covers the policy and not the thing that
-    /// actually decides what the user sees. This function is the decision; `init` only stores it.
+    // Why: a test of `ChatOpsPairingRestore.state` alone would not cover how `init` derives it, so the decision lives here.
+    /// Folds the per-provider credential reads into the three restore verdicts; `init` only stores the result.
     nonisolated static func restoreStates(
         keychain: KeychainAccessing,
         logger: DGLogger? = nil,
@@ -338,8 +269,8 @@ final class ChatOpsConfigManager {
                 addressPresent: discord.addressPresent,
                 authorizedUserID: discord.userID,
                 chatID: discord.chatID),
-            // ⚠️ Slack needs BOTH tokens, and `combining` lets `unreadable` dominate `absent`:
-            // one present + one unreadable is an outage, not a half-finished pairing.
+            // Slack needs both tokens, and `combining` lets `unreadable` dominate `absent`:
+            // one present plus one unreadable is an outage, not a half-finished pairing.
             slack: ChatOpsPairingRestore.state(
                 credentials: .combining([
                     state(AppSettings.chatOpsSlackBotTokenKey),
@@ -356,11 +287,8 @@ final class ChatOpsConfigManager {
     var botToken: String? {
         get {
             access(keyPath: \.botToken)
-            // Cached three-state read (registers KC-29 / KC-47); a FAILED read is never
-            // memoized — see `readCredential`. The KC-10 distinction survives: the
-            // `credentialState`/`restoreStates` machine reads the backend DIRECTLY, so the
-            // user-facing state still sees truth, while this cached value only ever feeds
-            // "value or nothing" consumers.
+            // Cached three-state read; a failed read is never memoized (see `readCredential`). The restore path reads the backend
+            // directly, so the user-facing state sees the truth; this cached value feeds only value-or-nothing consumers.
             return readCredential(AppSettings.chatOpsBotTokenKey)
         }
         set {
@@ -389,22 +317,9 @@ final class ChatOpsConfigManager {
         }
     }
 
-    /// Telegram's security tier.
-    ///
-    /// ⚠️⚠️ ONE TIER USED TO GOVERN ALL THREE PLATFORMS WHILE BEING RENDERED INSIDE EACH PLATFORM'S
-    /// OWN TAB. The Settings pane embeds the same `securityCard` in the Telegram, Discord and Slack
-    /// stacks with no qualifier anywhere, so a user who set "Full Access" on Telegram — to approve
-    /// tools from their phone — found the Discord tab already reading Full Access, and a user who
-    /// then set Discord to "Read Only" silently dropped their phone to Read Only too, whereupon its
-    /// approvals began failing with a message that named no cause.
-    ///
-    /// ⚠️ THE FILE ALREADY SOLVED THIS ONCE, FOR THE CURSOR. `ProviderSessionContext`'s header says
-    /// a service reading the bare `activeConversationID` "would have moved Discord's conversation by
-    /// writing Telegram's" — the tier is the same shape and simply never got the same treatment.
-    ///
-    /// ⚠️ THREE STORED PROPERTIES RATHER THAN ONE FUNCTION, because `@Observable` tracks key paths:
-    /// a computed `securityTier(for:)` alone could not invalidate a view when the value changed.
-    /// The switch helper below exists for call sites that hold a provider in a variable.
+    /// Telegram's security tier, stored per platform so a change on one tab never re-tiers the others.
+    /// Three stored properties rather than one function, because `@Observable` tracks key paths;
+    /// the switch helper below serves call sites that hold a provider in a variable.
     var securityTier: ChatOpsSecurityTier {
         get {
             access(keyPath: \.securityTier)
@@ -486,7 +401,7 @@ final class ChatOpsConfigManager {
     nonisolated static let discordToolApprovalsKey = "chatOpsDiscordToolApprovals"
     nonisolated static let slackToolApprovalsKey = "chatOpsSlackToolApprovals"
 
-    /// ⚠️ ABSENT KEY → `.ask`. The default must be the one that stops and shows you the arguments.
+    /// An absent key defaults to `.ask`, the setting that stops and shows the arguments.
     nonisolated private static func approvals(forKey key: String) -> ChatOpsToolApprovals {
         guard let raw = UserDefaults.standard.string(forKey: key),
               let value = ChatOpsToolApprovals(rawValue: raw) else { return .ask }
@@ -509,12 +424,8 @@ final class ChatOpsConfigManager {
         }
     }
 
+    // Why: re-checks the tier, not only the UI: the stored value survives a drop to Standard or Read Only, which must revoke it.
     /// Whether this provider actually runs tools without asking.
-    ///
-    /// ⚠️⚠️ THE TIER IS RE-CHECKED HERE, NOT ONLY IN THE UI. The picker is revealed only at `.full`,
-    /// but the stored value survives a later drop to Standard or Read Only — so a user who granted
-    /// Autonomous and then tightened the tier would still be running unattended if this read the
-    /// approvals setting alone. The UI hides it; this makes it actually stop.
     func isAutonomous(for provider: RemoteChannel.Provider) -> Bool {
         securityTier(for: provider) == .full && toolApprovals(for: provider).isAutonomous
     }
@@ -522,8 +433,7 @@ final class ChatOpsConfigManager {
     nonisolated static let discordSecurityTierKey = "chatOpsDiscordSecurityTier"
     nonisolated static let slackSecurityTierKey = "chatOpsSlackSecurityTier"
 
-    /// ⚠️ ABSENT KEY → `.readOnly`. A provider that has never had a tier chosen for it must start at
-    /// the least-privileged one, not inherit whatever another platform was granted.
+    /// An absent key defaults to `.readOnly`: a provider never given a tier starts at the least privilege.
     nonisolated private static func tier(forKey key: String) -> ChatOpsSecurityTier {
         guard let raw = UserDefaults.standard.string(forKey: key),
               let tier = ChatOpsSecurityTier(rawValue: raw) else { return .readOnly }
@@ -559,20 +469,9 @@ final class ChatOpsConfigManager {
         }
     }
 
-    /// The ONE remote account allowed to drive this Mac over Telegram.
-    ///
-    /// ⚠️⚠️ CHATOPS IS A SINGLE-USER REMOTE CONTROL, AND THIS IS WHERE THAT IS ENFORCED RATHER THAN
-    /// ASSUMED. Authorization used to compare the CHAT (or, on Discord and Slack, the CHANNEL) and
-    /// nothing else. A Telegram chat id in a DM happens to identify a person, so the assumption held
-    /// there by accident — but a Telegram group, a Discord channel and a Slack channel all identify a
-    /// ROOM, and every member of one could send commands, answer clarifications, and at `.full` tap
-    /// Approve on a mirrored tool call. The sender was on the wire the whole time and decoded; it was
-    /// simply never compared. Recorded at the moment the PIN matches, from the same `origin` value the
-    /// pairing lockout already computes.
-    ///
-    /// ⚠️ NIL IS REFUSED, NOT WAVED THROUGH. A pairing made before this existed has no recorded
-    /// sender, and treating "unknown" as "anyone" is the original hole with extra steps. The gate
-    /// fails closed and names re-pairing as the fix.
+    // Why: authorizes the sender, not the chat: a group or channel identifies a room, and every member could send commands.
+    /// The one remote account allowed to drive this Mac over Telegram, recorded when the PIN matches.
+    /// Nil is refused, not waved through: a pairing without a recorded sender fails closed and names re-pairing as the fix.
     var authorizedUserID: String? {
         get {
             access(keyPath: \.authorizedUserID)
@@ -597,11 +496,7 @@ final class ChatOpsConfigManager {
         }
     }
 
-    /// ⚠️ FORWARDS OVER `RemoteSessionStore` — see that file. This used to read and write
-    /// `UserDefaults` inline, as did its Discord and Slack twins: three copies of one concept.
-    /// The storage is unchanged (same key, no migration); only the code path is now single.
-    /// The `access`/`withMutation` wrappers are kept so `@Observable` invalidation still works —
-    /// nothing observes these three today, but a settings row showing the bound conversation would.
+    /// Forwards over `RemoteSessionStore`, keeping the `access`/`withMutation` wrappers so `@Observable` invalidation works.
     var activeConversationID: UUID? {
         get {
             access(keyPath: \.activeConversationID)
@@ -718,13 +613,11 @@ final class ChatOpsConfigManager {
         }
     }
 
-    // MARK: - Credential writes (registers KC-11 / KC-12)
+    // MARK: - Credential writes
 
-    /// The shared body behind every explicit credential write. Register KC-11: a Swift property
-    /// setter cannot return the `OSStatus`, so every failed Keychain save/delete was discarded at
-    /// these exact sites (`_ = keychain.save(…)`) and pairing kept reporting success over a
-    /// credential that was never stored. The property setters now delegate HERE; callers that act
-    /// on the result call these methods directly.
+    // Why: a property setter cannot return the `OSStatus`, so setter-only writes would report success over a failed save.
+    /// The shared body behind every explicit credential write; returns the Keychain `OSStatus`.
+    /// The property setters delegate here; callers that act on the result call these methods directly.
     @discardableResult
     private func writeCredential(
         _ value: String?,
@@ -779,7 +672,7 @@ final class ChatOpsConfigManager {
         writeCredential(nil, account: AppSettings.chatOpsBotTokenKey, label: "Telegram bot token", keyPath: \.botToken)
     }
 
-    /// Stores the Discord bot token. Register KC-11 — see `writeCredential`.
+    /// Stores the Discord bot token and returns the Keychain `OSStatus`.
     @discardableResult
     func storeDiscordBotToken(_ value: String) -> OSStatus {
         writeCredential(value, account: AppSettings.chatOpsDiscordBotTokenKey, label: "Discord bot token", keyPath: \.discordBotToken)
@@ -791,7 +684,7 @@ final class ChatOpsConfigManager {
         writeCredential(nil, account: AppSettings.chatOpsDiscordBotTokenKey, label: "Discord bot token", keyPath: \.discordBotToken)
     }
 
-    /// Stores the Slack bot token. Register KC-11 — see `writeCredential`.
+    /// Stores the Slack bot token and returns the Keychain `OSStatus`.
     @discardableResult
     func storeSlackBotToken(_ value: String) -> OSStatus {
         writeCredential(value, account: AppSettings.chatOpsSlackBotTokenKey, label: "Slack bot token", keyPath: \.slackBotToken)
@@ -803,7 +696,7 @@ final class ChatOpsConfigManager {
         writeCredential(nil, account: AppSettings.chatOpsSlackBotTokenKey, label: "Slack bot token", keyPath: \.slackBotToken)
     }
 
-    /// Stores the Slack app-level token. Register KC-11 — see `writeCredential`.
+    /// Stores the Slack app-level token and returns the Keychain `OSStatus`.
     @discardableResult
     func storeSlackAppToken(_ value: String) -> OSStatus {
         writeCredential(value, account: AppSettings.chatOpsSlackAppTokenKey, label: "Slack app token", keyPath: \.slackAppToken)
@@ -815,15 +708,13 @@ final class ChatOpsConfigManager {
         writeCredential(nil, account: AppSettings.chatOpsSlackAppTokenKey, label: "Slack app token", keyPath: \.slackAppToken)
     }
 
-    /// Shown when a pairing's token write was refused by the Keychain. A SEPARATE literal from
-    /// `unreadableMessage`, deliberately: that one says "do not re-pair" about a credential that
-    /// exists and is intact; this one is the opposite case — nothing was saved, and trying again
-    /// is exactly the right advice. A test pins that the two never collapse.
+    // Why: a separate literal from `unreadableMessage`, which says not to re-pair; the two must never collapse.
+    /// Shown when a pairing's token write was refused by the Keychain; nothing was saved, so trying again is right.
     static let credentialSaveFailedMessage =
         "The bot token could not be saved to the Keychain, so nothing was paired and nothing was "
         + "overwritten. Unlock your login keychain — or click Allow if macOS asked for access — and try again."
 
-    /// The error copy for a disconnect whose credential delete failed. Register KC-12.
+    /// The error copy for a disconnect whose credential delete failed.
     static func clearFailedMessage(labels: [String]) -> String {
         "Disconnect could not delete \(labels.joined(separator: ", ")) from the Keychain, so this "
         + "integration is NOT fully disconnected — the credential is still stored on this Mac. "
@@ -839,11 +730,9 @@ final class ChatOpsConfigManager {
 
     // MARK: - Reset
 
-    /// Resets all Telegram ChatOps state (used on disconnect). Register KC-12.
-    /// - Returns: what the credential wipe actually did — the caller must log the failures
-    ///   instead of "credentials cleared". When a delete failed, the connection is left in
-    ///   `.error`, never `.disconnected` — reporting a clean disconnect over a stored token is
-    ///   the same lie `unreadableMessage` exists to prevent, one direction over.
+    /// Resets all Telegram ChatOps state (used on disconnect).
+    /// - Returns: what the credential wipe did; callers log the failures. When a delete failed the connection is left in
+    ///   `.error`, never `.disconnected`, so a clean disconnect is not reported over a stored token.
     @discardableResult
     func reset() -> ChatOpsCredentialClearSummary {
         var summary = ChatOpsCredentialClearSummary()
@@ -861,13 +750,13 @@ final class ChatOpsConfigManager {
         return summary
     }
 
-    /// Resets all Discord ChatOps state (used on disconnect). Register KC-12 — see `reset()`.
+    /// Resets all Discord ChatOps state (used on disconnect); returns the credential-wipe summary like `reset()`.
     @discardableResult
     func resetDiscord() -> ChatOpsCredentialClearSummary {
         var summary = ChatOpsCredentialClearSummary()
         recordClear(clearDiscordBotToken(), label: "the Discord bot token", into: &summary)
         discordAuthorizedUserID = nil
-        // ⚠️ The tier goes with the pairing — a new one must start at Read Only, not inherit Full Access.
+        // The tier goes with the pairing: a new pairing starts at Read Only, not at the previous Full Access.
         discordSecurityTier = .readOnly
         discordToolApprovals = .ask
         discordBotUsername = nil
@@ -989,8 +878,7 @@ final class ChatOpsConfigManager {
     }
 
     /// Resets all Slack ChatOps state (used on disconnect).
-    /// Resets all Slack ChatOps state (used on disconnect). Register KC-12 — see `reset()`.
-    /// Slack folds TWO credentials; a failure on either one keeps the bridge in `.error`.
+    /// Slack folds two credentials; a failure on either one keeps the bridge in `.error`.
     @discardableResult
     func resetSlack() -> ChatOpsCredentialClearSummary {
         var summary = ChatOpsCredentialClearSummary()
@@ -1011,29 +899,8 @@ final class ChatOpsConfigManager {
     }
 
     private init() {
-        // ⚠️⚠️ "IS PAIRED" AND "IS SWITCHED ON" ARE DIFFERENT QUESTIONS, AND CONFLATING THEM MADE THE
-        // OFF SWITCH A ONE-WAY DOOR. These three conditions used to include `isEnabled`, so a user
-        // who turned ChatOps off — which the toggle's own description invites, "Start the Telegram
-        // long-polling listener… while this is on" — and then quit, came back to a
-        // `.disconnected` state, a Pairing card offering "Start Pairing", and an Enable toggle
-        // greyed out by `.disabled(!config.connectionState.isConnected)`. Nothing in the app could
-        // turn it back on: the only other writer of `isEnabled = true` is a pairing service. Their
-        // credentials and chat id were intact the whole time; the only way back was to re-do the
-        // pairing they never undid, on all three platforms identically.
-        //
-        // ⚠️ `connectionState` describes whether a PAIRING EXISTS — credentials plus a chat or
-        // channel id. Whether the listener is currently running is `isEnabled`, which
-        // `ChatOpsCoordinator.bootstrap()` already consults separately; the two concerns are
-        // correctly separated everywhere except here.
-        //
-        // ⚠️⚠️ AND "A PAIRING EXISTS" IS STILL NOT "SOMEONE IS AUTHORIZED TO USE IT" — the third
-        // question, added with per-sender authorization (invariant 38). `authorizedUserID` is written
-        // ONLY by a pairing service and nothing backfills it, so every pairing made before that build
-        // restores with it nil and `senderIsAuthorized` refuses every inbound message. Reading only
-        // the address here painted `.connected` — a green dot — over a bridge that could not answer
-        // anything. `ChatOpsPairingRestore.state` asks all three questions; see it for why a log line
-        // was not an adequate substitute for saying so in the UI.
-        // ⚠️ The derivation lives in `restoreStates` so it can be tested; this only stores it.
+        // `connectionState` says whether a usable pairing exists (credentials, address, authorized sender), not whether the
+        // listener runs; that is `isEnabled`. The derivation lives in `restoreStates`; this only stores it.
         let restored = Self.restoreStates(
             keychain: keychain,
             logger: logger,

@@ -4,28 +4,7 @@
 //  MistralV3Parser.swift
 //  Devgentic
 //
-//  Phase 3 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.mistralV3Array` dialect — older Mistral Tekken tokenizer family.
-//
-//  Covers:
-//    - mistralai/Mistral-7B-Instruct-v0.3
-//    - mistralai/Mistral-Nemo-Instruct-2407
-//    - mistralai/Mixtral-8x22B-Instruct
-//    - mistralai/Mistral-Small-Instruct-2409 (pre-3.1)
-//    - mistralai/Ministral-8B-Instruct-2410
-//    - mistralai/Pixtral-Large-Instruct-2411
-//    - Older Devstral variants
-//
-//  Canonical output (parallel calls = all objects in one array):
-//
-//    [TOOL_CALLS] [{"name": "list_directory", "arguments": {"path": "/"}, "id": "abc123xyz"}]</s>
-//
-//  Drift tolerated:
-//   - Missing `</s>` suffix
-//   - Multiple `[TOOL_CALLS]` markers on separate lines (segment and parse each array)
-//   - Missing `id` field (optional; ignored when present)
-//   - Whitespace between `[TOOL_CALLS]` and `[`
-//   - `parameters` as alias for `arguments` (cross-family key leakage)
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -33,6 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "MistralV3Parser")
 
+/// Primary parser for the `.mistralV3Array` dialect (older Mistral Tekken tokenizers): `[TOOL_CALLS] [{...}]`.
+/// Tolerates a missing `</s>`, repeated markers, a missing `id`, and `parameters` as an alias for `arguments`.
 struct MistralV3Parser: CognitiveParserProtocol {
 
     /// Mistral v3 tool call object. `id` is template-enforced but we ignore it.
@@ -128,13 +109,8 @@ struct MistralV3Parser: CognitiveParserProtocol {
         BalancedJSONScanner.balancedRange(in: text, from: startingAt, opener: "[")
     }
 
-    /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    /// Repairs trailing commas and Python literals in the model's JSON via the shared sanitizer, which repairs only outside
+    /// string values so file content in a `write_file` call is untouched; see `JSONStructuralSanitizer`.
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }

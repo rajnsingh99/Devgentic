@@ -4,6 +4,8 @@
 //  AgentTimelineView.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import SwiftUI
 import os
@@ -31,10 +33,8 @@ struct AgentTimelineView: View {
     /// workflow per-node timelines have their own indicators and leave this nil.
     private let streamingContext: StreamingContext?
 
-    /// When true, `.thought`/`.reasoning` nodes render as a muted compact row —
-    /// appropriate when the bubble shows its final answer separately. Workflow
-    /// per-node views keep this false because their "thought" often *is* the
-    /// node's final output and should stay full scale.
+    /// When true, `.thought`/`.reasoning` nodes render as a muted compact row.
+    /// Workflow per-node views keep this false because their thought is often the node's final output.
     private let compactReasoning: Bool
 
     /// [TL-4] Change marker for `events` — proxies the whole array in `Equatable` so
@@ -42,42 +42,25 @@ struct AgentTimelineView: View {
     /// Bumped by `ChatMessage.timelineEvents.didSet` on EVERY mutation path.
     private let revision: UInt64
 
-    /// How the run ACTUALLY ended, when the caller knows it (`ChatMessage.terminalOutcome`,
-    /// stamped at finalize). The header must never claim a run was stopped without this:
-    /// the previous heuristic inferred cancellation from a per-tool `failureCategory`, which
-    /// `ToolExecutionLoop` also stamps when the user merely SKIPS an `ask_user` prompt on a run
-    /// that then completes normally. nil = not known (the workflow per-node init), and the
-    /// header then reports success/degraded but never "Stopped".
+    /// How the run actually ended, when the caller knows it (`ChatMessage.terminalOutcome`).
+    /// nil means unknown; the header then reports success or degraded but never "Stopped".
     private let terminalOutcome: ExecutionOutcome?
 
     /// `message.lifecycleState.isInterrupted`, or false for the workflow per-node inits, which
     /// render a node's events and have no message lifecycle of their own.
     private let isInterrupted: Bool
 
-    /// The conversation this timeline BELONGS to, when the caller knows it. Threaded down to
-    /// `ActionDetailView` so an "Open in viewer" whose disk read outlives a conversation switch
-    /// can be dropped instead of landing a tab in whatever conversation is open when it returns
-    /// (CF-53).
-    ///
-    /// nil = the caller supplied none. That is NOT "this surface opens no tabs" — any caller
-    /// that leaves it nil still opens into the SAME shared Code Viewer, because
-    /// `ChatHistoryViewModel` is injected at the app root. A nil here only means the
-    /// per-conversation half of the check cannot run; the switch-in-flight half in
-    /// `ActionDetailView.shouldDeliverOpen` still covers it. The workflow per-node timeline
-    /// DOES supply one (`WorkflowExecutionTimelineView` passes its `conversationID` to all four
-    /// `AgentTimelineView` inits) — note that value is the SIDEBAR selection, which leads the
-    /// chat view model by the switch debounce; see the property's doc there.
+    /// The conversation this timeline belongs to, when the caller knows it.
+    /// Forwarded to `ActionDetailView` so an "Open in viewer" whose disk read outlives a conversation switch is dropped.
+    /// nil means the per-conversation check cannot run; the switch-in-flight check in `shouldDeliverOpen` still applies.
     private let conversationID: UUID?
 
-    /// When true, the expanded nodes container is constrained to a fixed/proportional
-    /// maximum height with vertical scrolling, preventing long tool sequences from pushing
-    /// the final answer off-screen. Set to false by callers that already own the vertical
-    /// scroll container (e.g. `WorkflowExecutionTimelineView`).
+    /// When true, the expanded nodes container has a bounded height and scrolls vertically.
+    /// Callers that already own the vertical scroll container (e.g. `WorkflowExecutionTimelineView`) set it to false.
     private let scrollable: Bool
 
-    /// Set for a CONTINUATION (a report drawn inside the turn above it — `TranscriptGrouping`):
-    /// the header then reads "↳ <lead> · N steps", standing in for the divider the stub used to
-    /// draw, and the Thoughts toggle is left to the turn's own header.
+    /// Set for a continuation (a report drawn inside the turn above it, see `TranscriptGrouping`).
+    /// The header then reads "↳ <lead> · N steps" and the Thoughts toggle is left to the turn's own header.
     private let continuationLead: String?
 
     /// Initialize from a ChatMessage (existing usage in chat bubbles).
@@ -98,28 +81,9 @@ struct AgentTimelineView: View {
         self.scrollable = scrollable
     }
 
-    /// Initialize from raw timeline events (used by workflow per-node detail views).
-    /// - Parameter chatFidelity: When `true`, render with the same compact
-    ///   reasoning treatment used in chat bubbles (`InterimReasoningRow` for
-    ///   thoughts) and surface the streaming footer when `isStreaming` is true.
-    ///   The workflow execution UI passes `true` for the live "currently running"
-    ///   node so its in-flight timeline matches what the user sees in chat.
-    /// - Parameter streamingStartedAt: Wall-clock start time for the streaming
-    ///   footer's elapsed counter. Required when `chatFidelity && isStreaming`;
-    ///   ignored otherwise.
-    /// - Parameter finalContentText: When the caller renders the final answer
-    ///   separately below this timeline (e.g. the workflow node detail view),
-    ///   pass it here so a trailing reasoning event that merely repeats the
-    ///   answer is deduplicated — same behaviour as the chat-bubble init.
-    /// - Parameter conversationID: The chat conversation these events belong to, when there is
-    ///   one. Only the capability cards pass it — a plan step's / attempt's nested timeline is
-    ///   still IN a chat message, so its file rows need CF-53's destination check exactly as
-    ///   much as a top-level row does, and `CapabilityCardRouter` puts most agent runs' tool
-    ///   rows there. The workflow per-node callers leave it nil — see the `conversationID`
-    ///   property for what nil does and does not mean there.
-    /// - Parameter scrollable: When `true`, wraps expanded nodes in an internal scroll container
-    ///   capped at `ChatUIConstants.agentTimelineMaxHeight`. Defaults to `false` for raw event
-    ///   views since parent containers typically manage their own scrolling.
+    /// Creates a timeline from raw events (used by workflow per-node detail views). `chatFidelity` renders thoughts
+    /// compactly and shows the streaming footer; `streamingStartedAt` drives its elapsed counter. `finalContentText`
+    /// dedups a trailing reasoning event that repeats the answer.
     init(
         events: [TimelineEvent],
         revision: UInt64 = 0,
@@ -172,23 +136,14 @@ struct AgentTimelineView: View {
         return min(estimated, timelineMaxHeight)
     }
 
+    // Why: row view identity is not stable (grouping and run end rebuild the subtree), so per-row @State would reset; keep
+    // expansion state here.
     /// Which tool rows the user has expanded, keyed by the tool event's stable id.
-    ///
-    /// Deliberately held HERE rather than as `@State` on each row. A row's view identity is
-    /// not stable: when a second tool arrives, `buildGroupedNodes` promotes `.action(A)` into
-    /// `.actionGroup([A, B])`, which moves `ActionDetailView` to the other branch of the body
-    /// switch and hands it fresh structural identity — silently resetting per-row `@State`.
-    /// The whole subtree is also torn down when the run ends and `isStreaming` flips. Either
-    /// one collapsed a row the user had just opened, which reads as "expanding does nothing".
-    /// `data.id` survives both (`ActiveStreamManager` mutates the row in place on completion).
     @State private var expandedRowIDs: Set<UUID> = []
 
     var body: some View {
-        // Grouping is O(n) over up to `ChatMessage.maxTimelineEvents` (500) events —
-        // NOT the "< 30" this comment used to assume — and body re-ran on every parent
-        // pass, i.e. every streamed token. [TL-4] The chat bubble call site wraps this
-        // view in `.equatable()` so body (and this rebuild) is skipped unless the
-        // timeline `revision`, streaming flag, or (post-stream) final text changed.
+        // Grouping is O(n) over up to `ChatMessage.maxTimelineEvents` events. The chat bubble wraps this view in
+        // `.equatable()` so the rebuild is skipped unless revision, streaming flag or final text changed.
         let nodes = Self.buildGroupedNodes(
             from: events,
             isStreaming: isStreaming,
@@ -200,9 +155,7 @@ struct AgentTimelineView: View {
         }
         let visibleNodes = Self.filterVisibleNodes(nodes, showThoughts: showThoughts)
         let showFooter = streamingContext?.shouldDisplay ?? false
-        // [tc-7] Read ONCE — see the `summary` property. Both the glyph, the tint and the title
-        // (which `body` needs twice: the visible `Text` and the `.accessibilityLabel`) come from
-        // these two locals.
+        // Read once; the glyph, tint and title (used twice by `body`) all derive from these locals.
         let summaryValue = summary
         let titleText = continuationLead.map { Self.continuationTitle(lead: $0, stepsCount: nodes.count) }
             ?? summaryTitle(nodesCount: nodes.count, summary: summaryValue, showThoughts: showThoughts)
@@ -370,39 +323,18 @@ struct AgentTimelineView: View {
     }
 
     /// Whether the execution log's body renders.
-    ///
-    /// [CF-47] The body used to be gated on `isTimelineExpanded || isStreaming`, so collapsing
-    /// DURING a run did nothing at all while the chevron rotated shut and the `.help` and
-    /// VoiceOver label both announced it as collapsed — the one control on a live run advertised
-    /// an action it would not perform until the run ended. The streaming auto-expand is a
-    /// DEFAULT, so it stops applying the moment the user takes the decision themselves. The
-    /// alternative (suppress the chevron, help and label while streaming) was rejected: it makes
-    /// the control inert instead of making it work.
-    ///
-    /// `nonisolated static` and pure so the rule is unit-testable; the `@State` plumbing that
-    /// sets these three is not.
+    /// The streaming auto-expand is only a default: once the user toggles, their choice applies even during a run.
+    /// `nonisolated static` and pure so the rule is unit-testable.
     nonisolated static func showsTimelineBody(isTimelineExpanded: Bool,
                                               isStreaming: Bool,
                                               userToggled: Bool) -> Bool {
         if userToggled { return isTimelineExpanded }
-        // `.onAppear` only runs AFTER the first render, so on that first pass a streaming
-        // timeline still has `isTimelineExpanded == false`. `|| isStreaming` is the auto-expand
-        // default covering that window; once the user has toggled, it is theirs to decide.
+        // `.onAppear` runs after the first render, so `|| isStreaming` supplies the auto-expand default for that first pass.
         return isTimelineExpanded || isStreaming
     }
 
     /// What the collapsed header may claim about a finished run.
-    ///
-    /// The header is the ONLY thing visible once a run ends — `.onChange(of: isStreaming)`
-    /// collapses the body — and it used to hardcode a green `checkmark.circle.fill` plus
-    /// "Executed N steps", asserting success for runs where half the tools failed or which
-    /// were cancelled outright. The failed rows are red once expanded and `TerminalOutcomeChip`
-    /// renders below the content, but neither is inside the collapsed log, so the log itself
-    /// was the thing lying.
-    ///
-    /// `message.terminalOutcome` decides it when the caller has one, and the events decide it
-    /// otherwise — the workflow per-node init has no message, and a run with failed tool rows
-    /// must still read degraded there.
+    /// `message.terminalOutcome` decides when the caller has one; otherwise the events decide.
     enum TimelineSummaryStatus {
         case succeeded, degraded, cancelled
         /// The run never reached a clean finish and never stamped an outcome — a force-quit
@@ -415,76 +347,29 @@ struct AgentTimelineView: View {
             case .succeeded:   return "checkmark.circle.fill"
             case .degraded:    return "exclamationmark.triangle.fill"
             case .cancelled:   return "slash.circle"
-            // Deliberately a CIRCLE, not the triangle `.degraded` uses: the two states sit in
-            // the same slot and must stay tellable apart at a glance.
+            // A circle rather than `.degraded`'s triangle so the two states stay distinguishable in the same slot.
             case .interrupted: return "exclamationmark.circle"
             }
         }
     }
 
-    /// Failed-tool count alongside the status, so the title can say how much went wrong.
-    /// `static` + internal for the same reason as `buildGroupedNodes`: it is the part with
-    /// logic worth testing directly.
-    /// - Parameter isInterrupted: `message.lifecycleState.isInterrupted`. Only consulted when
-    ///   `outcome` is nil, because an outcome means the run reached an end and reported it.
-    ///   A force-quit reaches neither `finalizeMessage` nor `.executionFinished`, so nothing
-    ///   stamps `terminalOutcome` and it restores nil — while `markInterruptedByProcessDeath`
-    ///   deliberately writes NOTHING to the abandoned row (resume finds it by `output == nil`),
-    ///   so `failed` stays 0 too. Both of those are correct in themselves, and together they
-    ///   made `case .completed, nil:` return `.succeeded`: a green checkmark and "Executed 3
-    ///   steps" directly above the `InterruptedRunChip` saying the run was cut off. The header
-    ///   had no way to know — the view was never handed `lifecycleState`.
-    /// ⚠️ [tc-7] Returns `toolCount` as well, so ONE flatten answers every question the header
-    /// asks. `summaryTitle` used to run its own second `events.flatMap(\.flattenedIncludingNested)`
-    /// for exactly the same count.
+    /// Returns the status, failed-tool count and total tool count from a single flatten of the events. `isInterrupted` is
+    /// only consulted when `outcome` is nil, because an outcome means the run reached an end and reported it.
     static func summarize(events: [TimelineEvent],
                           outcome: ExecutionOutcome? = nil,
                           isInterrupted: Bool = false) -> (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int) {
-        // FLATTENED, not top-level. With Plan & Execute or Reflexion on — most agent runs —
-        // `CapabilityCardRouter` routes every tool event into the active step's/attempt's nested
-        // array, so the top-level array holds only the card itself and ZERO tool rows. Reading it
-        // flat made the header report "Thought for N steps" with a green checkmark for a run in
-        // which every tool failed: exactly the blindness CH25 was filed for, in the fix meant to
-        // stop the header lying.
+        // Counts flattened events, not top-level ones: capability cards nest tool rows inside step/attempt arrays.
         var failed = 0
         var toolCount = 0
         for event in events.flatMap(\.flattenedIncludingNested) {
             guard case .toolExecution(let data) = event else { continue }
             toolCount += 1
-            // ⚠️ [tc-4] A SKIPPED `ask_user` is not a failure. `ToolExecutionLoop` yields
-            // `.toolFailed(category: .cancelled)` with `isSuccess: didAnswer` == false when the
-            // user declines or ignores the prompt, and the run then continues and completes
-            // normally. Counting it made the header read "Executed 4 steps (4 tools · 1 failed)"
-            // in amber about an event the USER declined — while `ActionDetailView.statusIcon`
-            // painted that same row a muted grey `arrow.uturn.left` with no failure capsule.
-            // The row and the header disagreed about one event.
-            //
-            // Narrow on PURPOSE: only `ask_user` AND only the `.cancelled` category. An
-            // `ask_user` that failed for any other reason is a real failure, and a cancelled
-            // WRITE still counts — the write did not happen. That last point is what keeps
-            // CF-46's `testSkippedAskUserDoesNotMakeACompletedRunLookCancelled` green: its
-            // `row()` helper builds a `write_file`, so it pins the cancelled-write rule, not
-            // this one. CF-46 itself is untouched — it is about never inferring a STOPPED RUN
-            // from a per-tool category, which this does not do.
+            // A skipped `ask_user` (`.cancelled`) is not a failure; other `ask_user` failures and cancelled writes still count.
             let isDeclinedPrompt = data.name == "ask_user" && data.failureCategory == .cancelled
             if data.isSuccess == false, !isDeclinedPrompt { failed += 1 }
         }
-        // The RUN's own outcome LEADS; the tool-failure count can only escalate from there.
-        //
-        // [CF-46] It used to be consulted for `.cancelled` alone, so `.failed` and
-        // `.completedWithWarnings` fell through to the failure count — and neither produces a
-        // failed tool ROW (iteration exhaustion and the circuit breaker end the LOOP, not a
-        // tool), so `failed == 0` and the header rendered a green checkmark plus "Executed N
-        // steps" directly above the amber TerminalOutcomeChip saying the run didn't finish
-        // cleanly. Both map to `.degraded` because that is exactly how the chip treats them —
-        // one amber vocabulary for "the answer shipped but the run stopped early".
-        //
-        // Cancellation likewise comes from the outcome and is never inferred from a tool row:
-        // `failureCategory == .cancelled` is also written by `ToolExecutionLoop` when the user
-        // skips an `ask_user` prompt ("skip/timeout = cancelled (soft failure, no constraint)"),
-        // after which the run continues and finishes — so the old heuristic asserted "Stopped"
-        // for a run that completed. Flattening makes those rows MORE visible, not less, so the
-        // two changes have to land together.
+        // The run's own outcome leads; the tool-failure count can only escalate from there. `.failed` and
+        // `.completedWithWarnings` map to `.degraded`; cancellation comes only from the outcome, never from a tool row.
         switch outcome {
         case .cancelled:
             return (.cancelled, failed, toolCount)
@@ -499,17 +384,9 @@ struct AgentTimelineView: View {
         }
     }
 
-    /// ⚠️ [tc-7] COMPUTED, and therefore deliberately read EXACTLY ONCE per body pass, into a
-    /// local. It was read six times — `summaryStatus`, `summaryTint` (which read
-    /// `summaryStatus`), `summaryTitle` twice (the `Text` and the `.accessibilityLabel`), and
-    /// `summaryTitle`'s own separate tool-count flatten — each one a fresh recursive flatten of
-    /// up to `ChatMessage.maxTimelineEvents` (500) events PLUS every nested capability-card
-    /// sub-event. Cheap while streaming (the `isStreaming` ternaries short-circuit and
-    /// `summaryTitle` returns early), so the cost landed on conversation load, where every
-    /// finalized agent message renders once.
-    ///
-    /// Do not read this property more than once in `body`, and do not reintroduce a second
-    /// flatten anywhere downstream — pass the value.
+    // Why: each read re-flattens up to `maxTimelineEvents` events plus nested capability-card events; pass the value instead
+    // of re-reading.
+    /// Computed summary of the timeline; read it once per body pass into a local.
     private var summary: (status: TimelineSummaryStatus, failedTools: Int, toolCount: Int) {
         Self.summarize(events: events, outcome: terminalOutcome, isInterrupted: isInterrupted)
     }
@@ -519,9 +396,7 @@ struct AgentTimelineView: View {
         case .succeeded: return theme.successColor
         case .degraded:  return theme.warningColor
         case .cancelled: return theme.tertiaryText
-        // ⚠️ `warningColor`, matching `InterruptedRunChip` (AgentBubbleContentView), which renders
-        // on the NEXT LINE for exactly this state. The register suggested `tertiaryText`; a muted
-        // grey beside the chip's amber would have read as two different claims about one run.
+        // `warningColor` matches `InterruptedRunChip`, rendered on the next line for this state.
         case .interrupted: return theme.warningColor
         }
     }
@@ -573,9 +448,7 @@ struct AgentTimelineView: View {
         let toolCount = summary.toolCount
         let steps = "\(nodesCount) step\(nodesCount == 1 ? "" : "s")"
 
-        // ⚠️ BEFORE the zero-tool early return below. An interrupted run that died before its
-        // first tool would otherwise read "Thought for 2 steps" — the same clean-run claim this
-        // status exists to stop, just via the other branch.
+        // Runs before the zero-tool early return so an interrupted run that died before its first tool is not reported as clean.
         if status == .interrupted {
             guard toolCount > 0 else {
                 return String(localized: "Interrupted after \(steps)")
@@ -621,26 +494,13 @@ struct AgentTimelineView: View {
         }
     }
 
-    /// Tool calls that only OBSERVE a background task. Deliberately NOT including
-    /// `stop_background_task`: that one CHANGES state, and an action the user took (or the agent took on
-    /// their behalf) should stay visible even when its outcome is also on the card. Hide
-    /// observations, keep actions.
+    /// Tool calls that only observe a background task.
+    /// `stop_background_task` is excluded because it changes state and stays visible.
     private static let backgroundPollTools: Set<String> = ["get_task_output"]
 
     /// Drops poll rows for tasks that already have a `.backgroundTask` card.
-    ///
-    /// ⚠️ Device test 2026-09-21: asked to "check on it periodically", the model produced NINE
-    /// `command_status` calls in ~40 seconds — one every few seconds, because nothing lets it
-    /// wait. (2026-09-23: it did it TWENTY times and hit the iteration cap; `command_status` has
-    /// since been withdrawn and the polls now arrive as `get_task_output`, which this folds.) Each was an ordinary tool execution, so the timeline showed nine identical
-    /// "Command bg_1" rows above a card that was already displaying the same status live.
-    ///
-    /// Folded in the VIEW, not at the source: the events stay in `timelineEvents`, so episodic
-    /// history, resume reconstruction and export are unaffected. This is presentation — the polls
-    /// really happened and the record should still say so.
-    ///
-    /// ⚠️ Only when a card EXISTS for that task. A task adopted with no live stream has no card,
-    /// and hiding its polls too would leave the user with nothing at all.
+    /// Presentation only: the events stay in `timelineEvents`, so history, resume and export are unaffected.
+    /// Polls are kept when no card exists for the task.
     static func foldBackgroundTaskPolls(_ events: [TimelineEvent]) -> [TimelineEvent] {
         let carded: Set<String> = Set(events.compactMap {
             if case .backgroundTask(let data) = $0 { return data.taskID }
@@ -658,10 +518,8 @@ struct AgentTimelineView: View {
         }
     }
 
-    /// ⚠️ PARSED, not substring-matched. `params.contains("bg_1")` would also fire on a
-    /// `batch_command` whose COMMAND text happened to mention a task id, folding a row that is
-    /// not a poll at all — the shape-matching class of defect this codebase has already paid for
-    /// four times.
+    // Why: parse the JSON; a substring match would also fire on a command whose text mentions a task id.
+    /// Returns the task id from tool params, or nil.
     private static func taskID(inParams params: String) -> String? {
         guard let data = params.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -670,9 +528,7 @@ struct AgentTimelineView: View {
     }
 
     /// Builds grouped timeline nodes from raw events.
-    /// Homogeneous / heterogeneous tool runs of size 2+ collapse into `.actionGroup`.
-    /// Single tools render as `.action` (no collapsible header).
-    /// `ask_user` always renders as `.action` (interactive moments shouldn't hide in a group).
+    /// Runs of 2+ tools collapse into `.actionGroup`; single tools and `ask_user` always render as `.action`.
     static func buildGroupedNodes(
         from events: [TimelineEvent],
         isStreaming: Bool,
@@ -691,24 +547,8 @@ struct AgentTimelineView: View {
             }
         }
 
-        // Deduplication pass 1: if not streaming and last event is narrative
-        // (thought/reasoning), hide it — it usually duplicates the final outcome
-        // shown immediately below.
-        //
-        // ⚠️ [tc-11] Gated on there BEING a final outcome below. This pass used to run
-        // unconditionally, so when the bubble had no answer to duplicate it deleted the only
-        // record of what the agent had been doing. Reachable three ways, and the workflow one is
-        // the strongest: a `.skipped` or cancelled node renders its timeline with no final text
-        // at all, so the user's last "why" vanished with it. A `.stoppedRunPlaceholder` is not an
-        // answer either — it is the synthetic marker for a run that produced nothing, which is
-        // exactly when the narrative is all there is.
-        //
-        // Deliberately NOT a containment test ("is the thought a prefix of the answer?"): that
-        // would also stop dropping the trailing system-status thought ("Composing final
-        // response…") this pass exists to hide, which pass 2's equality test cannot catch.
-        // `isSyntheticPlaceholder` rather than two inline comparisons — it already owns both
-        // placeholder spellings (and its own exact-match-after-trim rule), so a third can never
-        // be added without this gate learning about it.
+        // Dedup pass 1: when not streaming, hides a trailing thought/reasoning event that duplicates the final outcome below.
+        // Applies only when a real final outcome exists below, so a run with no answer keeps its narrative.
         let hasFinalAnswerBelow: Bool = {
             guard let final = finalContentText?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !final.isEmpty else { return false }
@@ -723,13 +563,8 @@ struct AgentTimelineView: View {
             }
         }
 
-        // Deduplication pass 2: strip any narrative event whose text exactly
-        // matches the final content. Catches the single-iter genuine-completion
-        // case where the model's reasoning IS the final answer — without this,
-        // the same 60-character response appears twice (once in the timeline,
-        // once as the bubble's main content). Pass 1's "last event" rule doesn't
-        // catch it because a trailing `.thought("Composing final response…")`
-        // gets emitted after the reasoning.
+        // Dedup pass 2: strips narrative events whose text exactly matches the final content.
+        // Pass 1 misses this when a trailing "Composing final response…" thought follows the reasoning.
         if !isStreaming,
            let finalText = finalContentText?.trimmingCharacters(in: .whitespacesAndNewlines),
            !finalText.isEmpty {
@@ -743,13 +578,7 @@ struct AgentTimelineView: View {
             }
         }
 
-        // Pass 3: Merge consecutive short-status thoughts into one row. System-level
-        // infrastructure progress ("Connecting to Ollama…", "Model loaded…",
-        // "Preparing agent tools…") is emitted as individual `.thought` events,
-        // each short (< 100 chars, no newlines). Left alone, these stack as 3+
-        // separate rows dominating the top of every bubble. Merged, they become
-        // one compact progress line joined with " · ". Real model narratives are
-        // long / multiline and fall outside this rule.
+        // Pass 3: merges consecutive short status thoughts (< 100 chars, single line) into one " · "-joined row.
         events = collapseShortStatusRuns(events)
 
         // Pass 4: fold away the polls on a background task that already has a card.
@@ -782,9 +611,7 @@ struct AgentTimelineView: View {
                 }
 
             case .reasoning(let id, let text):
-                // Reasoning reuses the `.thought` timeline node for identical visual
-                // treatment. The semantic split lives at the TimelineEvent layer so
-                // analytics / scratchpad paths can distinguish model vs. system prose.
+                // Reasoning reuses the `.thought` node for identical visuals; the model/system split lives at the TimelineEvent layer.
                 flushActions()
                 if isRedundantSystemText(text) {
                     break
@@ -808,9 +635,7 @@ struct AgentTimelineView: View {
                 pendingActions.append(event)
 
             case .backgroundTask(let data):
-                // Never grouped. A grouped row collapses to a one-line summary, and this is the
-                // only place a running task is visible at all — the tool call that started it
-                // returned long ago.
+                // Never grouped: a grouped row collapses to a one-line summary, and this is the only place a running task is visible.
                 flushActions()
                 nodes.append(.backgroundCard(data))
 
@@ -930,12 +755,9 @@ enum TimelineNode: Identifiable {
     case planCard(PlanRunData)
     /// Structured Reflexion card (attempt rows with nested sub-timelines).
     case reflectionCard(ReflectionRunData)
-    /// An event a NEWER build wrote that this build has no renderer for.
-    ///
-    /// ⚠️ Rendered, not hidden. Silently dropping it makes the timeline under-report what the run
-    /// actually did — and if the unrecognised event is a capability card, its whole nested
-    /// sub-timeline vanishes with no indication anything is missing. A visible row is the only
-    /// honest option: the data IS preserved on disk, this build just cannot draw it.
+    // Why: render it instead of dropping it, otherwise the timeline under-reports the run and a card's nested sub-timeline
+    // vanishes.
+    /// An event written by a newer build that this build has no renderer for.
     case unrecognized(id: UUID, caseName: String)
 
     var id: UUID {
@@ -964,8 +786,7 @@ struct TimelineNodeGroupView: View {
     /// Threaded to capability cards so their live indicators (ticking elapsed,
     /// auto-expanded running step) only run while the message is streaming.
     var isStreaming: Bool = false
-    /// The owning conversation, forwarded to `ActionDetailView` for CF-53's destination check.
-    /// nil when the caller supplied none — see `AgentTimelineView.conversationID`.
+    /// The owning conversation, forwarded to `ActionDetailView` for the destination check; nil when the caller supplied none.
     var conversationID: UUID? = nil
     /// Owned by `AgentTimelineView` — see the declaration there for why a row's
     /// disclosure cannot live in the row.
@@ -980,19 +801,10 @@ struct TimelineNodeGroupView: View {
     var body: some View {
         switch node {
         case .thought(_, let text):
-            // Chat/code bubbles render the final answer as separate main content
-            // below the timeline, so any thought that survives dedup is *interim*
-            // reasoning between tool calls. Models like qwen-coder emit full-response-
-            // sized narratives before each tool call ("Project Analysis Summary…"
-            // with h1s and bullet lists), which visually competes with the real
-            // final answer. InterimReasoningRow de-emphasises these so the final
-            // answer stays the clear focus.
-            //
-            // Workflow per-node views (compactReasoning == false) keep the full
-            // markdown — their "thought" often IS the node's output.
+            // Chat/code bubbles show the final answer separately, so surviving thoughts are interim reasoning and render
+            // de-emphasised. Workflow per-node views (`compactReasoning == false`) keep the full markdown.
             if compactReasoning {
-                // [CF-49] `isLive` gates the sparkle's repeating pulse. Without it a reasoning
-                // row in a run that finished last week held a Core Animation loop forever.
+                // `isLive` gates the sparkle's repeating animation so finished runs do not hold an animation loop.
                 InterimReasoningRow(text: text, isLive: isStreaming)
             } else {
                 WorkflowMarkdownView(text: text)
@@ -1159,14 +971,8 @@ struct TimelineFileViewerAction: Equatable {
     /// Absolute path of the file this row touched. Identity for tab reuse (a bare basename
     /// collides across directories) and the read source for `.fromDisk` rows.
     let filePath: String
-    /// Where the viewer gets the content.
-    ///
-    /// `.inline` — the params already carry the exact bytes (the write tools). Params are
-    /// not size-capped, so this is faithful.
-    /// `.fromDisk` — read the file at click time. Required for `read_file`, whose content
-    /// would otherwise come from `ToolExecutionData.output`, which IS capped
-    /// (`maxPersistedOutputLength`) and additionally carries a decorative header — so a
-    /// large file would open truncated, with the marker embedded in the code.
+    /// Where the viewer gets its content. `.inline`: the params carry the exact bytes (write tools). `.fromDisk`: read at
+    /// click time, because `ToolExecutionData.output` is capped and header-decorated.
     enum ContentSource: Equatable {
         case inline(String)
         case fromDisk
@@ -1181,26 +987,8 @@ struct TimelineFileViewerAction: Equatable {
         return nil
     }
 
-    /// Successful `write_file` / `overwrite_file` / `create_new_file` rows open the
-    /// POST-WRITE file (with a pre-write diff when the snapshot was captured); successful
-    /// `read_file` rows open what the agent read.
-    ///
-    /// APPEND MODE is the trap this exists to handle: `write_file` with the append flag
-    /// carries only the appended FRAGMENT in `content` — treating it as the file produced
-    /// a diff claiming the entire file was deleted and one line added. The post-write file
-    /// is snapshot + fragment; without the snapshot it can't be represented faithfully,
-    /// so the row gets NO affordance rather than a lying one.
-    /// Tools that SHOULD produce a chip. Anything else legitimately has none, so its nil
-    /// return stays silent — logging every `execute_shell` row would drown the signal.
-    /// ⚠️ `create_file` and `edit_code` belong here alongside `write_file`, and their absence was
-    /// an oversight rather than a policy. All three are `.libraryExceptCode` in
-    /// `NativeToolCatalog` — the file-editing tools a CHAT or WORKFLOW profile gets, superseded
-    /// only when the Library is opened for a Code profile — and `write_file` was already listed.
-    /// Without them, `TimelineFileViewerAction.resolve` returned nil, so `ActionEffect.from`
-    /// produced nil too: a chat-profile file write got no `+N −M`, no "Previous version", and no
-    /// PERSISTED `ActionEffect` — the record that exists precisely because the model cannot
-    /// reconstruct a file it has already overwritten.
-    /// Exposed for the drift test that ties this to `SnapshotToolContract` — see its doc.
+    /// Tools whose successful rows get a file-viewer chip: write tools open the post-write file, `read_file` opens what
+    /// was read. Exposed for the drift test that ties this set to `SnapshotToolContract`.
     static var chipEligibleToolsForTesting: Set<String> { chipEligibleTools }
 
     private static let chipEligibleTools: Set<String> = [
@@ -1226,12 +1014,8 @@ struct TimelineFileViewerAction: Equatable {
         resolve(data: data, params: parsedParams(data.params), missingBaseline: missingBaseline)
     }
 
-    /// [tc-8] The form that takes an ALREADY-PARSED params dictionary — see
-    /// `ToolArgFormatter.primaryLabel(tool:dict:)` for why.
-    ///
-    /// ⚠️ `params` is OPTIONAL, not a plain dictionary: nil means "the params were not decodable
-    /// JSON", which is a different diagnostic from "decoded fine but carried no path" and the two
-    /// `skip` reasons below must keep saying which happened.
+    /// Resolves the viewer action from an already-parsed params dictionary. `params` nil means the params were not
+    /// decodable JSON, which is reported differently from a decoded dictionary with no path.
     static func resolve(data: ToolExecutionData,
                         params: [String: Any]?,
                         missingBaseline: MissingBaselinePolicy = .skipAction) -> TimelineFileViewerAction? {
@@ -1256,19 +1040,13 @@ struct TimelineFileViewerAction: Equatable {
               !rawPath.isEmpty else {
             return skip("no 'path'/'file_path' argument — nothing to open")
         }
-        // MUST match how the executor resolved it. `expandingTildeInPath` expands `~` but
-        // leaves a RELATIVE path untouched, and `URL(fileURLWithPath:)` then anchors that to
-        // the PROCESS working directory — `/` for a GUI-launched app. The write tools go
-        // through `FilePathResolver`, which anchors relative paths to HOME; the viewer did
-        // not, so a model emitting `Notes.java` produced a tab pointing at `/Notes.java`
-        // while the agent had written `~/Notes.java`.
+        // Must match the executor's resolution: `FilePathResolver` anchors relative paths to HOME, not the process working
+        // directory.
         let filePath = FilePathResolver.resolve(rawPath)
         let fileName = (filePath as NSString).lastPathComponent
 
         switch data.name {
-        // `create_file` carries `{file_path, content, overwrite?}` — the same full-post-state
-        // shape as these three. It has no append mode, so the `isAppendMode` branch below stays
-        // `write_file`-only.
+        // `create_file` has the same full-post-state shape as the others and no append mode.
         case "write_file", "overwrite_file", "create_new_file", "create_file":
             guard let content = params["content"] as? String, !content.isEmpty else {
                 return skip("write to '\(fileName)' carried no 'content' argument")
@@ -1278,12 +1056,8 @@ struct TimelineFileViewerAction: Equatable {
                     guard missingBaseline == .recordFragment else {
                         return skip("append to '\(fileName)' has no pre-write snapshot, so the post-write file can't be reconstructed (file was unreadable or over the snapshot cap at capture time)")
                     }
-                    // The fragment IS what was added, so `linesAdded` downstream is exact and
-                    // `removed: 0` is genuinely true rather than a placeholder — an append
-                    // removes nothing. It still renders `baseline="none"` because the XML has
-                    // no append marker, so the model cannot tell this apart from an overwrite
-                    // and would read a placeholder zero as measured. Under-claiming is the
-                    // safe direction; the alternative recorded nothing at all.
+                    // The appended fragment is exactly what was added, so `removed: 0` is true; the baseline stays "none" because the
+                    // XML has no append marker.
                     return TimelineFileViewerAction(
                         fileName: fileName,
                         filePath: filePath,
@@ -1323,8 +1097,7 @@ struct TimelineFileViewerAction: Equatable {
                 isWrite: true
             )
         case "read_file":
-            // Deliberately NOT `data.output`: that is capped and header-decorated. Read the
-            // file itself at click time instead.
+            // Reads the file at click time rather than using `data.output`, which is capped and header-decorated.
             guard data.output?.isEmpty == false else {
                 return skip("read of '\(fileName)' produced no output — treating it as nothing to open")
             }
@@ -1357,12 +1130,8 @@ struct TimelineFileViewerAction: Equatable {
     }
 }
 
-/// `.task(id:)` key for chip resolution — the row must re-resolve when the tool finishes,
-/// not just when a different event takes its place. Completion is also the ONLY place
-/// `params` is rewritten (`completeToolTimelineEvent` / `CapabilityCardRouter.completeTool`
-/// assign `params` and flip `isExecuting` in the same mutation), so a cache keyed on this
-/// is also a cache keyed on the params. Internal, not private, so the cache rule in
-/// `ActionDetailView.primaryArgLabel` can be unit-tested.
+/// `.task(id:)` key for chip resolution; changes when the tool completes, which is also when `params` is rewritten.
+/// Internal so the cache rule in `ActionDetailView.primaryArgLabel` can be unit-tested.
 struct TimelineChipKey: Equatable {
     let id: UUID
     let isExecuting: Bool
@@ -1371,10 +1140,8 @@ struct TimelineChipKey: Equatable {
 
 struct ActionDetailView: View {
     let event: TimelineEvent
-    /// The conversation this row was rendered for, when the caller supplied one. `openInViewer`
-    /// compares it against the view model's current conversation AFTER its disk read returns
-    /// (CF-53). A nil falls back to the switch-in-flight term of `shouldDeliverOpen`, not to
-    /// "always deliver".
+    /// The conversation this row was rendered for, when the caller supplied one.
+    /// `openInViewer` compares it with the current conversation after its disk read; nil falls back to the in-flight check.
     var originConversationID: UUID? = nil
     @Environment(\.appTheme) private var theme
     /// Optional lookup: contexts that render timelines without a chat VM in the
@@ -1390,27 +1157,15 @@ struct ActionDetailView: View {
     /// "+N −M" for successful writes with a pre-write snapshot; computed off-main once.
     @State private var writeDiffStat: (added: Int, deleted: Int)? = nil
 
-    /// Neither of the next two values is resolved in `body`: each JSON-parses the tool
-    /// params — the FULL params string, which for `write_file` / `create_new_file` is the
-    /// whole file, and is never capped — and a body-side call re-parsed it once per row per
-    /// render pass across the whole timeline, on the main actor, for every stream event.
-    /// Both are resolved once per row in `.task(id: TimelineChipKey)` (`resolveChip`) and
-    /// cached here. (`ToolArgFormatter.primaryLabel` did exactly the forbidden thing at the
-    /// row label until CF-45, a few lines below this rule.)
+    // Why: resolving parses the full params JSON (a whole file for writes); doing it in `body` re-parses on every render pass.
+    /// The resolved file-viewer action for this row, computed once in `.task` and cached here.
     @State private var resolvedAction: TimelineFileViewerAction?
-    /// The row's primary-argument label, with the key it was resolved for. Read through
-    /// `primaryArgLabel(cached:for:tool:params:)`, which falls back to a fresh parse on a
-    /// key mismatch — so the first pass (before `.task` runs) and the one pass after the
-    /// completion rewrite of `params` still render, at one parse each, and a recycled row
-    /// identity can never show the previous row's label.
+    /// The row's primary-argument label with the key it was resolved for.
+    /// `primaryArgLabel(cached:for:tool:params:)` falls back to a fresh parse on a key mismatch.
     @State private var primaryArgCache: (key: TimelineChipKey, label: String)?
     /// True while a `.fromDisk` row is being read after a click.
     @State private var isOpeningFromDisk = false
-    /// Why the last "Open in viewer" failed, rendered under the row. `.fromDisk` is the ONLY
-    /// route a `read_file` row offers (`TimelineFileViewerAction.resolve` deliberately refuses
-    /// `data.output`), so a silent failure left the user with no affordance and no explanation
-    /// — the spinner simply stopped. Every other error surface in this cluster renders
-    /// something; this one rendered nothing.
+    /// Why the last "Open in viewer" failed, rendered under the row.
     @State private var openFailureReason: String?
 
     private func rowDetail(_ data: ToolExecutionData) -> TimelineRowDetail? {
@@ -1421,16 +1176,9 @@ struct ActionDetailView: View {
         expandedRowIDs.contains(data.id)
     }
 
-    /// Always-visible pills for a file-touching row: the change stat, an inline diff, and
-    /// the affordances that open content in the Code Viewer.
-    ///
-    /// Deliberately split into TWO sources. `data.effect` is PERSISTED and self-sufficient
-    /// (path, counts, diff), so the stat and the diff render from it alone. Everything that
-    /// needs actual file CONTENT — "Previous version", "Open in viewer" — needs
-    /// `resolvedAction`, which reads the SESSION-SCOPED snapshots and is nil after a reload.
-    /// Gating the whole block on `resolvedAction` made the persisted diff unreachable for
-    /// `edit_code_*` and append rows on any reloaded conversation, defeating the point of
-    /// persisting it (found by the 2026-07-26 re-scope audit).
+    /// Always-visible pills for a file-touching row: the change stat, an inline diff, and affordances that open the Code
+    /// Viewer. The stat and diff render from the persisted `data.effect`; "Previous version" and "Open in viewer" need
+    /// `resolvedAction`, which is nil after a reload.
     @ViewBuilder
     private func fileViewerChip(data: ToolExecutionData) -> some View {
         let effect = data.effect
@@ -1439,12 +1187,8 @@ struct ActionDetailView: View {
             return writeDiffStat.map { $0.added == 0 && $0.deleted == 0 } ?? false
         }()
         let stat: (added: Int, deleted: Int)? = effect.map { ($0.linesAdded, $0.linesRemoved) } ?? writeDiffStat
-        // A persisted effect with `diff == nil` came from `ActionEffectBuilder`'s no-baseline
-        // branch: the file was over `preWriteSnapshotByteLimit` (512 KB) or wasn't readable as
-        // UTF-8 when the snapshot was taken. Its `linesRemoved: 0` is a PLACEHOLDER, not a
-        // measurement — printing "+N −0" made a destructive overwrite of an 800 KB file look
-        // exactly like creating a new one. `writeDiffStat` is always measured against a real
-        // pre-image, so it stays trusted.
+        // A persisted effect with `diff == nil` has no measured baseline (file too large or not UTF-8), so its
+        // `linesRemoved: 0` is a placeholder, not a measurement.
         let hasBaseline: Bool = effect.map { $0.diff != nil } ?? true
 
         if effect != nil || resolvedAction != nil {
@@ -1519,12 +1263,8 @@ struct ActionDetailView: View {
         }
     }
 
-    /// The change this row made, rendered where the change happened.
-    ///
-    /// Reads `ToolExecutionData.effect`, which is derived ONCE at tool completion and
-    /// persisted — so this survives a relaunch, and it is the SAME value the agent has in
-    /// episodic memory. The row and the model can therefore never describe a write
-    /// differently, which they could if this recomputed its own diff.
+    /// The change this row made, rendered from the persisted `ToolExecutionData.effect`.
+    /// The same value the agent holds in episodic memory, so the row and the model describe a write identically.
     @ViewBuilder
     private func inlineDiff(_ effect: ActionEffect) -> some View {
         if let diff = effect.diff {
@@ -1609,15 +1349,9 @@ struct ActionDetailView: View {
             }.value
             isOpeningFromDisk = false
 
-            // [CF-53] The read outlived a conversation switch. Nothing cancels this task and the
-            // view holds no handle to it, so without a destination check the tab (and its failure
-            // banner) landed in whatever conversation is open when the disk read returns.
-            //
-            // `currentChatMessages` CANNOT answer this on its own: `loadConversation` assigns it
-            // only after its fetch returns, so for the whole duration of a switch it still names
-            // the OUTGOING conversation (`ChatHistoryViewModel.destinationConversationID`) — the
-            // one window `resetCodeViewer()` has already emptied the viewer in. So the in-flight
-            // flag is asked FIRST and the displayed identity is only trusted outside a load.
+            // Why: `currentChatMessages` still names the outgoing conversation during a switch, so the in-flight flag is checked
+            // before the displayed identity.
+            // Drops the open when the conversation changed while the disk read was in flight.
             let current = viewModel.currentChatMessages.first?.conversationId
             let isLoadInFlight = viewModel.isInitiallyLoadingConversation
             guard Self.shouldDeliverOpen(origin: originConversationID,
@@ -1654,39 +1388,9 @@ struct ActionDetailView: View {
         }
     }
 
-    /// Whether a completed disk read may still open a tab.
-    ///
-    /// [CF-53] The sibling paths in `ChatHistoryViewModel` were given explicit destination checks
-    /// by CH15/CH17/CH60; this one had none. Two independent ways the click can be stale, because
-    /// the row's own identity only covers one of them:
-    ///
-    /// * `isLoadInFlight` — a conversation switch is between `resetCodeViewer()` (which has
-    ///   already stashed and emptied the viewer) and `restoreCodeViewerSession(for:)`. NOTHING may
-    ///   be planted in that window, whatever the row's origin: `currentChatMessages` still names
-    ///   the OUTGOING conversation throughout it, so `origin == current` passes exactly when it
-    ///   must not, and a tab planted here ALSO suppresses the incoming conversation's restore,
-    ///   which only fires on an empty viewer. This term is also what covers any caller that
-    ///   supplies no origin yet opens into that same shared viewer.
-    /// * `origin != current` — the switch settled on a different conversation before the read
-    ///   returned.
-    ///
-    /// A nil `origin` outside a load still delivers: the viewer's owner has not moved, so there is
-    /// nothing to be wrong about.
-    ///
-    /// Deliberately conservative — a same-conversation reload in flight drops too. Re-clicking
-    /// costs the user one click; the other error destroys the incoming conversation's tabs and
-    /// unsaved drafts.
-    ///
-    /// ⚠️ The stated REASON was "the chat view model publishes no destination identity to tell the
-    /// two apart (its `destinationConversationID` is private)". That was true until 2026-09-06,
-    /// when the property was made internal for `ConversationSyncService`; it would now distinguish
-    /// the two cases (on a same-conversation reload the destination IS the origin). The
-    /// conservatism is therefore a CHOICE from here on, not a constraint — and a cheap one, since
-    /// `loadConversation` skips `resetCodeViewer()` on a same-conversation reload, so there is no
-    /// emptied viewer to plant into. Anyone tightening this must change the CALL SITE too, which
-    /// still passes the positional `currentChatMessages.first?.conversationId` as `current`.
-    ///
-    /// `nonisolated static` and pure so the rule is unit-testable; the `Task`/read plumbing is not.
+    /// Whether a completed disk read may still open a tab. Drops it while a conversation load is in flight, or when the
+    /// origin differs from the current conversation; a nil origin outside a load delivers. `nonisolated static` and pure
+    /// so the rule is unit-testable.
     nonisolated static func shouldDeliverOpen(origin: UUID?, current: UUID?, isLoadInFlight: Bool) -> Bool {
         guard !isLoadInFlight else { return false }
         guard let origin else { return true }
@@ -1716,11 +1420,8 @@ struct ActionDetailView: View {
         TimelineChipKey(id: data.id, isExecuting: data.isExecuting, isSuccess: data.isSuccess)
     }
 
-    /// The row label: the cached one when it was resolved for exactly `key`, a fresh parse
-    /// otherwise. A miss is not an error — it is the very first body pass before `.task`
-    /// has run, or the single pass after completion rewrote `params` (a new key) before
-    /// `resolveChip` re-resolves. `nonisolated static` and pure so the hit/miss rule is
-    /// unit-testable (`TimelinePrimaryArgCacheTests`); the `.task` plumbing is not.
+    /// The row label: the cached one when it was resolved for exactly `key`, a fresh parse otherwise.
+    /// A miss is expected on the first body pass and after completion rewrites `params`. `nonisolated static` and pure.
     nonisolated static func primaryArgLabel(
         cached: (key: TimelineChipKey, label: String)?,
         for key: TimelineChipKey,
@@ -1731,15 +1432,8 @@ struct ActionDetailView: View {
         return ToolArgFormatter.primaryLabel(tool: tool, params: params)
     }
 
-    /// Whether this row needs its OWN measured diff, or already has the answer persisted.
-    ///
-    /// [CF-48] `fileViewerChip` reads `writeDiffStat` only as the fallback for a row with no
-    /// `effect`: `stat`, `isNoOpWrite` and `hasBaseline` all take the `effect` branch first. So
-    /// on the in-session path — where `ActionEffectBuilder` has already produced an effect — the
-    /// full-file LCS diff below was computed and never read, and because it lives in `.task(id:)`
-    /// it was re-armed every time the row scrolled back into the `LazyVStack`.
-    ///
-    /// `nonisolated static` and pure so the rule is unit-testable; the `.task` plumbing is not.
+    /// Whether this row needs its own measured diff, or already has the answer persisted.
+    /// `fileViewerChip` reads `writeDiffStat` only for a row with no `effect`. `nonisolated static` and pure.
     nonisolated static func needsMeasuredWriteDiff(hasPersistedEffect: Bool,
                                                    action: TimelineFileViewerAction?) -> Bool {
         guard !hasPersistedEffect, let action, action.isWrite else { return false }
@@ -1749,9 +1443,8 @@ struct ActionDetailView: View {
     /// One resolution + one stat computation + one label parse per row, keyed by the event
     /// id and completion state — off the render path entirely.
     private func resolveChip(for data: ToolExecutionData) async {
-        // Label first, before any suspension: it is the cheapest of the three and the one
-        // every row shows, so it must not wait behind a detached diff.
-        // [tc-8] ONE parse for this row, shared by the label and the chip resolution.
+        // Label first, before any suspension: it is the cheapest and every row shows it.
+        // One parse of the params is shared by the label and the chip resolution.
         let parsed = ToolArgFormatter.parsedParamsForRow(data.params)
         primaryArgCache = (
             key: Self.chipKey(for: data),
@@ -1830,10 +1523,8 @@ struct ActionDetailView: View {
 
     var body: some View {
         if case .toolExecution(let data) = event {
-            // ⚠️ [tc-9] Resolved ONCE per body pass. `TimelineRowDetail.resolve` trims and scans
-            // the tool output — up to 32 KB for a write row — and it was called twice on every
-            // pass: once by `actionRowButton` for the `isDisclosable` predicate and again here
-            // for the disclosed content. A `LazyVStack` re-runs this on every scroll-in.
+            // Resolved once per body pass: `TimelineRowDetail.resolve` scans up to 32 KB of tool output, and `LazyVStack`
+            // re-runs this on scroll-in.
             let detail = rowDetail(data)
             let isDisclosable = detail != nil && !data.isExecuting
             let isExpanded = isOutputExpanded(data)
@@ -1858,9 +1549,7 @@ struct ActionDetailView: View {
                                 .font(.system(size: 12, weight: .regular))
                                 .foregroundColor(theme.secondaryText)
 
-                            // Cached per key by `resolveChip`; parsed inline only on a miss (see
-                            // `primaryArgLabel`). A direct `primaryLabel` call here re-parsed the
-                            // full params — the whole file for a write — on every body pass (CF-45).
+                            // Cached per key by `resolveChip`; parsed inline only on a miss (see `primaryArgLabel`).
                             let primaryArg = Self.primaryArgLabel(
                                 cached: primaryArgCache,
                                 for: Self.chipKey(for: data),
@@ -1888,13 +1577,9 @@ struct ActionDetailView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    // `.allowsHitTesting` rather than `.disabled`: on macOS a `.plain` button
-                    // renders its label dimmed when disabled, which would grey out the verb,
-                    // path and spinner of every row for as long as it runs.
+                    // `.allowsHitTesting` rather than `.disabled`, which dims the label of a `.plain` button on macOS.
                     .allowsHitTesting(isDisclosable)
-                    // SwiftUI has no "expanded" trait for a hand-rolled disclosure, and the
-                    // label text is identical in both states — without this VoiceOver cannot
-                    // tell them apart at all.
+                    // SwiftUI has no "expanded" trait for a hand-rolled disclosure and the label is the same in both states.
                     .accessibilityValue(
                         isDisclosable
                             ? Text(isExpanded ? String(localized: "Expanded") : String(localized: "Collapsed"))
@@ -1998,9 +1683,8 @@ struct ActionDetailView: View {
                     isHovering = hovering
                 }
             }
-            // Keyed on the completion state too: a row resolves to no chip while the tool
-            // is still executing, and must re-resolve once it finishes — which is also when
-            // `params` is rewritten, so the cached label re-resolves with it.
+            // Keyed on completion state: a row has no chip while executing and re-resolves when the tool finishes (when `params`
+            // is rewritten).
             .task(id: Self.chipKey(for: data)) {
                 await resolveChip(for: data)
             }
@@ -2063,21 +1747,8 @@ struct ActionDetailView: View {
                         .foregroundColor(theme.errorColor)
                 }
             } else {
-                // ⚠️ [tc-10] SETTLED, but its outcome was never reported. `isExecuting == false` with
-                // `isSuccess == nil` used to fall off the end of this `if`/`else if` and render
-                // NOTHING, so a row a user Stop had closed looked the same as one still waiting for a
-                // badge — no spinner, no glyph, nothing to say the tool's fate is unknown.
-                //
-                // Reachable from EXACTLY three writers, all deliberate terminal closes in
-                // `DanglingToolRowCloser`: `closeReporting` (cancel), `closeForUserSkipReporting`
-                // (the user skipped the node) and `markInterruptedByProcessDeath`. Every normal
-                // completion pairs `isSuccess` with `isExecuting = false` — `ActiveStreamManager`
-                // :1261/:1264 and `CapabilityCardRouter` :252/:255 — and `ToolOutput.isSuccess` is a
-                // non-optional `Bool`, so a finished tool can never land here.
-                //
-                // ⚠️ `slash.circle`, matching `CapabilityStatusIcon`'s cancelled glyph — NOT
-                // `ToolFailureCategory.cancelled.icon`, which is `xmark.circle` and reads as a
-                // failure. A user's own Stop is not a failure; `summarize` still counts nothing here.
+                // A settled row with no reported outcome (closed by a user stop, skip, or process death) shows a muted
+                // `slash.circle`, matching `CapabilityStatusIcon`; it is not a failure.
                 Image(systemName: data.failureCategory == .cancelled ? "slash.circle" : "circle.dotted")
                     .font(.system(size: 10))
                     .foregroundColor(theme.tertiaryText)
@@ -2234,12 +1905,10 @@ struct SystemStatusRow: View {
 // MARK: - Interim Reasoning Row
 
 /// Compact display for `.thought`/`.reasoning` nodes inside a chat/code bubble.
-/// Strips heading markers (so `# Summary` doesn't render as an H1 competing with
-/// the final answer), renders at a muted scale, and provides a clean Antigravity-style
-/// collapsible tree hierarchy.
+/// Strips heading markers, renders at a muted scale, and offers a collapsible tree hierarchy.
 struct InterimReasoningRow: View {
     let text: String
-    /// [CF-49] Whether the run producing this reasoning is still going.
+    /// Whether the run producing this reasoning is still going.
     var isLive: Bool = false
 
     @Environment(\.appTheme) private var theme
@@ -2308,11 +1977,8 @@ struct InterimReasoningRow: View {
         }
     }
 
-    /// Flattens markdown for compact display: drops heading markers, list
-    /// bullets (dash / star / numbered), inline emphasis (`**bold**`, `__bold__`,
-    /// `*italic*`), and collapses blank lines so the row reads as a single muted
-    /// paragraph rather than a full document. Inline code (backticks) is kept —
-    /// file paths / identifiers inside them carry meaning.
+    /// Flattens markdown for compact display: drops heading markers, list bullets and emphasis, and collapses blank lines.
+    /// Inline code is kept because paths and identifiers carry meaning.
     private var flattenedText: String {
         var out: [String] = []
         for raw in text.components(separatedBy: .newlines) {
@@ -2366,10 +2032,8 @@ struct StreamingContext {
     let startedAt: Date
     let isStreaming: Bool
 
-    /// Footer is a progress indicator — it only appears while the response is
-    /// still streaming. Once streaming ends, the bubble's existing `TokenUsageBadge`
-    /// carries the final token + duration summary, so the footer hides to avoid
-    /// a duplicate "done" display or a stale ticking timer next to old messages.
+    /// The footer is a progress indicator shown only while streaming; afterwards the bubble's `TokenUsageBadge` carries
+    /// the summary.
     var shouldDisplay: Bool { isStreaming }
 }
 
@@ -2397,15 +2061,7 @@ struct StreamingTimelineFooter: View {
         }
         .padding(.horizontal, 10)
         .padding(.top, 2)
-        // `.ignore`, and a label with no elapsed time in it. This used to be
-        // `"Streaming, \(elapsed(to: Date()))"` — rebuilt on every body pass, so the label
-        // changed once a second and VoiceOver re-announced the footer for the whole
-        // response. It also read `Date()` instead of the TimelineView's own `timeline.date`,
-        // so the spoken time didn't match the displayed one.
-        //
-        // The elapsed counter stays visual. A duration spoken aloud is stale the moment
-        // it's said, and "Streaming response" is the part that's actually actionable —
-        // same call as the run-history cards.
+        // `.ignore` with a label that has no elapsed time, so VoiceOver does not re-announce the footer every second.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Streaming response")
     }
@@ -2413,10 +2069,8 @@ struct StreamingTimelineFooter: View {
 
 // MARK: - Tool Arg Formatter
 
-/// Extracts display-ready verb, object label, and primary argument for a tool invocation.
-/// Drives both group-header summarization ("Read 3 files") and per-row labels ("Read BackendOrchestrationService.swift").
-/// Tool-name lookups are local to this file so the timeline rendering owns its vocabulary
-/// instead of leaking display strings into the tool registry.
+/// Extracts the display-ready verb, object label and primary argument for a tool invocation.
+/// Drives group-header summaries ("Read 3 files") and per-row labels; the tool-name lookups stay local to this file.
 enum ToolArgFormatter {
 
     /// Short verb used in both row labels and group titles.
@@ -2439,31 +2093,17 @@ enum ToolArgFormatter {
         return plural == 1 ? "tool" : "tools"
     }
 
-    /// The primary argument to surface in the row — filename for fs ops, query for searches,
-    /// command prefix for shell, question for ask_user, etc. Empty string means "no useful label".
-    /// [tc-8] String form — parses, then delegates. Kept for the callers that genuinely hold only
-    /// a String (`ConversationExporter`, and `primaryArgLabel`'s cache-miss path).
+    /// The primary argument to surface in the row: filename for file ops, query for searches, command prefix for shell, etc.
+    /// An empty string means no useful label. Parses the String form and delegates to `primaryLabel(tool:dict:)`.
     static func primaryLabel(tool: String, params: String) -> String {
         primaryLabel(tool: tool, dict: parseParams(params))
     }
 
-    /// [tc-8] The form that takes an ALREADY-PARSED params dictionary.
-    ///
-    /// `resolveChip` needs both this and `TimelineFileViewerAction.resolve` for the same row, and
-    /// each used to run its own `JSONSerialization` pass over the full, uncapped params — which
-    /// for a write row is the entire file. Worse than once per row: `.task(id:)` keys on
-    /// `(id, isExecuting, isSuccess)`, and completion flips `isExecuting` AND rewrites `params`,
-    /// so a normal live run resolved every write row twice — four full parses of the file on the
-    /// main actor.
-    ///
-    /// ⚠️ Deliberately NOT moved into a `Task.detached`: that inserts a suspension before
-    /// `primaryArgCache` is set, so the first render falls through to the cache-miss path and
-    /// parses anyway. Parsing once and sharing the result is the whole fix.
+    // Why: parse the params once and share the result; a detached parse would suspend before the cache is set and parse again.
+    /// Returns the primary-argument label from an already-parsed params dictionary.
     static func primaryLabel(tool: String, dict: [String: Any]?) -> String {
-        // `final_answer` is a terminal signal — its `answer` arg is rendered as the
-        // assistant's final message directly below this chip. Surfacing the answer
-        // text in the chip duplicates it and leaks raw markdown (`###`, `**`, etc.)
-        // into a non-rendering label. Keep the chip terse — just the "Final" verb.
+        // `final_answer` is rendered as the assistant message below the chip; keep the chip to the "Final" verb to avoid
+        // duplicating raw markdown.
         if tool == "final_answer" {
             return ""
         }
@@ -2471,14 +2111,8 @@ enum ToolArgFormatter {
         guard let dict, !dict.isEmpty else { return "" }
 
         switch tool {
-        // ⚠️ The Code profile's intent-split tools MUST be listed here too. `CodeToolPreset`
-        // supplies `create_new_file`/`overwrite_file`/`edit_code_single`/`edit_code_batch` to
-        // every Code profile, and none of them was in this switch — so they fell through to the
-        // fallback below, which surfaced whichever String the params dictionary happened to
-        // yield first. For `{file_path, content}` that is frequently `content`, so a row for a
-        // newly created Swift file rendered `Create import SwiftUI import Foundation str…`
-        // instead of `Create Notes.swift`. The same label feeds `ConversationExporter`, so the
-        // export carried the code fragment too.
+        // The Code profile's intent-split tools must be listed here, otherwise the fallback labels the row with an arbitrary
+        // string param (often file content).
         case "read_file", "write_file", "edit_file", "edit_code", "create_file",
              "file_overview", "read_file_metadata", "watch_folder",
              "create_new_file", "overwrite_file", "edit_code_single", "edit_code_batch":
@@ -2511,11 +2145,7 @@ enum ToolArgFormatter {
             if let t = firstString(dict, keys: ["task", "goal", "prompt"]) {
                 return truncate(t, 50)
             }
-        // `recall_conversation_history` no longer exists — the tool was dropped from dispatch as
-        // redundant with the RAG pipeline, and its struct deleted 2026-07-31. This case and its
-        // label/icon entries are kept deliberately: stored conversations from before the removal
-        // still contain calls to it, and this view renders history. Deleting these would make
-        // those old turns fall back to a generic label for no gain.
+        // Retained so stored conversations that still contain this removed tool render with a proper label.
         case "recall_conversation_history":
             if let q = firstString(dict, keys: ["query", "topic"]) {
                 return truncate(q, 50)
@@ -2542,29 +2172,10 @@ enum ToolArgFormatter {
             break
         }
 
-        // Fallback for a tool with no case above — a third-party MCP tool, or one added to the
-        // catalogue without a row here.
-        //
-        // ⚠️ THREE properties this must have. The first two were learned from the split tools
-        // falling through; the third from [CR25].
-        //  1. DETERMINISTIC. `for (_, v) in dict` iterates a bridged dictionary in an order that
-        //     is per-instance, so the SAME stored row could label differently between launches.
-        //     Sorted keys make the label a function of the params alone.
-        //  2. NEVER a payload. `content`/`old_string`/`new_string` carry whole files and code
-        //     fragments; surfacing one puts source into a 40-char chip and into the Markdown
-        //     export. An identifying value or nothing is the right choice — a row with no label
-        //     still renders its verb and object. ⚠️ The empty label is the DECISION here, not a
-        //     gap in it: `testAnUnknownToolWithOnlyPayloadParamsLabelsNothing` asserts it in so
-        //     many words. If some tool genuinely needs identity, widen `identifyingParamKeys` —
-        //     never relax this set.
-        //  3. [CR25] NEVER a credential. Property 2 one step further, and the reason is the
-        //     EXPORT: `ConversationExporter.toolRowLine` calls this function and has no redaction
-        //     pass of its own, so for the one surface here that the user hands to someone else,
-        //     this is the last thing standing between a param value and a third party. Two
-        //     carriers are closed — a secret-NAMED key (skipped outright) and a URL's
-        //     query/fragment/userinfo (`webURLLabel` rebuilds from host and path only). Note that
-        //     property 1 is what made the second one necessary: sorting is a TOTAL order, so
-        //     `api_key` beat `topic` every single time rather than merely sometimes.
+        // Why: this feeds ConversationExporter, which has no redaction of its own; secret-named keys are skipped and URLs are
+        // reduced by `webURLLabel`.
+        // Fallback for a tool with no case above (third-party MCP tools or catalogue additions without a row here). The
+        // label must be deterministic (sorted keys), never a payload value, and never a credential.
         if let identifying = firstString(dict, keys: identifyingParamKeys) {
             if let web = webURLLabel(identifying) { return web }
             return pathShaped(identifying) ? basename(identifying) : truncate(identifying, 40)
@@ -2572,12 +2183,7 @@ enum ToolArgFormatter {
         for key in dict.keys.sorted()
         where !payloadParamKeys.contains(key) && !isSecretParamName(key) {
             if let s = dict[key] as? String, !s.isEmpty {
-                // ⚠️ [CR25] `webURLLabel` HERE TOO, not only on the identifying branch above.
-                // `http_request` DECLARES `url`, but its decoder also accepts `endpoint`/`uri`/
-                // `address` (NetworkTools.swift:115) and a third-party tool may name its URL
-                // parameter anything at all — `webhook`, `callback`, `href`. Those values reach
-                // the sweep, where `truncate(s, 40)` would carry 40 characters of query string
-                // into the export. A URL is a URL wherever it is found.
+                // `webURLLabel` applies here too: a URL can arrive under any param name and its query string must not reach the export.
                 return webURLLabel(s) ?? truncate(s, 40)
             }
             if let n = dict[key] as? NSNumber {
@@ -2587,61 +2193,27 @@ enum ToolArgFormatter {
         return ""
     }
 
-    /// Keys that identify WHAT a tool acted on, tried in order before anything else.
-    ///
-    /// ⚠️ [CR25] `endpoint`/`uri`/`address` are here because `http_request`'s DECLARED schema says
-    /// `url` while its `Decodable` accepts all four (NetworkTools.swift:115). Without them a model
-    /// that emitted `endpoint` fell to the sorted sweep, where `method` outranks it alphabetically
-    /// — so the row named the VERB ("GET") instead of the host it called.
-    ///
-    /// ⚠️ Nothing in this list may be a credential name. This branch runs BEFORE the sweep and
-    /// deliberately does NOT consult `isSecretParamName` (that check would then run on every row
-    /// render for a list that is a fixed literal right here). The disjointness is therefore held
-    /// by a test — `testNeitherKeyListMayCarryACredentialName` — and not by code on the render path.
+    // Why: a test holds the disjointness from the secret-key list, not code on the render path.
+    /// Keys that identify what a tool acted on, tried in order before the sorted sweep.
+    /// No entry may be a credential name; this branch does not consult `isSecretParamName`.
     private static let identifyingParamKeys = [
         "file_path", "path", "query", "pattern", "command", "cmd",
         "url", "endpoint", "uri", "address",
         "symbol", "name", "directory", "dir", "action"
     ]
 
-    /// Keys whose values are CONTENT rather than identity — never a chip label.
-    ///
-    /// ⚠️ [CR25] `headers`: `NetworkTools` decodes `http_request`'s headers as an object OR as a
-    /// JSON STRING, deliberately, because models emit both (:136-147). In the object form the
-    /// sweep skips it anyway — `dict[key] as? String` fails on a bridged `NSDictionary`. In the
-    /// string form that cast SUCCEEDS, and the label became `{"Authorization":"Bearer sk-…`. A
-    /// header blob is never identity, so refusing it costs a row nothing.
-    ///
-    /// ⚠️ [CR25] `script`/`applescript`/`appleScript`/`sourceCode`: `run_applescript`
-    /// (NativeSystemTools.swift:183) has no case in the switch above, so its `script` param
-    /// reached the sweep and put 40 characters of raw AppleScript into the chip and the export —
-    /// the language whose ordinary idiom is `do shell script "…" password "…"`. This set is read
-    /// ONLY by the sweep, so `run_shell`/`execute_shell` are unaffected: they read `script`
-    /// through their own `case` and never consult it.
+    /// Keys whose values are content rather than identity; never used as a chip label.
+    /// Covers header blobs and script bodies that could carry credentials; read only by the sorted sweep.
     private static let payloadParamKeys: Set<String> = [
         "content", "old_string", "new_string", "text", "body", "answer",
         "data", "source", "code", "edits",
         "script", "applescript", "appleScript", "sourceCode", "headers"
     ]
 
-    /// [CR25] Param names whose VALUE is a credential. The sorted sweep skips them outright.
-    ///
-    /// ⚠️ DERIVED from `TelemetrySanitizer.standardSecretKeysForEgress`, never hand-typed here.
-    /// That list's own doc says it is the single place to add a secret key — "Adding a key here
-    /// strengthens both" — and a second copy of the same strings inside a view file is exactly the
-    /// drift this project keeps writing drift tests to punish.
-    ///
-    /// Matched by NORMALIZED CONTAINS (lowercased, with `_`, `-` and `.` stripped) rather than by
-    /// equality, because a third-party MCP schema will not spell it the canonical way: this is
-    /// what catches `x-api-key`, `X_API_KEY`, `openaiApiKey`, `githubToken`. The false positives
-    /// are real and ACCEPTED rather than worked around — `author` and `authority` contain `auth`,
-    /// `tokenizer` contains `token` — because the sweep is a last resort that is already permitted
-    /// to return "" (property 2). A dropped label is the safe side of this trade; a surfaced
-    /// credential is not. If a real tool trips it, add that key to `identifyingParamKeys`, which
-    /// runs first — do not weaken the token rule.
-    ///
-    /// ⚠️ This is still a rule about the NAME. It never inspects the value: no entropy test, no
-    /// "looks like a key" regex. See `webURLLabel` for why that line is drawn where it is.
+    // Why: false positives (`author`, `tokenizer`) are accepted; add such keys to `identifyingParamKeys` rather than
+    // weakening the match.
+    /// Param names whose value is a credential; the sorted sweep skips them. Derived from
+    /// `TelemetrySanitizer.standardSecretKeysForEgress`, matched by normalized contains (case, `_`, `-`, `.` ignored).
     private static let secretParamNameTokens: Set<String> = Set(
         TelemetrySanitizer.standardSecretKeysForEgress.map { ToolArgFormatter.normalizedParamName($0) }
     )
@@ -2666,42 +2238,10 @@ enum ToolArgFormatter {
         value.contains("/") && !value.contains(" ")
     }
 
-    /// [CR25] An absolute URL reduced to `host[:port]/…/lastSegment`, or nil if the value is not
-    /// one. Three defects in a single branch, all downstream of `pathShaped` being TRUE of every
-    /// URL (it contains `/` and no space) and `basename` being the one branch with NO length cap:
-    ///
-    ///  • The HOST was thrown away. `https://api.github.com/repos/x/y/issues` labelled `issues`,
-    ///    so neither the chip nor the exported Markdown said which machine was contacted. For an
-    ///    `http_request` row the host is the most load-bearing fact there is — a call to
-    ///    `evil.example.com/steal` exported as `steal`, which is worse than no label at all
-    ///    because it reads as though it had told you something.
-    ///  • The QUERY STRING survived verbatim and uncapped:
-    ///    `…/weather?appid=SECRET&q=London` labelled `weather?appid=SECRET&q=London`, and
-    ///    `ConversationExporter.inlineArgument` wrapped that in backticks in a file the user hands
-    ///    to someone else. Its 80-char bound never fired — the string is 32. Nothing downstream
-    ///    catches it either: `RemoteEgressSanitizer.credentialsOnly` matches known token prefixes,
-    ///    `Bearer`, `user:pass@`, quoted JSON keys and `KEY=value` env assignments, and `appid=`
-    ///    is none of those ("APPID" does not contain "API").
-    ///  • `user:pass@host` basic-auth rode along inside the same string.
-    ///
-    /// ⚠️ THIS PARSES; IT DOES NOT PATTERN-MATCH — and that distinction is the standing project
-    /// rule "key off the argument NAME, never the SHAPE". `pathShaped`'s slash heuristic IS a
-    /// shape rule, and it is what produced all three defects above. The NAME still decides WHICH
-    /// value is surfaced (`identifyingParamKeys`, `payloadParamKeys`, `isSecretParamName`); this
-    /// decides only how to SHORTEN a value already chosen, and it decides against a DECLARED
-    /// GRAMMAR — a scheme plus a non-empty authority — which either matches or does not.
-    ///
-    /// ⚠️ ANY SCHEME WITH A HOST, not an http(s) allowlist. `TelemetrySanitizer`'s own
-    /// `sanitizeURLCredentials` was widened for exactly this reason: `postgres://`, `mongodb://`,
-    /// `redis://`, `s3://` are precisely the URIs a `.env` is full of and an agent quotes back.
-    /// Requiring a non-empty HOST is what keeps the grammar honest — a Windows path `C:/x/y.txt`
-    /// parses with scheme `C` and host nil, `mailto:` and `todo:` have no host either, and a POSIX
-    /// path has no scheme. All four return nil here and are still basenamed exactly as before.
-    ///
-    /// ⚠️ The label is built from `host`, `port` and `path` ONLY. Nothing below reads `query`,
-    /// `fragment`, `user`, `password` or `absoluteString`, so no credential can reach a label by
-    /// any route this function later grows. That is a stronger guarantee than nil-ing those fields
-    /// on a `var components` and serializing it — do not "simplify" it back to that.
+    // Why: build the label from host, port and path only so no credential can reach it; do not rebuild it from a mutated
+    // `URLComponents`.
+    /// Reduces an absolute URL to `host[:port]/…/lastSegment`, or returns nil if the value is not a URL. Parses a scheme
+    /// plus non-empty authority; it never reads query, fragment or userinfo.
     private static func webURLLabel(_ value: String) -> String? {
         guard let components = URLComponents(string: value),
               components.scheme != nil,
@@ -2731,8 +2271,7 @@ enum ToolArgFormatter {
         "run_shell":                   "Ran",
         "bash":                        "Ran",
         "shell":                       "Ran",
-        // ⚠️ `batch_command` STAYS — a timeline row PERSISTED before the split still carries that
-        // toolName, and dropping it would relabel every historical row to the generic fallback.
+        // Retained so rows persisted with this tool name keep their label.
         "batch_command":               "Ran",
         "run_command":                 "Ran",
         "start_background_task":       "Started",
@@ -2750,10 +2289,7 @@ enum ToolArgFormatter {
         "file_overview":               "Analyzed",
         "project_tree":                "Mapped",
         "diff_files":                  "Diffed",
-        // The Code profile's intent-splits. Without these `verbLabel` falls back to a generic
-        // verb and `objectLabel` to "tool"/"tools", so a group of three file creations in a Code
-        // profile was headed "Create 3 tools" while the same work in a Chat profile read
-        // "Created 3 files".
+        // The Code profile's intent-split tools, labelled like their Chat-profile equivalents.
         "create_new_file":             "Created",
         "overwrite_file":              "Overwrote",
         "edit_code_single":            "Edited",
@@ -2802,21 +2338,8 @@ enum ToolArgFormatter {
         "code_search_files": ("file", "files")
     ]
 
-    // [tc-12] `icon(tool:)` and its 29-entry `iconOverrides` table were DELETED here on
-    // 2026-09-12. They had zero callers — production or test — under a doc comment claiming they
-    // were "the single vocabulary for every per-tool glyph, so rendering paths can't drift": a
-    // vocabulary no renderer consulted. The 2026-09-12 tc-1 pass had just added seven Code-profile
-    // split tools to that table, which is how dead it was.
-    //
-    // Deleted rather than WIRED on purpose: hanging a glyph off `actionRowButton` would put a new
-    // icon on every row of every agent timeline — a visual change nobody asked for, justified by a
-    // row whose own evidence records no user-visible failure. The vocabulary is recoverable from
-    // git if a surface ever wants it.
-    //
-    // ⚠️ `verbOverrides` / `objectOverrides` are LIVE (`verb`, `objectLabel`) and keep their
-    // `edit_file` entry deliberately, even though no NATIVE tool is named that: MCP servers
-    // commonly expose `edit_file`, and those tables are what stop a third-party row's group title
-    // reading "Edited 3 tools". Same reasoning as the `recall_conversation_history` entries.
+    // Parses a params JSON string into a dictionary for a row; `verbOverrides`/`objectOverrides` keep `edit_file`
+    // because MCP servers expose it.
 
     // MARK: - Helpers
 
@@ -2857,23 +2380,15 @@ enum ToolArgFormatter {
 // MARK: - [TL-4] Render-skip contract
 
 extension AgentTimelineView: Equatable {
-    /// `revision` proxies `events` (bumped on every timeline mutation via
-    /// `ChatMessage.timelineEvents.didSet`), so the array itself is not compared.
-    /// `finalContentText` is deliberately ignored WHILE STREAMING: it mirrors the
-    /// growing prose (changes every token) but both grouping dedup passes are
-    /// `!isStreaming`-gated — comparing it live would re-run body per token and
-    /// defeat the memoization on the exact path it exists for. The streaming
-    /// footer self-ticks via `TimelineView(.periodic)`, so skipping body never
-    /// freezes the elapsed counter.
+    /// `revision` proxies `events`, so the array is not compared.
+    /// `finalContentText` is ignored while streaming (it changes every token and dedup is gated on `!isStreaming`).
     static func == (lhs: AgentTimelineView, rhs: AgentTimelineView) -> Bool {
         lhs.revision == rhs.revision
             && lhs.continuationLead == rhs.continuationLead
             && lhs.isStreaming == rhs.isStreaming
             && lhs.compactReasoning == rhs.compactReasoning
             && lhs.scrollable == rhs.scrollable
-            // Without this a Resume — which flips `lifecycleState` to `.streaming` and back to
-            // `.final` without necessarily bumping `revision` in the same pass — could leave the
-            // interrupted header on a run that has since finished cleanly.
+            // Compared so a Resume that flips `lifecycleState` without bumping `revision` cannot leave a stale interrupted header.
             && lhs.isInterrupted == rhs.isInterrupted
             && lhs.streamingContext?.startedAt == rhs.streamingContext?.startedAt
             && (lhs.isStreaming || lhs.finalContentText == rhs.finalContentText)
@@ -2883,13 +2398,9 @@ extension AgentTimelineView: Equatable {
 
 // MARK: - Unrecognized Event Row
 
-/// Rendered for a timeline event written by a NEWER build of Devgentic.
-///
-/// ⚠️ Shown rather than hidden on purpose. The event's bytes ARE preserved on disk — this build
-/// simply has no renderer for it — so hiding it would make the timeline silently under-report what
-/// the run did, and would make an unrecognised capability card's whole nested sub-timeline vanish
-/// with no indication. The wording says "this version" because the data is not lost, only
-/// undrawable here.
+// Why: render it rather than hide it, or the timeline under-reports the run.
+/// A row for a timeline event written by a newer build of Devgentic.
+/// The wording says "this version" because the data is preserved on disk and only undrawable here.
 struct UnrecognizedEventRow: View {
     let caseName: String
     @Environment(\.appTheme) private var theme

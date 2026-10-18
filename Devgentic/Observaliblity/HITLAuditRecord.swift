@@ -4,21 +4,15 @@
 //  HITLAuditRecord.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
 import GRDB
 
-/// A durable, cross-restart audit record of one HITL request and its resolution.
-///
-/// [HITL/C2] Unlike the C1 `userInteraction` trace span (emitted only ON resolve), this row is
-/// written at RAISE — so a request still pending when the app quits or crashes survives as a row
-/// with no `resolvedAt`, which the launch reconcile pass stamps `interrupted`. Lives in the
-/// observability store (`traces.sqlite`) alongside traces/spans/logs.
-///
-/// Privacy: stores the structural facts (which interface/node/tool, when, how it resolved, how long
-/// the user took) — NOT verbatim question text or argument values, mirroring the banner-log policy.
+/// A durable, cross-restart audit record of one HITL request and its resolution, stored in the observability store
+/// (`traces.sqlite`). Written at raise, so a request pending at quit or crash survives with no `resolvedAt` and is
+/// stamped `interrupted` at launch. It stores structural facts only, never question text or argument values.
 struct HITLAuditRecord: Codable, Identifiable, Sendable {
     var id: String { operationID }      // operationID is the natural unique key
 
@@ -33,9 +27,8 @@ struct HITLAuditRecord: Codable, Identifiable, Sendable {
     var resolvedAt: Date?               // nil while pending; set on resolve / interrupted reconcile
     var outcome: String?                // approved/denied/answered/skipped/rejected/cancelled/interrupted
 
-    // v8 join keys (Run-Report Phase 5) — nullable, still no FK: rows must keep
-    // surviving trace purge and process death. nil on pre-v8 rows, which the Run
-    // Report matches by conversation + time window instead.
+    // Join keys, nullable and without a foreign key so rows survive trace purge and process death; nil on older rows,
+    // which the Run Report matches by conversation and time window.
     var traceID: String?
     var spanID: String?
 
@@ -71,9 +64,8 @@ struct HITLAuditRecord: Codable, Identifiable, Sendable {
 extension HITLAuditRecord: FetchableRecord, PersistableRecord {
     static var databaseTableName: String { "hitl_audit" }
 
-    // Persist Date columns as REAL seconds-since-1970 (matching the `.double` columns) so the
-    // 30-day `purgeHITLAuditOlderThan` and the `reconcileOrphanedHITL` (raisedAt < ?) comparisons
-    // actually match. See `LogEntry`/`TraceRecord` for the full rationale.
+    // Persists Date columns as REAL seconds-since-1970 (matching the `.double` columns) so the 30-day purge and
+    // orphan-reconcile comparisons match. See `LogEntry`/`TraceRecord`.
     static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
     static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
 

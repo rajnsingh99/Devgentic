@@ -4,10 +4,7 @@
 //  AgentConfigCodableTests.swift
 //  DevgenticTests
 //
-//  Codable roundtrip and backward compatibility tests for all
-//  execution-related config types: RetryPolicy, ErrorRecovery,
-//  AgentCapabilities, PlanningCapabilityConfig, SelfReflectionConfig,
-//  AgentDelegationConfig, and supporting enums.
+//  Created by Raj Singh.
 //
 
 import XCTest

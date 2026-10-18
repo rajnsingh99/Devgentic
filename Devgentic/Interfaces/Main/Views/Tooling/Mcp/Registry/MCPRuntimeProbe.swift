@@ -4,16 +4,7 @@
 //  MCPRuntimeProbe.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — is the launcher a registry entry needs actually on this machine?
-//
-//  A registry entry says `runtimeHint: "uvx"`. If uv isn't installed, connecting can only
-//  ever fail — with a bare ENOENT from `posix_spawn` that says nothing a user can act on.
-//  Checking first lets the browse list disable that row and say "Needs uv" instead, which
-//  is the difference between a dead end and an instruction.
-//
-//  Resolution deliberately mirrors `ShellProcess`: the same augmented PATH, so what the
-//  probe finds is exactly what the spawn will find. A probe that consulted a different PATH
-//  would be worse than none — it would promise a runtime that then failed to launch.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -21,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "MCPRuntimeProbe")
 
+/// Checks whether the launcher a registry entry needs (such as `uvx`) is installed, so the browse list can say
+/// "Needs uv" instead of failing with a bare ENOENT. Resolves like `ShellProcess`, with the same augmented PATH, so
+/// the probe finds exactly what the spawn will find.
 @MainActor
 enum MCPRuntimeProbe {
 
@@ -51,19 +45,9 @@ enum MCPRuntimeProbe {
         return resolved
     }
 
-    /// Whether the launcher BINARY exists. Not whether it can currently run anything.
-    ///
-    /// ⚠️ The distinction only matters for container runtimes, and there it matters a lot.
-    /// `npx` and `uvx` present on PATH means they will run; `docker` present on PATH means
-    /// nothing of the sort — Docker Desktop may be stopped, in which case every `docker run`
-    /// exits 125 with "Cannot connect to the Docker daemon". So a docker-backed registry entry
-    /// is offered as installable even when it cannot start today.
-    ///
-    /// That is the RIGHT trade for this call site: it renders a scrolling grid, and probing a
-    /// daemon per row would put a socket round-trip on every frame to answer a question that
-    /// changes while the user is reading. The daemon's absence is caught where it is cheap and
-    /// unambiguous — at connect, where docker's own stderr says exactly what is wrong and
-    /// `processFailedToStart` shows it verbatim.
+    /// Whether the launcher binary exists, not whether it can currently run anything. A docker-backed entry is offered
+    /// even when Docker Desktop is stopped: probing a daemon per row would cost a socket round trip per frame, and
+    /// connect reports the failure with docker's own stderr.
     static func isAvailable(_ runtime: String) -> Bool {
         resolve(runtime) != nil
     }

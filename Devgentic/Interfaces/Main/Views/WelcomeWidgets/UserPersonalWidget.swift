@@ -4,7 +4,7 @@
 //  UserPersonalWidget.swift
 //  Devgentic
 //
-//  Personal-profile summary as a registered welcome widget.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

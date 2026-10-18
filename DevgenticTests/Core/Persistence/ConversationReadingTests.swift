@@ -4,20 +4,7 @@
 //  ConversationReadingTests.swift
 //  DevgenticTests
 //
-//  C1 of the ChatOps remote-interface plan: the conversation list read.
-//
-//  Three properties are worth pinning, and each corresponds to a way this could have been built
-//  wrong — two of which the app already gets wrong somewhere else:
-//
-//   1. An unavailable store THROWS rather than returning `[]`. `recentConversations(limit:)`
-//      returns `[]` and its own comment admits the result is indistinguishable from a user with
-//      no history. On the remote surface an empty list is the answer to "what can I reach?", so
-//      the collapse is not acceptable here.
-//   2. The title is the DERIVED one. Two `displayTitle`s exist and disagree; the bridges render
-//      the derived one and `recentConversations` renders the other. Picking the wrong one is a
-//      silent, plausible-looking regression on every untitled conversation.
-//   3. Empty conversations are INCLUDED. `recentConversations` drops them; the ChatOps list must
-//      not, because `/new` reuses one and the user has to be able to see it.
+//  Created by Raj Singh.
 //
 
 import XCTest

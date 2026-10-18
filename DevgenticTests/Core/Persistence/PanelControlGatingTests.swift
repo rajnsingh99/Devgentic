@@ -4,9 +4,7 @@
 //  PanelControlGatingTests.swift
 //  DevgenticTests
 //
-//  Created on 09/08/26.
-//
-//  Registers B33 / B34 / B36.
+//  Created by Raj Singh.
 //
 
 import XCTest

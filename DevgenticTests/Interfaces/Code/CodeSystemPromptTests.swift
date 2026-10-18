@@ -2,21 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  CodeSystemPromptTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The Code system prompt had NO test coverage at all, despite being the largest behavioural
-//  surface in Code mode.
-//
-//  ⚠️ These deliberately assert almost nothing about WORDING. A test that pinned the prose would
-//  be the drift test this project has been burned by before — red on a correct rewrite, useless
-//  against a real regression. What they guard is the handful of things that must hold however the
-//  text is phrased:
-//
-//    1. The project root reaches the model. A prompt without it is what let a Code session walk
-//       the user's home directory (field-observed 2026-09-20).
-//    2. The prompt does not CONTRADICT the runtime. Until 2026-09-20 it told the model that
-//       cross-folder reads were legitimate — then `WorkspaceBoundary` started interrupting the
-//       user to approve them. Prompt and enforcement have to describe the same product.
+//  Created by Raj Singh.
 //
 
 import XCTest

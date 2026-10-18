@@ -4,10 +4,7 @@
 //  TraceExportDTOTests.swift
 //  DevgenticTests
 //
-//  Regression coverage for Gap #2 — the exported `trace.json` was hollow because the
-//  GRDB-backed `TraceRecord`/`Span` exclude their hydrated `rootSpans`/`events`/`children`
-//  from CodingKeys. The `TraceExportDTO`/`SpanExportDTO` surface must serialize the full
-//  rootSpans → spans → events tree (and round-trip, for the in-app bundle viewer).
+//  Created by Raj Singh.
 //
 
 import XCTest

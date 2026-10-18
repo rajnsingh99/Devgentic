@@ -4,17 +4,7 @@
 //  CodeViewerP3ClusterTests.swift
 //  DevgenticTests
 //
-//  Covers the Code Viewer half of the P3 pass (Chat_Production_Readiness_Fresh.md):
-//  CF-10 (a rejected live-write tab's drift baseline), CF-11 (Save & Close for path-linked
-//  tabs), CF-12 (save bookkeeping surviving a stash), CF-13 (per-tab editor view state),
-//  CF-16 (the intra-line refinement split out of the line-level diff), CF-17 (the Save-As
-//  destination pre-read cap).
-//
-//  CF-12's stash-during-modeless-panel race is NOT covered here: `tabsByConversation` and
-//  the stash functions are private, and the race can only be reached by suspending real
-//  filesystem I/O mid-await, which this store-injection seam does not reach. Verify on
-//  device: Save As on an agent-written tab, switch conversations while the panel is open,
-//  confirm the tab is linked and clean on return.
+//  Created by Raj Singh.
 //
 
 import XCTest

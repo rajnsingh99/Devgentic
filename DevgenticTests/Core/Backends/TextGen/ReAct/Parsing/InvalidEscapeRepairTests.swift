@@ -2,12 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  InvalidEscapeRepairTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  An escape JSON does not define (`\'`, `\d`, `\u` without four hex digits) used to fail the
-//  whole call. On the 2026-10-06 device run Qwen2.5-3B answered T3 correctly with
-//  `Devgentic\'s` in the answer; the decode failed, both retries repeated it, and the run ended
-//  on a wrong answer. Such an escape now keeps its backslash: nothing the model wrote is lost.
+//  Created by Raj Singh.
 //
 
 import XCTest

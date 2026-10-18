@@ -4,37 +4,23 @@
 //  ChatMessage.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 22/08/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 struct ResponseMessageVariant: Codable, Equatable {
 
+    // Why: a `let` with an initial value is encoded but skipped on decode, so the id would regenerate on every load;
+    // it must stay a `var` with a tolerant decoder.
     /// Stable identity for this variant, preserved across a save/load cycle.
-    ///
-    /// ⚠️ This was `let variantId: UUID = UUID()`, which is a Swift trap: the SYNTHESIZED encoder
-    /// EMITS an immutable property that has an initial value, while the synthesized decoder SKIPS it
-    /// (it cannot overwrite a `let` that is already initialized — the compiler warns about exactly
-    /// this). So the id was written into `agentResponseData` on every flush and thrown away on every
-    /// load, regenerating each time. Two consequences, neither obvious:
-    ///
-    ///   1. The blob's bytes changed on every load→save cycle even when nothing about the response
-    ///      had changed.
-    ///   2. `variantId` participates in the synthesized `Equatable`, which propagates through
-    ///      `AgentResponse ==` → `ChatMessage ==` → `Conversation ==`. A conversation re-fetched
-    ///      from the store therefore NEVER compared equal to the identical in-memory one, forcing
-    ///      every consumer of those operators to treat an unchanged response as changed.
-    ///
-    /// Now a `var` with a declaration default plus a tolerant decoder below, so it round-trips.
     var variantId: UUID = UUID()
 
     var content: MessageContent
     let backendEntityId: UUID?
 
-    /// ⚠️ Explicit, because the tolerant `init(from:)` in the extension below needs to name it.
-    /// Declaring `CodingKeys` here is safe — unlike declaring `init`, it does not suppress the
-    /// memberwise initializer the call sites use.
+    /// Explicit so the tolerant `init(from:)` in the extension below can name the keys; declaring `CodingKeys` here keeps
+    /// the memberwise init.
     enum CodingKeys: String, CodingKey {
         case variantId, content, backendEntityId
     }
@@ -42,13 +28,8 @@ struct ResponseMessageVariant: Codable, Equatable {
 
 extension ResponseMessageVariant {
 
-    /// ⚠️ In an EXTENSION, not the struct body — declaring `init(from:)` inline would suppress the
-    /// memberwise init that `beginRegenerationVariant` and `ChatMessage.init` both use.
-    ///
-    /// Tolerant on `variantId` specifically: every blob written before this fix carries one, but a
-    /// blob written before the field existed does not, and a missing id must not fail the whole
-    /// variant. Minting one there is correct — it becomes stable from that save onward.
-    /// `content` stays required: a variant with no content is corruption, not an old shape.
+    // Why: lives in an extension: an inline `init(from:)` would suppress the memberwise init used by call sites.
+    /// Tolerant decoder: a missing `variantId` is minted fresh instead of failing the variant; `content` stays required.
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.variantId = (try? container.decode(UUID.self, forKey: .variantId)) ?? UUID()
@@ -64,11 +45,9 @@ struct AgentResponse: Codable, Equatable {
     var generationAttempts: Int = 1
 }
 
-/// Data model for a tool execution event in the agent timeline.
-/// Mutable fields (`output`, `isSuccess`, `failureCategory`, `durationMs`, `isExecuting`)
-/// are updated when the tool completes — the struct is replaced in-place in the timeline array.
-/// `failureCategory` is nil on success; on failure it carries the structured cause so
-/// EpisodicHistoryFormatter can build constraints without string-matching the output.
+/// Data model for a tool execution event in the agent timeline; the struct is replaced in place when the tool completes.
+/// `failureCategory` is nil on success; on failure it carries the structured cause so EpisodicHistoryFormatter can
+/// build constraints without string-matching the output.
 struct ToolExecutionData: Equatable, Identifiable, Sendable {
     let id: UUID
     let name: String
@@ -82,47 +61,29 @@ struct ToolExecutionData: Equatable, Identifiable, Sendable {
     /// flat timeline back into per-iteration assistant(tool_calls)→tool(result) turns (G1 Piece 2).
     /// Optional + nil for legacy rows / non-ReAct paths.
     var stepId: Int? = nil
-    /// For file-writing tools: the target file's content just before the write ("" = the
-    /// file didn't exist; nil = not captured). Set on completion from `ToolOutput`; drives
-    /// the timeline's "View changes" → Code Viewer diff. Size-capped at capture.
-    ///
-    /// SESSION-SCOPED: deliberately NOT persisted (see `encode(to:)`). Keeping it would put
-    /// up to a megabyte of file content per write into the message's timeline blob —
-    /// which is re-encoded whole on every flush and decoded eagerly on every conversation
-    /// load. See `Docs/large-tool-payload-storage.md` for the eventual fix.
+    /// For file-writing tools: the target file's content just before the write ('' = file did not exist; nil = not
+    /// captured). Drives the timeline's 'View changes' diff; size-capped at capture and session-scoped, never persisted
+    /// (see `encode(to:)`).
     var preWriteContent: String? = nil
     /// For EDIT tools (find/replace params, no full content): the file read back after a
     /// successful edit — the post-state the params can't provide. Size-capped at capture.
     /// Session-scoped like `preWriteContent`.
     var postWriteContent: String? = nil
 
-    /// What this call changed on disk — derived from the snapshots ONCE, when the tool
-    /// finishes.
-    ///
-    /// Computed here rather than where it's consumed because the episodic formatter runs on
-    /// EVERY request: deriving it there re-ran an O(n²) LCS for every historical write on
-    /// every prompt build (a 4000-line diff measured ~6s in test).
-    ///
-    /// Unlike the snapshots above this IS persisted — it's a bounded summary (4KB cap), and
-    /// a resumed conversation that can't say what it changed can't undo it. See
-    /// `Docs/codeviewer-rescope-design.md` §12 D1.
+    // Why: derived here, not at the consumer: the episodic formatter runs on every request and an O(n^2) diff per
+    // write is too slow.
+    /// What this call changed on disk, derived from the snapshots once when the tool finishes (persisted, bounded to
+    /// 4KB).
     var effect: ActionEffect? = nil
-    /// The COMMAND's exit status for shell-family tools, nil for everything else.
-    ///
-    /// Not a failure signal — the tool ran fine. `grep` exits 1 for "no match" and `diff` for
-    /// "files differ", so classifying non-zero as a tool failure would abort a run after three
-    /// consecutive searches (`CognitiveCircuitBreaker` aborts at 3 consecutive failures).
-    /// It is carried because a verdict cannot be re-derived: re-running `swift build` after an
-    /// edit answers a different question than the original run did.
+    // Why: not a failure signal: `grep` exits 1 for no match, and counting that as failure would trip
+    // `CognitiveCircuitBreaker`.
+    /// The command's exit status for shell-family tools, nil for everything else; carried because a verdict cannot be
+    /// re-derived.
     var exitCode: Int32? = nil
 
-    /// Longest tool output retained in the timeline. Generous by design: it must not bite
-    /// normal tool results, only pathological ones (build logs, huge file dumps). Beyond
-    /// this the output is truncated with an explicit marker — never silently.
-    ///
-    /// This value is load-bearing beyond display: `TimelineTurnReconstructor` rebuilds a
-    /// resumed run's LLM tool observations from `output`, so the marker is what tells the
-    /// model its view of that observation is incomplete.
+    /// Longest tool output retained in the timeline; beyond it the output is truncated with an explicit marker.
+    /// `TimelineTurnReconstructor` rebuilds a resumed run's tool observations from `output`, so the marker tells the
+    /// model it is incomplete.
     static let maxPersistedOutputLength = 32_768
 
     /// Truncates `text` to `maxPersistedOutputLength`, appending a marker that states what
@@ -135,16 +96,8 @@ struct ToolExecutionData: Equatable, Identifiable, Sendable {
     }
 }
 
-// Backward-compatible Codable: persisted history from prior builds lacks
-// `failureCategory`, `durationMs`, `stepId`, `preWriteContent`, and `postWriteContent` —
-// decode them as optional and default to nil.
-//
-// ENCODE is explicit (not synthesized) so the file-snapshot fields can be OMITTED from
-// persistence while still decoding cleanly on the way in. Rationale: the snapshots exist
-// to power the timeline's "View changes" affordance during the session that produced the
-// write, which is when anyone looks. Persisting them put up to 1MB per write into the
-// timeline blob — permanently, re-encoded on every flush. Decode still reads them so any
-// rows already written by an earlier build keep working.
+// Backward-compatible Codable: fields absent from older rows decode as optional/nil.
+// Encode is explicit so the session-scoped file snapshots are omitted from persistence while still decoding if present.
 extension ToolExecutionData: Codable {
     enum CodingKeys: String, CodingKey {
         case id, name, params, output, isSuccess, failureCategory, durationMs, isExecuting, stepId, preWriteContent, postWriteContent, effect, exitCode
@@ -161,9 +114,7 @@ extension ToolExecutionData: Codable {
         try c.encodeIfPresent(durationMs, forKey: .durationMs)
         try c.encode(isExecuting, forKey: .isExecuting)
         try c.encodeIfPresent(stepId, forKey: .stepId)
-        // preWriteContent / postWriteContent intentionally omitted — session-scoped.
-        // `effect` IS encoded: it is the bounded summary derived from them, and it is what
-        // lets a resumed run describe (and undo) what it changed.
+        // `preWriteContent`/`postWriteContent` are omitted (session-scoped); `effect` is their bounded summary and is encoded.
         try c.encodeIfPresent(effect, forKey: .effect)
         // Like `effect`: a verdict the next turn cannot re-derive.
         try c.encodeIfPresent(exitCode, forKey: .exitCode)
@@ -187,16 +138,9 @@ extension ToolExecutionData: Codable {
     }
 }
 
+// Why: a flat String rawValue, not a nested enum carrying `exited(code:)`: nested rawValue changes corrupt timelines.
+// `interrupted` is present so a persisted `running` can be reloaded as such after a quit kills the task.
 /// How a background task ended, on the wire.
-///
-/// ⚠️ A FLAT `String` rawValue, deliberately, rather than mirroring
-/// `BackgroundProcessRegistry.Status` — which carries `exited(code:)` as an associated value. A
-/// nested enum's rawValue changing is one of the documented corruption classes that used to lose a
-/// whole run's timeline; the exit code rides alongside in its own field instead.
-///
-/// `interrupted` exists from day one although nothing sets it yet: quit KILLS every background
-/// task, so a persisted `running` is a lie the moment the app restarts and reload has to be able
-/// to say so. Adding the case later would be a wire-format change; adding it now is free.
 enum BackgroundTaskStatus: String, Codable, Equatable {
     case running
     case exited
@@ -207,15 +151,9 @@ enum BackgroundTaskStatus: String, Codable, Equatable {
     var isTerminal: Bool { self != .running }
 }
 
+// Why: `outputTail` is bounded: the full log lives in the file at `logPath`, and a live task would otherwise re-encode
+// a large blob on every output tick.
 /// A `batch_command(background:)` task, as the timeline sees it.
-///
-/// ⚠️⚠️ `outputTail` IS BOUNDED AND THAT IS THE POINT. The full log lives in a FILE (`logPath`);
-/// this carries only its last few KB. `preWriteContent` / `postWriteContent` on
-/// `ToolExecutionData` are excluded from persistence for exactly this reason — *"up to a megabyte
-/// of file content per write into the message's timeline blob — which is re-encoded whole on every
-/// flush and decoded eagerly on every conversation load"*. A real build log is 375 KB, and a LIVE
-/// task would re-encode that blob on every output tick. The UI reads `logPath` directly when it
-/// wants the whole thing.
 struct BackgroundTaskData: Codable, Equatable, Identifiable {
     /// Timeline identity. Distinct from `taskID`: this keys SwiftUI's `ForEach` and must stay
     /// stable across every in-place update of the row.
@@ -237,10 +175,8 @@ struct BackgroundTaskData: Codable, Equatable, Identifiable {
     var outputTail: String
     /// Characters the log holds in total, so the UI can say how much is not shown here.
     var logCharacterCount: Int
-    /// The `ResponseMessageVariant.variantId` of the attempt that started this task. A Redo appends
-    /// to the SAME timeline, so without this a report from attempt 1 cannot be told from one from
-    /// attempt 2 (`TranscriptGrouping` folds the former). Nil on a row written before 2026-09-27 —
-    /// read as "current attempt", so nothing old is folded away.
+    /// The `ResponseMessageVariant.variantId` of the attempt that started this task, so a Redo's reports can be told apart.
+    /// Nil on older rows, read as the current attempt.
     var variantID: UUID? = nil
 
     /// Small enough that a handful of tasks cannot bloat the message blob, large enough to carry a
@@ -260,12 +196,9 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     /// can differentiate model-authored prose from system narration.
     case reasoning(id: UUID, text: String)
     case toolExecution(ToolExecutionData)
-    /// A `batch_command(background:)` task, which OUTLIVES the tool call that started it.
-    ///
-    /// ⚠️ Deliberately NOT a `toolExecution` with `isExecuting: true`. That flag means "the ReAct
-    /// loop is blocked here", and every consumer reads it that way — `ActiveStreamManager` finds
-    /// the live entry BY it. A background task's tool call has already returned; the task is what
-    /// is still running. Overloading the flag would make the loop look stuck on a finished call.
+    // Why: not a `toolExecution` with `isExecuting: true`: that flag means the ReAct loop is blocked there, and
+    // consumers read it so.
+    /// A `batch_command(background:)` task, which outlives the tool call that started it.
     case backgroundTask(BackgroundTaskData)
     case mediaGeneration(id: UUID, toolName: String, artifact: MediaArtifact?, isComplete: Bool)
 
@@ -275,25 +208,18 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     // System-level recoverable warnings (rate limits, memory pressure, parse retries, etc.)
     case warning(id: UUID, category: WarningCategory, text: String)
 
-    /// A Plan & Execute run rendered as one structured card: the step list with live
-    /// statuses, each step holding ITS OWN nested timeline (reasoning + tool rows).
-    /// Replaces the flat planGenerated/subtaskStarted/subtaskCompleted milestone chips
-    /// for chat/code agent runs. Updated in place by `CapabilityCardRouter`.
+    /// A Plan & Execute run rendered as one structured card: the step list with live statuses, each step holding its own
+    /// nested timeline (reasoning + tool rows). Updated in place by `CapabilityCardRouter`.
     case planExecution(PlanRunData)
 
     /// A Reflexion run rendered as one structured card: attempts with verdicts and the
     /// evaluator's critique, each attempt holding its own nested timeline.
     case reflectionRun(ReflectionRunData)
 
-    /// An event THIS build cannot model, held verbatim so re-encoding preserves it.
-    ///
-    /// Two things produce one: a case a NEWER build introduced, and a known case whose payload
-    /// changed shape (a new required field, a widened type, a new nested enum `rawValue`). Before
-    /// this existed, either one threw and the ENTIRE array was lost — one unreadable event deleted
-    /// the whole run's timeline.
-    ///
-    /// ⚠️ `id` is derived from the payload, NOT freshly generated: SwiftUI's `ForEach` keys off it,
-    /// so a new UUID per decode would churn the list on every reload.
+    // Why: `id` is derived from the payload, not freshly generated: SwiftUI's ForEach keys off it and a new UUID
+    // would churn the list.
+    /// An event this build cannot model, held verbatim so re-encoding preserves it. Produced by a case a newer build
+    /// introduced or a known case whose payload changed shape.
     case unknown(id: UUID, caseName: String, payload: PreservedJSON)
 
     var id: UUID {
@@ -311,11 +237,9 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
         }
     }
 
+    // Why: not folded into `isCapabilityCard`: cards are never evicted, so all-unknown timelines would breach the
+    // cap; see `evictOverflow`.
     /// True for an event written by a newer build that this one is preserving verbatim.
-    ///
-    /// ⚠️ Deliberately NOT folded into `isCapabilityCard`. A card is protected absolutely, so a
-    /// timeline made entirely of unknowns would never evict and would breach `maxTimelineEvents`.
-    /// This is a THIRD eviction tier instead — see `evictOverflow`.
     var isUnknown: Bool {
         if case .unknown = self { return true }
         return false
@@ -326,20 +250,15 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     var isCapabilityCard: Bool {
         switch self {
         case .planExecution, .reflectionRun: return true
-        // A background task's row is the ONLY record of a live process: its id, its log path, and
-        // the handle the UI polls. Evicting it while the task runs leaves a process nothing can
-        // name. Safe to protect absolutely because there are a handful per conversation, not
-        // hundreds — unlike the narrative events this cap exists to bound.
+        // A background task's row is the only record of a live process (id, log path, UI handle), so it is never evicted;
+        // safe because there are only a handful per conversation.
         case .backgroundTask: return true
         default: return false
         }
     }
 
-    /// Depth-first flattening: self plus every event nested inside capability cards
-    /// (plan steps, reflection attempts — including a plan card nested in an attempt
-    /// when both capabilities are stacked). Consumers that semantically want "every
-    /// tool / thought that happened in this run" (episodic memory, native-history
-    /// rebuild, resume reconstruction) iterate this instead of the raw array.
+    /// Depth-first flattening: self plus every event nested inside capability cards (plan steps, reflection attempts).
+    /// Consumers that want every tool/thought in a run (episodic memory, history rebuild, resume) iterate this.
     var flattenedIncludingNested: [TimelineEvent] {
         switch self {
         case .planExecution(let data):
@@ -353,29 +272,8 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
 }
 
 // MARK: - TimelineEvent Codable (forward-compatible)
-//
-// ⚠️ WHY THIS IS HAND-WRITTEN, AND WHY IT MIRRORS RATHER THAN REPLACES.
-//
-// The synthesized codec threw on any element it could not model, and because that throw propagates
-// out of the ARRAY decode, a single unreadable event destroyed the whole run's timeline. Worse, the
-// empty result was then written back over the blob, so the loss became permanent on the next save.
-//
-// The fix is a catch-all case. But hand-writing `CodingKeys` for all 8 cases — including the `_0`
-// key Swift uses for a single UNLABELED associated value — would risk my keys silently diverging
-// from the shape ALREADY ON DISK. So instead `KnownTimelineEvent` mirrors the original 8 cases
-// exactly and keeps its SYNTHESIZED conformance: the wire format is therefore unchanged by
-// construction, not by my care, and the two mapping switches below are exhaustive so the compiler
-// catches any case added later.
-//
-// ⚠️ THE FALLBACK IS TOTAL, not "unrecognised case name only". Measured across 10 corruption
-// classes: a total fallback recovers 10/10 with an exact round-trip, while keying on an unknown
-// case name alone still loses the ENTIRE array in 4/10 — a new nested enum `rawValue`, a widened
-// field type, a malformed UUID, or a new required field all fail INSIDE a case that is perfectly
-// recognisable by name.
-//
-// Because this lives in `TimelineEvent.init(from:)`, it applies at EVERY nesting depth for free —
-// including events inside `PlanStepData.events` and `ReflectionAttemptData.events`, where most of a
-// real run's events actually live.
+// Hand-written codec that mirrors the synthesized one: `KnownTimelineEvent` keeps the original cases' synthesized
+// conformance, so the wire format is unchanged; a total fallback preserves anything unreadable as `.unknown`.
 
 /// The eight cases as they were before `.unknown`, with their conformance still synthesized.
 /// Exists only to pin the on-disk wire format; never stored, never surfaced.
@@ -410,9 +308,7 @@ extension TimelineEvent {
             case .reflectionRun(let data):          self = .reflectionRun(data)
             }
         } catch {
-            // Preserve rather than throw. If even this fails the value is not JSON at all, and the
-            // error propagates to the array decode — which `ChatMessageSD.toChatMessage` reports as
-            // a total failure and the write-refusal guard then protects.
+            // Preserve rather than throw; if even this fails the value is not JSON, and the error propagates to the array decode.
             let payload = try PreservedJSON(from: decoder)
             let entry = payload.singleKeyEntry
             self = .unknown(
@@ -452,13 +348,9 @@ extension TimelineEvent {
 
 // MARK: - Capability Card Data (Plan & Execute)
 
-/// Live status of one plan step — the UI vocabulary for `PlanStepData`.
-/// (Distinct from `SubTaskStatus`, which belongs to the planner's own model.)
-/// ⚠️ Hand-written `RawRepresentable` so an unrecognised status is PRESERVED, not rejected.
-/// An unknown value here used to fail `PlanStepData`, which failed `PlanRunData`, which made the
-/// WHOLE capability card opaque — taking every nested tool call out of `flattenedTimelineEvents`
-/// and disqualifying the run from resuming. Stdlib gives byte-identical Codable and rawValue-based
-/// equality, so no call site changes.
+/// Live status of one plan step, the UI vocabulary for `PlanStepData` (distinct from the planner's `SubTaskStatus`).
+/// Hand-written `RawRepresentable` so an unrecognised status is preserved, not rejected; Codable and equality are
+/// rawValue-based.
 enum PlanStepStatus: RawRepresentable, Codable, Equatable, Sendable {
     case pending, running, completed
     /// Ended early but usable (inner run finished `.completedWithWarnings`, e.g. circuit-breaker abort).
@@ -558,17 +450,14 @@ struct PlanRunData: Codable, Equatable, Identifiable {
         self.finishedAt = finishedAt
     }
 
-    /// ⚠️ `.other` is deliberately NOT counted. An unrecognised status might be a new terminal
-    /// state or a new in-flight one; counting it as completed would overstate what actually
-    /// finished, which is the more misleading of the two errors.
+    /// Number of steps that finished successfully; `.other` is deliberately not counted, since counting it would
+    /// overstate progress.
     var completedCount: Int {
         steps.filter { $0.status == .completed || $0.status == .warning }.count
     }
 
-    /// ⚠️ `.other` IS counted as degraded. This build cannot verify the step succeeded, and the
-    /// point of the indicator is "do not take this run's output at face value" — which is exactly
-    /// the situation. Left to fall through silently, an unreadable status would have rendered as a
-    /// clean run.
+    /// True when any step warned, failed, or has an unrecognised status; `.other` counts as degraded because it cannot be
+    /// verified.
     var hasDegradedSteps: Bool {
         steps.contains { $0.status == .warning || $0.status == .failed || $0.status.isUnrecognised }
     }
@@ -576,8 +465,7 @@ struct PlanRunData: Codable, Equatable, Identifiable {
 
 // MARK: - Capability Card Data (Reflexion)
 
-/// ⚠️ Hand-written `RawRepresentable` — same reasoning as `PlanStepStatus`: an unknown value made
-/// the entire Reflexion card opaque, hiding every nested tool call from resume and episodic memory.
+/// Hand-written `RawRepresentable` so an unrecognised attempt status is preserved, not rejected (as `PlanStepStatus`).
 enum ReflectionAttemptStatus: RawRepresentable, Codable, Equatable, Sendable {
     case running
     case evaluating
@@ -670,14 +558,8 @@ struct ReflectionRunData: Codable, Equatable, Identifiable {
     }
 }
 
-/// Describes the type of capability milestone for timeline rendering.
-/// ⚠️ Hand-written `RawRepresentable` so an unrecognised milestone is PRESERVED, not rejected.
-/// This one degrades gracefully: the row renders `detail` (a plain String), so an unknown kind
-/// still shows a fully readable chip — only the icon and tint are generic.
-///
-/// Worth hardening despite that, because the stream vocabulary is already richer than this enum
-/// (`ActiveStreamManager` folds `.planApproved`/`.requestPlanReview` onto `.planGenerated`), so a
-/// faithful new case here is a near-term likelihood rather than a hypothetical.
+/// Describes the type of capability milestone for timeline rendering. Hand-written `RawRepresentable` so an
+/// unrecognised milestone is preserved; the row still renders `detail` with a generic icon.
 enum CapabilityMilestoneKind: RawRepresentable, Codable, Equatable, Sendable {
     // Planning
     case planGenerated          // "Planned 3 subtasks"
@@ -784,12 +666,9 @@ enum CapabilityMilestoneKind: RawRepresentable, Codable, Equatable, Sendable {
     }
 }
 
-/// Lifecycle / persistence state of a message. For agent messages this distinguishes a
-/// fully-finished run from one that was still `.streaming` or `.parkedHITL` (awaiting the
-/// user) when the row was last written. After an unexpected restart, a persisted non-`.final`
-/// state is the durable "this run was interrupted" marker — and `.parkedHITL` additionally
-/// carries the operationID needed to later resume it (G1 Piece 2). Defaults to `.final` so
-/// every legacy row and user message reads as completre.
+/// Lifecycle/persistence state of a message: `.final`, or `.streaming`/`.parkedHITL` when the row was last written
+/// mid-run, which marks an interrupted run after a restart; `.parkedHITL` carries the operationID needed to resume.
+/// Defaults to `.final`.
 enum MessageLifecycleState: Codable, Equatable, Sendable {
     case final
     case streaming
@@ -804,7 +683,7 @@ enum MessageLifecycleState: Codable, Equatable, Sendable {
         }
     }
 
-    /// The parked HITL operationID, if any — the message↔HITL join key used to resume.
+    /// The parked HITL operation id, if any; the join key between a message and its pending HITL request, for resuming.
     var parkedOperationID: UUID? {
         if case .parkedHITL(let id) = self { return id }
         return nil
@@ -834,89 +713,42 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     let timestamp: Date
     let sender: SenderRole
     
-    /// The distributed trace ID for the request that produced this message.
-    /// Set when agent execution begins; used to retrieve trace data for the Report UI.
+    /// The distributed trace ID for the request that produced this message; looks up trace data for the Report UI.
     var traceID: String?
 
     /// The profile type that generated this message (bot, agent, workflow, imageGen).
     /// Tagged at creation time by ActiveStreamManager — eliminates runtime profile store lookups.
     var profileType: ProfileType?
 
-    /// Where this message originated from (local Mac UI, Telegram, Discord, Orb, QuickAccess,
-    /// a scheduled task, a finished background task).
-    ///
-    /// ⚠️ DURABLE AS OF 2026-09-23 — `messageSourceRaw` on `ChatMessageSD`, restored by
-    /// `toChatMessage()`. This comment previously said the opposite ("TRANSIENT — no column …
-    /// do not add a claim here that survives a relaunch") and that was correct for what the
-    /// field was then: nothing but log interpolation read it, so persisting it would have been
-    /// storage nobody spent. The column was added deliberately when the UI began to branch on
-    /// it — an unprompted `.backgroundTask` report renders differently from a typed reply, and a
-    /// difference that evaporates on relaunch is worse than no difference at all, because the
-    /// same message changes appearance depending on when you look at it.
-    ///
-    /// ⚠️ Rows written before the column decode as `.localUI`, which is the pre-existing
-    /// behaviour and the only honest answer — those rows never recorded a source.
-    ///
-    /// ⚠️ It is NOT the same question as `sender`. `sender` is who spoke; a woken report is
-    /// genuinely `.agent`, written by the agent from the conversation's own profile. This says
-    /// what CAUSED the turn, which is why the two must not be collapsed — see `SenderRole`.
-    ///
-    /// Readers: two log interpolations in `ActiveStreamManager` (`[HISTORY]`, `[STREAM_START]`),
-    /// `OrbAmbientRunWatcher` (whether to announce a finished run), and — since the column —
-    /// `AgentMessageActionsView` and the timeline divider.
+    /// Where this message originated (local Mac UI, Telegram, Discord, Orb, QuickAccess, a scheduled task, a finished
+    /// background task). Persisted via `messageSourceRaw`; rows without it decode as `.localUI`. Distinct from `sender`:
+    /// this is what caused the turn.
     var messageSource: MessageSource = .localUI
 
-    /// Machine-authored scaffolding: a turn nobody typed, written so the exchange PAIRS.
-    ///
-    /// ⚠️⚠️ THIS EXISTS BECAUSE AN UNPAIRED ASSISTANT MESSAGE IS SILENTLY DISCARDED. Both
-    /// `NativeHistoryConverter.buildPairs` and `EpisodicHistoryFormatter.pairTurns` walk the
-    /// history as `user → agent` couples, binding `pendingUser` on a user row and consuming it
-    /// on the next agent row. An agent row with no user row in front of it fails the
-    /// `let userTurn = pendingUser` binding and is dropped — no warning, no log.
-    ///
-    /// A woken background-task report was exactly that shape: `BackgroundTaskWakeCoordinator`
-    /// built a user message and handed it to `startMessageStream` WITHOUT persisting it, so the
-    /// store held `user, agent, agent(orphan), user…` and every report the agent delivered was
-    /// gone from its own history by the next turn. The agent told the user a build had finished
-    /// and then had no record of having said so.
-    ///
-    /// The stub closes that. It is deliberately SHORT — unlike the wake prompt it replaces, it
-    /// is carried in the prompt on every subsequent turn, so the ~1KB of raw task output the
-    /// wake sends this turn (via `promptOverride`) must not be what persists. What persists is
-    /// the stub plus the model's report; the report IS the compression.
-    ///
-    /// ⚠️ NOT a hidden row. It renders as a centered system divider — see
-    /// `BackgroundTaskDividerView`. A store that holds a message the screen denies is a
-    /// divergence nobody can reason about later; the divider is the honest form of the same
-    /// information, and it carries the authoritative status (id, exit code) read from the
-    /// snapshot rather than from the model's prose, which a small local model can get wrong.
+    // Why: an unpaired assistant message is silently dropped by history pairing (`NativeHistoryConverter`,
+    // `EpisodicHistoryFormatter`); keep the stub short: it rides in every later prompt.
+    /// Machine-authored scaffolding: a turn nobody typed, written so the exchange pairs (e.g. a woken background-task
+    /// report). Rendered as a centered system divider (see `BackgroundTaskDividerView`), not hidden.
     var isSyntheticPrompt: Bool = false
     
     var content: MessageContent
     var agentResponse: AgentResponse?
     var isStreaming: Bool = false
 
-    /// Terminal outcome of the agent run that produced this message. `nil` while streaming
-    /// or for legacy rows that predate this field. Set by `ActiveStreamManager` when it
-    /// receives an `.executionFinished` stream event. Drives the "response may be incomplete"
-    /// indicator in the bubble so users can distinguish a proper answer from a best-effort
-    /// synthesis produced after circuit-breaker abort / iteration exhaustion / cancellation.
+    /// Terminal outcome of the agent run that produced this message; nil while streaming or for older rows.
+    /// Drives the 'response may be incomplete' indicator in the bubble.
     var terminalOutcome: ExecutionOutcome? = nil
 
     /// Optional human-readable reason accompanying `terminalOutcome`. Same nil semantics.
     var terminalReason: String? = nil
 
     // MARK: - Lifecycle / Run Identity (G1 Piece 1 — in-flight persistence)
-    /// `.streaming` while a run is in flight, `.parkedHITL(operationID:)` while it awaits the
-    /// user, `.final` once finished. Persisted (split into `lifecycleStateRaw` + `parkedOperationID`
-    /// columns) so an interrupted run is distinguishable from a finished one after restart and the
-    /// parked operationID survives. Defaults to `.final`.
+    /// `.streaming` while a run is in flight, `.parkedHITL(operationID:)` while it awaits the user, `.final` once finished.
+    /// Persisted so an interrupted run is distinguishable after restart. Defaults to `.final`.
     var lifecycleState: MessageLifecycleState = .final
 
-    /// The provider/model/dialect that actually produced this message, captured immutably at run
-    /// start. `apiProvider`/`modelDialect` are the resume-safety guard (detect a model switch
-    /// between park and resume); all three give the UI an honest "which model ran" label even after
-    /// the originating profile is later edited. Nil for legacy rows / user messages.
+    /// The provider/model/dialect that actually produced this message, captured at run start.
+    /// `apiProvider`/`modelDialect` guard resume against a model switch; nil for older rows and user messages.
     var apiProvider: String? = nil
     var modelName: String? = nil
     var modelDialect: String? = nil
@@ -924,11 +756,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     // MARK: - Glass Box UI State (Gemini-Style)
     // These properties store the intermediate reasoning and tool outputs.
     // These properties derive chronological reasoning steps and tool outputs from timelineEvents.
-    /// Unified thought stream used by the compact `ThinkingDynamicIsland`. Includes
-    /// both `.thought` (system narration / extended thinking) and `.reasoning` (model
-    /// monologue) so the expanded island shows the full cognitive trail regardless
-    /// of source. Analytics and scratchpad paths can still distinguish the two by
-    /// reading `timelineEvents` directly.
+    /// Unified thought stream used by the compact `ThinkingDynamicIsland`: both `.thought` (system narration) and
+    /// `.reasoning` (model monologue). Callers that must tell them apart read `timelineEvents` directly.
     var thoughts: [AgentThought] {
         flattenedTimelineEvents.compactMap { event in
             switch event {
@@ -942,20 +771,14 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         }
     }
 
-    /// The timeline with capability-card sub-timelines flattened in (depth-first, cards
-    /// included as markers). Plan & Execute / Reflexion runs nest their per-step and
-    /// per-attempt events inside `.planExecution` / `.reflectionRun` — consumers that
-    /// want "everything that happened" (episodic memory, native-history rebuild, resume
-    /// reconstruction, tool scans) iterate this instead of `timelineEvents`.
+    /// The timeline with capability-card sub-timelines flattened in (depth-first, cards included as markers).
+    /// Consumers that want everything that happened (episodic memory, history rebuild, resume, tool scans) iterate this.
     var flattenedTimelineEvents: [TimelineEvent] {
         timelineEvents.flatMap(\.flattenedIncludingNested)
     }
 
-    /// The most recent COMPLETED image artifact anywhere in the timeline (including
-    /// nested capability-card sub-timelines). An image generation surfaces its result
-    /// ONLY as a `.mediaGeneration` event — nothing sets it as message content — so
-    /// without promoting it the bubble falls through to the "stopped" placeholder and
-    /// the image is invisible. `resolveFinalizedContent` uses this at finalize.
+    /// The most recent completed image artifact anywhere in the timeline, including nested card timelines.
+    /// An image generation surfaces its result only as a `.mediaGeneration` event, so finalizing promotes it to content.
     var lastCompletedImageArtifact: MediaArtifact? {
         for event in flattenedTimelineEvents.reversed() {
             if case .mediaGeneration(_, _, let artifact?, let isComplete) = event,
@@ -966,12 +789,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         return nil
     }
 
-    /// Resolves the content a finalized (non-throwing) run should display. Prefers the
-    /// streamed text; failing that, a produced image artifact (image generations stream
-    /// no text, so without this they fell through to the placeholder and the image never
-    /// rendered — audit gap #2); failing that, a "stopped" placeholder so an empty run
-    /// doesn't masquerade as a clean completion. Pure + static for testability — the
-    /// finalize path (ActiveStreamManager) and `GeneratedImageRenderGapTests` share it.
+    /// Resolves the content a finalized run displays: the streamed text, else a produced image artifact, else a 'stopped'
+    /// placeholder. Pure and static so the finalize path and tests share it.
     static func resolveFinalizedContent(streamed: MessageContent?, imageArtifact: MediaArtifact?) -> MessageContent {
         if let streamed, let text = streamed.textContent,
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -983,48 +802,28 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         return .markdownText(Self.stoppedRunPlaceholder)
     }
 
-    /// Synthetic placeholder written when a run ends with no content (cancelled or
-    /// empty). Deliberately unlocalized — persisted, and other layers classify by it.
+    /// Synthetic placeholder written when a run ends with no content; deliberately unlocalized because it is persisted
+    /// and classified by.
     static let stoppedRunPlaceholder = "*Operation was stopped before a response could be generated.*"
 
-    /// True when `text` IS a synthetic stopped-run placeholder (exact match after
-    /// trimming — a message that merely QUOTES the phrase inside real prose is real
-    /// content and must not be treated as synthetic). Used by the RAG gate so
-    /// placeholders stop polluting conversation memory (observed on-device
-    /// 2026-07-19: a cancelled run's placeholder was embedded and stored).
+    /// True when `text` is a synthetic stopped-run placeholder (exact match after trimming; a message that merely quotes
+    /// the phrase is real content). Used by the RAG gate to keep placeholders out of conversation memory.
     static func isSyntheticPlaceholder(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed == stoppedRunPlaceholder
     }
 
-    /// Merges an incoming streamed text chunk into the current content. Returns the
-    /// new content plus (optionally) a timeline event the caller must append, or
-    /// `nil` when the chunk can't merge and content should stay untouched (e.g.
-    /// `.mediaArtifact` — the parked media+text decision). Pure + static for
-    /// testability, same pattern as `resolveFinalizedContent`; the streaming path
-    /// (`ActiveStreamManager.updateMessageContent`) and `StreamedChunkMergeTests`
-    /// share it.
-    /// What the bubble shows while a `.draftText` preview is live: the pre-draft content with the
-    /// draft after it, by the same rule a streamed chunk follows — except that a pre-draft `.error`
-    /// card is shown as the draft alone and is NOT demoted (the draft may be withdrawn; the real
-    /// `.content` does the demotion when it arrives).
+    /// What the bubble shows while a `.draftText` preview is live: the pre-draft content with the draft after it, by the
+    /// rule a streamed chunk follows, except that a pre-draft `.error` card is shown as the draft alone and is not
+    /// demoted until the real `.content` arrives.
     static func draftDisplayContent(baseline: MessageContent, draft: String) -> MessageContent {
         resolveStreamedChunkMerge(current: baseline, chunk: draft)?.content ?? .markdownText(draft)
     }
 
     static func resolveStreamedChunkMerge(current: MessageContent, chunk: String) -> (content: MessageContent, demotedError: TimelineEvent?)? {
         if case .error(let title, let details, _, let suggestion) = current {
-            // [ASM-1] A mid-run `.error` replaced content with the structured card,
-            // but the producer survived it and streamed prose afterwards (a workflow
-            // where one node fails and a terminal node succeeds; a planning run
-            // where a subtask fails and the loop continues). Appending onto the
-            // card's textContent laundered the failure into the answer's opening
-            // words — "Execution Failed: Connection refusedHere is the summary…" —
-            // destroying the category icon + suggestion, and that merged string is
-            // what got persisted and RAG-indexed. Start the answer fresh and demote
-            // the error to a timeline warning so the failure stays discoverable.
-            // ("Error" fallback matches `textContent`'s — deliberately unlocalized,
-            // the string persists and feeds RAG.)
+            // A mid-run `.error` card is not appended onto: the answer starts fresh and the error is demoted to a timeline warning,
+            // so the failure stays discoverable and is not merged into the answer text that is persisted and RAG-indexed.
             let headline = "\(title ?? "Error"): \(details)"
             let demoted = TimelineEvent.warning(
                 id: UUID(),
@@ -1037,13 +836,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         return (content: .markdownText(currentText + chunk), demotedError: nil)
     }
 
-    /// [ASM-2] Content for a run that ended in a THROW after possibly streaming prose.
-    /// The old chokepoint replaced everything the user watched stream with the error
-    /// card — bubble, persistence, and the RAG index all lost the partial answer. When
-    /// real prose exists it stays as content and the error demotes to a timeline
-    /// warning; the failure remains loud via the `.failed` chip + the retry affordance.
-    /// A streamed error card is NOT prose (its `textContent` is the error string), and
-    /// media has no text to keep — both fall back to card-replaces, today's behavior.
+    /// Content for a run that ended in a throw after possibly streaming prose: real prose stays as content and the error
+    /// demotes to a timeline warning; an error card or media has no prose to keep, so the card replaces it.
     static func resolveThrownFinalContent(streamed: MessageContent?, errorCard: MessageContent) -> (content: MessageContent, demotedError: TimelineEvent?) {
         guard let streamed else { return (errorCard, nil) }
         if case .error = streamed { return (errorCard, nil) }
@@ -1061,11 +855,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         return (streamed, demoted)
     }
 
-    /// [ASM-4] Terminal outcome for a run whose producer never emitted
-    /// `.executionFinished`. The old fallback keyed only on "did a throw reach
-    /// finalize" — a producer that yielded a structured `.error` event and then ended
-    /// cleanly was stamped `.completed`: a green chip and a `completed` trace status
-    /// sitting on top of an error card.
+    /// Terminal outcome for a run whose producer never emitted `.executionFinished`; a structured `.error` content is not
+    /// `.completed`.
     static func resolveFallbackOutcome(threwError: Error?, content: MessageContent) -> (outcome: ExecutionOutcome, reason: String?) {
         if let threwError {
             return (.failed, threwError.localizedDescription)
@@ -1080,17 +871,9 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// guard below share this — they had drifted into two literal `5`s).
     static let maxGenerationAttempts = 5
 
-    /// [P0 crash fix 2026-07-19] Prepares this message for a regeneration attempt in
-    /// ONE write access: appends the fresh variant, selects it, bumps the attempt
-    /// count, flips `isStreaming`. Returns `false` (no mutation) at the attempt cap
-    /// or when the message has no response to regenerate.
-    ///
-    /// The coordinator previously did this inline as three optional-chained writes,
-    /// one of which READ `agentResponse` on the RHS while the LHS held the `modify`
-    /// access — under `@Observable` that is a FATAL Swift exclusivity trap
-    /// ("Simultaneous accesses…"), reproduced on-device from the Retry button.
-    /// Same crash class the test suite documented earlier: capture a value copy,
-    /// mutate it, write back once.
+    // Why: a single write: reading `agentResponse` while a `modify` access is open is an exclusivity trap under @Observable.
+    /// Prepares this message for a regeneration attempt in one write access: appends the fresh variant, selects it, bumps the
+    /// attempt count, flips `isStreaming`. Returns `false` (no mutation) at the attempt cap or when there is no response.
     @discardableResult
     func beginRegenerationVariant(backendEntityId: UUID?) -> Bool {
         guard var response = agentResponse, response.generationAttempts < Self.maxGenerationAttempts else {
@@ -1104,39 +887,22 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         return true
     }
 
-    /// [TL-1] Closes tool rows still marked executing at end-of-run — a cancel or failure
-    /// mid-tool used to leave the row's spinner running forever, and it PERSISTED that way.
-    ///
-    /// Walks NESTED card rows too. The earlier version iterated only `timelineEvents` and
-    /// documented nested rows as "closed separately by
-    /// `CapabilityCardRouter.handleExecutionFinished`" — that was not true: the router closes
-    /// step and attempt STATUSES and never touches a nested `ToolExecutionData.isExecuting`.
-    /// With Plan & Execute or Reflexion on (most agent runs) tool rows live nested rather than
-    /// top-level, so the common case was the uncovered one: a stop mid-tool closed nothing,
-    /// logged nothing, and persisted a row that renders an animating spinner forever, with no
-    /// output, no failure badge and no way to expand it (`isDisclosable` requires
-    /// `!isExecuting`). `sanitizeCapabilityCardsForResume` does reach nested rows but runs only
-    /// on the resume path, and REMOVES them rather than closing them.
-    ///
-    /// Returns how many were closed so the caller can log the repair.
+    /// Closes tool rows still marked executing at end of run, including rows nested in capability cards, so a cancel or
+    /// failure mid-tool does not leave a spinner running forever. Returns how many were closed.
     @discardableResult
     func closeDanglingToolRows(outcome: ExecutionOutcome?) -> Int {
         DanglingToolRowCloser.close(&timelineEvents, outcome: outcome)
     }
 
-    /// `closeDanglingToolRows`, returning the rows it settled so the caller can react to WHICH
-    /// tools were abandoned. Used by [CF-9] to post the `AgentLiveWriteEvent.completed` that a
-    /// cancelled or thrown run never emits, which is what left a live Code Viewer tab stuck
-    /// showing "Agent is writing this file" for the rest of the session.
+    /// `closeDanglingToolRows`, returning the rows it settled so the caller can post the live-write completion
+    /// that a cancelled or thrown run never emits.
     @discardableResult
     func closeDanglingToolRowsReporting(outcome: ExecutionOutcome?) -> [DanglingToolRowCloser.ClosedRow] {
         DanglingToolRowCloser.closeReporting(&timelineEvents, outcome: outcome)
     }
 
-    /// [G1 resume] Prepares persisted capability cards for a resumed run: drops dangling
-    /// (still-executing / output-less) tool rows inside nested step/attempt timelines and
-    /// closes any card the interruption left unfinished — the resumed continuation streams
-    /// NEW top-level events, never back into the old card, so an open card would spin forever.
+    /// Prepares persisted capability cards for a resumed run: drops dangling tool rows in nested timelines and closes any
+    /// unfinished card, since the continuation streams new top-level events and an open card would spin forever.
     func sanitizeCapabilityCardsForResume() {
         func isDangling(_ event: TimelineEvent) -> Bool {
             if case .toolExecution(let data) = event { return data.isExecuting || data.output == nil }
@@ -1178,132 +944,71 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         }
     }
 
-    /// Chronological timeline of agent reasoning steps, tool executions, and capability milestones.
-    /// Ordering is guaranteed by @MainActor serialization in ActiveStreamManager's event loop.
-    /// SwiftUI ForEach preserves insertion order via unique UUID identities.
-    /// Capped at `maxTimelineEvents` to prevent unbounded memory growth in long-running agents.
+    /// Chronological timeline of reasoning steps, tool executions, and capability milestones, in event-loop order.
+    /// Capped at `maxTimelineEvents` to bound memory in long-running agents.
     static let maxTimelineEvents = 500
 
     var timelineEvents: [TimelineEvent] = [] {
         didSet { timelineRevision &+= 1 }
     }
 
-    /// True when this message was loaded from a store whose `timelineEventsData` could not be
-    /// decoded, so `timelineEvents` is EMPTY BY FAILURE rather than because the run had no events.
-    ///
-    /// ⚠️ This flag is the only thing standing between a read failure and permanent data loss.
-    /// Both persistence writers null the blob whenever the in-memory timeline is empty
-    /// (`ChatMessageSD.from` and `ChatPersistenceStore.addMessages`), so without it the sequence is:
-    /// load an undecodable blob → `timelineEvents == []` → the next flush writes nil → the original
-    /// bytes are gone. The `timelineRevision` skip-cache is NOT a safety net: the revision is seeded
-    /// randomly per instance, so a freshly-loaded message always looks changed and the very first
-    /// flush takes the write branch.
-    ///
-    /// ⚠️ It lives on the VALUE object, not as a `@Transient` on `ChatMessageSD`, because the
-    /// decode happens on one fetched instance while the write happens after a SEPARATE fetch — a
-    /// model-side flag would silently reset to false in between and the destructive write would
-    /// proceed. This value flows to both writers by construction.
-    ///
-    /// Deliberately excluded from `CodingKeys` and from `==`: it describes THIS LOAD, not the
-    /// message, and two messages differing only by a failed read are the same message.
+    // Why: both writers null the blob when the timeline is empty, so a failed read would erase the original bytes;
+    // it lives on the value object so it reaches both writers across separate fetches.
+    /// True when `timelineEventsData` could not be decoded, so `timelineEvents` is empty by failure, not because the run
+    /// had no events. Excluded from `CodingKeys` and `==`: it describes this load, not the message.
     @ObservationIgnored var timelineDecodeFailed: Bool = false
 
-    /// The placeholder issued when `contentData` could not be decoded at all, or nil if it decoded.
-    ///
-    /// ⚠️ `contentData` IS the conversation, so this is the most consequential of the write guards.
-    /// A genuinely corrupt blob yields a "Decode Error" card, and BOTH writers used to re-encode
-    /// that card straight over the original bytes — so a message that might have been recoverable
-    /// by a later build became permanently a Decode Error card instead.
-    ///
-    /// Stores the placeholder rather than a bare Bool so the setter can tell an opportunistic save
-    /// (handing the same card back) from a deliberate replacement, matching the `BackendProfile`
-    /// rule. Load-scoped, like `timelineDecodeFailed`, and excluded from `CodingKeys` and `==`.
-    ///
-    /// Note this is for CORRUPT bytes only. Readable JSON of an unknown shape now decodes to
-    /// `MessageContent.unknown` and needs no guard — it is preserved by the codec itself.
+    // Why: `contentData` is the conversation: re-encoding the Decode Error card over corrupt bytes would make them
+    // unrecoverable.
+    /// The placeholder issued when `contentData` could not be decoded at all, or nil if it decoded. Load-scoped and
+    /// excluded from `CodingKeys` and `==`; readable JSON of an unknown shape decodes to `MessageContent.unknown`
+    /// instead.
     @ObservationIgnored var undecodableContentPlaceholder: MessageContent?
 
-    /// Set when `agentResponseData` could not be decoded on this load.
-    ///
-    /// ⚠️ The third column of this kind, and the one that was missed. `contentData` and
-    /// `timelineEventsData` both got a write refusal; `agentResponseData` did not, even though its
-    /// decode-failure path sets `agentResponse = nil` — and nil is exactly what the writers persist.
-    /// So a response blob this build cannot read (variants written by a newer build, or genuine
-    /// corruption) was turned into NULL the first time the message was re-persisted, which happens
-    /// on any resume or in-flight flush of the enclosing conversation.
-    ///
-    /// Load-scoped and on the VALUE object for the same reason as `timelineDecodeFailed`, and
-    /// likewise excluded from `CodingKeys` and `==`.
+    // Why: the failed decode leaves `agentResponse` nil, which the writers would persist over the unreadable blob.
+    /// Set when `agentResponseData` could not be decoded on this load; load-scoped and excluded from `CodingKeys` and `==`.
     @ObservationIgnored var agentResponseDecodeFailed: Bool = false
 
-    /// Set when `tokenUsageData` could not be decoded on this load.
-    ///
-    /// ⚠️ READINESS CR-63 (2026-10-12). The fourth column of this kind, and the last one missed: a
-    /// failed decode leaves `tokenUsage == nil`, and both writers persist nil, so the first
-    /// re-persist of the message (the history reconcile write-back, a resume, an in-flight flush)
-    /// erased the stored usage and cost for good. Load-scoped, on the VALUE object, and excluded
-    /// from `CodingKeys` and `==`, for the same reasons as `timelineDecodeFailed`.
+    // Why: the failed decode leaves `tokenUsage` nil, which the writers would persist over the stored usage and cost.
+    /// Set when `tokenUsageData` could not be decoded on this load; load-scoped and excluded from `CodingKeys` and `==`.
     @ObservationIgnored var tokenUsageDecodeFailed: Bool = false
 
     /// Whether it is safe to persist `content` over the stored blob.
-    ///
-    /// False only in the exact case that loses data: the decode failed AND the caller is handing
-    /// back the very placeholder we issued. Anything else — a live agent writing real content, a
-    /// deliberate replacement — writes normally, so a message never becomes permanently stuck.
+    /// False only when the decode failed and the caller is handing back the very placeholder that was issued.
     var canPersistContent: Bool {
         guard let placeholder = undecodableContentPlaceholder else { return true }
         return (currentAgentContent ?? content) != placeholder
     }
 
-    /// Whether it is safe to persist `agentResponse` over the stored blob.
-    ///
-    /// Same shape as the timeline rule, and deliberately NOT the profile rule: false only when the
-    /// decode failed AND nothing has replaced it, so the caller is handing back the nil we produced.
-    /// A regeneration that appends a real variant onto a failed load still writes — the record stays
-    /// repairable rather than frozen.
+    /// Whether it is safe to persist `agentResponse` over the stored blob: false only when the decode failed and nothing has
+    /// replaced the nil it produced, so a regeneration that appends a real variant still writes.
     var canPersistAgentResponse: Bool {
         !(agentResponseDecodeFailed && agentResponse == nil)
     }
 
-    /// Whether it is safe to persist `tokenUsage` over the stored blob (CR-63). Same shape as
-    /// `canPersistAgentResponse`: false only when the decode failed AND nothing has replaced the nil
-    /// it produced, so a run that later reports real usage still writes it.
+    /// Whether it is safe to persist `tokenUsage` over the stored blob: false only when the decode failed and nothing has
+    /// replaced the nil it produced, so a run that later reports real usage still writes it.
     var canPersistTokenUsage: Bool {
         !(tokenUsageDecodeFailed && tokenUsage == nil)
     }
 
-    /// Whether it is safe to persist `timelineEvents` over the stored blob.
-    ///
-    /// False only in the exact case that loses data: the decode failed AND nothing has been appended
-    /// since, so the caller is handing back the empty placeholder. A live run that appended new
-    /// events onto a failed load IS written — matching the profile rule that a different value is a
-    /// deliberate edit, so the record stays repairable.
-    ///
-    /// ⚠️ Never gate on `timelineEvents.isEmpty` alone: every user message and every bot message
-    /// legitimately has an empty timeline and must still be able to clear its blob.
+    /// Whether it is safe to persist `timelineEvents` over the stored blob: false only when the decode failed and nothing
+    /// has been appended since. Never gate on `timelineEvents.isEmpty` alone: user and bot messages legitimately have
+    /// empty timelines.
     var canPersistTimeline: Bool {
         !(timelineDecodeFailed && timelineEvents.isEmpty)
     }
 
-    /// True when the timeline is not a faithful record of what the run actually did.
-    ///
-    /// ⚠️ Disqualifying for RESUME, which is a different bar from disqualifying for display. An
-    /// `.unknown` renders as a visible placeholder — fine for a human reading the history — but it
-    /// is invisible to `TimelineTurnReconstructor`, so a completed tool call hiding inside one makes
-    /// the model believe that tool never ran. An unrecognised CAPABILITY CARD is worse still: its
-    /// entire nested sub-timeline disappears from `flattenedTimelineEvents`.
+    /// True when the timeline is not a faithful record of what the run did. Disqualifies resume: an `.unknown` (or an
+    /// unrecognised card's nested events) is invisible to `TimelineTurnReconstructor`.
     var timelineIsDegraded: Bool {
         timelineDecodeFailed || flattenedTimelineEvents.contains(where: \.isUnknown)
     }
 
-    /// [P4/TL-4] Change marker for `timelineEvents`, bumped by `didSet` so EVERY
-    /// mutation path counts — append, eviction, in-place card updates, subscript
-    /// writes, decode-time assignment. Consumers: the persistence flush skips
-    /// re-encoding an unchanged timeline (up to 500 events, every ~2s during a
-    /// stream), and `AgentTimelineView`'s Equatable skips regrouping on unrelated
-    /// body passes. Seeded randomly per instance so two instances of the SAME
-    /// persisted message (reload, regenerate) can never alias revisions in the
-    /// store's skip cache — an aliased skip would silently drop timeline writes.
+    // Why: seeded randomly per instance so two instances of the same persisted message never alias revisions in the
+    // store's skip cache.
+    /// Change marker for `timelineEvents`, bumped by `didSet` so every mutation path counts; the persistence flush and
+    /// `AgentTimelineView` skip work on an unchanged timeline.
     @ObservationIgnored private(set) var timelineRevision: UInt64 = .random(in: UInt64.min ... UInt64.max)
 
     /// Appends a timeline event, evicting the oldest non-tool events if the cap is exceeded.
@@ -1314,14 +1019,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         Self.evictOverflow(&timelineEvents, context: "top-level")
     }
 
-    /// [TL-2/P3] The single eviction rule for ANY timeline container — the message's
-    /// top-level array AND the nested per-step / per-attempt arrays inside capability
-    /// cards (which used to bypass the cap entirely, so a runaway capability run grew
-    /// its card without bound in memory, persistence, and render). Oldest narrative
-    /// (.thought/.reasoning) goes first; then the oldest non-card event; a capability
-    /// card is never evicted — it holds whole nested sub-timelines (a plan card sits
-    /// near the start of every planned run, so plain removeFirst() would delete the
-    /// run's shape).
+    /// The single eviction rule for any timeline container, top-level or nested in capability cards: oldest narrative
+    /// (.thought/.reasoning) first, then the oldest non-card event; a capability card is never evicted.
     static func evictOverflow(_ events: inout [TimelineEvent], context: String) {
         guard events.count > maxTimelineEvents else { return }
         if let firstNarrativeIndex = events.firstIndex(where: {
@@ -1336,13 +1035,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             events.remove(at: firstEvictableIndex)
             DGLogger(category: "ChatMessage").debug("[TIMELINE] Evicted oldest non-card event (\(context), cap \(maxTimelineEvents)).")
         } else if let firstUnknownIndex = events.firstIndex(where: { $0.isUnknown }) {
-            // ⚠️ THIRD TIER, and deliberately last. An `.unknown` is neither narrative nor a
-            // recognisable card, so under the old two-tier rule it was the FIRST non-narrative
-            // victim — meaning a capability card written by a newer build would be preferentially
-            // deleted, which is the exact opposite of the card-protection rule's intent.
-            //
-            // It is not folded into `isCapabilityCard` either: a card is protected absolutely, so a
-            // timeline made entirely of unknowns would never evict at all and would breach the cap.
+            // Third tier, deliberately last: an `.unknown` may be a card written by a newer build, so it must not be the first
+            // victim, and it is not folded into `isCapabilityCard` because an all-unknown timeline would never evict.
             let dropped = events.remove(at: firstUnknownIndex)
             DGLogger(category: "ChatMessage").error(
                 "[TIMELINE] Evicted an UNRECOGNISED event (\(context), cap \(maxTimelineEvents), "
@@ -1366,37 +1060,14 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     // MARK: - RAG Indexing State
     // No longer polled; index occurs on stream completion.
 
-    // [mm-11] `tokenCountEstimate` and `estimateCodeBlockCharCount` were DELETED here on
-    // 2026-09-12. They had ZERO production readers under a doc comment claiming they existed
-    // "for UI display and cost estimation" — and the app estimates tokens in six independent
-    // inline `count / 4` sites instead, so this was redundant rather than reserved. It carried
-    // sixteen dedicated test methods across three classes, all of which went with it: tests for
-    // unreachable code cost maintenance and buy nothing.
-    //
-    // ⚠️ One fact is worth keeping out of it, because it is about the RENDERED form and not about
-    // the estimator: `.error` content ships as `"\(title ?? "Error"): \(details)"` — so anything
-    // measuring or matching an error message must account for the `": "` separator AND the
-    // "Error" default title, not just sum the raw fields. That was the one case where the deleted
-    // estimator and the shipped text had disagreed.
-    //
-    // ⚠️ It also had a latent bug never worth fixing: an UNTERMINATED ``` fence left `inBlock`
-    // true at EOF and its characters uncounted, so a streaming message undercounted. If a token
-    // estimator is ever wanted here, close that case in the same change.
+    // Rendered `.error` content ships as 'title: details' with a default title of 'Error'; anything measuring or matching
+    // an error message must account for that separator and default title.
 
     // MARK: - Performance Caching
     @ObservationIgnored var cachedMarkdownBlocks: [ContentBlock]? = nil
 
-    /// The exact text `cachedMarkdownBlocks` was parsed from — the cache's KEY.
-    ///
-    /// ⚠️ Without this the cache was keyed on nothing: `getOrCreateMarkdownBlocks(from:)`
-    /// returned whatever it held whenever it was non-nil, ignoring its own `text` argument, so
-    /// correctness depended entirely on every writer of the displayed text ALSO calling
-    /// `invalidateMarkdownCache()`. The response-variant picker
-    /// (`ChatBubbleView`, `selectedVariantIndex`) did not — and since `displayedContent`
-    /// resolves through `variants[selectedVariantIndex]`, switching versions re-rendered the
-    /// PREVIOUS variant's prose under an animation that made the switch look successful.
-    /// Keying on the text makes a stale render unrepresentable rather than a thing every new
-    /// call site has to remember.
+    /// The exact text `cachedMarkdownBlocks` was parsed from: the cache's key, so a stale render for different text
+    /// cannot be reused.
     @ObservationIgnored private var cachedMarkdownSource: String? = nil
 
     /// Test seam: the text `cachedMarkdownBlocks` was parsed from. Not read by app code — the
@@ -1404,13 +1075,9 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// the key can only observe positional block ids, which are identical across a re-parse.
     var cachedMarkdownSourceForTesting: String? { cachedMarkdownSource }
 
-    /// Incremental parser used ONLY while this message is streaming — settled
-    /// regions parse once, and each flush re-parses just the trailing block
-    /// instead of the whole accumulated text (the old full-reparse-per-flush was
-    /// O(n²) over a response, on the main thread). Dropped on the first
-    /// non-streaming access, which also forces one authoritative full re-parse
-    /// so the final rendering is exactly what `parseMarkdown` produces.
-    /// Transient — never persisted.
+    /// Incremental parser used only while this message is streaming: settled regions parse once and each flush re-parses
+    /// the trailing block. Dropped on the first non-streaming access, forcing one full authoritative re-parse. Transient,
+    /// never persisted.
     @ObservationIgnored private var streamingMarkdownParser: StreamingMarkdownParser? = nil
 
     var attachedTextFiles: [AttachedTextFile]?
@@ -1426,12 +1093,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         return response.variants[response.selectedVariantIndex].content
     }
 
-    /// The content actually on screen for this message.
-    ///
-    /// `ChatBubbleView.contentToDisplay` and the search path's content selection were the same
-    /// expression written twice; search and render must never disagree about WHICH text a
-    /// message shows, or a regenerated response is searched in one variant and highlighted in
-    /// another. Note user messages use `content` directly, which this matches.
+    /// The content actually on screen for this message; search and render share it so they never disagree about which
+    /// variant's text a message shows.
     var displayedContent: MessageContent {
         sender == .agent ? (currentAgentContent ?? content) : content
     }
@@ -1455,13 +1118,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         }
     }
     
-    /// Parsed blocks for `text`, memoised per message.
-    ///
-    /// ⚠️ The cache HIT requires `cachedMarkdownSource == text`, not merely a non-nil cache.
-    /// See `cachedMarkdownSource` for what returning a differently-sourced cache did. The
-    /// external `invalidateMarkdownCache()` calls remain correct and are still what forces the
-    /// per-flush re-parse during streaming; the key is a backstop for every writer that does
-    /// not call it — the variant picker being the one that did not.
+    /// Parsed blocks for `text`, memoised per message; a cache hit requires `cachedMarkdownSource == text`.
+    /// `invalidateMarkdownCache()` still forces the per-flush re-parse during streaming.
     func getOrCreateMarkdownBlocks(from text: String) -> [ContentBlock] {
         if isStreaming {
             if let cached = cachedMarkdownBlocks, cachedMarkdownSource == text { return cached }
@@ -1473,9 +1131,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             return blocks
         }
 
-        // First non-streaming access after a stream: drop the incremental state and
-        // invalidate so the full parse below becomes the authoritative final result
-        // (heals any mid-stream boundary cosmetics — see StreamingMarkdownParser).
+        // First non-streaming access after a stream: drop the incremental state and invalidate so the full parse is
+        // authoritative.
         if streamingMarkdownParser != nil {
             streamingMarkdownParser = nil
             cachedMarkdownBlocks = nil
@@ -1494,26 +1151,11 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.cachedMarkdownSource = nil
     }
 
+    // Why: must stay pure: it is called detached from background tasks, so touching the markdown caches would add
+    // an unsynchronised writer; do not route it back through `getOrCreateMarkdownBlocks`.
     /// Returns parsed ContentBlocks for the RAG indexing pipeline.
-    ///
-    /// ⚠️ PURE — it must not touch `cachedMarkdownBlocks`/`cachedMarkdownSource`/
-    /// `streamingMarkdownParser`. Its only caller is `RAGIndexingService.indexSingleMessage`,
-    /// which both call sites launch DETACHED (`ActiveStreamManager`, `ChatPersistenceStore`)
-    /// against the very `ChatMessage` instance the view model holds. `ChatMessage` is
-    /// `@unchecked Sendable` and not `@MainActor`, and those fields are plain stored
-    /// properties, so routing this through `getOrCreateMarkdownBlocks` put an unsynchronised
-    /// background WRITER on a slot the main actor writes from the render path, the per-chunk
-    /// invalidate and `trimMarkdownCachesOutsideWindow`. Two unordered reference writes to one
-    /// `[ContentBlock]?` is an ARC double-release, and the indexer's 500 ms delay also let it
-    /// populate the cache from `content` — which during a regeneration still holds the PREVIOUS
-    /// variant — so a retry could render the old answer for a frame.
-    ///
-    /// `parseMarkdown` is a free function and writes no cache on any `ChatMessage`; this is the
-    /// same choice `ChatPersistenceStore.fetchSearchDocuments` and `ChatSearchDecomposition`
-    /// already make, and for the same reason. Do not "optimise" this back onto the cache.
     func getBlocksForIndexing() -> [ContentBlock] {
-        // One rule, in one place: the indexer parses a Sendable SNAPSHOT (RAG-16), and this
-        // delegates to the same code so the two cannot drift.
+        // Delegates to the indexer's Sendable snapshot parse so the two rules cannot drift.
         IndexableMessage(self).blocksForIndexing()
     }
 
@@ -1534,11 +1176,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
 
     /// Current schema version of the FULL-OBJECT JSON envelope. Increment when adding/removing
     /// persisted fields.
-    //
-    // ⚠️ [P5] SCOPE: this version tags the full-object envelope only — which no production code
-    // path round-trips (tests are the sole consumer). The SwiftData store persists PER-FIELD blobs
-    // (contentData, timelineEventsData, …) versioned at the ChatMessageSD layer, so bumping this
-    // constant does NOT protect on-disk data.
+    // Tags the full-object envelope only; the SwiftData store persists per-field blobs versioned at the `ChatMessageSD`
+    // layer, so bumping this constant does not protect on-disk data.
     private static let currentSchemaVersion = 1
 
     private enum CodingKeys: String, CodingKey {
@@ -1633,21 +1272,15 @@ enum MessageContent: Equatable, Codable {
     /// Contains a structured summary of older conversation turns.
     case checkpoint(summary: String)
 
-    /// Content THIS build cannot model, held verbatim so re-encoding preserves it.
-    ///
-    /// ⚠️ This is the highest-stakes catch-all in the app: `contentData` IS the conversation. The
-    /// decoder previously ended in `default: throw … "Invalid MessageContent type"`, so a single
-    /// case added by a newer build turned the message into a "Decode Error" card — which both
-    /// writers then re-encoded over the original bytes. The message text was gone, permanently,
-    /// from one enum case.
-    ///
-    /// Distinct from the Decode Error card, which remains the presentation for genuinely corrupt
-    /// bytes. This case means "readable JSON, unknown shape" and is fully recoverable.
+    // Why: throwing on an unknown case would let the writers overwrite the original bytes.
+    // `contentData` is the conversation, so an unknown case is carried rather than thrown on.
+    /// Content this build cannot model, held verbatim so re-encoding preserves it: readable JSON of an unknown shape.
+    /// Distinct from the Decode Error card, which is the presentation for genuinely corrupt bytes.
     case unknown(type: String, payload: PreservedJSON)
 
     enum CodingKeys: String, CodingKey {
         case type, text, language, code, title, details, artifact, summary
-        case category, suggestion   // structured error enrichment (Round 2 Phase 4)
+        case category, suggestion
     }
 
     init(from decoder: Decoder) throws {
@@ -1679,11 +1312,8 @@ enum MessageContent: Equatable, Codable {
             let summary = try container.decode(String.self, forKey: .summary)
             self = .checkpoint(summary: summary)
         default:
-            // ⚠️ PRESERVE, never throw. A `type` this build does not know is overwhelmingly a case
-            // a NEWER build added — not corruption. Throwing here turned the whole message into a
-            // Decode Error card that the next save wrote over the original bytes, so one new enum
-            // case permanently destroyed the message text. Capture the WHOLE object (not just the
-            // known keys) so re-encoding is faithful.
+            // Preserve, never throw: an unknown `type` is almost always a case a newer build added; capture the whole object
+            // so re-encoding is faithful.
             let payload = try PreservedJSON(from: decoder)
             self = .unknown(type: type, payload: payload)
         }
@@ -1712,9 +1342,8 @@ enum MessageContent: Equatable, Codable {
             try container.encode("mediaArtifact", forKey: .type)
             try container.encode(artifact, forKey: .artifact)
         case .unknown(_, let payload):
-            // Re-emit exactly what was read. Uses a single-value container rather than the keyed
-            // one above because the payload IS the whole object, including keys this build has no
-            // CodingKey for — encoding it key-by-key would silently drop them.
+            // Re-emits exactly what was read via a single-value container; the payload is the whole object, including keys
+            // without a CodingKey.
             var single = encoder.singleValueContainer()
             try single.encode(payload)
             return

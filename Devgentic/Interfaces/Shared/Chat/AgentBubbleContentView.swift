@@ -4,7 +4,7 @@
 //  AgentBubbleContentView.swift
 //  Devgentic
 //
-//  Extracted from ChatBubbleView for decomposition.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -31,19 +31,11 @@ struct AgentBubbleContentView: View, Equatable {
     let contentToDisplay: MessageContent
     var groupStyle: BubbleGroupStyle = .standalone
 
-    /// Lets a settled bubble skip its body when a PARENT re-render recreates it — which
-    /// happens to every visible message whenever `ChatHistoryView.body` re-runs (a scroll
-    /// flipping `showScrollToBottom`, a search toggle, the speech island appearing).
-    ///
-    /// It deliberately does NOT try to help while streaming. This view *observes*
-    /// `isStreaming`, `timelineEvents`, `terminalOutcome` and friends, so `@Observable`
-    /// invalidates it directly when they change and the body re-runs regardless of what
-    /// `==` says. Claiming equality mid-stream would buy nothing and risk a stale gate.
-    /// Hence: while either side is streaming, never equal.
-    ///
-    /// Everything compared below is read by `body`'s conditionals. If you add a
-    /// `message.x` read to the body, it belongs here too — otherwise a settled bubble
-    /// can miss the update that a parent re-render would have shown.
+    // Why: everything compared here is read by `body`'s conditionals; a new `message.x` read in the body must be added here too,
+    // or a settled bubble can miss an update.
+    /// Lets a settled bubble skip its body when a parent re-render recreates it (every visible message whenever
+    /// `ChatHistoryView.body` re-runs). While either side is streaming, never equal: the view observes streaming state
+    /// directly, so equality would buy nothing and risk a stale gate.
     static func == (lhs: AgentBubbleContentView, rhs: AgentBubbleContentView) -> Bool {
         guard !lhs.message.isStreaming, !rhs.message.isStreaming else { return false }
         return lhs.message.id == rhs.message.id
@@ -74,10 +66,8 @@ struct AgentBubbleContentView: View, Equatable {
         ChatUIConstants.codeFontSize(forChatFontSize: themeManager.chatFontSize)
     }
 
-    /// True when the bubble's current content is an `.error` card. The error
-    /// card already carries a full title + details + retry affordance, so the
-    /// terminal-outcome warning chip would duplicate the same "something went
-    /// wrong" signal and clutter the bubble.
+    /// True when the bubble's current content is an `.error` card, which already carries title, details and retry, so the
+    /// terminal-outcome chip would duplicate the signal.
     private var isErrorContent: Bool {
         if case .error = contentToDisplay { return true }
         return false
@@ -88,20 +78,12 @@ struct AgentBubbleContentView: View, Equatable {
 
             // 1. INDICATORS
             if isAgentic {
-                // Agent: the timeline, with reasoning steps, tool calls, capability cards.
-                // Gate on `timelineEvents` — covers tool calls, warnings, capability milestones,
-                // and media, not just text thoughts. A tool-heavy response with no narration
-                // should still show its timeline after streaming ends.
-                //
-                // There used to be a second variant here (ThinkingDynamicIsland) chosen by an
-                // `agentViewVariant` setting; it was removed 2026-07-17 and the timeline is now
-                // the only agent view. AgentTimelineView renders its own capability cards, so
-                // the island's compensating ForEach went with it.
+                // Agent timeline (reasoning steps, tool calls, capability cards), gated on `timelineEvents` so a tool-heavy response
+                // with no narration still shows it after streaming ends.
                 if message.isStreaming || !message.timelineEvents.isEmpty {
                     AgentTimelineView(message: message, continuationLead: groupStyle.lead)
-                        // [TL-4] Skip the O(events) grouping rebuild on every streamed
-                        // token — body re-runs only when the timeline revision (or the
-                        // streaming flag / post-stream final text) actually changes.
+                        // Skip the O(events) grouping rebuild on every streamed token: body re-runs only when the timeline revision,
+                        // streaming flag or post-stream final text changes.
                         .equatable()
                         .transition(.opacity)
                 } else if let lead = groupStyle.lead {
@@ -118,11 +100,8 @@ struct AgentBubbleContentView: View, Equatable {
                 }
             }
 
-            // 1b. INTERRUPTED-RUN BADGE (G1 Piece 1)
-            // A reloaded message whose run never finalized — the app was force-quit or crashed while
-            // it was still streaming or parked on a HITL. `isStreaming` is false on a reloaded row, so
-            // this shows only post-restart, never for a live run; it pairs with the partial timeline
-            // above to explain why the response looks unfinished.
+            // 1b. Interrupted-run badge: a reloaded message whose run never finalized (force-quit or crashed mid-stream or while
+            // parked on a HITL). `isStreaming` is false on a reloaded row, so it never shows for a live run.
             if !message.isStreaming, message.lifecycleState.isInterrupted {
                 InterruptedRunChip(
                     wasParked: message.lifecycleState.parkedOperationID != nil,
@@ -131,14 +110,7 @@ struct AgentBubbleContentView: View, Equatable {
                 )
             }
 
-            // 2. ARTIFACTS — removed with the dynamic island (2026-07-17).
-            // `ToolArtifactsRow` was gated on `.dynamicIsland`, so the timeline never showed
-            // it; the timeline surfaces tool calls as its own action rows instead. Nothing a
-            // timeline user could see has changed.
-
-            // [HITL/P6] Live HITL now renders exclusively in the shared above-input
-            // InteractionBannerStack — the per-bubble request cards were removed with the
-            // ChatMessage.pendingInteraction container.
+            // Live HITL renders only in the shared above-input InteractionBannerStack, not in per-bubble request cards.
 
             // 4. CONTENT
             contentView
@@ -153,15 +125,8 @@ struct AgentBubbleContentView: View, Equatable {
                 TurnMemoryChangesCard(message: message)
             }
 
-            // 5. TERMINAL OUTCOME INDICATOR
-            // Surfaces a subtle chip when the run ended in a non-success state
-            // (circuit-breaker abort, iteration exhaustion). Keeps
-            // the bubble honest — user shouldn't mistake best-effort synthesis
-            // for an authoritative answer.
-            //
-            // Skipped when cancelled or showing a stopped-run placeholder (the text already explains
-            // that the operation was stopped, making a "Run stopped" chip redundant) or when content
-            // is already a `.error` card.
+            // 5. Terminal outcome indicator: a subtle chip for a non-success end (circuit-breaker abort, iteration exhaustion),
+            // so best-effort synthesis isn't read as authoritative.
             if !message.isStreaming,
                let outcome = message.terminalOutcome,
                outcome != .completed,
@@ -199,10 +164,8 @@ struct AgentBubbleContentView: View, Equatable {
 
         case .markdownText(let text):
             if !text.isEmpty {
-                // During streaming: use getOrCreateMarkdownBlocks which caches blocks and only
-                // reparses when text changes. Previously called parseMarkdown() on every body
-                // evaluation — O(n) per keystroke. Now O(1) when text hasn't changed.
-                // The cache is invalidated by ActiveStreamManager when content updates.
+                // During streaming: `getOrCreateMarkdownBlocks` caches blocks and only reparses when the text changes;
+                // ActiveStreamManager invalidates the cache when content updates.
                 let blocks = message.getOrCreateMarkdownBlocks(from: text)
                 let query = searchViewModel.isSearchActive ? searchViewModel.effectiveQuery : ""
                 let activeMatch = searchViewModel.activeMatch(in: message.id)
@@ -218,10 +181,8 @@ struct AgentBubbleContentView: View, Equatable {
                     .equatable()
                 }
 
-                // [ASM-2] A failed run that KEPT its partial prose (throw after streaming;
-                // the error card demoted to the timeline) has no error-card Retry — give
-                // the failure the same affordance. `terminalOutcome` is only stamped at
-                // finalize, so this never shows mid-stream.
+                // A failed run that kept its partial prose (the error card is demoted to the timeline) has no error-card Retry, so
+                // show one here; `terminalOutcome` is stamped only at finalize, so this never shows mid-stream.
                 if message.terminalOutcome?.isFailureLike == true {
                     RetryMessageButton(
                         action: { mainAppViewModel.regenerateResponse(for: message) },
@@ -244,38 +205,25 @@ struct AgentBubbleContentView: View, Equatable {
 
         case .error(let title, let details, let category, let suggestion):
             VStack(alignment: .leading, spacing: 8) {
-                // [CF-40] An identity-bearing announcement key, so VoiceOver speaks a RETRY that
-                // failed the same way instead of suppressing it as a repeat. Keyed on the message
-                // plus `generationAttempts`, which `beginRegenerationVariant` increments on every
-                // Retry — the same shape `MediaArtifactImageView` uses with its `loadAttempt`.
-                // Without it this card falls back to the error SENTENCE, and two identical failures
-                // five seconds apart are indistinguishable from the same card being rebuilt.
+                // An identity-bearing announcement key, so VoiceOver speaks a retry that failed the same way instead of suppressing
+                // it as a repeat: keyed on the message plus `generationAttempts`, which each Retry increments.
                 ErrorMessageView(
                     title: title, details: details, category: category, suggestion: suggestion,
                     announcementKey: "agent-error-\(message.id.uuidString)#\(message.agentResponse?.generationAttempts ?? 1)"
                 )
 
-                // P1: Retry button for failed agent responses
+                // Retry button for failed agent responses.
                 RetryMessageButton(
                     action: { mainAppViewModel.regenerateResponse(for: message) },
                     refusal: mainAppViewModel.regenerationRefusal(for: message)
                 )
             }
-            // [CF-42] `.contain`, not `.combine`. `.combine` merged the card and its Retry into
-            // ONE element, and the `.accessibilityLabel` that followed then REPLACED the merged
-            // label outright — so the two things a screen-reader user needs here never arrived:
-            // `RetryMessageButton`'s refusal reason ("This message has reached its limit of 3
-            // attempts."), and `ErrorMessageView`'s `suggestion` line. Both children already
-            // label themselves correctly, and the ASM-2 Retry above sits under the body's own
-            // `.contain` and has always worked; this makes the error path match it. The hand-
-            // written label is gone rather than extended: it was a lossy duplicate of
-            // `ErrorMessageView.spokenDescription`, free to drift from it.
+            // `.contain`, not `.combine`: combining merged the card and its Retry and the following `.accessibilityLabel`
+            // replaced the merged label, hiding the Retry refusal reason and the card's suggestion from VoiceOver.
             .accessibilityElement(children: .contain)
 
-        // NB there is no `.image` case any more (removed 2026-07-17): MediaArtifact is the
-        // single image representation. Legacy persisted "image" messages convert at decode
-        // time — data becomes an `.ephemeralData` artifact, URL-only becomes `.remoteURL`
-        // (whose resolve failure lands in MediaArtifactImageView's error card + Retry).
+        // There is no `.image` case: MediaArtifact is the single image representation, and legacy persisted "image" messages
+        // convert at decode time (data becomes `.ephemeralData`, URL-only becomes `.remoteURL`).
         case .mediaArtifact(let artifact):
             if artifact.kind == .image {
                 MediaArtifactImageView(artifact: artifact)
@@ -303,9 +251,8 @@ struct AgentBubbleContentView: View, Equatable {
             .cornerRadius(8)
 
         case .unknown:
-            // Shown, and explicitly reassuring. The bytes ARE preserved — this build simply has no
-            // renderer — so the wording must not read like the message was lost. The payload is not
-            // displayed: it is raw JSON, not something the user wrote.
+            // Shown, and reassuring: the bytes are preserved and this build simply has no renderer, so the wording must not read
+            // as if the message was lost. The raw JSON payload is not displayed.
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "questionmark.square.dashed")
                     .font(.caption)
@@ -360,20 +307,18 @@ struct AgentBubbleContentView: View, Equatable {
 
 // MARK: - Interrupted Run Chip
 
-/// [G1 Piece 1] Shown under a reloaded message whose run never finalized — the app was force-quit
-/// or crashed while it was still streaming or parked on a HITL. Subdued, like `TerminalOutcomeChip`:
-/// it explains why the response looks unfinished without alarming. Distinguishes a run that was
-/// waiting on the user (`.parkedHITL`) from one cut off mid-stream.
+/// Shown under a reloaded message whose run never finalized (force-quit or crashed mid-stream or while parked on a
+/// HITL). Subdued, like `TerminalOutcomeChip`: it explains why the response looks unfinished without alarming.
+/// Distinguishes a run that was waiting on the user (`.parkedHITL`) from one cut off mid-stream.
 struct InterruptedRunChip: View {
     /// True when the run died while waiting for the user (a parked HITL) vs cut off mid-stream.
     let wasParked: Bool
     /// [G1 Piece 2] Resume action — present only when the run is parked AND resumable. Nil hides the
     /// Resume button (a mid-stream cut-off run has no clean re-entry point and isn't resumable in v1).
     var onResume: (() -> Void)? = nil
-    /// Why Resume is temporarily unavailable, or nil when it may run. Distinct from `onResume == nil`
-    /// on purpose: that means "never resumable" and HIDES the button, whereas this is a transient
-    /// state (a run is live in this conversation) that must DISABLE it with a reason instead — a
-    /// button that vanishes and returns reads as a glitch.
+    /// Why Resume is temporarily unavailable, or nil when it may run. Distinct from `onResume == nil`, which means "never
+    /// resumable" and hides the button; this is a transient state (a run is live in this conversation) that disables it
+    /// with a reason.
     var refusal: RunAdmissionPolicy.Refusal? = nil
 
     @Environment(\.appTheme) private var theme
@@ -434,10 +379,9 @@ struct InterruptedRunChip: View {
 
 // MARK: - Terminal Outcome Chip
 
-/// Compact banner shown under the final response when the agent run didn't complete
-/// cleanly. Distinguishes best-effort synthesis (`.failed` — circuit breaker / iteration
-/// exhaustion) from a user stop (`.cancelled`). Deliberately subdued styling so it
-/// informs without alarming — honesty about completion state, not a loud error banner.
+/// Compact banner under the final response when the agent run didn't complete cleanly. Distinguishes best-effort
+/// synthesis (`.failed`: circuit breaker, iteration exhaustion) from a user stop (`.cancelled`). Subdued styling so
+/// it informs without alarming.
 struct TerminalOutcomeChip: View {
     let outcome: ExecutionOutcome
     let reason: String?
@@ -510,12 +454,10 @@ struct TerminalOutcomeChip: View {
         // shipped, but the run stopped early (circuit breaker / iteration budget).
         case .failed, .completedWithWarnings:
             return String(localized: "Response may be incomplete — the agent didn't finish cleanly.")
-        // Neutral wording: `.cancelled` covers both an explicit Stop and a system
-        // refusal to resume an interrupted run (unresumable profile / provider drift
-        // / etc.). The reason line below states which — the headline must not assert
-        // "by user" over a reason that says otherwise.
+        // Neutral wording: `.cancelled` covers both an explicit Stop and a system refusal to resume an interrupted run, so
+        // the headline must not assert "by user"; the reason line below states which.
         case .cancelled: return String(localized: "Run stopped.")
-        // HITL Waiting Contract §4 — the reason line below carries the limit.
+        // The reason line below states the limit that was hit.
         case .timedOut: return String(localized: "Timed out — the run hit its execution limit.")
         case .completed: return String(localized: "Completed.")
         }

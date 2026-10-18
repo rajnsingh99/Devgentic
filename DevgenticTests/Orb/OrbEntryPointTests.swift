@@ -4,18 +4,7 @@
 //  OrbEntryPointTests.swift
 //  DevgenticTests
 //
-//  The rest of the session's entry points, driven on a real controller.
-//
-//  ⚠️ WHY THIS FILE EXISTS. F2 shipped NON-FUNCTIONAL with 163 green tests, and the cold-open
-//  push-to-talk bug survived a 69-row audit, for the same reason both times: the pure halves were
-//  tested and the plumbing was not. `OrbPushToTalkAdmissionTests` closed one entry point; these
-//  close the rest — `armManualCapture`, `commitCaptureNow`, `cancelCapture`, `bargeIn`.
-//
-//  ⚠️ HOW THIS RUNS WITHOUT A MICROPHONE. `startListeningLoop` does spawn a task, but
-//  `runListeningSessions` checks `WhisperRecognitionService.loadingState` BEFORE it ever asks for
-//  microphone permission, so with no model loaded it turns straight around. Every assertion here is
-//  synchronous and lands before that task gets a turn on the main actor, and each test tears the
-//  controller down afterwards. Earcons are silenced because arming plays one.
+//  Created by Raj Singh.
 //
 
 import XCTest

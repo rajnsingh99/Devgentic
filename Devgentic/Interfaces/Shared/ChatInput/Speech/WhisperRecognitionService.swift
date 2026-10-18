@@ -4,7 +4,7 @@
 //  WhisperRecognitionService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/07/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -64,10 +64,8 @@ struct StreamingTranscriptionState {
         Self.joined(confirmed: confirmedText, partial: partialText)
     }
 
-    /// Single source of truth for joining confirmed + partial text. The live display
-    /// and the FINAL transcript must agree — [V7] the final path used raw concatenation
-    /// ("there.How") while the user watched this space-joined version, so the text
-    /// changed underneath them at stop.
+    /// Single source of truth for joining confirmed and partial text, so the live display and the final
+    /// transcript agree.
     static func joined(confirmed: String, partial: String) -> String {
         // Join with a space separator if both parts have content to avoid
         // inconsistent spacing when switching between currentText and unconfirmedSegments
@@ -106,11 +104,7 @@ class WhisperRecognitionService {
     private(set) var loadingState: ModelLoadingState = .idle
 
     /// Which surface currently holds the single app-wide stream slot, if any.
-    ///
-    /// The ledger is private so nothing outside can corrupt the slot bookkeeping, but "who has
-    /// the microphone" is the single most useful diagnostic this subsystem has: when a surface is
-    /// refused with `.sessionBusy` the user sees an error naming a panel they may have forgotten
-    /// is open. Exposing the owner (never the session) lets a settings pane answer it directly.
+    /// Exposes the owner (never the session) so a settings pane can explain a `.sessionBusy` refusal.
     var activeVoiceOwner: VoiceSurface? { ledger.active?.owner }
 
     /// The Whisper model currently selected, for diagnostics.
@@ -122,12 +116,8 @@ class WhisperRecognitionService {
     /// [V1/V2/V6] Bookkeeping for the single app-wide stream slot — who holds it,
     /// whether a stop is on record, and which teardown is authoritative.
     private var ledger = VoiceSessionLedger()
-    /// [Phase 4b] A BORROWED reference to the panel-scoped duplex engine — never owned here.
-    ///
-    /// ⚠️ Its lifetime is the PANEL session (`OrbDuplexAudio`), not the stream session. Tying
-    /// it to the stream session meant rebuilding voice processing after every answer, seconds
-    /// after AVSpeechSynthesizer released its audio unit, and it captured nothing. Do not add a
-    /// `stopEngine` call anywhere in this file.
+    // Why: its lifetime is the panel session (`OrbDuplexAudio`), not the stream session; never call `stopEngine` in this file.
+    /// A borrowed reference to the panel-scoped duplex engine; never owned here.
     private var orbDuplexProcessor: OrbAudioProcessor?
     private var currentModelName: String
     private var _currentLanguage: String?
@@ -143,10 +133,8 @@ class WhisperRecognitionService {
     private var lastConfirmedText: String = ""
     private var lastPartialText: String = ""
 
-    /// Whether ANY energy sample arrived this session — "proof the engine is
-    /// actually delivering audio" (Orb's phrase). Logged at finalize so a
-    /// dead-mic session (`_StartIO error 35` class) is identifiable from the
-    /// [VOICE] narrative alone, for every surface.
+    /// Whether any energy sample arrived this session: proof the engine is delivering audio.
+    /// Logged at finalize so a dead-mic session is identifiable from the [VOICE] log alone.
     private var sessionSawAudio = false
 
     private let logger = DGLogger(category: "WhisperRecognitionService")
@@ -229,9 +217,8 @@ class WhisperRecognitionService {
     /// Asynchronously loads a WhisperKit model. Downloads on first run, cached thereafter.
     /// Uses a two-phase approach: download → prepare/prewarm, giving the UI finer-grained progress.
     private func loadModel(named modelName: String) async {
-        // Tear down existing transcriber and model — through stopStreaming so the
-        // session ledger stays truthful (a direct transcriber stop would leave a
-        // phantom active session that rejects every future start as busy).
+        // Tear down through `stopStreaming` so the session ledger stays truthful: a direct transcriber stop would
+        // leave a phantom active session that rejects every future start as busy.
         if ledger.isBusy {
             logger.log("[VOICE] Model load requested while a session is active — stopping it first.")
             _ = await stopStreaming()
@@ -242,7 +229,6 @@ class WhisperRecognitionService {
             logger.log("Starting model load for '\(modelName)'.")
             loadingState = .downloading
 
-            // Phase 1: Download model files (or resolve from cache)
             logger.log("Initializing WhisperKit (download phase)...")
             whisperKit = try await WhisperKit(
                 model: modelName,
@@ -251,7 +237,6 @@ class WhisperRecognitionService {
                 load: false
             )
 
-            // Phase 2: Prewarm and load into memory
             logger.log("Prewarming and loading model into memory...")
             loadingState = .preparing
             try await whisperKit?.prewarmModels()
@@ -271,15 +256,9 @@ class WhisperRecognitionService {
 
     // MARK: - Streaming Transcription
 
-    /// Starts real-time streaming transcription using AudioStreamTranscriber.
-    /// This method blocks the calling task until `stopStreaming()` is called or VAD auto-stops.
-    /// - Parameters:
-    ///   - owner: Which surface is claiming the single app-wide stream slot — named in
-    ///     logs and in the `.sessionBusy` error another surface receives ([V2]).
-    ///   - onStateChange: Callback fired on each transcription state update (bridged to MainActor).
-    /// - Throws: `.sessionBusy` when another surface is recording; `.streamEndedUnexpectedly`
-    ///   when the stream died mid-run on a swallowed WhisperKit error ([V1] — the engine
-    ///   has been forced closed by then).
+    /// Starts real-time streaming transcription; blocks the calling task until `stopStreaming()` or VAD auto-stop.
+    /// - Parameters: owner names the surface claiming the single app-wide slot; onStateChange fires on each state update.
+    /// - Throws: `.sessionBusy` when another surface is recording; `.streamEndedUnexpectedly` when the stream died mid-run.
     func startStreaming(
         owner: VoiceSurface,
         onStateChange: @escaping (StreamingTranscriptionState) -> Void
@@ -294,10 +273,8 @@ class WhisperRecognitionService {
             throw RecognitionError.modelNotLoaded
         }
 
-        // [V2] Single-slot guard. Every surface-level guard is per-instance, so this is
-        // the only place that can see a cross-surface collision (main composer recording
-        // while QuickAccess or Orb starts). Overwriting the live session here is what
-        // used to orphan a transcriber into a permanent decode loop.
+        // Single-slot guard: surface-level guards are per-instance, so only this sees a cross-surface collision.
+        // Overwriting the live session would orphan a transcriber in a permanent decode loop.
         guard let session = ledger.begin(owner: owner) else {
             let holder = ledger.active?.owner ?? owner
             logger.error("[VOICE] START REJECTED for '\(owner.rawValue)' — slot held by '\(holder.rawValue)' (session \(self.ledger.active?.shortID ?? "?")). Surfaces must stop the active session first.")
@@ -331,20 +308,16 @@ class WhisperRecognitionService {
             options.usePrefillPrompt = false
         }
 
-        // ⚠️ BORROWED, never built here. The engine is owned by `OrbDuplexAudio` for the whole
-        // panel session: building one per stream session meant constructing voice processing
-        // seconds after AVSpeechSynthesizer released its audio unit, and it captured nothing.
-        // A cold engine yields nil, which falls through to WhisperKit's own below — that fallback
-        // is why a duplex failure never fails a session, and it must stay.
+        // Borrowed, never built here: `OrbDuplexAudio` owns the engine for the whole panel session. A cold engine yields nil,
+        // which falls through to WhisperKit's own engine; that fallback is why a duplex failure never fails a session.
         let duplexProcessor = OrbDuplexAudio.shared.borrow(for: owner)
         if duplexProcessor != nil {
             logger.log("[VOICE] Session \(session.shortID) using the panel-scoped Orb DUPLEX engine (echo cancellation active).")
         }
         orbDuplexProcessor = duplexProcessor
 
-        // The microphone the user chose (right-click the mic → Microphone, or Settings). Applies
-        // to WhisperKit's own engine only — Orb's duplex engine keeps the system default, see
-        // `MicrophoneSelection`. nil = the system default, which is what WhisperKit opens anyway.
+        // The microphone the user chose; applies to WhisperKit's own engine only, since Orb's duplex engine
+        // keeps the system default (see `MicrophoneSelection`). nil means the system default.
         let recorder: any AudioProcessing
         if let duplexProcessor {
             recorder = duplexProcessor
@@ -361,10 +334,8 @@ class WhisperRecognitionService {
             segmentSeeker: whisperKit.segmentSeeker,
             textDecoder: whisperKit.textDecoder,
             tokenizer: tokenizer,
-            // [Phase 4a] Orb may supply its OWN engine with echo cancellation enabled, through
-            // WhisperKit's public `AudioProcessing` seam — no fork. Everything else (composer,
-            // QuickAccess) keeps WhisperKit's engine untouched, and Orb falls back to it the
-            // moment the flag is off or the duplex engine refuses to start.
+            // Orb may supply its own echo-cancelling engine through WhisperKit's public `AudioProcessing` seam; everything else
+            // keeps WhisperKit's engine, and Orb falls back to it when the flag is off or the duplex engine refuses to start.
             audioProcessor: recorder,
             decodingOptions: options,
             useVAD: true,
@@ -392,20 +363,14 @@ class WhisperRecognitionService {
 
         // Post-return triage. Three ways the blocking call comes back:
         if Task.isCancelled {
-            // Caller cancelled the owning task (QuickAccess stop(), main-composer
-            // cancelRecording(), Orb stopListening()) — realtimeLoop breaks on the
-            // swallowed CancellationError WITHOUT stopping the recorder. Every canceller
-            // pairs the cancel with an explicit stopStreaming(), which performs the real
-            // teardown; doing it here too would race that call's finalize.
+            // The caller cancelled the owning task; every canceller pairs the cancel with an explicit `stopStreaming()`,
+            // which does the real teardown. Tearing down here too would race that call's finalize.
             logger.log("[VOICE] Session \(session.shortID) returned via task cancellation — teardown deferred to the paired stopStreaming().")
             return
         }
         if ledger.isUnrequestedEnd(session.id) {
-            // [V1] Nothing requested this end: WhisperKit's realtimeLoop caught a decode
-            // error and broke with `state.isRecording` still true and the AVAudioEngine
-            // tap still open — then returned as if the session ended cleanly. The UI
-            // would show idle over a live microphone. Force the engine closed and
-            // surface the failure instead of pretending success.
+            // Nothing requested this end: WhisperKit's realtime loop swallowed a decode error and broke with the tap still open.
+            // Force the engine closed and surface the failure rather than showing idle over a live microphone.
             logger.error("[VOICE] Session \(session.shortID) (owner: \(owner.rawValue)) ended WITHOUT a stop request — swallowed mid-stream decode failure (V1). Forcing engine teardown; surfacing error to the UI.")
             await transcriber.stopStreamTranscription()
             _ = finalizeSession(session, reason: "abnormal-end")
@@ -415,13 +380,10 @@ class WhisperRecognitionService {
     }
 
     /// Stops the active streaming transcription and returns the final combined text.
-    /// Safe to call from any surface and safe to double-call: teardown is keyed to the
-    /// session that started it ([V6]), so a stop resuming after its await can't clobber
-    /// state that no longer belongs to it.
+    /// Safe from any surface and safe to double-call: teardown is keyed to the session that started it.
     func stopStreaming() async -> String? {
-        // Mark intent BEFORE any await ([V1]): the blocking startStreamTranscription()
-        // return races this continuation on the MainActor, and only the pending-stop
-        // record tells it this end was requested.
+        // Mark intent before any await: the blocking `startStreamTranscription()` return races this continuation,
+        // and only the pending-stop record tells it this end was requested.
         guard let session = ledger.markStopRequested(), let transcriber = streamTranscriber else {
             logger.warning("[VOICE] stopStreaming: no active session — no-op.")
             return nil
@@ -444,14 +406,8 @@ class WhisperRecognitionService {
         let finalText = buildFinalTranscript()
         self.streamTranscriber = nil
         self.onStateChangeCallback = nil
-        // ⚠️⚠️ THE ENGINE IS BORROWED — DO NOT STOP IT HERE. Its lifetime is the PANEL session,
-        // owned by `OrbDuplexAudio`; stopping it per stream session is exactly the bug this
-        // phase fixed, because rebuilding voice processing after every answer never captures.
-        // Only the reference is dropped. Release is the panel's job and is wired at each of its
-        // teardown paths: panel close, system sleep/lock, Repair Audio, profile switch, duplex
-        // toggled off, recognizer switched to Apple Speech, and app termination.
-        // ⚠️ A live AVAudioEngine at process death still wedges coreaudiod into `_StartIO error
-        // 35` — that hazard is now wider, not gone.
+        // The engine is borrowed; do not stop it here. Only the reference is dropped; the panel releases it.
+        // A live AVAudioEngine at process death can wedge coreaudiod into `_StartIO error 35`.
         orbDuplexProcessor = nil
         self.consecutiveSilenceCount = 0
         logger.log("[VOICE] Session \(session.shortID) FINALIZED (owner: \(session.owner.rawValue), reason: \(reason), transcript: \(finalText.count) chars, audio: \(sessionSawAudio ? "yes" : "NONE — engine likely failed to start")).")
@@ -469,10 +425,8 @@ class WhisperRecognitionService {
             newState.confirmedSegments.map { $0.text }.joined()
         )
 
-        // Build partial text: currentText is the live decode of the same audio window
-        // that unconfirmedSegments covers, so use whichever is more current (not both).
-        // - During active decoding: currentText has the latest real-time progress
-        // - After a decode cycle completes: currentText is cleared, use unconfirmedSegments
+        // `currentText` is the live decode of the window `unconfirmedSegments` covers; use whichever is more current:
+        // `currentText` during active decoding; `unconfirmedSegments` after a cycle completes (currentText is cleared).
         let rawCurrentText = newState.currentText
         let isStatusMessage = rawCurrentText.hasPrefix("Waiting for")
         let partialText: String

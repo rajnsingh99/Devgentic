@@ -4,9 +4,8 @@
 //  DiffUtility.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 08/08/25.
+//  Created by Raj Singh.
 //
-//  ENHANCED: Now calculates line numbers for professional diff display.
 
 import Foundation
 import os
@@ -33,91 +32,40 @@ struct DiffResult: Identifiable, Hashable {
     let type: LineChangeType
     let originalLineNumber: Int?
     let modifiedLineNumber: Int?
-    /// Intra-line refinement for MODIFIED line pairs (a deletion paired with an addition
-    /// whose text is similar): the line split into changed/unchanged runs. Nil when the
-    /// line has no counterpart, the pair is too dissimilar to be a "modification", or the
-    /// row is unchanged — renderers fall back to the plain whole-line treatment.
+    /// Intra-line refinement for modified line pairs (a deletion paired with a similar addition): the line split into
+    /// changed and unchanged runs. Nil when the line has no counterpart, the pair is too dissimilar to count as a
+    /// modification, or the row is unchanged; renderers then use the plain whole-line treatment.
     var segments: [DiffSegment]? = nil
 }
 
 /// A utility for generating a line-by-line diff between two strings.
 struct DiffUtility {
 
-    /// Maximum number of lines before falling back to a simpler linear scan.
-    /// Full LCS on files beyond this threshold would freeze the UI.
-    ///
-    /// ⚠️ [cv-6] 5,000 bounds BOTH costs, and both are quadratic — doubling it is 4x, not 2x:
-    ///  - WORK: up to 25,000,000 cell visits, synchronous on the main actor at the
-    ///    `ActionEffectBuilder` call site (see the note there) — this is what "freeze the UI" means;
-    ///  - MEMORY: the same 25,000,000 cells as a RETAINED UInt8 direction table for the
-    ///    backtrack, ~25 MB transient across ~5,001 arrays (see `lcsCoreDiff`).
-    /// Which of the two drove the original 5,000 is NOT recorded, and this comment does not
-    /// pretend otherwise; both hold it now. The rolling two-row arrays this file's docs used to
-    /// advertise are the LCS *lengths* — O(m), and not what bounds this.
+    // Why: 5,000 bounds two quadratic costs (doubling is 4x): up to 25,000,000 cell visits on the main actor, and a retained
+    // ~25 MB `UInt8` direction table for the backtrack (see `lcsCoreDiff`).
+    /// Maximum number of lines before falling back to a simpler linear scan; full LCS beyond this would freeze the UI.
     private static let lcsLineLimit = 5_000
 
-    /// Generates a diff between an original and a modified string: the line-level rows
-    /// plus the character-level `segments` on modified pairs.
-    ///
-    /// Callers that need only the row TYPES must use `lineLevelDiff` — the refinement
-    /// below is the expensive half and nothing about a row's type depends on it.
+    /// Generates a diff between an original and a modified string: line-level rows plus character-level `segments` on
+    /// modified pairs. Callers that need only the row types should use `lineLevelDiff`; the refinement is the expensive
+    /// half.
     static func generateDiff(original: String, modified: String) -> [DiffResult] {
         var rows = lineLevelDiff(original: original, modified: modified)
         refineIntraLine(&rows)
         return rows
     }
 
-    /// The LINE-level half of `generateDiff`: identical rows, minus the character-level
-    /// `refineIntraLine` pass (so every `segments` is nil).
-    ///
-    /// **Optimizations over the original implementation:**
-    /// - Rolling two-row LCS for the lengths — O(m), not the O(n*m) `Int` table the original
-    ///   used. ⚠️ [cv-6] This bullet used to read "O(2m) space instead of O(n*m)" full stop,
-    ///   which is false: the BACKTRACK still needs a `(n+1) x (m+1)` direction table, retained
-    ///   until the walk finishes (`lcsCoreDiff`). Space is O(n*m) BYTES — an 8x constant-factor
-    ///   win over the `Int` table on a 64-bit target, not an asymptotic change. `lcsLineLimit`
-    ///   is sized against exactly that; see its own note.
-    /// - Backtrack builds in forward order (append) instead of O(n) insert-at-0.
-    /// - Common prefix/suffix stripped before LCS to reduce the matrix size.
-    /// - Falls back to a simple linear scan for files > `lcsLineLimit` lines.
-    ///
-    /// Split out because `changeCounts` reads only `row.type` — running the intra-line
-    /// refinement for it computed up to `intraLineMaxPairs` char-level LCS tables purely
-    /// to throw them away, and it runs on the main actor at the tool-completion site
-    /// (`ActionEffectBuilder`), which also computes the FULL diff for the same file.
-    /// `generateDiff`'s own rows are unchanged: it still refines before returning, for its
-    /// ONE `segments` consumer — `FileChangePreviewView`, which renders them, off the main
-    /// actor. [cv-5] `ActionEffectBuilder` — the main-actor tool-completion site — now calls
-    /// THIS once and derives both its counts (`changeCounts(rows:)`) and its diff text from the
-    /// same rows; it used to run `changeCounts` AND `generateDiff` over the same pair, i.e. two
-    /// line-level passes plus a discarded refinement.
+    // Why: the backtrack still needs a (n+1) x (m+1) direction table, so space is O(n*m) bytes; `lcsLineLimit` is sized
+    // against exactly that.
+    /// The line-level half of `generateDiff`: identical rows minus the character-level `refineIntraLine` pass (every
+    /// `segments` is nil). Rolling two-row LCS, common prefix/suffix stripped first, linear scan above `lcsLineLimit`.
+    /// Callers needing counts and diff text run it once and derive both from the same rows (`changeCounts(rows:)`).
     static func lineLevelDiff(original: String, modified: String) -> [DiffResult] {
         #if DEBUG
         lineLevelDiffCalls.withLock { $0 += 1 }
         #endif
-        // ⚠️ [cv-4] An EMPTY side is ZERO lines, not one empty line.
-        // `"".components(separatedBy: .newlines)` yields `[""]`, so a brand-new file — whose
-        // pre-write snapshot is deliberately `""`, the documented "file doesn't exist yet" value
-        // from `ToolExecutionLoop.preWriteSnapshot` — diffed against its content produced a
-        // phantom `.deleted` row. The timeline chip then rendered "+12 −1" for a creation that
-        // deleted nothing, and `ActionEffectBuilder.changedLines` emitted a bare `-` row into the
-        // persisted effect the model reads back.
-        //
-        // `lcsCoreDiff`'s `n == 0` / `m == 0` guards already expect this shape and turn it into a
-        // pure-addition (or pure-deletion) diff — see their comment, which also notes both-empty
-        // yields `[]`. The prefix/suffix scans are `minCount`-bounded, so they no-op at zero.
-        // ⚠️ git-style: a SINGLE trailing newline terminates the last line, it does not begin a
-        // new empty one. Splitting without this made `"a\nb\n"` three lines, the third empty —
-        // and once [cv-4] stopped the empty ORIGINAL from producing a matching empty line for the
-        // suffix scan to pair it with, that trailing element stopped rendering as a blank
-        // `.unchanged` context row and started rendering as an `.added` one. A 12-line file
-        // creation then previewed as `+13 −0` with a spurious green blank row, and
-        // `ActionEffectBuilder.changedLines` wrote that phantom added line into the PERSISTED
-        // effect the model reads back.
-        //
-        // Applied here rather than in `changeCounts` (which had its own private version) so the
-        // row array and the counts describe the SAME thing — they are read by different consumers
-        // and disagreeing was the defect.
+        // An empty side is zero lines, and one trailing newline terminates the last line instead of opening an empty one
+        // (git-style); otherwise creations show phantom rows. Applied here so rows and `changeCounts` describe the same thing.
         func lines(_ text: String) -> [String] {
             guard !text.isEmpty else { return [] }
             let body = text.hasSuffix("\n") ? String(text.dropLast()) : text
@@ -188,21 +136,11 @@ struct DiffUtility {
         return finalDiff
     }
 
-    /// Added/deleted line counts for a "+N −M" stat badge.
-    ///
-    /// Uses git-style trailing-newline semantics: a final "\n" TERMINATES the last line
-    /// rather than opening an empty one, so appending to a newline-terminated file counts
-    /// as pure addition instead of reporting a phantom "deleted blank line". Counts only —
-    /// `generateDiff` itself keeps its raw rows (hunk reconstruction depends on their
-    /// exact round-trip).
-    ///
-    /// Runs the LINE-level diff only. The counts are a function of `row.type` alone, and
-    /// `refineIntraLine` never changes a row's type — it only attaches `segments` — so
-    /// skipping it here cannot move a count, and it saves up to `intraLineMaxPairs`
-    /// character-level LCS tables per call.
+    /// Added/deleted line counts for a '+N −M' stat badge, with git-style trailing-newline semantics.
+    /// A final newline terminates the last line, so appending to a newline-terminated file counts as pure addition.
+    /// Runs the line-level diff only: counts depend on `row.type`, which `refineIntraLine` never changes.
     static func changeCounts(original: String, modified: String) -> (added: Int, deleted: Int) {
-        // [cv-4] The trailing-newline trim now lives in `lineLevelDiff`, so this no longer needs
-        // its own copy — and more importantly the counts and the ROWS can no longer disagree.
+        // The trailing-newline trim lives in `lineLevelDiff`, so the counts and the rows cannot disagree.
         changeCounts(rows: lineLevelDiff(original: original, modified: modified))
     }
 
@@ -221,12 +159,9 @@ struct DiffUtility {
     }
 
     #if DEBUG
-    /// Test seams [cv-5]: how many times each pass has run in this process. The tool-completion
-    /// site must cost exactly ONE line-level pass and ZERO refinements per write; a test that
-    /// reads the counters around `ActionEffect.from` is what keeps a second pass from creeping
-    /// back in. Lock-protected because the passes run from several isolation domains at once
-    /// (`FileChangePreviewView` diffs on a detached task while the main actor completes tools);
-    /// a bare static would be a data race in every DEBUG build, not just in tests.
+    /// Test seams: how many times each pass has run in this process, so a test can assert the tool-completion site costs
+    /// one line-level pass and zero refinements per write. Lock-protected because passes run from several isolation
+    /// domains at once; a bare static would be a data race in every DEBUG build.
     private static let lineLevelDiffCalls = OSAllocatedUnfairLock(initialState: 0)
     private static let refineIntraLineCalls = OSAllocatedUnfairLock(initialState: 0)
     static var lineLevelDiffCallsForTesting: Int {
@@ -252,11 +187,9 @@ struct DiffUtility {
     /// Unchanged gaps of at most this many characters BETWEEN two changed runs are absorbed
     /// into one run — `foo(a, b)` → `foo(x, y)` reads as one edit, not two chars of confetti.
     private static let intraLineMergeGap = 2
-    /// Minimum fraction of a line pair that must be unchanged for it to count as a
-    /// MODIFICATION. Below this the lines are just different lines; highlighting ~all of
-    /// both is noise, so they keep the plain whole-line treatment. Deliberately strict:
-    /// character-level LCS finds scattered letter-soup subsequences between UNRELATED
-    /// code lines, so a lenient gate lets nonsense pairs through.
+    /// Minimum fraction of a line pair that must be unchanged for it to count as a modification; below it the lines are
+    /// just different lines and keep the whole-line treatment. Strict because character-level LCS finds scattered
+    /// subsequences between unrelated code lines.
     private static let intraLineMinSimilarity = 0.45
     /// At most this many pairs are refined per diff — a pathological 1000-line rewrite
     /// gets plain rows past this point rather than a quadratic bill per pair.
@@ -345,13 +278,10 @@ struct DiffUtility {
         )
     }
 
-    /// Character-level rolling LCS over the (bounded) cores. Returns per-character
-    /// changed masks. Mirrors the line-level algorithm above, including the `1...0`
-    /// guards for one-sided cores — and, [cv-6], including its direction table, so this is
-    /// O(n*m) bytes too. Here that is harmless and stays harmless only because BOTH bounds
-    /// hold: `intraLineCoreLimit` caps a pair at 400x400 (~160 KB) and `intraLineMaxPairs`
-    /// caps how many pairs are refined, and the tables are allocated and released one at a
-    /// time rather than all at once.
+    // Why: the table is harmless only while both bounds hold: `intraLineCoreLimit` caps a pair at 400x400 and
+    // `intraLineMaxPairs` caps how many are refined, with tables allocated and released one at a time.
+    /// Character-level rolling LCS over the bounded cores; returns per-character changed masks.
+    /// Mirrors the line-level algorithm, including the `1...0` guards for one-sided cores and its O(n*m)-byte table.
     private static func charLCSChangedMasks(old: [Character], new: [Character]) -> ([Bool], [Bool]) {
         let n = old.count
         let m = new.count
@@ -445,33 +375,20 @@ struct DiffUtility {
 
     // MARK: - LCS Core Diff
 
-    /// Computes the diff for the changed region using a rolling two-row LCS for the lengths
-    /// and a retained direction table for the backtrack.
-    ///
-    /// ⚠️ [cv-6] Space is O(m) for `prev`/`curr` PLUS O(n*m) bytes for `directions`, which is
-    /// what `lcsLineLimit` bounds. The header here used to say "(O(2m) space)" and this line
-    /// used to say "O(2 * modifiedCount) instead of O(n * m)" — both sat directly above the
-    /// `directions` allocation that contradicts them, which is the kind of comment that gets a
-    /// limit raised on a false premise.
+    /// Computes the diff for the changed region using a rolling two-row LCS for the lengths and a retained direction
+    /// table for the backtrack. Space is O(m) for `prev`/`curr` plus O(n*m) bytes for `directions`, which is what
+    /// `lcsLineLimit` bounds.
     private static func lcsCoreDiff(original: [String], modified: [String]) -> [(String, LineChangeType)] {
         let n = original.count
         let m = modified.count
 
-        // A one-sided (or empty) core needs no LCS: an empty original means every
-        // modified line was added; an empty modified means every original line was
-        // deleted. This is identical to what the backtrack below would yield — and,
-        // crucially, it guards the `1...n` / `1...m` loops, which trap on `1...0`
-        // when a dimension is 0. That is reached on ANY pure-insertion or
-        // pure-deletion diff (append lines to a file; a file ending in a newline vs
-        // a trailing-trimmed snippet), i.e. common input, not an edge case. Both-empty
-        // falls out of the first branch as `[]`.
+        // A one-sided (or empty) core needs no LCS: an empty original means every line was added, an empty modified every
+        // line deleted. It also guards the `1...n`/`1...m` loops, which trap on `1...0`. Both-empty yields `[]`.
         if n == 0 { return modified.map { ($0, .added) } }
         if m == 0 { return original.map { ($0, .deleted) } }
 
-        // --- Forward pass: compute LCS lengths with two rows ---
-        // We also need the full backtrack info, so store direction pointers.
-        // For space efficiency with backtracking, we use a compact direction table.
-        // Direction: 0 = diagonal (match), 1 = up (delete), 2 = left (add)
+        // Forward pass: compute LCS lengths with two rows, storing direction pointers in a compact table for the backtrack.
+        // Direction: 0 = diagonal (match), 1 = up (delete), 2 = left (add).
         var directions = Array(repeating: Array(repeating: UInt8(0), count: m + 1), count: n + 1)
         var prev = Array(repeating: 0, count: m + 1)
         var curr = Array(repeating: 0, count: m + 1)

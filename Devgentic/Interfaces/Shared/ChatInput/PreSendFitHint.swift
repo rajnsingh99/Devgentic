@@ -4,30 +4,19 @@
 //  PreSendFitHint.swift
 //  Devgentic
 //
-//  Created on 12/07/26.
-//
-//  COMPOSER-SIDE pre-send overflow hint: the moment attachments + the selected
-//  profile imply the prompt won't fit, the advisory banner appears — BEFORE the
-//  user spends a (30-second, on local models) turn on a doomed send.
-//
-//  Deliberately the same surface, not a new one: this posts/clears the SAME
-//  contextOverflow advisory the orchestrator's send-time check (Section 5)
-//  refines — identical dedupe key, so the accurate send-time numbers update the
-//  banner in place with no flicker or duplicate. This estimate is a heuristic
-//  (file sizes are stat'd, content unread; history not included); send-time
-//  remains the authority.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Composer-side overflow hint: shows the advisory once attachments and profile imply the prompt will not fit.
+/// Posts and clears the same `contextOverflow` advisory the send-time check refines, under the same dedupe key.
+/// A heuristic (file sizes are stat'd, content unread, history excluded); the send-time check stays authoritative.
 @MainActor
 enum PreSendFitHint {
 
-    // ⚠️ File kinds come from `AttachmentClassifier` — the owner the backend, the transcript and
-    // attach-time intake already ask. This file used to carry its own extension lists, and they
-    // disagreed with the send: an `.svg` was priced as text here but shipped as an image, an
-    // `.xls` was priced by its binary bytes, and an extension-less text file was missed by
-    // the image check entirely.
+    // File kinds come from `AttachmentClassifier`, the owner the backend, transcript and attach-time intake also ask,
+    // so the estimate agrees with what is actually sent.
 
     /// Re-evaluates the composer state and posts/clears the overflow advisory.
     /// Called on attachment and profile changes — human-speed events, no debounce.
@@ -40,37 +29,24 @@ enum PreSendFitHint {
         // New-chat edge: no conversation to key the advisory on yet — the
         // send-time check catches the first turn of a fresh chat.
         guard let conversationID else { return }
-        // Code is included deliberately: it's where large file attachments are MOST
-        // common, and it was the one text profile getting no pre-send warning at all.
-        // Workflow / imageGen stay out — they have no single primary context window.
+        // Code is included because large file attachments are most common there; Workflow / imageGen stay out, since
+        // they have no single primary context window.
         guard let profile,
               profile.profileType == .bot || profile.profileType == .agent || profile.profileType == .code
         else { return }
 
-        // `resolvedLLMConfig` (not `primaryLLMConfig`) — the latter returns nil for
-        // `.code`, so the estimate would have been computed against nothing. Left the
-        // shared `primaryLLMConfig` alone on purpose: it also backs `supportsVisionInput`
-        // and the orchestration path, so widening it would change Code-mode vision
-        // behaviour as a side effect of adding a hint.
+        // `resolvedLLMConfig`, not `primaryLLMConfig`: the latter returns nil for `.code`. `primaryLLMConfig` is left alone
+        // because it also backs `supportsVisionInput` and the orchestration path.
         let llmConfig = profile.resolvedLLMConfig
-        // Resolved through the SAME call the ring uses, so both composer surfaces agree on the
-        // denominator — including MLX healing, which only the ring used to run. An unhealed
-        // MLX profile therefore read a real 32K in the ring and 8K here, and because the
-        // shared dedupe key ends in `|window`, the send-time banner then stopped updating this
-        // one in place: two banners, two numbers, neither replacing the other.
+        // Resolved through the same call the ring uses so both composer surfaces agree on the denominator (including MLX
+        // healing); the shared dedupe key ends in `|window`, so differing windows would leave two banners.
         let flavour: OllamaConfigDefaultProfile = .forProfileType(profile.profileType)
         let (window, trained) = llmConfig.map {
             ContextWindowUsage.windows(for: $0, profileID: profile.id, flavour: flavour)
         } ?? (EffectiveContextWindow.resolve(for: nil, flavour: flavour), nil)
 
-        // Gated on vision so the composer never warns about images a non-vision model
-        // will have stripped before they reach the wire. Matches the send-time gate, so
-        // the two numbers agree and the shared-dedupeKey banner doesn't jump on send.
-        // Vision is read off `resolvedLLMConfig`, NOT `profile.supportsVisionInput`:
-        // the latter is built on `primaryLLMConfig`, which is nil for `.code`, so
-        // using it would have made this term dead for exactly the profile type where
-        // large attachments are most common — the same trap the window lookup above
-        // already sidesteps.
+        // Gated on vision so the composer never warns about images a non-vision model will have stripped; matches the
+        // send-time gate. Read from `resolvedLLMConfig`, not `supportsVisionInput`, which is nil for `.code`.
         let supportsVision = llmConfig?.supportedModalities.contains(.visionInput) ?? false
         let imageTokens = supportsVision
             ? PromptFitCheck.estimatedImageTokens(forImageURLs: imageURLs(of: attachedFiles), provider: llmConfig?.apiProvider)
@@ -86,9 +62,8 @@ enum PreSendFitHint {
         )
 
         guard PromptFitCheck.exceeds(estimatedTokens: estimated, windowTokens: window) else {
-            // Composer state fits — self-heal. (A history-driven overflow the
-            // send-time check posted may clear here too; it re-posts, with
-            // accurate numbers, on the next send.)
+            // Composer state fits: self-heal. A history-driven overflow the send-time check posted may clear here too;
+            // it re-posts with accurate numbers on the next send.
             AdvisoryCenter.shared.clear(category: .contextOverflow, conversationID: conversationID)
             return
         }
@@ -116,17 +91,9 @@ enum PreSendFitHint {
         ))
     }
 
-    /// Byte sizes of the attachments that will flow through TEXT injection. Stat for the size;
-    /// classifying reads at most `BinaryFileProbe.probeLength` bytes of the head.
-    ///
-    /// Priced:
-    ///  • `.text` — its bytes ARE what gets injected.
-    ///  • a `.document` whose bytes are plain text (CSV, TSV, RTF) — a usable bound on what
-    ///    extraction yields: under for CSV (cells gain ` | ` table padding), over for RTF
-    ///    (markup). Either is capped at the per-file budget by the injection arithmetic.
-    /// Not priced: images (in tokens, `imageURLs`); binary documents (PDF, DOCX, XLSX — their
-    /// bytes overstate the extracted text by orders of magnitude; send-time measures the
-    /// truth); binaries, videos and folders, which deliver no content.
+    /// Byte sizes of the attachments that will flow through text injection.
+    /// Priced: `.text` and plain-text `.document`s (CSV, TSV, RTF); not priced: images, binary documents, binaries, folders.
+    /// Stat for the size; classifying reads at most `BinaryFileProbe.probeLength` bytes of the head.
     static func estimatableSizes(of files: [FileSystemItem]) -> [Int] {
         files.compactMap { file in
             switch AttachmentClassifier.classify(file) {
@@ -141,10 +108,8 @@ enum PreSendFitHint {
         }
     }
 
-    /// The counterpart to `estimatableSizes`: the attachments it deliberately drops
-    /// because they are priced in tokens, not characters. Every image is returned —
-    /// unlike the size lookup above, nothing is silently skipped on a read failure,
-    /// because `ImageTokenHeuristic` falls back to a flat per-image estimate.
+    /// The counterpart to `estimatableSizes`: the attachments it drops because they are priced in tokens, not characters.
+    /// Every image is returned; `ImageTokenHeuristic` falls back to a flat per-image estimate if a read fails.
     static func imageURLs(of files: [FileSystemItem]) -> [URL] {
         files.compactMap { file in
             AttachmentClassifier.classify(file) == .image ? file.url : nil

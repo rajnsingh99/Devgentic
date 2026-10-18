@@ -4,22 +4,7 @@
 //  HonestParkResolutionTests.swift
 //  DevgenticTests
 //
-//  Increment 3 of the Phase B plan: a park torn down by CANCELLATION must never be recorded as a
-//  decision the user made.
-//
-//  ⚠️ THE DEFECT THIS PINS WAS LIVE, and independent of skip. `ExecutionSuspensionService` resolves
-//  a waiting permission with `false` on teardown — both via `cancel(for:)` and via the suspend's own
-//  `onCancel` handler — and `false` is indistinguishable from a real "Deny" at the call site. So
-//  pressing Stop while a permission banner was up wrote a denial the user never made into:
-//    • `RunInteractionMemory` — which AUTO-DENIES an identical later call with no banner at all,
-//    • a `.toolFailed(… .userDenied)` event in the node timeline and the persisted run record,
-//    • the observation fed back to the model, which then reasons about a refusal that never happened,
-//    • the dedicated 2-strike denial circuit breaker.
-//  The `ask_user` twin fabricated a "user skipped" answer and REPLAYED it on an identical re-ask.
-//
-//  These tests drive the real `executeToolCalls` inside an already-cancelled Task. That is exactly
-//  the production shape: `suspend`'s `onCancel` resumes `false` immediately, so the guard is what
-//  stands between that `false` and a fabricated denial.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,11 +4,7 @@
 //  ChatSearchUnreachableFlagTests.swift
 //  DevgenticTests
 //
-//  Register CF-35 — the search bar's "Older than the loaded history" caption is driven by
-//  `ChatSearchViewModel.currentMatchUnreachable`, set by the chat view's scroll attempt. The
-//  view side (setting it) runs through a ScrollViewProxy and is not reachable from a unit
-//  test; these pin the CLEARING contract, which is what keeps a stale caption from
-//  outliving the match it described.
+//  Created by Raj Singh.
 //
 
 import XCTest

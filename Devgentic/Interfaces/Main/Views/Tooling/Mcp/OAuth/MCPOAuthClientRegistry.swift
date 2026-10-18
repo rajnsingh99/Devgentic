@@ -4,11 +4,7 @@
 //  MCPOAuthClientRegistry.swift
 //  Devgentic
 //
-//  RFC 7591 — Dynamic Client Registration. Instead of asking the user to
-//  paste a `client_id` (which most users don't have), we register the app
-//  with the authorization server at first connect and stash the resulting
-//  `client_id` in the credential bundle. Each MCP server gets its own
-//  registration — a `client_id` is scoped to the issuer that minted it.
+//  Created by Raj Singh.
 //
 
 import Foundation

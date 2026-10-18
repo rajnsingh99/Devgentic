@@ -12,14 +12,10 @@ import os
 
 private let logger = DGLogger(category: "SideBarPaneView")
 
-/// A sidebar route. `String` raw-value + `Codable` so it can be persisted to
-/// `@AppStorage` — previously the selected tab reset to `.conversations` on
-/// every launch because it lived in `@State`.
+/// A sidebar route. `String` raw-value + `Codable` so the selection can be persisted to `@AppStorage`.
 enum SidebarTab: String, CaseIterable, Identifiable, Codable {
-    /// The `@AppStorage` key the selection persists under.
-    ///
-    /// ⚠️ Named here so the menu command that needs to CHANGE the tab (register A33) and the
-    /// container that owns it cannot drift apart over a string literal.
+    /// The `@AppStorage` key the selection persists under, named here so the menu command that changes the tab and
+    /// the container that owns it cannot drift apart over a string literal.
     static let storageKey = "sidebar.selectedTab"
 
     case conversations    = "conversations"

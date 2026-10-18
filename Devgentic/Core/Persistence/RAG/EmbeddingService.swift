@@ -4,7 +4,7 @@
 //  EmbeddingService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/07/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -37,42 +37,31 @@ actor EmbeddingService {
 
     // MARK: - Private Properties
 
-    /// The loaded Core ML sentence embedding model.
-    ///
-    /// Provenance (see `THIRD_PARTY_NOTICES.md` → "Bundled models"): `all-MiniLM-L6-v2` by the
-    /// sentence-transformers project, **Apache-2.0**, converted to Core ML with coremltools. It was
-    /// fine-tuned upstream from `nreimers/MiniLM-L6-H384-uncased` (MIT, a six-layer cut of Microsoft
-    /// MiniLM), which is also where the WordPiece tokenizer files under `Resources/AllMiniLMTokenizer`
-    /// come from. ⚠️ Not this project's own model — the `.mlpackage` metadata once claimed so; the
-    /// author and licence keys there are the attribution and must stay correct.
+    /// The loaded Core ML sentence embedding model: `all-MiniLM-L6-v2` (sentence-transformers, Apache-2.0)
+    /// converted with coremltools. Not this project's own model; attribution is in `THIRD_PARTY_NOTICES.md`
+    /// and the `.mlpackage` author and licence metadata must stay correct.
     private let model: All_MiniLM_L6_v2?
 
     /// The fixed sequence length the Core ML model expects.
     private let sequenceLength = 128
 
-    /// Output width contract — must match ChildChunkEntity's `dimensions=384`
-    /// HNSW annotation. Enforced loudly in `generateEmbedding`: a swapped model
-    /// with a different width would otherwise corrupt the index schema silently
-    /// (the annotation is the only other place the contract lives).
+    /// Output width contract; must match ChildChunkEntity's `dimensions=384` HNSW annotation.
+    /// Enforced in `generateEmbedding`, since a swapped model of another width would corrupt the index
+    /// schema silently.
     static let expectedDimensions = 384
 
-    /// Which model produced the stored vectors, recorded beside the vector store (RAG-32). Vectors
-    /// from two models are not comparable even at the same width, so a store written by another
-    /// model is set aside rather than mixed. Derived from the GENERATED Core ML class, so swapping
-    /// the bundled model changes it without anyone remembering to.
+    /// Which model produced the stored vectors, recorded beside the vector store.
+    /// Vectors from different models are not comparable, so a store written by another model is set aside;
+    /// derived from the generated Core ML class.
     static let modelIdentifier = "\(String(describing: All_MiniLM_L6_v2.self))/\(expectedDimensions)"
 
-    /// Special-token IDs, resolved from the LOADED tokenizer where possible —
-    /// the BERT-vocab literals (102 / 0) remain only as fallbacks. Previously
-    /// hardcoded: a tokenizer swap with different special tokens would have
-    /// broken truncation/padding silently.
+    /// Special-token IDs, resolved from the loaded tokenizer where possible; the BERT-vocab literals (102 /
+    /// 0) are fallbacks.
     private var sepTokenID = 102
     private var padTokenID = 0
 
-    /// Embedding cache. The dominant repeat pattern is replace-on-reindex:
-    /// re-attaching a file re-embeds mostly byte-identical chunks — this makes
-    /// those hits free. FIFO eviction (the win is the burst, not long-lived
-    /// reuse); bounded at ~256 × 384 floats ≈ 400 KB.
+    /// Embedding cache: re-attaching a file re-embeds mostly identical chunks, so repeats become free.
+    /// FIFO eviction, bounded at about 256 x 384 floats (400 KB).
     private var cache: [String: [Float]] = [:]
     private var cacheOrder: [String] = []
     private let cacheLimit = 256
@@ -103,21 +92,16 @@ actor EmbeddingService {
 
     // MARK: - Public Interface
 
-    /// Generates a vector embedding for a given string of text.
-    ///
-    /// This function is asynchronous and can be safely called from any thread.
-    /// It tokenizes the text using a real WordPiece tokenizer, feeds the numerical
-    /// input to the Core ML model, and L2-normalizes the output.
-    ///
-    /// - Parameter text: The input string to generate an embedding for.
-    /// - Returns: An array of `Float` representing the normalized vector embedding, or `nil` if an error occurs.
+    /// Generates a vector embedding for a string of text; safe to call from any thread.
+    /// Tokenizes with a WordPiece tokenizer, runs the Core ML model and L2-normalizes the output.
+    /// - Returns: the normalized embedding, or `nil` if an error occurs.
     func generateEmbedding(for text: String) async -> [Float]? {
         if let cached = cache[text] {
             return cached
         }
 
         guard let model = self.model else {
-            // Once per launch, not once per chunk (RAG-38): a file is ~1k chunks.
+            // Logged once per launch, not once per chunk: a file can be about a thousand chunks.
             if !reportedModelUnavailable {
                 reportedModelUnavailable = true
                 logger.error("[RAG] Embedding requested but the model is not loaded. CONSEQUENCE: every embed this launch returns nil — nothing new is indexed and retrieval finds nothing. (Logged once.)")
@@ -148,7 +132,7 @@ actor EmbeddingService {
             // 6. L2-normalize the embedding (standard for sentence-transformers)
             // Use safeL2Normalize to catch zero vectors before they reach HNSW
             guard let normalizedArray = VectorMath.safeL2Normalize(floatArray) else {
-                // [M6] Length only — `text` is user content (RAG-38).
+                // Logs length only; `text` is user content.
                 logger.warning("[RAG] The model produced a zero vector for a \(text.count)-char chunk. CONSEQUENCE: that chunk is not indexed.")
                 return nil
             }

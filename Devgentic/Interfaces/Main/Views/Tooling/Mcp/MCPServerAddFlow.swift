@@ -4,16 +4,7 @@
 //  MCPServerAddFlow.swift
 //  Devgentic
 //
-//  The order of operations for saving an MCP server that carries an OAuth sign-in. Register KC-5.
-//
-//  ⚠️ WHY THIS IS NOT INLINE IN THE CONTAINER VIEW. Adding a server used to be: insert the row,
-//  THEN `try? MCPOAuthCoordinator.persist(bundle, sourceID: newID)`. A Keychain refusal — a locked
-//  login keychain, or the ACL prompt after a re-sign or a Sparkle update — threw away a sign-in the
-//  user had just completed in the browser: no log, no UI, the form dismissed as though it had
-//  succeeded, and the server sat in the library with no credentials. The fix is an ordering rule
-//  (the step that can fail runs FIRST, keyed on the identity the row will get) plus an outcome the
-//  form can show. Both live here behind injected collaborators, so the ordering is testable without
-//  SwiftUI, SwiftData or a Keychain — and the container's wiring is one call.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -31,13 +22,9 @@ enum MCPAddOutcome {
 @MainActor
 enum MCPServerAddFlow {
 
-    /// Adds a server, persisting its OAuth bundle FIRST under the id the row will get.
-    ///
-    /// - Parameters:
-    ///   - isDuplicate: whether `serverName` is already taken.
-    ///   - persistBundle: writes the bundle under the given source id; throws on failure.
-    ///   - addTool: inserts the row under the given id; nil when the store could not.
-    ///   - discardBundle: removes a bundle written for a row that was never created.
+    /// Adds a server, persisting its OAuth bundle first under the id the row will get.
+    /// `persistBundle` throws on failure; `addTool` returns nil when the store could not insert;
+    /// `discardBundle` removes a bundle written for a row that was never created.
     static func add(
         serverName: String,
         oauthBundle: MCPOAuthCredentialBundle?,
@@ -88,14 +75,9 @@ enum MCPServerAddFlow {
         return .added
     }
 
-    /// Persists a re-authenticated OAuth bundle AHEAD of an edit. Register KC-5, edit path.
-    ///
-    /// ⚠️ Only a CHANGED bundle is written. The form holds the stored bundle from the moment the
-    /// editor opened, so on a plain rename `oauthBundle == stored` and there is nothing to persist —
-    /// refusing a rename over a write it does not need would be a regression. When the stored
-    /// bundle cannot be read (`stored == nil`) the comparison fails closed: the write is attempted,
-    /// and if it fails the edit is refused rather than applied over an unconfirmed sign-in.
-    /// - Returns: true when a write happened.
+    /// Persists a re-authenticated OAuth bundle ahead of an edit; returns true when a write happened.
+    /// Only a changed bundle is written. When `stored == nil` the comparison fails closed: the write is attempted and,
+    /// if it fails, the edit is refused.
     @discardableResult
     static func persistIfChanged(
         _ oauthBundle: MCPOAuthCredentialBundle?,

@@ -4,7 +4,7 @@
 //  ExecutionSuspensionService.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -26,13 +26,8 @@ enum HITLResolvedKey {
     static let conversationID = "conversationID"
     static let operationID = "operationID"
     static let approved = "approved"
-    /// WHO answered the prompt, as a `MessageSource.rawValue`. ABSENT means no human answered —
-    /// a timeout or a force-cancel — which is a different fact from "answered on the Mac" and is
-    /// why this is optional rather than defaulted to a surface.
-    ///
-    /// ⚠️ The ChatOps mirror edits the remote prompt in place when it resolves, and without this it
-    /// had nothing to go on: it hard-coded "(from Mac)" and therefore told a Telegram user that the
-    /// button they had just tapped on Telegram was answered on the Mac.
+    /// Who answered the prompt, as a `MessageSource.rawValue`; absent means no human answered (a timeout or force-cancel),
+    /// which is why it is optional rather than defaulted to a surface.
     static let source = "source"
     /// [HITL/C1] Precise, type-specific resolution outcome for the trace span:
     /// permission → approved/denied, clarification → answered/skipped,
@@ -40,18 +35,11 @@ enum HITLResolvedKey {
     static let outcome = "outcome"
 }
 
-/// ⚠️ EVERY RESOLUTION INSIDE THIS FILE PASSES `resolvedBy: nil`, and that is deliberate: a
-/// double-suspension cleanup, a `Task.isCancelled` check, an `onCancel` teardown and a deadline are
-/// machines, not people. `resolvedBy` is REQUIRED rather than defaulted precisely so each of these
-/// had to say so — when it was added, the compiler surfaced ten such call sites that the previous
-/// hard-coded remote copy had been reporting to users as "(from Mac)".
-///
-/// Manages the "Pause/Resume" state of Agent execution.
-/// Uses Swift Concurrency continuations to bridge the gap between
-/// the synchronous-feeling Agent Loop and the asynchronous User Interaction.
-///
-/// Keyed by **operationID** (unique per HITL event) rather than conversationID,
-/// which enables multiple concurrent HITL operations and multi-surface deduplication.
+// Why: every resolution in this file passes `resolvedBy: nil`: double-suspension cleanup, cancellation and
+// deadlines are machines, not people.
+/// Manages the Pause/Resume state of agent execution, using Swift Concurrency continuations to bridge the
+/// synchronous-feeling agent loop and asynchronous user interaction. Keyed by operationID (unique per HITL event), not
+/// conversationID.
 actor ExecutionSuspensionService {
 
     static let shared = ExecutionSuspensionService()
@@ -66,27 +54,15 @@ actor ExecutionSuspensionService {
     private var gateContinuations: [UUID: CheckedContinuation<String?, Never>] = [:]
     // Reverse lookup: operationID -> conversationID (for cancel-by-conversation)
     private var operationToConversation: [UUID: UUID] = [:]
-    /// Reverse lookup: operationID -> workflow NODE, for `cancelNode`. Absent for every park with
-    /// no node dimension — chat and code runs, and both MCP brokers, which build their HITLOrigin
-    /// with `nodeID: nil`. Those are drained only by the conversation-wide `cancel(for:)`.
-    ///
-    /// ⚠️ Written and removed in LOCKSTEP with `operationToConversation`. This actor is a
-    /// process-wide singleton with no reset, so a removal missed at any one of the five sites leaks
-    /// for the life of the process.
+    // Why: written and removed in lockstep with `operationToConversation`; the actor is a singleton, so a missed
+    // removal leaks for the process lifetime.
+    /// Reverse lookup: operationID -> workflow node, for `cancelNode`. Absent for parks with no node dimension (chat and
+    /// code runs, MCP brokers), which only the conversation-wide `cancel(for:)` drains.
     private var operationToNode: [UUID: UUID] = [:]
-    /// Reverse lookup: operationID -> owning workflow RUN (register EXC-2), for `cancelRun`.
-    ///
-    /// Stamped by reading the `WorkflowRunScope.token` TaskLocal inside each `suspend*` body — an
-    /// actor call runs on the CALLER's task, so every park raised anywhere inside a workflow run's
-    /// structured task tree (the executor's own Gate/Router/Action parks, AND an agent node's tool
-    /// confirmations via ToolExecutionLoop, plan reviews via PlanningCapability) carries its run's
-    /// token with zero signature changes at the 23 suspend call sites. Absent for parks raised
-    /// outside any run's task tree: chat and code runs, and both MCP brokers (whose parks arrive on
-    /// the MCP transport's own task) — those remain drainable by ANY drain in their conversation,
-    /// exactly as before.
-    ///
-    /// ⚠️ Same LOCKSTEP rule as `operationToNode`: removed at all five removal sites or it leaks
-    /// for the life of the process.
+    // Why: same lockstep rule as `operationToNode`: removed at every removal site or it leaks for the process lifetime.
+    /// Reverse lookup: operationID -> owning workflow run, for `cancelRun`. Stamped from the `WorkflowRunScope.token`
+    /// TaskLocal inside each `suspend*` body; absent for parks raised outside any run's task tree (chat/code runs, MCP
+    /// brokers).
     private var operationToRunToken: [UUID: UUID] = [:]
 
     // MARK: - Park accounting (for compute-only node timeouts)
@@ -98,36 +74,22 @@ actor ExecutionSuspensionService {
     /// Completed parked time, as a UNION of overlapping parks — not a sum.
     private var parkedTotal: [UUID: TimeInterval] = [:]
 
-    /// Cumulative wall-clock during which AT LEAST ONE operation in this conversation was parked
-    /// awaiting a human, including any park still open.
-    ///
-    /// ⚠️ This exists so a workflow node timeout can bound COMPUTE rather than wall-clock. A node
-    /// that sat for ten minutes because nobody clicked the confirmation button has not misbehaved,
-    /// and killing it is the wrong answer — that was a live defect on the profile path before
-    /// 2026-08-13 (a slow tool confirmation killed the node at 120s) and would have killed the
-    /// Router's deliberately-indefinite ambiguity arbitration outright.
-    ///
-    /// ⚠️ Reference-counted, so two simultaneous parks count once. Callers snapshot this at node
-    /// start and diff later; there is no history, only a running total.
-    ///
-    /// ⚠️ Scoped per CONVERSATION, not per node — parallel sibling nodes in one run share the
-    /// credit, so a node can over-run its limit if a sibling parked. That direction is deliberate:
-    /// over-crediting wastes some time, under-crediting kills work that was only ever waiting.
+    // Why: reference-counted and scoped per conversation, so a node may over-run if a sibling parked; over-crediting
+    // wastes time, under-crediting kills waiting work.
+    /// Cumulative wall-clock during which at least one operation in this conversation was parked awaiting a human, including
+    /// any open park. Lets a workflow node timeout bound compute rather than wall-clock; callers snapshot it at node start
+    /// and diff later.
     func cumulativeParkedTime(for conversationID: UUID) -> TimeInterval {
         let completed = parkedTotal[conversationID] ?? 0
         guard let began = parkBegan[conversationID] else { return completed }
         return completed + Date().timeIntervalSince(began)
     }
 
-    /// Called when an operation begins waiting on a human.
-    ///
-    /// Credits the conversation total (kept for any reader that wants "was anyone waiting here")
-    /// AND, separately, each time bound in the park's OWNER CHAIN — which is what the timeouts read
-    /// (HITL Waiting Contract, decision A; see `ParkScope`).
+    /// Called when an operation begins waiting on a human. Credits the conversation total and, separately, each time bound
+    /// in the park's owner chain, which is what the timeouts read (see `ParkScope`).
     private func beginPark(_ conversationID: UUID, operationID: UUID) {
-        // Local inference coordinator, phase 4: a run waiting on a human gives the local lock up.
-        // The run is read off the CALLER's task, like the owner chain below; the end is reported from
-        // `endPark`, which every resolution path reaches, so the two stay in lockstep.
+        // A run waiting on a human gives the local lock up; the run is read off the caller's task, and the end is reported from
+        // `endPark`, which every resolution path reaches.
         if let runID = LocalInferenceScope.runID {
             operationToLocalRun[operationID] = runID
             Task { @MainActor in LocalInferenceCoordinator.shared.parkBegan(runID: runID, operationID: operationID) }
@@ -142,9 +104,8 @@ actor ExecutionSuspensionService {
         let chain = ParkScope.chain
         let owners: [UUID]
         if chain.isEmpty {
-            // Out of chain: an MCP elicitation/sampling request arrives on the transport's own task.
-            // Its owner cannot be known, so every bound open in this conversation is paused — the
-            // old conversation-wide credit, now confined to this one case.
+            // Out of chain: an MCP elicitation/sampling request arrives on the transport's own task, so its owner cannot be known
+            // and every bound open in this conversation is paused.
             owners = activeScopes.filter { $0.value == conversationID }.map(\.key)
         } else {
             owners = chain
@@ -184,15 +145,9 @@ actor ExecutionSuspensionService {
 
     // MARK: - Local-model queue credit (local inference coordinator, phase 2)
 
-    /// A run is waiting in line for the local model. Its time bounds — the caller's `ParkScope`
-    /// chain — are paused exactly as a HITL park pauses them, so a queued scheduled run is not timed
-    /// out by minutes it spent waiting for another run to finish.
-    ///
-    /// ⚠️ SCOPE CREDIT ONLY. It is NOT a park in the conversation: nothing is waiting on a human, so
-    /// `parkDepth` / `cumulativeParkedTime` stay untouched, and so does anything that asks whether a
-    /// run is awaiting someone. A wait outside any chain (no bound open) credits nothing — unlike an
-    /// out-of-chain HITL park, there is no conversation-wide fallback, because the run knows its own
-    /// chain here.
+    /// A run is waiting in line for the local model; its time bounds (the caller's `ParkScope` chain) pause as a HITL park
+    /// pauses them. Scope credit only: not a park in the conversation, so `parkDepth` / `cumulativeParkedTime` are
+    /// untouched, and a wait outside any chain credits nothing.
     func beginQueueWait(_ waitID: UUID) {
         let owners = ParkScope.chain
         guard !owners.isEmpty else {
@@ -238,11 +193,9 @@ actor ExecutionSuspensionService {
         if !attended { unattendedScopes.insert(scope) }
     }
 
-    /// Whether an out-of-chain ask in this conversation — an MCP question or sampling approval,
-    /// which arrive on the MCP transport's own task and cannot read the run's attendance — has
-    /// anyone to answer it. False while any open bound in the conversation belongs to an
-    /// unattended run (HITL Waiting Contract, decision C). One run per conversation
-    /// (`ConversationAdmission`) is what makes "any bound" a fair proxy for "this call's run".
+    /// Whether an out-of-chain ask in this conversation (an MCP question or sampling approval) has anyone to answer it.
+    /// False while any open bound in the conversation belongs to an unattended run; one run per conversation makes that a
+    /// fair proxy.
     func canReachAHuman(inConversation conversationID: UUID) -> Bool {
         !activeScopes.contains { $0.value == conversationID && unattendedScopes.contains($0.key) }
     }
@@ -282,19 +235,15 @@ actor ExecutionSuspensionService {
     // [HITL/A3] operationID -> user-edited tool arguments to apply on approval.
     private var editedArgs: [UUID: [String: JSONValue]] = [:]
 
-    // [HITL/P5] No internal HITL watchdog. A pause waits INDEFINITELY; the execution CONTAINER
-    // owns the deadline — chat = none (drained by Stop / conversation close), workflow = node
-    // timeout, scheduled = a 10-minute max-run deadline. Every deadline arrives as Task
-    // cancellation, which the `withTaskCancellationHandler` blocks below resolve safely (deny / nil).
+    // No internal HITL watchdog: a pause waits indefinitely and the execution container owns the deadline, delivered as
+    // Task cancellation, which the `withTaskCancellationHandler` blocks below resolve safely (deny / nil).
 
     private init() {}
 
     // MARK: - Queries
 
-    /// Whether ANY operation (approval / clarification / plan review / gate) is
-    /// currently parked. Used by MLXService's idle timer to distinguish
-    /// "parked mid-run" from "genuinely idle" in its unload log — behavior is
-    /// identical either way (unload + lazy reload on resume).
+    /// Whether any operation (approval / clarification / plan review / gate) is currently parked; MLXService's idle timer
+    /// uses it to tell 'parked mid-run' from 'genuinely idle' in its unload log.
     func hasPendingSuspensions() -> Bool {
         !activeContinuations.isEmpty
             || !clarificationContinuations.isEmpty
@@ -302,30 +251,17 @@ actor ExecutionSuspensionService {
             || !gateContinuations.isEmpty
     }
 
-    /// How many operations are parked right now, across every kind and conversation.
-    ///
-    /// ⚠️ Read-only, and NOT redundant with the boolean above. A park is only observable once its
-    /// continuation is INSTALLED: `suspendForGate` writes `operationToConversation` and calls
-    /// `beginPark` before it `await`s to install the continuation, so `isSuspended(for:)` goes true
-    /// while a `resumeGate` would still find nothing to resume. Anything that must wait for a
-    /// SECOND park to land cannot use `hasPendingSuspensions()` as its barrier — it is already
-    /// true from the first. This count is that barrier.
+    /// How many operations are parked right now, across every kind and conversation. Read-only; use it, not
+    /// `hasPendingSuspensions()`, as a barrier for a second park, since a park is observable only once its continuation is
+    /// installed.
     func pendingSuspensionCount() -> Int {
         activeContinuations.count + clarificationContinuations.count
             + planReviewContinuations.count + gateContinuations.count
     }
 
-    /// Invariant probe: an ORPHANED park — a continuation is installed but its
-    /// `operationToConversation` index is gone, so no resume-by-conversation or drain can ever
-    /// find it again (only a direct `resume*(for: operationID)` can).
-    ///
-    /// The one producer of this state is a drain (`cancel(for:)` / `cancelNode`) interleaving in
-    /// the pre-install window — after `suspend*` publishes its indexes, before the continuation
-    /// installs — WITHOUT task cancellation (the in-body `Task.isCancelled` check covers the
-    /// cancelled case). Every drain today accompanies cancellation, so this should never be true;
-    /// `SuspensionInstallWindowProbeTests` races the interleaving to keep that claim empirical
-    /// rather than argued. Reads two maps in ONE actor call — the atomicity is the point; sampling
-    /// them from outside races the install and misclassifies.
+    /// Invariant probe: an orphaned park, whose continuation is installed but whose `operationToConversation` index is gone,
+    /// so no resume-by-conversation or drain can find it. Reads two maps in one actor call; sampling them from outside races
+    /// the install.
     func isOrphaned(operation operationID: UUID) -> Bool {
         guard operationToConversation[operationID] == nil else { return false }
         return activeContinuations[operationID] != nil
@@ -336,20 +272,12 @@ actor ExecutionSuspensionService {
 
     // MARK: - Permission Suspension (Tool Confirmation)
 
-    /// Pauses execution for the specific operation until `resume` is called or timeout occurs.
-    /// - Parameters:
-    ///   - operationID: Unique identifier for this HITL operation.
-    ///   - conversationID: The conversation this operation belongs to (for cancel-by-conversation).
-    /// - Returns: `true` if the user approved the action, `false` if denied or timed out.
+    /// Pauses execution for the specific operation until `resume` is called or the task is cancelled. - Parameters:
+    /// `operationID` identifies this HITL operation; `conversationID` enables cancel-by-conversation. - Returns: `true` if
+    /// the user approved the action, `false` if denied or cancelled.
     func suspend(for operationID: UUID, conversationID: UUID, nodeID: UUID? = nil) async -> Bool {
-        // Safety: If we somehow suspend twice with the same operationID, auto-deny previous.
-        //
-        // ⚠️ Routed through `resume(for:)`, NOT a bare `existing.resume` + removeValue. The bare
-        // form resolved the continuation but skipped `endPark` and the index removals — so the
-        // FIRST suspend's `beginPark` was never balanced, `parkDepth` never returned to zero, and
-        // `cumulativeParkedTime` grew forever: every later node timeout in that conversation
-        // credited all wall-clock as parked time and never fired. Latent (every caller mints a
-        // fresh UUID today), but exactly the accounting trap `drainOperation` documents.
+        // Safety: a second suspend with the same operationID auto-denies the previous one, routed through `resume(for:)` so
+        // `endPark` and the index removals balance the first suspend's `beginPark`.
         if activeContinuations[operationID] != nil {
             logger.warning("[Suspension] Overwriting existing suspension for operation \(operationID). Auto-denying previous. CONSEQUENCE: the earlier waiter resolves as denied and its park closes; this new suspension parks fresh.")
             resume(for: operationID, approved: false, resolvedBy: nil)
@@ -373,24 +301,15 @@ actor ExecutionSuspensionService {
                 }
             }
         } onCancel: {
-            // Stop button / conversation close / container deadline must wake the parked
-            // await immediately rather than leaving it to the watchdog. The WAITER resolves as
-            // denied (false is the Bool contract's only safe answer); the AUDIT outcome says
-            // "cancelled" — teardown is not a user decision.
+            // Stop, conversation close and container deadlines wake the parked await immediately: the waiter resolves as denied
+            // (the only safe Bool), while the audit outcome says 'cancelled' since teardown is not a user decision.
             Task { await self.resume(for: operationID, approved: false, resolvedBy: nil, outcome: "cancelled") }
         }
     }
 
-    /// Resumes execution for a suspended operation.
-    /// - Parameters:
-    ///   - operationID: The unique operation identifier.
-    ///   - approved: Whether the user clicked "Allow" (true) or "Deny" (false).
-    ///   - outcome: Override for the resolved-notification/audit outcome. Callers resolving on the
-    ///     user's actual decision leave it nil ("approved"/"denied" derives from `approved`); the
-    ///     TEARDOWN paths (task cancellation) pass "cancelled" so the trace/audit row stops claiming
-    ///     the user denied a tool they were never able to answer — the notification twin of the
-    ///     honest-park-resolution rule (a cancelled park is not a denial). `approved` itself stays
-    ///     false on teardown: the waiter's contract is Bool and false is the only safe answer.
+    /// Resumes a suspended operation. `approved` is the user's Allow/Deny; `outcome` overrides the audit outcome, nil
+    /// derives 'approved'/'denied' from `approved`, and teardown paths pass 'cancelled' because they are not a denial
+    /// (`approved` stays false).
     func resume(for operationID: UUID, approved: Bool, resolvedBy: MessageSource?, editedArguments: [String: JSONValue]? = nil, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
@@ -426,11 +345,8 @@ actor ExecutionSuspensionService {
 
     // MARK: - Clarification Suspension (ask_user)
 
-    /// Pauses execution until the user provides a text answer or the timeout fires.
-    /// - Parameters:
-    ///   - operationID: Unique identifier for this HITL operation.
-    ///   - conversationID: The conversation this operation belongs to.
-    /// - Returns: The user's text response, or `nil` if timed out / cancelled.
+    /// Pauses execution until the user provides a text answer. - Parameters: `operationID` identifies this HITL operation;
+    /// `conversationID` is the conversation it belongs to. - Returns: The user's text response, or `nil` if cancelled.
     func suspendForClarification(for operationID: UUID, conversationID: UUID, nodeID: UUID? = nil) async -> String? {
         // Safety: prevent double-suspension leaks. Via `resumeClarification` so the previous
         // park's accounting balances — see the `suspend` twin for the parkDepth leak this avoids.
@@ -484,12 +400,9 @@ actor ExecutionSuspensionService {
 
     // MARK: - Plan Review Suspension (indefinite — container owns the deadline)
 
-    /// Pauses execution until the user reviews, edits, and approves the generated plan.
-    /// Unlike tool confirmations, plan review has **no timeout** — it stays indefinitely.
-    /// - Parameters:
-    ///   - operationID: Unique identifier for this HITL operation.
-    ///   - conversationID: The conversation this operation belongs to.
-    /// - Returns: The user-edited subtask array, or `nil` if the user rejected the plan.
+    /// Pauses execution until the user reviews, edits, and approves the generated plan; unlike tool confirmations it has no
+    /// timeout. - Parameters: `operationID` identifies this HITL operation; `conversationID` is the conversation it belongs
+    /// to. - Returns: The user-edited subtask array, or `nil` if the user rejected the plan.
     func suspendForPlanReview(for operationID: UUID, conversationID: UUID, nodeID: UUID? = nil) async -> [SubTask]? {
         // Safety: prevent double-suspension leaks. Via `resumePlanReview` so the previous
         // park's accounting balances — see the `suspend` twin for the parkDepth leak this avoids.
@@ -575,10 +488,8 @@ actor ExecutionSuspensionService {
         }
     }
 
-    /// Resumes a gate suspension with the user's chosen option (nil = cancelled / timed out / rejected).
-    /// - Parameter outcome: what to REPORT when there is no choice. Nil means "cancelled"; a gate's
-    ///   own configured timer passes "expired" (HITL Waiting Contract, decision B), so trace, audit
-    ///   and the remote mirror can tell an expired gate from a stopped run.
+    /// Resumes a gate suspension with the user's chosen option (nil = cancelled / expired / rejected). - Parameter outcome:
+    /// what to report when there is no choice; nil means 'cancelled', a gate's own timer passes 'expired'.
     func resumeGate(for operationID: UUID, chosenOption: String?, resolvedBy: MessageSource?, outcome: String? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
         operationToNode.removeValue(forKey: operationID)
@@ -600,13 +511,9 @@ actor ExecutionSuspensionService {
 
     // MARK: - Cancellation & Status
 
-    /// Force-cancels ALL suspensions for a conversation (e.g., user stops the stream).
-    /// Resumes with `false` (Denied) for permissions, `nil` for clarifications.
-    ///
-    /// ⚠️ CONVERSATION-scoped by design, and staying that way: conversation delete, ChatOps
-    /// `/cancel`, Orb teardown, and chat-run stops all legitimately want EVERY park in the
-    /// conversation gone, including the token-less ones (chat/code confirmations, MCP-broker
-    /// consents). A WORKFLOW root run's own stop wants `cancelRun` instead — see register EXC-2.
+    /// Force-cancels all suspensions for a conversation (e.g. the user stops the stream): `false` for permissions, `nil` for
+    /// clarifications. Conversation-scoped by design, including token-less parks; a workflow root run's own stop uses
+    /// `cancelRun` instead.
     func cancel(for conversationID: UUID) {
         // Find all operations belonging to this conversation
         let permissionOps = operationToConversation.filter { $0.value == conversationID }.map(\.key)
@@ -616,14 +523,9 @@ actor ExecutionSuspensionService {
         }
     }
 
-    /// Force-cancels the parks owned by ONE time bound — raised inside its chain, or out of chain
-    /// (an MCP question) while it was open in its conversation — and nothing else.
-    ///
-    /// ⚠️ For a CONTAINER deadline (the scheduler's per-run limit). The scheduler used to call
-    /// `cancel(for: conversation)`, which also resolved the parks of an attended run the scheduled
-    /// run was queued behind — its approval came back as a denial nobody made (Timeout inventory
-    /// D-20). Owner-chain credit already records which bounds each park belongs to, so the drain
-    /// can be exactly as wide as the bound.
+    /// Force-cancels the parks owned by one time bound (raised inside its chain, or out of chain while it was open in its
+    /// conversation), for a container deadline such as the scheduler's per-run limit, so an attended run queued behind it is
+    /// not denied.
     @discardableResult
     func cancel(scope: UUID) -> [UUID] {
         let owned = operationToScopes.filter { $0.value.contains(scope) }.map(\.key)
@@ -637,30 +539,16 @@ actor ExecutionSuspensionService {
         return owned
     }
 
-    /// Force-cancels ONE workflow run's suspensions, leaving a concurrent run's parks standing.
-    ///
-    /// ⚠️ THE EXC-2 FIX, and the run-scoped sibling of `cancel(for:)` — NOT a replacement for it.
-    /// Stopping run A used to drain run B's parked tool confirmation with `approved = false`; back
-    /// in run B `Task.isCancelled` was false, so the node recorded "User denied tool 'X'" and fired
-    /// its error branch — a webhook or Slack post running on a run the user never touched.
-    ///
-    /// Drains operations in the conversation whose stamped run token MATCHES, plus the TOKEN-LESS
-    /// ones. The token-less inclusion is deliberate and load-bearing: parks raised outside the
-    /// run's task tree (MCP sampling/elicitation consents — even ones triggered BY this run's own
-    /// MCP tool call) carry no token, and a token-partitioned drain that skipped them would leave a
-    /// consent banner standing for a run that no longer exists. `cancelNode`'s doc already records
-    /// the same class of mistake as "a HANG, not a warning". The cost is that a token-less park
-    /// belonging to a concurrent CHAT run in the same conversation is still swept — byte-identical
-    /// to today's behavior, so this drain strictly narrows, never widens.
-    ///
-    /// Returns the operations it resolved, so the caller can log what it actually did.
+    /// Force-cancels one workflow run's suspensions, leaving a concurrent run's parks standing; returns the operations it
+    /// resolved. Drains operations whose run token matches plus token-less ones (MCP consents carry none); the run-scoped
+    /// sibling of `cancel(for:)`.
     @discardableResult
     func cancelRun(_ runToken: UUID, in conversationID: UUID) -> [UUID] {
         let conversationOps = operationToConversation.filter { $0.value == conversationID }.map(\.key)
         let drained = conversationOps.filter { operationToRunToken[$0] == nil || operationToRunToken[$0] == runToken }
         let survivors = conversationOps.count - drained.count
-        // ⚠️ Counted BEFORE the drain loop — `drainOperation` removes the token entry, so counting
-        // after would report every drained op as token-less.
+        // Counted before the drain loop: `drainOperation` removes the token entry, so counting after would report every op as
+        // token-less.
         let tokenless = drained.filter { operationToRunToken[$0] == nil }.count
 
         for opID in drained {
@@ -672,25 +560,11 @@ actor ExecutionSuspensionService {
         return drained
     }
 
-    /// Force-resolves every park belonging to ONE workflow node, leaving its siblings alone.
-    ///
-    /// ⚠️ THE N3 FIX, and the narrower sibling of `cancel(for:)` — NOT a replacement for it. A
-    /// conversation legitimately holds parks with no node dimension at all (chat and code runs, and
-    /// both MCP brokers, which build their origin with `nodeID: nil`), and a node-partitioned
-    /// reimplementation of the conversation-wide drain would silently stop draining those. That is
-    /// a HANG, not a warning, so the two stay separate.
-    ///
-    /// The `conversationID` term is not redundant with `nodeID`: it keeps the drain inside the
-    /// one-root-run-per-conversation boundary and guards against a stale node id from an earlier
-    /// run of the same graph.
-    ///
-    /// EXC-2 twin: when the CALLER runs inside a workflow run (its `WorkflowRunScope.token`
-    /// TaskLocal is set), the drain additionally requires the park's stamped token to match (or be
-    /// absent) — two concurrent runs of the SAME workflow have IDENTICAL node IDs, so without the
-    /// filter run A's node timeout drained run B's park for the same node. A caller with no token
-    /// (tests, any future non-run teardown) behaves exactly as before.
-    ///
-    /// Returns the operations it resolved, so a caller can log what it actually did.
+    // Why: when the caller runs inside a workflow run, the park's token must also match: concurrent runs of the same
+    // workflow share node IDs.
+    /// Force-resolves every park belonging to one workflow node, leaving siblings alone; returns the operations it resolved.
+    /// Separate from `cancel(for:)` because parks with no node dimension would otherwise never drain; the `conversationID`
+    /// term guards against stale node ids.
     @discardableResult
     func cancelNode(_ nodeID: UUID, in conversationID: UUID, outcome: String = "cancelled") -> [UUID] {
         let callerToken = WorkflowRunScope.token
@@ -707,39 +581,21 @@ actor ExecutionSuspensionService {
         return ops
     }
 
-    /// Resolves ONE parked operation: drops its indexes, closes its park, resumes whichever
-    /// continuation kind it holds, and posts the matching resolved notification.
-    ///
-    /// ⚠️ SHARED BY BOTH DRAINS ON PURPOSE. This was the body of `cancel(for:)`; `cancelNode`
-    /// needs byte-identical semantics, and two copies of park accounting would be two chances to
-    /// unbalance it.
-    ///
-    /// ⚠️ Exactly ONE `endPark` per drained operation — `beginPark`/`endPark` are a reference count
-    /// over a UNION window keyed by CONVERSATION, so draining a subset correctly leaves the window
-    /// OPEN while a sibling is still parked. An extra `endPark` here would drive the depth to zero
-    /// early, close the window, and every later node in that conversation would stop crediting
-    /// parked time — its timeout would then fire on wall-clock, killing work that was only waiting.
-    ///
-    /// ⚠️ `outcome` is free-form and reaches the trace row and the remote mirror. "cancelled" is the
-    /// teardown value; a caller resolving a park for a different reason should say so, because
-    /// downstream surfaces render it verbatim.
+    // Why: exactly one `endPark` per drained operation: an extra one closes the parked-time window early while a
+    // sibling is still parked.
+    /// Resolves one parked operation: drops its indexes, closes its park, resumes whichever continuation kind it holds, and
+    /// posts the resolved notification. `outcome` is free-form and rendered verbatim downstream; 'cancelled' is the teardown
+    /// value.
     private func drainOperation(_ opID: UUID, conversationID: UUID, outcome: String) {
         operationToConversation.removeValue(forKey: opID)
         operationToNode.removeValue(forKey: opID)
         operationToRunToken.removeValue(forKey: opID)
-        // ⚠️ Force-cancel closes the park too. Without this the depth never returns to zero and
-        // `cumulativeParkedTime` grows forever, so every later node in the conversation would
-        // believe it had been waiting on a human and its timeout would never fire.
+        // Force-cancel closes the park too; otherwise the depth never returns to zero and `cumulativeParkedTime` grows forever.
         endPark(conversationID, operationID: opID)
         editedArgs.removeValue(forKey: opID)
 
-        // ⚠️ NO `HITLResolvedKey.source` on any of these posts, and that absence is the message:
-        // a force-cancel or a deadline is not a person answering. A surface that renders an
-        // attribution must say nothing rather than name the Mac, which is what it used to do.
-        // Post the matching resolved notification (mirrors resume*/timeout) so every surface —
-        // the legacy banners, the unified InteractionCenter, and the ChatOps remote mirror —
-        // clears immediately on cancel rather than relying on a downstream finalize backstop.
-        // This is what makes remote-Stop (no Mac task to tear down) dismiss the banner too.
+        // Posts the matching resolved notification so every surface (banners, InteractionCenter, ChatOps remote mirror) clears
+        // at once. No `HITLResolvedKey.source` is set on purpose: a force-cancel or deadline is not a person answering.
         if let continuation = activeContinuations.removeValue(forKey: opID) {
             logger.info("[Suspension] Force-resolving permission for operation: \(opID) (\(outcome))")
             continuation.resume(returning: false)
@@ -770,11 +626,8 @@ actor ExecutionSuspensionService {
         return operationToConversation.values.contains(conversationID)
     }
 
-    /// Whether a specific workflow NODE has a park awaiting the user. Drives per-node affordances
-    /// (the timeline's "Needs your input" state, and Phase B's skip button on a parked row).
-    ///
-    /// ⚠️ Answers only for parks that CARRY a node dimension. A chat park, or an MCP broker park
-    /// (`nodeID: nil` by construction), is invisible here however true `isSuspended(for:)` is.
+    /// Whether a specific workflow node has a park awaiting the user; drives per-node affordances in the timeline. Answers
+    /// only for parks that carry a node dimension; chat and MCP broker parks are invisible here.
     func isSuspended(node nodeID: UUID, in conversationID: UUID) -> Bool {
         operationToConversation.contains { $0.value == conversationID && operationToNode[$0.key] == nodeID }
     }
@@ -783,7 +636,7 @@ actor ExecutionSuspensionService {
 
     /// Posts an HITL resolved notification on the main actor for cross-surface deduplication.
     /// Centralizes the pattern used by all resume/timeout paths to prevent drift.
-    // MARK: - Resolution memory (readiness CR-40)
+    // MARK: - Resolution memory
 
     /// Operations resolved recently, oldest first. Bounded: it only has to outlive the gap between
     /// a request being raised and its banner being shown.
@@ -791,14 +644,9 @@ actor ExecutionSuspensionService {
     private var recentlyResolvedSet: Set<UUID> = []
     private static let recentlyResolvedLimit = 512
 
-    /// Whether `operationID` has already been answered, denied, cancelled or drained.
-    ///
-    /// ⚠️ CR-40 (2026-10-12). The stream manager shows a banner only after awaiting a persistence
-    /// flush, and a request can be resolved inside that wait (a Stop, a remote ChatOps answer, a
-    /// drain). The resolution notification then found no banner to remove, the banner was shown
-    /// anyway, and it could never be answered or dismissed. "Not pending" is not the same
-    /// question: a request is raised BEFORE its suspension registers, so a pending check could hide
-    /// a live banner and hang the run. Only an operation actually resolved is reported here.
+    /// Whether `operationID` has already been answered, denied, cancelled or drained. Only an operation actually resolved is
+    /// reported, not 'not pending': a request is raised before its suspension registers, so a pending check could hide a
+    /// live banner.
     func wasResolved(_ operationID: UUID) -> Bool {
         recentlyResolvedSet.contains(operationID)
     }

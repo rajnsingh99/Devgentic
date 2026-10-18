@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  The coordinator is read from the field through its logs: who held the local model, who waited and
-//  for how long, what was unloaded and why. Every line it writes is tagged so one grep reconstructs the
-//  story, and every warning or error states its CONSEQUENCE (production logging standard).
+//  LocalInferenceLoggingTests.swift
+//  DevgenticTests
 //
-//  ⚠️ A source scan, deliberately: a new branch added without a log, or a log without its tag, fails
-//  no behavioural test.
+//  Created by Raj Singh.
 //
 
 import XCTest

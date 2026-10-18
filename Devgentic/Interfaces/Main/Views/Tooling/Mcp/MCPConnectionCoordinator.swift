@@ -4,21 +4,7 @@
 //  MCPConnectionCoordinator.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — owns WHEN Devgentic connects to MCP servers.
-//
-//  Until now nothing connected until the agent's first tool call reached `DynamicMCPTool`,
-//  which took the failure path, reconnected, and only then ran. Three consequences, all
-//  user-visible:
-//
-//   1. The first tool call of every session paid the full connect cost (a cold `npx -y`
-//      fetch can take a minute), inside a turn the user was waiting on.
-//   2. A misconfigured server was only discovered mid-conversation, as a tool failure,
-//      rather than at launch when the user was looking at the app.
-//   3. The Tool Library's status dots were grey for everything until something happened to
-//      use a server, so "is this set up correctly?" had no answer.
-//
-//  This connects every ENABLED server at launch, concurrently, and owns rescan and
-//  reconnect so the UI has one place to call.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -26,6 +12,8 @@ import os
 
 private let logger = DGLogger(category: "MCPConnectionCoordinator")
 
+/// Owns when Devgentic connects to MCP servers: connects every enabled server at launch, concurrently,
+/// and owns rescan and reconnect so the UI has one place to call.
 @Observable @MainActor
 final class MCPConnectionCoordinator {
 
@@ -44,15 +32,9 @@ final class MCPConnectionCoordinator {
     /// Connects every enabled server. Safe to call more than once — later calls join the
     /// in-flight sweep rather than starting a second one.
     func connectEnabledServersAtLaunch() async {
-        // ⚠️⚠️ THIS SPAWNS CHILD PROCESSES — `npx` and friends — THAT INHERIT THE HOST'S ENTIRE
-        // ENVIRONMENT, and resolves their credentials from the developer's REAL login Keychain. In a
-        // test host that means arbitrary third-party server code executing with the developer's
-        // full environment, during a run nobody is watching, in a process about to be killed (so the
-        // children can outlive their parent's teardown).
-        //
-        // ⚠️ The user-driven paths — Add-server "Test Connection", an explicit reconnect — are
-        // deliberately NOT guarded: someone is sitting there, and a test cannot reach them. Only the
-        // automatic LAUNCH sweep is refused, because only it runs without anyone asking.
+        // Why: user-driven paths (Test Connection, explicit reconnect) stay unguarded: only the launch sweep runs unasked.
+        // Refuse the automatic launch sweep under test: it spawns child processes (`npx` and friends) that inherit the
+        // host environment and resolve credentials from the real login Keychain.
         guard TestHost.permits("connect enabled MCP servers at launch (this spawns child processes inheriting the full environment and reads the real login Keychain)", logger: logger) else { return }
 
         if let existing = launchConnectTask {
@@ -74,11 +56,8 @@ final class MCPConnectionCoordinator {
         let disabledCount = allSources.count { !$0.isEnabled }
         let unconfigured = allSources.count { $0.isEnabled && $0.serverDefinition == nil }
 
-        // ⚠️ BEFORE the empty-guard, not after. `enabled` excludes servers with no
-        // definition, so when EVERY configured server is corrupt the guard returns first and
-        // this error never runs — the one case where the corruption is total is the one case
-        // that was reported as a bland "nothing to connect" info line. The diagnostic has to
-        // be unconditional on how many servers survived the filter.
+        // Runs before the empty-guard: `enabled` excludes servers with no definition, so when every server is corrupt
+        // the guard would return first and this diagnostic would never run.
         if unconfigured > 0 {
             logger.error("""
                 [MCP-LAUNCH] \(unconfigured) enabled server(s) have NO serverDefinition and were \
@@ -180,10 +159,7 @@ final class MCPConnectionCoordinator {
     // MARK: - Rescan
 
     /// Re-reads a server's tool list and persists the result.
-    ///
-    /// Servers only announced tool changes if they implemented `tools/list_changed`; for
-    /// everything else the list was frozen at whatever it was when the server was added,
-    /// with no way to refresh short of deleting and re-adding it.
+    /// Covers servers that do not implement `tools/list_changed`.
     /// - Returns: the new tool count, or nil if the rescan failed.
     @discardableResult
     func rescan(sourceID: UUID) async -> Int? {

@@ -4,21 +4,7 @@
 //  HistoryProseSizingTests.swift
 //  DevgenticTests
 //
-//  Both fit estimators charged history prose as `sum(message.textContent.count)` over every
-//  message. That over-counted three independent ways at once:
-//
-//    1. it ignored the per-strategy turn limit (10 pairs for `.recentHistory`),
-//    2. it ignored the char budget's oldest-first trimming,
-//    3. it charged providers that receive NO prose at all.
-//
-//  (3) is the severe one. MLX gets no `nativeHistoryTurns`, so prior turns reach the model
-//  only through the episodic XML's 80-char `goal` and 200-char `<outcome>` — which the
-//  episodic term already counts. On a 50-message MLX conversation the ring read 248% of an
-//  8K window where the truth was 24%: a permanent red band the user could not clear, because
-//  the phantom cost is history the composer cannot edit.
-//
-//  `carriesHistoryImages` had guarded exactly this for images since the vision work. The text
-//  term simply never got the same gate.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,14 +4,7 @@
 //  OrbDeadMicrophoneTests.swift
 //  DevgenticTests
 //
-//  The dead-microphone escalation ladder — the thing that turns "the orb looks fine and hears
-//  nothing" into a visible NO AUDIO, a reachable "Repair Audio…", and eventually OFFLINE.
-//
-//  ⚠️ WHY THIS FILE EXISTS AT ALL. The ladder was written inline in the WhisperKit loop and simply
-//  never written in the Apple Speech one, so that path re-armed forever on a healthy-looking
-//  STANDBY — with the only remedy for a `coreaudiod` wedge unreachable, because the menu item is
-//  gated on the flags this escalation sets. Two copies of a policy is how one of them goes missing;
-//  what is pinned here is the ONE function both loops now call.
+//  Created by Raj Singh.
 //
 
 import XCTest

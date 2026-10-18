@@ -4,13 +4,7 @@
 //  SecureKeyStorageTests.swift
 //  DevgenticTests
 //
-//  Integration tests for SecureKeyStorage — exercises real Keychain APIs.
-//  Uses a unique service/account per test run to avoid cross-contamination.
-//
-//  ⚠️ These are the ONLY tests that should touch the real login Keychain, and they opt in by name:
-//  under XCTest every plain `SecureKeyStorage()` is redirected to an in-memory store (registers
-//  KC-54/55), which is exactly what these tests must NOT exercise — their job is the `SecItem*`
-//  query dictionaries. The throwaway service keeps them away from every production item.
+//  Created by Raj Singh.
 //
 
 import XCTest

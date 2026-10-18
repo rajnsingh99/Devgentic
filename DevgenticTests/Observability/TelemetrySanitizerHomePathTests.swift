@@ -2,26 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  TelemetrySanitizerHomePathTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The redaction that ate 221 characters of an agent's answer.
-//
-//  ⚠️⚠️ THE FAILURE THIS PINS, OBSERVED IN A REAL LAUNCH LOG (2026-09-11). `sanitizeHomePath` matched
-//  the username with `[^\/]+` — "anything that is not a slash". That is only the username when a
-//  slash actually follows it, and in PROSE it does not. An agent reply beginning ``The home
-//  directory (`/Users/dev`) contains both files and many folders.`` carries no forward slash for 221
-//  characters after the username, so a single match swallowed the entire paragraph — newlines
-//  included — and the log line read ``The home directory (`/[USER_PATH]/`, `Desktop/`.``
-//
-//  ⚠️ IT WAS INVISIBLE BECAUSE THE DAMAGE LOOKED LIKE REDACTION. `[USER_PATH]` is exactly what a
-//  reader expects to see, so a line missing a paragraph reads as a line that was correctly
-//  sanitised. The only reason it surfaced is that an UNSANITISED twin of the same string was printed
-//  two lines later and did not match.
-//
-//  ⚠️ THIS IS THE FOURTH INSTANCE OF ONE CLASS IN THIS REPO: a transform that shape-matches a
-//  payload and rewrites content it never intended to touch. See the path-normalisation corruption
-//  register — the rule there was "key off the argument NAME, not the shape", and the rule here is
-//  the same in miniature: match the token you mean, not everything that is not a delimiter.
+//  Created by Raj Singh.
 //
 
 import XCTest

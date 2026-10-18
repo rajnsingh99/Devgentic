@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
+//
+//  ReportInspectorPanel.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
 
 import AppKit
 import SwiftUI
@@ -128,11 +134,8 @@ class ReportInspectorPanelManager {
     
     func close() {
         guard let panel = activePanel else { return }
-        // Release ownership SYNCHRONOUSLY, before the fade. The completion used to nil
-        // `activePanel` 0.15s later — by which time `show()` had already stored the NEW
-        // panel there, so the manager forgot it: the second panel's ✕ went dead (borderless
-        // panels have no close button of their own) and further clicks stacked more panels.
-        // The fade-out below animates the LOCAL reference and needs no manager state.
+        // Release ownership synchronously, before the fade: a delayed `activePanel = nil` would clear a panel stored by a newer
+        // `show()`. The fade-out animates the local reference and needs no manager state.
         activePanel = nil
 
         NSAnimationContext.runAnimationGroup({ context in

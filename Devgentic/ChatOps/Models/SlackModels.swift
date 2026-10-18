@@ -4,7 +4,7 @@
 //  SlackModels.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -92,21 +92,15 @@ struct SlackInteractivePayload: Codable, Sendable {
     let trigger_id: String?
 
     /// The submitted modal, present only on a `view_submission`.
-    ///
-    /// ⚠️ THIS WAS ABSENT, so a submission decoded cleanly and carried nothing: the typed answer
-    /// and the correlation metadata were both invisible. Worse, the bridge dropped the payload one
-    /// line in on `guard let action = payload.actions?.first else { return }` — a `view_submission`
-    /// has no `actions` array — with no log, so the whole interaction vanished without trace.
+    /// A `view_submission` has no `actions` array, so handlers must read this instead.
     let view: SlackViewSubmission?
 
     /// Payload types.
     static let blockActions = "block_actions"
     static let viewSubmission = "view_submission"
 
+    // Why: `state.values` is keyed block id then action id; a flat read finds nothing and looks like an empty answer.
     /// The text a user typed into one field of a submitted modal.
-    ///
-    /// ⚠️ `state.values` is keyed BLOCK id then ACTION id — two levels, not one. A flat read finds
-    /// nothing and presents as "the user submitted an empty answer".
     func submittedValue(blockID: String, actionID: String) -> String? {
         view?.state?.values[blockID]?[actionID]?.value
     }
@@ -118,9 +112,8 @@ struct SlackInteractivePayload: Codable, Sendable {
 struct SlackViewSubmission: Codable, Sendable {
     let callback_id: String?
 
-    /// ⚠️ THE CORRELATION CARRIER. A modal is not in a channel, so a submission has no `channel`
-    /// to infer anything from — `private_metadata` is what the view was opened with and comes back
-    /// untouched. Slack allows 3000 characters here; a 48-byte token is nothing.
+    /// The correlation carrier: a modal is not in a channel, so `private_metadata` (returned untouched,
+    /// up to 3000 characters) identifies the submission.
     let private_metadata: String?
 
     let state: SlackViewState?
@@ -268,11 +261,8 @@ struct SlackPostMessagePayload: Codable, Sendable {
     let text: String
     let blocks: [SlackBlock]?
 
-    /// ⚠️⚠️ [BR-3/EG-3] NEUTRALISED IN THE INITIALIZER, NOT AT THE CALL SITE, for the same reason
-    /// Discord's `allowed_mentions` is a defaulted property: a step each sender has to remember is a
-    /// step the next send path forgets. Every `chat.postMessage` this app makes goes through here.
-    /// See `RemoteMarkupEscaping.withoutSlackBroadcasts` for why rewriting this text is safe when
-    /// four previous content rewrites in this codebase were not.
+    /// Broadcast mentions are neutralised in the initializer, not at the call site, so every `chat.postMessage` is covered.
+    /// See `RemoteMarkupEscaping.withoutSlackBroadcasts`.
     init(channel: String, text: String, blocks: [SlackBlock]? = nil) {
         self.channel = channel
         self.text = RemoteMarkupEscaping.withoutSlackBroadcasts(text)
@@ -287,7 +277,7 @@ struct SlackUpdateMessagePayload: Codable, Sendable {
     let text: String
     let blocks: [SlackBlock]?
 
-    /// ⚠️ Edits need it as much as posts — a mirrored prompt is edited in place when it resolves.
+    /// Applies the same neutralisation as posts, since a mirrored prompt is edited in place when it resolves.
     init(channel: String, ts: String, text: String, blocks: [SlackBlock]? = nil) {
         self.channel = channel
         self.ts = ts
@@ -298,13 +288,8 @@ struct SlackUpdateMessagePayload: Codable, Sendable {
 
 // MARK: - Modal Views
 
-/// A modal view, as `views.open` wants it.
-///
-/// ⚠️ A SEPARATE TYPE FROM `SlackBlock`, DELIBERATELY. A modal's input block needs a `label` and a
-/// SINGULAR `element`; `SlackBlock` has neither — it carries a plural `elements` array and no label,
-/// because it exists for message blocks. Widening it would let a message block sprout a label and
-/// an input, which Slack rejects at the API with an opaque `invalid_arguments`, so the two shapes
-/// stay separate rather than sharing a type that is wrong for both.
+/// A modal view, as `views.open` expects it.
+/// A separate type from `SlackBlock`: a modal input block needs a `label` and a singular `element`.
 struct SlackModalView: Encodable, Sendable {
     let type: String
     let callback_id: String
@@ -314,8 +299,7 @@ struct SlackModalView: Encodable, Sendable {
     let close: SlackTextObject
     let blocks: [SlackInputBlock]
 
-    /// ⚠️ Slack caps `title`, `submit` and `close` at 24 characters EACH and rejects the whole
-    /// `views.open` call otherwise — the user sees a button that does nothing.
+    /// Slack caps `title`, `submit` and `close` at 24 characters each and rejects the whole `views.open` call otherwise.
     init(callbackID: String, privateMetadata: String, title: String, blocks: [SlackInputBlock]) {
         self.type = "modal"
         self.callback_id = callbackID
@@ -377,10 +361,8 @@ struct SlackAPIResponse<T: Decodable>: Decodable {
     let channel: String?
     let ts: String?
 
-    /// ⚠️ WHERE SLACK PUTS THE ACTUAL REASON, and it was being discarded. A rejected view comes
-    /// back as HTTP 200 with `ok: false` and `error: "invalid_arguments"` — a string that names
-    /// nothing — while the field that says WHICH argument sits in here. Without it, a malformed
-    /// modal is undebuggable from logs, which is exactly the state this path must not ship in.
+    /// Where Slack names the actual reason for a rejected view: the response is HTTP 200 with `ok: false` and a generic
+    /// `invalid_arguments`, and this field says which argument.
     let response_metadata: SlackResponseMetadata?
 }
 

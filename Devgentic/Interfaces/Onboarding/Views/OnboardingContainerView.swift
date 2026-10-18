@@ -4,7 +4,7 @@
 //  OnboardingContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/09/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -234,13 +234,8 @@ struct OnboardingContainerView: View {
 }
 
 // MARK: - Window Accessor for Onboarding
-/// Sizes and centres the window ONCE when onboarding appears, and gives the window back as it was
-/// when onboarding goes away.
-///
-/// ⚠️ It used to run on every `updateNSView` — every state change, including each 250 ms download
-/// poll — and snap any window more than 15 pt off 880×800 back to centre, so the user could not
-/// resize it. It also set `minSize` and never restored it, so the MAIN window kept onboarding's
-/// 840×720 minimum after setup finished.
+// Why: must not re-run on `updateNSView` (it would fight user resizing), and `minSize` must be restored on exit
+/// Sizes and centres the window once when onboarding appears and restores the window when onboarding goes away.
 struct OnboardingWindowAccessor: NSViewRepresentable {
     static let targetSize = NSSize(width: 880, height: 800)
     static let minimumSize = NSSize(width: 840, height: 720)

@@ -4,67 +4,7 @@
 //  DerivedHistorySourceTests.swift
 //  DevgenticTests
 //
-//  Could `ActiveStreamManager` DERIVE the model-facing history instead of ACCEPTING it?
-//
-//  ⚠️ WRITTEN AS A FEASIBILITY GATE, BEFORE THE MOVE — and left in the present tense after it,
-//  which made it read as a description of live code for a day. `startMessageStream` NO LONGER
-//  TAKES `history`, `conversationID` or `userQuery` (`ActiveStreamManager.swift:357-366`); it
-//  takes `userMessage` and derives the rest. The paragraphs below are kept because they record
-//  WHY, but read them as history, not as the current API.
-//
-//  What it took history as a parameter FOR: the manager could not tell a resolved ascending
-//  merge from a descending store dump (`SchedulerCoordinator`) from a 20-message pagination
-//  window (`QuickAccessSessionViewModel`) from a private append-only transcript
-//  (`OrbSessionController`). Every rule about that argument lived in a comment. That is why
-//  invariant #8 ("ascending history only, from `BackendHistoryResolver`") was violated in live
-//  code by the scheduler.
-//
-//  The fix was the move `LLM_Execution_Concurrency_Design.md:55` had already made once for
-//  `streamingMessageID`: stop passing the value, derive it, and the wrong call becomes
-//  unrepresentable rather than guarded against.
-//
-//  ⚠️ WHAT THIS FILE GUARDS NOW. Its tests exercise `BackendHistoryResolver` — that the derived
-//  SOURCE (`[userMessage] ∪ activeStreams`) is equivalent to the UI array it replaced, which is
-//  the property that made the move safe. It does NOT guard `ActiveStreamManager.deriveHistory`
-//  itself; `DerivedHistoryContractTests` does that, and the two files assert DIFFERENT layers.
-//  Where they look contradictory — an in-flight reply, carried here and absent there — see
-//  `testTheResolverCarriesTheInFlightReplyAndTheSendPathThenOmitsIt` below, which pins both
-//  halves in one place so neither can be read as refuting the other.
-//
-//  `BackendHistoryResolver.resolve(inMemory:)` USED TO BE fed
-//  `chatHistoryViewModel.currentChatMessages`. The derivation was only safe if the manager's own
-//  state carries everything that array contributes. The resolver's own header says `inMemory`
-//  exists for exactly two reasons (`MessagingCoordinator.swift:795-797`): the just-sent user
-//  message racing its detached persist, and in-flight streaming messages. If that is the whole
-//  list, the manager can supply both — the user message becomes a parameter, and the streams
-//  are `activeStreams`. The UI array would then be OVER-SUPPLY, which is precisely what let
-//  QuickAccess pass a pagination window in the first place.
-//
-//  It was NOT the whole list when this file was written, and
-//  `testTwoInputDerivationLosesAnUnpersistedCompactionCheckpoint` is the counter-example that
-//  found the third: `MessagingCoordinator` used to persist a compaction checkpoint in a DETACHED
-//  task while splicing it into `currentChatMessages` immediately, with the comment "so the NEXT
-//  turn's history resolution sees it in memory too". For the width of that unawaited write the
-//  UI array was the ONLY carrier, so a two-input derivation dropped it and the model lost the
-//  summary standing in for turns already compacted away — silent context loss, the exact class
-//  the resolver exists to prevent.
-//
-//  ✅ RESOLVED at the source rather than absorbed here. `MessagingCoordinator.deliverCheckpoint`
-//  now AWAITS the store write before splicing, so the store is authoritative before anything can
-//  observe the checkpoint and the splice is render-only. The derivation therefore needs only TWO
-//  inputs in production:
-//      derived = [the just-sent user message] ∪ activeStreams
-//
-//  These tests stay as the guard on both halves of that. `…LosesAnUnpersistedCompactionCheckpoint`
-//  records WHY the await is load-bearing; `…ThreeInputDerivationIsEquivalentToTheUIArray` pins the
-//  fallback shape if an unpersisted in-memory carrier is ever reintroduced; and
-//  `…TheThirdInputIsOnlyNeededWhileThePersistIsInFlight` is the one that now describes production.
-//  The ordering itself is pinned separately, and mutation-checked, by
-//  `CompactionCheckpointDeliveryTests`.
-//
-//  Equivalence is compared as an ORDERED SEQUENCE OF IDS, never as a count or a character sum.
-//  A character sum is order-independent, which is how the descending-history bug survived
-//  (`architecture_readme.md` §7 #8, and `EpisodicFitGaugeAlignmentTests`).
+//  Created by Raj Singh.
 //
 
 import XCTest

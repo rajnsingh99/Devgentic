@@ -4,9 +4,7 @@
 //  GlobalRateLimiterTests.swift
 //  DevgenticTests
 //
-//  Tests for profile-scoped rate limiting using the Token Bucket algorithm.
-//  Covers: key derivation, bucket isolation, burst behavior, debt/throttling,
-//  drain & penalize, and shared-key scenarios.
+//  Created by Raj Singh.
 //
 
 import XCTest

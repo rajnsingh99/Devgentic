@@ -4,9 +4,7 @@
 //  OrbStreamingSpeakerTests.swift
 //  DevgenticTests
 //
-//  Phase 1 segmentation. `cut` is the piece that decides what Orb says out loud and when,
-//  and it runs against a stream that arrives in arbitrary fragments — the exact shape that is
-//  impractical to verify by talking to a device. All of it is pure.
+//  Created by Raj Singh.
 //
 
 import XCTest

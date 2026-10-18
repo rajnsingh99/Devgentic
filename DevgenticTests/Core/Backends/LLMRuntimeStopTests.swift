@@ -4,13 +4,7 @@
 //  LLMRuntimeStopTests.swift
 //  DevgenticTests
 //
-//  Timeout inventory D-27, three of its rows:
-//    - a stopped MLX or IC generation returned its partial text as a complete answer;
-//    - a stopped image generation was recorded as FAILED with an error card;
-//    - every Ollama pull longer than 30 minutes failed, however well it was progressing.
-//
-//  The MLX and IC paths need a loaded model to run end to end, so their rule is tested directly
-//  and their call sites are pinned from source (the wiring is what a refactor drops).
+//  Created by Raj Singh.
 //
 
 import XCTest

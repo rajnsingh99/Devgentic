@@ -4,47 +4,13 @@
 //  DiagnosticBundle.swift
 //  Devgentic
 //
-//  Data types for the Phase F diagnostic export. The user-facing output is a
-//  zip archive with a structured layout — one JSON per concern, all sanitized.
-//  This file defines the manifest + scope + includes enums; actual assembly
-//  lives in `BundleExporter`.
-//
-//  Layout of a produced bundle:
-//
-//      devgentic-bug-report-{traceID8}-{iso8601}.zip
-//      └── devgentic-bug-report-{...}/         (ditto --keepParent adds this)
-//          ├── manifest.json                    (version, scope, includes, sanitization)
-//          ├── trace.json                       (fully-hydrated TraceRecord + spans + events)
-//          ├── config_snapshot.json             (TraceConfigSnapshot)
-//          ├── logs/
-//          │   └── recent.jsonl                 (one LogEntry per line, sanitized)
-//          ├── metrics/
-//          │   ├── tool_reliability.json
-//          │   ├── category_frequency.json
-//          │   ├── model_reliability.json
-//          │   └── circuit_breaker.json
-//          ├── environment/
-//          │   ├── hardware.json
-//          │   ├── app_version.json
-//          │   └── feature_flags.json
-//          ├── preferences/
-//          │   └── app_settings.json            (non-secret UserDefaults)
-//          ├── user_feedback/                   (only if includes.userFeedback)
-//          │   ├── message.txt
-//          │   ├── rating.json
-//          │   └── screenshot.png               (only if includes.screenshot)
-//          ├── crashes/                         (only if includes.crashes AND reports exist)
-//          │   ├── <ProcessName>-<date>.ips     (sanitized system crash reports)
-//          │   └── metrickit-<date>.json        (sanitized MetricKit diagnostic payloads)
-//          └── SANITIZATION_NOTICE.txt          (plain-text statement of redactions)
-//
-//  Extensibility: adding a new section is two lines — an `Includes` case and a
-//  corresponding `BundleExporter` writer method. The manifest automatically
-//  records which sections were included.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Data types for the diagnostic export: manifest, scope and includes.
+/// The output is a zip with one sanitized JSON per concern; assembly lives in `BundleExporter`.
 enum DiagnosticBundle {
 
     // MARK: - Manifest
@@ -82,10 +48,8 @@ enum DiagnosticBundle {
         /// ("things broke after message 5").
         case conversation(id: UUID)
 
-        /// Recent activity across all conversations. `hours` defines the window.
-        /// Logs and metrics pulled for the same window. Used when the user
-        /// reports a general "things have been weird" issue without a specific
-        /// failed message.
+        /// Recent activity across all conversations; `hours` defines the window.
+        /// Logs and metrics for that window, for general reports without a specific failed message.
         case recent(hours: Int)
 
         /// Human-readable description used in the manifest.
@@ -140,8 +104,8 @@ enum DiagnosticBundle {
         /// Screenshot PNG (requires userFeedback).
         static let screenshot     = Includes(rawValue: 1 << 7)
 
-        /// Crash & hang reports (§12.1): the app's `.ips`/`.hang` files from
-        /// ~/Library/Logs/DiagnosticReports + persisted MetricKit payloads, sanitized.
+        /// Crash and hang reports: the app's `.ips`/`.hang` files from ~/Library/Logs/DiagnosticReports,
+        /// plus persisted MetricKit payloads, sanitized.
         static let crashes        = Includes(rawValue: 1 << 8)
 
         // MARK: Presets
@@ -157,15 +121,13 @@ enum DiagnosticBundle {
         /// For cases where the user wants minimal data leakage.
         static let minimal: Includes = [.trace, .configSnapshot, .environment]
 
-        /// Presets for the user-feedback flow — trace + config + logs + environment,
-        /// plus the feedback/rating if available. No metrics dashboard data since
-        /// that's dev-oriented. Crashes included: "it crashed" is the report this
-        /// flow most needs to answer.
+        /// Preset for the user-feedback flow: trace, config, logs and environment, plus feedback and rating if available.
+        /// No metrics data; crashes are included because "it crashed" is the report this flow most needs to answer.
         static let userReport: Includes = [
             .trace, .configSnapshot, .logs, .environment, .userFeedback, .crashes
         ]
 
-        /// Human-readable rawValue names — used to populate `Manifest.includes`.
+        /// Human-readable names of the included sections, for `Manifest.includes`.
         var describe: [String] {
             var names: [String] = []
             if contains(.trace)          { names.append("trace") }

@@ -4,60 +4,24 @@
 //  OrbSpeechRecognizer.swift
 //  Devgentic
 //
-//  [Phase 5] Apple's macOS 26 `SpeechAnalyzer` as an alternative recognizer for Orb.
-//
-//  WHY: WhisperKit's `AudioStreamTranscriber` re-decodes its whole un-purged buffer, which is why
-//  Orb has to recycle passive sessions every 45s, and it reports no finality — so Orb infers
-//  "you stopped talking" from 2.2s of textual stability on a punctuation-stripped projection of
-//  the transcript. `SpeechAnalyzer` is a long-lived actor with an explicit `isFinal` per result:
-//  no per-turn restart, no growing buffer, no model download, and the send can fire the INSTANT
-//  the transcriber finalizes instead of 2.2s later.
-//
-//  ⚠️ DEFAULT OFF, Developer mode. Never exercised against a real microphone.
-//
-//  VERIFIED AGAINST THE INSTALLED SDK (Speech.swiftmodule/arm64e-apple-macos.swiftinterface),
-//  not against recall — Phase 4 taught that a confident plan can be wrong on its load-bearing API:
-//   • `SpeechAnalyzer` is a `final public actor` (:223) — every call to it is `await`.
-//   • `init(inputSequence:modules:options:analysisContext:volatileRangeChangedHandler:)` (:229)
-//     requires `InputSequence.Element == AnalyzerInput`, and `AnalyzerInput(buffer:)` (:294) is
-//     the only wrapper needed.
-//   • `SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith:)` is `static async -> AVAudioFormat?`
-//     (:278) — the analyzer tells US its format; we convert the tap to it.
-//   • `SpeechTranscriber(locale:preset:)` (:408) with `.progressiveTranscription` (:414).
-//   • `SpeechTranscriber.Result` (:495) carries `text: AttributedString`, and `isFinal` comes from
-//     the `SpeechModuleResult` extension (:384).
-//   • `SpeechDetector.Result` (:347) carries `speechDetected: Bool` — real ML voice activity,
-//     which is also the future barge-in trigger once duplex playback lands.
-//   • `SpeechTranscriber.isAvailable` (:474) gates adoption.
-//  ⚠️⚠️ The convenience types every write-up mentions — `CaptureInputSequenceProvider`,
-//  `AssetInputSequenceProvider`, `AnalyzerInputConverter` — **DO NOT EXIST** in this SDK. I
-//  grepped: zero occurrences. The tap → converter → AsyncStream plumbing below is hand-rolled
-//  because it has to be, and a format mismatch here compiles cleanly and produces TOTAL SILENCE.
-//  That is why the negotiated format is logged and a zero-result session is reported loudly.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import AVFoundation
 import Speech
 
+/// An alternative Orb recognizer built on Apple's macOS 26 `SpeechAnalyzer`.
+/// A long-lived actor with an explicit `isFinal` per result, so a send can fire the instant the transcriber finalizes.
 @available(macOS 26.0, *)
 final class OrbSpeechRecognizer {
 
     /// Whether this machine can run the Apple recognizer at all.
     static var isAvailable: Bool { SpeechTranscriber.isAvailable }
 
-    /// Whether the audio tap has delivered ANY buffer this session.
-    ///
-    /// ⚠️⚠️ THE ONLY HONEST LIVENESS SIGNAL ON THIS PATH, and the reason the caller's dead-microphone
-    /// detection could not simply be copied from the WhisperKit loop. `handle(_:)` emits
-    /// `bufferEnergy: []` — this recognizer has no per-buffer energy to report — so the controller's
-    /// shared `receivedAudio` flag can only ever be set by TEXT arriving. Text proves audio, but
-    /// silence does not disprove it: keyed on transcription alone, a dead microphone and a quiet
-    /// room are the same observation, and warning on that would light up "NO AUDIO" every time
-    /// nobody happened to speak.
-    ///
-    /// The tap firing is precisely what a non-empty `bufferEnergy` means on the WhisperKit side: a
-    /// healthy engine delivers buffers within ~100 ms whether or not anyone is talking.
+    /// Whether the audio tap has delivered any buffer this session.
+    /// The honest liveness signal here: `handle(_:)` emits no per-buffer energy, so text cannot tell a dead mic from silence.
+    /// A healthy engine delivers buffers within ~100 ms whether or not anyone is talking.
     var hasReceivedAudio: Bool {
         if tapDeliveredAudio { return true }
         return tapAdapter?.snapshot.sawAudio ?? false
@@ -77,16 +41,13 @@ final class OrbSpeechRecognizer {
     private var resultsTask: Task<Void, Never>?
     private var detectorTask: Task<Void, Never>?
 
-    /// Text finalized so far this session, plus the volatile hypothesis — deliberately mapped onto
-    /// the SAME `StreamingTranscriptionState` the WhisperKit path emits, so every consumer
-    /// (the orb's live caption, the stability watchdog, the dead-mic detector) works unchanged.
+    /// Text finalized so far this session plus the volatile hypothesis, mapped onto the same `StreamingTranscriptionState`
+    /// the WhisperKit path emits, so every consumer works unchanged.
     private var finalizedText = ""
     private var volatileText = ""
     private var sawAnyResult = false
-    /// Latched copy of the tap's liveness, because `stop()` releases the adapter that owns it.
-    /// Without the latch, whether a session counted as "dead" would depend on whether the caller
-    /// happened to ask before or after stopping — a race in the one signal that decides whether the
-    /// user is told their microphone is broken.
+    /// Latched copy of the tap's liveness, because `stop()` releases the adapter that owns it; otherwise the
+    /// dead-session verdict would depend on whether the caller asks before or after stopping.
     private var tapDeliveredAudio = false
     private var onUpdate: ((StreamingTranscriptionState) -> Void)?
     /// Fired when the transcriber marks a result final — the whole point of this recognizer.
@@ -113,13 +74,8 @@ final class OrbSpeechRecognizer {
         sawAnyResult = false
         tapDeliveredAudio = false
 
-        // ⚠️⚠️ RESOLVE AND RESERVE THE LOCALE FIRST. `SpeechTranscriber` will happily run with an
-        // unallocated locale — it does not throw, it WARNS and transcribes in a degraded mode.
-        // Device test 2026-09-04: "write an essay on technology" came back as "write an SM
-        // technology" and then "write in Asian technology", with the framework quietly logging
-        // `Cannot use modules with unallocated locales [en_IN]. Currently allocated locales are []`.
-        // Reserving is therefore not optional setup — it IS the difference between this recognizer
-        // working and producing garbage.
+        // Resolve and reserve the locale first: `SpeechTranscriber` does not throw for an unallocated locale, it warns
+        // and transcribes in a degraded mode, so reserving is required for correct output.
         let resolved = await Self.resolveLocale(locale, logger: logger)
         guard let resolvedLocale = resolved else {
             logger.error("[ORB_APPLE_ASR]\(self.correlationTag) No supported Apple Speech locale equivalent to \(locale.identifier). CONSEQUENCE: refusing to start rather than transcribing in a degraded mode — the caller falls back to WhisperKit.")
@@ -129,9 +85,7 @@ final class OrbSpeechRecognizer {
         // `.progressiveTranscription` is the preset that reports volatile hypotheses as well as
         // finalized text — without it there is nothing to show in the orb's live caption.
         let transcriber = SpeechTranscriber(locale: resolvedLocale, preset: .progressiveTranscription)
-        // Explicit sensitivity rather than the convenience init: the level is the only tuning
-        // this module exposes (there is no numeric threshold), so it should be visible here
-        // rather than hidden behind a default.
+        // Explicit sensitivity rather than the convenience init: the level is the only tuning this module exposes.
         let detector = SpeechDetector(
             detectionOptions: .init(sensitivityLevel: .medium),
             reportResults: true
@@ -153,10 +107,8 @@ final class OrbSpeechRecognizer {
         // Async path: settle by awaiting rather than stalling the UI.
         await OrbAudioEngineBuilder.awaitDeviceRelease(logger: logger)
         let graph = try OrbAudioEngineBuilder.make(voiceProcessing: voiceProcessing, logger: logger)
-        // ⚠️ NOT `AVAudioConverter(from: graph.tapFormat, …)`. That format is read before the
-        // engine starts, and voice processing renegotiates the device afterwards — a converter
-        // pinned to the stale format yields silence with no error. The adapter builds its own from
-        // the first real buffer, downmixes mic arrays, and names every dropped buffer.
+        // Not `AVAudioConverter(from: graph.tapFormat, …)`: that format is read before the engine starts and voice processing
+        // renegotiates it, yielding silence with no error. The adapter builds its converter from the first real buffer.
         let adapter = OrbTapAdapter(predicted: graph.tapFormat, target: analyzerFormat, tag: "[ORB_APPLE_ASR]", logger: logger)
         self.tapAdapter = adapter
 
@@ -188,10 +140,7 @@ final class OrbSpeechRecognizer {
 
         detectorTask = Task { [weak self] in
             guard let self else { return }
-            // Real ML voice activity, replacing a buffer-energy counter that fires on fan hum.
-            // Once duplex PLAYBACK lands this is also the barge-in trigger: speech detected on an
-            // AEC-cleaned stream while Orb is speaking means the user interrupted, and nothing
-            // else does.
+            // Real ML voice activity, rather than a buffer-energy counter that fires on fan hum.
             do {
                 for try await result in detector.results {
                     // Real ML voice activity — logged at debug so a device test can correlate it
@@ -216,9 +165,7 @@ final class OrbSpeechRecognizer {
             do {
                 try await analyzer.finalizeAndFinishThroughEndOfInput()
             } catch {
-                // This call exists so a command spoken right before the stop is not lost. A
-                // swallowed throw loses exactly that, and the user sees a truncated command with
-                // no explanation anywhere.
+                // This flush exists so a command spoken right before the stop is not lost; a swallowed throw would truncate it silently.
                 logger.error("[ORB_APPLE_ASR]\(self.correlationTag) Final flush FAILED: \(error.localizedDescription). CONSEQUENCE: anything said in the last moment before stopping is missing from the transcript — the command may be truncated with no other sign.")
             }
         }
@@ -226,8 +173,7 @@ final class OrbSpeechRecognizer {
         detectorTask?.cancel(); detectorTask = nil
 
         if let tapAdapter {
-            // ⚠️ Latch BEFORE releasing the adapter — `hasReceivedAudio` is read by the caller's
-            // dead-microphone check, which runs after this.
+            // Latch before releasing the adapter: `hasReceivedAudio` is read by the dead-microphone check, which runs after this.
             tapDeliveredAudio = tapAdapter.snapshot.sawAudio
             logger.notice("[ORB_APPLE_ASR]\(self.correlationTag) Tap summary — \(tapAdapter.summary()).")
         }
@@ -241,9 +187,7 @@ final class OrbSpeechRecognizer {
         detector = nil
 
         let text = StreamingTranscriptionState.joined(confirmed: finalizedText, partial: volatileText)
-        // ⚠️ Only a session that actually RAN can prove a format mismatch. A superseded or
-        // cancelled session naturally has no results, and reporting that as the mismatch
-        // signature trains the reader to ignore the one line that matters.
+        // Only a session that actually ran can prove a format mismatch; a superseded or cancelled session has no results.
         if !sawAnyResult, reason == "finished" {
             // The silent-failure signature this recognizer is most likely to hit: a clean compile,
             // a running engine, and no results at all because the format negotiation was wrong.
@@ -258,10 +202,8 @@ final class OrbSpeechRecognizer {
 
     // MARK: - Locale + on-device assets
 
-    /// The supported locale closest to `requested`, or nil if the language is unavailable.
-    ///
-    /// Uses the framework's own matcher rather than string comparison: `en_IN` is not in
-    /// `supportedLocales` verbatim on every machine, but has a supported equivalent.
+    /// Returns the supported locale closest to `requested`, or nil if the language is unavailable.
+    /// Uses the framework's matcher, not string comparison: `en_IN` has a supported equivalent not listed verbatim.
     private static func resolveLocale(_ requested: Locale, logger: DGLogger) async -> Locale? {
         if let equivalent = await SpeechTranscriber.supportedLocale(equivalentTo: requested) {
             if equivalent.identifier != requested.identifier {
@@ -274,12 +216,9 @@ final class OrbSpeechRecognizer {
         return nil
     }
 
+    // Why: skipping `AssetInventory.reserve` does not fail but silently degrades transcription.
     /// Reserves the locale and installs its on-device model if needed.
-    ///
-    /// ⚠️ `AssetInventory.reserve` is what moves a locale into "allocated". Skipping it does NOT
-    /// fail — it degrades, silently, which is exactly how this shipped broken the first time.
-    /// There is a hard cap (`maximumReservedLocales`), so a reserve can legitimately fail and
-    /// must be reported rather than swallowed.
+    /// A reserve can fail (cap `maximumReservedLocales`); the failure is reported, not swallowed.
     private static func reserveAndInstall(locale: Locale,
                                           modules: [any SpeechModule],
                                           logger: DGLogger) async throws {
@@ -372,10 +311,8 @@ enum OrbSpeechRecognizerError: LocalizedError {
 // MARK: - One-shot gate
 
 /// Bridges the Apple recognizer's callbacks into the listening loop's sequential shape.
-///
-/// Resumes EXACTLY ONCE, whichever edge arrives first — a finalized result, the capture hard cap,
-/// an expired follow-up window, or a superseded generation. The same exactly-once discipline as
-/// `drainSpeechCompletion`: a double resume traps, and a missed resume parks the turn forever.
+/// Resumes exactly once, whichever edge arrives first (final result, capture cap, follow-up expiry, new generation);
+/// a double resume traps and a missed one parks the turn forever.
 @MainActor
 final class OrbOneShot {
     private var continuation: CheckedContinuation<String, Never>?

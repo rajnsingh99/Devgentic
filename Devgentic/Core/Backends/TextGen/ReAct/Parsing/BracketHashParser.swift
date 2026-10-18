@@ -4,12 +4,7 @@
 //  BracketHashParser.swift
 //  Devgentic
 //
-//  Fallback parser for the <Functions#tool_name> format used by Devstral/OpenHands.
-//  Expected formats:
-//    <Functions#[tool_name]{"key": "value"}>
-//    <Functions#tool_name>{"key": "value"}</Functions>
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

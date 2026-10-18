@@ -4,33 +4,15 @@
 //  CodeFenceShield.swift
 //  Devgentic
 //
-//  Keeps the code fences INSIDE a tool call's JSON string values out of reach of the fence stripper.
-//
-//  ## Why (readiness CR-3, 2026-10-10)
-//
-//  `OutputSanitizer.sanitize` strips every ``` from the whole reply before any parser reads it, and
-//  several parsers depend on that: the heuristic JSON finder and ReAct's `Action Input:` reader both
-//  treat ``` as structure and fail on valid JSON that still contains one. So the strip cannot simply
-//  be skipped. But it also removed fences from argument VALUES — a README written via `write_file`
-//  reached disk without its code blocks, an `old_string` holding ``` could never match the file, and
-//  a ReAct `final_answer` lost its code. The sixth member of the content-corruption class: a transform
-//  rewriting content because of what it looked like.
-//
-//  ## How
-//
-//  Before the cascade, every ``` that sits INSIDE A JSON STRING LITERAL of a balanced `{…}` is
-//  swapped for a placeholder of private-use characters; after it, the placeholder is swapped back in
-//  the parsed arguments and text. A fence that WRAPS a call is outside every string literal, so it is
-//  still stripped exactly as before — which is what lets a fence-wrapped call parse at all.
-//
-//  ⚠️ Scoped by STRUCTURE (inside a string literal of a balanced object, located by the same
-//  escape-aware scanner the parsers use), never by what the surrounding text looks like.
-//  ⚠️ Not covered: dialects whose values are NOT JSON strings (Qwen3-Coder `<parameter=…>` bodies).
-//  Those are normally decoded upstream by the MLX framework (Stage 0) and never reach this.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+// Why: the sanitizer's blanket fence strip cannot be dropped (parsers rely on it) but would corrupt argument values.
+/// Keeps code fences inside a tool call's JSON string values out of reach of the fence stripper.
+/// Before parsing, each ``` inside a JSON string literal of a balanced `{…}` becomes a placeholder, restored afterwards.
+/// A fence that wraps a call is outside every literal and is still stripped. Non-JSON-string dialects are not covered.
 enum CodeFenceShield {
 
     /// Three private-use scalars. A model cannot produce them by accident, they survive JSON
@@ -106,7 +88,7 @@ enum CodeFenceShield {
             parseOutcome: step.parseOutcome,
             reasoningReplay: step.reasoningReplay,
             callsRecoveredFromText: step.callsRecoveredFromText.map(unshield),
-            // CR-52: carried, or every rejected sibling vanished again right here.
+            // Carried through, or every rejected sibling call would be dropped here.
             rejectedCalls: step.rejectedCalls.map {
                 RejectedSiblingCall(
                     call: PendingToolCall(id: $0.call.id, name: $0.call.name, arguments: $0.call.arguments.mapValues(unshield)),

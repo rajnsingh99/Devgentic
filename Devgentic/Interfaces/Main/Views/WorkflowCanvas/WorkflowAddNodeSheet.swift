@@ -4,29 +4,21 @@
 //  WorkflowAddNodeSheet.swift
 //  Devgentic
 //
-//  Created on 29/08/26.
-//
-//  The two-option add flow for profile-backed workflow nodes.
-//
-//  ⚠️ A node's configuration is SCOPED TO ITS WORKFLOW. "New node" builds a private profile row from
-//  scratch; "Import from a profile" COPIES an existing one, once, and detaches. Neither leaves a live
-//  link to the shared profile library — editing a node changes nothing outside its canvas, and
-//  deleting the profile it was imported from means nothing to it.
-//
-//  This replaced a picker that could only REFERENCE a shared profile, which is why editing a node's
-//  instructions used to rewrite a profile chat and other workflows also ran.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The two-option add flow for profile-backed workflow nodes: "New node" builds a private profile row, "Import from
+/// a profile" copies a shared one once and detaches. A node's configuration is scoped to its workflow, with no live
+/// link to the shared profile library.
 struct WorkflowAddNodeSheet: View {
 
     @Environment(\.appTheme) private var theme
     @Environment(\.dismiss) private var dismiss
 
-    /// Shared library profiles offered for import. ⚠️ Must be `sharedProfiles` — another node's
-    /// owned row is not a profile the user has anywhere else, and importing one would copy a
-    /// configuration that is already private to a different node.
+    /// Shared library profiles offered for import; must be `sharedProfiles`, since another node's owned row is not a
+    /// profile the user has anywhere else.
     let profiles: [BackendProfileModel]
     let workflowProfileID: UUID
 

@@ -4,11 +4,12 @@
 //  ProviderSidebarListView.swift
 //  Devgentic
 //
-//  Left sidebar of the dedicated Model Catalog split view showing providers and key status.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Left sidebar of the model catalog split view, listing providers and their key status.
 struct ProviderSidebarListView: View {
 
     @Binding var selectedCategory: ModelCatalogProviderCategory

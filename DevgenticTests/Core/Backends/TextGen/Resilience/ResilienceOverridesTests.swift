@@ -4,9 +4,7 @@
 //  ResilienceOverridesTests.swift
 //  DevgenticTests
 //
-//  Phase-B resilience: per-tier override resolution precedence, backward-compat
-//  with the legacy single-knob RetryPolicy, Codable round-trip + omit-empty, and
-//  end-to-end persistence through a round-tripped AgentConfig profile.
+//  Created by Raj Singh.
 //
 
 import XCTest

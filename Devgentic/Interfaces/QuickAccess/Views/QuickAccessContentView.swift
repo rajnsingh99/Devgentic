@@ -4,17 +4,21 @@
 //  QuickAccessContentView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 07/05/25.
-//  [QA revival P1a] Rewired onto the real streaming stack: hosts a live transcript of
-//  shared ChatBubbleViews driven by QuickAccessSessionViewModel (which streams through the
-//  app-wide ActiveStreamManager). The old dead OllamaConnect view model is gone.
+//  Created by Raj Singh.
 //
+
 import SwiftUI
 import AppKit // For NSPasteboard / NSOpenPanel
 import UniformTypeIdentifiers // For .fileURL drag-and-drop
 
 private let logger = DGLogger(category: "QuickAccessContentView")
 
+/// The QuickAccess panel's content: a live transcript of shared ChatBubbleViews driven by `QuickAccessSessionViewModel`,
+/// which streams through the app-wide ActiveStreamManager.
+/// The QuickAccess panel's content: a live transcript of shared ChatBubbleViews driven by `QuickAccessSessionViewModel`,
+/// which streams through the app-wide ActiveStreamManager.
+/// The QuickAccess panel's content: a live transcript of shared ChatBubbleViews driven by `QuickAccessSessionViewModel`,
+/// which streams through the app-wide ActiveStreamManager.
 struct QuickAccessContentView: View {
     // --- Callbacks ---
     var dismiss: () -> ()
@@ -30,9 +34,8 @@ struct QuickAccessContentView: View {
     // [M9] Register a handler that maps the panel's ⌘Return / Escape onto a pending HITL request.
     var onRegisterHITLKeyHandler: ((@escaping (QuickAccessHITLKeyAction) -> Bool) -> Void)?
 
-    // --- Injected shared graph (from AppDelegate → panel) ---
-    // Plain lets, not @Environment: this view is hosted in an AppKit NSHostingView built
-    // by AppDelegate, outside the SwiftUI environment, so the graph is threaded in by hand.
+    // Injected shared graph: plain lets, not @Environment, because this view is hosted in an AppKit NSHostingView outside
+    // the SwiftUI environment.
     private let mainAppViewModel: MainApplicationViewModel
     private let themeManager: ThemeManager
     // [QA revival P1e] false when the panel's last session timed out → start fresh.
@@ -64,10 +67,9 @@ struct QuickAccessContentView: View {
     /// (nil = non-chat profile, so the ring self-hides). Recomputed on turn / model /
     /// attachment changes, mirroring the main composer.
     @State private var contextUsage: ContextWindowUsage?
-    // [QA revival P2b → Composer P2] Voice dictation via the shared ComposerVoiceController
-    // (per-instance; owns the Whisper session lifecycle incl. the C9 re-entry/cancel guards).
+    // Voice dictation via the shared `ComposerVoiceController` (per-instance; owns the Whisper session lifecycle).
     @State private var voice = ComposerVoiceController()
-    // [QA revival P3] Screen-capture state.
+    // Screen-capture state.
     @State private var isCapturing: Bool = false
     @State private var showCaptureDeniedPopover: Bool = false
     // [L6] Shown when the mic is tapped but no speech model is downloaded yet.
@@ -76,18 +78,15 @@ struct QuickAccessContentView: View {
     @State private var showMicDeniedPopover: Bool = false
     @State private var isMenuHovered: Bool = false
 
-    // [Composer P1] What this surface offers — drives which shared composer buttons render
-    // (screenshot is a QuickAccess capability; the main composer has it off).
+    // What this surface offers; drives which shared composer buttons render (screenshot is on here, off in the main
+    // composer).
     private let capabilities = ComposerCapabilities.quickAccess
 
-    // --- Styling Constants ---
-    // [H3] Chrome colors come from the app theme, not hardcoded white, so the panel stays
-    // legible in Light Mode. The panel's NSAppearance is pinned to the theme's colorScheme
-    // (QuickAccessPanelView.setupContentView) so the Liquid Glass backdrop renders in the same
-    // mode these tokens are designed against.
+    // Chrome colors come from the app theme so the panel stays legible in Light Mode; the panel's NSAppearance is pinned to
+    // the theme's colorScheme so the Liquid Glass backdrop matches these tokens.
     private var theme: any Theme { themeManager.currentTheme }
-    /// [CF-21] The shared reader, so this panel can mount its transport while it is speaking.
-    /// `SpeechControlIsland` reads the same singleton, so no injection is needed.
+    /// The shared reader, so this panel can mount its transport while it is speaking; `SpeechControlIsland` reads the same
+    /// singleton.
     private var speechService = SpeechService.shared
     /// [sa-5] The identity this panel's transcript registers as a speech-transport host under.
     /// Owned by the panel so its close path can deregister the same id.
@@ -133,13 +132,8 @@ struct QuickAccessContentView: View {
 
     var body: some View {
         ZStack {
-            // [drag-vs-select fix v2] Window-drag surface as a REAL backmost layer. A `.background`
-            // NSViewRepresentable did NOT receive empty-area mouse-downs (SwiftUI routed them past
-            // it → panel immovable). As a ZStack sibling behind the content, SwiftUI hit-tests
-            // empty/chrome areas TO it → it drags the window (performDrag); the text field, buttons,
-            // and transcript are in front and keep their own selection/click/scroll. Replaces
-            // isMovableByWindowBackground, which stole drags over the input field. Works collapsed +
-            // expanded.
+            // Window-drag surface as a real backmost layer: empty/chrome areas hit-test to it and drag the window, while the text
+            // field, buttons and transcript in front keep their own behavior. A `.background` view misses those mouse-downs.
             WindowDragArea()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -159,10 +153,8 @@ struct QuickAccessContentView: View {
                         .padding(.bottom, 6)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                // [Advisory] Compact ambient warning — same AdvisoryCenter (and dismissal
-                // suppression) as the main window's banner. Same stacking rule too: HITL
-                // above, advisory anchored next to the input, so transient HITL banners
-                // come and go without displacing it.
+                // Compact ambient warning from the same AdvisoryCenter (and dismissal suppression) as the main window; HITL banners
+                // stack above, the advisory stays anchored next to the input.
                 if let advisory = AdvisoryCenter.shared.current(for: session.conversationID ?? Advisory.allConversations) {
                     QuickAccessAdvisoryBanner(
                         advisory: advisory,
@@ -183,9 +175,7 @@ struct QuickAccessContentView: View {
                     .padding(.horizontal, isExpanded ? 12 : 0)
                     .padding(.bottom, isExpanded ? 12 : 0)
                     .padding(.horizontal, isExpanded ? expandedInputAreaHorizontalMargin : 0)
-                    // [Unified card] The collapsed window height IS this measured height (the
-                    // card is the only content). Editor growth / chips appearing re-measure and
-                    // the window follows; expanded ignores it (the card grows into the transcript).
+                    // The collapsed window height is this measured height (the card is the only content); expanded ignores it.
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.size.height
                     } action: { newHeight in
@@ -195,8 +185,7 @@ struct QuickAccessContentView: View {
             }
         }
         .frame(minWidth: contentViewMinWidth)
-        // [Composer P1] The shared composer buttons (ComposerKit) read \.appTheme — set it once at
-        // the panel root so every child themes correctly (inner injections become redundant).
+        // The shared composer buttons read `\.appTheme`; setting it once at the panel root themes every child.
         .environment(\.appTheme, themeManager.currentTheme)
         // MARK: Liquid Glass — replace material + stroke + shadow with glassEffect
         .background(.clear)
@@ -209,9 +198,8 @@ struct QuickAccessContentView: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isDropTargeted)
-        // [L5] Match the window-frame animation (NSAnimationContext 0.3s ease in
-        // resizePanelProgrammatically) with a non-overshooting ease of the SAME duration — a spring
-        // here overshot the window bounds and clipped the glass edge mid-expand.
+        // Matches the window-frame animation (0.3s ease in `resizePanelProgrammatically`) with a non-overshooting ease; a
+        // spring overshoots the window bounds.
         .animation(.easeInOut(duration: 0.3), value: isExpanded)
         .animation(.easeInOut(duration: 0.2), value: isPanelZoomedToFullScreen)
         // [Pre-send fit hint] Same composer-state advisory as the main window —
@@ -250,21 +238,20 @@ struct QuickAccessContentView: View {
         }
         .onAppear {
              onResize?(isExpanded ? expandedViewMinHeight : inputAreaMeasuredHeight, isExpanded)
-             // [QA revival P0] Summon-and-type: focus the editor once the panel has become
-             // key. Retried a few runloop ticks — the NSTextView ref arrives asynchronously.
+             // Summon-and-type: focus the editor once the panel is key; retried a few runloop ticks because the NSTextView ref
+             // arrives asynchronously.
              focusEditor()
              // [QA revival P1a/P1e] Load the persisted QuickAccess conversation (if resuming);
              // a timed-out session starts fresh.
              session.prepareSession(resume: shouldResumeSession)
              recomputeContextGauge()
-             // [Composer P2] What THIS surface does with dictation events: mirror the transcript
-             // into the input field, surface a permission denial, refocus after a stop.
+             // What this surface does with dictation events: mirror the transcript into the input field, surface a permission
+             // denial, refocus after a stop.
              voice.onTextChange = { inputText = $0 }
              voice.onPermissionDenied = { showMicDeniedPopover = true } // [L3]
              voice.onFinished = { focusEditor() }
-             // [M9] Map the panel's ⌘Return / Escape onto the pending HITL request, so a keyboard
-             // user can answer a tool/plan/clarification/gate — and Escape no longer just closes
-             // the panel while a run stays parked.
+             // Maps the panel's Cmd-Return / Escape onto the pending HITL request, so Escape does not just close the panel while a
+             // run stays parked.
              onRegisterHITLKeyHandler? { action in
                  MainActor.assumeIsolated {
                      guard let pending = session.pendingInteraction else { return false }
@@ -312,10 +299,9 @@ struct QuickAccessContentView: View {
         )
     }
 
-    /// [Context gauge] Rebuilds the window-occupancy snapshot for the toolbar ring from the
-    /// panel's state. The panel is chat-only (no Code mode), so the profile is simply
-    /// `session.selectedProfile`. Synchronous and cheap — called on turn / model / attachment
-    /// changes, never per keystroke.
+    /// Rebuilds the window-occupancy snapshot for the toolbar ring from the panel's state; the panel is chat-only, so the
+    /// profile is `session.selectedProfile`. Synchronous and cheap; called on turn/model/attachment changes, never per
+    /// keystroke.
     @State private var contextGaugeTask: Task<Void, Never>?
 
     private func recomputeContextGauge() {
@@ -329,7 +315,7 @@ struct QuickAccessContentView: View {
             // render window. See `ChatHistoryViewModel.resolveContextHistory(for:)`.
             let history: [ChatMessage]
             if let conversationID {
-                // RAG-6: one resolve per burst — see the main composer's `recomputeContextGauge`.
+                // One resolve per burst; see the main composer's `recomputeContextGauge`.
                 try? await Task.sleep(for: ChatHistoryViewModel.contextGaugeSettle)
                 guard !Task.isCancelled else { return }
                 history = await session.chatHistoryViewModel.resolveContextHistory(for: conversationID)
@@ -375,11 +361,8 @@ extension QuickAccessContentView {
     @ViewBuilder
     private var topBarView: some View {
         ZStack {
-            // [drag] Top bar = the panel's drag handle in expanded mode (title-bar-like). The
-            // transcript ScrollView and the decorative tint backgrounds capture drags, so the
-            // backmost WindowDragArea can't cover the whole expanded panel. This one sits in front
-            // of the top bar's tint but behind the buttons — its empty areas drag the window while
-            // the buttons still work.
+            // Top bar is the panel's drag handle in expanded mode: this drag area sits in front of the top bar's tint but behind
+            // the buttons, since the transcript and tint backgrounds capture drags before the backmost area.
             WindowDragArea()
             HStack {
             QuickAccessCloseButton(action: {
@@ -480,18 +463,12 @@ extension QuickAccessContentView {
         )
     }
 
-    // [QA revival P1a] Live transcript. Reuses the app's real ChatBubbleView stack — the
-    // streamed ChatMessage is the same @Observable class the main chat renders, so markdown,
-    // code blocks, tool timelines, thinking indicators, and the streaming cursor all come for
-    // free. The four Observable objects the bubble tree requires are injected here (a missing
-    // one traps at first render); the transcript is driven by a PANEL-SCOPED
-    // ChatHistoryViewModel bound to the shared ActiveStreamManager.
+    // Live transcript reusing the app's real ChatBubbleView stack, driven by a panel-scoped ChatHistoryViewModel; the four
+    // Observable objects the bubble tree requires are injected here, and a missing one traps at first render.
     @ViewBuilder
     private var transcriptView: some View {
         if session.chatHistoryViewModel.currentChatMessages.isEmpty {
-            // Empty state — a quiet placeholder instead of a large black void (e.g. the panel
-            // auto-expands when a file is attached before anything was sent). Non-hittable so
-            // drags in the empty area still reach the WindowDragArea (panel move).
+            // Empty state: a quiet placeholder, non-hittable so drags in the empty area still reach the `WindowDragArea`.
             VStack(spacing: 10) {
                 Image(systemName: "bubble.left.and.bubble.right")
                     .font(.system(size: 30, weight: .light))
@@ -521,11 +498,8 @@ extension QuickAccessContentView {
                     LazyVStack(spacing: 0) {
                         // currentChatMessages is newest-first; reverse for top→bottom display.
                         ForEach(session.chatHistoryViewModel.currentChatMessages.reversed()) { message in
-                            // ⚠️ The same branch the main transcript makes. A synthetic stub is a
-                            // `sender: .user` row nobody typed, so without this the panel draws it
-                            // as a user bubble — the one rendering that is outright wrong. This
-                            // panel shows the SAME conversations as the main window, so a stub
-                            // reaching it is ordinary, not an edge case.
+                            // The same branch the main transcript makes: a synthetic stub is a `sender: .user` row nobody typed and must not be
+                            // drawn as a user bubble.
                             if message.isSyntheticPrompt {
                                 BackgroundTaskDividerView(message: message)
                                     .id(message.id)
@@ -568,13 +542,8 @@ extension QuickAccessContentView {
             )
         }
         .frame(minHeight: 0, maxHeight: .infinity)
-        // [CF-21] The speech transport. Read Aloud is reachable here — this panel renders the
-        // app's real `ChatBubbleView`, whose button is not among the actions
-        // `chatActionsSuppressed` hides — but the island was mounted ONLY in `ChatHistoryView`,
-        // so starting playback from the panel gave a reader with no Play, Pause, Stop or speed
-        // control anywhere on screen. Same placement as the main window: bottom-centred, over
-        // the transcript. Deliberately OUTSIDE the `.mask` above, so the island is not faded by
-        // the transcript's top-edge gradient.
+        // The speech transport: Read Aloud is reachable here, so the island is mounted bottom-centred over the transcript, as
+        // in the main window, and outside the `.mask` above so the transcript's top-edge gradient does not fade it.
         .overlay(alignment: .bottom) {
             if speechService.isActive {
                 SpeechControlIsland()
@@ -583,15 +552,8 @@ extension QuickAccessContentView {
                     .animation(.spring(response: 0.4, dampingFraction: 0.7), value: speechService.isActive)
             }
         }
-        // [sa-5] The transcript is this panel's transport host — the island above lives inside
-        // it, and it renders only while expanded. Closing the panel (Esc → `orderOut` + `close`)
-        // AND collapsing it both tear it down; when no other host (a main-window
-        // `ChatHistoryView`) remains, the service stops the reader instead of leaving it
-        // speaking with no Stop on screen. Registered here rather than on the panel's
-        // `.onDisappear` beside the mic cleanup so the collapsed-panel case is covered too.
-        // The id is the PANEL's (`QuickAccessPanelView.transportHostID`), which also deregisters
-        // it from `closePanel()` — so the panel closing stops the reader even if AppKit's
-        // `orderOut` + `close` on a retained panel does not deliver this `onDisappear`.
+        // The transcript is this panel's transport host: closing or collapsing the panel tears it down, and when no other host
+        // remains the service stops the reader. `closePanel()` also deregisters the panel's `transportHostID`.
         .onAppear { speechService.transportHostDidAppear(transportHostID) }
         .onDisappear { speechService.transportHostDidDisappear(transportHostID) }
     }
@@ -603,9 +565,8 @@ extension QuickAccessContentView {
         }
     }
 
-    // [Unified card] ONE input structure for both states — collapsed shows just this card,
-    // expanded shows top bar + transcript + this card. One editor identity (focus and drafts
-    // survive expand/collapse), no duplicated layouts for fixes to drift between.
+    // One input structure for both states (collapsed shows this card, expanded adds the top bar and transcript), so focus
+    // and drafts survive expand/collapse and layouts cannot drift.
     @ViewBuilder
     private var inputCardView: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -624,12 +585,8 @@ extension QuickAccessContentView {
                 .padding(.top, 10)
             }
 
-            // 2. Editor — the app's real composer editor: Return sends, Shift/Option+Return
-            // inserts a newline, auto-grows ~1→4 lines (the window follows via onGeometryChange),
-            // list auto-continuation, sanitized paste, real undo. The suggestion/query-history
-            // hooks are inert here (the panel has no prompt-library / @-mention data source);
-            // Escape passes through to the panel (dismiss / HITL-deny) instead of NSTextView's
-            // word-completion.
+            // The app's real composer editor: Return sends, Shift/Option+Return inserts a newline, auto-grows ~1-4 lines.
+            // Suggestion and query-history hooks are inert (no prompt-library data source); Escape passes through to the panel.
             ZStack(alignment: .topLeading) {
                 if inputText.isEmpty {
                     Text("Ask anything")
@@ -653,9 +610,7 @@ extension QuickAccessContentView {
                     showFileSuggestions: .constant(false),
                     fileSuggestionQuery: .constant(""),
                     activeFileMentionTriggerRange: .constant(nil),
-                    // ⚠️ `/` is Agent-profile only and QuickAccess has no profile context, so the
-                    // picker is off here — as `#` and `@` already are. A trigger that opened a
-                    // picker QuickAccess cannot act on would be worse than no trigger.
+                    // `/` is Agent-profile only and QuickAccess has no profile context, so the picker is off here, as `#` and `@` are.
                     showSkillSuggestions: .constant(false),
                     skillSuggestionQuery: .constant(""),
                     activeSkillTriggerRange: .constant(nil),
@@ -663,12 +618,8 @@ extension QuickAccessContentView {
                     textViewRef: { tv in editorTextView = tv },
                     escapePassesThrough: true
                 )
-                // CONTENT-driven height, not proposal-driven: fixedSize asks the editor for its
-                // ideal height (sizeThatFits clamps it to min…max internally). A
-                // .frame(minHeight:maxHeight:) here was FLEXIBLE — expanded stretched it to the
-                // full maxHeight (huge card), and collapsed clamped it to the fixed window so
-                // typed lines never changed the measured height (no window growth, text
-                // overflowing onto the toolbar row).
+                // Content-driven height: `fixedSize` asks the editor for its ideal height; a flexible `.frame(minHeight:maxHeight:)`
+                // stretches when expanded and never changes the measured height when collapsed.
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 8)
                 .padding(.horizontal, 12)
@@ -680,7 +631,9 @@ extension QuickAccessContentView {
                 profilePickerButton
                 composerAttachAndCaptureButtons
                 Spacer()
-                // [Context gauge] Same window-occupancy ring as the main composer.
+                // [Context gauge] Gets the breakdown rows, the last-turn cut line and the cut-strategy picker, but no Compact
+                // button and no Tools link: the panel has no route to either (no router for the Tool Library, no transcript
+                // for `ManualCompactionRow` to report progress in).
                 if let contextUsage {
                     ContextWindowGauge(usage: contextUsage) { profileID in
                         onOpenProfileSettings?(profileID)
@@ -691,9 +644,8 @@ extension QuickAccessContentView {
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
         }
-        // [UI audit B] Card chrome only in EXPANDED (inset card over the transcript). Collapsed
-        // is full-bleed: the window's glass IS the container — a nested bg/stroke would read as
-        // a card-inside-a-bubble with mismatched radii.
+        // Card chrome only when expanded (inset over the transcript); collapsed is full-bleed since the window's glass is the
+        // container.
         .background(isExpanded ? Color.primary.opacity(0.03) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
@@ -714,9 +666,8 @@ extension QuickAccessContentView {
         }
     }
 
-    // [QA revival P1b] Compact profile chip. Presents the app's standard ProfileSelectorPopover
-    // (search + type bubbles + list) filtered to chat-type profiles only — the panel is a chat
-    // surface and must never offer/run a workflow. The choice is remembered across panel sessions.
+    // Compact profile chip presenting the standard ProfileSelectorPopover filtered to chat-type profiles only; the panel is
+    // a chat surface and must never offer or run a workflow. The choice is remembered across panel sessions.
     @ViewBuilder
     private var profilePickerButton: some View {
         Button(action: { showingProfilePopup = true }) {
@@ -741,11 +692,8 @@ extension QuickAccessContentView {
         .help("Select the chat profile this panel uses")
         .accessibilityLabel("Selected profile: \(session.selectedProfile?.displayName ?? "none"). Change profile")
         .popover(isPresented: $showingProfilePopup, arrowEdge: .bottom) {
-            // [selector v2 demo] Redesigned picker: search + type bubbles + single list. The old
-            // multi-column BackendSelectorPopup needed 360pt+ for two columns but the popover
-            // resolved a smaller width → content clipped on both sides. The new view is fixed-width
-            // (320), so NSPopover sizing is deterministic. preferredColorScheme pins the popover
-            // (its own window, system-appearance by default) to the app theme, matching the panel.
+            // Fixed-width (320) popover so NSPopover sizing is deterministic; preferredColorScheme pins the popover's own window to
+            // the app theme.
             ProfileSelectorPopover(
                 configuration: session.backendConfiguration,
                 isPresented: $showingProfilePopup,
@@ -845,7 +793,7 @@ extension QuickAccessContentView {
         .frame(width: 280)
     }
 
-    // MARK: - Shared composer buttons [Composer P1]
+    // MARK: - Shared composer buttons
     // ComposerKit primitives, gated on this surface's ComposerCapabilities — e.g. screenshot is
     // a capability flip, not view surgery. Used by both the expanded and collapsed rows.
 
@@ -888,16 +836,14 @@ extension QuickAccessContentView {
         )
     }
 
-    // [Composer P2] Dictation session logic (C9 re-entry guard, permission flow, VAD auto-stop,
-    // live mirroring) lives in the shared ComposerVoiceController now — the view only decides
-    // WHAT to do with the transcript/denial (callbacks wired in onAppear) and WHEN to toggle.
+    // Dictation session logic lives in the shared `ComposerVoiceController`; the view only decides what to do with the
+    // transcript/denial (callbacks wired in onAppear) and when to toggle.
     private func toggleDictation() {
         if voice.isRecording {
             voice.stop()
         } else if voice.isModelReady {
-            // Blur the editor for the dictation session: CustomTextEditor's updateNSView refuses
-            // external text while the user is mid-edit (isTyping guard, reset on blur), which
-            // would block the live transcript mirror. onFinished refocuses.
+            // Blur the editor for the dictation session: CustomTextEditor's updateNSView refuses external text while the user is
+            // mid-edit, which would block the live transcript mirror; `onFinished` refocuses.
             editorTextView?.window?.makeFirstResponder(nil)
             voice.start(baseText: inputText.isEmpty ? "" : inputText + " ")
         } else {
@@ -906,9 +852,8 @@ extension QuickAccessContentView {
         }
     }
 
-    // [QA revival P2a / Q8] File attachment via the shared FileAttachmentPicker. Presented as a
-    // SHEET on the panel — a detached picker opens at normal window level BEHIND this floating
-    // panel (non-activating app, nothing promotes it) and is barely reachable.
+    // Presented as a sheet on the panel: a detached picker opens behind this floating non-activating panel and is barely
+    // reachable.
     private func openFilePicker() {
         FileAttachmentPicker.presentOpenPanel(attachedTo: editorTextView?.window) { items in
             appendAttachments(items)
@@ -920,8 +865,7 @@ extension QuickAccessContentView {
         return FileAttachmentPicker.handleDrop(providers) { item in appendAttachments([item]) }
     }
 
-    /// ⚠️ The panel keeps its own list (it isn't the main composer), so it applies
-    /// `AttachmentIntake` itself — it skipped every check before.
+    /// The panel keeps its own attachment list, so it applies `AttachmentIntake` itself.
     private func appendAttachments(_ items: [FileSystemItem]) {
         // Against the panel's own profile — a folder is refused where it injects (ATT-3).
         let mode = session.selectedProfile.map { AttachmentDeliveryMode.resolve(for: $0) }
@@ -1031,12 +975,9 @@ struct QuickAccessCloseButton: View {
 
 
 
-/// [drag-vs-select fix] An AppKit drag surface for the borderless panel. Placed behind the content
-/// (in front of the glass), it lets the user move the window by dragging empty/chrome areas — a
-/// bare mouse-down starts `performDrag`, which no-ops if the pointer doesn't actually move. It
-/// carries NO drawing and sits under the interactive controls, so the text field / buttons /
-/// transcript hit-test in front of it and keep their own selection/click/scroll behavior. This
-/// replaces `isMovableByWindowBackground`, which stole drags over the input field.
+/// An AppKit drag surface for the borderless panel, placed behind the content: a bare mouse-down starts `performDrag` on
+/// empty/chrome areas, while the text field, buttons and transcript in front keep their own selection/click/scroll. It
+/// carries no drawing.
 private struct WindowDragArea: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { DraggingView() }
     func updateNSView(_ nsView: NSView, context: Context) {}

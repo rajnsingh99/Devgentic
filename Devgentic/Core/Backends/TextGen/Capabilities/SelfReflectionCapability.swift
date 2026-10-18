@@ -4,10 +4,7 @@
 //  SelfReflectionCapability.swift
 //  Devgentic
 //
-//  Self-reflection capability: runs the wrapped executor, evaluates the result,
-//  and retries with accumulated critique if the outcome is unacceptable.
-//
-//  Extracted from ReflexionExecutor.swift during the Agent Capabilities Migration.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -73,12 +70,8 @@ actor SelfReflectionExecutorWrapper: Executor {
     nonisolated private let config: SelfReflectionConfig
 
     init(innerExecutor: any Executor, config: SelfReflectionConfig) {
-        // SelfReflectionCapability seeds prior trial output into workingMemory.
-        // This only works with executors that consume AgentInput.workingMemory:
-        // ReActAgentExecutor directly, or a PlanningExecutorWrapper (which threads
-        // input.workingMemory into every subtask) when both capabilities stack —
-        // ExecutorFactory builds Reflexion(Planning(ReAct)), so the old ReAct-only
-        // assert crashed every debug run with both toggles on (backends-audit #6).
+        // Seeds prior trial output into `workingMemory`, so the inner executor must consume `AgentInput.workingMemory`:
+        // `ReActAgentExecutor` directly, or a `PlanningExecutorWrapper` when both capabilities stack.
         assert(innerExecutor is ReActAgentExecutor || innerExecutor is PlanningExecutorWrapper,
                "SelfReflectionCapability requires an inner executor that consumes workingMemory (ReActAgentExecutor or PlanningExecutorWrapper).")
         self.innerExecutor = innerExecutor
@@ -102,27 +95,21 @@ actor SelfReflectionExecutorWrapper: Executor {
                 }
                 var accumulatedConstraints = Set(sessionState.negativeConstraints)
 
-                // #23: whether any answer content reached the UI. The cancel handler emits a
-                // placeholder only when the bubble would otherwise be empty (defensive — today
-                // trial content is accumulated, not forwarded, and the final answer is yielded
-                // only after the loop, immediately before finishing).
+                // Whether any answer content reached the UI; the cancel handler emits a placeholder only when the bubble would be empty.
                 var didEmitContent = false
 
                 do {
                     logger.info("Self-reflection capability initiated (maxTrials: \(self.config.maxTrials)).")
 
-                    // Fixed scope = the capability's own context: the reflection evaluator's
-                    // LLM calls (previously invisible) record as llmCall spans at capability
-                    // level. Trial executors build their OWN spy with a per-iteration scope.
+                    // The evaluator's LLM calls record as `llmCall` spans in the capability's own scope;
+                    // trial executors build their own spy.
                     let spyModel = APISpyModel(inner: model, spanScope: LLMSpanScope(input.traceContext))
                     let executionTrace = input.traceContext
                     let reflectionEvaluator = ReflectionEvaluator()
                     var reflexionMemory = ReflexionMemoryState()
 
-                    // [Loop Safety] ONE interaction memory across all trials: a question the
-                    // user answered in trial 1 replays for an identical re-ask in trial 2
-                    // ("a human's answer stands for the run"). Also inherited by a stacked
-                    // inner Planning wrapper via the same field.
+                    // One interaction memory across all trials: a question answered in one trial replays for an identical re-ask
+                    // in the next. A stacked inner Planning wrapper inherits it through the same field.
                     let interactionMemory = input.interactionMemory ?? RunInteractionMemory()
 
                     // --- Start Episode ---
@@ -134,20 +121,12 @@ actor SelfReflectionExecutorWrapper: Executor {
                     var bestTrial: Int = 0    // trial `bestOutput` came from (what ships)
                     var trialsRun: Int = 0    // total trials executed (for honest trace count)
 
-                    // =====================================================================
-                    // OUTER LOOP: TRIALS
-                    // =====================================================================
-
                     trialLoop: for trial in 1...self.config.maxTrials {
                         try Task.checkCancellation()
 
                         let trialSpan = executionTrace.newSpan()
-                        // Persist the trial span so the inner executor's iteration spans
-                        // attach to a real parent row instead of orphaning (Gap #10). The
-                        // success flag keeps the status honest when the trial's stream
-                        // throws or is cancelled (audit #9); a RETRY verdict still counts
-                        // as a completed trial — the trial ran, the evaluator just wasn't
-                        // satisfied.
+                        // Persists the trial span so inner iteration spans attach to a real parent row.
+                        // A RETRY verdict still counts as a completed trial.
                         await TraceRecorder.shared.beginSpan(context: trialSpan, name: "trial_\(trial)", kind: .subtask)
                         var trialSucceeded = false
                         defer {
@@ -177,10 +156,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                             trialInstructions = input.instructions ?? ""
                         }
 
-                        // Seed working memory with the prior trial's output so the
-                        // next trial doesn't re-discover what was already found.
-                        // Combined with the critique in instructions, the model gets
-                        // both "what went wrong" and "what was already discovered".
+                        // Seeds working memory with the prior trial's output so the next trial does not re-discover what was found.
                         var seededMemory = input.workingMemory
                         // Seed with the best output so far (which may be from an earlier trial
                         // than trial-1 if the immediately-prior trial failed — #18 A1).
@@ -196,10 +172,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                             logger.info("Seeded trial \(trial) working memory with trial \(bestTrial) output (\(bestOutput.count) chars).")
                         }
 
-                        // Trial-scoped input by copy-derivation (AgentInput contract):
-                        // everything not overridden — userPayload images, modelTier,
-                        // workflowContext, and any future field — is inherited from the
-                        // parent run automatically.
+                        // Trial-scoped input by copy-derivation: every field not overridden is inherited from the parent run.
                         var trialInput = input
                         trialInput.activeState = SessionGraph(
                             sessionID: sessionState.sessionID,
@@ -211,10 +184,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                         trialInput.interactionMemory = interactionMemory
                         trialInput.instructions = trialInstructions.isEmpty ? nil : trialInstructions
                         trialInput.suppressEpisodeManagement = true
-                        // Trial output is intermediate for the evaluator loop (the
-                        // evaluator judges tool results, not the synthesized prose);
-                        // per-trial IC synthesis was pure cost. On the legacy path the
-                        // shipped bestOutput becomes the deterministic summary.
+                        // Trial output is intermediate for the evaluator, which judges tool results, so per-trial synthesis is skipped.
                         trialInput.suppressLLMSynthesis = true
                         trialInput.traceContext = trialSpan
 
@@ -230,17 +200,12 @@ actor SelfReflectionExecutorWrapper: Executor {
                                 case .content(let text):
                                     trialOutput += text
                                 case .thought(let thought, let id, _):
-                                    // Forwarded verbatim — attribution is structural now (the
-                                    // stream-bridge routes trial events into the reflection
-                                    // card's attempt sub-timeline), so no "[Trial N]" prefix.
+                                    // Forwarded verbatim; the stream bridge routes trial events into the reflection card's attempt timeline.
                                     continuation.yield(.thought(thought, id: id))
                                 case .reasoning(let text, let id, _):
-                                    // Model monologue — previously dropped by the default case.
                                     continuation.yield(.reasoning(text, id: id))
-                                // Stacked capabilities: when the inner executor is a Planning
-                                // wrapper, its plan/subtask events must pass through — dropping
-                                // requestPlanReview would deadlock the run (it suspends waiting
-                                // for a banner the UI never saw).
+                                // Why: dropping `requestPlanReview` deadlocks the run, which suspends waiting for a banner the UI never saw
+                                // Stacked capabilities: a Planning wrapper's plan and subtask events must pass through.
                                 case .planGenerated, .planApproved, .requestPlanReview,
                                      .subtaskStarted, .subtaskCompleted:
                                     continuation.yield(event)
@@ -292,10 +257,8 @@ actor SelfReflectionExecutorWrapper: Executor {
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch {
-                            // [G10] Trial-level error recovery: log failure, mark summary,
-                            // and continue to next trial instead of aborting the entire loop.
-                            // Structured warning so the UI marks the trial failure distinctly
-                            // from narrative thoughts and downstream consumers see a category.
+                            // A trial's stream error is logged and marked, and the loop continues with the next trial.
+                            // A structured warning lets the UI distinguish it from narrative thoughts.
                             logger.error("Trial \(trial) stream error: \(error.localizedDescription)")
                             continuation.yield(.warning(
                                 category: .retry,
@@ -307,20 +270,12 @@ actor SelfReflectionExecutorWrapper: Executor {
                         }
 
                         trialsRun = trial
-                        // #18 (A1): don't let an empty or failed later trial clobber a good
-                        // earlier result. Keep the most recent NON-EMPTY output, and never let
-                        // a failed trial overwrite one that already succeeded (a trial can throw
-                        // mid-stream and leave trialOutput empty/partial — :250-265). True
-                        // best-SCORING selection across multiple non-empty trials is A2 (deferred:
-                        // needs a numeric score on the evaluator verdict).
+                        // Keeps the most recent non-empty output, and a failed trial never overwrites one that succeeded.
+                        // A trial that throws mid-stream can leave `trialOutput` empty or partial.
                         if !trialOutput.isEmpty && (trialSucceeded || bestOutput.isEmpty) {
                             bestOutput = trialOutput
                             bestTrial = trial
                         }
-
-                        // =============================================================
-                        // REFLECTION PHASE
-                        // =============================================================
 
                         // Skip reflection on the last trial
                         guard trial < self.config.maxTrials else { break trialLoop }
@@ -338,12 +293,8 @@ actor SelfReflectionExecutorWrapper: Executor {
                         )
                         continuation.yield(.tokenUsage(reflectionUsage))
 
-                        // [WF-CC11] An evaluation the LLM call itself failed is NOT a verdict.
-                        // Keep the trial's answer as-is and stop reflecting: re-running the whole
-                        // agent trial (tool side effects included) off an infrastructure fault —
-                        // while feeding the next prompt a fabricated "be more careful with tools"
-                        // critique — was the filed defect. No reflexion-memory entry, no
-                        // accumulated constraint: nothing was actually judged.
+                        // Why: re-running the trial off an infrastructure fault repeats tool side effects and feeds a fabricated critique
+                        // A failed evaluation LLM call is not a verdict: keep the trial's answer and stop reflecting.
                         guard case .verdict(let reflection) = evaluation else {
                             if case .inconclusive(let reason) = evaluation {
                                 logger.warning("[REFLECTION] Trial \(trial) evaluation was INCONCLUSIVE (\(reason)). CONSEQUENCE: the trial's answer is kept without a verdict; remaining trials are skipped rather than spent re-running work nothing judged deficient.")
@@ -380,18 +331,12 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                     } // End trial loop
 
-                    // =====================================================================
-                    // FINAL OUTPUT
-                    // =====================================================================
-
                     let terminalOutcome: ExecutionOutcome = bestOutput.isEmpty ? .failed : .completed
                     sessionState.closeActiveEpisode(outcome: terminalOutcome, message: bestOutput)
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
-                    // Anchor to the EXISTING root span (a never-begun `newSpan()` orphans
-                    // the event — FK failure at flush; same defect class as the Planning
-                    // phase-0 log). The outcome metadata makes the session summary reflect
-                    // the REFLEXION verdict rather than whichever trial reported last.
+                    // Why: an event on a never-begun span orphans and fails the foreign key at flush
+                    // Anchors to the existing root span; the outcome metadata makes the session summary reflect the reflexion verdict.
                     onTraceUpdate(AgentTraceLog(
                         traceID: executionTrace.traceID,
                         spanID: executionTrace.spanID,
@@ -404,9 +349,7 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                     continuation.yield(.content(bestOutput))
                     didEmitContent = true
-                    // Reuse `terminalOutcome` computed earlier for the episode close —
-                    // empty best output after exhausting all trials means the reflection
-                    // loop never produced acceptable content; that's `.failed`.
+                    // Reuses `terminalOutcome`: an empty best output after all trials means the loop never produced acceptable content.
                     let terminalReason: String? = bestOutput.isEmpty
                         ? "All \(self.config.maxTrials) trials rejected by reflection evaluator"
                         : nil
@@ -415,12 +358,8 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                 } catch is CancellationError {
                     logger.notice("Self-reflection cancelled.")
-                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
-                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
-                    // tool would then be reported "denied by the user" though the user never saw it.
-                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
-                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
-                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    // Why: the conversation-wide drain resolves every park, including a sibling node's or a parent's
+                    // Node-scoped when this run is a workflow node; chat and code runs keep the conversation-wide sweep.
                     if let nodeID = input.workflowContext?.nodeID {
                         await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
                     } else {
@@ -439,10 +378,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                         content: "Cancelled by user.",
                         metadata: ["outcome": ExecutionOutcome.cancelled.rawValue]
                     ))
-                    // #23: mirror ReActAgentExecutor's cancel placeholder so a cancelled
-                    // Reflexion run doesn't leave an empty bubble (trial content is accumulated,
-                    // not forwarded, so on a wrapper-level cancel nothing has reached the UI).
-                    // Guarded against double content.
+                    // Mirrors `ReActAgentExecutor`'s cancel placeholder so a cancelled run leaves no empty bubble.
                     if !didEmitContent {
                         continuation.yield(.content("*Operation stopped by user.*"))
                     }
@@ -463,12 +399,8 @@ actor SelfReflectionExecutorWrapper: Executor {
                         span: input.traceContext,
                         error: classified
                     )
-                    // ⚠️ NODE-SCOPED WHEN THIS RUN IS A WORKFLOW NODE (N3). The conversation-wide drain
-                    // force-resolves EVERY park in the conversation — including a SIBLING node's, whose
-                    // tool would then be reported "denied by the user" though the user never saw it.
-                    // A sub-workflow child is constructed with the PARENT's conversationID, so a child's
-                    // node timeout used to sweep the outer run's banners too. Chat and code runs have no
-                    // `workflowContext`, so they keep the conversation-wide sweep unchanged.
+                    // Why: the conversation-wide drain resolves every park, including a sibling node's or a parent's
+                    // Node-scoped when this run is a workflow node; chat and code runs keep the conversation-wide sweep.
                     if let nodeID = input.workflowContext?.nodeID {
                         await ExecutionSuspensionService.shared.cancelNode(nodeID, in: input.conversationID)
                     } else {

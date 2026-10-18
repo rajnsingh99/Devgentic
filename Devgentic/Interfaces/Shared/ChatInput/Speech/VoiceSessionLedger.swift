@@ -4,29 +4,7 @@
 //  VoiceSessionLedger.swift
 //  Devgentic
 //
-//  Pure bookkeeping for the app-wide SINGLE Whisper stream slot (voice cluster
-//  V1/V2/V6, chat hardening round 3).
-//
-//  Three surfaces drive the shared WhisperRecognitionService — the main composer
-//  (ChatInputViewModel), the QuickAccess panel (ComposerVoiceController), and the
-//  Orb HUD (OrbSessionController) — and every guard used to be per-surface,
-//  so a second surface starting dictation silently overwrote `streamTranscriber`
-//  and orphaned the first AudioStreamTranscriber into a permanent decode loop
-//  (observed on device as a zombie app process burning a core for a day). The
-//  ledger makes the slot explicit:
-//
-//  - `begin` is the V2 guard: one session app-wide, second caller is rejected.
-//  - `markStopRequested` + `isUnrequestedEnd` are the V1 detector: WhisperKit's
-//    realtimeLoop swallows mid-stream decode errors and BREAKS with the mic still
-//    open, returning from `startStreamTranscription` as if nothing happened. A
-//    return with no stop on record is that failure, and the service force-closes
-//    the engine instead of reporting a clean end.
-//  - `end` is the V6 guard: teardown is keyed to the session that started it, so
-//    a stop resuming after its await can't clobber state that no longer belongs
-//    to it (double-stop races, model-switch during stop).
-//
-//  Pure + Equatable so the contract is unit-testable without WhisperKit
-//  (loading a Whisper model in tests is forbidden — see MEMORY.md).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -108,16 +86,8 @@ struct VoiceSessionLedger: Equatable, Sendable {
 
 // MARK: - Dead-Mic Detection
 
-/// Detects "the engine opened but never delivered audio" sessions — the
-/// `_StartIO error 35` / stale-HAL-IO-thread failure observed on-device
-/// 2026-07-19: three consecutive composer sessions recorded 0 chars while the
-/// UI showed a normal recording and no error. Orb has carried this detection
-/// since its MVP ("Energy samples are proof the engine is actually delivering
-/// audio"); this ports it to the composer path as a pure, testable core.
-///
-/// A session counts as DEAD only when it lasted at least
-/// `minimumSessionDuration` AND no energy sample ever arrived — a rapid
-/// tap-tap under the threshold is a user action, not an engine failure.
+/// Detects sessions where the engine opened but never delivered audio, as a pure, testable core.
+/// A session is dead only when it lasted at least `minimumSessionDuration` and no energy sample ever arrived.
 struct DeadMicDetector: Equatable, Sendable {
 
     /// Below this, a silent session is presumed to be a quick manual stop.

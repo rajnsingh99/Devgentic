@@ -4,10 +4,7 @@
 //  DownloadManagerContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//  Rewritten 2026-04-21 — reads from `DownloadHistoryStore` directly via
-//  `@Query` so history survives relaunches. Mirrors the sidebar's layout
-//  (in-progress section + date-grouped history) at a roomier scale.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -17,11 +14,7 @@ import AppKit
 private let logger = DGLogger(category: "DownloadManagerContainer")
 
 /// Bounded history query shared by the sidebar and the Downloads screen.
-///
-/// ⚠️ Both views previously used an UNBOUNDED `@Query`, loading every row ever written and then
-/// re-filtering the whole array in each computed property on every body pass. `fetchHistory`
-/// already capped at 200; these bypassed it entirely. The limit matches that cap so the two
-/// paths agree.
+/// The limit matches the cap in `fetchHistory`, so both paths agree.
 private let boundedDownloadRecords: FetchDescriptor<DownloadRecord> = {
     var descriptor = FetchDescriptor<DownloadRecord>(
         sortBy: [SortDescriptor(\DownloadRecord.updatedAt, order: .reverse)]
@@ -30,6 +23,8 @@ private let boundedDownloadRecords: FetchDescriptor<DownloadRecord> = {
     return descriptor
 }()
 
+/// The Downloads screen: in-progress downloads plus date-grouped history, read from `DownloadHistoryStore` via `@Query`.
+/// Mirrors the sidebar's layout at a roomier scale.
 struct DownloadManagerContainerView: View {
     var isEmbeddedInSettings: Bool = false
 
@@ -390,9 +385,8 @@ private struct ActiveDownloadCardView: View {
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
-    /// ⚠️ `Text`, not `String`. "Ollama" / "MLX" / "Whisper" are product names and are
-    /// deliberately `verbatim` — translating them would be wrong. The FALLBACK is ordinary
-    /// prose, and as a `String` in a `Text` it never reached the String Catalog at all.
+    /// Returns `Text`, not `String`: "Ollama" / "MLX" / "Whisper" are product names rendered `verbatim`,
+    /// while the fallback prose must reach the String Catalog.
     private var backendLabel: Text {
         guard let backend = record.backend else { return Text("Unknown") }
         return Text(verbatim: backend.rawValue)
@@ -445,11 +439,8 @@ private struct ActiveDownloadCardView: View {
 
                     Spacer()
 
-                    // ⚠️ Pause is offered for MLX ONLY. It is the one backend whose transport
-                    // resumes (HubApi re-reads the `.incomplete` files via a `Range` header);
-                    // offering it elsewhere would promise a continuation that cannot happen.
-                    // G2 shipped this on the sidebar but not here, so the Downloads screen
-                    // could only cancel — discarding bytes the user meant to keep.
+                    // Pause is offered for MLX only, the one backend whose transport resumes (HubApi re-reads `.incomplete` files).
+                    // Offering it elsewhere would promise a continuation that cannot happen.
                     if record.backend == .mlx {
                         DownloadActionPillButton(
                             title: "Pause",
@@ -512,9 +503,8 @@ private struct HistoryDownloadCardView: View {
 
     private var tint: Color { record.backend?.tintColor ?? .blue }
     private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
-    /// ⚠️ `Text`, not `String`. "Ollama" / "MLX" / "Whisper" are product names and are
-    /// deliberately `verbatim` — translating them would be wrong. The FALLBACK is ordinary
-    /// prose, and as a `String` in a `Text` it never reached the String Catalog at all.
+    /// Returns `Text`, not `String`: "Ollama" / "MLX" / "Whisper" are product names rendered `verbatim`,
+    /// while the fallback prose must reach the String Catalog.
     private var backendLabel: Text {
         guard let backend = record.backend else { return Text("Unknown") }
         return Text(verbatim: backend.rawValue)
@@ -574,10 +564,8 @@ private struct HistoryDownloadCardView: View {
 
             Spacer()
 
-            // Resume continues from bytes already on disk; Re-download (in the menu) starts over.
-            // Both exist because a resume can continue a partial but cannot repair a corrupt one.
-            // ⚠️ On the row, not in the menu: tucked away, a paused or failed download's bytes
-            // were easy to forget — gigabytes the user never knew were still there.
+            // Resume continues from bytes on disk; Re-download (in the menu) starts over, since resume cannot repair corruption.
+            // Shown on the row, not in the menu, so partial bytes are not forgotten.
             if isResumableMLX {
                 HStack(spacing: 8) {
                     DownloadActionPillButton(
@@ -650,10 +638,8 @@ private struct HistoryDownloadCardView: View {
             // sentence around it must reach the String Catalog with a `%@` placeholder.
             Text("Re-pull \(record.displayName) from \(backendLabel)? Existing files will be overwritten.")
         }
-        // ⚠️ Removing the row of a paused/interrupted download is not a neutral tidy-up: the
-        // partial folder is hidden from the installed list, so that row is the ONLY handle on
-        // those bytes. Deleting it leaves them reachable from Finder alone. Ask instead of
-        // silently stranding them.
+        // Removing the row of a paused or interrupted download strands its partial folder, hidden from the installed list;
+        // so the user is asked first.
         .alert(
             "Keep the partial download?",
             isPresented: Binding(
@@ -708,9 +694,7 @@ private struct HistoryDownloadCardView: View {
             Label("Interrupted", systemImage: "bolt.horizontal.circle.fill")
                 .foregroundColor(theme.warningColor)
         case .paused:
-            // G2 added `.paused` but this surface never got an arm, so a paused download —
-            // the one state whose bytes are deliberately still on disk — rendered as a grey
-            // question mark labelled with a non-localizing `rawValue.capitalized`.
+            // Paused: the one state whose bytes are still on disk.
             Label("Paused", systemImage: "pause.circle.fill")
                 .foregroundColor(theme.warningColor)
         default:
@@ -733,8 +717,7 @@ private struct HistoryDownloadCardView: View {
         }
     }
 
-    /// ⚠️ Drop the row only once the bytes are actually gone — the row is the sole remaining
-    /// handle on a partial folder, so removing it after a refused reclaim strands them for good.
+    /// Drops the row only once the bytes are actually gone; the row is the sole handle on a partial folder.
     private func discardPartialFiles() {
         if MLXModelService.shared.discardPartialDownload(repoId: record.modelIdentifier) {
             _ = DownloadHistoryStore.shared.delete(id: record.id)
@@ -751,7 +734,7 @@ private struct HistoryDownloadCardView: View {
             _ = DownloadHistoryStore.shared.delete(id: record.id)
             return
         }
-        // Off the render path deliberately — this walks the partial folder.
+        // Off the render path: this walks the partial folder.
         let folder = MLXModelService.shared.partialDownloadFolder(for: record.modelIdentifier)
         let bytes = MLXModelService.resumableBytes(at: folder)
         if bytes > 0 {
@@ -803,10 +786,7 @@ private struct HistoryDownloadCardView: View {
 
 // MARK: - Unfinished downloads with no history row
 
-/// Partial MLX downloads that no history row points at: what older builds leaked, what a crash
-/// left before its row was saved, and what "Keep Files & Remove" deliberately leaves behind.
-/// Before this section they were reachable from Finder alone, and the launch scan only logged
-/// them.
+/// Partial MLX downloads that no history row points at: crash leftovers and what "Keep Files & Remove" leaves behind.
 private struct LeftoverDownloadsSection: View {
 
     let leftovers: [MLXModelService.OrphanedPartialDownload]

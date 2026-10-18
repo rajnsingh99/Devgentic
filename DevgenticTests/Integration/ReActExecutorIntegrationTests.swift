@@ -4,10 +4,7 @@
 //  ReActExecutorIntegrationTests.swift
 //  DevgenticTests
 //
-//  End-to-end integration tests for the ReAct execution pipeline.
-//  Uses MockLLMProvider with scripted ModernCognitiveStep responses.
-//  Everything downstream of the LLM — tool execution, working memory,
-//  eviction, circuit breaker, response synthesis — runs with real implementations.
+//  Created by Raj Singh.
 //
 
 import XCTest

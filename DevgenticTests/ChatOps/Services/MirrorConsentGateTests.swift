@@ -2,21 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MirrorConsentGateTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Which runs are allowed to leave the machine.
-//
-//  ⚠️⚠️ THE FAILURE THIS PINS (MIR-1 / CRIT-6). The mirror's entry gate was
-//  `guard remoteSessions[conversationID] != nil` — "has this conversation EVER been driven from
-//  chat". `unregisterSession` had ZERO callers and only stopping the bridge cleared the map, so the
-//  answer stayed yes forever. One prompt sent from Slack, and every later run in that conversation —
-//  typed at the Mac, or fired by the scheduler — had its FULL response posted to the shared channel,
-//  with no switch anywhere to turn it off. The sibling path to the same channel
-//  (`ChatOpsNotificationChannel`) is default-OFF with a written rationale about exactly this.
-//
-//  ⚠️ THE GATE FAILS CLOSED. `.localUI` means "not attributed" rather than "typed by hand" — a new
-//  surface that forgets to stamp `messageSource` lands there — so a non-matching source refuses to
-//  mirror rather than assuming permission.
+//  Created by Raj Singh.
 //
 
 import XCTest

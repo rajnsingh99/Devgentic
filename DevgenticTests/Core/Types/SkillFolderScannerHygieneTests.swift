@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillFolderScannerHygieneTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The S0 hygiene fixes in `SkillFolderScanner`: deterministic scan order (a real regression
-//  test), and the symlinked-resource-subdirectory behaviour (CHARACTERIZATION only — see the
-//  note above those tests; they pass with and without the guard).
-//
-//  Kept separate from `SkillFolderScannerTests` so the fixtures here (symlinks, deliberate
-//  out-of-order names) cannot quietly change what those tests are asserting.
+//  Created by Raj Singh.
 //
 
 import XCTest

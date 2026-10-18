@@ -4,12 +4,7 @@
 //  ReportRedoTests.swift
 //  DevgenticTests
 //
-//  Redo on a background-task report (2026-09-27). It re-sent the wake STUB — one line — with the
-//  profile's full toolset, because the prompt carrying the task's output was never persisted. The
-//  stub now keeps the finished task's card; Redo rebuilds the same prompt from it, report-only.
-//
-//  Also: the report itself was never stamped `.backgroundTask`, so the trimmed action row that was
-//  meant to keep Redo off reports matched only in tests.
+//  Created by Raj Singh.
 //
 
 import XCTest

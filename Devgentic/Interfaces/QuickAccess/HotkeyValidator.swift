@@ -4,13 +4,7 @@
 //  HotkeyValidator.swift
 //  Devgentic
 //
-//  [H4] Validates a candidate global shortcut before it is bound. The recorder previously
-//  accepted anything with ≥1 modifier + a mappable key, which let through combos that are
-//  actively harmful as a GLOBAL hotkey: OS-critical single-⌘ shortcuts (⌘Q quit / ⌘W close /
-//  ⌘H hide …) that would then stop working system-wide, Spotlight's ⌘Space (which the OS
-//  intercepts upstream, so the panel silently never appears), and Shift-only combos like
-//  ⇧A that would swallow a plain capital letter everywhere. This classifier is pure and
-//  unit-testable so the rules can be exercised without any UI.
+//  Created by Raj Singh.
 //
 
 import AppKit

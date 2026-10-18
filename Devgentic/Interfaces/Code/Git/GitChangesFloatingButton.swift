@@ -4,12 +4,13 @@
 //  GitChangesFloatingButton.swift
 //  Devgentic
 //
-//  The Code interface's git pill: branch + `+N −N`. Opens the Git Changes panel. A member of the
-//  floating pill stack (`FloatingPillStack`), which decides the MODE; this decides the rest.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The Code interface's git pill: branch name and `+N −N`, which opens the Git Changes panel. A member of the
+/// floating pill stack (`FloatingPillStack`), which decides the mode.
 struct GitChangesFloatingButton: View {
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
@@ -18,13 +19,9 @@ struct GitChangesFloatingButton: View {
 
     @State private var isHovering = false
 
-    /// Shown once a repository has loaded and while no side panel occupies the slot (the pill would
-    /// point at — or sit on — an open panel). Not shown for "not a repository" / "git unavailable":
-    /// those are answers the PANEL gives; a pill advertising them would be noise on every non-git
-    /// folder. A clean tree still shows (branch name, no counts) — ZCode parity.
-    ///
-    /// Promoted out of the body for the reason `BackgroundTasksFloatingButton.shouldShow` gives: a
-    /// test must read the same expression, not a transcription of it.
+    /// Shown once a repository has loaded and while no side panel occupies the slot. Not shown for "not a repository" or
+    /// "git unavailable", which the panel reports; a clean tree still shows the branch. A static function so a test reads
+    /// the same expression, as with `BackgroundTasksFloatingButton.shouldShow`.
     static func shouldShow(hasLoadedRepository: Bool, anyPanelOpen: Bool) -> Bool {
         hasLoadedRepository && !anyPanelOpen
     }
@@ -41,12 +38,8 @@ struct GitChangesFloatingButton: View {
         return String(localized: "no commits")
     }
 
-    /// Branch names past this many characters are middle-truncated IN CODE.
-    ///
-    /// ⚠️ Not `.frame(maxWidth:)`: a flexible frame takes the WHOLE width it is offered up to its
-    /// cap, and the pill stack offers the full chat width — so "main" sat centred in a fixed 140 pt
-    /// slot and the pill rendered several times wider than the Code Viewer pill beside it. A
-    /// truncated string keeps the text at its natural width.
+    /// Branch names past this many characters are middle-truncated in code. Not `.frame(maxWidth:)`, which would take the
+    /// whole width the pill stack offers; a truncated string keeps the text at its natural width.
     static let branchCharacterLimit = 18
 
     /// `feature/very-long-branch-name` → `feature/…anch-name`. Middle, because both ends carry

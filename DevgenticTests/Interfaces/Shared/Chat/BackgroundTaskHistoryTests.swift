@@ -4,8 +4,7 @@
 //  BackgroundTaskHistoryTests.swift
 //  DevgenticTests
 //
-//  The task list after a relaunch (2026-09-26). It read only the in-memory registry, so it came
-//  back EMPTY — and its pill hid — while every run was saved in the conversation's task cards.
+//  Created by Raj Singh.
 //
 
 import XCTest

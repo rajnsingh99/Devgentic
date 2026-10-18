@@ -4,17 +4,7 @@
 //  WorkflowCanvasRunOverlayTests.swift
 //  DevgenticTests
 //
-//  The canvas showed NOTHING about execution until 2026-08-15: `WorkflowCanvasView` did not receive
-//  execution state, `WorkflowCanvasState` had no per-node status, and `WorkflowNodeView` carried an
-//  empty `.overlay(alignment: .topLeading) { }` where a badge was plainly once intended. During and
-//  after a run every node looked exactly as it had before it, and a Router with three output ports
-//  drew three identical curves — so "which branch did it take?", the one question a graph view is
-//  better placed to answer than a timeline, was unanswerable on the canvas.
-//
-//  ⚠️ Edge liveness here is DERIVED from what each endpoint did, because the engine's authoritative
-//  `WorkflowState.edgeIsLive` needs `activeOutputPorts`, which the UI never receives. Plumbing that
-//  into a view would create a second, drifting copy of the routing rules — the exact defect class
-//  `edgeIsLive` exists to prevent. These tests pin what the derivation can and cannot conclude.
+//  Created by Raj Singh.
 //
 
 import XCTest

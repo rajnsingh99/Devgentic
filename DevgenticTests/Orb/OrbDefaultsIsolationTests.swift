@@ -2,25 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  OrbDefaultsIsolationTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The Orb settings store must not be the developer's own.
-//
-//  ⚠️⚠️ WHY THIS FILE EXISTS. The test host IS the shipping app, so `UserDefaults.standard` inside
-//  a test is the real `app.devgentic.macos` domain. `OrbConfigManager` held
-//  `private let defaults = UserDefaults.standard`, which meant an ordinary
-//  `test-without-building` run READ the author's Orb settings — and, through
-//  `wakeWordRaw`'s setter, WROTE them.
-//
-//  Field-observed 2026-09-20: nine `OrbWakeWordTests` failed on the author's machine and passed
-//  on every other. They exercise the NO-ARGUMENT call shape deliberately — that is the wiring
-//  coverage, since an explicit `wakeWord:` argument would still pass if the setting were
-//  disconnected from the matcher — so they can only be right when "unset" genuinely means unset.
-//  With a custom wake word configured, it did not.
-//
-//  ⚠️ Fixing the nine tests by passing `wakeWord:` explicitly would have turned them green by
-//  DELETING what they test. The isolation has to come from the domain, which is what
-//  `TestHost.defaults` provides.
+//  Created by Raj Singh.
 //
 
 import XCTest

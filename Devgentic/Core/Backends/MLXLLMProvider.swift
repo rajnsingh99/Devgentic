@@ -4,7 +4,7 @@
 //  MLXLLMProvider.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -13,11 +13,9 @@ import os
 
 private let logger = Logger(subsystem: DGLogger.subsystem, category: "MLXLLMProvider")
 
-/// Thread-safe sink for the exact token counts MLXService surfaces via its terminal
-/// completion event. `@unchecked Sendable` + a lock because the `@Sendable onUsage`
-/// closure writes from the generation task while the calling method reads after the
-/// stream drains. Local mirror of ChatExecutor's private `StreamUsageBox` (kept local
-/// rather than widening that type's visibility).
+/// Thread-safe sink for the exact token counts MLXService surfaces in its terminal completion event.
+/// Locked because `onUsage` writes from the generation task while the caller reads after the stream drains.
+/// Local mirror of ChatExecutor's private `StreamUsageBox`.
 private final class MLXUsageSink: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: TokenUsage?
@@ -64,13 +62,8 @@ struct MLXLLMProvider: LLMProvider {
         self.generationConfig = advancedConfig ?? .default()
     }
 
-    /// When the chat template's `{% if tools %}` branch fires, it prepends a large
-    /// `<tools>...</tools>` block of JSON schemas to the system message. Recent-token
-    /// repetition penalty at configured levels (1.20-1.30 for small Q4 models) can then
-    /// distort the first-token sampling distribution enough to favor EOS — observed as
-    /// "47s prefill, zero tokens emitted" failures. Capping at 1.15 for the native-tools
-    /// path is a safe operating point: still penalizes degenerate loops, doesn't starve
-    /// the model of initial tokens.
+    /// Caps the repetition penalty at 1.15 on the native-tools path, where the template prepends a large `<tools>` block.
+    /// Higher penalties (1.20-1.30) on small Q4 models can bias first-token sampling toward EOS (zero tokens emitted).
     private static let nativeToolsMaxRepPenalty: Float = 1.15
 
     /// Resolves the effective repetition penalty for a given call, reducing it when
@@ -85,11 +78,9 @@ struct MLXLLMProvider: LLMProvider {
         try await generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema).text
     }
 
-    /// Non-streaming generation that ALSO surfaces MLX's exact terminal token counts.
-    /// Overrides the protocol default (text + nil usage → caller estimates via chars/4)
-    /// so non-streaming callers (synthesis, reflection, planning) get real MLX numbers.
-    /// Usage is nil only when generation stops early (no completion event) — the caller
-    /// then estimates exactly as before, so this never regresses those paths.
+    /// Non-streaming generation that also surfaces MLX's exact terminal token counts.
+    /// Overrides the protocol default so synthesis, reflection and planning get real counts; usage is nil only when
+    /// generation stops early, in which case the caller estimates.
     func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
         // The local-inference gate: holds (or waits for) the local lock and counts this generation.
         let generation = try await LocalInferenceScope.beginGeneration(engine: .mlx, modelID: modelName)
@@ -121,31 +112,18 @@ struct MLXLLMProvider: LLMProvider {
         return (fullText, sink.value)
     }
 
-    /// ⚠️ Timeout inventory D-27. `MLXService` ends its stream NORMALLY when the task is
-    /// cancelled (Stop, a node timeout, a per-node skip) — it never throws. So the loops above
-    /// simply ran out of tokens and returned half an answer as a complete one, and synthesis,
-    /// planning and reflection acted on it. A cancelled call must END as a cancellation; callers
-    /// that want the partial text catch it and label it partial themselves.
+    // Why: `MLXService` ends its stream normally on cancellation and never throws, so loops would return half an answer.
+    /// Ends a cancelled call as a cancellation instead of returning `partial` as a complete answer;
+    /// callers that want the partial text catch it and label it partial.
     static func throwIfCancelled(discarding partial: String, path: String) throws {
         guard Task.isCancelled else { return }
         logger.notice("[MLX-GEN] \(path, privacy: .public) was cancelled after \(partial.count) chars. CONSEQUENCE: the partial text is NOT returned as an answer; the caller sees a cancellation.")
         throw CancellationError()
     }
 
-    /// Multimodal (vision) path — serves BOTH the bot flow and, since MLX/legacy
-    /// agent vision, the agent flow. Overrides the protocol default (which strips
-    /// images via `toLegacyDict()`) to route attached images through the on-device
-    /// VLM processor (`MLXService.streamVisionChat`). No images → falls back to the
-    /// text path. (Detection in `MLXTokenizerAnalyzer` gates which models report
-    /// `.visionInput`; the degrade-if-not-vision guard lives in the orchestrator.)
-    ///
-    /// `tools` here are the legacy/dialect PROMPTED tools already rendered into the
-    /// system message, so `streamVisionChat` needs no tool-schema injection — but it
-    /// DOES get the same stop sequences + repetition penalty as the text path, because
-    /// the agent loop that calls this runs a small VLM that can loop just as badly with
-    /// an image attached as without. The `nativeToolsPresent` cap does not apply: these
-    /// tools never hit an `{% if tools %}` template branch (the processor owns
-    /// templating here), so the configured penalty is used as-is.
+    /// Multimodal (vision) path for bot and agent flows: routes attached images through the on-device VLM processor.
+    /// Overrides the protocol default, which strips images; with no images it falls back to the text path.
+    /// `tools` are already rendered into the system message; stop sequences and repetition penalty match the text path.
     func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         // Collect attached image bytes (resolve() throws on missing/unreadable → surfaced).
         var imageData: [Data] = []
@@ -164,9 +142,8 @@ struct MLXLLMProvider: LLMProvider {
             return try await generate(messages: messages, tools: tools, responseSchema: responseSchema)
         }
 
-        // [VISION] Confirms the bytes actually reach the on-device VLM (the last hop
-        // before generation). Absence of this after a [MULTIMODAL]/[VISION] gate-pass
-        // line means the image was lost between orchestration and the provider.
+        // [VISION] Confirms the image bytes reach the on-device VLM; its absence after the gate-pass lines means the image
+        // was lost between orchestration and the provider.
         logger.info("[VISION] MLX on-device VLM '\(modelName)': routing \(imageData.count) image(s) through streamVisionChat")
 
         let generation = try await LocalInferenceScope.beginGeneration(engine: .mlx, modelID: modelName)
@@ -194,12 +171,8 @@ struct MLXLLMProvider: LLMProvider {
         streamWithUsage(messages: messages, tools: tools, onUsage: nil)
     }
 
-    /// Streams tokens AND surfaces MLX's exact terminal token counts through `onUsage`
-    /// (see `MLXService.streamChat`). Overrides the protocol default (which drops usage,
-    /// forcing the caller to estimate) so the Bot streaming path's usage badge and the
-    /// context-window gauge show real MLX numbers. An early stop-sequence / circuit-breaker
-    /// exit skips the completion event → `onUsage` never fires → the caller estimates,
-    /// identical to the prior behaviour.
+    /// Streams tokens and surfaces MLX's exact terminal token counts through `onUsage` (see `MLXService.streamChat`).
+    /// An early stop-sequence or circuit-breaker exit skips the completion event, so `onUsage` never fires.
     func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
         // Capture config values before entering the closure
         let config = generationConfig
@@ -209,12 +182,9 @@ struct MLXLLMProvider: LLMProvider {
         let repPenalty = effectiveRepPenalty(nativeToolsPresent: nativeToolsPresent)
 
         return AsyncThrowingStream { continuation in
-            // Capture the handle so a consumer teardown propagates all the way down to
-            // MLXService's producer and the vendored evaluator. Discarding it here would
-            // leave the GPU decoding after Stop even though MLXService now cancels
-            // correctly — this is the outermost link in that chain.
-            // ⚠️ Created inside the caller's task, so it inherits `LocalInferenceScope.runID` — the gate
-            // below reads it.
+            // Why: create it inside the caller's task so it inherits `LocalInferenceScope.runID`, which the gate below reads.
+            // Capture the handle so a consumer teardown reaches MLXService's producer and the evaluator; discarding it would
+            // leave the GPU decoding after Stop.
             let producer = Task {
                 do {
                     let generation = try await LocalInferenceScope.beginGeneration(engine: .mlx, modelID: modelName)
@@ -251,12 +221,8 @@ struct MLXLLMProvider: LLMProvider {
 
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let (fullText, realUsage) = try await generateWithUsage(messages: messages, tools: tools, responseSchema: nil)
-        // Empty registry is correct here: the only caller of this method is
-        // NativeStructuredGenerator, which re-validates the result through
-        // NativeParsePipeline (ToolNameResolver with the real [AgentTool]
-        // registry). MLX never routes to the native generator today, so this
-        // path is effectively dormant — but if it ever runs, validation is
-        // layered above, same as OllamaLLMProvider's content fallback.
+        // Empty registry is correct: the only caller, NativeStructuredGenerator, re-validates the result through
+        // NativeParsePipeline with the real tool registry, so validation is layered above (as in OllamaLLMProvider).
         let pipeline = CognitiveParsePipeline(
             expectedDialect: dialect,
             modelId: modelName,
@@ -264,9 +230,8 @@ struct MLXLLMProvider: LLMProvider {
         )
         var step = pipeline.parse(raw: fullText)
 
-        // Prefer MLX's exact terminal token counts (now surfaced via generateWithUsage);
-        // fall back to a chars/4 estimate only when the run stopped before the completion
-        // event fired (early stop sequence / circuit breaker).
+        // Prefer MLX's exact terminal token counts; fall back to a chars/4 estimate only when the run stopped before the
+        // completion event fired (early stop sequence or circuit breaker).
         let inputChars = messages.reduce(0) { $0 + ($1["content"]?.count ?? 0) }
         step = ModernCognitiveStep(
             reasoning: step.reasoning,

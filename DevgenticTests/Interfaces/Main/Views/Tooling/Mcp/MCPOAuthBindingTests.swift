@@ -4,20 +4,7 @@
 //  MCPOAuthBindingTests.swift
 //  DevgenticTests
 //
-//  Register KC-14. An MCP OAuth access token used to be attached by sourceID alone, so editing
-//  a server's URL — or repurposing the row for a different vendor — replayed the old host's
-//  token at the new one. The invariant the fix enforces, from three independent call sites that
-//  all delegate to `MCPOAuthBinding`:
-//
-//      an OAuth credential bundle is attached only to the server URL it was issued for.
-//
-//  The three points disagree DELIBERATELY about what to do when the binding is unknown:
-//    - ATTACH  (`shouldAttach`)          — legacy bundles attach (compatibility);
-//    - PERSIST (`isProvablyMisbound`)    — only a PROVEN misbinding is cleared (never destroy
-//                                          what cannot be read);
-//    - SAVE    (`editDecision`)          — fail closed: a save whose effective bundle is not
-//                                          provably bound to the new URL demands a re-auth.
-//  A mutation that homogenises any two of those answers must go red.
+//  Created by Raj Singh.
 //
 
 import XCTest

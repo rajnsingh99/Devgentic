@@ -4,15 +4,7 @@
 //  ProfileNameTrimmingTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Register A76 — new profiles were saved with the UNTRIMMED display name while every check around
-//  the save compared the trimmed one, so a whitespace-padded duplicate slipped past the warning and
-//  then evaded it forever.
-//
-//  `createDefaultProfile` is private to a SwiftUI view, so what is asserted here is the asymmetry
-//  that made the bug possible: what duplicate detection compares, and what the validator measures.
-//  Both work on trimmed text — which is precisely why persisting the raw string was wrong.
+//  Created by Raj Singh.
 //
 
 import XCTest

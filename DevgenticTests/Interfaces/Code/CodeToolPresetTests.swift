@@ -4,14 +4,7 @@
 //  CodeToolPresetTests.swift
 //  DevgenticTests
 //
-//  `CodeToolPreset.defaultTools` used to spell out a description and an empty `ToolParameters`
-//  for each of its entries (16 at the time; 19 since the background-task tools landed). Both were wrong in different ways: the descriptions were dead text
-//  (resolution reads the tool's own via `AgentToolFactory`, never the profile's copy), and the
-//  empty schemas were a latent trap — harmless for Code profiles, which never read them, but
-//  `Tool.parameters` is exactly what a workflow Action node binds its arguments from.
-//
-//  It derives from `NativeToolCatalog` now. These tests pin the membership that was previously
-//  guaranteed by the literal, and pin the two properties the old shape got wrong.
+//  Created by Raj Singh.
 //
 
 import XCTest

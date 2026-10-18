@@ -4,10 +4,7 @@
 //  ImageIntentResolver.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Resolves whether the user wants Text-to-Image or Image-to-Image generation
-//  based on their query, attachments, and chat history.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -21,10 +18,9 @@ private let logger = DGLogger(category: "ImageIntentResolver")
 enum ImageIntent: Sendable {
     /// Generate a new image from a text description.
     case textToImage(prompt: String)
-    /// Generate a variation of an existing image with a guiding prompt.
-    /// - Parameter inferred: true when no image was ATTACHED and the edit was inferred from the wording
-    ///   plus a recent generated image. An inferred edit the model cannot perform falls back to a new
-    ///   image; an attached one is the user's explicit ask, so its failure is reported (CR-13).
+    /// Generates a variation of an existing image with a guiding prompt.
+    /// - Parameter inferred: true when the edit was inferred from wording plus a recent image, none attached.
+    ///   An inferred edit the model cannot perform falls back to a new image; an attached one reports its failure.
     case imageToImage(prompt: String, sourceImage: Data, inferred: Bool)
 }
 
@@ -35,11 +31,8 @@ enum ImageIntent: Sendable {
 enum ImageIntentResolver {
 
     /// Resolves the user's image generation intent.
-    /// - Parameters:
-    ///   - userQuery: The text the user typed.
-    ///   - attachedImages: Any image files the user attached to their message.
-    ///   - chatHistory: Recent chat messages for context.
-    /// - Returns: The resolved `ImageIntent`.
+    /// - Parameters: the typed query, any attached image files, and recent chat history for context.
+    /// - Returns: the resolved `ImageIntent`.
     static func resolve(
         userQuery: String,
         attachedImages: [Data]?,
@@ -95,12 +88,9 @@ enum ImageIntentResolver {
         return artifacts
     }
 
-    /// Whether the query asks to EDIT the last image rather than draw a new one.
-    ///
-    /// ⚠️⚠️ WHOLE WORDS AND PHRASES, never substrings (readiness CR-13, 2026-10-10). This was
-    /// `lowered.contains($0)`, so "a cat on a l-ADD-er", "a time-LESS portrait" and "a colour-FIX-ed
-    /// print" were all "edits" of whatever image came before — and a guessed capability then refused
-    /// them. Matching a word by its letters is the shape-matching this codebase keeps paying for.
+    // Why: substring matching read words like "ladder" or "timeless" as edits of the previous image.
+    /// Whether the query asks to edit the last image rather than draw a new one.
+    /// Matches whole words and phrases, never substrings.
     static func isEditRequest(_ query: String) -> Bool {
         let lowered = query.lowercased()
         return editPhrases.contains { phrase in

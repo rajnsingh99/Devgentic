@@ -2,39 +2,16 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ModelSettingsSection.swift
-//
-//  Where MLX models live on disk, and the HuggingFace token used to fetch them. Rendered inside
-//  Settings › General.
-//
-//  ⚠️ THIS FILE IS GUARDED BY PATH. `MLXStoreCapabilityTests` reads it by literal string to assert
-//  the Keychain-failure row records an attempt rather than inferring one. Its helper XCTFails on a
-//  missing path rather than skipping, so a rename fails the build loudly — repoint the test in the
-//  same change. (It was `ModelSettingsView.swift` until the Models tab was merged into General and
-//  the standalone `ModelSettingsView` wrapper, by then uncalled, was removed.)
 //  Devgentic
 //
-//  Where MLX models live on disk, and the HuggingFace token used to fetch them.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
-/// Settings for where models are stored and the credential used to download them.
-///
-/// ⚠️ THIS PANE WAS CALLED "Account" AND ITS HEADLINE CARD WAS A MOCK GOOGLE SIGN-IN. Both buttons
-/// only flipped an `@AppStorage` bool, "Sync Data" was bound to `.constant(true)` so it could not
-/// be switched off, and the three `mockGoogle*` keys were read nowhere else in the app. There was
-/// no Google SDK in any manifest, no OAuth, no registered URL scheme, no CloudKit — and no commit
-/// in this repository's history ever contained one. It was born mock.
-///
-/// It is gone rather than finished because it also contradicted the project's own published
-/// statements: `PRIVACY.md` says "No account, advertising identifier, or device fingerprint" and
-/// `README.md` says the app "has no backend of its own". Shipping a sign-in panel that promises
-/// cross-device sync alongside those made both untrue.
-///
-/// ⚠️ THE SECTIONS ARE RENDERED AS PART OF GENERAL SETTINGS. The two sections below
-/// (MLX Models and HuggingFace) now live in GeneralSettingsView directly after the Observability section.
-/// This file is retained to keep the section modular and satisfy drift tests asserting on its contents.
+/// Settings for where models are stored and the credential for downloading them.
+/// Rendered as part of General Settings (MLX Models and HuggingFace sections, after Observability).
 struct ModelSettingsSection: View {
     @Environment(\.appTheme) private var theme
 
@@ -64,9 +41,8 @@ struct ModelSettingsSection: View {
                 theme: theme
             ) {
                 if tokenStore.readFailed {
-                    // ⚠️ Register KC-8. Without this the card renders the identical empty state it
-                    // shows a brand-new user, so someone whose Keychain was momentarily unreadable
-                    // is told they have no token and re-pastes one they never lost.
+                    // Without this the card shows the same empty state as a new user, so someone whose Keychain was momentarily
+                    // unreadable is told they have no token and re-pastes one they never lost.
                     HStack(alignment: .top, spacing: 5) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 11))
@@ -126,13 +102,8 @@ struct ModelSettingsSection: View {
                             tokenSaved = tokenStore.store(tokenDraft)
                             keychainSaveFailed = !tokenSaved
                             tokenDraft = ""
-                            // ⚠️ VERIFY AFTER SAVING, NEVER AS A GATE. `looksLikeToken` warns and
-                            // stores anyway on purpose — refusing something valid because it does
-                            // not match a shape this app guessed is the worse failure. The same
-                            // reasoning applies twice over to a network check: a user on a plane
-                            // must still be able to paste a token. So the Keychain write is
-                            // already done and unconditional by the time this runs, and the
-                            // verdict only ever changes what is SAID.
+                            // Verify after saving, never as a gate: `looksLikeToken` warns and stores anyway, and a network check must not
+                            // block a user who is offline. The Keychain write is already done by now; the verdict only changes what is said.
                             guard tokenSaved else { return }
                             tokenVerdict = nil
                             isVerifyingToken = true
@@ -172,10 +143,8 @@ struct ModelSettingsSection: View {
                 .padding(.vertical, 10)
             }
 
-            // ⚠️ Only `.rejected` is allowed to say anything about the TOKEN; every other verdict
-            // reports that the CHECK failed and states the token was saved regardless. Telling
-            // someone offline that their credential is invalid sends them to regenerate a working
-            // one and teaches them to distrust the check.
+            // Only `.rejected` may say anything about the token; every other verdict reports that the check failed
+            // and that the token was saved regardless.
             if let tokenVerdict, !isVerifyingToken {
                 Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
                 HStack(spacing: 6) {
@@ -219,14 +188,8 @@ struct ModelSettingsSection: View {
                 .padding(.vertical, 10)
             }
 
-            // ⚠️ THIS CONDITION WAS INVERTED. It read
-            // `!tokenSaved && !hasToken && !tokenDraft.isEmpty`, which is true the moment a user
-            // types the FIRST character with nothing saved — so the red "Couldn't save" row
-            // appeared before they had attempted anything. And at the one moment it should fire,
-            // a Keychain write that actually failed, the Save handler had already cleared
-            // `tokenDraft` on the next line, so `!tokenDraft.isEmpty` was false and the row was
-            // suppressed. It showed exactly when it was wrong and hid exactly when it was right.
-            // `keychainSaveFailed` records the attempt instead of inferring it.
+            // `keychainSaveFailed` records the failed attempt instead of inferring it from the draft: the Save handler clears
+            // `tokenDraft`, so inferring from it would hide the row exactly when a write fails.
             if keychainSaveFailed {
                 Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
                 HStack(spacing: 6) {
@@ -242,11 +205,8 @@ struct ModelSettingsSection: View {
                 .padding(.vertical, 10)
             }
         }
-        // ⚠️ THE PRODUCTION CALLER `refreshFromKeychain` NEVER HAD — register KC-8. The store reads
-        // the Keychain once, in `init`, and caches the answer. Before this, a read that FAILED at
-        // launch was cached as "no token" for the life of the process, `invalidateCache()` had zero
-        // callers, and the only recovery was to quit the app. Re-deriving when this pane appears
-        // means the user's natural next move — unlock the Keychain, come back to Settings — works.
+        // Re-derive from the Keychain when this pane appears: the store caches its one launch-time read, so a failed read
+        // would otherwise stay "no token" until the app quits.
         .onAppear { tokenStore.refreshFromKeychain() }
     }
 

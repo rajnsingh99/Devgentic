@@ -4,7 +4,7 @@
 //  LegacyPromptAdapter.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 26/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -33,5 +33,4 @@ struct LegacyPromptAdapter: ToolSchemaAdapter {
 }
 
 // MARK: - Legacy Compatibility Mapping
-// Preserves compatibility with Phase 2 Generators that still reference the old struct name
 typealias PromptedMarkdownAdapter = LegacyPromptAdapter

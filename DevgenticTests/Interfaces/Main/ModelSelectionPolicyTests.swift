@@ -4,15 +4,7 @@
 //  ModelSelectionPolicyTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Register A37 — the Ollama picker silently rewrote the profile's persisted `modelName` on appear
-//  when the stored model was absent from the daemon's list.
-//
-//  ⚠️ This rule has been broken and re-fixed FOUR times across the model pickers (G95 OpenRouter,
-//  MP-01 cloud, A37 Ollama), because each picker owned its own copy of it. `ModelSelectionPolicy`
-//  is now the single implementation and all four pickers route through it — so these tests cover
-//  every picker at once, which is the whole point of extracting it.
+//  Created by Raj Singh.
 //
 
 import XCTest

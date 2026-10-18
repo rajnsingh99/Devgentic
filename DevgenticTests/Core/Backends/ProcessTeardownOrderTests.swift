@@ -4,10 +4,7 @@
 //  ProcessTeardownOrderTests.swift
 //  DevgenticTests
 //
-//  Timeout inventory D-29 — process teardown edge cases:
-//  - `discard` killed without a verdict, so a waiting foreground call reported "Exit code: 15";
-//  - a stop/timeout announced BEFORE the final drain, publishing a stale tail;
-//  - a quit-time `.stopped` could wake an unattended run.
+//  Created by Raj Singh.
 //
 
 import XCTest

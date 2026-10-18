@@ -4,18 +4,7 @@
 //  ActivityBar.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/05/25.
-//
-//  Refactored on 27/08/25 to remove LLM Integration sidebar.
-//  Refactored on 27/08/25 to add Backend Profiles window tab.
-//  Refactored on 27/08/25 to remove redundant NewChatTabView.
-//  Refactored on 27/08/25 to improve UI to match modern standards.
-//  Refactored on 27/08/25 to fix text wrapping and standardize names.
-//  Refactored on 28/08/25 to create a compact, icon-only activity bar.
-//  Refactored on 28/08/25 to fix incorrect new chat button behavior.
-//  Refactored on 28/08/25 to rename New Chat button to Home.
-//  Modernized on 17/02/26 with hover glow, press animations, and unified surface.
-//  Updated on 21/02/26 to add AppKit window-front checks to prevent duplicate spawning.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -23,6 +12,8 @@ import os
 
 private let logger = DGLogger(category: "ActivityBar")
 
+/// A small badge view that pulses to draw attention to an unread or active state.
+/// A badge drawn as a filled dot with a ring that pulses outward, in the given color.
 struct PulsingBadgeView: View {
     let color: Color
     @State private var isPulsing = false
@@ -222,9 +213,8 @@ struct ActivityBarView: View {
     @Environment(\.appTheme) private var theme
     @Environment(MainApplicationViewModel.self) private var viewModel
 
-    // ⚠️ The ONE site that is not compiler-enforced. Every other `SidebarTab` switch fails the
-    // build when a case is missing; this hand-written array does not — a tab omitted here exists,
-    // routes, and persists its selection, with no button anywhere to reach it.
+    // Not compiler-checked: a `SidebarTab` case omitted from these arrays routes and persists
+    // but has no button to reach it.
     private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .tools, .skills]
     private let bottomTabs: [SidebarTab] = [.settings]
 

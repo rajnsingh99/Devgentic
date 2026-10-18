@@ -4,47 +4,16 @@
 //  OrbTapAdapter.swift
 //  Devgentic
 //
-//  [Phase 4b] Turns raw microphone tap buffers into the format a recognizer wants, and — the
-//  reason this type exists — NAMES the reason whenever it cannot.
-//
-//  WHY THIS EXISTS. The first duplex device run produced a perfectly healthy-looking session that
-//  heard nothing:
-//
-//      [ORB_AUDIO] Duplex engine STARTED — voiceProcessing: true, tap: 16000 Hz / 3 ch
-//      [ORB_ASR]   Mic session closed — audio: NONE, heard 0 word(s).
-//
-//  Nothing in between said whether the tap fired at all. Both recognizers dropped buffers through
-//  bare `try?` / `guard … else { return }` on a real-time thread, so "engine running, zero
-//  samples" had at least four indistinguishable causes. Every drop is now counted and the first of
-//  each kind is logged with its consequence.
-//
-//  THE TWO SUBSTANTIVE FIXES, both aimed at what that run actually showed:
-//
-//   1. THE FORMAT IS READ FROM THE BUFFER, NOT PREDICTED. The old code read
-//      `inputNode.outputFormat(forBus: 0)` before `engine.start()` and built both the tap and the
-//      converter from it. The CoreAudio log shows voice processing still renegotiating AFTER that
-//      read — `AUVPAggregate: Timeout waiting for streams`, then `AUHalStreamFormats are invalid`
-//      with the channel count flapping 3 → 2 → 1 across successive attempts. A converter built
-//      from a stale format silently produces nothing. Here the converter is built lazily from the
-//      FIRST REAL BUFFER and rebuilt if the format ever changes mid-session, so renegotiation is
-//      survivable instead of fatal.
-//
-//   2. MULTICHANNEL IS DOWNMIXED EXPLICITLY. That machine's voice-processing tap delivers THREE
-//      channels (a built-in mic array). `AVAudioConverter` will happily be constructed for an
-//      exotic 3-channel layout and then produce zero frames, which is indistinguishable from a
-//      dead microphone. Anything above mono is folded down with WhisperKit's own `convertToMono`
-//      first, so the converter only ever sees mono → target.
-//
-//  ⚠️ `adapt(_:)` runs on the real-time audio thread. It takes a lock and logs, both of which are
-//  technically forbidden there. This is deliberate and bounded: the lock is uncontended in steady
-//  state, and logging is rate-limited to the first occurrence of each cause plus every 500th
-//  after. A dropped audio frame is recoverable; a subsystem that cannot say why it is deaf is not.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import AVFoundation
 import WhisperKit
 
+/// Turns raw microphone tap buffers into the format a recognizer wants, and names the reason whenever it cannot.
+/// The converter is built lazily from the first real buffer (the format can change mid-session); multichannel is folded.
+/// Every dropped buffer is counted and the first of each kind logged with its consequence; `adapt(_:)` is real-time.
 final class OrbTapAdapter {
 
     /// Why a buffer did not reach the recognizer. Each case is counted separately because they
@@ -80,10 +49,8 @@ final class OrbTapAdapter {
     private var converterInput: AVAudioFormat?
     private var stats = Stats()
 
-    /// - Parameters:
-    ///   - predicted: the format read before the engine started. Kept ONLY so the first real
-    ///     buffer can be compared against it — a mismatch is the signature of fix #1 above.
-    ///   - target: what the recognizer needs.
+    /// `predicted` is the format read before the engine started, kept only so the first real buffer can be compared with it;
+    /// a mismatch means voice processing renegotiated. `target` is what the recognizer needs.
     init(predicted: AVAudioFormat, target: AVAudioFormat, tag: String, logger: DGLogger) {
         self.predicted = predicted
         self.target = target
@@ -110,9 +77,8 @@ final class OrbTapAdapter {
             if actual == expected {
                 logger.notice("\(self.tag) First tap buffer: \(actual) — matches the pre-start read. Converting to \(Int(self.target.sampleRate)) Hz / \(self.target.channelCount) ch.")
             } else {
-                // The exact renegotiation this class was written for. Not an error: the lazy
-                // converter below absorbs it. Logged loudly because a fixed-format tap would be
-                // silently deaf right here.
+                // The renegotiation this class exists for, not an error: the lazy converter absorbs it. Logged loudly because a
+                // fixed-format tap would be silently deaf right here.
                 logger.notice("\(self.tag) First tap buffer: \(actual), but the pre-start read said \(expected). Voice processing renegotiated the device after the format was read; the converter is built from the buffer, so capture continues.")
             }
         }

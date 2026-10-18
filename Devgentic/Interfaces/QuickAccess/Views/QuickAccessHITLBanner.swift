@@ -4,17 +4,14 @@
 //  QuickAccessHITLBanner.swift
 //  Devgentic
 //
-//  [QA revival P1c] In-panel Human-in-the-Loop banner. The app's InteractionBannerStack is
-//  bound to the main window's selectedConversationID and its per-kind banners are fileprivate,
-//  so the panel needs its own compact host. It reads one pending interaction (strict FIFO) for
-//  the panel's conversation and answers via ExecutionSuspensionService — the same operationID-
-//  keyed path every other surface uses, so an answer here (or in the main window) resolves the
-//  request everywhere. Rendered as a self-contained themed card so it stays readable over the
-//  panel's translucent glass in either light or dark theme.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// In-panel Human-in-the-Loop banner: a compact host for the QuickAccess panel's pending interaction (strict FIFO).
+/// Answers via `ExecutionSuspensionService`, the same operationID-keyed path every surface uses, so an answer here
+/// resolves the request everywhere. A self-contained themed card, readable over the translucent panel in either theme.
 struct QuickAccessHITLBanner: View {
     let pending: PendingHITL
     let session: QuickAccessSessionViewModel
@@ -206,13 +203,8 @@ struct QuickAccessHITLBanner: View {
                 .foregroundColor(theme.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // ⚠️ A Router's ambiguity arbitration carries the text being routed in `inputText`
-            // rather than inside the prompt, because the highlight spans are measured against that
-            // exact string. Without this the QuickAccess panel would show "2 rules match this
-            // input — which branch?" and never show the input.
-            //
-            // Deliberately PLAIN here: this compact panel has no room for the colour-coded spans the
-            // main banner paints, so it degrades to unhighlighted text rather than dropping it.
+            // A Router's ambiguity arbitration carries the text being routed in `inputText`; show it, or the panel would ask
+            // "which branch?" without the input. Plain text: this compact panel has no room for colour-coded spans.
             if let input = g.inputText, !input.isEmpty {
                 ScrollView(.vertical, showsIndicators: false) {
                     Text(input)

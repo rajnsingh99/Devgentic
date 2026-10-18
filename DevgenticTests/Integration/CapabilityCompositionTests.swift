@@ -4,17 +4,7 @@
 //  CapabilityCompositionTests.swift
 //  DevgenticTests
 //
-//  Tests for stacking Planning + Self-Reflection capabilities.
-//  Verifies that the decorator pattern works when both capabilities
-//  wrap the same inner ReActAgentExecutor.
-//
-//  KNOWN LIMITATION (as of Build 98.9):
-//  Both PlanningExecutorWrapper and SelfReflectionExecutorWrapper assert that their
-//  innerExecutor is ReActAgentExecutor. This means they CANNOT be composed — stacking
-//  Planning(Reflection(ReAct)) or Reflection(Planning(ReAct)) will hit an assertion failure.
-//
-//  These tests verify each capability individually with different configurations.
-//  Composition support requires relaxing the inner-executor assertion to accept any Executor.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,24 +4,14 @@
 //  NotificationSettingsView.swift
 //  Devgentic
 //
-//  The notification settings, as a section of the General pane.
-//
-//  ⚠️ THE FILE NAME IS DELIBERATELY UNCHANGED. Three drift tests in
-//  DevgenticTests/Core/Notifications/NotificationChannelRegistryTests.swift read this file by its
-//  literal path (:198, :436, :459) and assert that specific source substrings are present. Their
-//  helper (:520-522) throws `XCTSkip` when the path does not resolve — so renaming or deleting this
-//  file does not turn the suite red, it turns those three tests into silent skips and drops their
-//  coverage invisibly. Keeping the path is what keeps them honest.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import UserNotifications
 
+// Why: a section, not a pane: it owns no ScrollView or outer padding, since the host supplies both.
 /// The notifications settings, rendered inside `GeneralSettingsView`.
-///
-/// ⚠️ THIS IS A SECTION, NOT A PANE. It used to be its own `SettingsCategory` row in the sidebar;
-/// it now renders at the top of General. It therefore owns NO `ScrollView` and NO outer padding —
-/// the host supplies both, and adding them back here nests a scroll view inside a scroll view.
 struct NotificationSettingsSection: View {
 
     @Bindable private var config = NotificationConfiguration.shared
@@ -201,10 +191,8 @@ struct NotificationSettingsSection: View {
             await refreshChannels()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            // Re-check when user returns from System Settings.
-            // ⚠️ Channels are re-read too, and not only for tidiness: registration happens from two
-            // detached `Task`s at launch, so a pane opened early can genuinely render before the
-            // ChatOps channel exists. This is the second chance to show it.
+            // Re-check when the user returns from System Settings. Channels are re-read too: registration runs from detached
+            // tasks at launch, so a pane opened early can render before the ChatOps channel exists.
             Task {
                 await refreshPermissionStatus()
                 await refreshChannels()
@@ -220,16 +208,11 @@ struct NotificationSettingsSection: View {
                 body: "Devgentic notifications are working correctly.",
                 conversationID: nil
             )
-            // ⚠️ "Test Sent!" USED TO BE UNCONDITIONAL, which was survivable only while the pane
-            // had no channel switches. Now that it does, a user can switch every channel off, press
-            // Test and — before this — be told it was sent. The whole point of a test button is
-            // that its answer can be trusted.
+            // Report "Test Sent!" only when something was delivered: with every channel switched off, the test must not claim
+            // success.
             let delivered = await NotificationDispatcher.shared.dispatch(payload)
-            // ⚠️ `delivered == 0` HAS TWO CAUSES AND THEY NEED DIFFERENT ANSWERS: the master switch
-            // (or a per-conversation mute) suppressed it, or every channel is switched off. An `Int`
-            // cannot tell them apart, so the cause is re-derived from the same pure policy the
-            // dispatcher used. Naming the wrong one on the ONE screen whose job is diagnosing
-            // delivery is worse than saying nothing.
+            // `delivered == 0` has two causes (master switch or mute, versus every channel off); an `Int` cannot tell them
+            // apart, so the cause is re-derived from the dispatcher's pure policy.
             let masterSwitchAllowedIt = NotificationGatePolicy.shouldDeliver(conversationID: nil)
             await MainActor.run {
                 if delivered > 0 {
@@ -255,12 +238,8 @@ struct NotificationSettingsSection: View {
         channels = await NotificationDispatcher.shared.channelSnapshots()
     }
 
+    // Why: optimistic write then authoritative re-read, so a rejected change visibly snaps back.
     /// Flips one channel.
-    ///
-    /// ⚠️ OPTIMISTIC WRITE, AUTHORITATIVE RE-READ. The switch moves immediately so it does not lag
-    /// under the pointer, but the local array is not the truth — the actor is. The re-read is what
-    /// makes a rejected change visibly snap back instead of leaving the pane showing a setting that
-    /// was never applied.
     @MainActor
     private func setChannel(_ info: NotificationChannelInfo, enabled: Bool) {
         channelErrorMessage = nil
@@ -281,8 +260,7 @@ struct NotificationSettingsSection: View {
         }
     }
 
-    /// ⚠️ Falls back rather than rendering a blank slot: a channel registered after this file was
-    /// written still gets a row, which is the entire point of reading the registry.
+    /// Falls back to a generic icon rather than a blank slot, so a channel registered later still gets a row.
     private func icon(for info: NotificationChannelInfo) -> String {
         switch info.id {
         case "local_notification": return "bell.badge"
@@ -306,10 +284,8 @@ struct NotificationSettingsSection: View {
         }
     }
 
-    /// ⚠️ Only claims a channel cannot deliver where that is actually KNOWN here. Local delivery is
-    /// checkable (the system permission). Whether ChatOps has a paired channel is not visible from
-    /// a snapshot, and a warning triangle guessed from `requiresConfiguration` alone would sit
-    /// permanently next to a channel that is working.
+    /// Only claims a channel cannot deliver where that is known here: local delivery is checkable (system permission),
+    /// while ChatOps pairing is not visible from a snapshot, so no warning is guessed from `requiresConfiguration`.
     private func isUnavailable(_ info: NotificationChannelInfo) -> Bool {
         info.id == "local_notification" && permissionStatus == .denied
     }
@@ -329,13 +305,9 @@ struct NotificationSettingsSection: View {
 
 // MARK: - Reusable Custom Channel Row with Hover States
 
-/// ⚠️ `name` IS A RUNTIME STRING, not a `LocalizedStringKey`, and it is rendered with
-/// `Text(verbatim:)`. It carries a channel's own `displayName` out of the registry; passing a
-/// runtime value where a `LocalizedStringKey` is expected asks the bundle for a translation keyed by
-/// that literal text and silently renders the key when there is none. `description` stays a
-/// `LocalizedStringKey` because every one of its values is still a literal in this file.
-///
-/// ⚠️ `isComingSoon` IS GONE. It only ever dimmed rows for channels this app had already built.
+// Why: a runtime value as `LocalizedStringKey` looks up a translation by its text and renders the key if none.
+/// A settings row for one channel. `name` is a runtime string (a channel's `displayName`) rendered with
+/// `Text(verbatim:)`; `description` stays a `LocalizedStringKey` because every value is a literal in this file.
 private struct ChannelRow<Control: View>: View {
     let name: String
     let description: LocalizedStringKey

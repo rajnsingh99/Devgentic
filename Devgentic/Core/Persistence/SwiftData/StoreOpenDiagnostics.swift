@@ -4,37 +4,7 @@
 //  StoreOpenDiagnostics.swift
 //  Devgentic
 //
-//  Created on 04/08/26.
-//
-//  Turns an opaque container-open failure into something a human can act on.
-//
-//  THE PROBLEM (SWIFTDATA_GAP_REGISTER.md G39/G40, both verified by probe):
-//  Every structurally distinct container-open failure — a non-optional attribute with no default,
-//  a `.unique` constraint violated by existing rows, a corrupt file, an unwritable path — reaches
-//  the app as the SAME value: `SwiftDataError(_error: .loadIssueModelContainer)`, NSError domain
-//  `SwiftData.SwiftDataError` code `1`, with **empty `userInfo` and empty `underlyingErrors`**.
-//  Pattern-matching `.unknownSchema` / `.modelValidationFailure` / `.backwardMigration`
-//  discriminates nothing, because everything matches `.loadIssueModelContainer`.
-//
-//  Worse: the diagnostic that WOULD identify the cause —
-//      {entity=PromptModel, attribute=driftProbe,
-//       reason=Validation error missing attribute values on mandatory destination attribute}
-//  — is written by Core Data to **stderr**, not to the unified log. Confirmed absent from
-//  `log show` under every subsystem. For a Finder-launched `.app` stderr is discarded, so the one
-//  piece of information that identifies the bug is unrecoverable after the fact.
-//
-//  So the user sends "The operation couldn't be completed. (SwiftData.SwiftDataError error 1.)"
-//  and nothing else — which violates the standing rule that the app must be field-debuggable from
-//  logs alone.
-//
-//  THE FIX — two complementary side channels, since error introspection cannot work:
-//   1. `classify(...)` reads the store's own metadata with Core Data's raw API, which DOES return
-//      real errors and real `NSStoreModelVersionHashes`. That yields entity-level diagnosis
-//      (which entities were added/removed) plus "is this even a store".
-//   2. `captureStandardError(during:)` redirects stderr to a temp FILE across a deliberate second
-//      open attempt, recovering the attribute-level reason Core Data only prints there.
-//
-//  They are complementary: (1) names the entities, (2) names the attribute.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -104,15 +74,9 @@ enum StoreOpenDiagnosis: Equatable {
 
 enum StoreOpenDiagnostics {
 
-    /// Classifies a failed open WITHOUT touching the store's contents.
-    ///
-    /// Strictly read-only: it stats the file, checks directory writability, and reads store
-    /// metadata. It never opens the store for writing, never migrates, and never deletes — the
-    /// launch path's whole promise is that a store it cannot read is left byte-intact.
-    ///
-    /// - Parameters:
-    ///   - storeURL: the store that failed to open.
-    ///   - expectedEntityNames: entity names in the CURRENT schema.
+    /// Classifies a failed open without touching the store's contents.
+    /// Read-only: stats the file, checks directory writability and reads store metadata; never opens for writing,
+    /// migrates or deletes. `expectedEntityNames` are the entity names in the current schema.
     static func classify(
         storeURL: URL,
         expectedEntityNames: Set<String>
@@ -142,9 +106,8 @@ enum StoreOpenDiagnostics {
             return .unreadableAsStore(domain: nsError.domain, code: nsError.code, reason: reason)
         }
 
-        // `NSStoreModelVersionHashes` maps entity name -> version hash for the model that WROTE
-        // the store. Comparing its key set against the current schema identifies entity-level
-        // drift precisely, which is the most common bricking shape.
+        // `NSStoreModelVersionHashes` maps entity name to version hash for the model that wrote the store;
+        // comparing its key set with the current schema identifies entity-level drift.
         guard let hashes = metadata[NSStoreModelVersionHashesKey] as? [String: Any] else {
             return .indeterminate
         }
@@ -161,14 +124,9 @@ enum StoreOpenDiagnostics {
         return .entitySetChanged(addedInCode: addedInCode, missingFromCode: missingFromCode)
     }
 
-    /// Runs `body` with stderr redirected to a temporary FILE, and returns whatever was written.
-    ///
-    /// ⚠️ A FILE, deliberately — not a pipe. A pipe has a fixed buffer (~64 KB) and blocks its
-    /// writer once full, which would deadlock the launch path if Core Data ever became chatty.
-    /// Files never block.
-    ///
-    /// Best-effort by construction: any failure to set up the redirect returns nil and runs `body`
-    /// normally, because a diagnostic must never be the reason the app fails differently.
+    // Why: a file, not a pipe: a pipe's ~64 KB buffer blocks its writer once full and would deadlock the launch path.
+    /// Runs `body` with stderr redirected to a temporary file and returns whatever was written.
+    /// Best-effort: if the redirect cannot be set up, returns nil and runs `body` normally.
     static func captureStandardError(during body: () -> Void) -> String? {
         let temporaryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("devgentic-stderr-\(UUID().uuidString).log")
@@ -202,13 +160,8 @@ enum StoreOpenDiagnostics {
         return captured
     }
 
-    /// Extracts the lines of captured stderr that actually identify a migration failure.
-    ///
-    /// Core Data prints a lot; only the lines naming an entity/attribute/reason or a
-    /// `NSCocoaErrorDomain` code are worth putting in front of a user or in a support paste.
-    /// Bounded on BOTH axes — `limit` lines, `maxLineLength` characters each — because Core Data's
-    /// lines routinely run to several hundred characters (they embed full nested NSError
-    /// descriptions with absolute URLs), and an unbounded paste is its own kind of useless.
+    /// Extracts the lines of captured stderr that identify a migration failure: those naming an entity, attribute,
+    /// reason or `NSCocoaErrorDomain` code, bounded to `limit` lines of at most `maxLineLength` characters each.
     static func migrationDetailLines(
         in capturedStandardError: String,
         limit: Int = 6,
@@ -231,15 +184,8 @@ enum StoreOpenDiagnostics {
         return result
     }
 
-    /// The single most actionable fragment Core Data prints: which entity, which attribute, why.
-    ///
-    /// ⚠️ This OUTRANKS `classify(...)` when both are available. Metadata comparison reports
-    /// whatever differs, which is not necessarily what BLOCKED the open — a store can legitimately
-    /// carry a retired entity (harmless, lightweight migration drops it) while the actual failure
-    /// is an attribute inside a completely different entity. Observed exactly that during
-    /// verification: the classifier said "CodeViewerSessionSD missing from this build" while the
-    /// real blocker was `PromptModel.driftProbe`. Lead with this; use the classification as
-    /// supporting context.
+    /// The most actionable fragment Core Data prints: which entity, which attribute, why.
+    /// Outranks `classify(...)`: metadata comparison reports any difference, not necessarily what blocked the open.
     static func primaryFailureReason(in capturedStandardError: String) -> String? {
         // Prefer the fully-qualified form Core Data emits for validation failures.
         for line in capturedStandardError.split(separator: "\n") {

@@ -4,25 +4,7 @@
 //  MLXTokenizerBridge.swift
 //  Devgentic
 //
-//  Adapts swift-transformers' `Tokenizers.Tokenizer` to the new
-//  `MLXLMCommon.Tokenizer` protocol introduced in mlx-swift-lm 3.x.
-//
-//  Why this file exists:
-//  mlx-swift-lm 3.x decoupled from swift-transformers and defined its own
-//  `Tokenizer` protocol inside MLXLMCommon. Our codebase still uses
-//  swift-transformers' `AutoTokenizer` for tokenization (and swift-transformers
-//  internally owns the Jinja chat-template rendering). The bridge wires the
-//  two together so we can pass a swift-transformers tokenizer wherever
-//  mlx-swift-lm expects an MLXLMCommon.Tokenizer.
-//
-//  This is a direct port of the `TokenizerAdaptorMacro` + `TokenizerLoaderMacro`
-//  expansions from mlx-swift-lm's MLXHuggingFace module. We re-implement them
-//  as plain Swift to avoid adding MLXHuggingFace + HuggingFace package products
-//  (which bring their own dependencies we don't otherwise need).
-//
-//  Exposes `TokenizerBridge.upstream` so callers can access the richer
-//  swift-transformers API (e.g. `applyChatTemplate(chatTemplate: .literal(...))`)
-//  that MLXLMCommon's protocol doesn't surface.
+//  Created by Raj Singh.
 //
 
 import Foundation

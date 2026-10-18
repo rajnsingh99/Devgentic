@@ -4,8 +4,7 @@
 //  WorkingMemoryStrategy.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 11/03/26.
-//  Updated: Unified WindowedLinearMemory — budget-aware sliding window for all model tiers.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -16,22 +15,16 @@ private let logger = DGLogger(category: "WorkingMemory")
 /// Defines how volatile working memory is recorded and compiled for the LLM prompt.
 protocol WorkingMemoryStrategy: Sendable {
     /// Records a tool execution result with optional media artifacts.
-    /// `params` is the serialised JSON arguments string the tool was invoked with —
-    /// rendered into the scratchpad so the model can see WHICH inputs produced
-    /// each observation, not just the tool name. Without this, two calls with
-    /// different paths look identical in the scratchpad and the model retries
-    /// the failed input because it can't see what it already attempted.
+    /// `params` is the serialised JSON arguments string, rendered into the scratchpad so the model can see which inputs
+    /// produced each observation.
     mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, params: String, result: String, artifacts: [MediaArtifact])
 
     /// Records a system-level alert or error.
     mutating func recordSystemAlert(msg: String)
 
-    /// Records the LLM's own reasoning for a step (step.reasoning). Persisted to
-    /// the compiled scratchpad so the model sees its prior thought chain in
-    /// subsequent iterations — fixes the "reasoning amnesia" where each iteration's
-    /// monologue was previously only yielded to the UI.
-    ///
-    /// Empty / whitespace-only strings are ignored (no-op).
+    /// Records the LLM's own reasoning for a step; it is persisted to the compiled scratchpad so later iterations see
+    /// it.
+    /// Empty or whitespace-only text is ignored.
     mutating func recordReasoning(stepId: Int, text: String)
 
     /// Compiles the collected logs into a string for prompt injection.
@@ -70,20 +63,9 @@ struct MemoryBudgetConfig: Sendable {
     /// Never size the scratchpad below this, even when the fixed prompt has already eaten the budget.
     static let minimumTotalChars = 2_000
 
-    /// Derives the scratchpad budget: WHATEVER ROOM THE PROMPT LEAVES, and one result may use all of it.
-    ///
-    /// The room is the same payload budget the native path works to (`PromptFitCheck
-    /// .nativePayloadCharBudget` — 75% of the window, the rest reserved for the reply) minus
-    /// `reservedChars`, the prompt parts that do not change during a run: instructions, history,
-    /// context blocks, tool text, the task. The scratchpad is the only part that grows.
-    ///
-    /// ⚠️⚠️ THIS WAS A FIXED 8–15% OF THE WINDOW until 2026-09-24, with a per-entry cap of that ÷
-    /// `maxIterations` — 200 characters on an 8K model — on every MLX run in Chat, Code and
-    /// workflows, whatever room was actually free. The user's rule since then: no limit below what
-    /// fits. So `perEntryCap == totalBudgetChars`; when entries outgrow the total, older ones are
-    /// compressed to one line (the scratchpad's equivalent of native compaction), not cut short.
-    ///
-    /// The native tool-call path is sized by `ToolResultBudget` instead.
+    /// Derives the scratchpad budget: whatever room the prompt leaves, and one result may use all of it.
+    /// The room is `PromptFitCheck.nativePayloadCharBudget` minus `reservedChars` (the parts fixed for a run).
+    /// `perEntryCap == totalBudgetChars`; older entries compress to one line. The native path uses `ToolResultBudget`.
     static func derive(contextWindow: Int, tier: ModelTier, reservedChars: Int = 0) -> MemoryBudgetConfig {
         // Guard against corrupted metadata: floor contextWindow at 2048 tokens.
         let safeContextWindow = max(2048, contextWindow)
@@ -104,22 +86,9 @@ struct MemoryBudgetConfig: Sendable {
 
 // MARK: - Unified Working Memory Implementation
 
-/// A budget-aware working memory strategy that replaces the former `SummarizedLinearMemory`
-/// and `HighContextLinearMemory` with a single adaptive implementation.
-///
-/// Behavior adapts to the model's context window via `MemoryBudgetConfig`:
-/// - **Recording**: Each observation result is truncated to `perEntryCap` at write time.
-/// - **Compilation**: Recent observations (last `fullFidelityWindow`) render at full detail;
-///   older observations compress to one-line summaries. System alerts are capped.
-/// - **Eviction**: If compiled output exceeds `totalBudgetChars`, oldest compressed entries
-///   are dropped from the front with an eviction marker.
-///
-/// For frontier models (70B+, 128K context), the budget is large enough that truncation and
-/// eviction rarely activate — matching the previous `HighContextLinearMemory` behavior.
-/// For tiny models (< 4B, 4K context), aggressive caps and early eviction prevent context overflow.
-///
-/// **Thread safety**: This is a value type (struct). Each executor/capability receives its own
-/// copy via Swift's value semantics. No shared mutable state across actor boundaries.
+/// A budget-aware working memory strategy that adapts to the model's context window via `MemoryBudgetConfig`.
+/// Results truncate on write, older observations compress to summaries, and the oldest are evicted over budget.
+/// A value type: each executor or capability gets its own copy.
 struct WindowedLinearMemory: WorkingMemoryStrategy {
 
     var perResultLimit: Int { config.perEntryCap }
@@ -160,11 +129,8 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
     /// Separator between compiled lines.
     private static let lineSeparator = "\n\n"
 
-    /// Hard cap on stored params strings. Large enough for paths and search terms
-    /// (the common case ~30-80 chars); truncates write_file-style content payloads
-    /// that would otherwise dominate the per-entry budget. Independent of
-    /// `perEntryCap` so growing the result budget doesn't proportionally bloat
-    /// params storage — params are a disambiguator, not the primary signal.
+    /// Hard cap on stored params strings: large enough for paths and search terms, truncating content payloads.
+    /// Independent of `perEntryCap`, since params only disambiguate calls.
     private static let paramsCap = 200
 
     // MARK: - State
@@ -187,10 +153,8 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         var estimatedSize = 0
         var stepEntryCount = 0  // observations + reasonings share the fidelity window
         let separatorLen = Self.lineSeparator.count
-        // G10: mirror compileForPrompt's dedup so the estimate matches the actual
-        // rendered size. Without this, repeated tool calls (e.g. qwen-coder looping on
-        // project_tree) inflate the estimate to full-render size for every duplicate
-        // and trigger false memory-pressure alerts while actual compile output stays small.
+        // Mirrors `compileForPrompt`'s dedup so the size estimate matches the rendered size and raises no false
+        // memory-pressure alerts.
         var seenObsKeys: Set<String> = []
         var alertMessages: [String] = []
 
@@ -198,9 +162,7 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             switch entry {
             case .observation(let rec):
                 stepEntryCount += 1
-                // Dedup key now includes params hash so two calls with different
-                // arguments don't false-positive collapse on a coincidentally
-                // identical result (e.g. two empty-directory listings).
+                // The dedup key includes the params hash so different calls with an identical result do not collapse.
                 let key = "\(rec.toolName)|\(rec.params.hashValue)|\(rec.result.hashValue)"
                 if seenObsKeys.contains(key) {
                     // Later occurrence — compile will emit a pointer line carrying the
@@ -224,23 +186,13 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
                 }
                 estimatedSize += separatorLen
             case .systemAlert(let msg):
-                // ⚠️ NOT sized here. Collected and sized after the loop through the same
-                // `renderableAlerts` the compile path uses — see below.
+                // Not sized here: collected and sized after the loop through the same `renderableAlerts` as the compile path.
                 alertMessages.append(msg)
             }
         }
 
-        // ⚠️ Alerts are sized from what will actually RENDER, not from what was recorded.
-        // This arm previously added every stored alert's bytes while `compileForPrompt` emitted at
-        // most `maxSystemAlerts` of them — so a run that recorded 11 alerts charged the budget for
-        // 11 and rendered 3. That phantom weight is what drove a real 2026-09-13 run to report
-        // "176% of scratchpad budget used": the estimate crossed 1.0, the executor's pressure
-        // branch recorded ANOTHER alert, and that alert's bytes pushed the estimate higher still.
-        // A self-reinforcing loop, powered entirely by lines the model never saw.
-        //
-        // This is the same obligation the G10 comment above states for observations, on the axis it
-        // was never applied to. Sharing `renderableAlerts` with the compile path is what keeps the
-        // two from drifting again.
+        // Alerts are sized from what will render, not what was recorded, so phantom weight cannot push the estimate over
+        // budget in a feedback loop.
         for rendered in Self.renderableAlerts(alertMessages, cap: config.maxSystemAlerts) {
             estimatedSize += rendered.count + 20 // "[SYSTEM ALERT] " prefix
             estimatedSize += separatorLen
@@ -249,8 +201,8 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         return Double(estimatedSize) / Double(config.totalBudgetChars)
     }
 
-    /// Chars of the newest `fullFidelityWindow − 1` step entries — the ones that, with the entry being
-    /// recorded, form the full-fidelity window `compileForPrompt` never evicts (CR-12).
+    /// Chars of the newest `fullFidelityWindow - 1` step entries, which with the entry being recorded form the window
+    /// `compileForPrompt` never evicts.
     private func unevictableRecentChars() -> Int {
         let keepPrior = max(0, config.fullFidelityWindow - 1)
         guard keepPrior > 0 else { return 0 }
@@ -271,12 +223,8 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
     mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, params: String, result: String, artifacts: [MediaArtifact]) {
         let suffixLen = Self.truncationSuffix.count
 
-        // Same cut as the native path: the MIDDLE goes, with a note naming what was removed and how
-        // to get it — a head-only cut dropped a build's final error.
-        // ⚠️⚠️ NOT `perEntryCap` alone (readiness CR-12). That equals the WHOLE budget, while eviction
-        // only ever removes OLD lines — the newest `fullFidelityWindow` entries are never evicted. So
-        // three large results in a row each kept the whole budget and the scratchpad shipped at ~3×.
-        // The room that is free is the budget minus the recent entries eviction cannot touch.
+        // Cuts the middle with a note naming what was dropped; the limit is capped by the room left after recent entries
+        // that cannot be evicted.
         let limit = min(config.perEntryCap,
                         ToolResultBudget.limit(payloadBudgetChars: config.totalBudgetChars,
                                                protectedChars: unevictableRecentChars(),
@@ -335,38 +283,11 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         case reasoning(ReasoningRecord)
     }
 
-    /// The alert lines the prompt will actually carry: byte-identical alerts collapsed to one,
-    /// then capped to the most recent `cap`.
-    ///
-    /// ⚠️ ONE definition, called by BOTH `compileForPrompt` and `budgetUtilization`. That is not
-    /// tidiness — `:195-198` records that G10's observation dedup had to be mirrored into the
-    /// estimator or it "trigger[ed] false memory-pressure alerts while actual compile output stays
-    /// small". The alert arm had never mirrored even the existing cap, so a 14-iteration run
-    /// counted ~11 alerts of phantom size against a budget that renders at most 3. Sharing the
-    /// function makes that class of drift unrepresentable rather than merely discouraged.
-    ///
-    /// ⚠️ **Keep the LAST occurrence, and dedupe BEFORE the cap.** Both halves are load-bearing:
-    ///   • Last, because alerts render at the very end of the prompt in insertion order, so a
-    ///     re-raised alert must reclaim its recency slot rather than stay pinned behind staler
-    ///     ones. The forward-iterating `Set` idiom keeps the FIRST occurrence, looks identical,
-    ///     and silently drops the newest alert on a `[X, B, C, D, X]` shape.
-    ///   • Before, because capping first spends slots on repeats: `[A, P, P, P, M]` with cap 3
-    ///     yields `[P, M]` (2 distinct, `A` lost) if capped first, and `[A, P, M]` (3 distinct)
-    ///     if deduped first. Same slots, never fewer distinct alerts.
-    ///
-    /// ⚠️ **The repeat COUNT is preserved, never dropped.** Both other collapses in this file keep
-    /// their evidence — `failed \(count)x` at :400 and `IDENTICAL TO Step \(firstSeen)` at :404 —
-    /// and an alert is the one channel carrying escalation ("this has now failed three times").
-    /// Rendering `(repeated Nx)` makes the collapse losslessly compressive: it carries exactly what
-    /// the duplicate lines carried, in fewer bytes. Without it this would be the first lossy
-    /// collapse in the file, and it would flatten two real signals — the skip/fallback alerts,
-    /// where the repeat IS the message, and denial alerts, which name the tool but not the
-    /// arguments (`ReActAgentExecutor.swift:1040`) and so are byte-identical across genuinely
-    /// different user decisions.
-    ///
-    /// ⚠️ Exact byte match only — no trimming, no casefolding. `unknownToolName` echoes the model's
-    /// attempted spelling, so normalising would merge two different hallucinated names; matching a
-    /// payload by shape rather than identity is this codebase's recidivist defect.
+    // Why: keep the last occurrence and dedupe before the cap; matching is exact bytes, since normalising would merge
+    // distinct hallucinated tool names.
+    /// Returns the alert lines the prompt will carry: byte-identical alerts collapsed, repeat count preserved, then
+    /// capped to the newest `cap`.
+    /// Shared by `compileForPrompt` and `budgetUtilization` so the estimate cannot drift from the render.
     static func renderableAlerts(_ all: [String], cap: Int) -> [String] {
         guard cap > 0, !all.isEmpty else { return [] }
 
@@ -389,9 +310,8 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
     func compileForPrompt() -> String {
         guard !entries.isEmpty else { return "No actions taken yet." }
 
-        // Step 1: Separate system alerts from step-linked entries (observations + reasonings).
-        // Step entries keep their original insertion order so a step's reasoning renders
-        // immediately before that step's tool observations in the final scratchpad.
+        // Separates system alerts from step-linked entries; step entries keep insertion order so reasoning precedes its
+        // observations.
         var allAlerts: [String] = []
         var stepEntries: [StepEntry] = []
 
@@ -406,23 +326,18 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             }
         }
 
-        // Step 2: Collapse byte-identical alerts (keeping the most recent occurrence and its
-        // repeat count), then cap to the most recent N. See `renderableAlerts` for why the order
-        // of those two operations is load-bearing.
+        // Collapses byte-identical alerts then caps to the most recent N; the order of those two operations matters (see
+        // `renderableAlerts`).
         let recentAlerts = Self.renderableAlerts(allAlerts, cap: config.maxSystemAlerts)
 
-        // Step 3: Partition step entries into "old" (compressed) and "recent" (full fidelity).
-        // Reasoning and observations share the window — a step's reasoning + its observations
-        // typically live together and age together.
+        // Partitions step entries into old (compressed) and recent (full fidelity); reasoning and observations age
+        // together.
         let splitIndex = max(0, stepEntries.count - config.fullFidelityWindow)
         let oldEntries = Array(stepEntries.prefix(splitIndex))
         let recentEntries = Array(stepEntries.suffix(from: splitIndex))
 
-        // Step 4: Collapse consecutive identical errors in old observations.
-        // Only applies to observations (reasoning never "repeats" as an error pattern).
-        // This prevents error cascades from consuming budget and evicting useful history.
-        // Error-collapse now requires SAME params too — two failures with different
-        // arguments are distinct exploration attempts and should stay separate.
+        // Collapses consecutive identical errors in old observations; the same params are required, since different
+        // arguments are distinct attempts.
         enum CollapsedOld {
             case observation(firstStep: Int, lastStep: Int, toolName: String, params: String, result: String, count: Int)
             case reasoning(ReasoningRecord)
@@ -455,17 +370,8 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         var oldLines: [(line: String, charCount: Int)] = []
         var protectedLines: [String] = []
 
-        // G10: Redundancy dedup across old + recent. Tracks the first step at which
-        // each unique (toolName, paramsHash, resultHash) combination was rendered at
-        // full detail; later occurrences become pointer lines ("IDENTICAL TO Step M")
-        // so the model sees an explicit signal that it wasted a call, and so the
-        // scratchpad doesn't spend budget re-rendering the same 8KB tree output twice.
-        //
-        // Keying on params + result eliminates the false-positive collision where two
-        // calls with different paths happen to produce identical output (e.g. two
-        // empty directories). Without params in the key, the second call would be
-        // mislabeled as redundant and the model loses signal that it's exploring
-        // different inputs.
+        // Redundancy dedup across old and recent entries, keyed on (tool, params, result); repeats become "IDENTICAL TO
+        // Step M" pointer lines.
         var seenFirstStep: [String: Int] = [:]
 
         func dedupKey(toolName: String, params: String, result: String) -> String {
@@ -504,21 +410,15 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             protectedLines.append("--- Recent observations ---")
         }
 
-        // Render recent entries at full fidelity.
-        //
-        // Prompt-render DOES NOT include `(id: <UUID>)` — small-capacity models
-        // (Q4 3B/8B) parrot the UUID into subsequent tool-call content, polluting
-        // write_file args and other downstream operations. The toolCallId stays in
-        // memory for log correlation and debugging; just not surfaced to the model.
+        // Renders recent entries in full, without the toolCallId, which small models parrot into later tool-call content.
         for entry in recentEntries {
             switch entry {
             case .observation(let obs):
                 let signature = renderToolSignature(toolName: obs.toolName, params: obs.params)
                 let key = dedupKey(toolName: obs.toolName, params: obs.params, result: obs.result)
                 if let firstSeen = seenFirstStep[key] {
-                    // G10: This exact (tool, params, output) already appeared at Step
-                    // `firstSeen`. Surface the redundancy explicitly instead of
-                    // re-rendering the full output.
+                    // This exact (tool, params, output) already appeared at `firstSeen`; surfaces the redundancy instead of
+                    // re-rendering the output.
                     protectedLines.append("- [Step \(obs.stepId)] \(signature) \u{2192} IDENTICAL TO Step \(firstSeen) (redundant call, output omitted)")
                 } else {
                     seenFirstStep[key] = obs.stepId
@@ -570,30 +470,8 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             }
         }
 
-        // Step 6: Assemble final output.
-        //
-        // ⚠️ NO separator re-evaluation here, and that is load-bearing rather than an omission.
-        // This used to branch on `allParts.isEmpty` and strip "--- Recent observations ---",
-        // under the rationale "all old lines were evicted, so there's no compressed section to
-        // separate from". Both halves of that were wrong:
-        //
-        //   1. The separator can never reach that branch. It is appended to `protectedLines` only
-        //      when `!oldEntries.isEmpty && !recentEntries.isEmpty` (Step 3), and a non-empty
-        //      `oldEntries` always yields at least one line in `oldLines` — so whenever the
-        //      separator exists, `allParts` is non-empty and the branch is not taken. The branch
-        //      DID run often (any run shorter than the full-fidelity window, where no separator was
-        //      ever added), so the filter executed and removed nothing, every time.
-        //   2. Even after a total eviction the separator is still CORRECT, because eviction does
-        //      not empty the compressed section — it replaces it with the
-        //      `[SYSTEM: N earlier observation(s) evicted…]` marker, which `oldLines.insert(at: 0)`
-        //      puts exactly where the old lines were. The separator then separates that marker from
-        //      the recent block, which is what a reader needs.
-        //
-        // Verified before removal: an `assert` placed inside the branch, asserting the filter
-        // removed nothing, survived 1,547 Backends + Integration tests without tripping.
-        // `testSeparator_AbsentWhenAllRecent` covers the short-run path this branch used to take,
-        // and `testEviction_MarkerReplacesTheOldBlockAndRecentSurvives` covers the total-eviction
-        // path it never took.
+        // Assembles the final output. No separator re-evaluation: the separator exists only when the compressed section
+        // does, and eviction keeps it.
         var allParts: [String] = oldLines.map(\.line)
         allParts.append(contentsOf: protectedLines)
 
@@ -616,11 +494,9 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         return String(oneLine.prefix(117)) + "..."
     }
 
-    /// Renders a tool name + serialised params as a compact call signature like
-    /// `list_directory({"path":"/Users/alice/Acme"})`. Empty / `{}` params render
-    /// as just the bare tool name so synthetic observations seeded by capability
-    /// decorators (Planning, Reflexion — which use `params: ""`) don't show
-    /// trailing empty parens.
+    /// Renders a tool name and serialised params as a compact call signature like
+    /// `list_directory({"path":"/Users/alice"})`.
+    /// Empty or `{}` params render as the bare tool name, so synthetic observations show no trailing empty parens.
     private func renderToolSignature(toolName: String, params: String) -> String {
         let trimmed = params.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty || trimmed == "{}" {

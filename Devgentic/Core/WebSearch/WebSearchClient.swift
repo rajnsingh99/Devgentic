@@ -4,18 +4,14 @@
 //  WebSearchClient.swift
 //  Devgentic
 //
-//  One request builder and one response parser per provider, normalised to `WebSearchResult`.
-//
-//  Credentials go in headers wherever the provider allows (Brave, Tavily). Google Custom Search
-//  only documents a `key` query parameter, so that URL carries the secret — which is why the
-//  default transport is an EPHEMERAL session: nothing is written to URLSession's on-disk cache
-//  (`~/Library/Caches`), where a keyed URL would otherwise sit indefinitely.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "WebSearchClient")
 
+/// A web search result normalised across providers; each provider has one request builder and one response parser.
 struct WebSearchResult: Equatable, Sendable {
     let title: String
     let url: String

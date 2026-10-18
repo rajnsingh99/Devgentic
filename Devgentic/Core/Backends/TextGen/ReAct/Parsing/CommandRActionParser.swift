@@ -4,23 +4,7 @@
 //  CommandRActionParser.swift
 //  Devgentic
 //
-//  Phase 5 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.commandRAction` dialect (Cohere Command-R / R+).
-//
-//  Canonical output: `Action:` markdown directive + fenced JSON list using
-//  `tool_name` + `parameters` keys (unique Cohere key-naming combo).
-//
-//    Action: ```json
-//    [
-//        {"tool_name": "search", "parameters": {"q": "weather"}}
-//    ]
-//    ```
-//
-//  Drift tolerated:
-//   - `name` alias for `tool_name` (cross-family flat-JSON drift)
-//   - `arguments` alias for `parameters` (Qwen-style leakage)
-//   - Missing or partial code fence
-//   - Multiple Action: blocks (extract all)
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -28,6 +12,9 @@ import OSLog
 
 private let logger = DGLogger(category: "CommandRActionParser")
 
+/// Primary parser for the `.commandRAction` dialect (Cohere Command-R / R+): an `Action:` directive followed by a
+/// fenced JSON list of `tool_name` / `parameters` objects. Tolerates `name` and `arguments` aliases, a missing or
+/// partial fence, and multiple `Action:` blocks.
 struct CommandRActionParser: CognitiveParserProtocol {
 
     private struct ToolCallObject: Decodable {
@@ -65,15 +52,9 @@ struct CommandRActionParser: CognitiveParserProtocol {
 
     // MARK: - Extraction
 
-    /// Locates each `Action:` segment and extracts the JSON array inside its code fence
-    /// (or bare array if no fence).
-    ///
-    /// ⚠️ READINESS CR-55 (2026-10-12). The search resumed just after each `Action:`, NOT after the
-    /// array it consumed, while each `Action:` takes the first array FOLLOWING it. So any second
-    /// `Action:` before or inside that array (a "Next Action: …" in the thought, or the word inside
-    /// an argument string) read the SAME array again and every call in it was emitted twice. The
-    /// loop's exact-duplicate removal happened to stop the double run; the parse is now right on
-    /// its own: the search resumes after the consumed array.
+    // Why: resume the search after the consumed array; resuming just after `Action:` re-reads the same array
+    // when a second `Action:` appears inside it, and emits every call twice.
+    /// Locates each `Action:` segment and extracts the JSON array in its code fence (or a bare array).
     private func extractToolCalls(from text: String) -> [PendingToolCall] {
         var results: [PendingToolCall] = []
         var searchStart = text.startIndex
@@ -90,7 +71,7 @@ struct CommandRActionParser: CognitiveParserProtocol {
             if let decoded = decodeArray(arraySlice) {
                 results.append(contentsOf: decoded.compactMap { toPendingCall($0) })
             }
-            // Advance past what we CONSUMED, not just past this `Action:` (CR-55).
+            // Resume after the consumed array, not just past this `Action:`.
             searchStart = consumedEnd
         }
 
@@ -143,13 +124,8 @@ struct CommandRActionParser: CognitiveParserProtocol {
         return nil
     }
 
-    /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    /// Repairs trailing commas and Python literals in the model's JSON, outside string values only.
+    /// Delegates to `JSONStructuralSanitizer`.
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }

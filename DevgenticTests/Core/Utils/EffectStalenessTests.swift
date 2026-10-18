@@ -2,23 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  EffectStalenessTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  F15(b): the episodic record must stop PROMISING a retrieval it cannot honour.
-//
-//  ⚠️⚠️ `<effect … diff="on_demand"/>` means "call get_conversation_history(N) and you will get
-//  this file's change". Once the file moves underneath — a git checkout, the user's editor,
-//  another agent — the stored diff no longer describes it and the promise is false.
-//
-//  Field-observed 2026-09-20: a file was restored underneath a live conversation. The record kept
-//  advertising a retrievable diff, the model answered "successfully completed in a previous turn
-//  (Turn 5)", and made ZERO tool calls.
-//
-//  ⚠️ SCOPE IS THE PROMISE, NOT A HINT. An earlier draft also injected "re-read it before relying
-//  on this" into the XML. That was cut deliberately: telling the model what to do about a changed
-//  file is the system prompt's job and the model's to follow, and prompts that accumulate
-//  per-symptom advice rot. Withdrawing a false promise costs zero extra context — `on_demand`
-//  becomes `stale` — and is a correctness fix rather than an assist.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,11 +4,12 @@
 //  QuickSchedulePopoverView.swift
 //  Devgentic
 //
-//  Compact popover for quickly scheduling a one-shot task from the ChatInputAreaView.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Compact popover for quickly scheduling a one-shot task from `ChatInputAreaView`.
 struct QuickSchedulePopoverView: View {
 
     let promptText: String

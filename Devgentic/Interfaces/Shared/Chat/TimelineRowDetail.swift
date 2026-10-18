@@ -4,16 +4,7 @@
 //  TimelineRowDetail.swift
 //  Devgentic
 //
-//  What a timeline tool row reveals when you expand it.
-//
-//  This exists as one named value rather than three inline conditions because that is
-//  precisely how it broke. `ActionDetailView` gated its chevron and its tap target on
-//  `data.output` while the body gated on `data.effect`, so a write row — which has BOTH —
-//  rendered its diff unconditionally under a chevron that toggled a flag nothing read
-//  (field-reported 2026-07-27). The mirror case is just as bad: an effect with no output
-//  would render a diff with no chevron and no way to collapse it.
-//
-//  Every one of those three call sites now asks this type.
+//  Created by Raj Singh.
 //
 
 import Foundation

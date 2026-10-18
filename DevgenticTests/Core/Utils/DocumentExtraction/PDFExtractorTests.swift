@@ -2,10 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PDFExtractorTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1 + 2: PDF extraction via PDFKit, OCR fallback, error handling.
-//  Uses real fixture files from the test bundle.
+//  Created by Raj Singh.
 //
 
 import XCTest

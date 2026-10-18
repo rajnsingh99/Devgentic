@@ -4,11 +4,7 @@
 //  ChatPersistenceStoreTests.swift
 //  DevgenticTests
 //
-//  Created on 03/04/26.
-//
-//  Comprehensive tests for ChatPersistenceStore — the SwiftData persistence layer
-//  for conversations and messages. Validates CRUD, upsert, cascade delete,
-//  pagination, pin/unpin, backend association, and edge cases.
+//  Created by Raj Singh.
 //
 
 import XCTest

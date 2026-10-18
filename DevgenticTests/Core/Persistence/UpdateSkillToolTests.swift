@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  UpdateSkillToolTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The one tool that lets an agent change what a future agent reads.
-//
-//  ⚠️ REWRITTEN FOR V6. These were quarantined when the folder registry was retired, not deleted,
-//  because every rule they encode is still owed: default-deny, refusal on name ambiguity, and the
-//  frontmatter being untouchable. Two things changed shape — the edit now APPENDS an immutable
-//  version instead of overwriting SKILL.md, and the permission lives on the library row.
+//  Created by Raj Singh.
 //
 
 import XCTest

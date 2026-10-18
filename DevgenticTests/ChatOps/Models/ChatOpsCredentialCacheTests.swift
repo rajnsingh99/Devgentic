@@ -4,17 +4,7 @@
 //  ChatOpsCredentialCacheTests.swift
 //  DevgenticTests
 //
-//  Registers KC-29 + KC-47. Every credential getter used to issue an uncached synchronous
-//  `SecItemCopyMatching` per access — the Settings pane evaluates several credentials per
-//  keystroke, and the notification path reads them too. The fix memoizes one value per account
-//  behind ONE rule that must never be broken:
-//
-//      a FAILED read is never memoized.
-//
-//  That rule is KC-8's lesson applied prospectively: a cache that stores "absent" off a locked
-//  Keychain read hides a live credential for the rest of the process. The test that pins it
-//  drives a failing backend, reads twice, clears the failure, and asserts the NEXT read goes to
-//  the Keychain again and sees the value.
+//  Created by Raj Singh.
 //
 
 import XCTest

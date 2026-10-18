@@ -4,19 +4,7 @@
 //  GaugeHistorySourceTests.swift
 //  DevgenticTests
 //
-//  The context gauge sized the REQUEST from `currentChatMessages` — the UI's pagination
-//  window (20 on open, +10 per scroll-back, cap 300). The request has always been
-//  store-authoritative. `resolveBackendHistory` had already written the rule down:
-//
-//      "What the model sees is a context concern; what the list renders is a rendering
-//       concern, and the two must not be the same value."
-//
-//  Consequences the gauge shipped with: the ring climbed as the user scrolled while the
-//  prompt was unchanged, and a freshly-opened long conversation under-read its own history
-//  by up to 15×.
-//
-//  Both paths now go through `BackendHistoryResolver`. These tests pin that they cannot
-//  drift apart again.
+//  Created by Raj Singh.
 //
 
 import XCTest

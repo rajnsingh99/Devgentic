@@ -4,19 +4,7 @@
 //  TimelinePrimaryArgCacheTests.swift
 //  DevgenticTests
 //
-//  CF-45 (Chat_Production_Readiness_Fresh.md): `ActionDetailView`'s row label called
-//  `ToolArgFormatter.primaryLabel(tool:params:)` inside `body`. `primaryLabel` JSON-parses
-//  the FULL params string — for `write_file` that is the entire file, and `params` is
-//  never capped — so every stream event re-parsed every write's whole payload on the main
-//  actor, three lines below a comment forbidding exactly that for its sibling
-//  `resolvedAction`.
-//
-//  The label is now resolved once per row in the existing `.task(id: TimelineChipKey)`
-//  alongside `resolvedAction` and cached with the key it was resolved for. `body` reads it
-//  through `ActionDetailView.primaryArgLabel(cached:for:tool:params:)`, a pure
-//  `nonisolated static` rule: cache hit on an equal key, fresh parse otherwise. These tests
-//  pin that rule and the key it depends on. The `.task` / `@State` plumbing that fills the
-//  cache is SwiftUI and cannot be driven from a unit test — on-device check.
+//  Created by Raj Singh.
 //
 
 import XCTest

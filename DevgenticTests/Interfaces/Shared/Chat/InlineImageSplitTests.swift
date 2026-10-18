@@ -4,12 +4,7 @@
 //  InlineImageSplitTests.swift
 //  DevgenticTests
 //
-//  Register render/mc-3 — an inline `![alt](path)` was dropped whenever anything else shared its
-//  paragraph: the `.image` block was emitted only for a paragraph whose ONLY child was the
-//  image, and every other shape fell to the text branch, where `AttributedString(markdown:)`
-//  keeps the alt text as characters and nothing draws a picture. CommonMark folds "prose,
-//  newline, image" into ONE paragraph, so the common model shape lost its chart with no
-//  failure card and no log line. A paragraph is now split at its images.
+//  Created by Raj Singh.
 //
 
 import XCTest

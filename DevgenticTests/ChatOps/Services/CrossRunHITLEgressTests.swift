@@ -2,21 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  CrossRunHITLEgressTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Cross-run HITL egress (found 2026-09-11 during the cluster-D fix, recorded in §6, fixed here).
-//
-//  Invariant 46 gates which RUNS the mirror observes: a run reaches a remote channel only when the
-//  source that started it matches the remote session. `evaluateMessageState` then went around that
-//  gate — it pulled pending interactions from `InteractionCenter.items(for: conversationID)`, which
-//  is keyed by CONVERSATION, and `HITLOrigin` carried nothing to say which run had raised one. So
-//  while a remote run was being mirrored, a tool confirmation raised by a LOCALLY-started run in the
-//  same conversation had its tool name and parameters posted to the third-party chat.
-//
-//  ⚠️ THE PRECONDITION IS REACHABLE, WHICH IS WHY THIS IS A FIX AND NOT A THEORY. `ActiveStreamManager`
-//  keys `activeStreams` by MESSAGE id, so two root runs in one conversation are representable; BR-4
-//  closed the remote half of that door but the Mac composer is not disabled during a remote run, so
-//  the local user can still start the second run.
+//  Created by Raj Singh.
 //
 
 import XCTest

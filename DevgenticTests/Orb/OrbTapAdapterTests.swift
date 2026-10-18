@@ -4,10 +4,7 @@
 //  OrbTapAdapterTests.swift
 //  DevgenticTests
 //
-//  Pins the behaviour that the first duplex device run proved was missing. That session logged
-//  `tap: 16000 Hz / 3 ch` from a healthy-looking engine and then `audio: NONE, heard 0 word(s)` —
-//  a three-channel mic array reaching a converter that had been pinned to a pre-start format.
-//  These run entirely on in-memory buffers: no device, no permission prompt.
+//  Created by Raj Singh.
 //
 
 import XCTest

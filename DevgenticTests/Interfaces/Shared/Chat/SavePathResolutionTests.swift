@@ -4,8 +4,7 @@
 //  SavePathResolutionTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the Code Viewer path/read-failure fixes of 2026-08-10
-//  (Chat_Production_Readiness.md rows CH4, CH5, CH6).
+//  Created by Raj Singh.
 //
 
 import XCTest

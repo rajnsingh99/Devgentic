@@ -4,7 +4,7 @@
 //  UserPersonalModels.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation

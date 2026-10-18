@@ -4,39 +4,14 @@
 //  SkillImportPlan.swift
 //  Devgentic
 //
-//  What to do when an imported skill has a name the library already uses.
-//
-//  ## Why this needed deciding at all
-//
-//  `SkillStore.create` always inserts. So re-importing a skill you already had — the obvious way to
-//  update one — produced a SECOND skill with the same name. That is worse than it sounds, because
-//  skills are addressed by NAME at run time: two `code-review`s mean one of them is unreachable by
-//  `load_skill`, chosen deterministically but arbitrarily. The user gets a library that looks right
-//  and an agent that reads the wrong instructions.
-//
-//  ## The three outcomes, and why the default is the one it is
-//
-//    - **Add a version** — the import becomes a new version of the skill already there. Default
-//      when exactly one skill has the name, because it is what re-importing almost always means,
-//      and because it is REVERSIBLE: versions are append-only, so the previous one is still in the
-//      history and still restorable. It also reaches every profile linked to that skill, which is
-//      the entire point of the library owning one copy.
-//    - **Import as new** — a genuinely different skill that happens to share a name. Available, but
-//      never the default: it is the outcome that creates the unreachable-duplicate problem, and
-//      there is no delete-and-merge afterwards that restores what the user meant.
-//    - **Skip** — leave the library alone.
-//
-//  ⚠️ When MORE THAN ONE existing skill shares the name, the default is SKIP. There is no
-//  defensible way to choose which one to version, and picking arbitrarily would land an update in a
-//  skill the user did not mean — the same reasoning that makes `update_skill` refuse on ambiguity.
-//
-//  ⚠️ A pure decision, deliberately. It used to be implicit in `SkillStore.create` always inserting,
-//  which is a decision with no name and no test. Three defects in this feature have come from logic
-//  living inside a SwiftUI view or an unconditional write.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// What to do when an imported skill has a name the library already uses: add a version, import as new, or skip.
+/// Default: add-a-version when exactly one skill has the name (versions are append-only), skip when several do.
+/// Import-as-new is never the default: it creates an unreachable duplicate (skills are addressed by name).
 enum SkillImportResolution: Equatable, Sendable {
     /// Create a brand-new library skill.
     case createNew
@@ -59,9 +34,7 @@ enum SkillImportPlan {
     }
 
     /// Classifies an incoming name against what the library already holds.
-    ///
-    /// Matched on `name`, not `displayName`: `name` is what `load_skill` resolves and what a
-    /// collision actually costs. Two skills may share a display label harmlessly.
+    /// Matched on `name`, not `displayName`: `name` is what `load_skill` resolves and what a collision costs.
     static func collision(for name: String, existing: [(id: String, name: String, displayName: String, versionCount: Int)]) -> Collision {
         let matches = existing.filter { $0.name == name }
         switch matches.count {
@@ -83,7 +56,7 @@ enum SkillImportPlan {
             // Reversible, and what re-importing almost always means.
             return .addVersion(skillID: skillID)
         case .several:
-            // ⚠️ Never guess. An update landing in the wrong skill is silent and unrecoverable.
+            // Never guess: an update landing in the wrong skill is silent and unrecoverable.
             return .skip
         }
     }

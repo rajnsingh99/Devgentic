@@ -4,8 +4,7 @@
 //  ExecutorCapability.swift
 //  Devgentic
 //
-//  Protocol for composable executor capabilities (Planning, Self-Reflection, Delegation).
-//  Each capability wraps an inner executor, adding behavior before/after execution.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,9 +4,7 @@
 //  CapabilityCardRouterTests.swift
 //  DevgenticTests
 //
-//  Unit tests for CapabilityCardRouter — the stream-bridge component that maintains
-//  the structured plan/reflection cards inside a message's timeline and routes
-//  forwarded events into the active step/attempt sub-timeline.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,9 +4,7 @@
 //  SkillFolderScanner.swift
 //  Devgentic
 //
-//  Scans a skill folder on disk, parses YAML frontmatter from SKILL.md files,
-//  and loads full skill packages on demand.
-//  Spec: https://agentskills.io/specification
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -16,6 +14,8 @@ private let logger = DGLogger(category: "SkillFolderScanner")
 
 // MARK: - Skill Folder Scanner
 
+/// Scans a skill folder on disk, parses YAML frontmatter from SKILL.md files and loads full skill packages on demand.
+/// Follows the agentskills.io specification.
 enum SkillFolderScanner {
 
     /// Scans a root skill folder and returns manifests for each valid skill subdirectory.
@@ -24,10 +24,9 @@ enum SkillFolderScanner {
         try scanDetailed(rootFolder: rootFolder).manifests
     }
 
-    /// Detailed scan that returns accepted manifests + skipped entries with reasons.
-    /// Handles two import modes:
-    /// - **Multi-skill folder**: Root contains skill subdirectories (e.g. `skills/`)
-    /// - **Single-skill folder**: Root itself contains a SKILL.md (e.g. `skills/algorithmic-art/`)
+    /// Detailed scan returning accepted manifests plus skipped entries with reasons.
+    /// Handles a multi-skill folder (root contains skill subdirectories) and a single-skill folder (root itself has a
+    /// SKILL.md).
     static func scanDetailed(rootFolder: URL) throws -> SkillScanResult {
         let fm = FileManager.default
 
@@ -51,16 +50,8 @@ enum SkillFolderScanner {
             }
         }
 
-        // Multi-skill folder: bounded recursive walk.
-        //
-        // ⚠️ RECURSIVE SINCE 2026-09-14, and the previous depth-1 rule was the single biggest
-        // usability gap in the feature. The layout Anthropic's own plugins ship — and the one a user
-        // gets by cloning any skills repository — is `repo/skills/<name>/SKILL.md`. Under depth-1
-        // that imported as ZERO skills plus one "No SKILL.md file" skip for `skills/`, which reads
-        // as "this repo has no skills in it".
-        //
-        // The walk is general rather than a hardcoded `skills/` + `plugins/` special case, because
-        // every layout this app has been shown so far was someone's convention rather than a spec.
+        // Multi-skill folder: bounded recursive walk, general rather than a hardcoded `skills/` + `plugins/` layout,
+        // so `repo/skills/<name>/SKILL.md` imports instead of reading as 'this repo has no skills'.
         var manifests: [SkillManifest] = []
         var skipped: [SkippedSkillEntry] = []
         var examined = 0
@@ -76,18 +67,11 @@ enum SkillFolderScanner {
                 .filter { url in
                     guard !url.lastPathComponent.hasPrefix("."), !ignoredNames.contains(url.lastPathComponent) else { return false }
                     guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
-                    // ⚠️ Symlinked directories are not followed. A walk that follows them can cycle,
-                    // and it can leave the folder the user actually chose.
+                    // Symlinked directories are not followed: a walk that follows them can cycle or leave the chosen folder.
                     return values.isDirectory == true && values.isSymbolicLink != true
                 }
-                // ⚠️ SORTED, so an import is deterministic: `contentsOfDirectory` returns filesystem
-                // order, which is neither alphabetical nor stable across machines, and that would
-                // otherwise decide which of two same-named skills wins a collision.
-                //
-                // ⚠️ It no longer decides PROMPT order — an earlier version of this note claimed it
-                // did. `SkillResolution` sorts by name immediately before rendering ("this becomes
-                // prompt bytes"), so that guarantee is owned there. Two places claiming the same
-                // guarantee is how one of them stops being true without anyone noticing.
+                // Sorted so an import is deterministic: `contentsOfDirectory` returns filesystem order, which would decide
+                // which of two same-named skills wins a collision. Prompt order is owned by `SkillResolution`.
                 .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         }
 
@@ -104,9 +88,8 @@ enum SkillFolderScanner {
 
             let skillFile = dir.appendingPathComponent("SKILL.md")
             if fm.fileExists(atPath: skillFile.path) {
-                // ⚠️ A directory that IS a skill is never descended into. Its `reference/`,
-                // `scripts/` and `assets/` are resources, not nested skills — and this is also what
-                // keeps the walk naturally bounded on real skill folders.
+                // A directory that is a skill is never descended into: its `reference/`, `scripts/` and `assets/` are resources,
+                // not nested skills, and this keeps the walk bounded.
                 do {
                     manifests.append(try parseManifest(from: skillFile, folderPath: dir.path))
                 } catch {
@@ -127,9 +110,8 @@ enum SkillFolderScanner {
 
         let topLevel = children(of: rootFolder)
         for child in topLevel {
-            // Report a top-level child as skipped only when its WHOLE subtree yielded nothing —
-            // otherwise `skills/` would be listed as "No SKILL.md file" while contributing every
-            // skill in the import.
+            // Report a top-level child as skipped only when its whole subtree yielded nothing,
+            // so `skills/` is not listed as 'No SKILL.md file' while contributing every skill.
             if !walk(child, depth: 1) && !hitTheCap {
                 skipped.append(SkippedSkillEntry(directoryName: child.lastPathComponent, reason: .noSkillFile))
             }
@@ -143,20 +125,13 @@ enum SkillFolderScanner {
                                totalSubdirectories: topLevel.count, isSingleSkillImport: false)
     }
 
-    /// How deep below the chosen folder a skill may sit.
-    ///
-    /// 4 covers every layout seen in the wild with room to spare: `<skill>/` (1),
-    /// `skills/<skill>/` (2), `plugins/<plugin>/skills/<skill>/` (4). It is a bound on a walk over a
-    /// user-chosen directory, not a statement about what is legal — the cost of being wrong is an
-    /// unbounded traversal of someone's home folder.
+    /// How deep below the chosen folder a skill may sit: 4 covers `plugins/<plugin>/skills/<skill>/`.
+    /// A bound on a walk over a user-chosen directory, not a statement about what is legal.
     static let maxScanDepth = 4
 
-    /// Hard ceiling on directories examined in one scan.
-    ///
-    /// ⚠️ Not a nicety. The user picks this folder with an open panel, and picking a source checkout
-    /// or a home directory is an ordinary mistake. Without a cap the scan walks it all, on the main
-    /// actor, with no way to stop. Hitting the cap is LOGGED rather than silently truncated — a scan
-    /// that quietly stopped halfway would look like "this repo only has three skills".
+    // Why: The user picks the folder with an open panel, and a source checkout or home directory would otherwise be walked
+    // entirely on the main actor.
+    /// Hard ceiling on directories examined in one scan; hitting it is logged rather than silently truncated.
     static let maxDirectoriesExamined = 5_000
 
     /// Parses a single SKILL.md file into a lightweight manifest.
@@ -170,19 +145,8 @@ enum SkillFolderScanner {
 
         return SkillManifest(
             id: UUID(),
-            // ⚠️ SHAPE ONLY — the "name must equal its folder name" rule was DROPPED 2026-09-14.
-            //
-            // It came from the agentskills.io spec, and it made sense while a folder path WAS the
-            // skill's identity: two skills in one directory, or a folder whose name disagreed with
-            // the manifest, broke the key. Under the V6 library identity is an opaque `skill_…` and
-            // the folder is a transport detail discarded at ingest, so the rule bought nothing and
-            // cost real imports — Anthropic's own Skills API requires only that SKILL.md sit at the
-            // root or in a top-level folder, so `my-skill-v2/SKILL.md` declaring `name: my-skill`
-            // is a valid package there and was refused here.
-            //
-            // The SHAPE check stays and is the one that matters: lowercase letters, digits and
-            // hyphens make `/`, `.` and `..` unrepresentable, so a name from an untrusted archive
-            // cannot become a path traversal.
+            // Shape only: the name need not equal its folder name, which is a transport detail.
+            // The charset makes `/`, `.` and `..` unrepresentable, so an archive name cannot traverse.
             name: try validateSkillNameShape(frontmatter.name),
             description: frontmatter.description,
             folderPath: folderPath,
@@ -196,34 +160,10 @@ enum SkillFolderScanner {
 
     // MARK: - Private Helpers
 
-    /// Lists valid resource files in a subdirectory (excluding hidden files, symlinks, directories).
-    ///
-    /// ## The subdirectory check is defence-in-depth and a LOG, not a vulnerability fix
-    ///
-    /// It looks like a symlinked resource directory (`reference -> ~/.ssh`) would be followed and
-    /// its contents read into the model's context. **It is not, and it never was** — verified on
-    /// macOS 26, Foundation:
-    ///
-    ///   - `URL.resourceValues(forKeys: [.isDirectoryKey])` does NOT resolve a symlink:
-    ///     a symlink to a directory reports `isDirectory == false`, `isSymbolicLink == true`.
-    ///   - `FileManager.contentsOfDirectory(at:)` on that URL returns ZERO entries rather than the
-    ///     target's contents.
-    ///
-    /// So both the enumeration above and this function already came back empty. The guard below
-    /// changes no outcome; it is here for two reasons only, and neither is "closes a hole":
-    ///
-    ///   1. **It says so out loud.** Without it, a user whose skill legitimately symlinks its
-    ///      `reference/` directory gets zero resources, silently, with nothing in the log to
-    ///      explain why. That is the silent-skip shape this codebase logs everywhere else.
-    ///   2. **It pins the assumption.** The safety here is Foundation's, not ours. If that
-    ///      behaviour ever changes, or if this function is rewritten onto an API that does follow
-    ///      symlinks (`enumerator(at:)` with different options, or a raw `opendir`), the guard is
-    ///      already in place and the characterization tests in
-    ///      `SkillFolderScannerHygieneTests` say what is being relied on.
-    ///
-    /// ⚠️ Do not read this as "symlink escape is handled". A skill package that ships a symlink is
-    /// still worth refusing at INSTALL time, where the file is written — see the zip-install work.
-    /// A guard here is a guard on this one read path, not on the capability.
+    // Why: The safety is Foundation's (symlinks are not resolved, `contentsOfDirectory` is empty); the guard logs and pins that.
+    // It is not a symlink-escape fix: refuse symlinks at install time.
+    /// Lists valid resource files in a subdirectory, excluding hidden files, symlinks and directories.
+    /// The symlink check is defence in depth and a log line: Foundation already returns nothing for a symlinked directory.
     private static func validFiles(in dir: URL) -> [URL] {
         let fm = FileManager.default
         guard let dirValues = try? dir.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey]) else { return [] }
@@ -256,21 +196,13 @@ enum SkillFolderScanner {
         !validFiles(in: folder.appendingPathComponent("scripts")).isEmpty
     }
 
-    /// Validates a skill name's SHAPE only — no directory-equality requirement.
-    ///
-    /// ⚠️ Split out so a caller that has a name but no directory yet can validate BEFORE building a
-    /// path from it. The importer used to need exactly that — it derived a directory name from an
-    /// untrusted archive's frontmatter, and without this check a `name` of `../../../victim` became
-    /// a real path that reached `removeItem`. That code is gone with the promote half; the live
-    /// callers are `SkillIngest.parse`, `SkillCreateSheet`, and `SkillMaterializer.write`, which is
-    /// now the only place a name becomes a filesystem path. The charset below — lowercase letters, digits and
-    /// hyphens — is what makes `/`, `.` and `..` unrepresentable, so traversal cannot be expressed
-    /// rather than having to be filtered.
+    // Why: `SkillMaterializer.write` is the only place a name becomes a filesystem path.
+    /// Validates a skill name's shape only, with no directory-equality requirement; callers validate before building a path.
+    /// The charset (lowercase letters, digits, hyphens) makes `/`, `.` and `..` unrepresentable, so traversal cannot be
+    /// expressed.
     @discardableResult
     static func validateSkillNameShape(_ name: String) throws -> String {
-        // ⚠️ The limit comes from `SkillLibraryLimits`, not a literal. It was declared there and
-        // enforced here with a hardcoded 64 — two definitions of one rule, and the kind that drifts
-        // silently because the constant had no readers to fail when it changed.
+        // The limit comes from `SkillLibraryLimits`, not a literal, so there is one definition of the rule.
         guard name.count <= SkillLibraryLimits.maxNameChars else {
             throw SkillParseError.invalidName("Name exceeds \(SkillLibraryLimits.maxNameChars) characters")
         }
@@ -296,18 +228,9 @@ enum SkillFolderScanner {
 
 // MARK: - YAML Frontmatter Parser
 
-/// Parses the YAML frontmatter block from a SKILL.md file.
-///
-/// Handles flat key-value pairs, folded/literal block scalars (`>` and `|`), single-level
-/// continuation lines, single-quoted and double-quoted scalars, and one-level SEQUENCES in both
-/// spellings — block (`- item`) and flow (`[a, b]`).
-///
-/// ⚠️ Still NOT a YAML parser. No nested maps, no anchors, no multi-document, no escape processing
-/// inside quoted scalars, and a literal block (`|`) is FOLDED rather than newline-preserving. It
-/// covers the agentskills.io spec's required fields (name, description) and the optional ones that
-/// carry meaning here (license, compatibility, allowed-tools) — and it is deliberately total: an
-/// unrecognised construct degrades to a scalar rather than throwing, because refusing to import a
-/// skill over a frontmatter nicety is worse than importing it with one field read loosely.
+/// Parses the YAML frontmatter of a SKILL.md: flat key-values, block scalars (`>` and `|`), quoted scalars, continuations
+/// and one-level sequences (block `- item` and flow `[a, b]`).
+/// Not a full YAML parser (no nested maps, anchors or escapes) and total: unrecognised constructs degrade to a scalar.
 enum YAMLFrontmatterParser {
 
     struct Frontmatter {
@@ -320,23 +243,13 @@ enum YAMLFrontmatterParser {
         let additionalFields: [String: String]
 
         /// Sequence-valued fields with their elements preserved.
-        ///
-        /// ⚠️ Kept SEPARATE from `additionalFields` rather than replacing it, because joining is
-        /// lossy in one direction only: `["Read, write"]` and `["Read", "write"]` join to the same
-        /// string. Anything that must address elements individually — `allowed-tools` does, it is
-        /// matched against tool names — has to read this.
+        /// Separate from `additionalFields` because joining is lossy: `["Read, write"]` and `["Read", "write"]` join alike.
+        /// Anything that addresses elements individually (`allowed-tools`) must read this.
         let listFields: [String: [String]]
 
         /// Reads a field as a list of elements, whichever YAML spelling produced it.
-        ///
-        /// Accepts all three shapes a skill author plausibly writes:
-        ///   - block sequence   `allowed-tools:\n  - Read\n  - Grep`
-        ///   - flow sequence    `allowed-tools: [Read, Grep]`
-        ///   - comma scalar     `allowed-tools: Read, Grep`
-        ///
-        /// The third is not a YAML list at all — it is one scalar string — but it is what people
-        /// write, and reading it as a single tool named "Read, Grep" would be a silent
-        /// misparse rather than an error anyone could see.
+        /// Accepts block sequences, flow sequences and a plain comma-separated scalar (`allowed-tools: Read, Grep`).
+        /// The comma scalar is not YAML but is what authors write; reading it as one tool would silently misparse.
         func list(_ key: String) -> [String]? {
             if let elements = listFields[key] { return elements }
             guard let scalar = additionalFields[key] else { return nil }
@@ -358,19 +271,12 @@ enum YAMLFrontmatterParser {
         var currentKey: String?
         var currentValue: String = ""
         var currentList: [String] = []
-        /// True while the open key was introduced with an explicit block-scalar indicator
-        /// (`>` or `|`). ⚠️ Load-bearing: without it a folded description whose first line begins
-        /// with a dash — an ordinary bulleted description — would be read as a block SEQUENCE and
-        /// the prose would silently become a list. See `testAFoldedDescriptionOfBulletsIsNotAList`.
+        // Why: Without it a folded description starting with a dash would be read as a block sequence.
+        /// True while the open key was introduced with an explicit block-scalar indicator (`>` or `|`).
         var currentIsBlockScalar = false
-        /// Whether the open key was written as a SEQUENCE at all.
-        ///
-        /// ⚠️ Tracked separately from `currentList.isEmpty`, and the difference is the whole point.
-        /// `allowed-tools: []` is an author saying "this skill needs no tools"; an absent key is an
-        /// author saying nothing. Keying the flush on emptiness collapses the first into the second
-        /// — the list never lands in `lists`, `list()` falls through to comma-splitting `""`, and
-        /// the declaration reads as absent. That inverts an explicit statement into silence, which
-        /// is the one direction this parser must never fail in.
+        // Why: Tracked separately from `currentList.isEmpty`: `allowed-tools: []` (needs no tools) must not collapse into an absent
+        // key.
+        /// Whether the open key was written as a sequence at all.
         var currentIsSequence = false
 
         func flush() {
@@ -386,12 +292,8 @@ enum YAMLFrontmatterParser {
         for line in yamlLines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            // A block-sequence item, at ANY indentation.
-            //
-            // ⚠️ Zero-indent items (`- Read` flush left) used to be dropped on the floor: they
-            // match neither the continuation branch (no leading spaces) nor `findFieldSeparator`
-            // (no colon), so the whole list vanished and the key parsed as empty. That is the
-            // shape GitHub's own YAML examples use, so it was the common case, not an edge one.
+            // A block-sequence item at any indentation, including flush-left `- Read`, which matches neither the continuation
+            // branch nor `findFieldSeparator` and would otherwise vanish.
             if currentKey != nil, !currentIsBlockScalar, currentValue.isEmpty,
                trimmed == "-" || trimmed.hasPrefix("- ") {
                 currentIsSequence = true
@@ -411,12 +313,8 @@ enum YAMLFrontmatterParser {
                 currentKey = String(line[line.startIndex..<fieldSeparator]).trimmingCharacters(in: .whitespaces)
                 let afterColon = String(line[line.index(after: fieldSeparator)...]).trimmingCharacters(in: .whitespaces)
 
-                // ⚠️ `|` joins `>` here. It was previously unhandled, so `description: |` parsed as
-                // the literal value "|" and every following line was appended to it — the prompt
-                // got `| Line one. Line two.` with a stray pipe at the front. Folding a literal
-                // block rather than preserving its newlines is deliberate: every consumer of these
-                // values collapses newlines anyway (`SkillDiscoveryRendering`), so the distinction
-                // has no observable effect beyond that leading character.
+                // `|` joins `>` here: a literal block is folded rather than newline-preserving, which is harmless since consumers
+                // collapse newlines anyway (`SkillDiscoveryRendering`).
                 currentIsBlockScalar = (afterColon == ">" || afterColon == "|")
                 if currentIsBlockScalar {
                     currentValue = ""
@@ -441,27 +339,10 @@ enum YAMLFrontmatterParser {
         return Frontmatter(name: name, description: description, additionalFields: fields, listFields: lists)
     }
 
-    /// Strips ONE layer of matching surrounding quotes.
-    ///
-    /// ⚠️ `name: "code-review"` used to be REJECTED at import: the quotes survived into the value,
-    /// and `validateSkillNameShape` refuses anything outside `[a-z0-9-]`, so a perfectly valid quoted
-    /// skill failed with "Name must be lowercase alphanumeric + hyphens only" — an error message
-    /// pointing at the wrong thing entirely. Quoting a scalar is ordinary YAML and mandatory for
-    /// values starting with `[`, `{`, `*`, `&`, or `%`.
-    ///
-    /// ⚠️⚠️ THE `''` COLLAPSE IS ONE HALF OF AN ENCODING — it must stay in step with
-    /// `SkillMaterializer.yamlScalar`, which emits single-quoted scalars and doubles every
-    /// apostrophe inside one. Shipping either half alone CREATES a corruption rather than fixing
-    /// one: without this collapse, exporting `Reviews the user's code` and re-importing it yields
-    /// `the user''s code`.
-    ///
-    /// It is also plain YAML — `''` is exactly how a single-quoted scalar spells one quote — so a
-    /// third-party SKILL.md that already used it was being misread before this.
-    ///
-    /// ⚠️ DOUBLE-quoted scalars still get NO escape processing: `\"` and `\\` stay literal. That gap
-    /// is deliberate and separate. Closing it correctly would mean making the `first == last` strip
-    /// above an escape-aware scan — `"He said \""` currently loses its final character — and this
-    /// app no longer emits that shape, so the gap only affects hand-written frontmatter.
+    // Why: Keep the `''` collapse in step with `SkillMaterializer.yamlScalar`, or an export-then-import corrupts apostrophes.
+    /// Strips one layer of matching surrounding quotes.
+    /// The `''` collapse mirrors `SkillMaterializer.yamlScalar`, which doubles apostrophes in single-quoted scalars;
+    /// double-quoted scalars get no escape processing.
     private static func unquote(_ value: String) -> String {
         guard value.count >= 2 else { return value }
         guard let first = value.first, let last = value.last, first == last,
@@ -473,11 +354,8 @@ enum YAMLFrontmatterParser {
         return inner.replacingOccurrences(of: "''", with: "'")
     }
 
-    /// Parses a YAML flow sequence — `[a, b]` — returning nil when the value is not one.
-    ///
-    /// Returns an EMPTY array for `[]`, which is meaningfully different from nil: `allowed-tools: []`
-    /// is an author saying "this skill needs no tools", and collapsing that to "unspecified" would
-    /// invert the declaration.
+    /// Parses a YAML flow sequence (`[a, b]`), returning nil when the value is not one.
+    /// Returns an empty array for `[]`, which differs from nil: `allowed-tools: []` declares that no tools are needed.
     private static func parseFlowSequence(_ value: String) -> [String]? {
         guard value.hasPrefix("["), value.hasSuffix("]"), value.count >= 2 else { return nil }
         let inner = String(value.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
@@ -485,17 +363,9 @@ enum YAMLFrontmatterParser {
         return splitTopLevel(inner).map(unquote)
     }
 
-    /// Splits on commas that are NOT inside parentheses, brackets, braces or quotes.
-    ///
-    /// ⚠️ Naive `split(separator: ",")` was wrong for the one field this parser exists to read.
-    /// Real `allowed-tools` declarations carry SCOPED forms — `Bash(git add:*, git commit:*)` — and
-    /// splitting them on every comma produces two fragments that are not tools and match nothing:
-    /// `Bash(git add:*` and `git commit:*)`. Both would then be shown to the user as things the
-    /// skill declared, which is a misquote of their own file.
-    ///
-    /// Depth-counted rather than regex-matched, and it never throws on unbalanced input: an
-    /// unclosed `(` simply means the remainder is one element. A frontmatter typo must degrade to
-    /// a slightly-wrong reading, never to a refused import.
+    /// Splits on commas that are not inside parentheses, brackets, braces or quotes, so `Bash(git add:*, git commit:*)`
+    /// stays whole.
+    /// Depth-counted, never throws on unbalanced input: an unclosed `(` makes the remainder one element.
     static func splitTopLevel(_ value: String) -> [String] {
         var parts: [String] = []
         var current = ""
@@ -530,10 +400,8 @@ enum YAMLFrontmatterParser {
             .filter { !$0.isEmpty }
     }
 
-    /// Finds the YAML field separator colon in a line.
-    /// A valid field separator is a colon where the key portion (before the colon) is a
-    /// simple bare word (no spaces, no special chars). This prevents colons inside values
-    /// (e.g., URLs like "https://example.com") from being misinterpreted as field separators.
+    /// Finds the YAML field separator colon: one whose key part is a simple bare word.
+    /// This keeps colons inside values (e.g. URLs) from being read as separators.
     private static func findFieldSeparator(in line: String) -> String.Index? {
         // Skip indented lines (handled as continuation)
         guard !line.hasPrefix(" "), !line.hasPrefix("\t") else { return nil }

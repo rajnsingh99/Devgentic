@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGHardeningTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Batch 8 of the RAG readiness register:
-//    RAG-18 — attachments are indexed whenever their CONTENT was delivered, not only under the
-//             `.directInjection` strategy (the stateless fallback and `.contextualRAG` inject too).
-//    RAG-20 — the query rewrite is bounded: head+tail history, no reasoning, a long query skipped,
-//             a wall-clock deadline that does not wait for a call ignoring cancellation.
-//    RAG-21 — retrieved text is framed as data and cannot close its own section.
-//    RAG-25 — the embedding model and vector store are first touched OFF the main thread.
-//    RAG-30 — an oversized plain-text attachment is indexed up to the cap instead of not at all.
-//    RAG-31 — an older build leaves a NEWER build's vector store untouched.
-//    RAG-32 — the embedding model is recorded; a store from another model is set aside.
-//    RAG-34 — no retrieval on an empty/emoji query; no fusion on filler words in tiny corpora.
-//    RAG-36 — the AST walk is iterative (no stack overflow on deep nesting).
-//    RAG-37 — the assembled retrieval context never exceeds its budget, markers included.
-//    RAG-38 — RAG logs are tagged, and never carry user text.
+//  Created by Raj Singh.
 //
 
 import XCTest

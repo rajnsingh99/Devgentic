@@ -4,26 +4,16 @@
 //  DiscordChatOpsBridge.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import SwiftData
 import os
 
-/// The core orchestrator for Discord ChatOps.
-///
-/// Routes incoming Discord Gateway events through the security gate, parses them into commands,
-/// and dispatches them to the appropriate handler.
-///
-/// Uses the single-path architecture: remote messages reach the agent through the same send path
-/// the Mac UI uses. The `RemoteMirrorService` handles mirroring events back to the transport.
-///
-/// ⚠️ [BR-4] FREE TEXT GOES THROUGH `ChatOpsCommandService.submitTurn`, NOT through the view model
-/// directly. This header used to name `MainApplicationViewModel.submitRemoteMessage()`, and calling
-/// it here is exactly what let a second remote message start a second root run in a conversation
-/// that was already streaming. `submitTurn` bundles the admission check, the mirror registration
-/// and the submit so the three bridges cannot order them three different ways.
+/// The core orchestrator for Discord ChatOps: routes Gateway events through the security gate and dispatches
+/// commands.
+/// Free text goes through `ChatOpsCommandService.submitTurn` (admission, mirror registration, submit).
 @Observable @MainActor
 final class DiscordChatOpsBridge {
 
@@ -88,24 +78,18 @@ final class DiscordChatOpsBridge {
             )
         }
 
-        // ⚠️⚠️ [DC-1/LIFE-2] REFUSE A SECOND START — see `ChatOpsBridgeStart.shouldProceed` for why
-        // this refuses rather than restarting: `stop()` tears down the mirror session and would kill
-        // an in-flight tool approval. Placed after the credential guards, so a start that was never
-        // going to work is still reported as a missing token rather than as a duplicate.
+        // Refuses a second start (see `ChatOpsBridgeStart.shouldProceed`), placed after the credential guards so bad
+        // config is reported first.
         guard ChatOpsBridgeStart.shouldProceed(isRunning: isRunning, provider: .discord, logger: logger) else { return }
 
-        // ⚠️ [LIFE-2] THE RUN'S OWN IDENTITY. Bumped on every start so the trailing block below can
-        // tell whether it is still the live run before it writes anything user-visible.
+        // The run's own identity, bumped on every start so the trailing block can tell whether it is still the live run.
         generation &+= 1
         let thisGeneration = generation
 
         isRunning = true
 
-        // ⚠️⚠️ [NEW-1] THE ONE CASE WHERE THIS BRIDGE ANNOUNCES ITSELF UNPROMPTED. A pairing made
-        // before per-sender authorization records no account, nothing backfills it, and the gate then
-        // refuses EVERY message with a bare return — so the remote user sees a bot that simply stopped
-        // answering. Settings now says so too, but they are not looking at Settings; they are looking
-        // at this chat. See `ChatOpsUpgradeNotice` for why posting here is safe and why it is once.
+        // The one case where this bridge announces itself unprompted: a pre-authorization pairing is refused silently (see
+        // `ChatOpsUpgradeNotice`).
         if ChatOpsUpgradeNotice.needsRepairing(addressPresent: config.discordAuthorizedChannelID != nil,
                                                authorizedUserID: config.discordAuthorizedUserID),
            ChatOpsUpgradeNotice.claimAnnouncement(for: .discord) {
@@ -127,11 +111,8 @@ final class DiscordChatOpsBridge {
                 await self.handleGatewayEvent(event)
             }
 
-            // ⚠️⚠️ [DC-7] DISCORD HAD NO TERMINAL REPORTING AT ALL. Telegram and Slack both read a
-            // `terminalFailure` off their transport and turned it into a red Settings state; this
-            // block logged one `.info` line and left the pane showing a green "Active" dot, so a
-            // permanently-closed Gateway (a revoked token, a 4014 intents refusal) killed remote
-            // control for the life of the process with nothing anywhere saying so.
+            // Reports a terminal gateway failure (revoked token, intents refusal) as a failed Settings state, as the other
+            // bridges do.
             let terminalFailure = await gateway.terminalFailure
 
             await MainActor.run {
@@ -161,10 +142,8 @@ final class DiscordChatOpsBridge {
         isRunning = false
         logger.info("DiscordChatOpsBridge stopped.")
 
-        // ⚠️⚠️ [LIFE-2/LIFE-7] RELEASE WHAT THIS RUN OWNED. `stop()` used to leave every client,
-        // transport and the command service installed, so a "stopped" bridge still held a live API
-        // client and — through `ChatOpsCommandService` — a STRONG reference to the app's main view
-        // model, defeating the `weak var viewModel` this file declares two lines up.
+        // Releases everything this run owned; a stopped bridge must not hold a live API client or a strong reference to
+        // the view model.
         apiClient = nil
         gatewayClient = nil
         discordTransport = nil
@@ -179,10 +158,7 @@ final class DiscordChatOpsBridge {
             // Store application ID and register slash commands
             await apiClient?.setApplicationID(ready.application.id)
             if let guildID = config.discordGuildID, let appID = ready.application.id as String? {
-                // ⚠️⚠️ THE SUCCESS LINE USED TO FIRE UNCONDITIONALLY, one statement below a `try?`.
-                // A failed registration therefore logged "Registered slash commands for guild X" —
-                // the single place a field debugger would look actively asserted the opposite of
-                // what happened. It now lives in the success branch, where it is true.
+                // The success line is logged only in the success branch.
                 do {
                     try await apiClient?.registerSlashCommands(applicationID: appID, guildID: guildID)
                     logger.info("[CHATOPS] Registered slash commands for guild \(guildID).")
@@ -190,8 +166,8 @@ final class DiscordChatOpsBridge {
                     logger.error("[CHATOPS] Failed to register Discord slash commands for guild \(guildID): \(error.localizedDescription). CONSEQUENCE: the user types \"/\" in Discord and Devgentic's commands are missing or STALE — a renamed verb keeps its old name and answers with a usage hint forever. Nothing retries until the next gateway READY.")
                 }
             } else {
-                // ⚠️ NAMED RATHER THAN LEFT AS AN EMPTY ELSE. Without a guild id no slash command is
-                // ever registered, and the symptom is identical to a failed registration.
+                // Named rather than left as an empty else: without a guild id no slash command registers, which looks like a
+                // failed registration.
                 let guild = config.discordGuildID ?? "nil"
                 logger.error("[CHATOPS] Discord READY arrived with no guild id (\(guild)) or no application id, so NO slash commands were registered. CONSEQUENCE: the user sees none of Devgentic's commands in Discord's \"/\" menu; they remain reachable only by typing them as ordinary messages.")
             }
@@ -203,10 +179,7 @@ final class DiscordChatOpsBridge {
             await handleInteraction(interaction)
 
         case .disconnected(let error):
-            // ⚠️ A PERMANENT close is not a disconnect to shrug at. The gateway client stops its
-            // reconnect loop for these, so this is the last event the bridge will ever see — and
-            // the cause (a rejected token, a privileged intent left disabled) is something only
-            // the user can fix.
+            // A permanent close ends the reconnect loop, so this is the bridge's last event; only the user can fix the cause.
             if case .gatewayClosedPermanently(let code, let reason)? = error as? DiscordAPIError {
                 logger.error("[CHATOPS] Discord is DISABLED until this is fixed — Gateway close \(code): \(reason) CONSEQUENCE: no Discord command, HITL prompt or mirrored response will be delivered, and the bridge will not retry on its own.")
             } else if let error {
@@ -232,10 +205,7 @@ final class DiscordChatOpsBridge {
                                                   senderID: message.author.id,
                                                   config: config)
         if case .refused(let refusal) = authorization {
-            // ⚠️⚠️ [TG-5/SEC-6] THE ONE REFUSAL THE OPERATOR IS OWED. Every other arm stays silent on
-            // purpose — answering an unpaired room confirms a Mac is listening there. A THROTTLED
-            // sender has already proved they are the paired operator, so telling them leaks nothing,
-            // and before this they saw exactly what an intruder saw.
+            // The one refusal the operator is owed: a throttled sender is the paired operator, so telling them leaks nothing.
             if refusal.mayReply, ChatOpsThrottleNotice.claim(for: .discord),
                case .rateLimited(let retry) = refusal.reason {
                 await tell(channelID,
@@ -260,7 +230,7 @@ final class DiscordChatOpsBridge {
             return
         }
 
-        // ⚠️ D-23: a work-starting command replayed long after it was sent is skipped, not run late.
+        // A work-starting command replayed long after it was sent is skipped, not run late.
         if RemoteCommandAge.isAgeGated(command),
            let age = RemoteCommandAge.staleAge(sentAt: RemoteCommandAge.discordSentAt(message.timestamp)) {
             logger.warning("[CHATOPS] A Discord \(String(describing: command)) in channel \(channelID) was sent \(Int(age))s ago. CONSEQUENCE: NOT run (older than \(Int(RemoteCommandAge.maxAge))s); the operator is told to send it again.")
@@ -276,19 +246,12 @@ final class DiscordChatOpsBridge {
     // MARK: - Interaction Handling
 
     /// The `custom_id` of the modal's single text field.
-    ///
-    /// ⚠️ FIXED, and deliberately not the operation id. The operation travels on the MODAL's
-    /// `custom_id`; the FIELD only has to be findable when the submission comes back, and giving it
-    /// a stable name keeps the read on the submission side a constant rather than a reconstruction.
+    /// Fixed rather than the operation id: the operation travels on the modal's `custom_id`; the field only needs a
+    /// findable name.
     private static let clarificationFieldID = "answer"
 
     /// Opens the free-text modal for a parked clarification.
-    ///
-    /// ⚠️ THE MODAL'S `custom_id` CARRIES THE OPERATION ID, and that is the entire point of slice 4
-    /// on Discord: the answer comes back naming the clarification it answers, instead of being
-    /// resolved against whichever conversation the provider cursor happened to point at — which
-    /// made a second parked clarification unanswerable and let a `/new` in between misroute the
-    /// reply into a brand-new agent run.
+    /// The modal's `custom_id` carries the operation id, so the answer names the clarification it answers.
     private func openClarificationModal(operationID: UUID, interaction: DiscordInteraction) async {
         do {
             try await apiClient?.respondToInteraction(
@@ -297,7 +260,7 @@ final class DiscordChatOpsBridge {
                 type: DiscordInteractionResponsePayload.modal,
                 data: DiscordInteractionCallbackData(
                     components: [.actionRow([
-                        // ⚠️ Discord requires each Text Input to be the SOLE child of its own row.
+                        // Discord requires each text input to be the sole child of its own row.
                         .textInput(
                             customID: Self.clarificationFieldID,
                             label: "Your answer",
@@ -310,8 +273,7 @@ final class DiscordChatOpsBridge {
             )
             logger.info("[CHATOPS] Opened a Discord answer modal for clarification \(operationID).")
         } catch {
-            // ⚠️ NOT `try?`. A failed modal-open is the user's whole interaction failing, and the
-            // old code swallowed ack errors silently — so "the button does nothing" had no trace.
+            // Not `try?`: a failed modal-open is the user's whole interaction failing, so it is logged.
             logger.error("[CHATOPS] Failed to open the Discord answer modal for clarification \(operationID): \(error.localizedDescription). CONSEQUENCE: the user sees Discord's red \"This interaction failed\", the run stays parked, and the only other way to answer is to type in the channel.")
         }
     }
@@ -329,9 +291,7 @@ final class DiscordChatOpsBridge {
 
         let answer = interaction.submittedValue(forCustomID: Self.clarificationFieldID) ?? ""
 
-        // ⚠️ ACK BEFORE RESOLVING. Resolving resumes a parked agent run, which is unbounded work;
-        // the 3-second deadline is not. A silent ack is right here because the mirror edits the
-        // original prompt in place when the clarification resolves — that edit IS the feedback.
+        // Ack before resolving: resolving resumes an unbounded agent run, but the ack has a 3-second deadline.
         await respond(to: interaction,
                       type: DiscordInteractionResponsePayload.deferredUpdateMessage,
                       whenLost: "the modal shows Discord's red \"This interaction failed\" even though the answer below IS accepted and the run does resume — so the user believes their answer was lost and is likely to send it again as a new message, starting a second run.")
@@ -341,18 +301,9 @@ final class DiscordChatOpsBridge {
     }
 
 
-    /// Sends an interaction's response, and says what the user is left looking at when it fails.
-    ///
-    /// ⚠️⚠️ AN INTERACTION HAS EXACTLY ONE INITIAL RESPONSE AND A THREE-SECOND DEADLINE. Every call
-    /// site was `try? await apiClient?.respondToInteraction(...)`, and `respondToInteraction` throws
-    /// WITHOUT logging internally — so a failed ack or reply left the user staring at Discord's red
-    /// "This interaction failed", or at a spinner that never resolves, with nothing written down
-    /// anywhere. That is precisely the failure this file's ordering comments were written to remove,
-    /// surviving one layer below them.
-    ///
-    /// ⚠️ `whenLost` IS REQUIRED, NOT DEFAULTED: the five call sites fail in visibly different ways
-    /// — a missing modal, an unresolved spinner, an unexplained refusal — and one shared sentence
-    /// would describe four of them wrongly.
+    /// Sends an interaction's response and logs what the user is left looking at when it fails.
+    /// An interaction has one initial response and a three-second deadline; `whenLost` states each call site's
+    /// consequence.
     private func respond(
         to interaction: DiscordInteraction,
         type: Int,
@@ -372,17 +323,8 @@ final class DiscordChatOpsBridge {
     }
 
     private func handleInteraction(_ interaction: DiscordInteraction) async {
-        // ⚠️⚠️ TWO DIFFERENT QUESTIONS, AND ONE VARIABLE USED TO ANSWER BOTH. This was
-        // `interaction.channel_id ?? config.discordAuthorizedChannelID ?? ""`, and that single
-        // expression fed BOTH the allowlist check and the reply address. For the reply address the
-        // fallback is harmless — posting into the user's own paired channel is always safe. For the
-        // allowlist it was a BYPASS: `authorizeDiscord` compares its argument against
-        // `discordAuthorizedChannelID`, so substituting that very value made the guard compare the
-        // authorized id with itself and pass unconditionally. Any interaction arriving without a
-        // `channel_id` was therefore authorized by construction.
-        //
-        // They are separated here so the fallback cannot reach the gate. `originChannelID` is
-        // evidence — nil means "the payload did not say" — and `replyChannelID` is an address.
+        // Origin and reply are separate: `originChannelID` is evidence (nil means unstated) and feeds the allowlist;
+        // `replyChannelID` is only an address.
         let originChannelID = interaction.channel_id
         let replyChannelID = interaction.channel_id ?? config.discordAuthorizedChannelID ?? ""
 
@@ -394,9 +336,7 @@ final class DiscordChatOpsBridge {
         case DiscordInteraction.applicationCommand:
             command = ChatOpsCommand.parseDiscord(slashCommandName: interaction.data?.name)
         default:
-            // ⚠️ WAS A BARE `return` — no ack, no log. Discord shows the user a red "Something went
-            // wrong" three seconds later and nothing was recorded anywhere, which is how a whole
-            // interaction type could be unsupported without leaving a trace.
+            // An unhandled interaction type is logged and answered, not dropped without an ack.
             logger.error("[CHATOPS] Discord interaction type \(interaction.type) is not handled by this build. CONSEQUENCE: the user is told the interaction is unsupported instead of watching it fail silently, and this line names the type so the gap is findable.")
             await respond(to: interaction,
                           type: DiscordInteractionResponsePayload.channelMessageWithSource,
@@ -405,24 +345,14 @@ final class DiscordChatOpsBridge {
             return
         }
 
-        // 2. ⚠️ GATES BEFORE ANY ACK, AND THE ORDER IS LOAD-BEARING TWICE OVER.
-        //    (a) A MODAL IS THE ACKNOWLEDGEMENT. Discord permits exactly one initial response per
-        //        interaction, so a modal cannot follow a deferred ack — anything that decides
-        //        whether to open one must run first.
-        //    (b) The old order acked FIRST and gated after, so an interaction from an unauthorised
-        //        channel — or one that tripped the rate limiter — received a deferred "thinking…"
-        //        and then returned, leaving that placeholder in the channel FOREVER because nothing
-        //        ever edited it.
-        //    Both gates are actor hops with no network in them, so the 3-second budget is intact.
+        // Gates run before any ack: a modal is the acknowledgement, and an ack followed by a refusal would leave a stuck
+        // "thinking" placeholder.
         if let originChannelID {
             let authorization = await securityGate.authorizeDiscord(channelID: originChannelID,
                                                       senderID: interaction.member?.user?.id,
                                                       config: config)
         if case .refused(let refusal) = authorization {
-            // ⚠️⚠️ [TG-5/SEC-6] THE ONE REFUSAL THE OPERATOR IS OWED. Every other arm stays silent on
-            // purpose — answering an unpaired room confirms a Mac is listening there. A THROTTLED
-            // sender has already proved they are the paired operator, so telling them leaks nothing,
-            // and before this they saw exactly what an intruder saw.
+            // The one refusal the operator is owed: a throttled sender is the paired operator, so telling them leaks nothing.
             if refusal.mayReply, ChatOpsThrottleNotice.claim(for: .discord),
                case .rateLimited(let retry) = refusal.reason {
                 await tell(originChannelID,
@@ -432,27 +362,19 @@ final class DiscordChatOpsBridge {
             return
         }
         } else if interaction.type == DiscordInteraction.modalSubmit {
-            // ⚠️ THE ONE DOCUMENTED EXEMPTION, and it matches what Slack already does for its own
-            // view submissions: a modal is not IN a channel, so there is no channel to check. The
-            // allowlist already ran on the button tap that opened it, and the answer is correlated
-            // by the operation id carried in the modal's `custom_id` — not by where it came from.
-            // The tier gate below still applies, because that is about the ACT, not the place.
+            // The one exemption: a modal submission has no channel; the allowlist ran on the opening tap and the operation id
+            // correlates the answer.
             logger.info("[CHATOPS] A Discord modal submission carried no channel_id, so the channel allowlist was skipped for it. CONSEQUENCE: this is expected — a modal is not in a channel; the allowlist ran when the button that opened it was tapped, and the tier gate still applies below.")
         } else {
-            // ⚠️ REFUSED, NOT WAVED THROUGH. Without a channel id there is no evidence this came
-            // from the paired channel, and the old fallback turned that absence into a pass.
+            // Refused: without a channel id there is no evidence the interaction came from the paired channel.
             logger.error("[CHATOPS] A Discord interaction of type \(interaction.type) arrived with NO channel_id, so it cannot be matched against the channel allowlist. CONSEQUENCE: it is refused and nothing is acknowledged. Previously the authorized channel id was substituted here, which made the allowlist compare that id with itself and admit the interaction unchecked.")
             return
         }
 
         guard await securityGate.canExecute(command, tier: config.securityTier(for: .discord)) else {
             let msg = await securityGate.denialMessage(for: command, tier: config.securityTier(for: .discord))
-            // ⚠️ A DIRECT REPLY, not an edit. `editInteractionResponse` only works after a deferred
-            // ack, and there is deliberately no longer one at this point.
-            // ⚠️ THIS IS THE INTERACTION'S ONE PERMITTED RESPONSE. If it fails the user gets
-            // Discord's red "This interaction failed" with no explanation — and previously with no
-            // log either, which is the "the button does nothing and nothing was recorded" failure
-            // the ordering comment above was written to eliminate.
+            // A direct reply, not an edit: `editInteractionResponse` needs a deferred ack. This is the interaction's one
+            // response, so failure is logged.
             do {
                 try await apiClient?.respondToInteraction(
                     interactionID: interaction.id,
@@ -499,18 +421,8 @@ final class DiscordChatOpsBridge {
 
     // MARK: - Command Routing
 
-    /// Resolves the three HITL decisions, and reports whether this was one.
-    ///
-    /// ⚠️ A RETURNED BOOL RATHER THAN A `default: break` FALL-THROUGH, and the distinction is the
-    /// point. This was an inline switch whose default arm was a bare `break` — correct, because it
-    /// falls through to more routing below, but INDISTINGUISHABLE at a glance from the bare `break`
-    /// arms in this same file that really did drop a command and record nothing. One of those
-    /// shapes is a filter and the other is a silent drop; making the filter return a value means a
-    /// reader (and a scan) can tell them apart without tracing what follows.
-    ///
-    /// It is deliberately the same shape as `routeThroughService`, which answers the same question
-    /// for the command service's verbs.
-    ///
+    /// Resolves the three HITL decisions and reports whether the command was one.
+    /// Returns a Bool so a filter is distinguishable from a silent-drop `break`.
     /// - Returns: whether the command was a HITL decision and has been resolved.
     private func routeHITL(_ command: ChatOpsCommand) async -> Bool {
         switch command {
@@ -527,12 +439,7 @@ final class DiscordChatOpsBridge {
     }
 
 
-    /// ⚠️ ONE DECISION, TWO ADDRESSES. Discord used to render `/conversations` two different ways —
-    /// a button grid when it arrived as a channel message, a numbered plain-text list when it
-    /// arrived as a slash command — because "reply into the interaction" was built as a SECOND CODE
-    /// PATH that re-derived its own text. Both callers now render the same view; only the
-    /// destination differs.
-    ///
+    /// Routes a command the command service owns, rendering the same view for every destination.
     /// - Returns: whether the command was one the service owns.
     private func routeThroughService(_ command: ChatOpsCommand, to destination: RemoteDestination) async -> Bool {
         switch command {
@@ -566,8 +473,8 @@ final class DiscordChatOpsBridge {
         return true
     }
 
-    /// [C8] Answers the parked clarification. ⚠️ Derived at the moment of the reply, never
-    /// remembered from when the prompt was sent.
+    /// Answers the parked clarification; the operation id is derived at the moment of the reply, never remembered from
+    /// the prompt.
     private func resolveClarification(_ text: String) async {
         guard let operationID = commands?.pendingClarificationOperationID() else {
             logger.error("[CHATOPS] A clarification answer arrived but no clarification is pending for the bound conversation. CONSEQUENCE: the reply was DROPPED rather than submitted as a new agent turn, and the remote user received no acknowledgement.")
@@ -594,19 +501,8 @@ final class DiscordChatOpsBridge {
     }
 
 
-    /// Posts a plain-text message that EXPLAINS something to the remote user, and logs when it does
-    /// not arrive.
-    ///
-    /// ⚠️⚠️ EVERY CALLER OF THIS IS A "HERE IS WHY NOTHING HAPPENED" MESSAGE — a tier denial, an
-    /// unbound conversation, a missing profile. They were all `_ = try? await apiClient?.send…`, so
-    /// the one message whose entire job is to explain a failure was itself dropped in silence: the
-    /// user's command did nothing, the explanation never arrived, and NO line was written anywhere.
-    /// A tier-blocked command and a crashed bridge looked identical from both sides.
-    ///
-    /// ⚠️ `whenLost` IS REQUIRED, NOT DEFAULTED, and that is the anti-drift mechanism — the same one
-    /// `resolvedBy:` and `offset:` use elsewhere in this subsystem. A new call site cannot be added
-    /// without stating what the user loses when the message does not arrive, and a default would be
-    /// one generic sentence quietly inherited by all of them.
+    /// Posts a plain-text message that explains something to the remote user, and logs when it does not arrive.
+    /// `whenLost` is required so each call site states what the user loses if the explanation is dropped.
     private func tell(_ channelID: String, _ text: String, whenLost consequence: String) async {
         guard let apiClient else {
             logger.error("[CHATOPS] No Discord API client while telling the user: \"\(text.prefix(60))\". CONSEQUENCE: \(consequence)")
@@ -635,33 +531,21 @@ final class DiscordChatOpsBridge {
         case .freeText(let text):
             await handleFreeText(text, channelID: channelID)
         case .answerClarification(let operationID):
-            // ⚠️ UNREACHABLE BY DESIGN, and named rather than defaulted so it says so. The button
-            // is intercepted in `handleInteraction` before routing (opening the modal IS that
-            // interaction's one response) and the submission is intercepted alongside it. Arriving
-            // here means one of those intercepts was removed, and the symptom would otherwise be a
-            // button that silently does nothing — the failure this switch's own comment describes.
+            // Unreachable by design: the button and the modal submission are intercepted before routing; arriving here means
+            // an intercept is missing.
             logger.error("[CHATOPS] A Discord `.answerClarification(\(operationID))` reached routeCommand, which should be impossible: the modal intercepts in handleInteraction run first. CONSEQUENCE: the Answer button did nothing and the run stays parked.")
         case .pairingAttempt:
-            // ⚠️ A WELL-FORMED PIN THAT ARRIVES OUTSIDE A PAIRING WINDOW. The pairing services run
-            // their OWN poll loops and consume attempts there, so anything reaching routeCommand is
-            // a PIN sent when nothing is waiting for one — usually a user re-sending the code after
-            // pairing already succeeded. Named explicitly so it is not reported as an unknown-command
-            // drop, which said the bot might be dead.
+            // A well-formed PIN outside a pairing window, usually a re-sent code after pairing succeeded; named so it is not
+            // logged as an unknown drop.
             logger.info("[CHATOPS] A pairing PIN arrived with no pairing window open. CONSEQUENCE: it is ignored — pairing is already complete, or the window expired and the user must start it again from Settings.")
 
         default:
-            // ⚠️ NOT "HANDLED ELSEWHERE" FOR EVERY CASE, which is what this comment used to imply.
-            // `.unknown` reaches here from a plain text message that matched no verb, and from a
-            // button whose callback token no longer parses — a stale button from a superseded
-            // grammar, which chat scrollback keeps forever.
+            // `.unknown` reaches here from unmatched text and from stale buttons whose callback token does not parse.
             logger.warning("[CHATOPS/SILENT] A Discord \(String(describing: command)) reached the end of routeCommand and was dropped. CONSEQUENCE: the user received NO reply at all and cannot tell whether the bot is alive; if this is a button tap, its callback token no longer parses and every copy of that button in scrollback is now inert.")
         }
     }
 
-    /// ⚠️ THE DIVERGENCE FIX. This used to re-derive plain text for three verbs, post STRAY CHANNEL
-    /// MESSAGES for `/new` and `/cancel` (leaving Discord's deferred "thinking…" hanging forever),
-    /// and drop `switch:` on a `default: break` — which is why the conversation buttons were inert.
-    /// It now renders the same views as the message path, addressed to the interaction.
+    /// Routes an interaction command to the same views the message path renders, addressed to the interaction.
     private func routeInteractionCommand(_ command: ChatOpsCommand, interaction: DiscordInteraction, channelID: String) async {
         let channel = RemoteChannel(provider: .discord, channelID: channelID)
         if await routeThroughService(command, to: .interactionReply(
@@ -671,17 +555,8 @@ final class DiscordChatOpsBridge {
             return
         }
 
-        // ⚠️⚠️ THE RETURN VALUE WAS DISCARDED WITH `_ =`, AND THAT LEFT A PERMANENT "THINKING…".
-        // This path is only reached AFTER the interaction has been acked with a deferred response,
-        // and Discord shows that placeholder until something edits it. A command the service does
-        // not own fell out of here having acked and posted nothing, so the placeholder stayed in
-        // the channel forever — the exact failure the deferred-ack ordering above was fixed to
-        // prevent, reachable through the front door.
-        //
-        // ⚠️ REACHABLE, NOT THEORETICAL. An unregistered or renamed slash name parses to `.unknown`
-        // (ChatOpsCommand.swift:79), `.unknown` is allowed at every tier
-        // (ChatOpsSecurityGate.swift:63), so it passes both gates, gets the ack, and lands here. A
-        // guild command left behind by a rename is enough.
+        // A command the service does not own would leave the deferred "thinking" placeholder forever; an unregistered
+        // slash name reaches here as `.unknown`.
         logger.error("[CHATOPS] A Discord interaction carried \(String(describing: command)), which no command handler owns. CONSEQUENCE: the deferred \"thinking…\" placeholder is resolved with an explanation instead of being left in the channel forever; the command itself did nothing, and this line names it so the gap is findable.")
 
         // Resolving the placeholder is the whole point, so this posts even though there is nothing
@@ -698,10 +573,7 @@ final class DiscordChatOpsBridge {
     // MARK: - Command Handlers
 
     private func handleFreeText(_ text: String, channelID: String) async {
-        // ⚠️ [LIFE-7] NO LIVENESS GUARD HERE ANY MORE. It used to bare-return, discarding a gated,
-        // tier-checked, parsed prompt with no line and no reply. `ChatOpsCommandService` now holds
-        // its host WEAKLY and answers a lost one through `hostLost` / `hostUnavailable`, so the
-        // command is refused *and the user is told* instead of vanishing.
+        // No liveness guard: `ChatOpsCommandService` holds its host weakly and tells the user when it is lost.
 
         guard let conversationID = config.discordActiveConversationID else {
             await tell(channelID,
@@ -716,22 +588,14 @@ final class DiscordChatOpsBridge {
             return
         }
 
-        // Send typing indicator
-        // ⚠️ DELIBERATELY SWALLOWED — see the matching note in ChatOpsBridge. A typing indicator is
-        // decoration with no consequence to name: it expires on its own and the reply arrives
-        // regardless. Logging a line per message for it would bury the drops that do matter.
+        // Sends a typing indicator; deliberately swallowed, since it expires on its own and a log line per message would
+        // bury real drops.
         try? await apiClient?.sendTypingIndicator(channelID: channelID)
 
         let requestConfig = BackendRequestConfig(profile: profile)
 
-        // ⚠️ [BR-4] See `ChatOpsCommandService.submitTurn` — admission, mirror registration and the
-        // submit are one call so the three bridges cannot order them three ways.
-        // ⚠️ [NEW-3] THE TRANSPORT IS RESOLVED INSIDE THE CLOSURE, NOT IN A GUARD ABOVE IT. This
-        // method opened with a bare `guard let transport = discordTransport else { return }` placed
-        // before the admission call, so a nil transport dropped the prompt with no log, no reply and
-        // no decision — while every other drop in this same method names its consequence to the user.
-        // Resolved here, the same nil becomes `false`, which `submitTurn` turns into a refusal the
-        // user is actually told about.
+        // The transport is resolved inside the closure, so a nil transport becomes a refusal the user is told about, not a
+        // silent drop.
         let admission = commands.submitTurn(
             prompt: text,
             conversationID: conversationID,
@@ -769,22 +633,20 @@ extension DiscordAPIClient {
 
 // MARK: - Announcing (slice 3)
 
-/// ⚠️ The BRIDGE conforms, not the transport: a transport renders to a destination it is given,
-/// while announcing means knowing this provider's OWN paired channel. Only the bridge knows both.
+/// The bridge conforms, not the transport: announcing needs this provider's own paired channel, which only the
+/// bridge knows.
 extension DiscordChatOpsBridge: RemoteAnnouncing {
 
     var provider: RemoteChannel.Provider { .discord }
 
-    /// ⚠️ Requires a live listener AND a paired channel. A bridge that was stopped, or was never
-    /// paired, must announce nothing — otherwise a notification would be addressed to a channel the
-    /// user has disconnected.
+    /// Requires a live listener and a paired channel; a stopped or never-paired bridge must announce nothing.
     var canAnnounce: Bool {
         isRunning && config.discordBotToken != nil && config.discordAuthorizedChannelID != nil
     }
 
     func isMirroring(_ conversationID: UUID?) -> Bool {
-        // ⚠️ nil is NOT a duplicate: an app-wide notification (a finished download) belongs to no
-        // conversation, so nothing is already reporting it.
+        // A nil conversation is not a duplicate: an app-wide notification belongs to no conversation, so nothing else
+        // reports it.
         guard let conversationID else { return false }
         return remoteMirrorService?.isMirroring(conversationID) ?? false
     }

@@ -4,10 +4,7 @@
 //  AskUserTool.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
-//
-//  A system tool that allows the Agent to ask the user for clarification mid-execution.
-//  Uses the ExecutionSuspensionService to pause the cognitive loop and wait for user input.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,7 +4,7 @@
 //  ConversationExporter.swift
 //  Devgentic
 //
-//  P1: Export conversation to Markdown.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -15,19 +15,9 @@ private let logger = DGLogger(category: "ConversationExporter")
 
 struct ConversationExporter {
 
-    /// A fence long enough to contain `content`.
-    ///
-    /// CommonMark closes a fenced block at the first run of backticks at least as long as the
-    /// opening fence, so a hardcoded ``` is broken by any content that contains one — the
-    /// remainder of that block then renders as document structure. This is reachable on the
-    /// ordinary `.codeBlock` path (an agent answer about markdown, or any nested fence), not
-    /// only in the file-embedding branch.
-    /// [mm-3] One quoted line stating a run's verdict, with any reason flattened onto it.
-    ///
-    /// Deliberately NOT routed through `inlineArgument`: that caps at 80 characters and wraps in
-    /// backticks, which would truncate a real error message and code-format prose. Only its
-    /// newline flattening is reused, and for the same reason — a raw newline in provider text
-    /// would end the block quote and drop the rest of the sentence out of it.
+    /// One quoted line stating a run's verdict, with any reason flattened onto a single line. Does not reuse
+    /// `inlineArgument`, which truncates at 80 characters and code-formats prose; a raw newline would end the
+    /// quote.
     nonisolated static func outcomeLine(_ verdict: String, reason: String?) -> String {
         let trimmed = (reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "> **Run outcome:** \(verdict)" }
@@ -61,20 +51,13 @@ struct ConversationExporter {
         return String(repeating: "`", count: max(3, longestRun + 1))
     }
 
-    // MARK: - Attachments and timeline [CF-19]
-    //
-    // `toMarkdown` read `attachedTextFiles` and the content enum and nothing else, so a turn that
-    // was "here's a screenshot, what's wrong?" exported as the prompt alone, and an agent turn
-    // that was all tool calls with no final prose exported as a heading over an empty section —
-    // under the doctrine, stated on the `.unknown` arm below, that an export which quietly omits
-    // something misrepresents the conversation. Both are now written; what is deliberately NOT
-    // embedded (image bytes, reasoning text, events nested inside capability cards) is counted
-    // and logged once per export.
+    // MARK: - Attachments and timeline
+    // Attachments and timeline are exported too; what is deliberately not embedded (image bytes, reasoning text, events
+    // nested inside capability cards) is counted and logged once per export, so the export never quietly omits something.
 
-    /// Tool rows written into one turn's execution log before the rest fold into "… and N more".
-    /// Generous for a real run (a ReAct turn is capped at ~15 iterations, and a plan card's
-    /// nested rows are summarised rather than listed), tight enough that a 500-event runaway
-    /// timeline does not turn the export into a log dump.
+    /// Tool rows written into one turn's execution log before the rest fold into "… and N more". Generous for a
+    /// real run (a ReAct turn is capped at ~15 iterations) yet tight enough that a 500-event runaway stays
+    /// readable.
     static let maxExportedToolRows = 50
 
     /// One `> Attached image:` line. Sized from the bytes actually held when present, falling
@@ -82,9 +65,8 @@ struct ConversationExporter {
     /// are never embedded: a base64 data URI per screenshot would put megabytes into a text file.
     nonisolated static func attachedImageLine(for image: AttachedImageFile) -> String {
         let kb = Int((Double(max(0, imageByteCount(image))) / 1024).rounded(.up))
-        // ⚠️ [mm-7] A LIST ITEM inside the quote. Consecutive `> Attached image:` lines are one
-        // blockquote PARAGRAPH in CommonMark, so their newlines are softbreaks and N attachments
-        // rendered run-together on a single wrapped line. `- ` makes each its own list item.
+        // A list item inside the quote: consecutive `> Attached image:` lines are one blockquote paragraph in CommonMark and
+        // would run together on one wrapped line; `- ` makes each its own item.
         return "> - Attached image: `\(image.name)` (\(kb) KB)"
     }
 
@@ -92,8 +74,7 @@ struct ConversationExporter {
         image.binaryData.isEmpty ? Int(image.size) : image.binaryData.count
     }
 
-    /// What one export's execution logs deliberately left out, accumulated across messages so
-    /// the omission is logged with counts rather than silently.
+    /// What one export's execution logs left out, accumulated across messages so the omission is logged with counts.
     struct TimelineOmissions {
         var reasoningRows = 0
         var nestedEvents = 0
@@ -105,10 +86,9 @@ struct ConversationExporter {
         }
     }
 
-    /// The `<details>` block for an agent turn's timeline: one bounded line per top-level tool
-    /// row, one line per capability card (with the count of what it holds), nothing for
-    /// reasoning. Returns nil when no event earns a line (a reasoning-only timeline), so the
-    /// caller writes no block; the skipped rows are still counted into `omissions`.
+    /// The `<details>` block for an agent turn's timeline: one bounded line per top-level tool row, one per
+    /// capability card (with the count of what it holds), nothing for reasoning. Returns nil when no event earns
+    /// a line, so the caller writes no block; skipped rows are still counted into `omissions`.
     nonisolated static func executionLogLines(for events: [TimelineEvent],
                                               omissions: inout TimelineOmissions) -> [String]? {
         var rows: [String] = []
@@ -131,10 +111,8 @@ struct ConversationExporter {
 
             case .backgroundTask(let data):
                 toolCallCount += 1
-                // The COMMAND and how it ended, never the output. An export is a transcript, and
-                // a background task's output is a 375 KB build log living in a temp file that a
-                // shared export would not carry anyway — `logPath` is meaningless on another
-                // machine, so it is deliberately omitted rather than exported as a dead path.
+                // The command and how it ended, never the output: a background task's log lives in a temp file whose `logPath` is
+                // meaningless on another machine, so it is omitted rather than exported as a dead path.
                 let verdict: String
                 switch data.status {
                 case .running:     verdict = "⏳ still running"
@@ -203,10 +181,8 @@ struct ConversationExporter {
         if let ms = data.durationMs {
             line += " (\(DurationFormat.milliseconds(ms)))"
         }
-        // ⚠️ `isSuccess != true`, not `== false`: since CF-51 a user Stop settles the row with
-        // `isSuccess` nil (a stop is not a tool failure) while still recording `.cancelled` in
-        // `failureCategory`. Gating on `== false` silently dropped the cause from every exported
-        // stopped row — the glyph stayed ⏹, so nothing looked broken.
+        // `isSuccess != true`, not `== false`: a user Stop settles the row with `isSuccess` nil while recording `.cancelled` in
+        // `failureCategory`, so gating on `== false` would drop the cause from stopped rows.
         if data.isSuccess != true, let category = data.failureCategory {
             line += " — \(category.displayName)"
         }
@@ -235,22 +211,9 @@ struct ConversationExporter {
         return bounded.contains("`") ? bounded : "`\(bounded)`"
     }
 
-    /// Exports a conversation's messages to a Markdown string.
-    /// [mm-5] Attached TEXT files are embedded, bounded per file. The `includeFileContent` flag
-    /// that used to gate this is gone: nothing in the app — production or test — ever passed it,
-    /// so the whole branch was unreachable in every build, and the export of a turn built around
-    /// an attached document carried the filename and none of the words the model was answering
-    /// about. The branch was also mis-built. It re-read the file from DISK through
-    /// `DocumentExtractionRegistry`, which registers only PDF/DOCX/XLSX/CSV/PPTX/RTF — so a
-    /// `.txt`, `.md`, `.swift` or `.json` attachment fell through it with no line and no warning
-    /// even with the flag on — and it could fail on a file since moved or deleted. What is
-    /// embedded now is `AttachedTextFile.content`: the exact bytes that were sent to the model,
-    /// already in memory, filled by `FileProcessorService.readFileContent` (which runs that same
-    /// registry itself for the binary formats).
-    /// - Parameter isTruncated: true when the caller's fetch hit its cap, so older turns are
-    ///   missing. Stated in the document — an export that silently begins partway through
-    ///   misrepresents the conversation exactly like a dropped turn does. Deliberately a flag
-    ///   and not a total: the caller knows it was capped, not how many messages exist.
+    /// Exports a conversation's messages to a Markdown string; attached text files are embedded, bounded per file, from
+    /// `AttachedTextFile.content` (the exact bytes sent to the model).
+    /// - Parameter isTruncated: true when the caller's fetch hit its cap, so older turns are missing; stated in the document.
     static func toMarkdown(title: String, messages: [ChatMessage],
                            isTruncated: Bool = false) async -> String {
         var lines: [String] = []
@@ -269,7 +232,7 @@ struct ConversationExporter {
         // Messages arrive newest-first; reverse for chronological order
         let chronological = messages.reversed()
 
-        // [CF-19] What this export deliberately does not embed — logged once at the end.
+        // What this export deliberately does not embed, logged once at the end.
         var omissions = TimelineOmissions()
         var omittedImageCount = 0
         var omittedImageBytes = 0
@@ -286,19 +249,14 @@ struct ConversationExporter {
             // Attached files
             if let files = message.attachedTextFiles, !files.isEmpty {
                 for file in files {
-                    // [mm-7] List item for the same reason as `attachedImageLine` — consecutive
-                    // quoted lines collapse into one paragraph.
-                    // The delivery note says when the model got less than this file (cut to the
-                    // injection budget, omitted, or path-only) — the content below is the FILE.
+                    // List item for the same reason as `attachedImageLine`: consecutive quoted lines collapse into one paragraph.
+                    // The delivery note says when the model got less than this file (cut to the injection budget, omitted, or path-only).
                     lines.append("> - Attached: `\(file.name)`" + (file.delivery?.note.map { " — \($0)" } ?? ""))
                 }
                 lines.append("")
 
-                // [mm-5] The attached file's text (see the delivery note above for how much of it
-                // the model received), folded so it does not drown the
-                // conversation. Bounded per file because `AttachedTextFile.content` holds up to
-                // 500 KB and a turn can carry several — the cap and its counter are what keep a
-                // .md export from silently becoming multiple megabytes.
+                // The attached file's text, folded and bounded per file: `AttachedTextFile.content` holds up to 500 KB and a
+                // turn can carry several, so the cap and its counter keep the export small.
                 for file in files where !file.content.isEmpty {
                     let body = String(file.content.prefix(Self.attachedFileContentLimit))
                     let omitted = file.content.count - body.count
@@ -306,9 +264,7 @@ struct ConversationExporter {
                         truncatedFileCount += 1
                         omittedFileBytes += omitted
                     }
-                    // ⚠️ `fence(for:)`, never a hard-coded ``` — a markdown or code attachment
-                    // containing its own fence would otherwise end this block early and the rest
-                    // of the file would render as document structure.
+                    // `fence(for:)`, never a hard-coded ```: an attachment containing its own fence would end this block early.
                     let fence = Self.fence(for: body)
                     lines.append("<details>")
                     lines.append("<summary>Content of \(file.name)\(omitted > 0 ? " — first \(Self.attachedFileContentLimit) characters of \(file.content.count)" : "")</summary>")
@@ -321,8 +277,8 @@ struct ConversationExporter {
                 }
             }
 
-            // Attached images [CF-19] — named and sized, never embedded (see `attachedImageLine`).
-            // What a bare-text export hid was that an image was part of the question at all.
+            // Attached images: named and sized, never embedded (see `attachedImageLine`), so the export shows an image
+            // was part of the question.
             if let images = message.attachedImageFiles, !images.isEmpty {
                 for image in images {
                     lines.append(Self.attachedImageLine(for: image))
@@ -332,8 +288,8 @@ struct ConversationExporter {
                 lines.append("")
             }
 
-            // Agent timeline [CF-19] — BEFORE the content switch, so an all-tool-calls turn with no
-            // final prose exports as its execution log rather than as an empty heading.
+            // Agent timeline, before the content switch, so an all-tool-calls turn with no final prose exports as its execution log
+            // rather than as an empty heading.
             let timeline = message.timelineEvents
             if message.sender == .agent, !timeline.isEmpty,
                let log = Self.executionLogLines(for: timeline, omissions: &omissions) {
@@ -341,24 +297,10 @@ struct ConversationExporter {
                 lines.append("")
             }
 
-            // [mm-3] The run's terminal outcome, stated BEFORE the content.
-            //
-            // The bubble shows a `TerminalOutcomeChip` for any non-completed run; the export
-            // said nothing, so an agent turn that streamed real prose and THEN failed or was
-            // stopped exported exactly like one that answered normally. The demotion is
-            // deliberate on screen (the partial answer is the useful half and the chip carries
-            // the verdict) — but the export dropped the chip's half entirely.
-            //
-            // ⚠️ BEFORE the content, not after, for the reason the execution log above is also
-            // first: the very failure being reported is the one most likely to have left the
-            // prose ending in an UNCLOSED ``` fence, and a `> …` line appended after that lands
-            // INSIDE the open code block and renders as literal text — invisible in precisely
-            // the case it exists for.
-            //
-            // ⚠️ ONE quoted paragraph, never a quote plus a `> - ` list item: a reason that is
-            // only whitespace would emit an EMPTY list item, and per CommonMark an empty list
-            // item cannot interrupt a paragraph, so it would collapse into the line above and
-            // render "Run outcome: Failed -". Trimmed and flattened onto the same line instead.
+            // Why: before the content: a failed run often ends in an unclosed ``` fence that would swallow a later `>
+            // …` line; one quoted paragraph, since an empty list item cannot interrupt a paragraph
+            // The run's terminal outcome, stated before the content, as the bubble's outcome chip does for a
+            // non-completed run.
             let displayed = message.sender == .agent ? (message.currentAgentContent ?? message.content) : message.content
             if message.sender == .agent, !message.isStreaming, !Self.isErrorContent(displayed) {
                 // Mirrors the bubble's own suppression (`!isErrorContent`): the `.error` arm
@@ -367,9 +309,8 @@ struct ConversationExporter {
                     lines.append(Self.outcomeLine(outcome.displayName, reason: message.terminalReason))
                     lines.append("")
                 } else if message.terminalOutcome == nil, message.lifecycleState.isInterrupted {
-                    // ⚠️ `isInterrupted` is `self != .final`, which is TRUE for a live
-                    // `.streaming` row — the `!message.isStreaming` guard above is what makes
-                    // this mean "cut off and never finished" rather than "in progress".
+                    // `isInterrupted` is `self != .final`, true for a live `.streaming` row too; the `!message.isStreaming` guard above
+                    // makes this mean "cut off and never finished" rather than "in progress".
                     lines.append(Self.outcomeLine("Interrupted", reason: "this run was cut off and never finished"))
                     lines.append("")
                 }
@@ -399,12 +340,8 @@ struct ConversationExporter {
                 lines.append("*[Media: \(artifact.label ?? artifact.kind.rawValue)]*")
 
             case .checkpoint(let summary):
-                // ⚠️ [mm-6] Emitted as SEPARATE lines with blank separators. As one joined string,
-                // `summary` was followed immediately by `---`, which CommonMark reads as a SETEXT
-                // HEADING UNDERLINE — so the whole checkpoint summary rendered as a giant H2
-                // instead of a rule-delimited note. `HistoryCompactionService.callIC` trims the
-                // summary and throws on empty, so it can never end in a newline of its own; the
-                // blank line here is the only thing separating it from the closing rule.
+                // Separate lines with blank separators: otherwise `summary` is followed directly by `---`, which CommonMark
+                // reads as a setext heading underline.
                 lines.append("---")
                 lines.append("")
                 lines.append("**History Checkpoint**")
@@ -424,8 +361,8 @@ struct ConversationExporter {
             lines.append("")
         }
 
-        // [CF-19] Same doctrine as the `.unknown` arm: nothing leaves this export unaccounted
-        // for. A "where is my screenshot in the export" report is answerable from this line.
+        // Same doctrine as the `.unknown` arm: nothing leaves this export unaccounted for, so a missing screenshot
+        // is answerable from this line.
         if omittedImageCount > 0 || truncatedFileCount > 0 || !omissions.isEmpty {
             let conversation = messages.first.map { String($0.conversationId.uuidString.prefix(8)) } ?? "none"
             logger.info("[EXPORT] conversation \(conversation): \(messages.count) message(s) exported. Not embedded by design — \(omittedImageCount) attached image(s) (\(omittedImageBytes) bytes) listed by name and size only; \(omissions.reasoningRows) reasoning row(s) skipped; \(omissions.nestedEvents) event(s) inside capability cards summarised as counts; \(omissions.foldedToolRows) tool row(s) past the \(Self.maxExportedToolRows)-row cap folded into '… and N more'; \(omissions.otherRows) milestone/warning/unknown row(s) skipped; \(truncatedFileCount) attached text file(s) truncated at \(Self.attachedFileContentLimit) characters, dropping \(omittedFileBytes) character(s) — the document says so per file.")
@@ -446,19 +383,9 @@ struct ConversationExporter {
     /// substitute a recorder (a modal alert would hang the test host).
     typealias FailureReporter = @MainActor (String) -> Void
 
-    /// Presents an NSSavePanel, then loads and writes the Markdown export.
-    ///
-    /// [mm-4] Panel FIRST, `load` after. The messages used to be fetched — every attached
-    /// image's external-storage bytes included, on the main actor — BEFORE the panel was
-    /// constructed, so for a long image-heavy conversation nothing appeared for seconds: the
-    /// window stopped redrawing, a live stream stalled, and the menu item looked like it had
-    /// done nothing, so the user clicked again and queued a second full decode. Now the panel
-    /// is on screen at once, a Cancel costs no fetch at all, and the load (already lighter,
-    /// see `fetchMessagesForExport`) runs only once the user has committed to a file.
-    ///
-    /// `load` returns nil when there is nothing to export any more — the panel is modeless, so
-    /// the conversation can be deleted while it is up. That used to write a header-only file and
-    /// log it as a success; now it is reported as a failure and nothing is written.
+    /// Presents an NSSavePanel, then loads and writes the Markdown export. The panel shows before `load` runs, so
+    /// Cancel costs no fetch. `load` returns nil when nothing remains to export (the conversation can be deleted
+    /// while the panel is up); that is reported as a failure.
     @MainActor
     static func exportToFile(title: String,
                              presentPanel: SavePanelPresenter = Self.presentSavePanel,

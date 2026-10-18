@@ -4,14 +4,7 @@
 //  WorkflowActionToolResolutionTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF3 — tool shadowing on the
-//  workflow Action-node path.
-//
-//  `AgentConnect.resolveWorkflowTool` resolved by NAME first and only fell through to MCP when
-//  the name missed, ignoring `Tool.sourceId` entirely. MCP servers choose their own tool names,
-//  so an Action node bound to a sandboxed filesystem server's `write_file` silently executed
-//  Devgentic's own unsandboxed `write_file`, with arguments resolved from upstream MODEL output.
-//  The agent path (`resolveExecutableTools`) fixed this; this twin never received it.
+//  Created by Raj Singh.
 //
 
 import XCTest

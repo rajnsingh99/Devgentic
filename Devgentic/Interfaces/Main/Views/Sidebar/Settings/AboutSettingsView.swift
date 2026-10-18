@@ -4,22 +4,14 @@
 //  AboutSettingsView.swift
 //  Devgentic
 //
-//  Settings → About: version, updates, links, licences and a copyable environment summary.
-//
-//  ⚠️ THE VERSION IS READ FROM THE BUNDLE, NEVER WRITTEN HERE. `release.sh` stamps
-//  `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` at archive time, so a development build shows the
-//  project default while the shipped one shows the release — a literal here would be wrong in one of
-//  the two. The build number is shown too: Sparkle compares it, and a bug report needs it.
-//
-//  ⚠️ THE LICENCE DOCUMENTS OPEN FROM THE BUNDLE, NOT FROM GITHUB. The "Copy licence notices into the
-//  bundle" build phase ships LICENSE, THIRD_PARTY_NOTICES.md and PRIVACY.md inside the app because
-//  several dependency licences require their notices to travel with the BINARY. Opening the bundled
-//  copy works offline and can never drift from what was actually shipped.
+//  Created by Raj Singh.
 //
 
 import AppKit
 import SwiftUI
 
+/// Settings About pane: version, updates, links, licences and a copyable environment summary.
+/// Version and build number are read from the bundle; licence documents open from the bundled copies.
 struct AboutSettingsView: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.openWindow) private var openWindow

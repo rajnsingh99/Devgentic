@@ -4,11 +4,7 @@
 //  ResumeReplayTests.swift
 //  DevgenticTests
 //
-//  G1 Piece 2 — proves the LEGACY-path resume premise. The unified resume preamble replays the
-//  reconstructed completed observations into working memory (instead of native turns) for non-native
-//  models. This test verifies that replay surfaces the prior tool work in `compileForPrompt()` — the
-//  exact scratchpad the legacy generator sends to the model on the next iteration — so a resumed legacy
-//  run continues with its prior context rather than starting blind (and re-running tools).
+//  Created by Raj Singh.
 //
 
 import XCTest

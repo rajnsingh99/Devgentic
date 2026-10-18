@@ -4,20 +4,7 @@
 //  SpeechPausedCompletionTests.swift
 //  DevgenticTests
 //
-//  [CF-22] `pauseSpeaking()` asks AVFoundation for `pauseSpeaking(at: .word)` and flips
-//  `isPaused` immediately, but the request is only honoured at the NEXT word boundary. Press
-//  Pause on the last word of a segment and the utterance FINISHES first — `didFinish` arrives
-//  with `isPaused` already true, and `handleUtteranceFinished`'s only gate was `guard isActive`.
-//  It spoke the next segment anyway: live audio under a transport showing Play, and the Play
-//  the user then pressed found the synthesizer un-paused and spoke that same segment a SECOND
-//  time (re-opening the Code Viewer with it, for a code block).
-//
-//  The decision is only reachable through a live `AVSpeechSynthesizer` delegate callback, so it
-//  is extracted into `SpeechService.completionAction(...)` — a pure table — and that is what
-//  these tests pin. That `handleUtteranceFinished` actually consults the table is covered in
-//  `SpeechStaleCompletionTests`, which drives the handler through its test seam. What remains
-//  unobservable is `resumeSpeaking` speaking the parked segment exactly once — that needs a real
-//  synthesizer and audio output.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,9 +4,7 @@
 //  OnboardingDiskSpaceTests.swift
 //  DevgenticTests
 //
-//  The model step checks free disk space before a download of up to ~18 GB: a model that does not
-//  fit cannot be downloaded (it would fail partway through), and when no starter model fits,
-//  Skip is offered so the mandatory download cannot strand the user.
+//  Created by Raj Singh.
 //
 
 import XCTest

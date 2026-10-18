@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ProfileFreshReadBeforeWriteTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  ⚠️⚠️ THE CLOBBER. `BackendProfileService.profiles` is an array of VALUE-TYPE snapshots taken when
-//  it last loaded. Several things write profile ROWS out of band and never refresh it:
-//  `BackendOrchestrationService` auto-healing a thinking flag, and `MLXContextWindowHealer`
-//  backfilling a context window — both by assigning `details` on the SwiftData row directly.
-//
-//  A writer that starts from the stale array, changes one facet and calls `saveProfile` writes the
-//  WHOLE stale snapshot back, because `BackendProfileStore.saveProfile` does
-//  `existing.details = snapshot.details` — and the trigger is an ordinary skill-link toggle.
-//
-//  `activateEditBuffer` already learned this for the editor path. `freshProfile(id:)` is that rule
-//  extracted and named, so the next whole-profile writer reaches for it instead of rediscovering it.
+//  Created by Raj Singh.
 //
 
 import XCTest

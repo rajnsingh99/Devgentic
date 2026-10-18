@@ -4,8 +4,7 @@
 //  WorkflowNodeOutcomeTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the workflow-cluster fixes of 2026-08-11
-//  (Chat_Production_Readiness.md rows CH46, CH47).
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,25 +4,14 @@
 //  PromptDetailContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  Displays a prompt's editable details in the main content area.
-//
-//  2026-04-21 — overhaul:
-//    · dirty-aware Save (disabled when buffer matches loaded prompt)
-//    · unsaved-changes guard on back navigation
-//    · toast feedback for save success/failure
-//    · category pill chips (replaces cramped 9-segment picker)
-//    · interactive tags editor with chips preview
-//    · detected template placeholders footer
-//    · metadata footer (created · last used · user/built-in)
-//    · overflow menu (Copy · Duplicate · Delete) — separates destructive action
-//    · focus rings + accessibility labels on plain TextFields
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// Displays a prompt's editable details in the main content area.
+/// Save is dirty-aware, back navigation is guarded against unsaved changes, and save results show as toasts.
 struct PromptDetailContainerView: View {
 
     let promptID: UUID
@@ -68,9 +57,8 @@ struct PromptDetailContainerView: View {
         }
         .onAppear {
             loadPrompt()
-            // Settle isInitialLoad after the first frame so SwiftData hydration
-            // gets a moment to populate `PromptService.shared.prompts`. Prevents
-            // a "Prompt Not Found" flash if the view is created before init.
+            // Settle `isInitialLoad` after the first frame so SwiftData hydration can populate `PromptService.shared.prompts`,
+            // preventing a "Prompt Not Found" flash if the view is created before init.
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(150))
                 isInitialLoad = false
@@ -156,10 +144,8 @@ struct PromptDetailContainerView: View {
         }
     }
 
-    /// Shown when the prompt with our `promptID` is gone from the library
-    /// (deleted externally). If the user had unsaved edits in the buffer,
-    /// offers a "Save as new prompt" recovery path so their work isn't lost.
-    /// Otherwise falls back to the standard `ContentNotFoundView`.
+    /// Shown when the prompt with our `promptID` is gone from the library (deleted externally).
+    /// With unsaved edits it offers a "Save as new prompt" recovery; otherwise it shows `ContentNotFoundView`.
     @ViewBuilder
     private var notFoundView: some View {
         if editVM.canSave && editVM.originalPrompt != nil {
@@ -625,15 +611,12 @@ struct PromptDetailContainerView: View {
         toastManager.show("Prompt text copied", style: .success)
     }
 
-    /// Stages the prompt text into the chat input (via `ChatInputViewModel`)
-    /// and navigates back to the chat view. If the user has unsaved edits,
-    /// those are staged — not the library's saved copy — because the buffer
-    /// is what the user is actively reading. Usage is still recorded.
+    /// Stages the prompt text into the chat input (via `ChatInputViewModel`) and navigates back to the chat view.
+    /// Unsaved buffer edits are staged rather than the library's saved copy; usage is still recorded.
     private func useInChat() {
         guard let source = prompt else { return }
-        // Compose a prompt object reflecting the current buffer so any
-        // uncommitted edits flow into chat. Falls back to the stored prompt
-        // for metadata (id, isUserDefined, etc.).
+        // Compose a prompt reflecting the current buffer so uncommitted edits flow into chat, taking metadata
+        // (id, isUserDefined, etc.) from the stored prompt.
         var stagingCopy = source
         stagingCopy.text = editVM.text
         let staged = chatInputVM.stagePromptFromLibrary(stagingCopy)
@@ -666,14 +649,10 @@ struct PromptDetailContainerView: View {
     private func loadPrompt() {
         if let prompt = prompt {
             editVM.loadDraft(from: prompt)
-            // Count opening-for-edit as a usage so Recently-Used sort
-            // reflects reading as well as chat insertion. Previously the
-            // sort only surfaced prompts the user actually sent to chat,
-            // which under-counted reference prompts people skim often.
+            // Count opening-for-edit as a usage so the Recently-Used sort reflects reading as well as chat insertion.
             PromptService.shared.recordUsage(of: prompt)
-            // 50ms lets the content view finish its first layout so the
-            // TextField's focus target is mounted — any shorter and the
-            // focus set silently fails after a navigation transition.
+            // 50ms lets the content view finish its first layout so the TextField's focus target is mounted; any shorter and
+            // the focus set silently fails after a navigation transition.
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(50))
                 focusedField = .title
@@ -683,17 +662,9 @@ struct PromptDetailContainerView: View {
 
     // MARK: - External update reconciliation
 
-    /// Called from `.onChange(of: prompt)` whenever `PromptService.shared.prompts`
-    /// emits a new snapshot for our current ID. Three outcomes:
-    ///
-    /// 1. **Deleted elsewhere** (`newValue == nil`) — the view falls through to
-    ///    `ContentNotFoundView` automatically; nothing to do here.
-    /// 2. **Matches our `originalPrompt`** — either this *was* our own save
-    ///    (which already synced `originalPrompt`) or a redundant write;
-    ///    silently ignore.
-    /// 3. **Diverged from `originalPrompt`** — someone else edited the prompt.
-    ///    If our buffer is clean, silently reload. If it's dirty, ask the
-    ///    user whether to keep local changes or accept the remote version.
+    /// Called from `.onChange(of: prompt)` when `PromptService.shared.prompts` emits a new snapshot for our ID.
+    /// Deleted: falls through to `ContentNotFoundView`. Matches `originalPrompt` (own save or redundant write): ignored.
+    /// Diverged: a clean buffer reloads silently; a dirty one asks to keep local changes or accept the remote version.
     private func handleExternalPromptChange(_ newValue: DevPrompt?) {
         guard let newValue else { return }
         guard let original = editVM.originalPrompt else {

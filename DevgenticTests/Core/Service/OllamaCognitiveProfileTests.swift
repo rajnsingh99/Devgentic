@@ -4,9 +4,7 @@
 //  OllamaCognitiveProfileTests.swift
 //  DevgenticTests
 //
-//  Tests for OllamaShowResponse.cognitiveProfile — the dialect and capability
-//  detection engine for Ollama models. Covers primary tool markers, secondary
-//  chat-format signals, family matching, modelfile hints, and metadata extraction.
+//  Created by Raj Singh.
 //
 
 import XCTest

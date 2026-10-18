@@ -4,7 +4,7 @@
 //  GitUICommand.swift
 //  Devgentic
 //
-//  The ONLY place the Git Changes panel builds a git argv or environment.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -35,19 +35,11 @@ struct GitRunOutput: Sendable {
 /// every invocation the store makes — no processes.
 typealias GitCommandRunner = @Sendable (GitInvocation) async throws -> GitRunOutput
 
-/// Builds every git command the panel runs.
-///
-/// ⚠️ Every invocation carries, by construction:
-/// - `GitCommandBuilder.hardening` — neutralises repo-supplied programs (`core.fsmonitor` fires on a
-///   bare `status`; `diff.external` on a bare `diff`). Shared with the agent's `git` tool so the
-///   security review is not re-derived here.
-/// - `GIT_OPTIONAL_LOCKS=0` — `git status` otherwise opportunistically rewrites the index stat cache
-///   under `.git/index.lock`; a background refresh racing the user's own `git commit` makes THEIR
-///   command fail with "index.lock: File exists". The panel is read-only only with this set.
-/// - `TERM=dumb`.
-/// Diff-family commands also carry `diffProgramSuppression` (`.gitattributes` drivers).
-///
-/// The UI never forwards user-typed git arguments; every argv is assembled here from typed inputs.
+// Why: `GIT_OPTIONAL_LOCKS=0` stops `git status` rewriting the index stat cache, which would make the
+// user's own `git commit` fail with "index.lock: File exists"
+/// Builds every git command the panel runs, from typed inputs; the UI never forwards user-typed git
+/// arguments. Every invocation carries `GitCommandBuilder.hardening` (neutralises repo-supplied programs),
+/// `GIT_OPTIONAL_LOCKS=0` and `TERM=dumb`; diff-family commands also carry `diffProgramSuppression`.
 enum GitUICommand {
 
     static let executable = "/usr/bin/git"
@@ -81,14 +73,10 @@ enum GitUICommand {
                    diffFamily: true)
     }
 
-    /// One side of a file, for the diff view.
-    ///
-    /// ⚠️ The index form is `:0:<path>`, never `:<path>`. Verified: with a file named `0:x.txt`,
-    /// `:0:x.txt` is parsed as STAGE 0 of `x.txt` — a different file. The explicit stage makes the
-    /// remainder unambiguously a path.
-    ///
-    /// `cat-file blob` rather than `show`: plumbing, prints the raw blob, and never applies a
-    /// textconv filter (that is opt-in for cat-file; `show`'s behaviour depends on its defaults).
+    // Why: the index form is `:0:<path>`, never `:<path>`: with a file named `0:x.txt`, `:0:x.txt` parses as
+    // stage 0 of `x.txt`
+    /// One side of a file, for the diff view. `cat-file blob` is used rather than `show`: it prints the raw blob
+    /// and never applies a textconv filter.
     static func blob(repoRoot: String, side: BlobSide, path: String) -> GitInvocation {
         invocation(in: repoRoot, ["cat-file", "blob", object(side: side, path: path)])
     }
@@ -148,11 +136,10 @@ extension GitUICommand {
         }.value
     }
 
-    /// Whether git can run without the Command Line Tools install dialog.
-    ///
-    /// `/usr/bin/git` is an `xcrun` shim: on a Mac without CLT, EVERY call pops the installer. So
-    /// this is asked once per launch through `xcode-select -p` (exit 0 ⇔ a developer dir exists),
-    /// which never triggers the dialog, and the panel shows an explainer instead of calling git.
+    // Why: `/usr/bin/git` is an `xcrun` shim that pops the installer on every call on a Mac without CLT
+    /// Whether git can run without the Command Line Tools install dialog: asked once per launch via `xcode-select
+    /// -p` (exit 0 means a developer dir exists), which never triggers the dialog; the panel shows an explainer
+    /// instead of calling git.
     static let isGitAvailable: Bool = {
         do {
             let result = try ProcessRunner.run(executable: "/usr/bin/xcode-select", arguments: ["-p"])

@@ -4,7 +4,7 @@
 //  AnthropicAdvancedConfig.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -35,24 +35,16 @@ struct AnthropicAdvancedConfig: Codable, Hashable {
     // MARK: - Extended Thinking
 
     /// When enabled, Claude reasons internally before responding.
-    ///
-    /// ⚠️ Carried by `anthropic-version: 2023-06-01` like every other request — thinking is NOT
-    /// gated behind an API version. A previous comment here claimed it required `2025-04-14`,
-    /// which is not a value the API recognises; the provider acted on that claim and rejected
-    /// every request from a thinking-enabled profile. See `AnthropicModelGeneration` for what
-    /// actually varies by model.
+    /// Needs no special `anthropic-version`; per-model differences live in `AnthropicModelGeneration`.
     var extendedThinking: Bool
 
     /// The maximum number of tokens Claude can use for internal thinking.
-    ///
-    /// ⚠️ LEGACY MODELS ONLY (Opus 4.5 and older, Sonnet 4.5/4.0, Haiku 4.5). `budget_tokens` was
-    /// removed on Opus 4.7+ / Sonnet 5 / Fable 5 and returns 400 there — those models take
-    /// `thinkingEffort` instead. Must be less than `maxTokens` where it does apply.
+    /// Legacy models only (Opus 4.5 and older, Sonnet 4.5/4.0, Haiku 4.5); newer models reject `budget_tokens`
+    /// and take `thinkingEffort`. Must be less than `maxTokens` where it applies.
     var thinkingBudgetTokens: Int?
 
     /// Thinking depth on adaptive-era models: `low` | `medium` | `high` | `xhigh` | `max`.
-    /// Nil means "API default" (`high`). Replaces `thinkingBudgetTokens` on those models.
-    /// ⚠️ `xhigh` arrived with Opus 4.7 and is rejected by Opus 4.6 / Sonnet 4.6.
+    /// Nil means the API default (`high`). `xhigh` is rejected by Opus 4.6 / Sonnet 4.6.
     var thinkingEffort: String?
 
     /// Creates a default configuration for Anthropic Claude.

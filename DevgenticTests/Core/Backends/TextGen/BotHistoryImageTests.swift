@@ -4,11 +4,7 @@
 //  BotHistoryImageTests.swift
 //  DevgenticTests
 //
-//  Covers prior-turn image support on the BOT path (ChatExecutor.buildHistoryImageBlocks).
-//  Bots compact history into episodic XML with no per-turn structure, so prior-turn
-//  images ride the CURRENT user turn — sourced directly from chatHistory, resolved
-//  BYTE-TRUTHFULLY (real container sniffed from bytes, not the filename), bytes-first,
-//  and bounded to a recent window. HEIC/TIFF/etc transcode to JPEG; the undecodable omit.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,7 +4,7 @@
 //  UserPersonalProfileView.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -60,12 +60,10 @@ struct UserPersonalContainerView: View {
 
     // MARK: - Title Builder
 
-    /// ⚠️ `LocalizedStringKey`, not `String`. Both branches are literals, so as keys they
-    /// extract cleanly — the interpolated one as `"Your Profile · %@"`, with the formatted date
-    /// substituted at display time. Built as a `String` it reached the non-localizing `Text`
-    /// overload and this header shipped untranslated (audit C2). Note this only works because
-    /// the literal is written HERE: a string assembled elsewhere and passed in would be
-    /// invisible to the extractor no matter what type it was given.
+    // Why: built as a `String` it would reach the non-localizing `Text` overload; the literal must be written here, since a
+    // string assembled elsewhere is invisible to the extractor.
+    /// A `LocalizedStringKey`, not a `String`: both branches are literals, so they extract cleanly (the interpolated one as
+    /// "Your Profile · %@").
     private var titleWithTimestamp: LocalizedStringKey {
         if let lastUpdated = service.lastUpdated {
             return "Your Profile · \(lastUpdated.formatted(date: .abbreviated, time: .shortened))"

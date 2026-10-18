@@ -4,33 +4,18 @@
 //  ActionEffectBuilder.swift
 //  Devgentic
 //
-//  Turns a completed file-mutating tool execution into the compact record of what it
-//  changed, for episodic memory (and, once the timeline renders diffs itself, for the tool
-//  row — same builder, so the row and the agent's memory can never disagree about what a
-//  write did).
-//
-//  See `Docs/codeviewer-rescope-design.md` §5 and §12 D1.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Turns a completed file-mutating tool execution into the compact record of what it changed, for episodic memory.
+/// One builder serves the timeline row and the agent's memory, so they cannot disagree about what a write did.
 extension ActionEffect {
 
     /// Derives the effect of a tool call, or nil when there is nothing to record.
-    ///
-    /// Deliberately built on `TimelineFileViewerAction.resolve` rather than re-reading the
-    /// params here: that resolver already owns the awkward cases — append mode carries only
-    /// the FRAGMENT in `content`, edit tools carry find/replace strings and get their post
-    /// state from the executor's read-back, and both spellings of the path argument exist.
-    /// Duplicating that logic would let the timeline chip and the agent's memory drift into
-    /// describing the same write differently.
-    /// `.recordFragment` is the one place memory deliberately diverges from the timeline
-    /// chip. `resolve`'s default returns nil for an append with no snapshot — right for a
-    /// chip, because opening the fragment as the file would lie. For memory it was the
-    /// worst possible answer: `ActionEffect.from` exited at its FIRST guard, so no element
-    /// was emitted at all and the `baseline="none"` hedge never applied to appends. The
-    /// model read the silence as "nothing happened" — the exact amnesia this type exists
-    /// to fix, reached by a different route (audited 2026-07-28).
+    /// Built on `TimelineFileViewerAction.resolve`, which owns append mode, edit tools and both path spellings.
+    /// `.recordFragment` lets an append with no snapshot still be recorded, which the timeline chip would not show.
     static func from(toolExecution data: ToolExecutionData) -> ActionEffect? {
         guard let action = TimelineFileViewerAction.resolve(data: data, missingBaseline: .recordFragment) else {
             return nil
@@ -40,9 +25,7 @@ extension ActionEffect {
         guard action.isWrite, let after = action.inlineContent else { return nil }
 
         guard let before = action.preWriteContent else {
-            // The write happened, but with no baseline the change itself can't be
-            // described. Record the fact and the file — an agent that knows it wrote
-            // `X.java` can at least re-read it; one told nothing assumes it did nothing.
+            // The write happened but there is no baseline to diff: record the fact and the file, so the agent can re-read it.
             effectLogger.info("[EFFECT] '\(data.name)' → \(action.fileName): no pre-write snapshot, recording the write without a diff (the file was unreadable or over the snapshot cap at capture).")
             return ActionEffect(
                 path: action.filePath,
@@ -56,14 +39,8 @@ extension ActionEffect {
             )
         }
 
-        // [cv-5] ONE line-level pass feeds both the counts and the diff text. This used to run
-        // `DiffUtility.changeCounts` (a full line-level LCS) and then `generateDiff` inside
-        // `changedLines` — a SECOND full pass over the same pair PLUS the character-level
-        // `refineIntraLine`, whose `segments` nothing in this file reads. Every caller is on the
-        // main actor (`ActiveStreamManager.completeToolTimelineEvent`, `CapabilityCardRouter.
-        // completeTool`), so a ~5,000-line rewrite paid two direction tables and up to 300
-        // char-level tables as one non-interruptible main-thread block per file write, while the
-        // transcript stopped scrolling and Stop did not respond.
+        // One line-level pass feeds both the counts and the diff text; this runs on the main actor, so a second pass would
+        // block it.
         let rows = DiffUtility.lineLevelDiff(original: before, modified: after)
         let counts = DiffUtility.changeCounts(rows: rows)
         guard counts.added > 0 || counts.deleted > 0 else {
@@ -83,24 +60,13 @@ extension ActionEffect {
             linesRemoved: counts.deleted,
             diff: diff,
             isTruncated: truncated,
-            // ⚠️ From `after`, which is ALREADY IN MEMORY — no syscall. This function runs on
-            // the main actor for every file write, and the note above about two direction tables
-            // blocking the main thread is the same hazard: a `stat` here cost the CodeViewer
-            // live-write suite ~40% (measured 2026-09-20). The comparison at render does the I/O,
-            // where it can short-circuit on size.
+            // Fingerprint from `after`, already in memory: no syscall on the main actor; the render-time comparison does the I/O.
             fingerprint: .of(after)
         )
     }
 
-    /// The changed lines, `+`/`-` prefixed, with a little surrounding context — capped.
-    ///
-    /// Context matters for reverting: `- foo()` alone doesn't say WHERE, so the agent
-    /// couldn't put it back. Two lines either side is enough to locate a hunk without
-    /// carrying the file.
-    ///
-    /// Takes the rows `from` already computed rather than the two strings: reads only `type`
-    /// and `line`, so it needs neither its own LCS pass nor `generateDiff`'s intra-line
-    /// refinement ([cv-5]).
+    /// The changed lines, `+`/`-` prefixed, with two lines of surrounding context, capped.
+    /// Context locates a hunk for reverting; takes the rows `from` already computed, so no second diff pass is needed.
     private static func changedLines(rows: [DiffResult]) -> (text: String, truncated: Bool) {
         let contextRadius = 2
 

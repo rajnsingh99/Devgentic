@@ -4,7 +4,7 @@
 //  OllamaModelStoreView.swift
 //  Devgentic
 //
-//  Created by Antigravity on 07/03/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -102,11 +102,8 @@ struct OllamaModelStoreContent: View {
                                 .stroke(theme.dividerColor, lineWidth: 1)
                         )
 
-                        // Contextual "Pull by name" affordance — replaces the
-                        // old standalone Button with the shared status view,
-                        // which handles in-progress / installed / available
-                        // states uniformly and writes to DownloadHistoryStore
-                        // via DownloadCoordinator.
+                        // Contextual "Pull by name" affordance using the shared status view, which handles in-progress, installed and
+                        // available states and writes to `DownloadHistoryStore` via `DownloadCoordinator`.
                         if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty {
                             ModelDownloadStatusView(
                                 backend: .ollama,
@@ -124,19 +121,8 @@ struct OllamaModelStoreContent: View {
             }
 
             // MARK: - Failure Banner
-            //
-            // ⚠️ Neither of these strings was rendered anywhere. `downloadErrorMessage` had exactly
-            // two references in the repo — its declaration and its assignment — and
-            // `modelRemoveError` had none outside the service that writes it. A refused delete or a
-            // failed pull left the store looking idle and unchanged.
-            // ⚠️ Status BELOW errors in precedence, and only when there is no error to show: the
-            // outcome keeps its last value after a failure, so rendering both would put two
-            // descriptions of the same event side by side.
-            //
-            // ⚠️ THE ICON COMES FROM THE OUTCOME, NEVER FROM `isDownloading`. Deriving it from the
-            // in-flight flag meant every terminal state that was not "in progress" rendered as
-            // success — so "Download cancelled." and "Failed to pull X." both got a green tick the
-            // instant the pull stopped. A phase cannot answer "did this succeed?".
+            // Renders delete and pull error messages; the pull status sits below errors and shows only when there is no error.
+            // The icon comes from the outcome, never from `isDownloading`, so cancelled and failed pulls do not show as success.
             if viewModel.deleteErrorMessage == nil,
                viewModel.downloadErrorMessage == nil,
                let status = viewModel.pullStatus {
@@ -149,9 +135,7 @@ struct OllamaModelStoreContent: View {
                         .foregroundColor(theme.primaryText)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
-                    // ⚠️ A banner with no way out is a banner that lives forever. This one used to
-                    // persist for the rest of the process: it had no dismiss control, and the only
-                    // thing that reset the underlying value had no callers.
+                    // The banner has a dismiss control, since nothing else resets the underlying value.
                     if status.isTerminal {
                         Button {
                             viewModel.dismissPullStatus()
@@ -221,11 +205,8 @@ struct OllamaModelStoreContent: View {
                     }
                 }
 
-                // Global in-flight banner intentionally omitted — the
-                // Downloads sidebar already surfaces all active downloads
-                // cross-backend, and `ModelDownloadStatusView` shows per-row
-                // progress inline. The old floating banner here duplicated
-                // that UX.
+                // No global in-flight banner: the Downloads sidebar shows all active downloads and `ModelDownloadStatusView` shows
+                // per-row progress.
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -276,20 +257,10 @@ struct OllamaModelStoreContent: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    // ⚠️ register A42 — `downloadBanner` was removed here. It was declared and never called, and
-    // it was the ONLY reader of `viewModel.downloadProgress` / `.currentDownloadName`, which the
-    // view model mirrored on every NDJSON line of a pull (a full re-filter and re-sort of the grid
-    // per tick) to feed a view nothing rendered. Live per-row progress is `ModelDownloadStatusView`
-    // above, backed by `DownloadManager`.
-    //
-    // ⚠️ ADJACENT GAP, deliberately not closed here: this banner held the only Cancel affordance
-    // for an Ollama pull, so `OllamaModelStoreViewModel.cancelDownload()` is now unreferenced.
-    // Deleting it would remove the only implementation of a capability users arguably want, and
-    // wiring a new Cancel control is a feature decision, not part of A42. Left for its own finding.
+    // Note: `OllamaModelStoreViewModel.cancelDownload()` is currently unreferenced, since the removed banner held the
+    // only Cancel affordance for an Ollama pull.
 
-    /// ⚠️ Exhaustive, no `default:` — a new outcome must fail the build here rather than silently
-    /// inherit another state's icon. Inheriting silently is exactly how cancellation and failure
-    /// came to render as success.
+    /// Exhaustive, with no `default:`, so a new outcome fails the build here instead of inheriting another state's icon.
     private func pullStatusIcon(for status: OllamaService.PullTerminalState) -> String {
         switch status {
         case .started:   return "arrow.down.circle"
@@ -299,8 +270,7 @@ struct OllamaModelStoreContent: View {
         }
     }
 
-    /// ⚠️ `.cancelled` is deliberately NEITHER green NOR red: the user asked for it, so it is not
-    /// a success to celebrate and not an error to alarm them about.
+    /// `.cancelled` is neither green nor red: the user asked for it, so it is neither a success nor an error.
     private func pullStatusColor(for status: OllamaService.PullTerminalState) -> Color {
         switch status {
         case .started:   return theme.accentColor
@@ -475,21 +445,11 @@ struct OllamaModelCardView: View {
 }
 
 // MARK: - Localizable Labels
-//
-// This lives here rather than beside the enum declaration on purpose:
-// `OllamaModelStoreViewModel.SortOption` is declared in the view model, which is
-// not part of this change's file scope.
-//
-// `ModelCognitiveCapability.localizedTitle` (used by the capability badge above)
-// is declared once in `AgentConfigDetailView.swift` — its enum lives in
-// `BackendProfile.swift`, a `Foundation`-only model file that must not import SwiftUI.
+// Localized titles for the view model's `SortOption`, declared here because the enum lives in the view model.
 
 extension OllamaModelStoreViewModel.SortOption {
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` /
-    /// `Label(x.rawValue, …)` bind to the non-localizing `StringProtocol` overload, so every
-    /// rawValue-sourced label was invisible to the String Catalog extractor and would have
-    /// shipped untranslated inside otherwise-translated chrome. `rawValue` stays for
-    /// persistence, `id`, and logging only.
+    /// User-facing name, kept separate from `rawValue` so labels reach the String Catalog extractor; `rawValue` is for
+    /// persistence, `id` and logging only.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .name: return "Name"

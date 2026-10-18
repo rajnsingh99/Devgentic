@@ -4,19 +4,7 @@
 //  WorkflowRunBootstrapTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF20.
-//
-//  The workflow-run bookkeeping (live state + `.running` stub + freeze/persist) lived inline in
-//  ONE of seven `startMessageStream` call sites. Scheduled runs, ChatOps, regenerate, QuickAccess
-//  and Orb started workflows with `workflowExecutionState == nil` — the run executed, but left
-//  no record at all, its HITL attributed to chat, and it rendered through the capability-card
-//  router that is deliberately disabled for workflows.
-//
-//  These tests exercise `WorkflowRunBootstrap` against the REAL `WorkflowRunHistoryStore` — the
-//  stub-insert/finalize round-trip through SwiftData is the behaviour under test. The view-model
-//  dependency is a narrow `WorkflowRunRegistry` protocol precisely so this is testable without
-//  constructing a `MainApplicationViewModel` (which claims `HITLPresenter` globally); a fake
-//  registry below stands in, so the in-memory-mirror half is covered too.
+//  Created by Raj Singh.
 //
 
 import XCTest

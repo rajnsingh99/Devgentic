@@ -4,9 +4,7 @@
 //  ToolNameResolverLengthGateTests.swift
 //  DevgenticTests
 //
-//  #15.4 — the fuzzy-match length gate: keep near-equal-length typos, reject short→long
-//  prefix fragments that Jaro-Winkler's prefix boost over-scores. The target tool's
-//  arg-schema check (in `resolve`) remains the primary guard against destructive remaps.
+//  Created by Raj Singh.
 //
 
 import XCTest

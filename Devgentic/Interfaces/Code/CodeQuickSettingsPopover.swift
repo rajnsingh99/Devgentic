@@ -4,18 +4,14 @@
 //  CodeQuickSettingsPopover.swift
 //  Devgentic
 //
-//  Per-project execution settings for the Code interface: iteration cap, compute budget and
-//  context size.
-//
-//  ⚠️ No tool settings (2026-09-25). The "Ask before running" section was removed: every Code tool
-//  is in the Tool Library now, which sets Ask First / Auto Run per tool, and this popover's copy
-//  of that choice was applied last on every run — silently overriding the Library.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
 
+/// Per-project execution settings for the Code interface: iteration cap, compute budget and context size.
 struct CodeQuickSettingsPopover: View {
 
     @Environment(CodeSessionManager.self) private var codeSessionManager
@@ -25,24 +21,17 @@ struct CodeQuickSettingsPopover: View {
     /// by clicking away — there is no Save button, and a draft that needed one would be lost.
     @State private var draft: CodeQuickSettings = .default
 
-    /// ⚠️ Set once `onAppear` has seeded `draft`. Without it, hydrating a project that HAS settings
-    /// mutates `draft` and fires `onChange`, so merely OPENING the popover writes the store and
-    /// bumps the entry's `updatedAt` — which is the retention cap's recency key, so browsing your
-    /// settings could evict a different project's. Viewing is not changing.
+    // Why: hydrating `draft` fires `onChange`; without this flag, merely opening the popover writes the store
+    // and bumps the entry's `updatedAt`.
+    /// Set once `onAppear` has seeded `draft`.
     @State private var hasHydrated = false
 
     /// What the Max Iterations field shows. Kept apart from `draft` so an out-of-range entry can sit
     /// in the field, flagged, without being saved — the draft only ever holds a valid cap or none.
     @State private var iterationsText = ""
 
-    /// ⚠️⚠️ F9. `draft` changes on every stepper CLICK, and each change used to persist
-    /// immediately: walking maxIterations 3→15 produced nine UserDefaults writes and nine
-    /// profile saves, each one bumping `lastSelected` and reordering "recently used" — for a
-    /// profile the user was configuring, not selecting.
-    ///
-    /// Every one of those writes is a genuine value change, so the store's no-op guard cannot
-    /// help; the churn has to stop at the source. The trailing edge is what the user meant —
-    /// the number they stopped on, not each one they passed through.
+    // Why: each stepper click changes `draft`; persisting every click churns the store and reorders recently-used profiles.
+    /// The pending debounced write of `draft`, so a run of stepper clicks persists once, on the last value.
     @State private var persistTask: Task<Void, Never>?
 
     /// Long enough to coalesce a burst of clicks, short enough that closing the popover by
@@ -91,10 +80,8 @@ struct CodeQuickSettingsPopover: View {
             }
         }
         .onDisappear {
-            // ⚠️ MANDATORY, not tidiness. A debounce that loses the user's last change is worse
-            // than the churn it replaces: clicking + then immediately dismissing would silently
-            // discard the setting. Cancel the pending write and commit the final value directly.
-            // If it already landed, the store's no-op guard makes this free.
+            // Cancels the pending debounce and commits the final value directly, so dismissing right
+            // after a change cannot lose it.
             persistTask?.cancel()
             persistTask = nil
             guard hasHydrated else { return }
@@ -542,7 +529,7 @@ struct CodeQuickSettingsPopover: View {
 
     // MARK: - Tool approvals
 
-    /// Where Ask/Auto went. One line, so someone who used to set it here finds it.
+    /// A one-line pointer to the Tool Library, where Ask First / Auto Run is set per tool.
     private var toolApprovalsPointer: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "wrench.and.screwdriver")

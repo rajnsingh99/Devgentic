@@ -4,9 +4,7 @@
 //  WindowedLinearMemoryTests.swift
 //  DevgenticTests
 //
-//  Tests for MemoryBudgetConfig derivation, WindowedLinearMemory protocol conformance,
-//  truncation, old/recent split, sliding window eviction, system alert cap,
-//  error deduplication, and budget utilization observability.
+//  Created by Raj Singh.
 //
 
 import XCTest

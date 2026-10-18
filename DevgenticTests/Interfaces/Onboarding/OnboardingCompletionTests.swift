@@ -4,10 +4,7 @@
 //  OnboardingCompletionTests.swift
 //  DevgenticTests
 //
-//  Field bug (owner, ~2026-09): the profile created in onboarding was missing from the Profiles
-//  sidebar until a second profile was created, when both appeared. The app-level
-//  `BackendProfileService` read its list once at launch; onboarding saved straight to the store.
-//  These tests reproduce that, then prove `OnboardingCompletion.apply` closes it.
+//  Created by Raj Singh.
 //
 
 import XCTest

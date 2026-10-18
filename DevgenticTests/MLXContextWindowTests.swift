@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MLXContextWindowTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Pure-logic coverage for reading an MLX model's trained context length out of its
-//  config.json (`MLXTokenizerAnalyzer.contextWindow(fromConfig:)`). This feeds
-//  ModelMetadata.contextWindow → EffectiveContextWindow, so getting the key priority
-//  and number coercion right is what stops MLX models from silently using the 8K
-//  fallback in the gauge and every window-derived budget.
+//  Created by Raj Singh.
 //
 
 import XCTest

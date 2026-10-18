@@ -4,11 +4,7 @@
 //  ImageGenConfigDetailView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Configuration detail view for Image Generator profiles.
-//  Updated to adopt Modern Dashboard UI, Model Pickers, and dynamic capabilities.
-//  Refactored on 27/03/26 to use ProfileEditBuffer (single source of truth for dirty tracking).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -18,6 +14,8 @@ import Flux2Core
 
 private let logger = DGLogger(category: "ImageGenConfigDetail")
 
+/// Configuration detail view for Image Generator profiles, with model pickers and capability-driven options.
+/// Dirty tracking comes from `ProfileEditBuffer`.
 struct ImageGenConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
@@ -36,18 +34,10 @@ struct ImageGenConfigDetailView: View {
     // Advanced config local state
     @State private var localAdvancedConfig: ImageGenAdvancedConfig = .default()
 
+    // Why: SwiftUI runs `.onChange` on the next update pass, so a flag set and cleared in one call is already false;
+    // a baseline survives the deferral because it is compared, not raced.
     /// The exact dictionary the last `loadAdvancedConfig()` produced.
-    ///
-    /// ⚠️ register B45 — this replaces an `isLoadingAdvancedConfig` boolean that could NEVER fire.
-    /// `load` set it true, assigned `localAdvancedConfig` and set it false, all synchronously in
-    /// one MainActor turn; SwiftUI runs `.onChange` on the *next* update pass, by which point the
-    /// flag was already false. So the write-back it existed to suppress happened on every open.
-    ///
-    /// This is register A9's defect verbatim, and A9's fix — a value baseline — never reached this
-    /// file because this editor hand-rolls the lifecycle instead of using
-    /// `ProviderAdvancedConfigManager`. A baseline survives the deferral because it is COMPARED,
-    /// not raced: `load` sets it in the same synchronous call, so whenever `.onChange` finally runs
-    /// it already holds the right value.
+    /// The `.onChange` write-back guard compares against it instead of consulting a loading flag.
     @State private var loadedAdvancedBaseline: [String: JSONValue]?
 
     // Deletion State
@@ -56,9 +46,8 @@ struct ImageGenConfigDetailView: View {
     // Unsaved-changes guard on back navigation.
     @State private var showingBackAlert = false
 
-    /// Advisory findings from the last save, shown until dismissed or the next save (register A34).
-    /// ⚠️ Cleared on every save, so it always describes the CURRENT state of the profile — a stale
-    /// note about a model the user has since changed would be worse than no note.
+    /// Advisory findings from the last save, shown until dismissed or the next save.
+    /// Cleared on every save so it always describes the current state of the profile.
     @State private var saveAdvisories: [ProfileValidationError] = []
 
 
@@ -71,11 +60,8 @@ struct ImageGenConfigDetailView: View {
     // MARK: - Computed Bindings
 
     private var providerConfig: Binding<ProviderConfig> {
-        // ⚠️ register B27 — capture the BUFFER, not `self`. Referencing `editBuffer` directly
-        // inside these closures captures the whole View struct, and the copy carries this
-        // view's `@State` window manager — so a binding handed to a long-lived NSWindow (or
-        // to a manager callback) closed a retain cycle straight back to the manager. A72
-        // fixed the callbacks and missed this, the other end of the same loop.
+        // Capture the buffer, not `self`: referencing `editBuffer` captures the whole View struct including its
+        // window manager, closing a retain cycle when the binding is handed to a long-lived window.
         let buffer = editBuffer
         return Binding<ProviderConfig>(
             get: {
@@ -94,7 +80,7 @@ struct ImageGenConfigDetailView: View {
     }
 
     private var negativePromptBinding: Binding<String> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer   // Capture the buffer, never `self`.
         return Binding<String>(
             get: {
                 if case .imageGen(let config) = buffer.draft.details { return config.negativePrompt ?? "" }
@@ -110,7 +96,7 @@ struct ImageGenConfigDetailView: View {
     }
 
     private var aspectRatioBinding: Binding<ImageAspectRatio> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer   // Capture the buffer, never `self`.
         return Binding<ImageAspectRatio>(
             get: {
                 if case .imageGen(let config) = buffer.draft.details { return config.defaultAspectRatio ?? .square }
@@ -126,7 +112,7 @@ struct ImageGenConfigDetailView: View {
     }
 
     private var advancedSettingsBinding: Binding<[String: JSONValue]?> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer   // Capture the buffer, never `self`.
         return Binding<[String: JSONValue]?>(
             get: {
                 if case .imageGen(let config) = buffer.draft.details { return config.advancedSettings }
@@ -174,12 +160,8 @@ struct ImageGenConfigDetailView: View {
             loadAdvancedConfig()
         }
         .onChange(of: localAdvancedConfig) { _, newValue in
-            // ⚠️ register B45 — compare against what `load` produced, do not consult a flag.
-            // Two consequences this restores, both of them A9's: an MLX profile with no stored
-            // config used to load `.mlxDefault()` over a `.default()` seed and go DIRTY ON MERE
-            // OPEN (phantom Save/Revert pill), and a profile whose blob failed to decode used to
-            // have app defaults written into the draft — so the next save overwrote a
-            // configuration that was unreadable but still present.
+            // Compare against what `load` produced rather than a flag, so merely opening a profile never reads as dirty
+            // and an undecodable stored config is not overwritten with defaults on the next save.
             let encoded = profileService.encodeConfig(from: newValue)
             guard encoded != loadedAdvancedBaseline else { return }
             advancedSettingsBinding.wrappedValue = encoded
@@ -205,13 +187,8 @@ struct ImageGenConfigDetailView: View {
                 actionButtons
             }
 
-            // ⚠️ register B17 — OUTSIDE the ScrollView, directly under the pinned island bar
-            // that holds Save. It used to be the first child of the scrolling form, with a comment
-            // claiming it sat "where the user's eye already is after pressing Save" — untrue for
-            // anyone saving from the Advanced section of an 800-line page, who got a green success
-            // toast and an advisory several screens above them. Pinning it beside the control that
-            // produced it makes the channel reach the user regardless of scroll position, without
-            // a ScrollViewReader or an auto-scroll that would yank the page under them.
+            // Outside the ScrollView, directly under the pinned island bar that holds Save, so the advisory reaches
+            // the user regardless of scroll position without an auto-scroll.
             SaveAdvisoryBanner(advisories: saveAdvisories) {
                 withAnimation { saveAdvisories = [] }
             }
@@ -390,19 +367,10 @@ struct ImageGenConfigDetailView: View {
         }
     }
 
-    /// ⚠️ register B46 — FLUSH FIRST. `BackendProfileService.flushPendingEditorText`'s own doc
-    /// comment says "call this BEFORE reading `hasUnsavedEditorChanges` at an exit point", and
-    /// until now it had exactly one caller: `applicationShouldTerminate` (register B3). The
-    /// floating Advanced prompt editor holds typing in `@State` and writes back only on an explicit
-    /// commit, so a back tap read a CLEAN buffer and left with no prompt — the multi-thousand
-    /// character loss A27/A29/B3 exist to prevent, at the exit B3 did not cover.
-    ///
-    /// ⚠️ Placed in the tap ACTION, not in the `isDirty:` the guard modifier reads: that value is
-    /// computed during a view update, and committing there would mutate state mid-pass.
-    ///
-    /// A no-op in editors that register no commit hook (`SimplePromptWindowManager` syncs on every
-    /// keystroke, so it has nothing pending). It is here in all three anyway — the whole class of
-    /// B44/B46 defects is a fix that landed on the one site that had the bug.
+    // Why: the floating prompt editor commits only explicitly, so an unflushed buffer reads clean and drops typed text.
+    /// Handles the back button, flushing pending floating-editor text before the dirty check.
+    /// The flush is in the tap action, not in `isDirty:`, which is computed during a view update.
+    /// A no-op in editors that register no commit hook.
     private func handleBackTap() {
         profileService.flushPendingEditorText()
         if editBuffer.isDirty {
@@ -412,12 +380,8 @@ struct ImageGenConfigDetailView: View {
         }
     }
 
-    /// The ONE way out of this editor.
-    ///
-    /// ⚠️ Register A28. The leading button used to be wired `onBack: onCancel ?? handleBackTap`,
-    /// so in the workflow sheet the xmark called `dismiss()` directly and never consulted
-    /// `editBuffer.isDirty` — the identical view, routed, prompted correctly. The dirty check now
-    /// happens for both hosts and only the EXIT differs: dismiss the sheet, or pop the router.
+    /// The one way out of this editor.
+    /// Runs the unsaved-changes check for both hosts; only the exit differs: dismiss the sheet or pop the router.
     private func leaveEditor() {
         if let onCancel {
             onCancel()
@@ -428,7 +392,7 @@ struct ImageGenConfigDetailView: View {
         }
     }
 
-    // MARK: - Extracted Sections
+    // MARK: - Sections
 
     @ViewBuilder
     private var generationDefaultsSection: some View {
@@ -533,29 +497,9 @@ struct ImageGenConfigDetailView: View {
     }
 
     #if MLX_IMAGE_GEN
-    /// Resolves the Flux2 model selection through `ModelSelectionPolicy` — register B34.
-    ///
-    /// ⚠️ This was `if !inferenceRawValues.contains(modelName) { modelName = klein4B }`, duplicated
-    /// verbatim inside `Flux2ModelPickerView.onAppear`, and neither copy logged. It made this the
-    /// SIXTH picker to implement the model-selection rule inline (`MLXModelPickerView` already
-    /// calls itself the fifth), which is precisely the drift `ModelSelectionPolicy` was extracted
-    /// to stop. The picker's copy is gone; this is the only site.
-    ///
-    /// ⚠️ **Re-derived, because the register row's failure scenario was wrong.** B34 reads as if
-    /// switching provider away and back loses a saved `dall-e-3`. It cannot: `switchProvider(to:)`
-    /// clears `modelName` to `""` by design, so the common path here is a *compliant fill of an
-    /// empty selection*, not an overwrite. The genuine defect is narrower — a stored, NON-empty
-    /// name this build does not recognise was silently replaced. That is reachable by running an
-    /// older build against a store a newer one wrote (a `Flux2Model` case this binary lacks), or by
-    /// a stored variant whose `isForInference` is false.
-    ///
-    /// ⚠️ **`.keptUnlisted` KEEPS, with no exception.** `MLXModelPickerView` used to carry the
-    /// module's one exception, and register B13 deleted it after proving its premise false; making
-    /// Flux2 the new exception would re-introduce what B13 just removed. Keeping is also safe here,
-    /// which is the part worth knowing: `MLXImageGenService.resolveFlux2Model` already falls back
-    /// to `.dev` and logs when it cannot map a name, so an unrecognised value still generates — it
-    /// does not strand the profile. Destroying the user's stored choice to avoid a warning the
-    /// runtime already handles is the worse trade.
+    /// Resolves the Flux2 model selection through `ModelSelectionPolicy`.
+    /// An empty selection is filled; a stored non-empty name this build does not recognise is kept (`.keptUnlisted`).
+    /// Keeping is safe: `MLXImageGenService.resolveFlux2Model` falls back to `.dev` and logs when it cannot map a name.
     private func snapToValidFlux2Model() {
         let inferenceRawValues = Flux2Model.allCases
             .filter(\.isForInference)
@@ -587,11 +531,9 @@ struct ImageGenConfigDetailView: View {
     }
     #endif
 
+    // Why: the baseline is assigned in the same synchronous call as `localAdvancedConfig`,
+    // because the guarded `.onChange` runs one update pass later and reads whatever is there by then.
     /// Decodes the stored advanced config into local state and records the baseline.
-    ///
-    /// ⚠️ register B45 — the baseline assignment is not bookkeeping, it is the fix. It must stay in
-    /// the same synchronous call as the `localAdvancedConfig` write, because the `.onChange` this
-    /// guards runs one update pass later and reads whatever is here by then.
     private func loadAdvancedConfig() {
         let defaultConfig: ImageGenAdvancedConfig = providerConfig.wrappedValue.apiProvider == .mlx
             ? .mlxDefault()
@@ -629,17 +571,12 @@ struct ImageGenConfigDetailView: View {
                 IslandPillButton(
                     title: "Revert",
                     style: .secondary,
-                    // ⚠️ register B12 — NO `.cancelAction`. Revert is destructive and discards
-                    // every unsaved edit without a prompt, so binding it to Esc gave a dirty editor
-                    // a silent one-keypress exit: Esc reverted, `isDirty` went false, and the
-                    // second Esc then passed `interactiveDismissDisabled(isDirty)` and closed the
-                    // sheet. A28's comment claimed "exactly one way out of a dirty editor, and it
-                    // is the one that prompts" — this was the second, and it prompted for nothing.
-                    // Esc now means close, which the unsaved-changes guard already governs.
+                    // No `.cancelAction`: Revert discards every unsaved edit without a prompt, so binding it to Esc would give a
+                    // dirty editor a silent exit. Esc closes the sheet, which the unsaved-changes guard governs.
                     accessibilityLabel: "Revert unsaved changes"
                 ) {
                     editBuffer.revert()
-                    // ⚠️ register B17 — the draft the advisory was about no longer exists.
+                    // The draft the advisory described has been replaced.
                     saveAdvisories = []
                     loadAdvancedConfig()
                 }
@@ -652,29 +589,21 @@ struct ImageGenConfigDetailView: View {
                     keyboardShortcut: KeyboardShortcut("s", modifiers: .command)
                 ) {
                     do {
-                        // ⚠️ Register A34: advisories are RETURNED now, not just logged. The
-                        // save succeeded either way — the banner explains what may not work, it
-                        // does not report a failure.
+                        // The save succeeded either way: the banner explains what may not work and does not report a failure.
                         saveAdvisories = try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
                         toastManager.show("Profile saved", style: .success)
                     } catch {
-                        // ⚠️ A toast and NOTHING else was the whole record of a failed save on the
-                        // primary user-data write path. It disappears in seconds, so "my image generator
-                        // config won't stick" arrived with no profile id, no type and no error to
-                        // correlate against.
+                        // A toast alone is not a durable record of a failed save on the primary write path, so log it
+                        // with the profile id, type and error.
                         logger.error(
                             "[PROFILE] Save FAILED for '\(editBuffer.draft.displayName)' "
                             + "(\(editBuffer.draft.id), image generator): \(error.localizedDescription). "
                             + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
                             + "unchanged; the user's edits are still on screen but not on disk."
                         )
-                        // ⚠️ register B17 — clear on FAILURE too. `saveAdvisories` was assigned
-                        // only in the `do` branch and never reset, so a banner from an earlier
-                        // successful save stayed on screen reading "Saved — one thing worth
-                        // knowing" while an error toast reported that this write did not happen.
-                        // An advisory describes the state of a profile that WAS saved; after a
-                        // failure it describes nothing that exists.
+                        // Clear on failure too: an advisory describes a profile that was saved,
+                        // so a stale banner would contradict the error toast.
                         saveAdvisories = []
                         toastManager.show(error.localizedDescription, style: .error)
                     }
@@ -723,9 +652,7 @@ private struct Flux2ModelPickerView: View {
                 }
             }
             .pickerStyle(.menu)
-            // ⚠️ register B34 — the second copy of the snap rule lived here and is DELETED, not
-            // rewritten. `snapToValidFlux2Model()` in the host owns it, runs on the same appear,
-            // and now logs. Two copies of a rule is how this defect reached six pickers.
+            // The Flux2 snap rule lives only in the host's `snapToValidFlux2Model()`; do not duplicate it here.
 
             // VRAM / memory info for the currently selected model
             if let model = selectedFlux2Model {

@@ -4,21 +4,7 @@
 //  ComposerIMETests.swift
 //  DevgenticTests
 //
-//  C1 (composer audit, 2026-07-18): the composer had ZERO marked-text handling —
-//  `grep hasMarkedText|markedRange|unmarkText|inputContext` over the whole ChatInput
-//  cluster returned nothing. `CustomNSTextView.keyDown` intercepted Return and the arrow
-//  keys unconditionally, so while an input method had text in composition:
-//    • Return SENT the half-composed message instead of confirming the IME candidate;
-//    • Up/Down hijacked candidate navigation for suggestions / query history.
-//  That made the composer effectively unusable in Japanese, Chinese and Korean.
-//
-//  Fix: `keyDown` defers entirely to AppKit while `hasMarkedText()` is true.
-//
-//  These tests drive the REAL keyDown with a synthesized key event, after putting the
-//  view into composition via `setMarkedText` (the same NSTextInputClient entry point an
-//  IME uses). Each case is paired with a CONTROL that asserts the key still works
-//  normally when nothing is being composed — without that pairing, "commit didn't fire"
-//  would pass even if the harness were simply broken.
+//  Created by Raj Singh.
 //
 
 import XCTest

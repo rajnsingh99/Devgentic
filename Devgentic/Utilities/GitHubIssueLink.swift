@@ -4,21 +4,15 @@
 //  GitHubIssueLink.swift
 //  Devgentic
 //
-//  Links into the public issue forms in `.github/ISSUE_TEMPLATE/`, pre-filled with the app version,
-//  macOS version and Mac model — the report path that needs no diagnostic bundle.
-//
-//  ⚠️ THE QUERY KEYS ARE THE FORMS' FIELD `id`s. GitHub pre-fills an issue form field whose id
-//  matches a query parameter, and silently ignores one that matches nothing — so renaming
-//  `version`, `macos` or `hardware` in a template stops the pre-fill with no error anywhere.
-//
-//  ⚠️ PUBLIC DESTINATION. Only the app build, OS and hardware model travel in the URL — never
-//  anything about the user, their files, models or configuration. The user reviews the issue
-//  before submitting; nothing is sent by opening the link.
+//  Created by Raj Singh.
 //
 
 import AppKit
 import Foundation
 
+// Why: the query keys must equal the forms' field ids, or GitHub silently skips the pre-fill.
+/// Builds links to the public issue forms, pre-filled with the app version, macOS version and Mac model.
+/// Only those three values travel in the URL; nothing is sent by opening the link.
 enum GitHubIssueLink {
 
     enum Kind {

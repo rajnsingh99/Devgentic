@@ -4,41 +4,14 @@
 //  CodeSystemPrompt.swift
 //  Devgentic
 //
-//  Production-grade system prompt for the Code interface.
-//  Baked-in — not user-editable (unlike agent profile instructions).
-//
-//  Dialect-aware: emits an XML variant for Anthropic (Claude's trained
-//  preference) and a markdown variant for every other provider.
-//
-//  ⚠️ ONE SOURCE (phase 4 of the project-memory redesign, 2026-10-06). The content is the
-//  `sections` list below, rendered four ways: markdown or XML, full or compact. The two formats
-//  used to be hand-copied 140-line strings, and they had drifted — the XML copy never got the
-//  background-task guidance. A rule now exists in every wording or in none.
-//
-//  The workflow is SDLC-shaped: decide whether the project is needed at all, understand, plan
-//  (multi-step only), change, verify, report. Rules added from the 2026-10-06 device runs:
-//  never edit a file you have not seen (T2/T7 edited files that did not exist), never repeat a
-//  call with the same arguments (T3/T4 looped), and state only what a tool showed you (T5
-//  reported line counts for files it never read).
-//
-//  `Wording.compact` is for tiny and small models: the SAME rules in fewer words — the full prompt
-//  is ~2K tokens of a 32K window before any tool schema. Tier picks wording, never rules.
-//
-//  Design decisions (G8 / Path A):
-//  - Tool DESCRIPTIONS are no longer embedded in the prompt — they travel
-//    via the native tool-calling schema sent through the API. Keeps the
-//    context window lean and avoids desync between prompt text and schema.
-//  - Only tool WORKFLOW / ORDERING guidance stays in the prompt (which tool
-//    to reach for first, how they combine), since that's behaviour not
-//    captured by per-tool descriptions.
-//  - The project's own knowledge — `AGENTS.md` and the learned memory in
-//    `.devgentic/memory/` — is NOT part of this stored prompt. It is read from
-//    disk when each run starts (`projectKnowledgeSection`), so an edit to either
-//    reaches the next run without rewriting the profile.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The baked-in (not user-editable) system prompt for the Code interface.
+/// Renders one `sections` list as an XML variant for Anthropic or a markdown variant for other providers,
+/// in full or `Wording.compact` form. The project's AGENTS.md and memory are read per run, not stored here.
 enum CodeSystemPrompt {
 
     /// How much to say. Same rules either way.
@@ -56,15 +29,9 @@ enum CodeSystemPrompt {
         }
     }
 
-    /// Generates the production system prompt optimized for the target provider.
-    ///
-    /// - Parameters:
-    ///   - projectPath: Absolute project root path.
-    ///   - projectName: Last path component of the project directory.
-    ///   - currentDate: Formatted date string injected as an environment fact.
-    ///   - apiProvider: The LLM provider. Anthropic receives the XML variant;
-    ///                  every other provider receives the markdown variant.
-    ///   - wording: `.compact` for small models — see `Wording`.
+    /// Generates the production system prompt for the target provider.
+    /// Anthropic receives the XML variant, every other provider the markdown variant; `.compact` wording is for small
+    /// models. `currentDate` is injected as an environment fact.
     static func production(
         projectPath: String,
         projectName: String,
@@ -81,12 +48,8 @@ enum CodeSystemPrompt {
 
     // MARK: - Project knowledge (read per run)
 
-    /// The project's own knowledge, appended to the stored prompt when a run starts: the
-    /// repository's `AGENTS.md`, then the learned memory listing. Nil when the project has neither.
-    ///
-    /// Read from disk on every run rather than stored with the prompt, so an edit to `AGENTS.md`
-    /// or a `remember` in the previous conversation is in the very next one, and the profile row
-    /// is not rewritten each time either changes.
+    /// The project's own knowledge: the repository's `AGENTS.md`, then the learned memory listing. Nil when neither exists.
+    /// Read from disk on every run, so an edit to `AGENTS.md` or a `remember` shows up in the very next conversation.
     static func projectKnowledgeSection(
         agentsInstructions: String?,
         memoryListing: String?,
@@ -112,10 +75,9 @@ enum CodeSystemPrompt {
         return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
     }
 
-    /// This project's knowledge as a run is given it — its own prompt layer, NOT appended to the
-    /// stored prompt. `PromptBuilder` renders it last in the system message (layout B): a memory
-    /// saved or a stale mark flipping by an edit changes only this section, so everything above
-    /// it — the Code prompt, the tools — stays a reusable prefix for the next request.
+    /// This project's knowledge as a run is given it, as its own prompt layer rather than part of the stored prompt.
+    /// `PromptBuilder` renders it last in the system message, so a memory change alters only this section and the Code
+    /// prompt and tools above it stay a reusable prefix for the next request.
     static func projectKnowledge(forProject projectPath: String, apiProvider: ApiProvider) -> (section: String?, memoryEntries: Int) {
         let store = ProjectMemoryStore(projectPath: projectPath)
         let section = projectKnowledgeSection(

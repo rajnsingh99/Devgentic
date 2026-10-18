@@ -4,8 +4,7 @@
 //  OrbAmbientAnnouncementTests.swift
 //  DevgenticTests
 //
-//  [Phase 6 · F3] Pins the four silence rules. This is the only Orb feature that speaks
-//  UNPROMPTED, so the tests that matter are the ones asserting it stays quiet.
+//  Created by Raj Singh.
 //
 
 import XCTest

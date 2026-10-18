@@ -2,25 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RemoteWindowIndependenceTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  A remote message runs in its own conversation and leaves the Mac window alone.
-//
-//  ⚠️⚠️ WHAT THIS REPLACED. `submitRemoteMessage` assigned `vm.selectedConversationID` on every
-//  remote turn, so a message arriving while the user worked elsewhere yanked the window to it —
-//  clearing the web-search toggle and repointing the app-global composer profile, the exact write
-//  `ChatOpsHosting` documents as forbidden ("exposed READ-ONLY on purpose: a remote write would
-//  retarget the local user's composer").
-//
-//  ⚠️ THE NAVIGATION WAS NEVER LOAD-BEARING FOR ROUTING. Everything on that path is keyed by the
-//  passed `conversationID`, and the mirror replies to the session's own chat id. The ONLY thing
-//  that depended on the selection was one unguarded UI insert, whose comment read "the conversation
-//  is now guaranteed to be selected" — the window was being moved to manufacture that guarantee.
-//
-//  ⚠️ THESE ARE DRIFT TESTS OVER REAL SOURCE, not behavioural ones, and the reason is LIFE-6: no
-//  test may construct `MainApplicationViewModel`, because doing so runs `ChatOpsCoordinator.bootstrap()`
-//  and opens real Telegram/Discord/Slack connections from the test host. Until that seam exists this
-//  is what can fail when the guard is removed, and it is strictly better than nothing.
+//  Created by Raj Singh.
 //
 
 import XCTest

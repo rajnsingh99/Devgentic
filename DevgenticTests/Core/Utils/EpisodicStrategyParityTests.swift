@@ -4,15 +4,7 @@
 //  EpisodicStrategyParityTests.swift
 //  DevgenticTests
 //
-//  The three episodic emitters each hand-rolled their own turn rendering, and the copies
-//  drifted. `buildHybridHistoryString`'s inline branch is commented "same format as
-//  buildRecentHistoryString" and was not: no `<effect>`, and `<params>` emitted in
-//  Dictionary order instead of sorted. Separately, hybrid returned "" for an empty
-//  post-checkpoint history and `buildPointerHistoryString` discards the checkpoint summary
-//  outright — both throwing away the `<compacted_context>` that `buildRecentHistoryString`
-//  preserves.
-//
-//  These pin the parity contract so the strategies cannot drift apart again.
+//  Created by Raj Singh.
 //
 
 import XCTest

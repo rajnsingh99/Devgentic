@@ -4,20 +4,7 @@
 //  RenderPipelineViewDecisionTests.swift
 //  DevgenticTests
 //
-//  The decisions behind three ContentBlockView/CodeBlockView defects
-//  (Chat_Production_Readiness_Fresh), each extracted out of the view's `body` so it can be
-//  driven directly:
-//
-//   • CF-5 — the inline "Viewer" button opened tabs with no origin identity, so dedup fell
-//     through to exact-code equality and a block opened mid-stream, then again once it had
-//     grown, left a duplicate tab holding the truncated fragment.
-//
-//   • CF-6 — a file-reference tap whose file was gone did nothing visible; the failure was
-//     a log line only, under a comment claiming parity with the timeline row's explicit
-//     failure surface.
-//
-//   • CF-7 — a markdown image naming a local path always rendered "Failed to load image":
-//     `URL(string:)` yields a SCHEME-LESS URL and AsyncImage loads through URLSession.
+//  Created by Raj Singh.
 //
 
 import XCTest

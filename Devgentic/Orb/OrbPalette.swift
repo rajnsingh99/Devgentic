@@ -4,13 +4,13 @@
 //  OrbPalette.swift
 //  Devgentic
 //
-//  [Orb MVP] The HUD's hologram look. Deliberately theme-independent: the
-//  overlay is always a dark "holographic" surface regardless of app theme, so the
-//  palette is fixed rather than drawn from the Theme protocol.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The Orb HUD's hologram look: a fixed palette, independent of the app theme, since the overlay is
+/// always a dark holographic surface.
 enum OrbPalette {
 
     /// Signature hologram cyan.

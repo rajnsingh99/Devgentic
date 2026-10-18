@@ -4,10 +4,7 @@
 //  BinaryAttachmentTests.swift
 //  DevgenticTests
 //
-//  The `@` picker offered `out/…/January2026.class`, auto-focused it ahead of the
-//  `.java`, and the send path dropped it with "Couldn't read — try re-attaching".
-//  Covers the three layers of that fix: the suggestion filter, the binary probe and
-//  the send-time error.
+//  Created by Raj Singh.
 //
 
 import XCTest

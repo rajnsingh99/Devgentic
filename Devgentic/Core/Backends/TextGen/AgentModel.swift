@@ -2,16 +2,15 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  AgentModel.swift
-//  Devgentic5
+//  Devgentic
 //
-//  Created by Raj Singh on 02/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 
 /// Lightweight result container for parallel tool execution within a single ReAct iteration.
-/// Replaces the now-removed CognitiveObservation, which was coupled to ObservationMemoryStore.
  struct ToolObservation: Sendable {
     let stepId: Int
     let toolCallId: String  // The unique ID assigned by the provider API (e.g., Claude's tool_use id, OpenAI's call id)
@@ -28,11 +27,8 @@ import Foundation
     let isTerminalSignal: Bool
     let terminalKind: TerminalKind?
 
-    /// Structured failure cause (nil on success). Carries `ToolExecutionResult`'s
-    /// classification across the loop→executor seam so consumers branch on category
-    /// instead of `isSuccess` + string-prefix matching — without it, the executor
-    /// couldn't tell a hallucinated name from an ordinary failure and prompt-banned
-    /// every failed tool (audit gap #2).
+    /// Structured failure cause, nil on success.
+    /// Carries `ToolExecutionResult`'s classification across the loop-to-executor seam so consumers branch on category.
     let failureCategory: ToolFailureCategory?
 
     init(
@@ -73,12 +69,8 @@ enum TerminalKind: Sendable, Codable, Equatable {
 }
 
 /// Mutable parent-span carrier for `APISpyModel`'s per-call telemetry.
-///
-/// The spy is constructed ONCE per run (before the ReAct loop), but each LLM call must
-/// parent under the CURRENT iteration/subtask span — so the executor updates this box as
-/// it opens each step span, and the spy reads it at call time. Access is sequential in
-/// practice (one cognitive loop, one call at a time); the lock makes the handoff safe
-/// anyway so a future concurrent caller degrades to a stale parent, never a torn read.
+/// The executor updates it as it opens each step span, and the spy reads it at call time.
+/// The lock makes the handoff safe; a concurrent caller sees a stale parent, never a torn read.
 final class LLMSpanScope: @unchecked Sendable {
     private let lock = NSLock()
     private var _context: TraceContext?
@@ -95,14 +87,9 @@ final class LLMSpanScope: @unchecked Sendable {
     }
 }
 
-/// Pass-through `LLMProvider` decorator sitting in front of every model on the ReAct,
-/// Planning and Reflexion paths. With a `spanScope`, each BLOCKING model call becomes a
-/// real `.llmCall` span (child of whatever the executor last put in the scope) carrying
-/// per-call duration and token counts in `spans.metadataJSON`, plus the
-/// llmRequest/llmResponse event pair — before this, the agent path had ZERO llmCall
-/// spans and every run's "Calls" count read 0. Streaming methods stay uninstrumented
-/// (the bot path's `chat_call` span covers its one stream); a nil scope is a strict
-/// pass-through, so headless/test constructions record nothing new by accident.
+/// Pass-through `LLMProvider` decorator in front of every model on the ReAct, Planning and Reflexion paths.
+/// With a `spanScope`, each blocking call becomes an `.llmCall` span with duration, tokens and request/response events.
+/// Streaming methods stay uninstrumented; a nil scope is a strict pass-through.
 struct APISpyModel: LLMProvider {
     let inner: any LLMProvider
     var spanScope: LLMSpanScope? = nil
@@ -165,10 +152,8 @@ struct APISpyModel: LLMProvider {
         }
     }
 
-    /// G12: forward the native-turn overload to the inner provider. Without this
-    /// explicit forward, the protocol's default fallback runs — which coerces
-    /// `tool_calls` arrays into Swift description strings via `"\(value)"` and
-    /// breaks the native-turn request shape before it ever reaches the real provider.
+    /// Forwards the native-turn overload to the inner provider.
+    /// The protocol's default fallback would coerce `tool_calls` arrays into description strings.
     func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         try await traced(messageCount: nativeMessages.count, preview: Self.stepPreview, usage: { $0.tokenUsage }) {
             try await inner.generateCognitiveStep(nativeMessages: nativeMessages, tools: tools)
@@ -238,33 +223,22 @@ struct ModernCognitiveStep: Sendable {
     /// `nil` when the provider doesn't report usage (e.g. mid-stream) or parsing failed.
     let tokenUsage: TokenUsage?
 
-    /// The verdict rendered by the parser/validator about this response.
-    /// Drives the terminator's completion vs. retry decision and, on failure,
-    /// carries the typed reason used to build a targeted corrective alert.
-    ///
-    /// Invariants:
-    ///   - `.success`            ⇒ `toolCalls` is non-empty
-    ///   - `.genuineCompletion`  ⇒ `toolCalls` is empty, no parse error
-    ///   - `.failed(reason)`     ⇒ `toolCalls` is empty, retry with reason-specific alert
+    /// The parser/validator verdict about this response; drives the terminator's completion-versus-retry decision.
+    /// `.success` implies non-empty `toolCalls`; `.genuineCompletion` implies empty `toolCalls` and no parse error;
+    /// `.failed(reason)` implies empty `toolCalls` and a reason-specific corrective alert.
     let parseOutcome: ParseOutcome
 
-    /// Provider data that must be sent back VERBATIM on this step's assistant turn, or nil.
-    /// Today: OpenRouter's `reasoning_details`. Reasoning models routed through OpenRouter (Claude,
-    /// Gemini, o-series) need their prior reasoning blocks — some encrypted or signed — returned
-    /// with the tool calls they produced, or the next turn either errors or reasons from scratch.
-    /// Opaque on purpose: nothing here reads it; the tool-turn adapter only echoes it.
+    /// Provider data that must be sent back verbatim on this step's assistant turn, or nil.
+    /// Currently OpenRouter's `reasoning_details`, which reasoning models need returned with their tool calls.
+    /// Opaque: nothing here reads it; the tool-turn adapter only echoes it.
     let reasoningReplay: JSONValue?
 
-    /// The visible reply text when `toolCalls` were RECOVERED from it rather than delivered on a
-    /// structured channel — Ollama's content fallback sets it; nil everywhere else. It lets
-    /// `NativeParsePipeline` tell "a JSON object in the answer that looked like a call" from a real
-    /// structured call to an unknown tool, and hand the WHOLE reply back when it is the answer
-    /// (`reasoning` there is only the prose before the first brace). See bug 3, 2026-10-06.
+    /// The visible reply text when `toolCalls` were recovered from it, not delivered on a structured channel; else nil.
+    /// Lets `NativeParsePipeline` return the whole reply when a JSON object in the answer is the answer, not a call.
     let callsRecoveredFromText: String?
 
-    /// Calls the model made in THIS step that failed validation while siblings passed (CR-52). The
-    /// step is still `.success` (partial progress beats none), and the execution loop reports each
-    /// one to the model as not run, with the reason. Empty whenever every call validated.
+    /// Calls the model made in this step that failed validation while sibling calls passed.
+    /// The step stays `.success`; the loop reports each rejected call to the model as not run, with the reason.
     let rejectedCalls: [RejectedSiblingCall]
 
     init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseOutcome: ParseOutcome? = nil, reasoningReplay: JSONValue? = nil, callsRecoveredFromText: String? = nil, rejectedCalls: [RejectedSiblingCall] = []) {
@@ -281,7 +255,7 @@ struct ModernCognitiveStep: Sendable {
     }
 }
 
-/// A call that failed validation in a step where other calls passed (CR-52).
+/// A call that failed validation in a step where other calls passed.
 struct RejectedSiblingCall: Sendable {
     let call: PendingToolCall
     let reason: ParseFailureReason
@@ -325,24 +299,13 @@ enum AgentState: Codable, Equatable, Sendable {
         case finalizing = "Finalizing"    // Finishing response
         case errorRecovery = "Recovering" // Self-correction
         case preparing = "Preparing"      // RAG: Context retrieval and rewriting
-        /// Admitted nowhere yet — another run holds this conversation.
-        ///
-        /// ⚠️ Without this a queued run is indistinguishable from a slow one: the indicator says
-        /// "Reasoning" while nothing is reasoning, and a message sent from ChatOps while the user
-        /// is typing locally looks like the app has stalled. The label is what turns "it's broken"
-        /// into "it's second in line".
-        ///
-        /// A `ThinkingDetail` rather than a new `AgentState` case: the label is `detail.rawValue`,
-        /// so this renders everywhere without touching a switch, and `EvaluationLogger` counts
-        /// iterations by comparing specific cases — so waiting correctly does not count as one.
+        /// Not yet admitted: another run holds this conversation.
+        /// A `ThinkingDetail` rather than an `AgentState` case, so it renders everywhere and is not counted as an iteration.
         case queued = "Waiting its turn"
-        /// Admitted in its conversation, but another run on this Mac holds the local model (the
-        /// local inference coordinator's lock). Distinct from `.queued` because the remedy is
-        /// different: that run is elsewhere, usually in another conversation. Who holds it is in
-        /// the conversation's advisory banner; this label stays short.
+        /// Admitted in its conversation, but another run on this Mac holds the local model lock.
+        /// Distinct from `.queued` because the holder is usually in another conversation; the advisory banner names it.
         case awaitingLocalModel = "Waiting for the local model"
-        /// Phase 7: held until its user chooses Proceed or Stop (a concern, e.g. memory) — the banner
-        /// above the input says why and counts down to the auto-deny.
+        /// Held until the user chooses Proceed or Stop; the banner above the input says why and counts down to the auto-deny.
         case awaitingConfirmation = "Waiting for you to proceed"
     }
 
@@ -386,18 +349,13 @@ enum AgentState: Codable, Equatable, Sendable {
 }
 
 
-// MARK: - Tool Schemas & Protocols (Migrated)
-
-// NOTE: ToolParameterProperty and ToolParameters are defined in ToolModel.swift
-// to act as a single source of truth across the app.
+// MARK: - Tool Schemas & Protocols
 
 /// Helper utility to concisely construct JSON schemas for tool definitions.
 enum SchemaBuilder {
     
     /// Builds a standard object schema from a list of properties.
-    /// - Parameters:
-    ///   - properties: An array of tuples containing (Key, Type, Description).
-    ///   - required: An array of keys that are mandatory.
+    /// `properties` are (key, type, description) tuples; `required` lists the mandatory keys.
     static func object(properties: [(String, String, String)], required: [String]) -> ToolParameters {
         var propsDict: [String: ToolParameterProperty] = [:]
         for (key, type, desc) in properties {
@@ -427,38 +385,20 @@ protocol AgentToolProtocol: Sendable {
     /// The JSON schema describing the `Arguments` structure to the LLM.
     var parameterSchema: ToolParameters { get }
 
-    /// The logical group this tool belongs to, used to organise the Tool Library.
-    ///
-    /// Declared on the protocol as of 2026-07-31, completing a migration that had been left at
-    /// "Step 3": `NativeToolWrapper` was reading this by `Mirror` REFLECTION, because the
-    /// protocol did not require it. Reflection meant a tool that simply omitted the property
-    /// silently landed in a default bucket, and the compiler could not say so.
-    ///
-    /// Deliberately required rather than defaulted. A default is what made the omission
-    /// invisible in the first place, and every tool has a group it belongs in — including the
-    /// internal ones, which use `"Internal"` and are never surfaced in the Library at all.
+    /// The logical group this tool belongs to, for organising the Tool Library.
+    /// Required rather than defaulted so a tool cannot silently land in a default bucket; internal tools use `"Internal"`.
     var category: String { get }
 
-    /// True when this tool's SUCCESSFUL output may legitimately begin with or contain
-    /// "error"-shaped text — e.g. a shell tool surfacing stderr, or a build-error reader
-    /// whose whole purpose is to return compiler errors. Such tools opt out of
-    /// `ToolExecutionMediator`'s content-sniffing semantic-failure check: a non-throwing
-    /// return is treated as success (#19). Default: false.
+    /// True when this tool's successful output may legitimately contain error-shaped text, such as stderr.
+    /// Such tools opt out of `ToolExecutionMediator`'s content-sniffing failure check. Default: false.
     var outputMayContainErrorText: Bool { get }
 
-    /// The ceiling (seconds) of a time bound this tool ENFORCES ITSELF, or nil. A tool that kills
-    /// its own work at a caller-chosen limit and hands back partial output (the terminal tools'
-    /// `timeout_seconds`) sets this so the dispatcher's per-tool timeout sits just ABOVE it rather
-    /// than cutting in first and discarding that output (HITL Waiting Contract, decision 2).
+    /// The ceiling in seconds of a time bound this tool enforces itself, or nil.
+    /// The dispatcher's per-tool timeout sits just above it so partial output is not discarded.
     var selfBoundCeiling: TimeInterval? { get }
 
-    /// True when this tool's ARGUMENT is executed as code — a shell command, or an AppleScript
-    /// body. Such a tool cannot be bounded by validating its arguments, because the argument IS
-    /// a program; the only real control is whether the profile grants it at all.
-    ///
-    /// Derived from `ToolCapability.arbitraryCodeExecution` by default, so the answer is the
-    /// same one every other part of the app gets and there is nothing to keep in sync. Default:
-    /// false, for the ~40 tools that do a bounded, named thing.
+    /// True when this tool's argument is executed as code, such as a shell command or AppleScript body.
+    /// Derived from `ToolCapability.arbitraryCodeExecution` by default; false for tools that do a bounded, named thing.
     var executesArbitraryCode: Bool { get }
 
     /// The execution block.
@@ -502,13 +442,12 @@ struct AgentTool: Sendable {
     let description: String
     let parameters: ToolParameters
 
-    // [HITL] Phase 1: Sensitivity Flag
     /// If true, the Executor will pause and ask the user before running this tool.
     let requiresConfirmation: Bool
 
     // Per-tool execution limits
-    /// The user's per-tool timeout override in seconds (Tool Library). Nil means the dispatcher's
-    /// default applies — NOT "no limit": every tool call is bounded (HITL Waiting Contract §2).
+    /// The user's per-tool timeout override in seconds.
+    /// Nil means the dispatcher's default applies, not "no limit".
     let timeout: TimeInterval?
     /// Custom message sent to the LLM when this tool times out. Nil uses the default timeout message.
     let timeoutMessage: String?
@@ -583,11 +522,8 @@ extension AgentTool {
         Self.markdownDefinition(name: name, description: description, parameters: parameters)
     }
 
-    /// The same rendering for any (name, description, parameters) triple.
-    ///
-    /// Extracted so the fit gauges can SIZE a tool payload straight from the registry without
-    /// constructing executable tools — measuring the real serializer rather than approximating
-    /// it, the same discipline the history and episodic terms use.
+    /// Renders the markdown definition for any (name, description, parameters) triple.
+    /// Lets the fit gauges size a tool payload from the registry without constructing executable tools.
     static func markdownDefinition(name: String, description: String, parameters: ToolParameters) -> String {
         var def = "### \(name)\n"
         def += "- Description: \(description)\n"
@@ -613,11 +549,8 @@ enum ToolExecutionResult: Sendable, Equatable {
     case timedOut(toolName: String, duration: TimeInterval, message: String? = nil)
     case semanticFailure(toolName: String, output: String) // E.g., null, empty, or explicit CLI errors
     case systemError(reason: String)
-    /// The call was cancelled before it finished — the run was stopped (Stop, conversation close,
-    /// an outer limit). Not a tool failure: it must not count against the tool's reliability or be
-    /// reported as a crash (Timeout inventory D-04; HITL Waiting Contract §3 `stopped`).
-    /// `message`: what the model reads when the call was stopped but the RUN goes on — a command
-    /// the user stopped from the task panel, with the output it printed first (D-17).
+    /// The call was cancelled before it finished because the run was stopped.
+    /// Not a tool failure: it does not count against reliability. `message` is what the model reads when the run goes on.
     case cancelled(toolName: String, message: String? = nil)
 
     /// Media artifacts (empty for non-success cases).
@@ -655,14 +588,8 @@ enum ToolExecutionResult: Sendable, Equatable {
         return false
     }
 
-    /// Maps the result to a structured `ToolFailureCategory` for `.toolFailed` events,
-    /// `EpisodicHistoryFormatter` constraint policy, and episodic-memory retrieval weights.
-    /// Returns `nil` for `.success` — callers should emit `.toolSucceeded` in that case.
-    ///
-    /// `.semanticFailure` is ambiguous at the call site (it covers both preflight argument
-    /// validation errors and tool-side semantic failures like empty output); we distinguish
-    /// via the error string prefix produced by `ToolExecutionMediator.validateRequiredArguments`.
-    /// `.systemError` is similarly split between permission-preflight failures and generic throws.
+    /// Maps the result to a structured `ToolFailureCategory`; returns `nil` for `.success`.
+    /// `.semanticFailure` and `.systemError` are each split by the error string prefix produced by `ToolExecutionMediator`.
     var failureCategory: ToolFailureCategory? {
         switch self {
         case .success:
@@ -693,8 +620,7 @@ enum ToolExecutionResult: Sendable, Equatable {
 // MARK: - Tool Argument Error (Phase 10)
 
 /// A descriptive error thrown when tool argument decoding fails.
-/// Replaces the cryptic Foundation `DecodingError` with an actionable message
-/// that includes the tool name, required parameters, and the raw JSON received.
+/// Includes the tool name, required parameters and the raw JSON received.
 struct ToolArgumentError: Error, LocalizedError {
     let toolName: String
     let detail: String
@@ -704,16 +630,8 @@ struct ToolArgumentError: Error, LocalizedError {
 // MARK: - Execution Input
 
 /// The standard payload required to initialize any Agent Executor.
-///
-/// Derivation contract: code that builds a sub-run input from an existing one
-/// (capability wrappers — Planning subtasks, Reflexion trials) MUST copy-and-
-/// mutate (`var derived = input; derived.field = …`) instead of calling the
-/// initializer with hand-forwarded fields. The init's defaulted parameters mean
-/// the compiler can't flag a forgotten forward, so re-initializing silently
-/// drops every field added after the call site was written (this is how
-/// `userPayload`/`modelTier`/`workflowContext` got lost — audit gap #7).
-/// Properties are `var` solely to enable this; value semantics keep each
-/// executor's copy isolated.
+/// Sub-run inputs must copy and mutate an existing input (`var derived = input`) rather than call the initializer,
+/// since defaulted parameters let a forgotten field be dropped silently.
 struct AgentInput: Sendable {
     var userInput: String
 
@@ -733,43 +651,23 @@ struct AgentInput: Sendable {
     /// (`AgentConnect.codeProjectKnowledge`). Its own layer — see `SemanticContext.projectKnowledge`.
     var projectKnowledge: String? = nil
 
-    /// MCP server-authored guidance on how to drive THIS run's tools, rendered as `<tool_guidance>`.
-    ///
-    /// ⚠️ Separate from `knowledgeBaseContext` on purpose (owner decision 2026-08-20). It used to
-    /// ride the knowledge layer, which conflated two things: knowledge is the USER's reference
-    /// material, this is operating instructions for TOOLS. It also cannot live in
-    /// `<available_tools>` — that section renders only for LEGACY (non-native) flows and holds
-    /// schemas rather than prose.
-    ///
-    /// ⚠️ GATED PER SERVER by the caller: only servers with at least one tool in this run's
-    /// resolved set contribute. Before that gate every connected server's instructions shipped in
-    /// every request — an agent with 3 built-in tools and ZERO MCP tools still received ~2,000
-    /// chars explaining how to drive 41 tools it did not have, and on the workflow path that text
-    /// became its `<task>`.
+    /// MCP server-authored guidance on how to drive this run's tools, rendered as `<tool_guidance>`.
+    /// Separate from `knowledgeBaseContext`; gated per server, so only servers with a tool in this run contribute.
     var toolGuidanceContext: String? = nil
 
-    // NOTE: Used ONLY by ChatExecutor (Bots). ReActAgentExecutor completely ignores this
-    // to enforce the "Zero-History Context" architecture.
+    // Used only by `ChatExecutor` (bots); `ReActAgentExecutor` ignores it.
     var chatHistory: [ChatMessage]
 
-    /// BOT path only: whether prior-turn images in `chatHistory` should be re-attached
-    /// to the request (vision-capable bots). Set by AgentConnect as
-    /// `isBotFlow && profile.supportsVisionInput`. Agents ignore this — they carry
-    /// history images via `nativeHistoryTurns`/the native splice. False for non-vision
-    /// bots (images omitted), which is why switching to a non-vision model is safe.
+    /// Bot path only: whether prior-turn images in `chatHistory` are re-attached to the request.
+    /// Agents ignore it; they carry history images via `nativeHistoryTurns`.
     var botHistoryImagesEnabled: Bool = false
 
     var conversationID: UUID
     var tools: [AgentTool]
     var longTermMemory: any LongTermMemoryStrategy
 
-    /// The project folder a Code session is confined to. Nil for every other profile type, which
-    /// is what leaves chat/agent/workflow runs unconfined — they have no user-chosen root.
-    ///
-    /// ⚠️ Until this existed, `projectPath` reached exactly ONE tool
-    /// (`UpdateProjectContextTool`); every filesystem tool was root-blind, so the folder the user
-    /// picked described the session without constraining it. `WorkspaceBoundary` turns it into a
-    /// boundary the tool loop actually applies.
+    /// The project folder a Code session is confined to; nil for every other profile type, which stay unconfined.
+    /// `WorkspaceBoundary` turns it into a boundary the tool loop applies.
     var workspaceRoot: String? = nil
 
     // Architecture: Split-State (Active State + History)
@@ -780,8 +678,7 @@ struct AgentInput: Sendable {
     var generatorStrategy: any CognitiveGenerator
     var workingMemory: any WorkingMemoryStrategy
 
-    // [Phase 2 Rate Limiting — profile-scoped]
-    // Bucket key derived from (provider + apiKey/baseURL) for profile-scoped rate limiting.
+    // Bucket key derived from provider and apiKey/baseURL for profile-scoped rate limiting.
     var rateLimitKey: String
     var rateLimitCategory: RateLimitCategory
 
@@ -794,36 +691,23 @@ struct AgentInput: Sendable {
     var retryPolicy: RetryPolicy
     var errorRecovery: ErrorRecovery
 
-    /// Resolved three-tier resilience policy (transport/cognitive/loop). Resolved
-    /// ONCE at the AgentConnect seam from provider class + the legacy RetryPolicy;
-    /// minimal constructors (tests, call_agent) get cloud-class defaults derived
-    /// from their `retryPolicy` so the legacy maxRetries linkage is preserved.
+    /// Resolved three-tier resilience policy (transport, cognitive, loop).
+    /// Resolved once at the `AgentConnect` seam; minimal constructors get cloud-class defaults derived from `retryPolicy`.
     var resiliencePolicy: ResolvedResiliencePolicy
 
     /// Whether IC-powered response synthesis is enabled for this run.
     var responseSynthesisEnabled: Bool
 
-    /// Pre-built native history turns for providers that support turn-by-turn conversation.
-    /// Nil when using XML episodic memory (non-native providers).
-    ///
-    /// ⚠️ MUST stay OPTIONAL. `ChatExecutor` derives `isNativeFlow` from
-    /// `nativeHistoryTurns != nil`, and an empty-but-non-nil value is reachable
-    /// (a history of user-only rows yields zero pairs). Letting Swift's natural
-    /// non-optional `[HistoryTurn]` shape win here would silently flip the flag
-    /// for every non-native run.
+    /// Pre-built native history turns for providers that support turn-by-turn conversation; nil for XML episodic memory.
+    /// Must stay optional: `ChatExecutor` derives `isNativeFlow` from `!= nil`, and an empty non-nil value is reachable.
     var nativeHistoryTurns: [HistoryTurn]?
 
     /// [G3/G5] When true, the inner executor skips episode append/close because
     /// the wrapping capability (Planning or Reflexion) owns the episode lifecycle.
     var suppressEpisodeManagement: Bool
 
-    /// When true, the inner executor never pays for LLM (IC) response synthesis.
-    /// Wrapper-run loops (Planning subtasks, Reflexion trials) produce INTERMEDIATE
-    /// output that the wrapper consumes and re-synthesizes, so a per-run IC
-    /// load/generate/unload cycle is pure cost (observed: 6 IC loads in one
-    /// 5-subtask MLX run). The synthesizer's free paths (native fast-path,
-    /// deterministic single-tool formatting) still apply — only the IC call
-    /// degrades to the deterministic builder.
+    /// When true, the inner executor never pays for LLM response synthesis.
+    /// Wrapper loops (Planning, Reflexion) re-synthesize intermediate output themselves; free synthesis paths still apply.
     var suppressLLMSynthesis: Bool
 
     /// Workflow execution context — non-nil when this agent is running as a node
@@ -831,31 +715,20 @@ struct AgentInput: Sendable {
     /// to use the workflow-specific prompt pipeline: no RAG, no history, clean task+input.
     var workflowContext: WorkflowExecutionContext?
 
-    /// [G1 Piece 2] Non-nil ONLY when resuming a parked-HITL run after restart. Carries the
-    /// reconstructed in-flight state (completed tool exchanges + the parked tool + loop bookkeeping)
-    /// rebuilt from the persisted message timeline. ReActAgentExecutor reads this to run the resume
-    /// preamble (seed prefix → replay completed exchanges → re-run the parked tool → continue at N+1);
-    /// every other executor ignores it. Set only for plain-ReAct native runs (the resume trigger
-    /// enforces scope). NOTE per the derivation contract above: capability sub-runs copy-and-mutate
-    /// `input`, so a wrapper would inherit this — out of scope today (resume excludes capabilities),
-    /// but a future capability-aware resume must null it on derived sub-inputs.
+    /// Non-nil only when resuming a parked human-in-the-loop run after restart.
+    /// Carries in-flight state rebuilt from the persisted timeline; only `ReActAgentExecutor` reads it.
+    /// Capability sub-runs copy `input`, so a capability-aware resume must nil this on derived sub-inputs.
     var resumeState: TimelineReconstruction?
 
     // The Trace Context for distributed observability
     var traceContext: TraceContext
 
-    /// Model tier derived from `LLMProviderConfig.modelMetadata?.tier`. Executors
-    /// use this to tune iteration gates / thresholds for weaker models. Nil when
-    /// the upstream config couldn't classify the model (cloud models without
-    /// metadata default to medium behaviour at the call site).
+    /// Model tier derived from `LLMProviderConfig.modelMetadata?.tier`; executors use it to tune gates for weaker models.
+    /// Nil when the model could not be classified.
     var modelTier: ModelTier?
 
-    /// Char budget for the native turn-by-turn conversation payload
-    /// (`liveConversationTurns`). Derived from the model context window at the
-    /// AgentConnect seam (~75% as chars). The ReAct loop compacts the oldest tool
-    /// exchanges once the payload exceeds this, bounding native-path growth that the
-    /// scratchpad budget (which the native path never sends) doesn't constrain.
-    /// 0 = disabled (no compaction) — the default for minimal/test constructors. (#22)
+    /// Char budget for the native turn-by-turn conversation payload (`liveConversationTurns`).
+    /// The ReAct loop compacts the oldest tool exchanges once the payload exceeds it. 0 disables compaction.
     var nativeContextBudgetChars: Int
 
     /// The window (tokens) the model runs under — what a step's REAL prompt count is compared to,
@@ -866,19 +739,12 @@ struct AgentInput: Sendable {
     /// profile's per-tool overrides. Defaults to automatic for minimal/test constructors.
     var cutPolicy: ToolCutPolicy
 
-    /// [Loop Safety] Shared per-run human-interaction memory. Nil (the default) means
-    /// the executor creates its own — the historical behavior. Capability wrappers
-    /// (Planning, Reflexion) set one instance on every derived sub-input so a
-    /// clarification answered once — including the pre-plan clarification — replays
-    /// for identical `ask_user` re-asks across subtasks and trials instead of
-    /// re-raising the banner. Declaration-level default keeps the memberwise init
-    /// and every existing construction site untouched.
+    /// Shared per-run human-interaction memory; nil means the executor creates its own.
+    /// Capability wrappers set one instance on sub-inputs so a clarification answered once replays for identical re-asks.
     var interactionMemory: RunInteractionMemory? = nil
 
-    /// Payload size (chars) at which the native loop asks the user before sending the next request.
-    /// Set by `AgentConnect` for remote endpoints only; 0 (the default) disables the gate, which is
-    /// what local providers and every minimal/test constructor get. See `LargeRequestGate`.
-    /// Declaration-level default for the same reason as `interactionMemory`.
+    /// Payload size in chars at which the native loop asks the user before sending the next request.
+    /// Set for remote endpoints only; 0 disables the gate. See `LargeRequestGate`.
     var largeRequestConfirmChars: Int = 0
 
     /// Resolved input: multimodal if available, text fallback otherwise.
@@ -897,10 +763,8 @@ struct AgentInput: Sendable {
         conversationID: UUID,
         tools: [AgentTool],
         longTermMemory: any LongTermMemoryStrategy,
-        /// ⚠️ Defaulted so every existing construction stays unconfined. Only AgentConnect's
-        /// `.code` arm passes it; a new call site that forgets it silently opts OUT of the
-        /// workspace boundary, which is why `WorkspaceBoundaryTests` asserts the Code path
-        /// supplies it rather than trusting the default.
+        // Why: a call site that forgets it silently opts out of the workspace boundary.
+        /// Defaulted so existing construction stays unconfined; only `AgentConnect`'s `.code` arm passes a root.
         workspaceRoot: String? = nil,
         activeState: SessionGraph? = nil,
         recentHistory: String? = nil,
@@ -969,12 +833,8 @@ struct EnvironmentFacts: Sendable {
     let osVersion: String
     let shellType: String
     let userName: String
-    /// Absolute home directory (e.g. "/Users/alice"). Small local models copy paths
-    /// verbatim from context — without a real absolute path to anchor on they emit
-    /// training-data placeholders like "/path/to/X". Populate with `NSHomeDirectory()`;
-    /// the app is NOT sandboxed (empty Devgentic.entitlements), so it returns the true
-    /// home. Under App Sandbox it would silently return the container path — switch to
-    /// `getpwuid(getuid())` if sandboxing is ever enabled.
+    /// Absolute home directory, e.g. "/Users/alice", so small local models do not invent placeholder paths.
+    /// Populate with `NSHomeDirectory()`; under App Sandbox that returns the container path, so use `getpwuid` instead.
     let homeDirectory: String
     /// The DAY only — it renders in the system message, which must stay byte-identical across a
     /// conversation's messages (layout B). The time of day is `currentTime`.
@@ -984,14 +844,7 @@ struct EnvironmentFacts: Sendable {
     let currentTime: String?
 
     /// The project folder a Code run is confined to, or nil when the run is unconfined.
-    ///
-    /// ⚠️⚠️ The `<environment>` block used to advertise ONLY the home directory — "use absolute
-    /// paths; user folders are under /Users/<name> (Desktop, Documents, Downloads)". For a Code
-    /// run that is a direct instruction to leave the project, sitting a few hundred characters
-    /// below a system prompt that says the project folder is a boundary. Field-observed
-    /// 2026-09-20: with the Code prompt missing entirely, this block was the ONLY path guidance
-    /// the model received, and it walked the home directory. It still contradicted the prompt
-    /// after that was fixed. When this is set the block names the project instead.
+    /// When set, the `<environment>` block names the project instead of advertising the home directory.
     let workspaceRoot: String?
 
     init(osVersion: String, shellType: String, userName: String, homeDirectory: String, currentDate: String, currentTime: String? = nil, workspaceRoot: String? = nil) {
@@ -1048,10 +901,8 @@ struct SemanticContext: Sendable {
     // 9. Prompt layer configuration — controls which optional layers are included
     let promptLayerConfig: PromptLayerConfig
 
-    // 10. Workflow context — full per-node execution context (nil for normal chat).
-    //     When non-nil, `buildStandardMessages` auto-derives the user-message
-    //     prefix from `workflowContext.userMessagePrefix(wrapping:)` so every
-    //     generator inherits workflow behavior with zero per-generator code.
+    // Per-node workflow execution context, nil for normal chat; `buildStandardMessages` derives the message prefix
+    // from it.
     let workflowContext: WorkflowExecutionContext?
 
     // 11. File-context delivery (2026-07 redesign) — defaulted so construction
@@ -1064,93 +915,45 @@ struct SemanticContext: Sendable {
     /// layer: budgeted content (directInjection) or a path manifest (stateless).
     var knowledgeBaseContext: String? = nil
 
-    /// Code runs only: `AGENTS.md` + the memory listing, rendered as the LAST section of the system
-    /// message. Kept out of `instructions` on purpose: it changes whenever a memory is saved or a
-    /// stale mark flips, and anything that changes must sit after everything that doesn't, or the
-    /// next request can reuse none of the prompt (layout B — see `PromptBuilder`).
+    /// Code runs only: `AGENTS.md` plus the memory listing, rendered as the last section of the system message.
+    /// Kept out of `instructions` because it changes between requests and must sit after the stable prompt for cache reuse.
     var projectKnowledge: String? = nil
 
-    /// MCP server-authored guidance on how to drive THIS run's tools, rendered as `<tool_guidance>`.
-    ///
-    /// ⚠️ Separate from `knowledgeBaseContext` on purpose (owner decision 2026-08-20). It used to
-    /// ride the knowledge layer, which conflated two things: knowledge is the USER's reference
-    /// material, this is operating instructions for TOOLS. It also cannot live in
-    /// `<available_tools>` — that section renders only for LEGACY (non-native) flows and holds
-    /// schemas rather than prose.
-    ///
-    /// ⚠️ GATED PER SERVER by the caller: only servers with at least one tool in this run's
-    /// resolved set contribute. Before that gate every connected server's instructions shipped in
-    /// every request — an agent with 3 built-in tools and ZERO MCP tools still received ~2,000
-    /// chars explaining how to drive 41 tools it did not have, and on the workflow path that text
-    /// became its `<task>`.
+    /// MCP server-authored guidance on how to drive this run's tools, rendered as `<tool_guidance>`.
+    /// Separate from `knowledgeBaseContext`; gated per server, so only servers with a tool in this run contribute.
     var toolGuidanceContext: String? = nil
 
-    /// Current-turn image attachments (already vision-gated upstream — nil for a
-    /// non-vision local model). The NATIVE path reads `input.userPayload` directly;
-    /// this field is the only channel by which the LEGACY/dialect generators can see
-    /// current-turn images, since a generator's sole input is this context. Defaulted,
-    /// so text-only construction sites are untouched.
+    /// Current-turn image attachments, already vision-gated upstream; nil for a non-vision local model.
+    /// The only way legacy/dialect generators see current-turn images; the native path reads `input.userPayload`.
     var userImagePayload: Payload? = nil
 
-    /// The span the prompt builder attributes its CONTEXT-injection telemetry to
-    /// (Run-Report Phase 3). Defaulted nil — construction sites that don't carry
-    /// tracing (planning fixtures, tests) stay untouched and emit nothing.
+    /// The span the prompt builder attributes context-injection telemetry to; nil when the site carries no tracing.
     var traceContext: TraceContext? = nil
 
-    /// Every tool name this RUN offers — a superset of `availableTools` whenever an iteration
-    /// withholds a tool from its schema (none does since the reading gate was removed on
-    /// 2026-10-06; the split stays so a future per-iteration filter cannot reopen the hole). Read
-    /// only to RECOGNISE an attempted call (`AttemptedToolCallGrammar`): a broken call to a
-    /// withheld tool is still a call, not an answer. Never offered to the model from here. Defaulted empty — construction sites
-    /// without a run (planning, tests) recognise against `availableTools` alone.
+    /// Every tool name this run offers, a superset of `availableTools` when an iteration withholds a tool from its schema.
+    /// Read only to recognise an attempted call (`AttemptedToolCallGrammar`); never offered to the model. Defaults to empty.
     var runToolNames: Set<String> = []
 }
 
 // MARK: - Agent Failure Reasons
 
-/// Typed failure signals enabling intelligent retry/skip/reroute decisions.
-/// Replaces opaque error strings with structured reasons the workflow layer can act on.
-/// ⚠️ `iterationBudgetExhausted` has a history worth knowing before you touch it.
-///
-/// It was declared in 6c2c0b4 with three switch arms and NEVER CONSTRUCTED — so `isRetryable`
-/// returned `true` for it and `remediation` offered advice that no user could ever see. It was
-/// DELETED as dead on 2026-08-19, then REINSTATED the same day once the investigation showed there
-/// is a real failure that should carry it. The lesson stands: **a case here is only worth having if
-/// something constructs it.** Do not re-add one without a construction site.
-///
-/// WHAT ACTUALLY HAPPENS ON EXHAUSTION (`ErrorRecovery.onIterationExhaustion` in `ReActAgentExecutor`):
-///   • `.synthesizeBestEffort` (the DEFAULT) with usable partial text → `.completedWithWarnings`.
-///     The workflow node stays `.completed`. **Not a failure, and not retried.**
-///   • `.synthesizeBestEffort` with an EMPTY response → `.failed`. This is the case that was missing:
-///     it reaches the workflow node on the DEFAULT policy, so it is not rare.
-///   • `.failHard` → `.failed` always.
-///
-/// ⚠️ Until this was reinstated, both failing paths were classified as `.modelError`, so the node's
-/// remediation read "The model provider returned an error. Check connectivity, credentials, and the
-/// selected model." for a run that had simply run out of steps.
-///
-/// ⚠️ NO `bestEffortOutput` PAYLOAD, deliberately. The old shape had one and it would always have
-/// been nil: a non-empty best effort produces `.completedWithWarnings`, which never becomes a
-/// failure reason at all. A payload that is structurally always nil is the same lie in miniature.
+/// Typed failure signals enabling retry, skip and reroute decisions in the workflow layer.
+/// `iterationBudgetExhausted` comes from `ErrorRecovery.onIterationExhaustion`: an empty best effort or `.failHard`
+/// fails, while usable partial text completes with warnings.
 enum AgentFailureReason: Sendable, Codable, Equatable {
     case iterationBudgetExhausted(iterations: Int)
     case consecutiveParseFailures(count: Int, lastError: String)
     case consecutiveToolFailures(count: Int, lastTool: String, lastError: String)
     case repetitiveActionLoop(action: String, count: Int)
     case executionTimeout(elapsed: TimeInterval, limit: TimeInterval)
-    /// A workflow Gate's own configured timer ran out with nobody answering (HITL Waiting Contract,
-    /// decision B) — the one timer the contract allows on a human. It used to be reported as
-    /// `.modelError`, whose remediation told the author to check their model and credentials.
+    /// A workflow Gate's own configured timer ran out with nobody answering; the one timer allowed on a human.
     case gateExpired(limit: TimeInterval)
     case modelError(provider: String, error: String)
     case cancelled
 
     var isRetryable: Bool {
         switch self {
-        // Retried per the owner's rule (a profile-node failure retries). The agent is
-        // non-deterministic, so a fresh sample may terminate where this one did not — but it is the
-        // most EXPENSIVE reason to retry, since each attempt costs a full iteration budget. The
-        // retry sites log it distinctly for exactly that reason.
+        // Retried like any profile-node failure; the costliest reason, since each attempt spends a full iteration budget.
         case .iterationBudgetExhausted: true
         case .consecutiveParseFailures: true
         case .consecutiveToolFailures: false
@@ -1183,10 +986,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
         }
     }
 
-    /// A short, actionable remediation hint shown to the workflow author when a
-    /// node fails with this reason. `nil` when there's nothing useful to suggest
-    /// (e.g. a user-initiated cancel). Folded into the node's failure detail so
-    /// it surfaces in every run card (Round 2 Phase 4).
+    /// A short, actionable remediation hint shown to the workflow author when a node fails with this reason.
+    /// `nil` when there is nothing useful to suggest, such as a user-initiated cancel.
     var remediation: String? {
         switch self {
         case .iterationBudgetExhausted(let iterations):
@@ -1208,20 +1009,10 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
         }
     }
 
-    /// Best-effort classification of an inner agent's terminal failure TEXT into a typed reason.
-    /// The inner stream's `executionFinished(.failed)` only carries a string, so wrap sites would
-    /// otherwise blanket-classify everything as `.modelError` — mislabelling e.g. the cognitive
-    /// circuit breaker's stale-loop abort and surfacing the wrong remediation ("check credentials"
-    /// for a loop the agent was stuck in). Marker strings match `CognitiveCircuitBreaker`'s abort
-    /// reasons. Falls back to `.modelError` for anything unrecognized.
+    /// Classifies an inner agent's terminal failure text into a typed reason, best effort.
+    /// Marker strings match `CognitiveCircuitBreaker`'s abort reasons; falls back to `.modelError` for anything unrecognized.
     static func classify(agentReasonText text: String, provider: String = "agent") -> AgentFailureReason {
-        // ⚠️ TWO DIFFERENT PHRASINGS, and matching only one covers only one path. The executor's
-        // `.failHard` arm says "Reached maximum allowed steps (N) without completion." while the
-        // `.synthesizeBestEffort` arm's terminalReason says "Reached maximum iterations (N) without
-        // explicit completion". The SECOND is the one that matters most: it is the default policy,
-        // and it reaches here whenever the agent produced no text. Both are matched on the shared
-        // "Reached maximum" prefix plus the parenthesised count, so a reworded message degrades to
-        // `.modelError` rather than silently matching the wrong thing.
+        // Matches two phrasings (`.failHard` and `.synthesizeBestEffort`) on the shared "Reached maximum" prefix plus the count.
         if let iterations = exhaustedIterationCount(in: text) {
             return .iterationBudgetExhausted(iterations: iterations)
         }
@@ -1239,11 +1030,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
         return .modelError(provider: provider, error: text)
     }
 
-    /// The executor's parse-loop stop message (`ReActAgentExecutor`, the "On Parse Failure" limit).
-    ///
-    /// Built HERE, next to `formatCorrectionsExhausted(in:)`, so the classifier reads exactly what the
-    /// executor emits. Without this a workflow node stopped by the limit was classified
-    /// `.modelError`, whose remediation tells the author to check connectivity and credentials.
+    /// Builds the executor's parse-loop stop message (the "On Parse Failure" limit).
+    /// Lives next to `formatCorrectionsExhausted(in:)` so the classifier reads exactly what the executor emits.
     static func formatCorrectionsExhaustedMessage(count: Int, last: String, identicalReplies: Bool) -> String {
         identicalReplies
             ? "\(identicalReplyPrefix)\(count)\(formatStopInfix)\(last)) — likely a parser/dialect mismatch."
@@ -1267,12 +1055,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
         return (count, String(rest[infix.upperBound..<close]))
     }
 
-    /// The iteration count from an exhaustion message, or nil if this is not one.
-    ///
-    /// Pure and total so the parsing is testable without an executor — the same shape as the rest of
-    /// the retry policy work. Returns nil rather than a default count when the number cannot be
-    /// read: a wrong count in a remediation string ("you used all 0 of your steps") is worse than
-    /// falling back to the generic reason.
+    /// Returns the iteration count from an exhaustion message, or nil if this is not one.
+    /// Returns nil rather than a default when the number cannot be read.
     static func exhaustedIterationCount(in text: String) -> Int? {
         guard text.contains("Reached maximum") else { return nil }
         guard let open = text.firstIndex(of: "("),
@@ -1282,13 +1066,8 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
     }
 }
 
-/// Error type wrapping an AgentFailureReason for throwing contexts.
-///
-/// ⚠️ `LocalizedError` is load-bearing. Without it every surface that renders
-/// `error.localizedDescription` — the chat/Code "Response Error" card, the terminal reason, the
-/// trace, a workflow Action node's per-attempt card — showed Foundation's placeholder "The
-/// operation couldn't be completed. (devgentic.AgentExecutionError error 1.)" instead of
-/// "Execution timeout after 30s (limit: 30s)" (Timeout inventory D-11, 2026-09-26).
+/// Error type wrapping an `AgentFailureReason` for throwing contexts.
+/// Conforms to `LocalizedError` so `localizedDescription` shows the reason instead of Foundation's placeholder.
 struct AgentExecutionError: LocalizedError, Sendable {
     let reason: AgentFailureReason
 

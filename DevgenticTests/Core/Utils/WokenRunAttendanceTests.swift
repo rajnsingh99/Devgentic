@@ -4,19 +4,7 @@
 //  WokenRunAttendanceTests.swift
 //  DevgenticTests
 //
-//  A run that a FINISHED PROCESS started has nobody watching it, and the codebase already has one
-//  predicate for that: `WorkflowRunAttendance.canReachAHuman`.
-//
-//  ⚠️⚠️ THE EXPOSURE IS NOT THEORETICAL, and `MessageSource.backgroundTask` alone does not close it.
-//  `SessionToolApprovals` keys its BLANKET autonomous grant on `(conversation, origin)`, so a
-//  surface boundary protects that one. But the per-tool "Allow for this chat" grant is keyed on
-//  `Scope(conversationID:nodeID:)` with NO origin — its only guard is `canReachAHuman`. Left at the
-//  `true` default, a build finishing overnight would spend an approval the user granted while
-//  sitting at the keyboard, with no banner on any surface.
-//
-//  The other two readers are `ToolExecutionLoop`'s WF-SE11 arms: with nobody reachable, `ask_user`
-//  and a tool confirmation are REFUSED with an honest observation instead of parking indefinitely
-//  until a run deadline cancels everything.
+//  Created by Raj Singh.
 //
 
 import XCTest

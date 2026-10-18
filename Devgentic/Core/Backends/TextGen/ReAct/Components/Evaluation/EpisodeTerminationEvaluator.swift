@@ -4,9 +4,7 @@
 //  EpisodeTerminationEvaluator.swift
 //  Devgentic
 //
-//  Pattern-matches a ModernCognitiveStep's `parseOutcome` to decide whether
-//  the executor should continue the loop, exit cleanly, or inject a typed
-//  corrective alert and retry.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -21,19 +19,16 @@ struct EpisodeTerminationEvaluator: TerminationEvaluating {
 
     func evaluate(step: ModernCognitiveStep, currentIteration: Int, maxIterations: Int) -> TerminationStatus {
 
-        // ⚠️ THE ANSWER IS READ BEFORE THE BUDGET (Timeout inventory D-19). The ceiling used to be
-        // checked FIRST, "regardless of outcome": a model that answered on its last allowed step had
-        // that answer replaced by the exhaustion template, and the user was told the agent ran out
-        // of steps when it had finished.
+        // The answer is read before the step budget, so a model that answers on its last allowed step keeps
+        // its answer.
         let isLastStep = currentIteration >= maxIterations
 
         // Primary decision: pattern-match the step's typed parse outcome.
         switch step.parseOutcome {
 
         case .success:
-            // Tool calls were extracted and validated — continue the loop.
-            // On the last step only `final_answer` may run: any other call would execute and its
-            // result could never be read (no step is left to read it), so the budget ends here.
+            // Tool calls were extracted and validated: continue the loop.
+            // On the last step only `final_answer` may run; any other call's result could never be read.
             if isLastStep {
                 if step.toolCalls.contains(where: { $0.name == "final_answer" }) { return .proceed }
                 logger.warning("🛑 Max iterations (\(maxIterations)) reached with \(step.toolCalls.count) tool call(s) pending. CONSEQUENCE: they are NOT run — no step remains to read their results.")
@@ -42,8 +37,7 @@ struct EpisodeTerminationEvaluator: TerminationEvaluating {
             return .proceed
 
         case .genuineCompletion:
-            // Model intentionally produced no tool calls. Exit cleanly with
-            // the model's reasoning as the final thought.
+            // The model produced no tool calls: exit cleanly with its reasoning as the final thought.
             logger.info("🛑 Genuine completion. Agent signaled task completion.")
             return .completed(finalThought: step.reasoning)
 
@@ -52,9 +46,8 @@ struct EpisodeTerminationEvaluator: TerminationEvaluating {
             return .maxIterationsReached
 
         case .failed(let reason):
-            // Parse/validation failure — inject a typed corrective alert and retry.
-            // The executor builds the alert string from the reason using
-            // `ParseFailureReason.modelCorrectiveAlert(availableToolNames:)`.
+            // Parse/validation failure: inject a typed corrective alert and retry.
+            // The executor builds the alert via `ParseFailureReason.modelCorrectiveAlert(availableToolNames:)`.
             logger.warning("🔄 Parse outcome failed: \(String(describing: reason)). Retrying with corrective alert.")
             return .suspectedFormatFailure(reason: reason, reasoning: step.reasoning)
         }

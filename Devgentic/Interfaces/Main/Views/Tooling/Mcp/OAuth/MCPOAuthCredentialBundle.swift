@@ -4,21 +4,13 @@
 //  MCPOAuthCredentialBundle.swift
 //  Devgentic
 //
-//  The single Codable artifact persisted to Keychain at
-//  `MCPSecretScope.oauthBundle` for any OAuth-configured MCP source.
-//
-//  Carries everything we need to:
-//   - attach `Authorization: Bearer <access_token>` on outgoing MCP calls
-//   - know when the access token is about to expire and trigger a refresh
-//   - perform the refresh against the right token endpoint
-//   - re-run a full auth dance if the registration is revoked
-//
-//  Stored as a JSON-encoded blob inside a single Keychain item so we never
-//  fragment OAuth state across multiple Keychain entries (atomic update).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The single Codable artifact persisted to Keychain at `MCPSecretScope.oauthBundle` for an OAuth MCP source.
+/// Carries what is needed to attach the bearer token, detect expiry and refresh; one item keeps updates atomic.
 struct MCPOAuthCredentialBundle: Codable, Hashable, Sendable {
 
     /// Issuer URL the tokens belong to. Pinned so we can detect later
@@ -30,13 +22,9 @@ struct MCPOAuthCredentialBundle: Codable, Hashable, Sendable {
     /// on every refresh request.
     let clientId: String
 
-    /// Set of scopes that were granted (may be a subset of what we asked for).
-    ///
-    /// `var` because a refresh can return a different set. It used to be `let`, which forced
-    /// `MCPOAuthCoordinator.refresh` to REBUILD the whole bundle whenever the scopes moved —
-    /// and a rebuild is a full re-listing of every field, so the one that was forgotten
-    /// (`resource`, the RFC 8707 audience binding) silently vanished. Mutating the fields
-    /// that actually change removes that failure mode rather than patching it.
+    /// Set of scopes that were granted, possibly a subset of those requested.
+    /// A `var` because a refresh can return a different set; refresh mutates changed fields rather than rebuilding the
+    /// bundle.
     var grantedScopes: [String]
 
     /// Loopback (or custom-scheme) redirect URI used for this client. Stored
@@ -50,10 +38,8 @@ struct MCPOAuthCredentialBundle: Codable, Hashable, Sendable {
     /// auth). When nil, expiry triggers a full re-auth instead of refresh.
     var refreshToken: String?
 
-    /// REQUIRED. Wall-clock time when the access token expires. The token
-    /// endpoint returns `expires_in` (seconds-from-now); we compute and
-    /// store an absolute Date so we don't have to remember when the response
-    /// came in.
+    /// Required. Wall-clock time when the access token expires.
+    /// Stored as an absolute `Date`, computed from the token endpoint's `expires_in`.
     var accessTokenExpiresAt: Date
 
     /// OPTIONAL. RFC 7592 registration-management credentials. Stashed so a
@@ -62,25 +48,13 @@ struct MCPOAuthCredentialBundle: Codable, Hashable, Sendable {
     let registrationAccessToken: String?
     let registrationClientUri: URL?
 
-    /// OPTIONAL (RFC 8707). The MCP server URL these tokens were bound to.
-    ///
-    /// Stored so REFRESH can repeat the same `resource` value — omitting it there would
-    /// let a refreshed token silently widen back to a general-purpose audience, undoing
-    /// the binding established at authorization time. Optional so bundles persisted
-    /// before 2026-08-01 keep decoding (they simply carry no audience binding).
+    /// Optional (RFC 8707). The MCP server URL these tokens were bound to.
+    /// Stored so refresh repeats the same `resource`; optional so older bundles without an audience binding keep
+    /// decoding.
     var resource: URL? = nil
 
-    /// OPTIONAL. The MCP server URL the sign-in was performed FOR — the local binding check.
-    /// Register KC-14.
-    ///
-    /// ⚠️ Distinct from `resource`, and deliberately so. `resource` is the protocol-level
-    /// audience we ASKED the authorization server to bind the token to; whether the AS honours
-    /// RFC 8707 is its business. `serverURL` is OUR record of which server entry the sign-in
-    /// targeted, and `MCPOAuthBinding` enforces it locally: a bundle is attached only to the
-    /// URL it was issued for, so editing a server's URL can never replay another host's token.
-    /// Optional so bundles persisted before 2026-09-27 keep decoding (they carry no local
-    /// binding; `MCPOAuthBinding` then fails closed at the EDIT gate and fails open at
-    /// ATTACH — the asymmetry is documented there).
+    /// Optional. The MCP server URL the sign-in was performed for, used by the local binding check.
+    /// Distinct from `resource` (the requested audience); `MCPOAuthBinding` enforces it. Legacy bundles carry none.
     var serverURL: URL? = nil
 
     /// True when the access token is past expiry (or within a 30-second
@@ -96,30 +70,14 @@ struct MCPOAuthCredentialBundle: Codable, Hashable, Sendable {
     }
 }
 
-/// The local enforcement of the KC-14 binding invariant: **an OAuth credential bundle is
-/// attached only to the MCP server URL it was issued for.** All three enforcement points call
-/// THESE functions, never their own URL comparison, so the rule cannot drift apart:
-///
-/// - `shouldAttach` — the runtime attach point (`MCPRuntimeSecrets.materialize`): a misbound or
-///   unparseable target refuses to attach the token. Fails OPEN for legacy bundles (no
-///   `serverURL`), which is compatibility with every bundle persisted before this register;
-///   the EDIT gate below is what retires them.
-/// - `isProvablyMisbound` — the persistence reconcile (`MCPToolStore.persistSecrets`): clears a
-///   stored bundle ONLY on proof of misbinding. Everything that cannot be proven (a legacy
-///   bundle, an undecodable blob, an unparseable URL) is KEPT — this is the same
-///   never-destroy-what-you-cannot-read rule as `MCPSecretStore.clear`.
-/// - `editDecision` — the form gate (`AddMCPServerView.saveAndDismiss`, add and edit alike):
-///   a save whose effective bundle is not bound to the URL being saved is refused with a
-///   re-auth request. This is the fail-closed point, and the only one a user can act on.
+/// Local enforcement of the invariant that an OAuth bundle is attached only to the MCP server URL it was issued for.
+/// `shouldAttach`, `isProvablyMisbound` and `editDecision` (the fail-closed form gate) all call these so the rule
+/// cannot drift.
 enum MCPOAuthBinding {
 
-    /// Normalizes a URL to the key this invariant compares on: scheme and host
-    /// case-insensitive, one trailing slash folded away, and an EXPLICIT port kept —
-    /// `host:8080` and `host:9090` are different servers, and refusing to notice would
-    /// let a token cross between services on one host. Path case is preserved — hosts are
-    /// case-insensitive by RFC 3986 §3.2.2, paths are not. A nil port (the scheme default)
-    /// and an explicitly written default port normalize differently; that asymmetry fails
-    /// closed, which is the correct direction for a binding check.
+    /// Normalizes a URL to the key this invariant compares on: scheme and host case-insensitive, one trailing slash
+    /// folded, explicit port kept.
+    /// Path case is preserved; a nil port and an explicit default port normalize differently, which fails closed.
     static func normalizedServerKey(_ url: URL) -> String {
         var path = url.path
         if path == "/" {
@@ -134,10 +92,7 @@ enum MCPOAuthBinding {
     }
 
     /// Whether `bundle`'s token may be attached to requests for `serverURLString`.
-    /// `nil`/unparseable target with a BOUND bundle is a refusal — we cannot confirm the one
-    /// thing this check exists to confirm. A LEGACY bundle (`serverURL == nil`) attaches:
-    /// refusing it would break every pre-register server on first connect, and the edit gate
-    /// is what requires those to re-auth the first time their URL actually changes.
+    /// A nil or unparseable target with a bound bundle is a refusal; a legacy bundle (`serverURL == nil`) attaches.
     static func shouldAttach(_ bundle: MCPOAuthCredentialBundle, to serverURLString: String?) -> Bool {
         guard let bound = bundle.serverURL else { return true }
         guard let target = serverURLString.flatMap(URL.init(string:)) else { return false }
@@ -161,18 +116,9 @@ enum MCPOAuthBinding {
         case requiresReAuth(MCPUserError)
     }
 
-    /// The form gate for BOTH add and edit. The invariant: the bundle that will be in effect
-    /// after this save must be bound to `newURL`.
-    ///
-    /// - `freshBundle` non-nil means the user completed a sign-in in this form session; it wins
-    ///   over anything stored and must itself be bound to `newURL` (the URL field may have been
-    ///   edited AFTER the sign-in — that is a refusal, not a pass-through).
-    /// - With no fresh sign-in, `storedRead` decides: `.notFound` proceeds (nothing stored, so
-    ///   nothing can be replayed); `.failed` and undecodable JSON refuse (fail closed — we
-    ///   cannot prove what the stored bundle is bound to); a decoded legacy bundle refuses when
-    ///   the URL CHANGED and passes when it did not (a rename on a pre-register server must not
-    ///   be refused over a binding it does not touch — the KC-1 lesson); a bound bundle passes
-    ///   only when its key matches `newURL`.
+    /// The form gate for add and edit: the bundle in effect after the save must be bound to `newURL`.
+    /// A fresh sign-in wins and must itself be bound to `newURL`; otherwise `storedRead` decides, failing closed on
+    /// read failure, undecodable JSON and a legacy bundle whose URL changed.
     static func editDecision(
         isOAuth: Bool,
         newURL: String?,

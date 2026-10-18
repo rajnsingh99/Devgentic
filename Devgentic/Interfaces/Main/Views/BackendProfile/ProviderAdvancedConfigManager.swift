@@ -4,8 +4,7 @@
 //  ProviderAdvancedConfigManager.swift
 //  Devgentic
 //
-//  Shared provider-specific advanced config management used by
-//  BotConfigDetailView and AgentConfigDetailView.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -14,8 +13,7 @@ private let logger = DGLogger(category: "AdvancedConfigSync")
 
 // MARK: - Config Manager
 
-/// Holds the 5 provider-specific local configs and manages the load/sync lifecycle.
-/// Replaces the duplicated @State variables and onChange handlers in Bot/Agent detail views.
+/// Holds the provider-specific local configs and manages their load/sync lifecycle.
 @Observable @MainActor
 final class ProviderAdvancedConfigManager {
     var localOllamaConfig: OllamaAdvancedConfig = .default()
@@ -30,25 +28,15 @@ final class ProviderAdvancedConfigManager {
     var localOpenAICompatibleConfig: OpenAIAdvancedConfig = .default()
     var localMlxConfig: MLXAdvancedConfig = .default()
 
+    // Why: compared, not raced: `.onChange` runs a pass after `load`, so a synchronous flag cannot suppress the
+    // echo.
     /// The exact dictionary `load` most recently produced, per provider.
-    ///
-    /// ⚠️ This replaces an `isLoading` boolean that could NEVER fire. `load` set it true, assigned
-    /// the local config and set it false — all synchronously, in one MainActor turn. SwiftUI runs
-    /// `.onChange` on the *next* update pass, by which point the flag was already false, so the
-    /// write-back it existed to suppress happened on every profile open: the buffer went dirty
-    /// (phantom Save pill), and switching from a profile with custom settings to one whose blob
-    /// failed to decode overwrote the second profile's stored config with `.default()`.
-    ///
-    /// A value baseline survives the deferral because it is compared, not raced.
     @ObservationIgnored private var loadedBaselines: [ApiProvider: [String: JSONValue]] = [:]
 
+    // Why: Ollama `default()` is the strict agent ladder (temp 0.1, seed 42): wrong for a Bot with no stored
+    // config.
     /// Decodes the provider config's `advancedConfiguration` dictionary into the correct local config.
-    ///
     /// - Parameter defaultProfile: whether this panel is hosted in an Agent or a Bot config.
-    ///   ⚠️ Load-bearing for Ollama: `default()` is the AGENT ladder (temperature 0.1, fixed
-    ///   seed 42), so a Bot profile with no stored config used to display — and, on the first
-    ///   edit, persist — settings that make a conversational bot answer every prompt identically.
-    ///   The parameter existed on the settings VIEW but never reached the load path.
     func load(
         from providerConfig: ProviderConfig,
         using profileService: BackendProfileService,
@@ -116,10 +104,8 @@ final class ProviderAdvancedConfigManager {
     }
 
     /// Encodes the current local config for the given provider back to the profile dictionary.
-    ///
-    /// Returns `nil` when the value is byte-identical to what `load` last produced — i.e. when the
-    /// change SwiftUI is reporting is the load itself echoing back, not a user edit. Callers skip
-    /// the write on nil.
+    /// Returns `nil` when the value is byte-identical to what `load` last produced, i.e. the change is `load` echoing
+    /// back, not a user edit. Callers skip the write on nil.
     func encode(for provider: ApiProvider, using profileService: BackendProfileService) -> [String: JSONValue]? {
         guard let encoded = encodeCurrent(for: provider, using: profileService) else { return nil }
         if let baseline = loadedBaselines[provider], baseline == encoded { return nil }
@@ -162,25 +148,16 @@ struct AdvancedConfigSyncModifier: ViewModifier {
             .onChange(of: configManager.localMlxConfig) { _, _ in sync(.mlx) }
     }
 
+    // Why: the discard must be logged, never silent: a provider switch in the same view pass otherwise loses the
+    // edit unseen.
     /// Writes one provider panel's edit back to the profile, or says why it did not.
-    ///
-    /// ⚠️ Register A57. This was seven copies of the same two-clause `guard`, and BOTH clauses
-    /// dropped the user's edit in silence — no log, no toast, no trace. The provider-mismatch arm is
-    /// the one that costs something real: edit the Ollama temperature, switch provider in the same
-    /// view pass, and the pending `.onChange` fires against the new provider, fails the check, and
-    /// the edit is gone. Switching back reloads from the profile and overwrites the local value, so
-    /// there is nothing left to recover.
-    ///
-    /// Discarding is still correct — writing an Ollama parameter set into a profile now configured
-    /// for Anthropic would corrupt the advanced blob, and `advancedConfiguration` holds only the
-    /// ACTIVE provider's dictionary. The defect was never the discard; it was the silence.
+    /// Discards the edit when the active provider differs, since `advancedConfiguration` holds only that provider's
+    /// dictionary.
     private func sync(_ provider: ApiProvider) {
         let activeProvider = providerConfig.wrappedValue.apiProvider
 
-        // ⚠️ Checked BEFORE `encode`, which the original did not do — and `encode` has a side
-        // effect: it advances `loadedBaselines[provider]` when it returns a value. So a mismatched
-        // edit used to move the baseline for a write that never happened, after which returning the
-        // panel to that same value read as "unchanged" and was skipped a second time.
+        // Checked before `encode`, which advances `loadedBaselines[provider]` when it returns a value: a mismatched edit
+        // must not move the baseline for a write that never happened.
         guard activeProvider == provider else {
             logger.notice(
                 "[PROFILE] Advanced-config edit for \(provider.rawValue) arrived while the profile "
@@ -191,9 +168,8 @@ struct AdvancedConfigSyncModifier: ViewModifier {
             return
         }
 
-        // nil here is the ordinary case: the change is `load()` echoing its own assignment back, so
-        // there is nothing to write. A genuine encode FAILURE is logged inside
-        // `BackendProfileService.encodeConfig`, which is the only other way this is nil.
+        // nil here is the ordinary case: the change is `load()` echoing its assignment back. A genuine encode failure is
+        // logged inside `BackendProfileService.encodeConfig`.
         guard let encoded = configManager.encode(for: provider, using: profileService) else { return }
 
         providerConfig.wrappedValue.advancedConfiguration = encoded
@@ -216,11 +192,9 @@ extension View {
 
 // MARK: - Settings View
 
-/// Switches on the provider to render the correct settings view bound to the config manager.
-///
-/// `modelMetadata` is optional and threaded through to provider-specific settings
-/// views that derive parameter bounds from model characteristics (currently only
-/// MLX uses it; cloud and Ollama settings rely on provider-defined ranges).
+/// Switches on the provider to render the matching settings view bound to the config manager.
+/// `modelMetadata` is optional and threaded to views that derive parameter bounds from model characteristics
+/// (currently MLX).
 struct ProviderAdvancedSettingsView: View {
     @Bindable var configManager: ProviderAdvancedConfigManager
     let provider: ApiProvider
@@ -229,15 +203,11 @@ struct ProviderAdvancedSettingsView: View {
     /// MLX and Ollama settings to derive bounds for token-count fields.
     /// Default-nil so callers that don't have the value handy stay compiling.
     let modelMetadata: ModelMetadata?
-    /// Active model name. Used as a secondary fallback to
-    /// `KnownModelContextWindows.lookup` when `modelMetadata.contextWindow` is
-    /// nil — common for Ollama profiles where `/api/show.details` populates
-    /// tier/quant but not the context window itself.
+    /// Active model name; secondary fallback to `KnownModelContextWindows.lookup` when `modelMetadata.contextWindow` is
+    /// nil, common for Ollama profiles, where `/api/show.details` fills tier and quant but not the window.
     let modelName: String?
-    /// Whether this view is hosted in an Agent or Bot config. Drives which
-    /// "Apply Optimal" preset the Ollama view uses (strict agent vs warm chat).
-    /// No default — every callsite must specify so a Bot profile never silently
-    /// inherits agent-strict defaults from a forgotten parameter.
+    /// Whether this view is hosted in an Agent or Bot config; picks the Ollama "Apply Optimal" preset (strict agent vs
+    /// warm chat). No default, so a Bot profile never inherits agent-strict defaults from a forgotten parameter.
     let defaultProfile: OllamaConfigDefaultProfile
 
     init(

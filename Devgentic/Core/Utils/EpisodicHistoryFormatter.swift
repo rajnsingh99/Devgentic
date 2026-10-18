@@ -4,67 +4,7 @@
 //  EpisodicHistoryFormatter.swift
 //  Devgentic
 //
-//  Converts UI chat history (ChatMessage[]) into cognitive state for the agent loop.
-//
-//  Two outputs:
-//  1. SessionGraph — ephemeral state object with episodes, negative constraints, and working memory.
-//     Built fresh per agent invocation from ChatMessage history (never persisted).
-//
-//  2. XML episodic memory string — injected as a user-tier message in the LLM prompt.
-//     Encodes 4 signals per turn:
-//       • recency    — "N turns ago" attribute for temporal weighting
-//       • outcome    — truncated agent response (200 chars) so follow-ups have referent context
-//       • errors     — <error> on failed/denied tool actions
-//       • corrections — <user_correction> when user denied a tool
-//
-//  XML schema:
-//    <episodic_memory>
-//      <recent>
-//        <turn status="completed|partial|failed|cancelled" goal="..." recency="1 turn ago">
-//          <outcome>Truncated agent response</outcome>
-//          <termination>Reason for forced termination (e.g. circuit-breaker abort)</termination>
-//          <action tool="tool_name" status="..." exit="1">
-//            <params key="value" .../>
-//            <error>Error reason (1024 chars — errorCharacterLimit — then a truncation note)</error>
-//            <effect file="X.java" path="/abs/path" added="14" removed="5" ...>diff</effect>
-//          </action>
-//          <user_correction>User denied: tool_name</user_correction>
-//        </turn>
-//      </recent>
-//    </episodic_memory>
-//
-//  `<action status>` is the full `ActionStatus.xmlValue` vocabulary, not a three-value one:
-//    active | success | denied | permission_denied | failed | timeout | invalid_args |
-//    not_found | cancelled
-//  `exit` is the shell COMMAND's exit status and appears only when non-zero. It is separate
-//  from `status` on purpose: the tool succeeded — it ran the command — while the command
-//  itself did not. Collapsing them would abort runs on a `grep` miss.
-//
-//  `<effect>` carries AT MOST ONE of the following markers — never two. They are mutually
-//  exclusive by construction (see `renderEffect`), because each answers a different "what can
-//  I do about this?", and a pair of them would answer it two ways at once:
-//    truncated="true"   the diff BODY hit `diffCharacterLimit` — only ever with a body present
-//    baseline="none"    no pre-write snapshot existed, so the change could not be reconstructed
-//    diff="elided"      a body exists but the aggregate budget dropped it this turn
-//    diff="on_demand"   body withheld; fetch it with get_conversation_history(N)
-//    diff="withheld"    body withheld and NOT fetchable — the profile has no tools this turn
-//  The element is self-closing whenever it has no body, which is every pointer turn.
-//
-//  Not shown above, all emitted by `envelope` / `wrapWithCheckpoint`:
-//    <tool_availability>          when a tool-less profile is handed a tool transcript
-//    <compacted_context checkpoint_turns="N">  a checkpoint summary, preceding <recent>
-//    <recent/>                    self-closing when no turns survive the filter — the
-//                                 post-compaction shape, where the summary is the only history
-//
-//  Status authority: when `ChatMessage.terminalOutcome` is set (modern rows), it
-//  overrides action-derived turn status. This catches the case where every tool
-//  call technically succeeded but the executor force-terminated the run via
-//  circuit breaker or iteration exhaustion. Without the override, those turns
-//  appear as `status="completed"` in the next turn's prompt, falsely teaching
-//  the model that the looping pattern was acceptable.
-//
-//  Ghost Protocol: Failed tool names are collected in SessionGraph.negativeConstraints
-//  and injected into the system prompt to prevent retry within the session.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -85,27 +25,10 @@ struct EpisodicHistoryFormatter {
             .replacingOccurrences(of: "'", with: "&apos;")
     }
 
-    /// The `<effect>` element for one action — what it changed on disk. This is what makes
-    /// "undo that" answerable: without it the model knows it called `write_file` and nothing
-    /// about the result.
-    ///
-    /// `baseline="none"` marks a write whose prior content was never captured (the file was
-    /// over `preWriteSnapshotByteLimit`, or wasn't readable as UTF-8). Its `removed="0"` is a
-    /// PLACEHOLDER, and without the marker the model reads a destructive overwrite of a large
-    /// file as a clean create — and will offer to undo something it cannot reconstruct.
-    ///
-    /// `diff="elided"` marks a measured change whose BODY was dropped to fit the aggregate
-    /// effect budget. It is deliberately not `baseline="none"`: that one means the pre-image
-    /// was never captured, so the change is unrecoverable and `removed="0"` is a placeholder.
-    /// Elided means the opposite — it WAS measured, the counts are real, and the diff is
-    /// still on the timeline row. Spelling both the same way would re-create exactly the
-    /// ambiguity `baseline="none"` exists to remove.
-    ///
-    /// `diff="on_demand"` marks a measured change the POINTER strategy deliberately did not
-    /// inline. Unlike `elided`, the model can still get it: this turn's `<outcome>` names the
-    /// `get_conversation_history(N)` call that returns it.
-    ///
-    /// Internal rather than private so the contract above is testable.
+    // Why: an unmarked placeholder makes a destructive overwrite of a large file read as a clean create
+    /// The `<effect>` element for one action: what it changed on disk, so "undo that" is answerable.
+    /// `baseline="none"`: prior content never captured (`removed="0"` is a placeholder). `diff="elided"`:
+    /// measured, body dropped for budget. `diff="on_demand"`: left for retrieval by the pointer strategy.
     static func renderEffect(_ effect: ActionEffect, diff availability: EffectDiff = .inline) -> String {
         let hasBody = effect.diff != nil
         let carriesBody = hasBody && availability == .inline
@@ -125,39 +48,25 @@ struct EpisodicHistoryFormatter {
         return openTag + ">\n\(xmlEscape(body))\n        </effect>\n"
     }
 
-    /// Whether an `<effect>` body is in the prompt — and if not, what the model can do about
-    /// it. One attribute, mutually exclusive values, because the three cases have different
-    /// action implications: conflating any two re-creates the ambiguity `baseline="none"`
-    /// exists to remove.
+    /// Whether an `<effect>` body is in the prompt and, if not, what the model can do about it. One attribute
+    /// with mutually exclusive values, because the cases carry different action implications.
     enum EffectDiff {
         /// The body is rendered inline.
         case inline
         /// Measured, dropped to fit the aggregate budget. NOT retrievable by the model —
         /// the full diff is on the timeline row, which is a user-facing surface.
         case elided
-        /// Measured, deliberately not inlined by the pointer strategy. Retrievable via the
-        /// `get_conversation_history(N)` call this turn's `<outcome>` names.
+        /// Measured, but not inlined by the pointer strategy; retrievable via the `get_conversation_history(N)` call this
+        /// turn's `<outcome>` names.
         case onDemand
-        /// Measured, but this profile has NO TOOLS — a diff is a revert instrument, and a
-        /// profile that cannot call `write_file` cannot act on one. Distinct from `elided`
-        /// (which means the budget dropped it) because the reason is permanent for this turn,
-        /// and from `on_demand` (which promises a retrieval) because there is no tool to
-        /// retrieve with. The counts and path still render: "what did you change?" stays
-        /// answerable, only "undo it" does not.
+        /// Measured, but this profile has no tools: a diff is a revert instrument and a profile that cannot call
+        /// `write_file` cannot act on one. Distinct from `elided` (budget) and `on_demand` (promises a retrieval);
+        /// counts and path still render.
         case withheld
-        /// Measured, but the FILE HAS CHANGED since the write — so the stored diff no longer
-        /// describes it.
-        ///
-        /// ⚠️⚠️ Distinct from every case above because the reason is about the WORLD, not this
-        /// prompt's budget or capabilities. `on_demand` promises "call get_conversation_history(N)
-        /// and you will get this change"; once the file moved, that promise is false. Field-observed
-        /// 2026-09-20: a file was restored underneath a conversation and the record kept advertising
-        /// a retrievable diff, so the model answered "successfully completed in a previous turn" and
-        /// made ZERO tool calls.
-        ///
-        /// ⚠️ The counts and path still render. "What did you change?" stays answerable — only the
-        /// claim that the stored body still matches the file is withdrawn. Same shape as `withheld`,
-        /// different cause.
+        // Why: `on_demand` promises a retrievable change; once the file moved that promise is false and the model answers from
+        // a stale record and makes no tool calls.
+        /// Measured, but the file has changed since the write, so the stored diff does not describe it.
+        /// Counts and path still render; only the claim that the stored body matches the file is withdrawn (like `withheld`).
         case stale
 
         var attribute: String {
@@ -171,16 +80,10 @@ struct EpisodicHistoryFormatter {
         }
     }
 
-    /// Decides whether an effect's file still matches what the write left behind.
-    ///
-    /// ⚠️⚠️ INJECTED, and it must stay injected. The comparison is a `stat`, and this formatter is
-    /// called by `ContextWindowGauge` to SIZE the prompt — on every recompute, including while the
-    /// user types. Putting the syscall inside `renderEffect` would put the filesystem on that path.
-    /// The request builder supplies `.live`; the gauge supplies `.unknown` and does no I/O.
-    ///
-    /// ⚠️ `.unknown` is also the honest answer for an effect with no fingerprint (recorded before
-    /// the field existed), which is why "unknown" renders exactly as it did before this case
-    /// existed rather than guessing either way.
+    // Why: injected, not called in `renderEffect`: the check is a `stat` and the formatter runs on every
+    // `ContextWindowGauge` recompute; the request builder supplies `.live`, the gauge `.unknown` (no I/O)
+    /// Decides whether an effect's file still matches what the write left behind. `.unknown` is also the answer
+    /// for an effect with no fingerprint.
     struct EffectStalenessCheck: Sendable {
         let isStale: @Sendable (ActionEffect) -> Bool
 
@@ -195,33 +98,21 @@ struct EpisodicHistoryFormatter {
         static let unknown = EffectStalenessCheck { _ in false }
     }
 
-    /// Truncates a string to a maximum length, appending "..." if truncated.
-    ///
-    /// Fine for a goal, an outcome or a param — nobody ACTS on those, so "there was more" is
-    /// all the reader needs. Errors get `cappedError` instead; see below.
+    /// Truncates a string to a maximum length, appending "..." if truncated. Fine for a goal, an outcome or a
+    /// param, where "there was more" is all the reader needs; errors use `cappedError`.
     private static func truncate(_ string: String, maxLength: Int) -> String {
         if string.count <= maxLength { return string }
         return String(string.prefix(maxLength - 3)) + "..."
     }
 
-    /// Longest tool-failure text carried into memory.
-    ///
-    /// Was 150 — shorter than most compiler errors and nearly every stack trace, so the model
-    /// routinely saw a clipped first line and adapted to a cause it could not read. Error text
-    /// is the highest-value prose in the blob: it is WHY the agent must do something different,
-    /// and unlike a successful read it cannot be re-derived by calling the tool again.
-    ///
-    /// A quarter of `ActionEffect.diffCharacterLimit`. Bounded in aggregate by the iteration
-    /// cap (15–20 tool calls per turn), so even an all-failing turn carries ~20 KB — the same
-    /// order as a single effect diff, and far less than the diffs a working turn carries.
+    /// Longest tool-failure text carried into memory. Error text is the highest-value prose in the blob: it is
+    /// why the agent must do something different, and unlike a successful read it cannot be re-derived by calling
+    /// the tool again. A quarter of `ActionEffect.diffCharacterLimit`.
     static let errorCharacterLimit = 1_024
 
-    /// Truncation that states what it dropped, matching `ToolExecutionData.cappedOutput`.
-    ///
-    /// The generic `truncate` appends "..." and nothing else. That is a decision input here:
-    /// a silently clipped stack trace makes the model adapt to a cause it never saw, and the
-    /// real error is often several frames down. Naming the loss lets it ask for more instead
-    /// of guessing.
+    /// Truncation that states what it dropped, matching `ToolExecutionData.cappedOutput`. The generic `truncate`
+    /// appends only "..."; naming the loss lets the model ask for more instead of adapting to a cause it never
+    /// saw (real errors are often several frames down).
     static func cappedError(_ text: String) -> String {
         guard text.count > errorCharacterLimit else { return text }
         let dropped = text.count - errorCharacterLimit
@@ -262,12 +153,9 @@ struct EpisodicHistoryFormatter {
 
     // MARK: - Tool Action Classification
 
-    /// Structured classification of a single tool execution, derived from
-    /// `ToolExecutionData.failureCategory` (modern) with a conservative fallback
-    /// for legacy persisted data that pre-dates the category field. Shared
-    /// between `buildGraph` (SessionGraph) and `pairTurns` (XML emitters) so
-    /// both paths classify the same tool failure identically — no more string
-    /// matching on output text in one path and structured enums in the other.
+    /// Structured classification of a single tool execution, derived from `ToolExecutionData.failureCategory`
+    /// with a conservative fallback for persisted data without the category. Shared by `buildGraph` and
+    /// `pairTurns` so both classify a failure identically.
     private struct ActionClassification {
         let status: ActionStatus
         let errorReason: String?
@@ -309,32 +197,26 @@ struct EpisodicHistoryFormatter {
 
     // MARK: - Turn Status Authority
 
-    /// Returns an authoritative turn status when `terminalOutcome` provides one.
-    /// `.failed` and `.cancelled` override action-derived status (those cases lose
-    /// signal otherwise — e.g. a circuit-breaker abort where every tool call
-    /// technically succeeded). `.completed` returns nil so action-level logic can
-    /// still classify partial successes correctly. Nil terminal outcome (legacy
-    /// rows) also returns nil and the caller falls back to action-level derivation.
+    /// Returns an authoritative turn status when `terminalOutcome` provides one: `.failed` and `.cancelled`
+    /// override action-derived status (e.g. a circuit-breaker abort where every call succeeded). `.completed` and
+    /// a nil outcome return nil so the caller derives status from the actions.
     private static func authoritativeStatus(from terminalOutcome: ExecutionOutcome?) -> String? {
         guard let outcome = terminalOutcome else { return nil }
         switch outcome {
         case .failed:    return "failed"
-        // Degraded success — the run stopped early but shipped a best-effort answer.
-        // "partial" tells the model the prior turn's answer may be incomplete without
-        // overstating it as a failure.
+        // Degraded success: the run stopped early but shipped a best-effort answer; "partial" says the answer may be
+        // incomplete without overstating it as a failure.
         case .completedWithWarnings: return "partial"
         case .cancelled: return "cancelled"
-        // HITL Waiting Contract §4: the next turn is told the previous one hit its limit.
+        // The next turn is told the previous one hit its time limit.
         case .timedOut:  return "timed_out"
         case .completed: return nil
         }
     }
 
-    /// Maps an executor `ExecutionOutcome` to the typed `EpisodeLifecycle` used by
-    /// `MemoryEpisode.status`. Returns `.completed` for legacy rows (nil terminal
-    /// outcome) so the SessionGraph rebuild stays backward-compatible with
-    /// messages persisted before terminal outcomes were tracked. Non-nil outcomes
-    /// pass through `EpisodeLifecycle(_:)` for a 1:1 typed mapping.
+    /// Maps an executor `ExecutionOutcome` to the typed `EpisodeLifecycle` used by `MemoryEpisode.status`.
+    /// Returns `.completed` for rows without a terminal outcome; other outcomes map 1:1 through
+    /// `EpisodeLifecycle(_:)`.
     private static func episodeStatus(from terminalOutcome: ExecutionOutcome?) -> EpisodeLifecycle {
         guard let outcome = terminalOutcome else { return .completed }
         return EpisodeLifecycle(outcome)
@@ -404,16 +286,9 @@ struct EpisodicHistoryFormatter {
         return "<episodic_memory>\n\(preamble)\(innerXML)\n</episodic_memory>"
     }
 
-    /// Builds an ephemeral SessionGraph from chat history.
-    ///
-    /// Pairs user↔agent messages into `MemoryEpisode`s, extracts tool executions with
-    /// parsed params and error reasons, and collects failed tool names into `negativeConstraints`
-    /// (Ghost Protocol). The graph is never persisted — ChatMessage[] is the source of truth.
-    ///
-    /// - Parameters:
-    ///   - history: The sanitized array of previous ChatMessages (excluding the current pending query).
-    ///   - sessionID: The current conversation UUID string.
-    /// - Returns: A fully assembled, ephemeral SessionGraph.
+    /// Builds an ephemeral SessionGraph from chat history; it is never persisted (ChatMessage[] is the source of truth).
+    /// Pairs user/agent messages into `MemoryEpisode`s, extracts tool executions, collects failed tool names as constraints.
+    /// `history` is the sanitized previous messages, excluding the current pending query.
     static func buildGraph(from history: [ChatMessage], sessionID: String) -> SessionGraph {
         var episodes: [MemoryEpisode] = []
         var negativeConstraints: Set<String> = []
@@ -440,12 +315,8 @@ struct EpisodicHistoryFormatter {
                 var usedTools: [String] = []
                 var userCorrection: String? = nil
 
-                // Extract tool executions from timeline events.
-                // Ghost Protocol: `data.failureCategory` drives constraint policy directly —
-                // no more string-matching on output text. Only hard-failure categories
-                // (userDenied / permissionRejected / notFound) add the tool name to
-                // `negativeConstraints`; soft failures (timeout / executionThrew / invalidArgs / cancelled)
-                // are recorded in the episode for retrieval but do not ban the tool outright.
+                // Extracts tool executions from timeline events; only hard failures (userDenied / permissionRejected /
+                // notFound) add the tool name to `negativeConstraints`, soft ones are only recorded.
                 for event in message.flattenedTimelineEvents {
                     if case .toolExecution(let data) = event, !data.isExecuting {
 
@@ -485,9 +356,8 @@ struct EpisodicHistoryFormatter {
                         summary = "User query: '\(truncatedUser)' -> Agent executed tools: [\(uniqueTools)]."
                     }
 
-                    // Episode status now reflects the executor's terminal outcome instead
-                    // of being hardcoded to COMPLETED. Legacy rows without a recorded
-                    // terminalOutcome still resolve to COMPLETED via the helper.
+                    // Episode status reflects the executor's terminal outcome; rows without a recorded `terminalOutcome` resolve
+                    // to COMPLETED via the helper.
                     let episode = MemoryEpisode(
                         id: message.id,
                         primaryGoal: userText,
@@ -513,24 +383,12 @@ struct EpisodicHistoryFormatter {
     }
 
     // MARK: - Shared Turn Renderers
-    //
-    // There are exactly TWO ways to render a turn — inline and pointer — and every
-    // strategy is a choice of which to use for which turns. They live here, once.
-    //
-    // Each strategy used to hand-roll its own copy, and the copies drifted:
-    // `buildHybridHistoryString`'s inline branch was commented "same format as
-    // buildRecentHistoryString" while emitting no `<effect>` and unsorted `<params>`,
-    // so a hybrid profile could not answer "undo that" for a write that had just
-    // happened. Fixing that one branch would have left the mechanism that produced it
-    // intact; composing from a single renderer makes the whole class of drift
-    // impossible instead.
+    // There are exactly two ways to render a turn, inline and pointer; every strategy chooses which to use for
+    // which turns, and they live here once so strategies cannot drift apart.
 
-    /// ` exit="N"` for a shell command that returned non-zero, empty otherwise.
-    ///
-    /// This is the whole later-turn fix: the exit code was surfaced in the observation and
-    /// then lost, because successful tool output is deliberately not carried. So on the next
-    /// prompt a failed `swift build` was indistinguishable from a passing one — the model
-    /// could read its own `status="success"` and conclude the build was fine.
+    /// ` exit="N"` for a shell command that returned non-zero, empty otherwise. Surfaces the exit code in later
+    /// prompts, since successful tool output is not carried and a failed `swift build` would otherwise look like
+    /// a passing one.
     private static func exitAttribute(_ action: MemoryAction) -> String {
         guard let code = action.exitCode, code != 0 else { return "" }
         return " exit=\"\(code)\""
@@ -570,22 +428,15 @@ struct EpisodicHistoryFormatter {
                                          answersCarriedNatively: Set<UUID> = []) -> String {
         var xml = turnOpenTag(turn, recency: recency)
 
-        // Image label — names the images the user attached on this turn so the model
-        // can map the re-provided image bytes (attached to the current message) back
-        // to the turn they belong to. Vision profiles only; text turns render nothing.
+        // Image label: names the images the user attached on this turn so the model can map the re-provided image
+        // bytes (attached to the current message) to their turn. Vision profiles only.
         if includeImageNames, !turn.attachedImageNames.isEmpty {
             let names = turn.attachedImageNames.map(xmlEscape).joined(separator: ", ")
             xml += "      <attached_images>\(names)</attached_images>\n"
         }
 
-        // Agent response context — present on every turn so follow-ups
-        // like "delete the first one" can resolve referents.
-        //
-        // ⚠️ EXCEPT when that same answer already rides in full as a native assistant turn
-        // (`answersCarriedNatively`, from `NativeHistoryConverter.buildCarryingProvenance`).
-        // Then `<outcome>` was a 200-char clip of text the model had complete right beside it —
-        // the answer twice, once cut mid-word. `goal` stays: it is what ties these actions to
-        // the question they served.
+        // Agent response context, present on every turn so follow-ups can resolve referents, except when the same
+        // answer already rides in full as a native assistant turn (`answersCarriedNatively`). `goal` stays.
         if let outcome = turn.outcome, !outcomeIsCarriedNatively(turn, answersCarriedNatively) {
             xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
         }
@@ -599,13 +450,8 @@ struct EpisodicHistoryFormatter {
         }
 
         for action in turn.actions {
-            // `xmlValue` covers all 9 ActionStatus cases — an earlier switch collapsed
-            // everything but success/denied into "failed", losing timeouts, permission
-            // rejections, and not-found tools.
-            // `exit` is SEPARATE from `status` on purpose. `status` is whether the TOOL ran;
-            // `exit` is what the COMMAND returned. Merging them would make `grep` with no
-            // match a tool failure, and three of those abort the run via the circuit breaker.
-            // Only non-zero is emitted — a zero exit is the default and costs nothing to omit.
+            // `exit` is separate from `status`: `status` is whether the tool ran, `exit` what the command returned
+            // (merging them would make a `grep` with no match a tool failure). Only non-zero is emitted.
             xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(action.status.xmlValue)\"\(exitAttribute(action))>\n"
 
             // Sorted by key: Dictionary order is seeded per process, so an unsorted
@@ -622,20 +468,11 @@ struct EpisodicHistoryFormatter {
                 xml += "        <error>\(xmlEscape(error))</error>\n"
             }
 
-            // What the action actually changed. This is what makes "undo that"
-            // answerable — without it the model knows it called write_file and
-            // nothing about the result.
-            //
-            // An elided action keeps the ELEMENT and its counts and loses only the diff
-            // body, so the model still knows the file changed and by how much. Dropping
-            // the whole element would read as "nothing happened", which is the failure
-            // `<effect>` was introduced to fix.
+            // What the action actually changed, so "undo that" is answerable. An elided action keeps the element and its
+            // counts and loses only the diff body; dropping the element would read as "nothing happened".
             if let effect = action.effect {
-                // ⚠️ Precedence. `withheld` first: with no tools there is nothing to retrieve
-                // WITH, which is true regardless of the file. `stale` next, because once the file
-                // has moved the stored body no longer describes it — rendering it inline would
-                // hand the model a revert instrument for a state that no longer exists, which is
-                // the same mistake as promising a retrieval. Only then does the budget speak.
+                // Precedence: `withheld` first (no tools, nothing to retrieve with), then `stale` (the stored body does not describe
+                // the file; inlining it would hand the model a revert instrument for a vanished state), and only then the budget.
                 let availability: EffectDiff
                 if !toolsAvailable { availability = .withheld }
                 else if staleness.isStale(effect) { availability = .stale }
@@ -655,27 +492,17 @@ struct EpisodicHistoryFormatter {
         return xml
     }
 
-    /// A turn rendered as a SKELETON: tool names and statuses only, with the outcome
-    /// pointing at `get_conversation_history(index)` for on-demand detail. Params and
-    /// effects are omitted deliberately — that omission is the strategy.
-    ///
-    /// Errors are the standing exception: a failure is a durable consequence, not a
-    /// detail the model can re-derive by looking again.
-    ///
-    /// `toolsAvailable` decides how an effect is marked: `diff="on_demand"` names a retrieval
-    /// the model can perform, so a tool-less profile gets `diff="withheld"` instead — the
-    /// counts still render, only the promise of a fetch is dropped. The parameter has no
-    /// default because a silent one is exactly how both call sites came to make that promise
-    /// to profiles that have no tools to keep it with.
+    // Why: `toolsAvailable` has no default: a silent one made both call sites promise a fetch to profiles that have no
+    // tools to keep it.
+    /// A turn rendered as a skeleton: tool names and statuses only, with the outcome pointing at `get_conversation_history`.
+    /// Params and effects are omitted by design; errors are the standing exception, as a failure is a durable consequence.
+    /// With `toolsAvailable` false, effects are marked `diff=withheld` instead of `on_demand`: counts render, no fetch.
     private static func renderPointerTurn(_ turn: TurnPair, index: Int, recency: String,
                                           toolsAvailable: Bool,
                                           staleness: EffectStalenessCheck) -> String {
         var xml = turnOpenTag(turn, recency: recency)
-        // The retrieval instruction is only true when there is something to retrieve WITH.
-        // Marking the effects `withheld` while this line still said "Call
-        // get_conversation_history(N)" left the blob contradicting itself: the envelope
-        // preface says the profile has no tools this turn, and every turn body told it to
-        // call one. A skeleton that cannot be expanded should say so rather than name a tool.
+        // The retrieval instruction is only true when there is a tool to retrieve with; a skeleton that cannot be
+        // expanded says so rather than naming a tool.
         xml += toolsAvailable
             ? "      <outcome>Call get_conversation_history(\(index)) for details.</outcome>\n"
             : "      <outcome>Summary only — full detail is not retrievable this turn.</outcome>\n"
@@ -695,10 +522,8 @@ struct EpisodicHistoryFormatter {
             if let error = action.errorReason {
                 children += "        <error>\(xmlEscape(error))</error>\n"
             }
-            // A file mutation is a durable consequence, not a detail the model can re-derive
-            // by looking again — the same reason errors are the skeleton's standing
-            // exception. Counts only, ~90 chars: enough to know something changed and that
-            // it is worth asking about. The body comes from `get_conversation_history(N)`.
+            // A file mutation is a durable consequence, like an error. Counts only (~90 chars): enough to know something
+            // changed; the body comes from `get_conversation_history(N)`.
             if let effect = action.effect {
                 // `on_demand` is a PROMISE that get_conversation_history(N) returns this change.
                 // A file that has moved since makes it false — see `EffectDiff.stale`.
@@ -720,21 +545,14 @@ struct EpisodicHistoryFormatter {
         return xml
     }
 
-    /// Wraps rendered turns in the `<episodic_memory>` envelope and applies the checkpoint
-    /// preamble — the single exit for every strategy.
-    ///
-    /// Shared because two strategies used to `return ""` on an empty post-checkpoint
-    /// history BEFORE reaching the wrap. Compaction leaves the checkpoint as the last
-    /// message, so the very next turn filtered to zero turns and threw away the summary
-    /// that had just been computed to stand in for the turns it replaced — and, because
-    /// `AgentConnect` gates `ConversationHistoryTool` on the rendered text, the means to
-    /// fetch it back went with it. An empty history is `<recent/>`, not silence.
+    // Why: returning "" on an empty post-checkpoint history threw away the fresh summary and, since
+    // `AgentConnect` gates `ConversationHistoryTool` on the rendered text, the means to fetch it back
+    /// Wraps rendered turns in the `<episodic_memory>` envelope and applies the checkpoint preamble: the single
+    /// exit for every strategy. An empty history is `<recent/>`, not silence.
     private static func envelope(turnsXML: String, checkpointSummary: String?, compactedTurnCount: Int,
                                  toolsAvailable: Bool = true) -> String {
-        // Without this a tool-less profile reads a full `<action tool="write_file">` transcript
-        // with no schemas to match — the same mimicry pressure that made tool summaries in
-        // assistant turns produce imitated tool calls instead of real ones. The actions are
-        // TRUE history and worth keeping; what was missing was the sentence saying so.
+        // Tells a tool-less profile that the `<action>` transcript is true history: without it, the actions with no
+        // schemas to match pressure the model into imitating tool calls.
         let preface = (!toolsAvailable && turnsXML.contains("<action "))
             ? "  <tool_availability>The actions below are HISTORY from earlier in this conversation. You have NO tools available this turn — do not attempt to call them. File changes show their line counts; the diffs themselves are not carried, so you cannot revert them.</tool_availability>\n"
             : ""
@@ -761,16 +579,9 @@ struct EpisodicHistoryFormatter {
         var totalCount: Int { carriedCount + elidedCount }
     }
 
-    /// Decides which effect diffs must lose their body to fit the prompt.
-    ///
-    /// Walks NEWEST first and stops at the first diff that does not fit — the same
-    /// newest-first, stop-on-overflow rule `NativeHistoryConverter` applies to turn pairs,
-    /// so both history channels trim by one policy. Stopping rather than greedily skipping
-    /// keeps the carried set a contiguous recent window the model can reason about ("I can
-    /// see the last N changes") instead of a scattered subset with holes in it.
-    ///
-    /// Newest-first because "undo that" refers to the most recent write. Only the diff
-    /// BODY is budgeted; the element and its counts always render.
+    /// Decides which effect diffs lose their body to fit the prompt: walks newest first and stops at the first
+    /// that does not fit (the rule `NativeHistoryConverter` applies to turn pairs), keeping a contiguous recent
+    /// window. Only the diff body is budgeted; the element and counts always render.
     private static func applyEffectBudget(to inlineTurns: ArraySlice<TurnPair>, budget: Int?) -> EffectBudgetOutcome {
         var candidates: [(id: UUID, fileName: String, chars: Int)] = []
         for turn in inlineTurns.reversed() {
@@ -816,12 +627,8 @@ struct EpisodicHistoryFormatter {
         )
     }
 
-    /// Episodic memory had NO size observability at all: nothing logged the blob, so a
-    /// context overflow caused by effect growth was undiagnosable from logs. An elision is
-    /// a silent drop, so it is logged at info with its consequence spelled out; the quiet
-    /// case still records the size at debug so growth is visible before it bites.
-    /// Says how many `<outcome>` clips were left out because the native turns carry those
-    /// answers in full. Request path only (a nil correlation is a gauge measurement).
+    /// Logs how many `<outcome>` clips were left out because the native turns carry those answers in full.
+    /// Request path only (a nil correlation is a gauge measurement).
     private static func logCarriedOutcomes(_ inlineTurns: [TurnPair], _ answersCarriedNatively: Set<UUID>,
                                            strategy: String, correlation: String?) {
         guard let correlation, !answersCarriedNatively.isEmpty else { return }
@@ -835,16 +642,14 @@ struct EpisodicHistoryFormatter {
                                           inlineTurns: Int, onDemandEffects: Int, xmlChars: Int,
                                           outcome: EffectBudgetOutcome, correlation: String?,
                                           toolsAvailable: Bool = true) {
-        // No correlation → this render is a MEASUREMENT (the fit gauges build the blob to
-        // size it), not a request. Logging it would put phantom "[EPISODIC] ELIDED …" lines
-        // in the log for prompts that were never sent.
+        // No correlation means this render is a measurement (the fit gauges size the blob), not a request; logging
+        // it would put phantom "[EPISODIC] ELIDED …" lines in the log.
         guard let correlation else { return }
         let tag = "\(correlation) "
         let shape = "\(strategy): \(messages) msg → \(turnsRendered) turn(s), \(xmlChars) chars XML"
 
-        // Rendering nothing is the loudest case, not the quietest: it is the signature of the
-        // post-compaction turn, where the checkpoint is the last message and the filter leaves
-        // no turns behind it. Two strategies used to return "" here and lose the summary too.
+        // Rendering nothing is the loudest case: it is the signature of the post-compaction turn, where the
+        // checkpoint is the last message and the filter leaves no turns behind it.
         guard turnsRendered > 0 else {
             episodicLogger.info("[EPISODIC] \(tag)\(shape) — NO turns rendered. The model sees an empty <recent/>; if a checkpoint exists its <compacted_context> summary is the only history it gets this turn.")
             return
@@ -856,19 +661,16 @@ struct EpisodicHistoryFormatter {
             return
         }
 
-        // Pointer skeletons carry effects too now — counts only, bodies behind the tool. They
-        // are NOT budgeted (no bodies to budget), so reporting them through the budget
-        // outcome alone would log "0 effect(s)" for a turn that recorded twenty file changes.
-        // Hybrid can have both kinds at once, so both are reported.
+        // Pointer skeletons carry effects too (counts only, bodies behind the tool) and are not budgeted, so they
+        // are reported separately from the budget outcome; hybrid can have both kinds.
         var parts: [String] = []
         if outcome.totalCount > 0 {
             let ceiling = outcome.budget.map(String.init) ?? "unbudgeted"
             parts.append("\(outcome.totalCount) inline effect(s) carrying \(outcome.carriedChars)/\(ceiling) diff chars")
         }
         if onDemandEffects > 0 {
-            // The marker these render under depends on whether the profile HAS the retrieval
-            // tool. Hardcoding "on_demand" here logged a promise the blob no longer makes for
-            // tool-less profiles, which is exactly the drift this log exists to catch.
+            // The marker depends on whether the profile has the retrieval tool; hardcoding "on_demand" would log a
+            // promise the blob does not make for tool-less profiles.
             parts.append(toolsAvailable
                 ? "\(onDemandEffects) effect(s) as diff=\"on_demand\" — counts only, bodies via get_conversation_history(N)"
                 : "\(onDemandEffects) effect(s) as diff=\"withheld\" — counts only, and no tool exists this turn to fetch the bodies")
@@ -877,13 +679,11 @@ struct EpisodicHistoryFormatter {
         episodicLogger.debug("[EPISODIC] \(tag)\(shape), \(inlineTurns) inline, \(carried).")
     }
 
-    /// THE turn list `get_conversation_history(N)` numbers — what every pointer skeleton enumerates.
-    ///
-    /// ⚠️⚠️ ONE DEFINITION (readiness CR-11, 2026-10-10). The skeletons numbered the turns AFTER the
-    /// latest checkpoint from 0, while `ConversationHistoryTool` numbered every turn from the start of
-    /// the conversation — compacted rows are never deleted. After one compaction "Call
-    /// get_conversation_history(0)" returned the OLDEST compacted turn, diffs included, and "undo that"
-    /// could revert the wrong file change. The tool now reads this, so the two cannot disagree.
+    // Why: numbering from the latest checkpoint made `get_conversation_history(0)` return the oldest compacted
+    // turn, so "undo that" could revert the wrong change
+    /// The turn list `get_conversation_history(N)` numbers, which every pointer skeleton enumerates. One
+    /// definition numbers every turn from the start of the conversation (compacted rows are never deleted), so
+    /// the skeleton and the tool cannot disagree.
     static func retrievableTurns(from history: [ChatMessage]) -> [TurnPair] {
         turnContext(from: history).turns
     }
@@ -905,21 +705,11 @@ struct EpisodicHistoryFormatter {
     static let recentTurnLimit = 10
     static let hybridInlineCount = 3
 
-    /// The ONE place a history strategy becomes a rendered blob.
-    ///
-    /// `AgentConnect` builds the prompt through this and the fit gauges size the prompt
-    /// through it, so the number the gauge reports IS the payload that ships — not a
-    /// parallel estimate keeping its own copy of the render rules. This file exists because
-    /// copies drift; an estimator would have been a fourth one.
-    ///
-    /// - Parameter correlation: nil for measurement (silent), a `conv:…/trace:…` string on
-    ///   the request path (logs).
-    /// - Important: `history` must be ASCENDING (oldest first). `pairTurns` walks forward
-    ///   matching each user message to the agent reply that follows it, so a descending
-    ///   array — which is what the chat view holds — mispairs every turn.
-    /// - Parameter toolsAvailable: false for a BOT, which `AgentConnect` gives `rawTools = []`
-    ///   and `ChatExecutor` sends `tools: nil`. Its history can still contain a full tool
-    ///   transcript from when the conversation ran under an agent profile.
+    // Why: `history` must be ascending (oldest first): `pairTurns` walks forward, so a descending array (as the chat view
+    // holds) mispairs every turn.
+    /// The one place a history strategy becomes a rendered blob; `AgentConnect` and the fit gauges both build through it,
+    /// so the gauge's number is the payload that ships. `correlation` is nil for measurement (silent).
+    /// `toolsAvailable` is false for a bot, whose history can still contain a tool transcript from an earlier agent profile.
     static func build(strategy: HistoryStrategy,
                       from history: [ChatMessage],
                       includeImageNames: Bool = false,
@@ -928,12 +718,8 @@ struct EpisodicHistoryFormatter {
                       toolsAvailable: Bool = true,
                       staleness: EffectStalenessCheck = .unknown,
                       answersCarriedNatively: Set<UUID> = []) -> String {
-        // EVERY branch forwards `toolsAvailable`. Two of them did not, and because the
-        // builders below it defaulted the flag to true, a tool-less profile silently got the
-        // agent rendering: no `<tool_availability>` preface, full diff bodies inline, and
-        // `diff="on_demand"` effects naming a `get_conversation_history` call it cannot make.
-        // A diff is a revert instrument and the pointer outcome is a fetch instruction —
-        // neither belongs in a prompt for a profile that was sent `tools: nil`.
+        // Every branch forwards `toolsAvailable`: a branch that did not would give a tool-less profile the agent
+        // rendering (full diff bodies, `diff="on_demand"` naming a tool it cannot call).
         switch strategy {
         case .recentHistory:
             return buildRecentHistoryString(from: history, limit: recentTurnLimit,
@@ -965,20 +751,9 @@ struct EpisodicHistoryFormatter {
 
     // MARK: - XML Episodic Memory Builder
 
-    /// Builds an XML episodic memory string for LLM prompt injection.
-    ///
-    /// Each turn encodes 4 signals: recency, outcome, tool errors, and user corrections.
-    /// Tool actions include full parameter recipes so the LLM can replicate or avoid them.
-    ///
-    /// - Parameters:
-    ///   - history: The array of previous ChatMessages.
-    ///   - limit: The maximum number of recent turn-pairs to include (default 4).
-    /// - Returns: An XML `<episodic_memory>` block ready for prompt injection.
-    /// - Parameter includeImageNames: when true (vision profiles), each turn that had
-    ///   attached images renders an `<attached_images>` label so the model can map the
-    ///   re-provided image bytes to the turn they belong to. Left false for non-vision
-    ///   profiles, whose images are omitted — labeling images the model won't receive
-    ///   would be misleading.
+    /// Builds the XML episodic memory for prompt injection: per turn, recency, outcome, errors and corrections.
+    /// - Parameters: limit: max recent turn-pairs; includeImageNames: label attached images, for vision profiles
+    /// only.
     static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 4, includeImageNames: Bool = false,
                                          effectBudget: Int? = nil, correlation: String? = nil,
                                          strategyLabel: String = "recent",
@@ -1016,13 +791,9 @@ struct EpisodicHistoryFormatter {
 
     // MARK: - Pointer History (Skeleton + Tool)
 
-    /// Builds an XML episodic memory string where every turn is a skeleton.
-    /// Outcomes point to `get_conversation_history(INDEX)` for on-demand retrieval.
-    /// Actions include tool name and status only — no params (save tokens).
-    ///
-    /// A `<compacted_context>` preamble still rides along when a checkpoint exists: the
-    /// skeleton replaces DETAIL, not the summary standing in for turns that were
-    /// compacted away. This used to discard the summary outright.
+    /// Builds an XML episodic memory string where every turn is a skeleton: outcomes point to
+    /// `get_conversation_history(INDEX)`, actions carry tool name and status only. A `<compacted_context>`
+    /// preamble still rides along when a checkpoint exists.
     static func buildPointerHistoryString(from history: [ChatMessage], correlation: String? = nil,
                                           strategyLabel: String = "pointer",
                                           toolsAvailable: Bool = true,
@@ -1037,10 +808,8 @@ struct EpisodicHistoryFormatter {
 
         let xml = envelope(turnsXML: body, checkpointSummary: summary, compactedTurnCount: compacted,
                            toolsAvailable: toolsAvailable)
-        // No effect BODIES here by construction, but every mutating action still renders a
-        // counts-only `diff="on_demand"` effect — reporting those through the budget outcome
-        // would log "0 effect(s)" for a conversation that recorded twenty file changes.
-        // Skeletons also grow linearly with conversation length, so the size is worth seeing.
+        // No effect bodies here, but every mutating action still renders a counts-only `diff=on_demand` effect; reporting those
+        // through the budget outcome would log '0 effect(s)' for a conversation that recorded twenty file changes.
         let onDemand = turns.reduce(0) { $0 + $1.actions.filter { $0.effect != nil }.count }
         logEpisodicBudget(strategy: strategyLabel, messages: history.count, turnsRendered: turns.count,
                           inlineTurns: 0, onDemandEffects: onDemand, xmlChars: xml.count,
@@ -1051,17 +820,9 @@ struct EpisodicHistoryFormatter {
 
     // MARK: - Hybrid History (Recent Full + Older Pointers)
 
-    /// Builds an XML episodic memory string with a split strategy:
-    /// - Older turns: pointer skeletons (`renderPointerTurn`, as `buildPointerHistoryString`)
-    /// - Recent turns (last `inlineCount`): full content (`renderInlineTurn`, as
-    ///   `buildRecentHistoryString`) — outcomes, params, errors, and effects
-    ///
-    /// Both segments call the SAME renderers the other two strategies call. The previous
-    /// inline branch was a copy that claimed parity in a comment and had lost `<effect>`.
-    ///
-    /// - Parameters:
-    ///   - history: The array of ChatMessages.
-    ///   - inlineCount: Number of most recent turns to render with full content (default 3).
+    /// Builds an XML episodic memory string with a split strategy: older turns as pointer skeletons, the last
+    /// `inlineCount` turns in full; both use the same renderers as the other strategies.
+    /// - Parameters: inlineCount: most recent turns rendered in full (default 3).
     static func buildHybridHistoryString(from history: [ChatMessage], inlineCount: Int = 3, includeImageNames: Bool = false,
                                          effectBudget: Int? = nil, correlation: String? = nil,
                                          strategyLabel: String = "hybrid",
@@ -1070,11 +831,8 @@ struct EpisodicHistoryFormatter {
                                          answersCarriedNatively: Set<UUID> = []) -> String {
         let (turns, summary, compacted) = turnContext(from: history)
         let pointerCount = max(0, turns.count - inlineCount)
-        // Only the inline segment carries effect bodies, so only it is budgeted — and with no
-        // tools it carries none, because `renderInlineTurn` marks every effect `withheld`
-        // ahead of consulting `elidedActionIDs`. Budgeting anyway would compute an elision set
-        // that changes no output and then log "ELIDED N of M" for bodies that were dropped for
-        // an entirely different, permanent reason. Same gate `buildRecentHistoryString` uses.
+        // Only the inline segment carries effect bodies, so only it is budgeted; with no tools it carries none (every effect is
+        // marked `withheld`), so budgeting would only log a misleading ELIDED count. Same gate as `buildRecentHistoryString`.
         let budgeted = applyEffectBudget(to: turns.dropFirst(pointerCount),
                                          budget: toolsAvailable ? effectBudget : nil)
 
@@ -1118,17 +876,9 @@ struct EpisodicHistoryFormatter {
         /// synthesized from completed/failed tool names to preserve follow-up referents.
         /// This is the PROMPT form: it rides every request, so it stays small.
         let outcome: String?
-        /// The same response UNTRUNCATED — the detail `get_conversation_history(N)` serves
-        /// when the model asks for what the skeleton deliberately withheld.
-        ///
-        /// The tool used to hand back `outcome`, i.e. the identical 200-char clip the prompt
-        /// already carried, so a `pointer` agent could never recover more than 200 characters
-        /// of any answer it had given and a `recentHistory` agent got a round trip that
-        /// returned exactly what it already had.
-        ///
-        /// Falls back to the synthesized outcome for cancelled/empty turns: there is no
-        /// fuller version, and the synthesis (which names the tools that did complete) beats
-        /// the raw placeholder text.
+        /// The same response untruncated: the detail `get_conversation_history(N)` serves when the model asks for
+        /// what the skeleton withheld. Falls back to the synthesized outcome for cancelled or empty turns, which
+        /// beats the raw placeholder text.
         let fullResponse: String
         /// True when the user stopped the agent mid-execution before a response was generated.
         let wasCancelled: Bool
@@ -1156,10 +906,8 @@ struct EpisodicHistoryFormatter {
         var pendingUserImages: [String] = []
 
         for message in history {
-            // ⚠️ SAME RULE AS `NativeHistoryConverter.pairMessages`: a row this build cannot read is
-            // skipped AND clears the pending user turn. The native pairing did this and this one did
-            // not, so one unreadable row shifted every later index between the native skeleton and
-            // `get_conversation_history` (CR-11).
+            // Same rule as `NativeHistoryConverter.pairMessages`: a row this build cannot read is skipped and clears the
+            // pending user turn, so indexes stay aligned between the native skeleton and `get_conversation_history`.
             guard !message.content.isUnrecognised else {
                 pendingUserText = nil
                 pendingUserImages = []
@@ -1194,19 +942,12 @@ struct EpisodicHistoryFormatter {
                     }
                 }
 
-                // Always capture the agent's response as outcome so the model knows
-                // what it told the user — not just which tools ran. Without this,
-                // follow-up references like "delete the first one" have no referent
-                // because the agent can't see what files it previously listed.
+                // Always capture the agent's response as the outcome, so follow-ups like "delete the first one" have a
+                // referent: the model sees what it told the user, not just which tools ran.
                 let responseText = message.content.textContent ?? ""
 
-                // Detect cancellation: the executor emits this placeholder when
-                // the user stops execution mid-session. Modern rows also have
-                // `terminalOutcome == .cancelled`; we OR the two signals so a row
-                // missing one but having the other is still classified correctly.
-                // Single source of truth for the literals (ChatMessage owns them —
-                // resolveFinalizedContent is the producer). `.contains` semantics kept
-                // here deliberately: this CLASSIFIES rows, it doesn't gate indexing.
+                // Detect cancellation from the executor's placeholder or `terminalOutcome == .cancelled`, so a row carrying either
+                // signal is classified correctly; `.contains` is deliberate: this classifies rows, it doesn't gate indexing.
                 let wasCancelled = responseText.contains(ChatMessage.stoppedRunPlaceholder)
                     || message.terminalOutcome == .cancelled
 

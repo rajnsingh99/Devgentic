@@ -4,13 +4,7 @@
 //  FenceFilenameLanguageTests.swift
 //  DevgenticTests
 //
-//  Register render/mc-5 — a fence whose info string IS the filename (```DijkstraSolver.java)
-//  claimed the filename but kept the whole filename as the LANGUAGE. There is no "plain-text
-//  grammar on a lookup miss": the resolver hands every non-trivial token to hljs, whose
-//  undefined result Highlightr turns into a 192-grammar `highlightAuto` on every streaming
-//  flush, and both badges printed the raw token — "dijkstrasolver.java" beside a file chip
-//  reading "DijkstraSolver.java". The language now comes from the extension, as a file-opened
-//  tab's already does.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,39 +4,22 @@
 //  DiscordPairingService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
-/// Manages the pairing flow between the Devgentic app and a Discord channel.
-///
-/// Flow:
-/// 1. User enters bot token in Settings → taps "Validate"
-/// 2. Service validates token via `getCurrentUser()`
-/// 3. Generates a 6-digit PIN → displayed in Settings UI
-/// 4. Starts a temporary Gateway connection waiting for `PAIR <pin>` in any channel
-/// 5. On match: stores channel_id + guild_id, transitions to `.connected`
-/// 6. On timeout (5 min): transitions to `.disconnected`
-///
-/// Note: Unlike Telegram which uses HTTP long-polling, Discord requires a full
-/// WebSocket Gateway connection even for pairing.
+/// Manages the pairing flow between the app and a Discord channel: validates the bot token, shows a 6-digit PIN,
+/// and waits on a temporary Gateway connection for `PAIR <pin>`. On a match it stores channel_id and guild_id and
+/// becomes `.connected`; after a 5-minute timeout it becomes `.disconnected`.
 @Observable @MainActor
 final class DiscordPairingService {
 
-    /// ⚠️⚠️ SHARED, BECAUSE A PAIRING WINDOW OUTLIVES THE VIEW THAT STARTS IT. This was
-    /// `@State private var` in `ChatOpsSettingsView`, so the service died with the pane while its
-    /// `pairingTask` did not — `pollForPairing` is an instance method, so the task retains `self`
-    /// for the full 300-second window and no pairing service has a `deinit`. Clicking Chat, or any
-    /// other settings category, tore the view down (`MainApplicationView` renders the settings
-    /// container inside an `if !router.isShowingChat` gate). Coming back rebuilt a FRESH, idle
-    /// service while `connectionState` — which lives on the shared config — still said
-    /// `.awaitingPairing`, so the PIN card rendered with a Cancel button that cancelled a nil task.
-    /// Starting again then ran TWO windows against one bot token, and the user's correct PIN was
-    /// consumed by whichever poll held the connection — counted as a FAILED attempt against their
-    /// own origin by the orphan. One instance means `cancelPairing()` and `startPairing()` always
-    /// reach the window that is actually running.
+    // Why: a pairing window outlives the settings view, so a per-view instance would orphan its task and allow two
+    // windows on one bot token.
+    /// The shared pairing service instance, so `startPairing()` and `cancelPairing()` always reach the window that is
+    /// actually running.
     static let shared = DiscordPairingService()
 
 
@@ -48,18 +31,9 @@ final class DiscordPairingService {
 
     private var pairingTask: Task<Void, Never>?
 
-    /// A wall-clock watchdog for the pairing window.
-    ///
-    /// ⚠️⚠️ THE DEADLINE CANNOT LIVE INSIDE THE EVENT LOOP, WHICH IS WHERE IT USED TO LIVE ON TWO OF
-    /// THE THREE PLATFORMS. Discord and Slack tested `Date() < deadline` as the first statement of a
-    /// `for await` BODY, so it could only run when the stream yielded — and neither stream emits
-    /// anything periodic (heartbeats and ACKs are consumed internally and yield nothing). On a quiet
-    /// channel the loop simply parked in `next()`: hours later the PIN was still live, the WebSocket
-    /// still open, and the credentials still sitting there with no owning session. Worse, the first
-    /// message to arrive AFTER the deadline was consumed by the expiry check and discarded — so a
-    /// user returning twenty minutes later and typing the correct PIN saw it silently do nothing.
-    /// Telegram got this right by bounding the LOOP (`while … && Date() < deadline`) rather than its
-    /// body; this watchdog gives all three the same guarantee independently of traffic.
+    // Why: the deadline cannot live inside the event loop body: a quiet channel parks `next()` and the PIN would stay
+    // live.
+    /// A wall-clock watchdog for the pairing window, independent of stream traffic.
     private var deadlineTask: Task<Void, Never>?
     private var currentPIN: String?
 
@@ -88,7 +62,7 @@ final class DiscordPairingService {
         config.discordBotToken = botToken
         config.discordConnectionState = .awaitingPairing(pin: pin)
 
-        // ⚠️ THE PIN IS NOT LOGGED — see the Telegram twin.
+        // The PIN is deliberately not logged.
         logger.info("Discord pairing window opened for \(self.pairingTimeout)s.")
 
         armDeadline(pin: pin)
@@ -113,7 +87,7 @@ final class DiscordPairingService {
     func disconnect() async {
         cancelPairing()
 
-        // ⚠️ Register KC-33: capture the credential state BEFORE the reset — see the Telegram twin.
+        // Capture the credential state before the reset, as the Telegram pairing service does.
         let credentialStateBeforeReset = ChatOpsConfigManager.credentialState(
             AppSettings.chatOpsDiscordBotTokenKey, keychain: config.keychain, logger: logger)
 
@@ -168,9 +142,8 @@ final class DiscordPairingService {
                 let attempt = PairingAttemptPolicy.classify(message.content, expectedPIN: pin)
                 guard attempt != .unrelated else { continue }
 
-                // ⚠️ THE AUTHOR, NOT THE CHANNEL. Everyone in a Discord channel shares its id, so
-                // counting per channel would let one member's guesses lock out every other member —
-                // and the pairing user is one of those members.
+                // Count attempts per author, not per channel: members share a channel id, so one member's guesses would lock out
+                // the others.
                 let origin = message.author.id
 
                 if ledger.isBlocked(origin) {
@@ -188,9 +161,8 @@ final class DiscordPairingService {
                     continue
                 }
 
-                // PIN matched — pairing successful
-                // ⚠️ See the Telegram twin: `origin` (the message author's id) is what proved it knew
-                //   the PIN, and a Discord channel id identifies a ROOM, not a person.
+                // PIN matched, pairing successful. `origin` (the message author's id) is what proved knowledge of the PIN; a
+                // channel id identifies a room, not a person.
                 config.discordAuthorizedUserID = origin
                 let channelID = message.channel_id
                 let guildID = message.guild_id
@@ -199,10 +171,7 @@ final class DiscordPairingService {
                 config.discordGuildID = guildID
                 config.discordApplicationID = applicationID
                 config.isDiscordEnabled = true
-                // ⚠️ THE WINDOW IS OVER THE MOMENT IT SUCCEEDS. `PairingWindowExpiry` would no-op anyway —
-                // the state no longer names this PIN — but leaving the watchdog armed keeps a task alive for
-                // the rest of the five minutes and writes a puzzling "no longer the live one" line when it
-                // fires. Disarming here says what actually happened.
+                // The window is over once it succeeds; disarm the watchdog rather than leave a task alive until it fires.
                 deadlineTask?.cancel()
                 deadlineTask = nil
                 config.discordConnectionState = .connected(chatID: Int64(channelID) ?? 0)
@@ -261,13 +230,9 @@ final class DiscordPairingService {
         }
     }
 
-    /// Arms the wall-clock watchdog for this window. See `deadlineTask`.
-    ///
-    /// ⚠️ It CANCELS the polling task rather than trying to unwind it from the outside: cancellation
-    /// is what makes an `AsyncStream`'s `next()` return, which is the only way to get a loop parked
-    /// on a silent channel to move at all. Expiry is then reported here, because the cancelled loop's
-    /// own terminal arm deliberately does nothing when `Task.isCancelled` — it cannot tell a timeout
-    /// from the user pressing Cancel, and `PairingWindowExpiry` is what knows the difference.
+    /// Arms the wall-clock watchdog for this window (see `deadlineTask`). It cancels the polling task so a loop parked
+    /// on a silent channel returns, and reports expiry itself because the cancelled loop cannot tell a timeout from the
+    /// user pressing Cancel.
     private func armDeadline(pin: String) {
         deadlineTask?.cancel()
         let timeout = pairingTimeout

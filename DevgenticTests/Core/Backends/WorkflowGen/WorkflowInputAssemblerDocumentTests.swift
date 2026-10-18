@@ -4,16 +4,7 @@
 //  WorkflowInputAssemblerDocumentTests.swift
 //  DevgenticTests
 //
-//  Pins the 2026-08-15 user decision (WF-OB3): document artifacts are inlined IN FULL — the
-//  4000-char total budget, the per-document split, the silent `break` past budget, and the
-//  "too large" mis-report for an over-share plain-text file are all retired. Fitting the result
-//  is the downstream model's context window, the author's responsibility — the same decision
-//  that made node TEXT unbounded on 2026-08-13.
-//
-//  ⚠️ These construct `.document` MediaArtifacts DIRECTLY. No production code creates one yet
-//  (every producer in the app emits `.image`), so this function is scaffolding for a future
-//  document-producing tool — these tests are what keep the scaffolding matching the decision
-//  until that producer lands.
+//  Created by Raj Singh.
 //
 
 import XCTest

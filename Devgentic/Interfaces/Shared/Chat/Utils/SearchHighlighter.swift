@@ -4,19 +4,13 @@
 //  SearchHighlighter.swift
 //  Devgentic
 //
-//  Single implementation of find-in-conversation match highlighting, shared by
-//  every chat surface (agent bubbles, markdown blocks, user bubbles). Previously
-//  this ~40-line offset-finding + forward-cursor apply pass was copy-pasted into
-//  three views, which had already drifted on the active-match color.
-//
-//  Both passes are O(n): one incremental scan to record character offsets of each
-//  match, then one forward-cursor pass to paint backgrounds. Highlight hues are
-//  injected by the caller (theme tokens) so no surface hard-codes colors — see
-//  `Theme.searchHighlight` / `Theme.searchHighlightActive`.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Find-in-conversation match highlighting shared by every chat surface.
+/// Highlight colours are injected by the caller as theme tokens.
 enum SearchHighlighter {
 
     /// Default hues for the theme-less static entry points (and the test suite).
@@ -31,11 +25,8 @@ enum SearchHighlighter {
         let end: Int
     }
 
-    /// Character offsets of every case-insensitive, non-overlapping occurrence of
-    /// `query` in `text`. Empty when the query is empty or unmatched.
-    ///
-    /// Each `distance(from: searchStart, ...)` measures only the gap since the last
-    /// match, so the whole pass is O(n) rather than O(n·matches).
+    /// Character offsets of every case-insensitive, non-overlapping occurrence of `query` in `text`.
+    /// Empty when the query is empty or unmatched.
     static func matchOffsets(in text: String, query: String) -> [MatchOffset] {
         guard !query.isEmpty else { return [] }
 

@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGRetrievalScopeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Batch 1 of the RAG readiness register:
-//  what conversation-memory retrieval may return for a turn.
-//    RAG-1  — exclude what the request CARRIES IN FULL, not the whole ≤300-row fetch.
-//    RAG-4  — a Redo never retrieves the rejected reply or the turns after it.
-//    RAG-14 — attachments are indexed under (and dated to) the message that carried them.
-//    RAG-15 — this turn's own attachments are never retrieved in their previous version.
-//    RAG-19 — memory is searched with what the user SAID, not the decorated model query.
-//
-//  The WIRING tests drive `BackendOrchestrationService.conversationMemoryContext` — the same
-//  composition the send path calls — through the real indexer, embedder and the test host's
-//  redirected vector store, so they fail if the exclusion is cut from the retrieval path.
+//  Created by Raj Singh.
 //
 
 import XCTest

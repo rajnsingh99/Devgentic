@@ -4,7 +4,7 @@
 //  TelegramListener.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -25,17 +25,9 @@ actor TelegramListener {
     /// Whether the listener is currently polling.
     private(set) var isPolling: Bool = false
 
+    // Why: set before `continuation.finish()` so a consumer reading it as its `for await` ends cannot see a stale nil.
     /// Why the poll loop stopped for good, or nil when it stopped because it was asked to.
-    ///
-    /// ⚠️⚠️ THE STREAM ENDING IS NOT THE SAME EVENT AS THE STREAM DYING, AND NOTHING COULD TELL THEM
-    /// APART. A terminal error `break`s the loop, finishes the continuation and marks the listener
-    /// stopped — byte-identical, from the consumer's side, to `stop()` being called. `ChatOpsBridge`
-    /// therefore logged one `.info` line and flipped `isRunning` for both, and nothing in the app
-    /// ever wrote `ChatOpsConnectionState.error` even though the Settings UI has a red arm waiting
-    /// for it. The result: a revoked or rotated bot token killed remote control for the life of the
-    /// process while the Pairing card kept a green dot and the word "Active", and the only recovery
-    /// was quitting the app. Set BEFORE `continuation.finish()` so a consumer that reads it the
-    /// moment its `for await` ends cannot see a stale nil.
+    /// Lets consumers tell a terminal failure (e.g. a revoked token) from `stop()`, which look identical at stream end.
     private(set) var terminalFailure: String?
 
     init(apiClient: TelegramAPIClient) {
@@ -80,26 +72,13 @@ actor TelegramListener {
                         }
 
                     } catch {
-                        // ⚠️⚠️ [TG-6] THE ORDER OF THESE THREE CHECKS IS THE CONTRACT.
-                        //   1. TERMINAL first — a revoked token must be reported even if the loop is
-                        //      also being torn down, or the Settings pane never learns why it died.
-                        //   2. CANCELLATION second — a deliberate stop is not a failure.
-                        //   3. Backoff last — everything else is transient.
-                        // Reversing 1 and 2 would silently gut the terminal classifiers: a stop that
-                        // races a 401 would exit quietly and the bridge would look stopped rather
-                        // than broken, which is the invisibility those classifiers were added to end.
+                        // The order of these checks is the contract: terminal first (a revoked token must be reported even during teardown),
+                        // cancellation second (a deliberate stop is not a failure), backoff last (everything else is transient).
                         let delay = Self.retryDelay(backoff: await self.getBackoffDelay(), error: error)
                         await self.increaseBackoff()
 
-                        // Check if this is a terminal error — one that retrying cannot clear,
-                        // because it needs the USER to do something.
-                        //
-                        // ⚠️ 409 IS TERMINAL TOO, AND ITS ABSENCE WAS THE QUIETER BUG. Telegram
-                        // answers `getUpdates` with 409 Conflict whenever a webhook is registered on
-                        // the bot or a second client is polling it — neither of which resolves on
-                        // its own. It fell through to the generic arm below and retried at the 60s
-                        // backoff ceiling forever, so the bridge looked alive, burned a request a
-                        // minute, and delivered nothing.
+                        // A terminal error is one retrying cannot clear because it needs the user to act. 409 Conflict is terminal too:
+                        // a registered webhook or a second poller never resolves on its own, and retrying forever delivers nothing.
                         if let apiError = error as? TelegramAPIError,
                            case .apiError(let code, let description) = apiError,
                            let reason = Self.terminalReason(code: code, description: description) {
@@ -108,14 +87,8 @@ actor TelegramListener {
                             break
                         }
 
-                        // ⚠️⚠️ [TG-6] THIS ARM USED TO BE UNREACHABLE FOR A DELIBERATE STOP AND
-                        // REPORTED ONE ANYWAY. `catch is CancellationError` — which sat above this
-                        // block — never matches a cancelled URLSession call: it throws
-                        // `URLError(.cancelled)`, an ordinary error. So `stop()` fell through to the
-                        // line below, which claimed a polling failure and a retry that never
-                        // happened, at a level `DGLogger.shouldPersist` writes into the exported
-                        // diagnostic bundle. Every normal ChatOps shutdown left a false failure in
-                        // the one artefact a field debugger reads.
+                        // A cancelled URLSession call throws `URLError(.cancelled)`, not `CancellationError`, so it is checked here;
+                        // otherwise a normal shutdown would be logged as a polling failure in the exported diagnostic bundle.
                         if RemoteLoopCancellation.isCancellation(error) {
                             await self.logStopped()
                             break
@@ -186,27 +159,18 @@ actor TelegramListener {
         terminalFailure = reason
     }
 
-    /// How long to wait before the next poll after `error`.
-    ///
-    /// ⚠️ D-23 (CO-4): a 429 carries Telegram's own `retry_after`, and the loop ignored it — polling
-    /// again after 1 s into a limit that said 30, which Telegram answers by extending the limit.
-    /// Honoured here, never shorter than the backoff, and sanitised exactly like the provider
-    /// Retry-After (D-09): a non-finite or negative value falls back to the backoff, and nothing
-    /// waits more than an hour.
+    /// Returns how long to wait before the next poll after `error`.
+    /// Honours a 429's Telegram `retry_after`, never shorter than the backoff; non-finite or negative values fall back to
+    /// the backoff and nothing waits more than an hour.
     nonisolated static func retryDelay(backoff: Double, error: Error) -> Double {
         guard let requested = (error as? TelegramAPIError)?.retryAfterSeconds,
               let wait = ProviderErrorClassifier.sanitizedRetryAfter(requested) else { return backoff }
         return max(backoff, wait)
     }
 
-    /// Whether a Telegram API error ends the poll loop, and what to tell the user if so.
-    ///
-    /// Returns nil for anything a retry can clear (network blips, 5xx, 429), which stays on the
-    /// existing backoff.
-    ///
-    /// ⚠️ `nonisolated` and `static` so a test can assert the CLASSIFICATION without standing up a
-    /// listener, an actor hop or a live socket — while the poll loop above still calls this exact
-    /// function, so a test that pins the mapping cannot drift from what production does.
+    /// Returns what to tell the user when a Telegram API error ends the poll loop, or nil for anything a retry can clear
+    /// (network blips, 5xx, 429), which stays on the backoff.
+    /// `nonisolated static` so tests can assert the classification without a listener; the loop calls this same function.
     nonisolated static func terminalReason(code: Int, description: String) -> String? {
         switch code {
         case 401:
@@ -214,8 +178,7 @@ actor TelegramListener {
         case 403:
             return "Telegram refused the bot (403 Forbidden) — it may have been blocked or removed from the chat."
         case 409:
-            // ⚠️ The description carries which of the two causes it is; Telegram's text is stable
-            // enough to be worth passing through, and a user who set a webhook needs to know that.
+            // The description says which of the two causes it is (webhook or second poller); passed through so the user knows.
             return "Telegram refused to poll (409 Conflict) — a webhook is registered on this bot, or another copy of the app is polling it. \(description)"
         default:
             return nil
@@ -226,8 +189,7 @@ actor TelegramListener {
         logger.error("\(message)")
     }
 
-    /// ⚠️ `.info`, not `.error`: a deliberate stop is a routine success. The whole point of TG-6 is
-    /// that this event was being reported as a failure.
+    /// Logs at `.info`: a deliberate stop is a routine success, not a failure.
     private func logStopped() {
         logger.info("[CHATOPS] The Telegram poll loop ended because it was cancelled. CONSEQUENCE: none — this is a deliberate stop, and no reconnect is attempted. It previously fell through to the generic error arm and wrote a false 'Polling error … Retrying' line into the diagnostic bundle.")
     }

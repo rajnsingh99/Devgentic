@@ -4,13 +4,7 @@
 //  ExportProjectionTests.swift
 //  DevgenticTests
 //
-//  Register model/mm-4 — Export fetched and decoded the whole conversation, every attached
-//  image's external-storage blob included, on the MainActor BEFORE the save panel appeared.
-//  Two halves, both pinned here:
-//    1. the store's export projection carries every message field the exporter reads but no
-//       image bytes, and decides truncation by COUNT rather than by decoding a probe message;
-//    2. the exporter presents the save panel FIRST and loads only after a destination is
-//       chosen — a Cancel costs nothing.
+//  Created by Raj Singh.
 //
 
 import XCTest

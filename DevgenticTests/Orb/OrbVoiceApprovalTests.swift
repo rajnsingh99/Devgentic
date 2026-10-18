@@ -4,11 +4,7 @@
 //  OrbVoiceApprovalTests.swift
 //  DevgenticTests
 //
-//  [Phase 6 · F2] The security tests for the spoken approval channel.
-//
-//  ⚠️ These are deny-by-default assertions. A failure here is not a cosmetic regression: it means
-//  a misheard word can commit an action the user never saw. Read `OrbApprovalPolicy`'s header
-//  before changing any expectation in this file.
+//  Created by Raj Singh.
 //
 
 import XCTest

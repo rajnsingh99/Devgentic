@@ -4,7 +4,7 @@
 //  MLXModelService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -31,27 +31,18 @@ class MLXModelService {
     var availableModels: [MLXDisplayModel] = []
     var isLoadingRemoteModels: Bool = false
 
-    /// Which store category `availableModels` was actually fetched for. A failed fetch used
-    /// to leave the previous category's payload in place, and the view model then re-filtered
-    /// THAT for the new category — presenting a plausible but wrong list with no indication
-    /// the network had failed. Callers compare this before rendering.
+    /// Which store category `availableModels` was actually fetched for; callers compare it before rendering.
+    /// A failed fetch leaves the previous category's payload in place, which must not be re-filtered for the new category.
     var availableModelsCategory: String?
 
+    // Why: The category alone is not the payload's identity: two cached store view models share this array with different sorts.
+    // Record every field the query varied by, or 'is this payload mine?' cannot be answered.
     /// The server ranking and search term that produced `availableModels`, alongside the category.
-    ///
-    /// ⚠️ THE CATEGORY ALONE IS NOT THE PAYLOAD'S IDENTITY. `DestinationCoordinator` caches TWO
-    /// store view models for the app lifetime — one filtered for tool-capable models, one not —
-    /// and they share THIS array. Each keeps its own sort, search and page count, so the agent
-    /// store fetching `.all` by downloads silently replaces the general store's `.all` ranked by
-    /// date. The category matched, so the general store rendered the other instance's rows and
-    /// then paged its own offset into them. Every field the query varied by has to be recorded, or
-    /// "is this payload mine?" cannot be answered.
     var availableModelsSort: String?
     var availableModelsSearch: String?
 
-    /// Why the last remote fetch failed, or nil if it succeeded. The store renders this
-    /// instead of the generic "No models found" empty state, which previously made
-    /// rate-limited, offline, gated and genuinely-empty look identical.
+    /// Why the last remote fetch failed, or nil if it succeeded.
+    /// Rendered instead of the generic empty state so rate-limited, offline, gated and empty results look different.
     var remoteLoadError: HFRequestError?
 
     /// Monotonic token identifying the newest fetch. Responses from older generations are
@@ -61,11 +52,9 @@ class MLXModelService {
     /// while another is still running.
     @ObservationIgnored private var inFlightFetches: Int = 0
 
-    /// Max simultaneous HuggingFace size requests. `?blobs=true` enumerates every file in a
-    /// repo, and this used to fan out one task per model with no bound — 30 per page, re-run
-    /// on every tab click and every debounce pause (a tab sweep was ~155 requests in seconds),
-    /// which reliably drew a 429 from the anonymous rate limit. 5 keeps a page responsive
-    /// while staying well inside it.
+    /// Max simultaneous HuggingFace size requests.
+    /// `?blobs=true` enumerates every file in a repo; an unbounded fan-out per page draws a 429 from the anonymous rate
+    /// limit.
     @ObservationIgnored private static let maxConcurrentSizeFetches = 5
 
     // Download State
@@ -74,41 +63,23 @@ class MLXModelService {
     var currentDownloadName: String = ""
     var errorMessage: String?
 
-    // Task management for cancellation.
-    // Internal rather than private so tests can install an in-flight download and exercise
-    // the pause / late-unwind paths — the flagship pause invariant previously had no coverage
-    // because there was no way to put the service into a genuinely downloading state.
+    // The in-flight download task, kept for cancellation.
+    // Internal rather than private so tests can install an in-flight download and exercise the pause and late-unwind paths.
     @ObservationIgnored var downloadTask: Task<Void, Never>?
 
+    // Why: A cancelled task's terminal handlers run after the slot may have changed hands; Pause then Resume reuses the repo id.
+    // Without the token a late unwind clears the new download's handles.
     /// Monotonic token identifying the current occupant of the single download slot.
-    ///
-    /// ⚠️ A download task's terminal handlers run LONG after the slot may have changed hands.
-    /// `pauseDownload` cancels the task and releases the slot synchronously, but the cancelled
-    /// task keeps unwinding — and `resumeDownload` calls straight back into `downloadModel`,
-    /// so Pause→Resume is the fast path into that window. Without a token the late unwind's
-    /// `clearDownloadHandles()` wiped the NEW download's `downloadTask` and
-    /// `currentDownloadName`, leaving it running with a dead Cancel button, self-suppressing
-    /// progress ticks, a bridge that recorded it as cancelled, and a freed interlock that
-    /// admitted a third concurrent `hub.snapshot` into the same folder.
-    ///
-    /// A repo-id comparison is NOT sufficient: Pause→Resume has the same id on both sides.
-    /// Bumped by whoever TAKES the slot (`downloadModel`) or RELEASES it (`pauseDownload`).
-    /// `cancelDownload` deliberately does not bump — it leaves `isDownloading` true, so the
-    /// slot stays occupied until the task's own handler runs and legitimately clears it.
+    /// Bumped by whoever takes the slot (`downloadModel`) or releases it (`pauseDownload`); `cancelDownload` does not bump.
     @ObservationIgnored var downloadGeneration: UInt64 = 0
 
-    // Cache for model sizes to avoid re-fetching. Read on every remote map (it used to be
-    // written and never read, so every page re-fetched sizes it already had).
+    // Cache of model sizes by repo id, read on every remote map to avoid re-fetching.
     var modelSizes: [String: String] = [:]
     /// Raw byte totals, keyed the same way. Sorting and fit assessment use these.
     var modelSizeBytes: [String: Int64] = [:]
 
-    /// On-disk size of each INSTALLED model, keyed by canonical repo id.
-    ///
-    /// Computed off the MainActor after each scan and published when it lands — deliberately
-    /// not part of the scan itself, which already runs synchronously on the main thread and
-    /// walks the whole tree (see the audit's A15). Empty until the first sizing pass
-    /// completes; the UI simply shows no figure until then.
+    /// On-disk size of each installed model, keyed by canonical repo id.
+    /// Computed off the MainActor after each scan and published when it lands; empty until the first sizing pass completes.
     var installedSizeBytes: [String: Int64] = [:]
 
     /// Total bytes occupied by installed models. Nil until the first sizing pass completes.
@@ -139,19 +110,15 @@ class MLXModelService {
         return profile
     }
 
-    /// The model's trained context window (read from its `config.json` via the cached
-    /// cognitive profile), looked up by display name. Nil when the model isn't installed
-    /// or its config exposes no context length. Used to heal MLX profiles that were saved
-    /// before the window was read into metadata (they'd otherwise show the 8K fallback).
+    /// The model's trained context window (from `config.json` via the cached cognitive profile), looked up by display name.
+    /// Nil when the model is not installed or its config exposes no context length.
     func trainedContextWindow(forModelName name: String) -> Int? {
         guard let item = installedModel(named: name) else { return nil }
         return cachedCognitiveProfile(for: item).metadata?.contextWindow
     }
 
-    /// The single lookup every consumer should use to turn a stored model name into an
-    /// installed model. Goes through `MLXModelIdentity` so a profile saved before the
-    /// canonical-id fix (which stored a bare, author-less name) still resolves — and so the
-    /// ambiguous fallback is logged rather than silently guessing.
+    /// The single lookup that turns a stored model name into an installed model.
+    /// Goes through `MLXModelIdentity`, so a bare author-less name still resolves and an ambiguous fallback is logged.
     func installedModel(named name: String) -> MLXModelItem? {
         if let exact = installedModels.first(where: {
             MLXModelIdentity.match(installed: $0.displayName, candidate: name) == .exact
@@ -169,20 +136,14 @@ class MLXModelService {
     }
 
 
-    // Debounce guard to prevent rapid-fire filesystem scans (e.g. init + onAppear).
-    //
-    // 2s, not 30s. The old 30s window made every explicit refresh a no-op — the store's
-    // Refresh button, the store's category switch and the picker's `.onAppear` all silently
-    // did nothing for half a minute after any prior scan, so adding or removing a model
-    // folder in Finder appeared to have no effect. The interval only needs to absorb the
-    // init + onAppear double-fire: the measured scan cost is 5-7ms for the walk and
-    // 10-18ms for the profile rebuild on an 18-model, 76GB library.
+    // Debounce guard against rapid-fire filesystem scans (e.g. init plus onAppear).
+    // The 2 s window only needs to absorb that double-fire; a long window would make explicit refreshes no-ops.
     private var lastScanTime: Date? = nil
     private let scanDebounceInterval: TimeInterval = 2.0
     /// Exposed so a test can assert the window stays short enough not to swallow a user's
     /// explicit Refresh — the failure this constant caused was invisible, not a crash.
     var scanDebounceIntervalForTesting: TimeInterval { scanDebounceInterval }
-    /// Snapshot of model count from last scan — used to skip no-op refreshes
+    /// Model count from the last scan, to skip no-op refreshes.
     private var lastScanModelCount: Int = 0
     /// Number of disk walks STARTED, ever. Two uses: the field log can tell a coalesced join
     /// from a real walk, and a test can assert that a forcing caller actually caused a new one
@@ -198,14 +159,11 @@ class MLXModelService {
 
     var modelsDirectory: URL {
         let fileManager = FileManager.default
-        // Test override → user's custom location → default. `MLXModelsLocation` logs whenever
-        // it falls back, because a silently-wrong directory here re-downloads gigabytes and
-        // points the partial-download cleanup somewhere it shouldn't be.
+        // Test override, then the user's custom location, then the default.
+        // `MLXModelsLocation` logs each fallback: a wrong directory here re-downloads gigabytes.
         let mlxPath = modelsRootOverride
             ?? MLXModelsLocation.effectiveDirectory()
-            // Last resort. `MLXModelsLocation` has already logged why both other paths failed;
-            // this keeps the app functional rather than trapping on a force-unwrap the way the
-            // old `urls(for:).first!` did.
+            // Last resort; `MLXModelsLocation` has already logged why both other paths failed. Avoids a force-unwrap trap.
             ?? fileManager.temporaryDirectory.appendingPathComponent("devgentic-models")
 
         if !fileManager.fileExists(atPath: mlxPath.path) {
@@ -231,20 +189,14 @@ class MLXModelService {
         await forceRefreshInstalledModelsAsync()
     }
 
+    // Why: An instance with a `modelsRootOverride` (a test) gets `{ nil }` instead of the Keychain reader.
+    // Reading the real login keychain can raise a modal prompt that a headless test run cannot dismiss.
     /// Supplies the HuggingFace token for `hub`.
-    ///
-    /// ⚠️ An instance created with a `modelsRootOverride` — i.e. a test — gets `{ nil }`
-    /// instead of the Keychain reader. Any path through `hub` otherwise reaches
-    /// `SecItemCopyMatching` against the real login keychain, which can raise a modal prompt
-    /// that no headless test run can dismiss; the run then dies ~340s later as a "runner hung
-    /// before establishing connection", which reads as a crash rather than a permission stall.
     @ObservationIgnored private let hfTokenProvider: () -> String?
 
     var hub: HubApi {
-        // ⚠️ Pass the token explicitly. `HubApi`'s own fallback is `hfTokenFromEnv()`, which
-        // reads `HF_TOKEN` from the process environment — and a .app launched from Finder,
-        // Spotlight or Sparkle inherits no shell environment, so that is always nil in the
-        // shipped product regardless of what the user has in their shell profile.
+        // Pass the token explicitly: `HubApi`'s own fallback reads `HF_TOKEN` from the process environment,
+        // which a .app launched from Finder, Spotlight or Sparkle does not inherit.
         HubApi(downloadBase: modelsDirectory, hfToken: hfTokenProvider())
     }
 
@@ -253,16 +205,10 @@ class MLXModelService {
         self.hfTokenProvider = modelsRootOverride == nil
             ? { HuggingFaceTokenStore.shared.token }
             : { nil }
-        // Kick off the first scan without blocking init. `installedModels` is empty until it
-        // lands; `ensureLoaded()` is how callers wait for it.
-        //
-        // ⚠️ The walk is STARTED here, synchronously — not from a deferred `Task`. It used to
-        // be `forceRefreshInstalledModels()`, whose Task had not run yet when a caller awaited
-        // `ensureLoaded()` in the same main-actor turn: that caller found nothing in flight and
-        // started its own walk, then the deferred forcing Task joined it and — being a forcing
-        // caller — started ANOTHER. Two walks over the model tree at launch, and a stray third
-        // `scanCount` bump that made `MLXAsyncScanTests` flaky. Now `scanTask` is set before
-        // init returns, so every early caller joins this one walk.
+        // Why: The walk starts here synchronously, not from a deferred Task, so `scanTask` is set before init returns
+        // and every early caller joins this one walk instead of starting another.
+        // Starts the first scan without blocking init; `installedModels` is empty until it lands, and `ensureLoaded()` waits
+        // for it.
         let initial = beginWalk()
         Task { [weak self] in
             await initial.value
@@ -289,42 +235,24 @@ class MLXModelService {
     }
 
 func refreshInstalledModels() {
-        // Fire-and-forget launcher. The scan itself is off-actor (see `scanDisk`), so this
-        // returns immediately and `installedModels` is published when the walk lands.
+        // Fire-and-forget launcher: the scan is off-actor and `installedModels` is published when it lands.
         // Callers that need the result must `await ensureLoaded()`.
         Task { await refreshInstalledModelsAsync() }
     }
 
     /// Scans disk and publishes the result.
-    ///
-    /// ⚠️ The walk and the per-model profile parsing run OFF the MainActor. Previously both
-    /// ran synchronously on it, reachable from four request-path consumers: a recursive
-    /// enumerator over an 81 GB tree plus `detectCognitiveProfile` per model, blocking the UI
-    /// while a user turn waited. Only the final publish is main-actor work.
+    /// The walk and per-model profile parsing run off the MainActor; only the final publish is main-actor work.
     func refreshInstalledModelsAsync(force: Bool = false) async {
-        // ⚠️ Coalesce BEFORE the debounce, not after.
-        //
-        // Several surfaces (init, onAppear, a completing download, a category switch) can ask
-        // at once. Joining an in-flight walk is cheaper than racing a second one over the same
-        // tree — but more importantly it is the only correct answer for a caller that needs
-        // the result. With the debounce checked first, a caller arriving moments after init
-        // started its scan was told "too soon" and returned on an EMPTY list, which reads as
-        // "no models installed" and fails a turn with a 404 for a model that is present.
+        // Coalesce before the debounce: several surfaces can ask at once, and joining an in-flight walk is the only correct
+        // answer for a caller that needs the result; a debounced caller would see an empty list as 'no models installed'.
         if let inflight = scanTask {
             await inflight.value
-            // ⚠️ Joining is NOT sufficient for a forcing caller. `force: true` means "I just
-            // changed the disk", and the walk we joined may have read it BEFORE that change —
-            // it was already running when we arrived. Returning here handed a delete its own
-            // model back as still installed, and handed a completed download a list without
-            // it, which the bridge then classified as cancelled. A forcing caller must see a
-            // walk that started after its mutation, so it falls through to start one.
+            // A forcing caller must see a walk that started after its mutation, so it does not return after joining:
+            // the walk it joined may have read the disk before the change.
             if !force { return }
 
-            // Unless another forcing caller already started one while we were joined: that
-            // walk also began after our mutation (we called before `inflight` finished), so
-            // joining it is correct and avoids a third pass over a multi-gigabyte tree.
-            // (`Task` is a struct but conforms to `Hashable` on the underlying task identity,
-            // so `!=` is the identity comparison here.)
+            // Unless another forcing caller already started a walk after our mutation; joining it avoids a third pass.
+            // `Task` conforms to `Hashable` on the underlying task identity, so `!=` is an identity comparison.
             if let newer = scanTask, newer != inflight {
                 await newer.value
                 return
@@ -338,9 +266,7 @@ func refreshInstalledModels() {
 
         let task = beginWalk()
         await task.value
-        // ⚠️ Clear only our own handle. A forcing caller that joined this walk falls through
-        // and installs its own task here; an unconditional nil would drop that reference and
-        // stop everyone arriving afterwards from coalescing onto it.
+        // Clear only our own handle: a forcing caller that joined this walk may have installed its own task here.
         if scanTask == task { scanTask = nil }
     }
 
@@ -381,13 +307,8 @@ func refreshInstalledModels() {
     /// Main-actor publish step — the only part that must run here.
     private func publish(models: [MLXModelItem], profiles: [String: CognitiveProfile]) {
         hasCompletedInitialScan = true
-        // ⚠️ Compare the ITEMS, not the name set. `MLXModelItem` carries mutable per-model
-        // state — `revision`, `localPath`, `createdAt` — and a name-set diff is blind to all
-        // of it. A re-download changes the commit but never the names, so the freshly scanned
-        // array was discarded: `checkForModelUpdates` kept re-reading the old hash and the
-        // "Update available" badge never cleared for the rest of the session. The same branch
-        // skipped `recomputeInstalledSizes()`, so a model that grew or shrank in place kept
-        // its old size too. Membership was only ever a proxy for "did anything change".
+        // Compare the items, not the name set: `MLXModelItem` carries mutable state (`revision`, `localPath`, `createdAt`)
+        // that a name diff misses; a re-download changes the commit but not the names.
         if models != installedModels {
             self.installedModels = models
             self.profileCache = profiles
@@ -469,16 +390,13 @@ func refreshInstalledModels() {
     
     // MARK: - Remote Discovery (Metadata & Store)
     
-    /// Fetches remote models with support for pagination, search, and category filtering.
-    /// - Parameter sort: the HuggingFace `sort=` field to rank by. nil keeps `defaultSortField`.
-    ///   ⚠️ `offset` indexes into THIS ranking — a caller that changes `sort` must restart at 0,
-    ///   or it appends page 4 of one result set on top of pages 1-3 of another.
+    /// Fetches remote models with pagination, search and category filtering.
+    /// - Parameter sort: the HuggingFace `sort=` field to rank by; nil keeps `defaultSortField`.
+    ///   `offset` indexes into this ranking, so a caller that changes `sort` must restart at 0.
     func fetchRemoteModels(limit: Int = 30, offset: Int = 0, tags: [String]? = nil, search: String? = nil, append: Bool = false, category: String? = nil, sort: String? = nil) async {
 
-        // Generation token (A11). Category switches and the 500ms search debounce can leave
-        // several fetches in flight at once; without this the SLOWEST response won, so a
-        // stale "All" page could replace the "Vision" results the user is looking at, and
-        // an append from an abandoned query could interleave into the new list.
+        // Generation token: category switches and the search debounce can leave several fetches in flight,
+        // so a stale response must not replace the current results or interleave an abandoned query's append.
         requestGeneration &+= 1
         let generation = requestGeneration
         inFlightFetches += 1
@@ -505,16 +423,11 @@ func refreshInstalledModels() {
                 return
             }
 
-            // Drop models the MLX runtime cannot load as an LLM before they ever reach a
-            // card. Verified live: results 1, 2 and 29 of the top 30 were `parakeet-tdt`
-            // speech-recognition models, each rendered with a "Chat" badge because anything
-            // unrecognised fell through to the `.textGeneration` default — a first-run user's
-            // top two recommendations were a 2.5 GB download that fails at inference.
+            // Drops models the MLX runtime cannot load as an LLM before they reach a card (e.g. speech-recognition models
+            // that would otherwise fall through to the `.textGeneration` default).
             let usable = rawModels.filter { raw in
-                // ⚠️ `ModelSupportPolicy`, not `MLXPipelineFilter` alone: the pasted-repo-ID path and
-                // the card's "Not supported" pill read the SAME policy, so the listing and the
-                // button can never disagree about what is runnable. It also adds the declared
-                // `system-one` tag, which a repo can carry under an otherwise-unfamiliar pipeline.
+                // Uses `ModelSupportPolicy`, the same policy as the pasted-repo-ID path and the card's 'Not supported' pill,
+                // so the listing and the download button agree about what is runnable.
                 guard ModelSupportPolicy.unsupportedReason(pipelineTag: raw.pipeline_tag, tags: raw.tags ?? []) != nil else { return true }
                 self.logger.info("[MLXSTORE] Excluding '\(raw.id)' from the store — pipeline '\(raw.pipeline_tag ?? "?")' is not something MLXService can run as an LLM (decision/classifier, speech, image or embedding model). CONSEQUENCE: it is hidden from results rather than offered with a misleading Chat badge.")
                 return false
@@ -538,9 +451,7 @@ func refreshInstalledModels() {
                     downloads: raw.downloads,
                     likes: raw.likes,
                     description: nil,
-                    // HuggingFace exposes `lastModified`; without it every remote model had
-                    // a nil date, so "Recent" compared .distantPast against itself and the
-                    // non-stable sort permuted the list arbitrarily on every tick.
+                    // HuggingFace exposes `lastModified`; without it every remote model has a nil date and 'Recent' sorting is arbitrary.
                     createdAt: raw.lastModifiedDate
                 )
             }
@@ -578,9 +489,8 @@ func refreshInstalledModels() {
                 // and presented as this category's results.
                 availableModels = []
                 availableModelsCategory = category
-                // ⚠️ The identity must be stamped on the FAILURE path too. Leaving a stale sort
-                // or search here means the next `loadMore` compares against the query that
-                // succeeded before this one failed, and decides the empty payload is its own.
+                // The identity is stamped on the failure path too: a stale sort or search would let the next `loadMore`
+                // treat the empty payload as its own.
                 availableModelsSort = sort ?? Self.defaultSortField
                 availableModelsSearch = search
             }
@@ -591,17 +501,9 @@ func refreshInstalledModels() {
         }
     }
 
-    /// Builds the HuggingFace listing URL.
-    ///
-    /// ⚠️ `URLComponents`, never string interpolation. `.urlQueryAllowed` — the character set
-    /// the old code escaped with — PERMITS `&`, `=`, `+` and `#`, so a search for
-    /// `a&limit=9999&filter=evil` injected extra query parameters into the request.
-    ///
-    /// `nonisolated static` so this is reachable from a test without standing up the service:
-    /// the B7 test previously rebuilt a `URLComponents` in its own body and asserted that
-    /// Foundation percent-encodes, which is true of Foundation whatever this function does.
-    /// HuggingFace's default ranking for this store, and the fallback for any `SortOption` the
-    /// API cannot rank by (repo bytes are not a field on the models listing).
+    // Why: `listingURL` uses `URLComponents`, never string interpolation: `.urlQueryAllowed` permits `&`, `=`, `+`, `#`,
+    // so a search like `a&limit=9999` would inject query parameters.
+    /// HuggingFace's default ranking for this store, and the fallback for any `SortOption` the API cannot rank by.
     nonisolated static let defaultSortField = "downloads"
 
     nonisolated static func listingURL(
@@ -612,9 +514,8 @@ func refreshInstalledModels() {
         var filters = ["mlx"]
         if let tags { filters.append(contentsOf: tags) }
         var items = [
-            // ⚠️ `direction` stays -1 for every field sent — downloads, lastModified and likes
-            // are all "more/newer first". An ascending sort would have to vary this with the
-            // field, so do not add one without revisiting this line.
+            // `direction` stays -1 for every field sent (downloads, lastModified, likes are all 'more/newer first').
+            // An ascending sort must vary it with the field.
             URLQueryItem(name: "sort", value: sort ?? Self.defaultSortField),
             URLQueryItem(name: "direction", value: "-1"),
             URLQueryItem(name: "limit", value: String(limit)),
@@ -633,11 +534,8 @@ func refreshInstalledModels() {
     /// return cleared it while the second was still running.
     private func finishFetch(generation: UInt64, error: HFRequestError?) {
         inFlightFetches = max(0, inFlightFetches - 1)
-        // ⚠️ The spinner is derived from the COUNTER, not from any one request's identity, so
-        // it must settle even for a superseded generation. With this behind the guard below, a
-        // stale fetch completing LAST left `isLoadingRemoteModels` true forever — the spinner
-        // never stopped and "Load More Models" stayed disabled for the rest of the session.
-        // The cancellation path above already settles it unguarded; these two disagreed.
+        // The spinner is derived from the counter, not any one request's identity, so it settles even for a superseded
+        // generation.
         if inFlightFetches == 0 { isLoadingRemoteModels = false }
         // Only the ERROR is generation-scoped: a superseded query's failure must not be
         // presented as the current query's result.
@@ -655,21 +553,15 @@ func refreshInstalledModels() {
             caps.insert(.vision)
         }
         
-        // 2. Reasoning (Chain of Thought)
-        // Centralized reasoning-family detection via `ModelCapabilityHeuristics`
-        // (catches deepseek-r1, qwq, magistral, gpt-oss, o1/o3/o4) plus the
-        // generic Hugging Face tags and the "reasoning" keyword some publishers
-        // add to their model id.
+        // Reasoning (chain of thought): `ModelCapabilityHeuristics` detection plus generic Hugging Face tags
+        // and the 'reasoning' keyword some publishers add to the model id.
         if tags.contains("reasoning") || tags.contains("chain-of-thought") ||
            lowerId.contains("reasoning") ||
            ModelCapabilityHeuristics.isReasoningOnly(nameCandidates: id) {
             caps.insert(.reasoning)
         }
         
-        // 3. Tool Use / Function Calling
-        // Explicit HF tags take priority, then fall back to family-name heuristics
-        // covering modern tool-capable families (Qwen2.5+, Llama-3.1+, Mistral Nemo/Small/
-        // Large, Phi-3.5+, Command-R, Granite, Devstral, GLM-4, DeepSeek V2/V3, Kimi K2, etc.).
+        // Tool use / function calling: explicit HF tags first, then family-name heuristics for tool-capable families.
         // Reasoning-only distills are excluded by `isLikelyToolCapable`.
         if tags.contains("tool-use") || tags.contains("function-calling") ||
            ModelCapabilityHeuristics.isLikelyToolCapable(modelId: id) {
@@ -777,18 +669,9 @@ func refreshInstalledModels() {
     /// True while an update sweep is running, so the UI can show progress.
     var isCheckingForUpdates: Bool = false
 
-    /// What a model's cached update status becomes once a download resolves it to `resolved`.
-    ///
-    /// `nil` means "drop the entry" — assigning nil through a dictionary subscript removes the
-    /// key, so the badge disappears and the next sweep re-derives the answer from scratch.
-    ///
-    /// ⚠️ ONLY claims `.upToDate` when the freshly-resolved commit IS the one the last check
-    /// reported as published. Any other outcome drops the entry rather than asserting a state
-    /// nothing verified: the publisher can push again between the check and the download, and
-    /// a badge that lies about being current is worse than no badge.
-    ///
-    /// Pure and static so the rule is testable without constructing the service, whose `init`
-    /// kicks off a filesystem scan.
+    /// What a model's cached update status becomes once a download resolves it to `resolved`; nil drops the entry.
+    /// Claims `.upToDate` only when the resolved commit is the one the last check reported as published.
+    /// Pure and static so the rule is testable without constructing the service.
     nonisolated static func statusAfterDownload(
         previous: MLXModelRevision.UpdateStatus?,
         resolved: String?
@@ -796,23 +679,16 @@ func refreshInstalledModels() {
         guard let previous, let resolved else { return nil }
         guard case .updateAvailable(let installed, let latest) = previous else { return nil }
         if resolved == latest { return .upToDate(revision: resolved) }
-        // ⚠️ UNCHANGED MEANS NOTHING WAS FETCHED — keep the badge. `HubApi.snapshot` takes an
-        // offline branch when the repo folder is complete: it verifies local hashes and returns
-        // normally, with no throw, no network and no bytes. The success path then ran in full and
-        // re-read the OLD commit, so dropping the entry here made the badge vanish on an update
-        // that never happened. The update really is still available.
+        // Unchanged means nothing was fetched, so keep the badge: `HubApi.snapshot` takes an offline branch for a
+        // complete repo folder and returns normally with no network.
         if resolved == installed { return previous }
-        // Some third commit: the publisher pushed again between the check and the download, so
-        // the previous comparison no longer describes anything. Drop it and let the next sweep
-        // re-derive rather than assert a currency nothing verified.
+        // Some third commit: the publisher pushed again between the check and the download.
+        // Drop the entry and let the next sweep re-derive rather than assert currency nothing verified.
         return nil
     }
 
-    /// Re-points a model's cached update status once its download lands.
-    ///
-    /// ⚠️ `updateStatus` was written in exactly ONE place and cleared NOWHERE, so a user who
-    /// acted on "Update available" kept seeing it for the rest of the session — the one signal
-    /// that the update had worked was the one signal missing.
+    /// Re-points a model's cached update status once its download lands, so 'Update available' clears after the user acts
+    /// on it.
     func noteRevisionAfterDownload(repoId: String, resolved: String?) {
         // No cached entry means no badge to clear; never invent one for a first install.
         guard let previous = updateStatus[repoId] else { return }
@@ -828,11 +704,7 @@ func refreshInstalledModels() {
     }
 
     /// Compares every installed model's downloaded revision against what HuggingFace publishes.
-    ///
-    /// ⚠️ Explicit, not automatic. One request per installed model is exactly the unbounded
-    /// fan-out A9 fixed — doing it on every store open would re-create that. This runs when the
-    /// user asks, bounded by the same concurrency window as the size lookups, and abandons the
-    /// sweep the moment HuggingFace starts rate-limiting.
+    /// Runs only when the user asks (one request per model), bounded like the size lookups, and stops on rate limiting.
     func checkForModelUpdates() async {
         await ensureLoaded()
         let models = installedModels
@@ -892,17 +764,8 @@ func refreshInstalledModels() {
         }
     }
 
-    /// Fetches the full model card for the detail sheet.
-    ///
-    /// Deliberately NOT called from the list path — that would reintroduce the N+1 fan-out A9
-    /// fixed. One request, on demand, when the user opens a model.
-    /// Why Devgentic can't run `repoId`, or nil when it can — or when that couldn't be determined.
-    ///
-    /// One model-info GET, no README: this runs as the user pastes an id, before they've asked
-    /// for anything. ⚠️ A failed lookup returns nil ("unknown → stays enabled") rather than
-    /// blocking: an offline blip must not turn a valid download into "Not supported". The
-    /// authoritative check is the one `fetchByRepoId` repeats from `fetchModelDetail` before a
-    /// download slot is taken.
+    /// Why Devgentic cannot run `repoId`, or nil when it can or when that cannot be determined.
+    /// One model-info GET with no README; a failed lookup returns nil so an offline blip never blocks a valid download.
     func unsupportedReason(forRepo repoId: String) async -> String? {
         guard let url = URL(string: "https://huggingface.co/api/models/\(repoId)") else { return nil }
         do {
@@ -944,13 +807,8 @@ func refreshInstalledModels() {
         request.cachePolicy = .useProtocolCachePolicy
         if let token = await MainActor.run(body: { HuggingFaceTokenStore.shared.token }) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            // ⚠️ AN AUTHENTICATED RESPONSE MAY NOT COME FROM, OR GO INTO, A URL-KEYED CACHE.
-            // `URLCache` ignores the `Authorization` header, so an anonymous 200 cached while
-            // browsing signed-out could answer the very next signed-in request — and vice versa.
-            // The new "Add Token…" flow makes that sequence routine: hit a 401, add a token, and
-            // `refresh()` re-requests the same listing URL that was just cached anonymously.
-            // The token check sets this explicitly for the same reason; here it covers every
-            // other token-bearing call.
+            // An authenticated response must not come from, or go into, a URL-keyed cache: `URLCache` ignores the
+            // `Authorization` header, so an anonymous cached 200 could answer a signed-in request and vice versa.
             request.cachePolicy = .reloadIgnoringLocalCacheData
         }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
@@ -968,13 +826,9 @@ func refreshInstalledModels() {
         return Int64(detail.siblings.compactMap { $0.size }.reduce(0, +))
     }
 
-    /// Public counterpart to `getSizeForModel` that returns the raw byte
-    /// total instead of a formatted string. Used by `DownloadCoordinator`
-    /// to pre-seed `DownloadRecord.fileSizeBytes` before kicking off an
-    /// MLX pull, so the speed/ETA display has an authoritative denominator
-    /// from the first progress tick onward. Returns nil on any error
-    /// (unknown repo, network issue, malformed response) — the download
-    /// still proceeds, the UI just falls back to "— MB/s".
+    /// Raw byte total of a repo, the counterpart of `getSizeForModel`; `DownloadCoordinator` uses it to pre-seed the file
+    /// size.
+    /// Returns nil on any error; the download still proceeds and the UI falls back to '— MB/s'.
     func getTotalBytesForModel(repoId: String) async -> Int64? {
         do {
             let totalBytes = try await Self.totalBytes(forRepo: repoId)
@@ -995,18 +849,8 @@ func refreshInstalledModels() {
     /// no-op here reads to the user as a dead button.
     @discardableResult
     func downloadModel(repoId: String) -> Bool {
-        // This used to call `cancelDownload()` unconditionally, silently pre-empting any
-        // in-flight pull. That discarded the running model's bytes with no toast and no
-        // log, AND corrupted the DownloadManager bridge: `isDownloading` never returned to
-        // false between the two, so the new model's progress was written into the OLD
-        // model's DownloadRecord, and when the pre-empted task's terminal branch fired it
-        // nil'd `mlxActiveID` — leaving the new download with no record, no sidebar row and
-        // no cancel button. Both sibling services already refuse rather than pre-empt
-        // (`WhisperModelDownloadService.downloadModel`, `OllamaService.pullModel`).
-        //
-        // Deliberately does NOT set `errorMessage`: the bridge reads that field to classify
-        // the ACTIVE download's terminal state, so writing a refusal there would mark the
-        // still-running model as failed when it later completes.
+        // Refuses while another pull is in flight rather than pre-empting it, like the sibling download services.
+        // Does not set `errorMessage`: the bridge reads it to classify the active download's terminal state.
         if isDownloading, !currentDownloadName.isEmpty {
             if currentDownloadName == repoId {
                 logger.info("[MLXSTORE] Ignoring duplicate download request for '\(repoId)' — already in flight.")
@@ -1035,30 +879,20 @@ func refreshInstalledModels() {
 
         downloadTask = Task { [repoId, generation] in
             do {
-                // mlx-swift-lm 3.x dropped `MLXLMCommon.downloadModel`. Download directly via
-                // swift-transformers' `HubApi.snapshot` which gives us the same progress callback
-                // and destination-directory contract. Empty `matching: []` downloads everything
-                // in the repo (weights, tokenizer, config JSONs) — mirrors the old default.
+                // Downloads via swift-transformers' `HubApi.snapshot`, which gives the progress callback and destination contract.
+                // Empty `matching: []` downloads everything in the repo (weights, tokenizer, config JSONs).
                 _ = try await hub.snapshot(from: repoId) { progress in
                     let fraction = progress.fractionCompleted
-                    // One unstructured Task per tick: HubApi fires this frequently and the
-                    // hops are unordered, so a tick from a download that has since been
-                    // cancelled or superseded can still land after the slot changed hands.
-                    // Re-checked against the slot's GENERATION, not the repo id — a
-                    // Pause→Resume of the same model shares the id, so a name comparison
-                    // would let the dead task drive the live download's progress bar. Weak
-                    // self so a torn-down service isn't kept alive by a queue of pending ticks.
+                    // One unstructured Task per tick; hops are unordered, so re-check against the slot's generation, not the repo id
+                    // (Pause then Resume shares the id). Weak self so pending ticks do not keep a torn-down service alive.
                     Task { @MainActor [weak self, generation] in
                         guard let self, self.downloadGeneration == generation else { return }
                         self.downloadProgress = fraction
                     }
                 }
 
-                // ⚠️ A cancel that lands BETWEEN files does not throw: `HubApi.snapshot`
-                // returns `repoDestination` normally after its `if Task.isCancelled` check.
-                // Classifying only on the thrown error therefore ran the SUCCESS handler for
-                // a user-cancelled download — logging "finished successfully" and letting the
-                // bridge see the partial repo as installed and record it COMPLETED.
+                // A cancel that lands between files does not throw: `HubApi.snapshot` returns normally after its
+                // `Task.isCancelled` check, so classify on the cancellation flag too.
                 if Task.isCancelled {
                     self.finishCancelled(repoId: repoId, generation: generation, reason: "cancelled between files (snapshot returned without throwing)")
                     return
@@ -1078,13 +912,10 @@ func refreshInstalledModels() {
                 }
                 // The badge that sent the user here has to go out when the work lands.
                 self.noteRevisionAfterDownload(repoId: repoId, resolved: resolved)
-                // Awaited: the DownloadManager bridge reads `installedModels` to classify the
-                // terminal state, so a fire-and-forget refresh would race it and record a
-                // successful pull as cancelled.
+                // Awaited: the DownloadManager bridge reads `installedModels` to classify the terminal state,
+                // so a fire-and-forget refresh would record a successful pull as cancelled.
                 await self.forceRefreshInstalledModelsAsync()
-                // A pause whose `task.cancel()` lost the race to a completing snapshot leaves
-                // the repo marked paused while it is in fact fully installed — the sidebar
-                // would offer Resume and Discard for a finished model.
+                // A pause whose cancel lost the race to a completing snapshot leaves the repo marked paused though fully installed.
                 if self.pausedRepoId == repoId {
                     self.logger.notice("[MLXSTORE] '\(repoId)' completed despite being paused (the cancel lost the race to the final file). CONSEQUENCE: clearing its paused marker so it presents as installed, not resumable.")
                     self.pausedRepoId = nil
@@ -1092,13 +923,8 @@ func refreshInstalledModels() {
                 self.finishTerminal(repoId: repoId, generation: generation, classification: "completed")
 
             } catch {
-                // ⚠️ swift-transformers surfaces a cancel as `URLError(.cancelled)` — its
-                // `Downloader.cancel()` broadcasts `.failed(URLError(.cancelled))` and
-                // `HubFileDownloader` rethrows it verbatim — NOT as `CancellationError`.
-                // The old `catch where error is CancellationError` arm was therefore dead,
-                // and every user cancel was logged at fault level and persisted as
-                // "Failed: cancelled". Key off the cancellation FLAG first, then either
-                // error type, and log which classification won and why.
+                // swift-transformers surfaces a cancel as `URLError(.cancelled)`, not `CancellationError`.
+                // Key off the cancellation flag first, then either error type, and log which classification won.
                 if Task.isCancelled || Self.isCancellation(error) {
                     self.finishCancelled(repoId: repoId, generation: generation, reason: "\(error)")
                     return
@@ -1109,19 +935,13 @@ func refreshInstalledModels() {
         return true
     }
 
-    /// Terminal transition for a genuine failure. **Keeps every downloaded byte.**
-    ///
-    /// ⚠️ Timeout inventory D-27: this used to run `removePartialDownload`, so a 20 GB pull that
-    /// failed at 95% — a dropped connection, a full disk — deleted the finished shards too and
-    /// the user started again from zero. A failed record is already `isResumable`, so keeping the
-    /// bytes is what makes its Resume button honest. The bytes are no longer invisible either: the
-    /// failed row shows their size with Resume and Discard next to it, and the leftover scan
-    /// counts them.
+    /// Terminal transition for a genuine failure; keeps every downloaded byte.
+    /// A failed record is already resumable, so keeping the bytes makes its Resume button honest; the failed row shows
+    /// their size.
     func finishFailed(repoId: String, generation: UInt64, error: Error) {
         logger.fault("[MLXSTORE] Download of '\(repoId)' FAILED: \(error.localizedDescription).")
-        // ⚠️ Gated on still holding the slot. Unguarded, a superseded task's failure wrote
-        // `errorMessage` — which the bridge reads to classify the ACTIVE download, marking a
-        // healthy running pull as failed.
+        // Gated on still holding the slot: a superseded task's failure would write `errorMessage`, which the bridge reads
+        // to classify the active download.
         guard stillOwnsSlot(generation, repoId: repoId, phase: "failure") else { return }
         errorMessage = "Download failed: \(error.localizedDescription)"
         let kept = Self.resumableBytes(at: partialDownloadFolder(for: repoId))
@@ -1138,12 +958,9 @@ func refreshInstalledModels() {
         return false
     }
 
-    /// Clears the in-flight handles. ⚠️ Must run on EVERY terminal branch that still OWNS the
-    /// slot — callers gate on `stillOwnsSlot(_:)` first.
-    /// Previously only the cancel branch cleared `currentDownloadName`, and NOTHING ever
-    /// cleared `downloadTask` — so after model A completed successfully, its stale handle
-    /// made the next `downloadModel(B)` call `cancelDownload()`, which captured A's name
-    /// and ran `removePartialDownload(repoId: A)` against the fully-installed model A.
+    /// Clears the in-flight handles; must run on every terminal branch that still owns the slot (callers gate on
+    /// `stillOwnsSlot(_:)`).
+    /// A stale `downloadTask` would make the next `downloadModel` cancel and clean up an already-installed model.
     private func clearDownloadHandles() {
         downloadTask = nil
         currentDownloadName = ""
@@ -1182,15 +999,8 @@ func refreshInstalledModels() {
         isDownloading = false
     }
     
-    /// True while a cancelled download's partial files are being removed from disk.
-    /// UI observes this to show a "Cleaning up…" indicator, since the scanner
-    /// would otherwise misidentify the orphaned `config.json` as "Installed".
     /// The repo whose partial files are being reclaimed right now, or nil.
-    ///
-    /// ⚠️ Carries the identity deliberately. This was a bare `Bool`, and the views gating on it
-    /// did not compare against their own model — so cancelling one download flipped EVERY
-    /// visible MLX card to "Cleaning up…", including installed ones and unrelated available
-    /// ones.
+    /// Carries the identity so views compare against their own model; the UI shows 'Cleaning up…' while it is set.
     var cancellingRepoId: String?
 
     /// True while `repoId`'s partial files are being removed. Views must pass their own
@@ -1200,25 +1010,16 @@ func refreshInstalledModels() {
     }
 
     /// The repo the user paused, if any.
-    ///
-    /// Read by the `DownloadManager` bridge so the terminal transition is classified `.paused`
-    /// rather than `.cancelled` — the distinction matters because cancelled discards the
-    /// partial bytes and paused deliberately keeps them.
+    /// The `DownloadManager` bridge reads it to classify the terminal transition as `.paused`, which keeps partial bytes,
+    /// not `.cancelled`.
     var pausedRepoId: String?
 
     /// How the most recent download ended (DownloadManager's history classification reads it).
     /// Cleared when a download starts; set on every terminal path before `isDownloading` flips.
     private(set) var lastDownloadEnding: RecordedDownloadEnding?
 
-    /// Stops the in-flight download but **keeps every downloaded byte**.
-    ///
-    /// This is the whole feature: swift-transformers already resumes from `.incomplete` files
-    /// via a `Range: bytes=N-` header (`Downloader.incompleteFileSize(at:)`), so resuming is
-    /// just re-entering `hub.snapshot`. The only thing that made resume impossible was that
-    /// the sole stop control ran `removePartialDownload`, deleting the repo folder — and the
-    /// `.incomplete` files live inside it, at `<repo>/.cache/huggingface/download/`.
-    ///
-    /// Returns false when there is nothing to pause.
+    /// Stops the in-flight download but keeps every downloaded byte; returns false when there is nothing to pause.
+    /// Resuming is re-entering `hub.snapshot`: swift-transformers resumes from `.incomplete` files via a `Range` header.
     @discardableResult
     func pauseDownload() -> Bool {
         guard let task = downloadTask, isDownloading, !currentDownloadName.isEmpty else {
@@ -1231,17 +1032,14 @@ func refreshInstalledModels() {
 
         task.cancel()
         lastDownloadEnding = RecordedDownloadEnding(modelID: repoId, ending: .paused)
-        // ⚠️ Releasing the slot synchronously while the cancelled task is still unwinding is
-        // what makes the generation bump mandatory: `resumeDownload` calls straight back into
-        // `downloadModel`, so a new occupant can be installed before the old task's terminal
-        // handler ever runs. Bumping here retires that handler — see `downloadGeneration`.
+        // The slot is released synchronously while the cancelled task still unwinds, so the generation bump is mandatory:
+        // `resumeDownload` can install a new occupant before the old handler runs. See `downloadGeneration`.
         downloadGeneration &+= 1
         clearDownloadHandles()
         downloadProgress = 0.0
         errorMessage = nil
         isDownloading = false
-        // ⚠️ Deliberately no `removePartialDownload` here. That is the entire difference
-        // between Pause and Cancel.
+        // No `removePartialDownload` here: that is the whole difference between Pause and Cancel.
         // Re-scan once the cancelled task has stopped writing, so the paused row shows its size.
         Task { [weak self] in
             _ = await task.value
@@ -1259,12 +1057,9 @@ func refreshInstalledModels() {
         return downloadModel(repoId: repoId)
     }
 
-    /// Abandons a paused/interrupted download and reclaims its bytes.
-    ///
-    /// Returns false when the bytes were NOT reclaimed — the folder turned out to be a
-    /// complete install, or the delete failed. The caller must not drop the history record
-    /// on a false: that record is the only remaining handle on those bytes, and deleting it
-    /// would strand them with no way back.
+    /// Abandons a paused or interrupted download and reclaims its bytes.
+    /// Returns false when the bytes were not reclaimed (a complete install, or the delete failed); the caller must then keep
+    /// the history record, which is the only remaining handle on those bytes.
     @discardableResult
     func discardPartialDownload(repoId: String) -> Bool {
         logger.notice("[MLXSTORE] DISCARDING partial download of '\(repoId)' at the user's request.")
@@ -1281,18 +1076,9 @@ func refreshInstalledModels() {
         return directorySize(at: folder)
     }
 
-    /// Resolve the on-disk folder that HubApi writes into for a given repo id.
-    ///
-    /// ⚠️ Derived from the library's OWN resolver — never reconstruct this path by hand.
-    /// `HubApi.localRepoLocation` is `downloadBase/<repo.type.rawValue>/<repo.id>`, and
-    /// `RepoType.models.rawValue == "models"`, so the real layout carries a *doubled*
-    /// component: `<modelsDirectory>/models/<author>/<name>`. This function previously
-    /// rebuilt it as `<modelsDirectory>/<author>/<name>`, omitting that component, which
-    /// made `removePartialDownload` a permanent silent no-op — every cancelled download
-    /// leaked its partial folder, invisible to the UI because `hasWeights` then filtered
-    /// it out of the installed scan. Delegating removes the drift entirely.
-    ///
-    /// Returns nil for malformed repo ids (anything that isn't exactly `author/name`).
+    // Why: Derived from the library's own resolver: the real layout has a doubled `models/` component.
+    // A hand-rebuilt path makes `removePartialDownload` a silent no-op.
+    /// Resolves the on-disk folder `HubApi` writes into for a repo id; nil for ids that are not exactly `author/name`.
     func partialDownloadFolder(for repoId: String) -> URL? {
         let components = repoId.components(separatedBy: "/")
         guard components.count == 2,
@@ -1304,34 +1090,18 @@ func refreshInstalledModels() {
         return hub.localRepoLocation(Hub.Repo(id: repoId))
     }
 
-    /// Remove a partial-download folder from disk so the scanner doesn't
-    /// misidentify it as installed and so the bytes are reclaimed.
-    /// Idempotent — safe to call before starting a fresh download too.
-    ///
-    /// This is a recursive delete of a potentially multi-gigabyte folder, so it refuses
-    /// any repo that resolves to a COMPLETED install. The cleanup path is reachable with
-    /// a stale repo id (see `cancelDownload`), and without this guard a stale id deletes
-    /// a model the user successfully downloaded.
-    /// Returns true when the repo's bytes are gone — either reclaimed here or never there.
-    /// False means bytes remain on disk (refused as an install, or the delete failed), and
-    /// the caller must keep whatever record still points at them.
+    /// Removes a partial-download folder so the scanner does not report it as installed; idempotent.
+    /// Refuses a completed install. Returns true when the bytes are gone, false (refused or failed) when they remain;
+    /// the caller must then keep any record that still points at them.
     @discardableResult
     func removePartialDownload(repoId: String) -> Bool {
         guard let folder = partialDownloadFolder(for: repoId) else { return false }
 
         let target = folder.standardizedFileURL
 
-        // Primary guard: ask the filesystem, not the in-memory list. `installedModels` is
-        // populated by a debounced scan, so it can be stale exactly when it matters — and a
-        // stale list would let this recursive delete run against a real install.
-        //
-        // ⚠️ The test is COMPLETENESS, not "has weights". `containsWeights` alone was the
-        // guard here, and it made this function a no-op for every sharded repo: HubApi moves
-        // each finished shard to its FINAL path before fetching the next, so an interrupted
-        // sharded download is *precisely* a folder containing weights. Cancelling a 5-shard
-        // pull half way therefore stranded gigabytes that no UI could reach — the exact leak
-        // this function exists to prevent. The comment that "A2 covers that case" was wrong:
-        // `shardCompleteness` only detects truncation, it never reclaims.
+        // Why: The test is completeness, not 'has weights': an interrupted sharded download is exactly a folder containing weights.
+        // `shardCompleteness` only detects truncation; it never reclaims.
+        // Primary guard asks the filesystem, not the in-memory list, which comes from a debounced scan and can be stale.
         if Self.isCompleteInstall(at: target) {
             logger.error("[MLXSTORE] REFUSING to remove '\(repoId)' at \(target.path) — it is a COMPLETE install, not partial-download residue. CONSEQUENCE: cleanup skipped (the safe outcome) and the model keeps its Delete button; a stale repo id reached the cleanup path and should be investigated.")
             return false
@@ -1339,10 +1109,8 @@ func refreshInstalledModels() {
 
         // Secondary guard: the scan may know it as installed under a different path.
         if let installed = installedModels.first(where: {
-            // ⚠️ `sameLocationLexically`, not `==`. `localPath` comes from
-            // `deletingLastPathComponent()` (trailing slash) while `target` comes from
-            // `appendingPathComponent` (none), so URL equality misses — and missing HERE means
-            // a recursive delete runs against a completed install.
+            // Use `sameLocationLexically`, not `==`: `localPath` has a trailing slash and `target` does not,
+            // and a miss here lets a recursive delete run against a completed install.
             $0.localPath.sameLocationLexically(as: target) || $0.displayName == repoId
         }) {
             logger.error("[MLXSTORE] REFUSING to remove '\(repoId)' at \(target.path) — it is a completed install (\(installed.displayName)). CONSEQUENCE: cleanup skipped (the safe outcome).")
@@ -1367,22 +1135,14 @@ func refreshInstalledModels() {
     }
 
     /// True when the folder holds at least one model weights file.
-    ///
-    /// ⚠️ This is a NECESSARY but not sufficient condition for "installed" — one shard of
-    /// four satisfies it. Anything deciding whether a folder is a real install (rather than
-    /// residue safe to delete) must use `isCompleteInstall`.
+    /// Necessary but not sufficient for 'installed' (one shard of four satisfies it); use `isCompleteInstall` to decide.
     nonisolated static func containsWeights(at url: URL) -> Bool {
         !weightFiles(at: url).isEmpty
     }
 
-    /// The single definition of "this directory is a usable install, not download residue".
-    ///
-    /// Composed from exactly the primitives `scanDisk` applies, so the two can never
-    /// disagree — and that agreement is the invariant that matters: **anything this returns
-    /// true for is surfaced in the installed list and therefore has a Delete button, and
-    /// anything it returns false for is invisible residue that cleanup must be free to
-    /// reclaim.** When these drifted apart, half-downloaded sharded repos fell into the gap:
-    /// hidden from the list (so no Delete) *and* refused by cleanup (so never reclaimed).
+    /// The single definition of 'this directory is a usable install, not download residue'.
+    /// Composed from the primitives `scanDisk` applies: true means listed with a Delete button, false means residue cleanup
+    /// may reclaim.
     nonisolated static func isCompleteInstall(at url: URL) -> Bool {
         guard FileManager.default.fileExists(
             atPath: url.appendingPathComponent("config.json").path
@@ -1403,19 +1163,9 @@ func refreshInstalledModels() {
         }
     }
 
-    /// Whether every shard a sharded repo declares is actually present.
-    ///
-    /// ⚠️ `containsWeights` is satisfied by ONE weights file, which is not completeness.
-    /// HubApi downloads files sequentially and moves each finished shard into place, so a
-    /// pull killed after shard 2 of 4 leaves two valid `.safetensors` beside `config.json` —
-    /// enough to pass the old check. The model then showed as Installed with a green badge
-    /// across relaunches and failed only at load time with a raw framework shard-lookup
-    /// error. Every sharded repo ships `model.safetensors.index.json` enumerating the full
-    /// set; this consults it.
-    ///
-    /// Returns `(isComplete, expected, present)`. Unsharded repos (no index file) report
-    /// complete — there is nothing to compare against, and `containsWeights` already
-    /// established that weights exist.
+    // Why: `containsWeights` is satisfied by one weights file, so a pull killed mid-shards would otherwise show as Installed.
+    /// Whether every shard a sharded repo declares is present, per `model.safetensors.index.json`.
+    /// Returns `(isComplete, expected, present)`; unsharded repos (no index file) report complete.
     nonisolated static func shardCompleteness(at url: URL) -> (isComplete: Bool, expected: Int, present: Int) {
         let indexURL = url.appendingPathComponent("model.safetensors.index.json")
         guard let data = try? Data(contentsOf: indexURL),
@@ -1448,9 +1198,8 @@ func refreshInstalledModels() {
 
     func cancelDownload() {
         guard let task = downloadTask else {
-            // No task, but a leftover name means a terminal branch didn't clean up.
-            // Clear it here so the invariant "no task ⇒ no in-flight name" always holds:
-            // a stale name is what let the old code schedule cleanup against the wrong repo.
+            // No task but a leftover name means a terminal branch did not clean up; clear it so 'no task implies no in-flight
+            // name' holds.
             if !currentDownloadName.isEmpty {
                 logger.error("[MLXSTORE] cancelDownload: no in-flight task but '\(self.currentDownloadName)' was still recorded as downloading — a terminal branch failed to clear it. CONSEQUENCE: clearing the stale name now; no cleanup is run, since the repo it names may be a completed install.")
                 clearDownloadHandles()
@@ -1459,11 +1208,8 @@ func refreshInstalledModels() {
             }
             return
         }
-        // A completed download used to leave `downloadTask` populated and
-        // `currentDownloadName` set, so this path could run with a STALE repo id and
-        // schedule a cleanup against the previous, fully-installed model. The terminal
-        // branches now clear both, but keep the guard: it is the last line of defence in
-        // front of a recursive multi-gigabyte delete.
+        // Last line of defence in front of a recursive multi-gigabyte delete: a stale repo id must not schedule cleanup
+        // against a previous, fully installed model.
         guard isDownloading else {
             logger.error("[MLXSTORE] cancelDownload: task handle present but no download in flight (stale handle for '\(self.currentDownloadName)'). CONSEQUENCE: clearing the handle WITHOUT running partial cleanup — cleaning up here would target an already-installed model.")
             clearDownloadHandles()
@@ -1476,23 +1222,15 @@ func refreshInstalledModels() {
         downloadTask = nil
         cancellingRepoId = modelName
 
-        // Wait for the in-flight task to observe cancellation (so it stops writing new
-        // files), then reclaim the partial folder from disk.
-        //
-        // NOTE: the original rationale documented here — "otherwise the orphaned
-        // config.json makes the scanner report the model as installed" — is wrong.
-        // `refreshInstalledModels`' `hasWeights` check already filters a config-only
-        // folder. The real justification is the disk leak: without this the partial
-        // bytes stay forever, and because `hasWeights` hides the folder there is no
-        // Delete button anywhere in the UI to reclaim them.
+        // Wait for the in-flight task to observe cancellation so it stops writing, then reclaim the partial folder.
+        // The disk leak is the real reason: `hasWeights` hides the folder, so no Delete button could reclaim it.
         Task { [weak self] in
             _ = await task.value
             await MainActor.run {
                 guard let self else { return }
 
-                // Corner case: user restarted the download for the SAME repo
-                // while we were awaiting cleanup. Don't delete the folder the
-                // new task is writing to, and don't stomp its state flags.
+                // The user restarted the download for the same repo while cleanup was awaited:
+                // do not delete the folder the new task is writing to, and do not overwrite its state flags.
                 let newTaskForSameRepo = self.downloadTask != nil && self.currentDownloadName == modelName
 
                 if modelName.isEmpty {
@@ -1523,10 +1261,8 @@ func refreshInstalledModels() {
     }
 
     /// Recomputes per-model disk usage in the background.
-    ///
-    /// Each model is a multi-gigabyte tree, so this is a real walk — it must never run on the
-    /// MainActor alongside the scan. Cancels any in-flight pass so rapid successive refreshes
-    /// don't stack.
+    /// Each model is a multi-gigabyte tree, so this must not run on the MainActor; cancels any in-flight pass so refreshes
+    /// do not stack.
     private func recomputeInstalledSizes() {
         sizingTask?.cancel()
         let targets = installedModels.map { ($0.displayName, $0.localPath) }
@@ -1534,13 +1270,8 @@ func refreshInstalledModels() {
             installedSizeBytes = [:]
             return
         }
-        // ⚠️ Hold the DETACHED task itself rather than an outer wrapper around it. A detached
-        // task does not inherit cancellation, so with the walk buried inside
-        // `await Task.detached { … }.value` the `sizingTask?.cancel()` above reached only the
-        // wrapper: the loop's `Task.isCancelled` check was dead code and every superseded pass
-        // ran to completion anyway. Published values stayed correct (the outer guard did work),
-        // but rapid refreshes stacked full walks over a multi-gigabyte tree. Cancellation now
-        // lands on the task actually doing the walking.
+        // Hold the detached task itself, not a wrapper: a detached task does not inherit cancellation,
+        // so cancelling a wrapper would never reach the walk.
         sizingTask = Task.detached(priority: .utility) { [weak self] in
             var sized: [String: Int64] = [:]
             for (name, path) in targets {
@@ -1586,16 +1317,9 @@ func refreshInstalledModels() {
         }
     }
 
-    /// Validates a folder the user picked and copies it into the store.
-    ///
-    /// ⚠️ Copies rather than symlinks or references-in-place, deliberately. An in-place
-    /// reference would put a folder the app doesn't own inside `installedModels`, where
-    /// `deleteModel` — a recursive delete — would happily remove the user's own directory, and
-    /// where the partial-download cleanup reasons about paths it didn't create. Copying costs
-    /// disk but keeps one clear ownership boundary.
-    ///
-    /// `repoId` names where it lands in the store, so an imported model is indistinguishable
-    /// from a downloaded one afterwards.
+    // Why: Copies rather than symlinks: an in-place reference would let `deleteModel` recursively delete the user's own
+    // directory.
+    /// Validates a folder the user picked and copies it into the store under `repoId`, indistinguishable from a download.
     func importModel(from source: URL, as repoId: String) async -> Result<String, ImportError> {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
@@ -1626,13 +1350,8 @@ func refreshInstalledModels() {
             return .failure(.copyFailed("'\(repoId)' is not a valid author/name identifier."))
         }
 
-        // ⚠️ Both the sizing walk and the copy run OFF the MainActor. `MLXModelService` is
-        // `@MainActor`, so leaving them inline froze the whole UI for the duration of a
-        // multi-gigabyte tree copy — Not Responding, with any concurrent download's progress
-        // hops queued behind it. This is the same hang A15 moved the scan off the actor to
-        // remove; import was written afterwards and inherited none of that. Note the size is
-        // computed eagerly for the log line, so it must be hoisted too — a recursive walk
-        // hidden inside a string interpolation is still a recursive walk.
+        // Both the sizing walk and the copy run off the MainActor; inline they would freeze the UI for a multi-gigabyte copy.
+        // The size is hoisted out of the log line for the same reason.
         let sourceBytes = await Task.detached(priority: .utility) {
             MLXModelService.directorySize(at: source)
         }.value
@@ -1685,12 +1404,9 @@ func refreshInstalledModels() {
 
     // MARK: - Disk capacity
 
-    /// Free space on the volume that holds the models directory, in bytes.
-    ///
-    /// Uses `volumeAvailableCapacityForImportantUsageKey`, which is what macOS will actually
-    /// let a user-initiated download consume — it accounts for purgeable space, unlike
-    /// `volumeAvailableCapacityKey`. Nil when the volume can't be queried; callers treat that
-    /// as "unknown" and proceed rather than blocking a download on a failed stat.
+    /// Free space on the volume holding the models directory, in bytes.
+    /// Uses `volumeAvailableCapacityForImportantUsageKey`, which accounts for purgeable space; nil when the volume cannot
+    /// be queried.
     nonisolated static func availableBytes(onVolumeContaining url: URL) -> Int64? {
         guard let values = try? url.resourceValues(
             forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]
@@ -1704,12 +1420,7 @@ func refreshInstalledModels() {
         return nil
     }
 
-    /// Headroom kept free beyond the download itself.
-    ///
-    /// Models land on the boot volume, and macOS degrades badly (and sometimes
-    /// unrecoverably) as the startup disk approaches full — swap, snapshots and app state all
-    /// need room. 5 GB is enough to keep the system healthy while staying small relative to
-    /// the multi-gigabyte downloads this guards.
+    /// Headroom kept free beyond the download itself, since macOS degrades badly as the startup disk nears full.
     static let diskHeadroomBytes: Int64 = 5 * 1024 * 1024 * 1024
 
     /// Whether `requiredBytes` fits on the models volume with headroom to spare.
@@ -1722,9 +1433,8 @@ func refreshInstalledModels() {
 
     // MARK: - Partial downloads on disk
 
-    /// A folder under the download root that is not a complete install — what a paused,
-    /// interrupted, failed or crashed pull leaves behind. `refreshInstalledModels` deliberately
-    /// filters these out of `installedModels`, so on their own they have no Delete button.
+    /// A folder under the download root that is not a complete install: what a paused, failed or crashed pull leaves behind.
+    /// `refreshInstalledModels` filters these out of `installedModels`, so on their own they have no Delete button.
     struct OrphanedPartialDownload: Equatable, Identifiable, Sendable {
         let repoId: String
         let path: URL
@@ -1793,9 +1503,7 @@ func refreshInstalledModels() {
         Self.scanForOrphans(under: modelsDirectory)
     }
 
-    /// Re-scans off the main actor and publishes the result. Called after every terminal
-    /// transition, pause and reclaim. Overlapping calls coalesce: only the newest scan publishes.
-    ///
+    /// Re-scans off the main actor and publishes the result; overlapping calls coalesce, only the newest scan publishes.
     /// `announce` asks for the launch notice when the leftovers are large enough.
     func refreshPartialDownloads(announce: Bool = false) {
         if announce { announceNextScan = true }
@@ -1867,12 +1575,8 @@ func refreshInstalledModels() {
                 let contents = (try? fm.contentsOfDirectory(
                     at: repo, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
                 )) ?? []
-                // Reclaimable means "not a complete install". A partially-sharded folder
-                // IS reclaimable residue — it holds weights but is hidden from the installed
-                // list, so it has no Delete button and this scan is the only thing that can
-                // account for it. Gating on `containsWeights` skipped exactly those folders,
-                // which is how they became invisible AND unreclaimable at the same time.
-                // An empty folder is not worth reporting.
+                // Reclaimable means 'not a complete install': a partially sharded folder holds weights but is hidden from the installed
+                // list, so this scan is the only thing that accounts for it. An empty folder is not reported.
                 guard !Self.isCompleteInstall(at: repo), !contents.isEmpty else { continue }
                 orphans.append(OrphanedPartialDownload(
                     repoId: "\(author.lastPathComponent)/\(repo.lastPathComponent)",
@@ -1928,12 +1632,7 @@ func refreshInstalledModels() {
     }
 
     /// Deletes an installed model from disk.
-    ///
-    /// Returns false when the delete was refused or failed; the caller should surface that.
-    /// Previously this ran unconditionally and silently: it did not check whether the model
-    /// was currently LOADED (MLXService would keep serving it, and a lazy reload would try to
-    /// read a path that no longer exists), left the `DownloadRecord` claiming "completed", and
-    /// swallowed any failure into an `errorMessage` nothing rendered.
+    /// Returns false when the delete was refused (e.g. the model is loaded) or failed; the caller should surface that.
     @discardableResult
     func deleteModel(_ item: MLXModelItem) async -> Bool {
         let path = item.localPath
@@ -1960,19 +1659,14 @@ func refreshInstalledModels() {
         }
         if await MLXService.shared.isModelLoaded(at: path) {
             logger.error("[MLXSTORE] REFUSING to delete '\(item.displayName)' — it is currently loaded in MLXService. CONSEQUENCE: delete skipped — deleting it would leave a lazy reload targeting a path that no longer exists. It unloads on MLX's 2-minute idle timer, or when a run on another local model takes the local lock.")
-            // ⚠️ Status, not a remedy: switching conversations or models no longer unloads anything
-            // (local inference coordinator, D10), so the old "switch to another model" was wrong.
+            // A status, not a remedy: switching conversations or models does not unload anything.
             errorMessage = "\(item.displayName) is still loaded in memory. It unloads by itself 2 minutes after its last use, or when a run on another local model starts."
             return false
         }
 
         do {
-            // ⚠️ Deliberately INLINE, unlike the sizing walk above and unlike import's copy.
-            // The two guards immediately above are `await`s, so every suspension added between
-            // them and this line widens the window in which a generation can start and then
-            // read weights that are being unlinked underneath it. An APFS recursive unlink is
-            // cheap where a recursive size walk is not, so the trade favours keeping the
-            // guarded region tight. Revisit only with a real hitch measurement.
+            // Deliberately inline, unlike the sizing walk and the import copy: the two guards above are awaits,
+            // so extra suspension widens the window in which a generation could read weights being unlinked.
             try FileManager.default.removeItem(at: path)
         } catch {
             logger.error("[MLXSTORE] Delete FAILED for '\(item.displayName)' at \(path.path): \(error.localizedDescription). CONSEQUENCE: the model remains on disk and still occupies \(ByteCountFormatter.string(fromByteCount: reclaimable, countStyle: .file)).")
@@ -2012,13 +1706,7 @@ func refreshInstalledModels() {
     }
 
     /// Drops the Intelligence Core selection when the delete left it pointing at nothing.
-    ///
-    /// ⚠️ Without this the setting outlived the model: every later compaction logged
-    /// `IC context-window lookup MISSED`, fell back to a 4096-token window, and still reported an
-    /// IC model as selected — so synthesis and compaction kept being planned around a model that
-    /// could not load. Checked AFTER the refresh and through `installedModel(named:)` (the same
-    /// resolution every IC reader uses), so a selection another installed copy still satisfies is
-    /// left alone; only one that no longer resolves is cleared.
+    /// Checked after the refresh via `installedModel(named:)`, so a selection another installed copy satisfies is left alone.
     private func clearIntelligenceCoreSelectionIfUnresolvable(afterDeleting item: MLXModelItem) {
         let key = AppSettings.coreIntelligenceModelKey
         let selected = UserDefaults.standard.string(forKey: key) ?? ""
@@ -2033,13 +1721,7 @@ func refreshInstalledModels() {
 // MARK: - HuggingFace transport
 
 /// A classified HuggingFace API failure.
-///
-/// Every HF call used to discard its `URLResponse` with `let (data, _) = …`, so a 429, 401,
-/// 500 or Cloudflare interstitial all arrived as a *successful* `data(from:)` whose body
-/// merely failed to decode. Rate-limited, offline, gated and genuinely-empty were therefore
-/// indistinguishable — all four rendered "No models found", and the log said "the data
-/// couldn't be read because it isn't in the correct format", pointing a maintainer at a
-/// schema bug rather than at throttling.
+/// Classifying the `URLResponse` separates rate-limited, offline, gated and genuinely-empty results from decode errors.
 enum HFRequestError: LocalizedError, Equatable {
     case rateLimited(retryAfter: TimeInterval?)
     case unauthorized
@@ -2090,13 +1772,9 @@ enum HFRequestError: LocalizedError, Equatable {
 /// provider rather than reimplementing status handling per call site.
 enum HFRequest {
 
-    /// One bounded retry with jittered backoff. Deliberately small: the failures worth
-    /// retrying here are transient 5xx and dropped connections, and retrying a 429 is what
-    /// deepens a rate limit — so `.rateLimited` is never retried, only surfaced.
-    /// - Parameter cachePolicy: defaults to the policy every listing call wants.
-    ///   ⚠️ Overridden ONLY by the token check: `URLCache` keys on the URL, NOT on the
-    ///   `Authorization` header, so a cached 200 for a shared URL can answer a request made with
-    ///   a DIFFERENT credential — which would let a revoked token verify as valid.
+    // Why: `URLCache` keys on the URL, not `Authorization`, so a cached 200 could verify a revoked token as valid.
+    /// One bounded retry with jittered backoff for transient 5xx and dropped connections; `.rateLimited` is never retried.
+    /// - Parameter cachePolicy: defaults to the policy every listing call wants; only the token check overrides it.
     static func get<T: Decodable>(
         _ type: T.Type,
         from url: URL,
@@ -2134,15 +1812,8 @@ enum HFRequest {
         // Bounded so the store cannot hang on URLSession's 60s default.
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        // The list endpoint's top-30 payload is highly cacheable; let URLSession revalidate
-        // instead of re-downloading an identical body every time the store opens.
-        //
-        // ⚠️ BUT AN AUTHENTICATED RESPONSE MAY NOT SHARE A URL-KEYED CACHE. `URLCache` ignores the
-        // `Authorization` header, so an anonymous 200 cached while browsing signed-out can answer
-        // the very next signed-in request — and vice versa. The "Add Token…" flow makes exactly
-        // that sequence routine: hit a 401, add a token, and `refresh()` re-requests the listing
-        // URL that was just cached anonymously, so the user adds a working token and sees the
-        // same signed-out results. The caller's policy still wins when there is no token.
+        // The list endpoint's top-30 payload is cacheable, so let URLSession revalidate when there is no token.
+        // An authenticated response must not share a URL-keyed cache: `URLCache` ignores `Authorization`.
         request.cachePolicy = token == nil ? cachePolicy : .reloadIgnoringLocalCacheData
 
         let data: Data
@@ -2203,7 +1874,7 @@ struct HFRawModel: Decodable {
     /// ISO-8601 timestamp from the HF API. Optional because not every listing includes it.
     let lastModified: String?
 
-    /// Parsed form used to make the "Recent" sort meaningful for remote results.
+    /// Parsed form that makes the 'Recent' sort meaningful for remote results.
     var lastModifiedDate: Date? {
         guard let lastModified else { return nil }
         return ISO8601DateFormatter.hfFormatter.date(from: lastModified)
@@ -2268,9 +1939,8 @@ struct HFModelDetail: Decodable {
     }
 
     struct Safetensors: Decodable {
-        /// Stored tensor-element count. ⚠️ For a quantized repo this is NOT the logical
-        /// parameter count — weights are packed — so it is presented as "tensor elements"
-        /// rather than dressed up as a parameter count it isn't.
+        /// Stored tensor-element count; for a quantized repo this is not the logical parameter count, so it is shown as 'tensor
+        /// elements'.
         let total: Int64?
     }
 }

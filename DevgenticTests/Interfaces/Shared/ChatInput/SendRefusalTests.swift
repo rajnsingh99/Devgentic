@@ -4,17 +4,7 @@
 //  SendRefusalTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Register A32 — the send BUTTON did nothing visible when the selected profile had been deleted,
-//  while ENTER opened the backend picker for the identical condition.
-//
-//  The two entry points implemented the send action separately and drifted; they now share
-//  `ChatInputAreaView.attemptSend`. A SwiftUI view method is not directly reachable from a unit
-//  test, so what is asserted here is the seam the fix turns on: `resolveRequestConfig()` reporting
-//  WHY a send cannot be configured. Before this, all three reasons collapsed into one `nil` and one
-//  log line, which is why neither entry point could say anything useful — and why a store failure
-//  was indistinguishable from a deletion.
+//  Created by Raj Singh.
 //
 
 import XCTest

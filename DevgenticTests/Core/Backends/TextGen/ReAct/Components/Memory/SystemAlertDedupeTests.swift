@@ -4,14 +4,7 @@
 //  SystemAlertDedupeTests.swift
 //  DevgenticTests
 //
-//  `WindowedLinearMemory.renderableAlerts` — byte-identical alerts collapse to one line carrying
-//  their repeat count, then cap to the most recent N.
-//
-//  ⚠️ WHY THIS FILE EXISTS SEPARATELY. Every pre-existing alert test in
-//  `WindowedLinearMemoryTests` / `WindowedLinearMemoryEdgeCaseTests` uses PAIRWISE-DISTINCT alert
-//  strings ("Alert 1"…"Alert 5"), so not one of them can distinguish keep-first from keep-last, or
-//  dedupe-before-cap from cap-before-dedupe. All 55 stay green against a keep-first implementation
-//  that silently drops the newest alert. The cases below are the ones that can fail.
+//  Created by Raj Singh.
 //
 
 import XCTest

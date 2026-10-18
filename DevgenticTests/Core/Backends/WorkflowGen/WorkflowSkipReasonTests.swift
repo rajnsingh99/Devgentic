@@ -4,21 +4,7 @@
 //  WorkflowSkipReasonTests.swift
 //  DevgenticTests
 //
-//  Covers the 2026-08-15 node state model: a node that did not run carries a TYPED cause, and the
-//  terminal set is computed over edges that actually fired.
-//
-//  Two defects motivate this file, both of which shipped:
-//
-//  1. "Did not run" was reported to every consumer as `.workflowNodeFailed` carrying the single
-//     sentence "Upstream dependency failed" — for FOUR structurally different causes. Two of them
-//     (a Router branching elsewhere, an error handler correctly standing down) happen on runs where
-//     nothing failed at all, so the app asserted a failure that never occurred.
-//
-//  2. `terminalOutputs` decided "has outgoing edges" from every DRAWN edge, so on the canonical
-//     error-handling shape — `A`, with `A --error--> Handler` — a fully successful run had no
-//     successful terminal: `A` was excluded for having an (untaken) outgoing edge, and the skipped
-//     `Handler` was the only terminal. The run reported "all terminal nodes failed" and A's answer
-//     was never emitted.
+//  Created by Raj Singh.
 //
 
 import XCTest

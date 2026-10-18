@@ -4,7 +4,7 @@
 //  CursorModifiers.swift
 //  Devgentic
 //
-//  Unified pointing hand cursor (NSCursor.pointingHand) and interactive hit-testing helpers.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

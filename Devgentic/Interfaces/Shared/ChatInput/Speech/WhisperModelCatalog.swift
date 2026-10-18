@@ -4,7 +4,7 @@
 //  WhisperModelCatalog.swift
 //  Devgentic
 //
-//  Shared catalog of available WhisperKit speech recognition models.
+//  Created by Raj Singh.
 //
 
 import Foundation

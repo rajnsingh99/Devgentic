@@ -4,11 +4,7 @@
 //  MLXModelDetailTests.swift
 //  DevgenticTests
 //
-//  G6 — the model detail sheet. The parsing is what can break silently: HuggingFace's schema
-//  is loose (fields present on some repos and absent on others, and `gated`/`base_model`
-//  change TYPE between repos), so a strict decode would fail for real models in the store.
-//
-//  Fixtures below are trimmed from real API responses.
+//  Created by Raj Singh.
 //
 
 import XCTest

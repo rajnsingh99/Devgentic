@@ -4,32 +4,7 @@
 //  NativeToolCatalog.swift
 //  Devgentic
 //
-//  The single source of truth for which native tools exist.
-//
-//  Until 2026-07-31 there were two hand-maintained lists: a `switch` in
-//  `AgentConnect.resolveNativeTool` deciding what RUNS, and a sequence of `registerNative(…)`
-//  calls in `LocalToolManager` deciding what is OFFERED. 63 of them constructed the same struct
-//  with the same expression in both files, and nothing checked they agreed.
-//
-//  The failure modes were asymmetric, which is why the drift only ever ran one way: forget the
-//  registration and you get a working, INVISIBLE tool that nobody notices because it works;
-//  forget the dispatch case and you get a visible tool that fails loudly the first time anyone
-//  picks it. Over time that produced 11 unreachable tools, 25 dispatchable tools in no picker,
-//  one struct dispatched under two names, and a split whose destructive half was selectable
-//  while its harmless half was not — every tool bug found in the 2026-07-31 audit.
-//
-//  Both consumers now derive from `entries` below. Adding a tool is one line, in one place.
-//
-//  **Why entries store a closure rather than an instance.** `AgentToolFactory.wrap` is generic
-//  over the concrete `T` so it can decode `T.Arguments`; a heterogeneous `[any DevgenticTool]`
-//  would erase exactly the type it needs. `make` captures `T` at each call site, which is what
-//  lets one list hold 71 different tool types.
-//
-//  **Why the closure takes a `UUID?`.** The shell tools need the conversation
-//  (`run_command`, `start_background_task`, `get_task_output`, `stop_background_task`), to scope their tasks
-//  so `bg_1` means one thing per conversation and one conversation cannot poll or stop another's
-//  build. Passing `nil` yields the same tool without that state, which is what the Library needs
-//  for metadata. The rest ignore the parameter. One uniform signature beats a special case.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -45,19 +20,13 @@ enum NativeToolVisibility: Sendable, Equatable {
     /// (both read `UnifiedToolStore`, which is built from `LocalToolManager`).
     case library
 
-    /// In the Library for Chat and Workflow profiles, but hidden when the Library is opened for a
-    /// CODE profile, because the preset supplies something that supersedes it.
-    ///
-    /// `supersededBy` names the replacement, and it is the point of this case: the previous
-    /// design carried these five names in a `Set` literal inside `CodeToolPreset`, so the fact
-    /// that `edit_code` is hidden *because* `edit_code_single`/`edit_code_batch` exist lived in a
-    /// comment rather than beside either tool. Offering both to a Code agent would hand it
-    /// several shapes for one intent — the exact confusion the splits were introduced to prevent.
+    /// In the Library for Chat and Workflow profiles, but hidden when the Library is opened for a Code profile because
+    /// the preset supplies something that supersedes it. `supersededBy` names the replacement, so offering both to a Code
+    /// agent (several shapes for one intent) is avoided.
     case libraryExceptCode(supersededBy: String)
 
-    /// Supplied by `CodeToolPreset` and deliberately absent from the Library — the intent-split
-    /// tools (`edit_code_single`, `code_search_text`, `overwrite_file`, …) whose originals the
-    /// Library offers instead. Surfacing both would hand the model several shapes for one intent.
+    /// Supplied by `CodeToolPreset` and absent from the Library: the intent-split tools whose originals the Library
+    /// offers instead. Surfacing both would give the model several shapes for one intent.
     case codeOnly
 
     /// Runs, but is offered nowhere. **Nothing is `.hidden` today.** Kept because the state is
@@ -66,11 +35,8 @@ enum NativeToolVisibility: Sendable, Equatable {
     case hidden(reason: String)
 }
 
-/// What a tool needs before it can work, and where the user provides it.
-///
-/// Declared on the catalogue entry so a future tool that needs configuration (an API key, an
-/// account, a path) opts in with one line and gets the Tool Library's "Setup" option, the
-/// enable-block and the workflow warning for free.
+/// What a tool needs before it can work, and where the user provides it. Declared on the catalogue entry so a tool
+/// needing configuration (API key, account, path) gets the Setup option, enable-block and workflow warning.
 struct ToolSetup: Sendable {
     /// Why the tool cannot work yet, or nil when it is ready. Evaluated live.
     let blocker: @Sendable () -> String?
@@ -84,24 +50,16 @@ struct NativeToolEntry: Sendable {
     let category: String
     let visibility: NativeToolVisibility
 
-    /// A PRECONDITION, not a policy: returns why this tool cannot work yet (no API key, no
-    /// provider chosen), or nil when it is ready. Evaluated live, so it follows the user's
-    /// settings. Nil for the vast majority of tools, which need nothing.
-    ///
-    /// ⚠️ This says "it would only return an error", never "it is risky": the Tool Library
-    /// refuses to ENABLE a blocked tool and agent resolution does not offer it, because
-    /// advertising a tool that can only fail wastes a slot and invites retry loops. It is
-    /// unrelated to `HITLRiskTier` / `ToolCapability`, which label and never gate.
+    /// A precondition, not a policy: returns why this tool cannot work yet (no API key, no provider), or nil when ready.
+    /// Evaluated live; nil for most tools. The Tool Library refuses to enable a blocked tool and agent resolution does
+    /// not offer it. Unrelated to `HITLRiskTier` / `ToolCapability`, which label and never gate.
     let setup: ToolSetup?
 
     private let buildAgentTool: @Sendable (UUID?, Bool, TimeInterval?, String?) -> AgentTool
     private let buildExecutable: @Sendable () -> any ExecutableTool
 
-    /// Builds an entry from a tool factory, capturing the concrete type.
-    ///
-    /// `name` and `category` are read from a probe instance built once here. Tools are cheap
-    /// value types whose initialisers do no work, so this costs nothing and keeps the metadata
-    /// honest — it is the tool's own answer, not a string repeated in the catalogue.
+    /// Builds an entry from a tool factory, capturing the concrete type. `name` and `category` come from a probe instance
+    /// built once here; tools are cheap value types, so the metadata is the tool's own answer.
     static func make<T: DevgenticTool>(
         _ visibility: NativeToolVisibility,
         setup: ToolSetup? = nil,
@@ -141,24 +99,17 @@ struct NativeToolEntry: Sendable {
 
 enum NativeToolCatalog {
 
-    /// Every native tool the app can run. **This is the list.** A tool absent here cannot be
-    /// dispatched and cannot be offered; a tool present here is automatically both, according to
-    /// its `visibility`.
-    ///
-    /// Order is presentational only — lookup is by name via `entry(named:)`.
+    /// Every native tool the app can run. A tool absent here cannot be dispatched or offered; one present is both,
+    /// according to its `visibility`. Order is presentational only; lookup is by name via `entry(named:)`.
     static let entries: [NativeToolEntry] = [
         // MARK: Offered in the Tool Library (71)
         .make(.library) { _ in UpdateSkillTool() },
         .make(.library) { _ in ListDirectoryTool() },
         .make(.library) { _ in ReadFileTool() },
-        // ⚠️ `write_file` is gone (2026-09-24): superseded by `create_new_file` / `overwrite_file`,
-        // which are now offered in the Tool Library for all profiles.
         .make(.library) { _ in DeleteFileTool() },
         .make(.library) { _ in MoveFileTool() },
         .make(.library) { _ in CopyFileTool() },
         .make(.library) { _ in CreateFolderTool() },
-        // ⚠️ `execute_shell` is gone (2026-09-24): a duplicate of `run_command`. No rename map, for
-        // the reasons given at `batch_command` below.
         .make(.library) { _ in OpenApplicationTool() },
         .make(.library) { _ in RunAppleScriptTool() },
         .make(.library) { _ in GetSystemStatsTool() },
@@ -195,43 +146,17 @@ enum NativeToolCatalog {
         .make(.library) { _ in ToggleDoNotDisturbTool() },
         .make(.library) { _ in GetWiFiInfoTool() },
         .make(.library) { _ in ManageBluetoothTool() },
-        // ⚠️ `grep_files` is gone (2026-09-24): superseded by `code_search_text`,
-        // which provides structured regex and literal search across files and directories.
         .make(.library) { _ in PreviewFileTool() },
         .make(.library) { _ in GetFileHashTool() },
-        // ⚠️ `edit_code` is gone (2026-09-24): superseded by `edit_code_single` / `edit_code_batch`,
-        // which are now offered in the Tool Library for all profiles.
-        // ⚠️ `code_search` is gone (2026-09-24): superseded by `code_search_text` / `code_search_symbol` /
-        // `code_search_files`, which are now offered in the Tool Library for all profiles.
         .make(.library) { _ in GlobFilesTool() },
         .make(.library) { _ in FindDefinitionTool() },
-        // ⚠️ `batch_command` IS GONE FROM THIS CATALOGUE. It was never two behaviours — its `call`
-        // was a two-line dispatcher over the same `runForeground` / `startBackground` statics these
-        // two use, so `run_command` was a literal duplicate of `batch_command(background: false)`.
-        // Keeping both meant chat and Code were offered different names for identical work, and the
-        // observer tools below had to describe a starter that differed by mode.
-        //
-        // ⚠️ `BatchCommandTool` the TYPE remains: it owns `precheck`, `runForeground`,
-        // `startBackground` and `effectiveTimeout`, which both tools below call.
-        // Only its catalogue entry is withdrawn, so no profile can select it any more.
-        //
-        // ⚠️ NO RENAME MAP. One was built and then deliberately removed: the only seeded tool lists
-        // (`CodeToolPreset`, `OnboardingToolPreset`) are built from this catalogue by name, so a
-        // profile created after this withdrawal CANNOT contain the old name, and
-        // with no released users the only holders were local development profiles. A standing
-        // "withdrawn names resolve to something else" mechanism is a first-party cousin of the
-        // guess-by-name fallback `resolveExecutableTools` deleted on purpose — keeping one invites
-        // reaching for it instead of migrating properly. A stored name that no longer exists is
-        // reported by the ⚠️ NOT RESOLVED error, which is the honest outcome.
+        // `batch_command` is not in the catalogue; `BatchCommandTool` remains as the type owning `precheck`,
+        // `runForeground`, `startBackground` and `effectiveTimeout`. A missing stored name is reported as NOT RESOLVED.
         .make(.library) { RunCommandTool(conversationID: $0) },
         .make(.library) { StartBackgroundTaskTool(conversationID: $0) },
-        // The three that make `background: true` worth calling. Without them the flag starts work
-        // nobody can observe, which is not a capability. Conversation-scoped for the same reason
-        // `batch_command` now is.
+        // The observer tools that make `background: true` worth calling; conversation-scoped like the starters.
         .make(.library) { CommandOutputTool(conversationID: $0) },
         .make(.library) { CommandStopTool(conversationID: $0) },
-        // ⚠️ `create_file` is gone (2026-09-24): superseded by `create_new_file` / `overwrite_file`,
-        // which are now offered in the Tool Library for all profiles.
         .make(.library) { _ in FileOverviewTool() },
         .make(.library) { _ in CodebaseMapTool() },
         .make(.library) { _ in ScreenCaptureTool() },
@@ -256,18 +181,14 @@ enum NativeToolCatalog {
         .make(.library) { _ in OverwriteFileTool() },
     ]
 
-    /// Name → entry. Built once; `resolveNativeTool` is a lookup in this, not a 100-line switch.
-    ///
-    /// A duplicate name would silently drop one entry, which is the shape of the old
-    /// `read_contacts` bug (one struct dispatched under two names), so the build order is
-    /// asserted to be lossless rather than trusted.
+    /// Name to entry, built once; `resolveNativeTool` is a lookup in this. A duplicate name would silently drop an entry,
+    /// so the build is checked to be lossless.
     static let byName: [String: NativeToolEntry] = {
         var map: [String: NativeToolEntry] = [:]
         for entry in entries { map[entry.name] = entry }
         if map.count != entries.count {
-            // `assert` is compiled OUT of release builds, so a duplicate name would silently
-            // drop a tool in exactly the builds users run. This is the `read_contacts` bug's
-            // shape (one struct, two names) and it must be visible in a field log.
+            // `assert` is compiled out of release builds, so a duplicate name would silently drop a tool in shipped builds; log
+            // it so it shows in a field log.
             let dupes = Dictionary(grouping: entries, by: \.name).filter { $0.value.count > 1 }.keys.sorted()
             logger.error("[TOOLCATALOG] ⚠️ duplicate tool name(s) \(dupes) — \(entries.count) entries collapsed to \(map.count). The later entry wins; the earlier tool is unreachable.")
             assertionFailure("NativeToolCatalog has duplicate tool names: \(dupes)")
@@ -285,12 +206,9 @@ enum NativeToolCatalog {
     /// keep offering "Setup" for changing the configuration.
     static func setupSettings(for name: String) -> SettingsCategory? { byName[name]?.setup?.settings }
 
-    /// The tools `LocalToolManager` registers, and therefore what the Tool Library and the
-    /// workflow Action-node picker show.
-    ///
-    /// `.libraryExceptCode` is included: those tools ARE in the Library — they are filtered out
-    /// later, and only when the Library is opened for a Code profile. Registration is about
-    /// existence; `hiddenFromCodeLibrary` is about that one context.
+    /// The tools `LocalToolManager` registers, and so what the Tool Library and the workflow Action-node picker show.
+    /// `.libraryExceptCode` is included: registration is about existence, and `hiddenFromCodeLibrary` filters only for a
+    /// Code profile.
     static var libraryTools: [NativeToolEntry] {
         entries.filter {
             switch $0.visibility {
@@ -300,11 +218,7 @@ enum NativeToolCatalog {
         }
     }
 
-    /// Library tools a CODE profile should not see, because the preset supersedes them.
-    ///
-    /// `CodeToolPreset.hiddenToolNames` used to carry these as a `Set` literal, which meant the
-    /// reason each was hidden lived in a comment above the list rather than beside the tool. Now
-    /// the entry states it, and the preset asks.
+    /// Library tools a Code profile should not see, because the preset supersedes them; each entry states its own reason.
     static var hiddenFromCodeLibrary: Set<String> {
         Set(entries.compactMap {
             if case .libraryExceptCode = $0.visibility { return $0.name }
@@ -318,18 +232,10 @@ enum NativeToolCatalog {
 
 // MARK: - Control-plane tools
 
-/// Name, description and argument schema for a tool `AgentConnect` builds per run.
-///
-/// ⚠️⚠️ METADATA ONLY — deliberately no `agentTool(...)` builder. These tools genuinely cannot
-/// live in `entries`: each needs run-scoped data to CONSTRUCT (the run's chat history, its skill
-/// manifests, a Code profile's project folder), which a startup catalogue cannot supply, and
-/// `ToolRegistryDriftTests` fails the build if one appears there. Giving this type a builder
-/// would re-open exactly that door.
-///
-/// But the data they need affects their BEHAVIOUR, not their schema: all five declare a constant
-/// `description` and `parameterSchema`. So they can be PRICED from a probe built with empty data
-/// even though they cannot be dispatched from one — and until 2026-09-20 nothing priced them, so
-/// every one cost 0 in the fit gauge.
+// Why: do not add an `agentTool(...)` builder; `ToolRegistryDriftTests` fails the build if such a tool appears in
+// `entries`.
+/// Name, description and argument schema for a tool `AgentConnect` builds per run. Metadata only, with no builder:
+/// these tools need run-scoped data to construct, but their schema is constant, so they can be priced from a probe.
 struct InjectedToolMetadata: Sendable {
     let name: String
     let description: String
@@ -344,18 +250,9 @@ struct InjectedToolMetadata: Sendable {
 
 extension NativeToolCatalog {
 
-    /// Every tool `AgentConnect` injects outside the catalogue. **This is the list.**
-    ///
-    /// It used to exist only as `ToolRegistryDriftTests.injectedOutsideCatalog` — a hand-written
-    /// `Set` in a TEST file, which is why nothing in production could price these or show them in
-    /// a loadout. That test now derives its list from here, so this is one list where there were
-    /// two, not a third one.
-    ///
-    /// ⚠️ `ask_user` is described in its RICH form. Its schema is the one thing here that varies
-    /// at runtime — `AgentConnect` drops `options`/`multiline` for small and tiny models, which
-    /// fumble them — so no single entry is exact. Rich is the larger of the two (456 vs 195
-    /// chars), and over-reading is the safe direction for a budget on the models with the
-    /// smallest windows.
+    /// Every tool `AgentConnect` injects outside the catalogue; `ToolRegistryDriftTests` derives its list from here.
+    /// `ask_user` is described in its rich form, the larger of its two schemas, since over-reading is the safe direction
+    /// for a budget.
     static let injectedTools: [InjectedToolMetadata] = [
         .describe(FinalAnswerTool()),
         .describe(AskUserTool(richFields: true)),
@@ -373,14 +270,8 @@ extension NativeToolCatalog {
 
     // MARK: - Retired names (diagnostics only)
 
-    /// Tools renamed in Build 102.6 (2026-09-25, commit 3d80ff6), old → new.
-    ///
-    /// ⚠️ DIAGNOSTICS ONLY — this is NOT an alias table. Nothing resolves an old name to the new
-    /// tool at run time (`ToolNameResolver` does not read this): there are no users to keep working,
-    /// and a silent alias would hide exactly the stale reference the user needs to fix. It exists so
-    /// that instructions written against the old vocabulary — Agent 3's "use fs_smart_search first"
-    /// was the case that found this — get a precise "renamed to X" advisory instead of a vague
-    /// "unknown tool". Every pair was verified against that commit's diff.
+    /// Tools that were renamed, old to new; diagnostics only, not an alias table (`ToolNameResolver` does not read it).
+    /// Lets instructions written against an old name get a precise "renamed to X" advisory instead of "unknown tool".
     static let renamedTools: [String: String] = [
         "fs_smart_search":    "spotlight_search",
         "fs_read_metadata":   "read_file_metadata",

@@ -4,16 +4,7 @@
 //  SplitToolTimelineLabelTests.swift
 //  DevgenticTests
 //
-//  tc-1 / tc-2 (2026-09-12 functional+performance register).
-//
-//  tc-1  The Code profile's intent-split tools were in none of `ToolArgFormatter`'s tables, so
-//        their rows fell through to an untargeted fallback that returned whichever String the
-//        params dictionary yielded first — frequently `content`, i.e. the file being written.
-//  tc-2  `create_file` and `edit_code` were missing from `chipEligibleTools` (and from the
-//        executor's snapshot sets), so a CHAT or WORKFLOW profile's file write produced no diff
-//        chip and no persisted `ActionEffect`.
-//
-//  Each test names the mutation that must kill it.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,12 +4,7 @@
 //  EditPatchStore.swift
 //  Devgentic
 //
-//  Where `EditPatch`es live: `~/Library/Application Support/Devgentic/EditPatches/<conversation>/
-//  <tool event>.json`, one file per agent write. Kept 7 days, 1 GB in total, oldest removed first —
-//  the same retention as command logs (user decision 2026-10-04).
-//
-//  ⚠️ Not in the message's timeline blob. That blob is re-encoded whole on every flush and decoded
-//  on every conversation load; a patch has no size cap.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "EditPatch")
 
+// Why: patches stay out of the message timeline blob, which is re-encoded on every flush and has no size cap for a patch.
+/// Stores `EditPatch`es as one JSON file per agent write under Application Support, grouped by conversation.
+/// Patches are kept 7 days and 1 GB in total, oldest removed first.
 final class EditPatchStore: @unchecked Sendable {
 
     static let shared = EditPatchStore(rootDirectory: defaultRootDirectory)

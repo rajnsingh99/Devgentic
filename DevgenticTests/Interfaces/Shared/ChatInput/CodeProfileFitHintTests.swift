@@ -4,15 +4,7 @@
 //  CodeProfileFitHintTests.swift
 //  DevgenticTests
 //
-//  C7 (composer audit, 2026-07-18): the pre-send context-overflow hint covered only
-//  `.bot`/`.agent`, so Code mode — where large file attachments are MOST common — got no
-//  warning at all and only discovered the overflow at send time.
-//
-//  Fixing it meant reading the model config through `resolvedLLMConfig` (which knows
-//  `.code`) instead of `primaryLLMConfig` (which returns nil for it). `primaryLLMConfig`
-//  was deliberately NOT widened: it also backs `supportsVisionInput` and the orchestration
-//  path, so broadening it would have silently changed Code-mode vision behaviour as a side
-//  effect of adding a hint. These tests pin both halves of that decision.
+//  Created by Raj Singh.
 //
 
 import XCTest

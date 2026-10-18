@@ -4,31 +4,14 @@
 //  DiscordGatewayClosePolicy.swift
 //  Devgentic
 //
-//  What a Discord Gateway close code means for reconnection.
-//
-//  WHY THIS EXISTS. `DiscordGatewayClient.connectAndListen` caught every error and reconnected with
-//  backoff, forever. Discord closes the socket with a code that says WHY, and several of those
-//  reasons cannot be fixed by reconnecting: a rejected bot token (4004) and a privileged intent that
-//  was never enabled in the Developer Portal (4014) are configuration facts, not transient faults.
-//  The bridge retried them every 60s indefinitely, and the user was never told what was wrong —
-//  Discord simply never worked.
-//
-//  ⚠️ THE THROWN ERROR CANNOT TELL YOU ANY OF THIS. A server-side close surfaces from
-//  `URLSessionWebSocketTask.receive()` as a generic `NSPOSIXErrorDomain` code 57 ("Socket is not
-//  connected") — identical whether the token was rejected or the Wi-Fi dropped. The close CODE is
-//  the only thing that separates them, and it lives on the TASK, not on the error.
-//
-//  ⚠️ AND THE CODE DOES SURVIVE, WHICH IS NOT OBVIOUS. `NSURLSessionWebSocketCloseCode` is a closed
-//  `NS_ENUM` whose largest case is 1015, so a reader would reasonably assume Discord's 4000-range
-//  codes are lost in the bridge to Swift. They are not: measured against a server that closes with
-//  4004, `task.closeCode.rawValue` reports 4004 and `task.closeReason` carries the server's text.
-//  This was verified before the policy was written, because the whole fix depends on it.
-//
-//  Codes per Discord's Gateway documentation (opcodes and status codes, v10).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Classifies a Discord Gateway close code as fatal, reconnect, or reconnect-with-new-session.
+/// The thrown error is generic (`NSPOSIXErrorDomain` 57); only the task's close code tells a rejected
+/// token from a dropped connection.
 enum DiscordGatewayClosePolicy {
 
     enum Disposition: Equatable {
@@ -47,8 +30,7 @@ enum DiscordGatewayClosePolicy {
     ///   without a server close frame (a dropped network), which is transient by definition.
     static func disposition(forCloseCode code: Int) -> Disposition {
         switch code {
-        // ⚠️ FATAL. Every one of these is a configuration fact. Retrying is not merely useless, it
-        // hides the problem behind an infinite loop of identical failures.
+        // Fatal: each of these is a configuration fault, and retrying only hides it behind an endless failure loop.
         case 4004:
             return .fatal(reason: "Discord rejected the bot token. Check the token in ChatOps settings — it is wrong, was revoked, or was regenerated in the Developer Portal.")
         case 4010:
@@ -62,15 +44,12 @@ enum DiscordGatewayClosePolicy {
         case 4014:
             return .fatal(reason: "A privileged Gateway intent is not enabled for this bot. Open the Discord Developer Portal → your application → Bot → Privileged Gateway Intents and enable Message Content Intent, then restart ChatOps.")
 
-        // The session is dead but the credentials are good — drop it and identify afresh.
-        // ⚠️ Reconnecting WITHOUT clearing the session state sends a RESUME carrying the same
-        // rejected sequence, which is closed again immediately: a tight loop that looks transient.
+        // The session is dead but the credentials are good: drop it and identify afresh.
+        // Resuming with the stale sequence is closed again immediately, a tight loop that looks transient.
         case 4007, 4009:
             return .reconnectWithNewSession
 
-        // 4000 unknown error, 4001 unknown opcode, 4002 decode error, 4003 not authenticated,
-        // 4005 already authenticated, 4008 rate limited, every 1000-range close, and 0 (no close
-        // frame at all — a dropped connection) are all genuinely retryable.
+        // Retryable: 4000-4003, 4005, 4008, every 1000-range close, and 0 (no close frame, a dropped connection).
         default:
             return .reconnect
         }

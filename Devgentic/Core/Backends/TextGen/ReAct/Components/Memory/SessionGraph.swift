@@ -4,20 +4,15 @@
 //  SessionGraph.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
-//  Updated: Memory Architecture Migration - Phase 3 (XML Episodic Memory)
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - Status Vocabularies
 
-/// Lifecycle of a `MemoryEpisode`. Mirrors `ExecutionOutcome` for terminal states
-/// and adds `.active` for in-progress episodes that haven't been closed yet.
-///
-/// Decoupled from `ExecutionOutcome` so the `.active` lifecycle case lives outside
-/// the executor's terminal vocabulary. Bridge from executor outcomes via
-/// `EpisodeLifecycle(_:)` — there is no inverse because `.active` has no terminal
+/// Lifecycle of a `MemoryEpisode`: mirrors `ExecutionOutcome` for terminal states and adds `.active` for open episodes.
+/// Bridge from executor outcomes via `EpisodeLifecycle(_:)`; there is no inverse because `.active` has no terminal
 /// equivalent.
 enum EpisodeLifecycle: String, Codable, Sendable {
     case active
@@ -31,9 +26,8 @@ enum EpisodeLifecycle: String, Codable, Sendable {
     init(_ outcome: ExecutionOutcome) {
         switch outcome {
         case .completed: self = .completed
-        // Degraded success: the run shipped a best-effort answer but did NOT achieve its
-        // goal cleanly — episodic memory keeps the failure signal (the executor also
-        // passes `.failed` for episodes explicitly; this mapping is the safety net).
+        // Degraded success: the best-effort answer did not achieve its goal cleanly, so episodic memory keeps the failure
+        // signal.
         case .completedWithWarnings: self = .failed
         case .failed:    self = .failed
         case .cancelled: self = .cancelled
@@ -42,10 +36,8 @@ enum EpisodeLifecycle: String, Codable, Sendable {
     }
 }
 
-/// Status of a `MemoryAction` within an episode. Mirrors `ToolFailureCategory`'s
-/// failure shapes plus `.success` for clean completion and `.active` for
-/// in-progress actions. Renders to lowercase via `xmlValue` for `<action status>`
-/// emission in the prompt-injected episodic memory.
+/// Status of a `MemoryAction` within an episode: `ToolFailureCategory`'s failure shapes plus `.success` and `.active`.
+/// Renders lowercase via `xmlValue` for `<action status>` in the episodic memory prompt.
 enum ActionStatus: String, Codable, Sendable {
     case active
     case success
@@ -58,9 +50,7 @@ enum ActionStatus: String, Codable, Sendable {
     case cancelled
 
     /// Lowercase value used in `<action status="...">` XML attributes.
-    /// Multi-word cases use snake_case so the LLM can distinguish them from the
-    /// simpler forms; this also matches existing pre-training conventions for
-    /// failure-category names in API documentation and chat templates.
+    /// Multi-word cases use snake_case so the LLM can tell them from the simpler forms.
     var xmlValue: String {
         switch self {
         case .active:           return "active"
@@ -88,32 +78,9 @@ enum ActionStatus: String, Codable, Sendable {
 
 // MARK: - Hierarchical Memory Models
 
-/// Represents a specific action or sub-task the agent took.
-/// What a mutating action actually DID — the change itself, never the whole file.
-///
-/// Without this the agent has no memory of its own edits: `MemoryAction` recorded the tool
-/// name, 200-char-truncated params and a status, and output only ever landed in
-/// `errorReason` on the FAILURE path. Asked to undo a write, the model answered "I do not
-/// have access to a version control system… restoring the file perfectly is impossible" —
-/// while the app was holding the pre-write snapshot the whole time (field-observed
-/// 2026-07-25). Reverting is not a tooling problem; it was a memory problem.
-///
-/// Persisted (unlike the raw snapshots it derives from) so a resumed or reopened
-/// conversation can still describe and undo what it changed — see
-/// `Docs/codeviewer-rescope-design.md` §12 D1.
-/// A file's observable state at a moment in time.
-///
-/// ⚠️⚠️ BUILT FROM CONTENT ALREADY IN MEMORY — never by stat'ing at capture. The first version of
-/// this took `FileManager.attributesOfItem` inside `ActionEffectBuilder.from`, which runs ON THE
-/// MAIN ACTOR for every file write (`ActiveStreamManager.completeToolTimelineEvent`,
-/// `CapabilityCardRouter.completeTool`). That file's own comment already warns what main-thread
-/// work there costs — "the transcript stopped scrolling and Stop did not respond" — and the
-/// syscall made the CodeViewer live-write suite ~40% slower, which was enough to tip a
-/// race-sensitive test over its budget. Measured 2026-09-20.
-///
-/// So the expensive half is the COMPARISON, which happens at render, and it is ordered to stay
-/// cheap: `stat` first (one syscall, no read) and only read the file when the size still matches.
-/// A change that alters length — nearly all of them — costs no read at all.
+// Why: Never stat at capture: capture runs on the main actor for every file write.
+/// A file's observable state at a moment in time (size and mtime), built from content already in memory.
+/// Comparison happens at render: `stat` first, reading the file only when the size still matches.
 struct EffectFingerprint: Sendable, Codable, Equatable {
     let byteCount: Int
     /// A cheap, stable digest of the bytes written. Not cryptographic: this answers "is this the
@@ -133,13 +100,8 @@ struct EffectFingerprint: Sendable, Codable, Equatable {
         return EffectFingerprint(byteCount: bytes.count, contentHash: hash)
     }
 
-    /// True when the file at `path` no longer matches this fingerprint.
-    ///
-    /// ⚠️ A file that cannot be read reads as CHANGED. Deleted or unreadable is precisely where a
-    /// stored diff misleads most, and "I could not check" must never render as "unchanged".
-    ///
-    /// ⚠️ Size is checked FIRST and short-circuits. That is the whole performance story: a real
-    /// edit almost always changes the length, so the common case is one `stat` and no read.
+    /// True when the file at `path` differs from this fingerprint; an unreadable or deleted file reads as changed.
+    /// Size is checked first and short-circuits, so the common case is one `stat` and no read.
     func differsFromDisk(at path: String) -> Bool {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
               let size = attributes[.size] as? Int else { return true }
@@ -161,24 +123,9 @@ struct ActionEffect: Sendable, Codable, Equatable {
     /// partial change is the whole one.
     let isTruncated: Bool
 
-    /// What the file looked like on disk immediately after this write.
-    ///
-    /// ⚠️⚠️ Exists so the episodic record stops PROMISING a retrieval it cannot honour. The
-    /// `<effect>` element advertises `diff="on_demand"`, meaning "call get_conversation_history(N)
-    /// and you will get the change for this file". Once the file changes underneath — a git
-    /// checkout, the user's editor, another agent — that stored diff no longer describes it, and
-    /// the promise is false. Same class as the `get_conversation_history` promise made to
-    /// tool-less profiles, fixed 2026-09-20.
-    ///
-    /// ⚠️ OPTIONAL, and that is mandatory rather than stylistic. Every effect already in the
-    /// store predates this field, and a non-optional property on a `Codable` type throws
-    /// `keyNotFound` on each of those blobs. Nil therefore means "staleness UNKNOWN" — a third
-    /// state, rendered as neither fresh nor stale, so old conversations are byte-identical.
-    ///
-    /// ⚠️ Size + mtime, NOT a content hash. Comparing requires reading the file, and episodic
-    /// memory is rebuilt on every request — a hash would put the whole file on the hot path.
-    /// `stat` reads nothing. Its weakness is a false STALE on a touch that changed no bytes,
-    /// which costs one re-read; the opposite error would let the model trust a file that moved.
+    // Why: Size and mtime, not a content hash: episodic memory is rebuilt every request and `stat` reads nothing.
+    /// What the file looked like on disk right after this write, so the episodic record does not promise a stale diff.
+    /// Optional: nil means staleness unknown, so effects stored before this field decode unchanged.
     let fingerprint: EffectFingerprint?
 
     init(path: String, linesAdded: Int, linesRemoved: Int, diff: String?, isTruncated: Bool,
@@ -196,20 +143,9 @@ struct ActionEffect: Sendable, Codable, Equatable {
     /// 32KB output cap: enough for a real edit, small enough that several per turn are safe.
     static let diffCharacterLimit = 4_096
 
-    /// Aggregate ceiling for ALL effect diffs in one rendered episodic blob.
-    ///
-    /// `diffCharacterLimit` bounds ONE action and nothing bounded the sum, so "small
-    /// enough that several per turn are safe" was an assumption the code never enforced:
-    /// a turn with ten writes carried up to 40 KB, multiplied again across
-    /// `buildRecentHistoryString`'s ten turns, and across the whole conversation under
-    /// `fullHistory`. Episodic memory rides in EVERY prompt, so that is unbounded growth
-    /// on the hot path — on a small local model it crowds out the request itself.
-    ///
-    /// Derived from the history char budget rather than invented. `AgentConnect` already
-    /// allocates that to the sibling `NativeHistoryConverter`, and both channels ride the
-    /// SAME prompt: a second independent allocation would double-spend the window. Effects
-    /// take a quarter of it, floored so one ordinary write always renders whole even on a
-    /// tiny context.
+    /// Aggregate ceiling for all effect diffs in one rendered episodic blob; `diffCharacterLimit` only bounds one action.
+    /// Derived from the history char budget shared with `NativeHistoryConverter` (effects take a quarter), floored so one
+    /// write renders whole.
     static func diffBudget(forHistoryCharBudget charBudget: Int) -> Int {
         max(diffCharacterLimit + 512, charBudget / 4)
     }
@@ -220,8 +156,8 @@ struct ActionEffect: Sendable, Codable, Equatable {
     var summary: String { "\(fileName) +\(linesAdded) −\(linesRemoved)" }
 }
 
-/// Maps to the LLM's `goalSummary`. Replaces the old `SubTask` model.
-/// Decoupled from database identity constraints.
+/// One action the agent took in an episode; maps to the LLM's `goalSummary`, decoupled from database identity
+/// constraints.
 struct MemoryAction: Sendable, Codable, Identifiable {
     let id: UUID
     let toolName: String
@@ -290,9 +226,7 @@ struct MemoryEpisode: Sendable, Codable, Identifiable {
     }
 }
 
-/// The root object for the agent's active cognitive state.
-/// Ephemeralized: This is no longer persisted to a database. It represents a computed
-/// state dynamically generated from the Single Source of Truth (`ChatMessage` history).
+/// The root object for the agent's active cognitive state: computed on demand from `ChatMessage` history, not persisted.
 struct SessionGraph: Sendable, Codable {
     let sessionID: String
     var episodes: [MemoryEpisode]
@@ -316,13 +250,7 @@ struct SessionGraph: Sendable, Codable {
     // MARK: - Episode Lifecycle Operations
 
     /// Closes the active episode using the executor's typed `ExecutionOutcome`.
-    /// The lifecycle stamp on the episode and the matching status on the last
-    /// action are derived from the same source of truth — no scattered string
-    /// literals, no risk of mismatched casing or typos.
-    ///
-    /// Parameter rename (`status:` → `outcome:`, `outcome:` → `message:`) is
-    /// intentional: the new signature is incompatible with the old one so the
-    /// compiler flags every callsite during migration.
+    /// The episode's lifecycle and the last action's status derive from the same outcome, with no string literals.
     mutating func closeActiveEpisode(outcome: ExecutionOutcome, message: String? = nil) {
         let lifecycle = EpisodeLifecycle(outcome)
         if let idx = episodes.lastIndex(where: { $0.status == .active }) {
@@ -362,8 +290,7 @@ struct SessionGraph: Sendable, Codable {
 
 // MARK: - Session Graph Store
 
-/// In-memory cache for active SessionGraph instances, keyed by conversation ID.
-/// Replaces the legacy ContextMemoryManager.
+/// In-memory cache of active `SessionGraph` instances, keyed by conversation ID.
 actor SessionGraphStore {
     static let shared = SessionGraphStore()
     private var graphs: [UUID: SessionGraph] = [:]

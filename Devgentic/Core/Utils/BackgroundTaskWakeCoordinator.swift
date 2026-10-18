@@ -4,41 +4,7 @@
 //  BackgroundTaskWakeCoordinator.swift
 //  Devgentic
 //
-//  Tier 3: the agent is told what a background task produced, when it finishes.
-//
-//  ── The problem ─────────────────────────────────────────────────────────────────────────
-//
-//  A background task OUTLIVES the turn that started it. The device run on 2026-09-21 is the whole
-//  argument: the model started a build, said it would "check periodically and notify you", then
-//  emitted `final_answer`. The stream closed, the loop ended, and the build's result reached nobody.
-//  Everything built since — the card, the registry, the tail — lets a HUMAN see that output. This is
-//  what lets the AGENT see it.
-//
-//  ── Why the model opts in ───────────────────────────────────────────────────────────────
-//
-//  `notify_on_completion` defaults to FALSE. A wake is a full LLM turn against the user's API key
-//  with nobody present, so "every task wakes the agent" spends money on `sleep 5`. The model is the
-//  party that says it will report back, so tying the wake to that declaration makes the promise and
-//  the mechanism the same thing.
-//
-//  ── What a woken run may do: nothing but answer ─────────────────────────────────────────
-//
-//  `ReportOnlyRun.isActive` empties the profile's tool list, leaving only the control-plane tools
-//  `AgentConnect` injects. ⚠️ That is not only about cost. THE TASK'S OUTPUT IS UNTRUSTED TEXT — a
-//  build log, a test runner, anything the command chose to print — and it goes into the prompt
-//  verbatim. A log line that reads like an instruction is still just data, and a run with no tools
-//  cannot act on it whatever it appears to say. Report-only is the blast radius, not a budget.
-//
-//  ── What it cannot do ───────────────────────────────────────────────────────────────────
-//
-//  Nothing here starts a run while the conversation is busy: `startMessageStream` awaits
-//  `ConversationAdmission`, so a wake landing mid-conversation QUEUES and the user sees "Waiting its
-//  turn". That matters more here than for any other surface — a build finishes precisely when the
-//  user is most likely still working in the conversation they started it from.
-//
-//  `isAttended = false` is bound by `startMessageStream` from `.backgroundTask`, so
-//  `SessionToolApprovals` refuses standing grants and `ToolExecutionLoop` refuses `ask_user` with an
-//  honest observation instead of parking for an answer that is not coming.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -46,32 +12,25 @@ import os
 
 private let logger = DGLogger(category: "BackgroundTaskWake")
 
+/// Tells the agent what a background task produced when it finishes, via a report-only run in the same conversation.
+/// A task opts in with `notify_on_completion`; the woken run has no profile tools because the task output is untrusted.
+/// A wake landing mid-conversation waits its turn in `ConversationAdmission`.
 @MainActor
 final class BackgroundTaskWakeCoordinator {
 
     static let shared = BackgroundTaskWakeCoordinator()
 
-    // ⚠️⚠️ THERE IS NO CAP ON WAKES, AND THAT IS A DECISION, NOT AN OMISSION (user, 2026-09-24).
-    // A per-conversation limit of 6 an hour used to live here, justified as "a task relaunching in a
-    // loop runs up spend while the user is away". It guarded a loop that cannot happen: a woken run
-    // is REPORT-ONLY (no profile tools, so it cannot start a task), each task wakes at most ONCE
-    // (`wokenFor`), and launching a task is a user-approved tool call. Unattended spend is therefore
-    // already bounded by the tasks the user chose to start. What the cap actually did, found on the
-    // first device run, was silently drop the 7th report of an ordinary working session — the footer
-    // promised a report, the task finished, and nothing ever arrived.
-    //
-    // If a limit is ever wanted again, it must NOT fail silently: a refused wake still owes the user
-    // the stub and a report of some kind.
+    // Why: a refused wake must still tell the user; a silent drop leaves a promised report that never arrives.
+    // There is no cap on wakes: a woken run is report-only and each task wakes at most once (`wokenFor`),
+    // so unattended spend is bounded by the tasks the user chose to start.
 
     private var observation: NSObjectProtocol?
     private weak var viewModel: MainApplicationViewModel?
     private var persistence: ChatPersistenceProtocol?
 
+    // Why: `.backgroundTaskChanged` fires repeatedly and `stop` can race a natural exit;
+    // without this set one task could start two runs.
     /// `conversationID|taskID` for every task already woken on.
-    ///
-    /// ⚠️ Load-bearing. `.backgroundTaskChanged` fires on launch AND on every terminal transition,
-    /// and `stop` can race a natural exit, so the same finished task can be announced more than
-    /// once. Without this, one build could start two runs.
     private var wokenFor: Set<String> = []
 
 
@@ -98,11 +57,7 @@ final class BackgroundTaskWakeCoordinator {
     // MARK: - Deciding
 
     /// Whether this announcement is one to wake on.
-    ///
-    /// ⚠️ Extracted and `nonisolated` so it can be tested without a view model. Left inline, the
-    /// terminal check was unreachable from any test: mutation removing `isTerminal` survived, and a
-    /// wake would then fire on the LAUNCH announcement — reporting a task that had just started as
-    /// though it had finished, with an empty tail.
+    /// `nonisolated` so it can be tested without a view model.
     nonisolated static func shouldWake(status: BackgroundProcessRegistry.Status,
                                        notifyOnCompletion: Bool,
                                        alreadyWoken: Bool) -> Bool {
@@ -118,10 +73,8 @@ final class BackgroundTaskWakeCoordinator {
         guard Self.shouldWake(status: snapshot.status,
                               notifyOnCompletion: snapshot.notifyOnCompletion,
                               alreadyWoken: wokenFor.contains(key)) else {
-            // ⚠️ Only the SURPRISING refusal is logged. `shouldWake` also declines every launch
-            // announcement and every task that never opted in, which is the overwhelming majority —
-            // logging those would bury the one case a user needs explained: "I set
-            // notify_on_completion, the task finished, and nothing happened."
+            // Only the surprising refusal is logged: `shouldWake` also declines every launch announcement and task
+            // that never opted in, so logging those would bury the one case a user needs explained.
             if snapshot.status.isTerminal, snapshot.notifyOnCompletion, wokenFor.contains(key) {
                 logger.info("[BGWAKE] \(taskID) in conversation \(conversationID.uuidString.prefix(8)) finished and asked to notify, but has already been woken on — ignoring this announcement. CONSEQUENCE: no second run; `.backgroundTaskChanged` fires more than once per task and `stop` can race a natural exit, so one finished task must not start two unattended runs.")
             }
@@ -146,59 +99,31 @@ final class BackgroundTaskWakeCoordinator {
             return
         }
 
-        // ⚠️⚠️ THE STORED CONTENT AND THE MODEL-FACING QUERY ARE DIFFERENT ON PURPOSE.
-        //
-        // The message persists as a SHORT stub; the full report prompt — which carries up to a
-        // few KB of the task's raw output — is handed to the run through `promptOverride`
-        // (`ActiveStreamManager`: `userQuery = promptOverride ?? userMessage.content.textContent`).
-        //
-        // Both halves are load-bearing:
-        //
-        //   PERSISTING AT ALL fixes the bug this whole change exists for. `startMessageStream` was
-        //   handed a user message that was never written, so the store held
-        //   `user, agent, agent(orphan), user…` — and both pairing walks
-        //   (`NativeHistoryConverter.buildPairs`, `EpisodicHistoryFormatter.pairTurns`) bind
-        //   `pendingUser` on a user row and consume it on the next agent row. The report had no
-        //   user row in front of it, failed the `let userTurn = pendingUser` binding, and was
-        //   dropped with no warning. The agent told the user a task had finished and then had no
-        //   record of having said so.
-        //
-        //   PERSISTING THE STUB RATHER THAN THE PROMPT is what keeps that affordable. Unlike the
-        //   prompt, this row is carried in EVERY subsequent turn's history; storing the raw output
-        //   would re-pay for it on every send for the life of the conversation. What survives is
-        //   the stub plus the model's report — the report IS the compression.
+        // Why: the stub row must exist (history pairing drops a report with no user row) yet stay short: it is re-sent every turn.
+        // The stored content and the model-facing query differ on purpose: the message persists as a short stub, while the
+        // full report prompt (up to a few KB of raw output) reaches the run through `promptOverride`.
         let userMessage = ChatMessage(conversationId: conversationID,
                                       sender: .user,
                                       content: .markdownText(Self.stub(for: snapshot)))
-        // ⚠️ Stamped BEFORE the send, as every other surface does. `startMessageStream` reads it to
-        // bind BOTH `WorkflowRunAttendance.origin` (grant isolation) and `isAttended = false`.
+        // Stamp `messageSource` before the send, as every other surface does: `startMessageStream` reads it to bind
+        // `WorkflowRunAttendance.origin` and `isAttended = false`.
         userMessage.messageSource = .backgroundTask
         // Renders as a centered system divider, not a user bubble — nobody typed this.
         userMessage.isSyntheticPrompt = true
-        // ⚠️ The stub keeps the finished task's CARD, because the prompt below is never persisted.
-        // Without it, Redo on the report had only the one-line stub to re-ask from and produced a
-        // confident report on output it never saw. `reportCard(behind:)` reads it back; the card
-        // lives in the timeline blob, so this is no schema change, and nothing renders a user
-        // row's timeline (the divider draws from the content).
+        // The stub keeps the finished task's card because the prompt is never persisted; `reportCard(behind:)` reads it back
+        // so Redo can rebuild the prompt. The card lives in the timeline blob; nothing renders a user row's timeline.
         userMessage.timelineEvents = [.backgroundTask(BackgroundTaskData(snapshot: snapshot))]
 
         logger.info("[BGWAKE] Waking conversation \(conversationID.uuidString.prefix(8)) for \(snapshot.id) (\(snapshot.status.label)) with profile '\(profile.displayName)'. CONSEQUENCE: one report-only turn, no profile tools, unattended.")
 
-        // ⚠️ PERSIST BEFORE THE STREAM STARTS, awaited — the same ordering `sendMessage` and
-        // `SchedulerCoordinator.persistScheduledQuestion` use. The deriver appends the in-memory
-        // message for THIS turn either way, so the ordering does not change what the woken run
-        // sees; it matters for the turn AFTER, where a stub that lost a race with the agent
-        // message's own flush would leave the report orphaned exactly as before.
-        // ⚠️ No `[weak self]`: nothing below touches `self`. `viewModel` and `persistence` are
-        // locals the guard above already unwrapped, so the closure captures those and not the
-        // coordinator — which is a singleton and never deallocates anyway.
+        // Persist (awaited) before the stream starts, the same ordering `sendMessage` and `SchedulerCoordinator` use;
+        // a stub that loses a race with the agent message's flush would leave the next turn's report orphaned.
         Task { @MainActor in
             await persistence.addMessage(userMessage, toConversation: conversationID)
             logger.info("[BGWAKE] Wake stub persisted for \(snapshot.id) — messageID: \(userMessage.id.uuidString.prefix(8)), conversation: \(conversationID.uuidString.prefix(8)). CONSEQUENCE: the report that follows now PAIRS, so it survives into the next turn's history instead of being silently dropped by the user↔agent walk.")
 
-            // ⚠️ Bound around the CALL, not inside the stream: an unstructured `Task` inherits the
-            // task-locals of the context that creates it, which is the same mechanism `$origin` and
-            // `$isAttended` rely on at this boundary.
+            // Bind around the call, not inside the stream: an unstructured `Task` inherits task-locals from the context creating it,
+            // the same mechanism `$origin` and `$isAttended` rely on at this boundary.
             let report = ReportOnlyRun.$isActive.withValue(true) {
                 viewModel.activeStreamManager.startMessageStream(
                     withConfig: BackendRequestConfig(profile: profile),
@@ -207,46 +132,28 @@ final class BackgroundTaskWakeCoordinator {
                     files: [],
                     updating: nil,
                     onComplete: {
-                        // ⚠️ Carries the conversation: `bg_1` is scoped PER CONVERSATION, so the task id
-                        // alone does not identify a task in a log covering more than one.
+                        // Include the conversation: `bg_1` is scoped per conversation, so the task id alone is ambiguous across conversations.
                         logger.info("[BGWAKE] Woken run for \(snapshot.id) in conversation \(conversationID.uuidString.prefix(8)) completed. CONSEQUENCE: the task's outcome has been reported into that conversation; nothing further is scheduled for this task.")
                     }
                 )
             }
-            // ⚠️ Stamped AFTER the call, as every other surface does (see `ActiveStreamMirrorDelegate`
-            // for why not earlier). This line was missing: the report kept the `.localUI` default,
-            // so `ChatBubbleView.isUnpromptedReport` never matched a real report and the trimmed
-            // action row — no Redo, no variants — existed only in tests.
+            // Stamp `messageSource` after the call, as every other surface does (see `ActiveStreamMirrorDelegate`);
+            // `ChatBubbleView.isUnpromptedReport` matches on it.
             report.messageSource = .backgroundTask
         }
     }
 
     /// The one line that persists in place of the wake prompt.
-    ///
-    /// ⚠️ Deliberately terse and deliberately FACTUAL — id, name, outcome. It is read by two
-    /// audiences that want opposite things: the model, which re-reads it on every later turn and
-    /// only needs to know the task ended (the report carries the detail), and
-    /// `BackgroundTaskDividerView`, which renders it verbatim. Anything longer is paid for twice.
-    ///
-    /// ⚠️ `nonisolated` for the same reason `prompt(for:)` is: pure over a `Sendable` snapshot, so
-    /// it is testable without standing up the coordinator.
+    /// Terse and factual (id, name, outcome): the model re-reads it every turn and `BackgroundTaskDividerView` shows it.
+    /// `nonisolated`: pure over a `Sendable` snapshot.
     nonisolated static func stub(for snapshot: BackgroundProcessRegistry.Snapshot) -> String {
         let name = snapshot.name.map { "\($0) (\(snapshot.id))" } ?? snapshot.id
         return "Background task \(name) \(snapshot.status.label)."
     }
 
     /// What the woken run is asked.
-    ///
-    /// ⚠️ Says explicitly that there are no tools. Without that the model spends its one turn
-    /// calling something that is not there, and a report-only run that fails to report is worse
-    /// than no wake at all — it costs a turn and produces nothing.
-    ///
-    /// ⚠️ The tail is DATA. It is whatever the command printed; a line that looks like an
-    /// instruction is still output. `ReportOnlyRun` is what makes that safe rather than this
-    /// wording, but the wording says so too, so the model is not guessing.
-    /// `nonisolated` because it is pure: it reads a `Sendable` snapshot and returns a string. The
-    /// main actor is irrelevant to it, and requiring one would make the prompt untestable without
-    /// spinning up the coordinator that owns it.
+    /// States explicitly that there are no tools and that the tail is data (whatever the command printed), not instructions.
+    /// `nonisolated`: pure over a `Sendable` snapshot.
     nonisolated static func prompt(for snapshot: BackgroundProcessRegistry.Snapshot) -> String {
         reportPrompt(label: snapshot.name.map { "\($0) (\(snapshot.id))" } ?? snapshot.id,
                      command: snapshot.command, workingDirectory: snapshot.workingDirectory,
@@ -254,11 +161,8 @@ final class BackgroundTaskWakeCoordinator {
                      output: snapshot.tail)
     }
 
-    /// The same prompt, rebuilt from the card the stub saved — what Redo on a report sends.
-    ///
-    /// ⚠️ The output is the card's tail (`BackgroundTaskData.maxOutputTail`), which can be shorter
-    /// than the registry tail the original wake sent. It is what survives a relaunch and the log's
-    /// retention sweep, so a Redo reads the same thing whenever it is pressed.
+    /// The same prompt, rebuilt from the card the stub saved; what Redo on a report sends.
+    /// Uses the card's tail (`BackgroundTaskData.maxOutputTail`), possibly shorter than the original registry tail.
     nonisolated static func prompt(for card: BackgroundTaskData) -> String {
         reportPrompt(label: card.name.map { "\($0) (\(card.taskID))" } ?? card.taskID,
                      command: card.command, workingDirectory: card.workingDirectory,
@@ -278,8 +182,7 @@ final class BackgroundTaskWakeCoordinator {
         }
     }
 
-    /// The card a report's stub saved, or nil when `stub` is not a wake stub or predates the card
-    /// (written before 2026-09-27) — a report with nothing to rebuild its prompt from.
+    /// The card a report's stub saved, or nil when `stub` is not a wake stub or carries no card.
     @MainActor
     static func reportCard(behind stub: ChatMessage) -> BackgroundTaskData? {
         guard stub.sender == .user, stub.isSyntheticPrompt, stub.messageSource == .backgroundTask else { return nil }

@@ -4,19 +4,7 @@
 //  ToolNameResolver.swift
 //  Devgentic
 //
-//  Resolves emitted tool names against the runtime registry using three tiers:
-//
-//    1. Exact match    — emitted name is in `registeredTools`.
-//    2. Alias map      — well-known hallucination → canonical (e.g. `final_summary` → `final_answer`).
-//    3. Fuzzy match    — Jaro-Winkler similarity ≥ threshold AND arg-schema compatible.
-//
-//  The arg-schema compatibility gate prevents name-similar but semantically-unrelated
-//  mismatches (e.g. `delete_file` → `delete_folder`). A fuzzy name is only promoted
-//  if its arguments would fit the target tool's schema.
-//
-//  Also provides a forgive-then-audit path for argument *key* mismatches on otherwise-valid
-//  tool calls (`filename` → `path`). Cloud providers occasionally emit these under prompt
-//  pressure; rejecting them wastes an iteration when a clean rename would work.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -78,15 +66,9 @@ struct ToolNameResolver: Sendable {
     /// Runtime tool registry for this agent invocation.
     let registeredTools: [AgentTool]
 
-    /// Jaro-Winkler similarity threshold for fuzzy matching. Catches `finalanswer` → `final_answer`.
-    ///
-    /// ⚠️ READINESS CR-51 (2026-10-12). This comment used to claim 0.85 blocks `delete_file` →
-    /// `delete_folder`. It does not: that pair scores ≈ 0.93, and `create_file` → `create_folder`
-    /// ≈ 0.94 — so a `create_file(path: "notes.md", content: …)` the registry lacked ran as
-    /// `create_folder`, made a DIRECTORY named `notes.md` and dropped the content. Similarity is not
-    /// a safety gate. Two guards in `resolve` are: `namesDifferOnlyByTypos` (a different WORD is a
-    /// different tool) and `carriesForeignArguments` (arguments the target doesn't take mean the
-    /// model meant another tool).
+    // Why: similarity is not a safety gate (`create_file` scores ~0.94 against `create_folder`); `resolve` guards with
+    // `namesDifferOnlyByTypos` and `carriesForeignArguments`.
+    /// Jaro-Winkler similarity threshold for fuzzy matching. Catches `finalanswer` -> `final_answer`.
     static let fuzzyThreshold: Double = 0.85
 
     /// Static alias table for well-known terminator hallucinations. These are the
@@ -162,9 +144,8 @@ struct ToolNameResolver: Sendable {
             )
         }
 
-        // 3. Fuzzy match — only promote if args fit AND the names are length-compatible
-        // (#15.4: a typo keeps near-equal lengths; the length gate filters prefix-fragment
-        // matches that Jaro-Winkler's prefix boost over-scores).
+        // 3. Fuzzy match: promote only if args fit AND the names are length-compatible; a typo keeps near-equal lengths, which
+        // filters prefix-fragment matches that Jaro-Winkler's prefix boost over-scores.
         let candidates = registeredTools
             .map { (tool: $0, score: Self.jaroWinkler(emittedName, $0.name)) }
             .filter { $0.score >= Self.fuzzyThreshold && Self.lengthCompatible(emittedName, $0.tool.name) }
@@ -196,11 +177,8 @@ struct ToolNameResolver: Sendable {
             }
         }
 
-        // If we had fuzzy candidates but none were arg-compat, surface the best one
-        // as a typed arg-mismatch so the model gets a targeted nudge about the fit.
-        // A candidate rejected for FOREIGN arguments is skipped: the call is evidence the model
-        // meant a different tool, so nudging it toward this one would be wrong — it falls through
-        // to "unknown" with suggestions instead.
+        // If there were fuzzy candidates but none were arg-compatible, surface the best as a typed arg-mismatch for a nudge.
+        // A candidate rejected for foreign arguments is skipped: the call suggests the model meant a different tool.
         if let bestCandidate = candidates.first(where: { !foreignArgumentRejects.contains($0.tool.name) }) {
             let repaired = ArgNameAliasResolver.repair(arguments: arguments, forTool: bestCandidate.tool)
             logger.info("⚠️ Fuzzy candidate '\(bestCandidate.tool.name)' rejected on arg fit for '\(emittedName)'")
@@ -224,15 +202,11 @@ struct ToolNameResolver: Sendable {
         return .unknown(attempted: emittedName, suggestions: Array(suggestions))
     }
 
-    // MARK: - Word Gate (CR-51)
+    // MARK: - Word Gate
 
-    /// Whether two tool names differ only by typos — the same words, possibly misspelt or joined —
-    /// rather than by a whole word. `final_answr`/`final_answer` and `finalanswer`/`final_answer`
-    /// pass; `create_file`/`create_folder` and `delete_file`/`delete_folder` don't.
-    ///
-    /// Names are split on `_`, `-` and `.`. With different word counts the names are compared with
-    /// the separators removed (a joined or split word). With the same count, each word pair must be
-    /// within a typo's distance: at most 1 edit (a swap counts as one), or 2 for words of 8+ characters.
+    /// Whether two tool names differ only by typos (the same words, possibly misspelt or joined), not by a whole word.
+    /// `final_answr`/`final_answer` and `finalanswer`/`final_answer` pass; `create_file`/`create_folder` doesn't.
+    /// Names split on `_`, `-`, `.`; same-count words must be within 1 edit (2 if 8+ chars), else compare unseparated.
     static func namesDifferOnlyByTypos(_ a: String, _ b: String) -> Bool {
         let separators: (Character) -> Bool = { $0 == "_" || $0 == "-" || $0 == "." }
         let aWords = a.lowercased().split(whereSeparator: separators).map(String.init)
@@ -271,11 +245,9 @@ struct ToolNameResolver: Sendable {
 
     // MARK: - Length Gate
 
-    /// Length-aware gate for fuzzy matches (#15.4). Jaro-Winkler's prefix boost can over-score
-    /// a short emitted name against a much longer tool name (a prefix fragment, e.g. `read` →
-    /// `read_file_recursive`, not a typo). Real typos keep near-equal lengths, so require the
-    /// shorter name to be at least half the longer and at least 3 chars. The target tool's
-    /// arg-schema check (in `resolve`) remains the primary guard against destructive remaps.
+    /// Length-aware gate for fuzzy matches: Jaro-Winkler's prefix boost can over-score a short name against a much longer
+    /// tool name (`read` -> `read_file_recursive`). Real typos keep near-equal lengths, so the shorter name must be at least
+    /// half the longer and at least 3 chars; the arg-schema check in `resolve` remains the primary guard.
     static func lengthCompatible(_ a: String, _ b: String) -> Bool {
         let shorter = min(a.count, b.count)
         let longer = max(a.count, b.count)

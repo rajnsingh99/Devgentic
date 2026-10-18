@@ -4,9 +4,7 @@
 //  PerToolTimeoutTests.swift
 //  DevgenticTests
 //
-//  Tests for per-tool timeout enforcement implemented in
-//  ToolExecutionMediator.executePreparedTool().
-//  Verifies that AgentTool.timeout and AgentTool.timeoutMessage are honored.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,18 +4,7 @@
 //  AgentConfigDetailView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 05/09/25.
-//  Updated on 28/01/26 to support Agent Architecture selection.
-//  Updated on 04/02/26 for Modern Dashboard UI.
-//  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
-//  Updated on 20/02/26 to add Detached Expandable Prompt Editor.
-//  Updated on 27/02/26 to add explicit MLX Warning Banner.
-//  Updated on 27/02/26 to refine Remote LLM UI and API Key gating.
-//  Updated on 28/02/26 to add OpenAI dynamic model picker.
-//  Updated on 28/02/26 to add editable Base URL endpoint field with default placeholders.
-//  Updated on 28/02/26 to align inputs right matching Modern Settings UI.
-//  Updated on 28/02/26 to fix MLX native tool toggle auto-enable bug.
-//  Refactored on 27/03/26 to use ProfileEditBuffer (single source of truth for dirty tracking).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -25,13 +14,10 @@ private let logger = DGLogger(category: "AgentConfigDetail")
 
 // MARK: - Localized Titles
 
+/// Presentation helpers for `ModelCognitiveCapability` in the agent configuration screen.
 extension ModelCognitiveCapability {
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)` binds to
-    /// the non-localizing `StringProtocol` overload, so every rawValue-sourced label was
-    /// invisible to the String Catalog extractor and would have shipped untranslated inside
-    /// otherwise-translated chrome. `rawValue` stays for persistence and logging only.
-    /// Declared here (not next to the enum in `BackendProfile.swift`) so the model layer keeps
-    /// its `Foundation`-only imports.
+    /// User-facing name, kept separate from `rawValue` so labels reach the String Catalog extractor; `rawValue` is for
+    /// persistence and logging only. Declared here so the model layer keeps its `Foundation`-only imports.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .none:            return "None"
@@ -44,11 +30,8 @@ extension ModelCognitiveCapability {
 struct AgentConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
-    /// When non-nil, the dynamic-island leading button becomes a cancel (xmark)
-    /// that invokes this closure — typically `dismiss()` from a modal host
-    /// (`WorkflowProfileEditorView`). Also hides the trash icon since modal
-    /// editors don't allow profile deletion; that's reserved for the standalone
-    /// profile management screen.
+    /// When non-nil, the leading button becomes a cancel (xmark) that invokes this closure, typically `dismiss()` from a
+    /// modal host. Also hides the trash icon, since modal editors do not allow profile deletion.
     var onCancel: (() -> Void)? = nil
     /// When true, renders without DynamicIslandBar, outer ScrollView, and navigation guards
     /// for embedding directly within composite containers like ProfileNodeInspectorView.
@@ -78,24 +61,20 @@ struct AgentConfigDetailView: View {
     // Unsaved-changes guard on back navigation.
     @State private var showingBackAlert = false
 
-    /// Advisory findings from the last save, shown until dismissed or the next save (register A34).
-    /// ⚠️ Cleared on every save, so it always describes the CURRENT state of the profile — a stale
-    /// note about a model the user has since changed would be worse than no note.
+    /// Advisory findings from the last save, shown until dismissed or the next save. Cleared on every save so it always
+    /// describes the current profile state.
     @State private var saveAdvisories: [ProfileValidationError] = []
 
     // File Importer State
     @State private var showingKnowledgeImporter = false
-    /// Why the last "Add File" did nothing, shown inline. Nil when there is nothing to report.
-    /// ⚠️ Register A60: the import result was previously discarded, so a failure was invisible.
+    /// Why the last "Add File" did nothing, shown inline; nil when there is nothing to report.
     @State private var knowledgeImportError: String?
 
     // Guide
     @State private var showingAgentGuide = false
 
-    /// Inline validation error for the System Instructions field. Set when the
-    /// user attempts to Save while the field is empty/whitespace; cleared the
-    /// moment the user starts editing again. Drives the red-border + inline
-    /// error caption next to the editor.
+    /// Inline validation error for the System Instructions field: set when Save is attempted with an empty field, cleared
+    /// when editing resumes.
     @State private var instructionsError: String? = nil
 
 
@@ -128,11 +107,8 @@ struct AgentConfigDetailView: View {
     // MARK: - Computed Bindings
 
     private var providerConfig: Binding<ProviderConfig> {
-        // ⚠️ register B27 — capture the BUFFER, not `self`. Referencing `editBuffer` directly
-        // inside these closures captures the whole View struct, and the copy carries this
-        // view's `@State` window manager — so a binding handed to a long-lived NSWindow (or
-        // to a manager callback) closed a retain cycle straight back to the manager. A72
-        // fixed the callbacks and missed this, the other end of the same loop.
+        // Captures the buffer, not `self`: capturing `editBuffer` through `self` copies the view's `@State` window manager
+        // and closes a retain cycle with long-lived windows.
         let buffer = editBuffer
         return Binding<ProviderConfig>(
             get: {
@@ -157,7 +133,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var capabilitiesBinding: Binding<AgentCapabilities> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<AgentCapabilities>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.capabilities }
@@ -181,7 +157,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var maxIterationsBinding: Binding<Int?> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<Int?>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.maxIterations }
@@ -197,7 +173,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var executionTimeoutBinding: Binding<TimeInterval?> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<TimeInterval?>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.executionTimeout }
@@ -213,7 +189,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var resilienceOverridesBinding: Binding<ResilienceOverrides?> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<ResilienceOverrides?>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.resilienceOverrides }
@@ -229,7 +205,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var errorRecoveryBinding: Binding<ErrorRecovery?> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<ErrorRecovery?>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.errorRecovery }
@@ -245,7 +221,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var historyStrategyBinding: Binding<HistoryStrategy> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<HistoryStrategy>(
             get: {
                 if case .agent(let config) = buffer.draft.details {
@@ -263,7 +239,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var instructionsBinding: Binding<String> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<String>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.instructions ?? "" }
@@ -279,7 +255,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var knowledgeSourcesBinding: Binding<[KnowledgeSource]> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<[KnowledgeSource]>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.knowledgeSources ?? [] }
@@ -295,7 +271,7 @@ struct AgentConfigDetailView: View {
     }
 
     private var toolsBinding: Binding<[Tool]> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<[Tool]>(
             get: {
                 if case .agent(let config) = buffer.draft.details { return config.tools }
@@ -320,18 +296,12 @@ struct AgentConfigDetailView: View {
             }
         }
         .task {
-            // Instructions are no longer auto-populated. Empty field is the
-            // initial state for new profiles; the user must either type their
-            // own or click "Use Default Persona". This forces a deliberate
-            // choice so small/Q4 models don't run with zero guidance just
-            // because the user accepted the default without reading it.
+            // Instructions are not auto-populated: the user types their own or taps "Use Default Persona", so small models do
+            // not run with zero guidance by accident.
             configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .agent)
 
-            // ⌘Q has no teardown to commit the floating editor on, so hand the service a way to
-            // reach it (register B3). `[weak promptWindowManager]` captures the manager object,
-            // never the view struct — capturing `self` here would route a closure the service
-            // owns back into this view's `@State`, which is the retain shape register A72 is
-            // about. `commitChanges` is nil while no window is open, so the hook is a safe no-op.
+            // Gives the service a way to commit the floating editor on ⌘Q. Captures the manager, never the view struct;
+            // `commitChanges` is nil while no window is open, so the hook is a safe no-op.
             profileService.commitPendingPromptEdits = { [weak promptWindowManager] in
                 promptWindowManager?.commitChanges?()
             }
@@ -356,11 +326,8 @@ struct AgentConfigDetailView: View {
 
     private var standaloneContent: some View {
         VStack(spacing: 0) {
-            // When `onCancel` is set (workflow modal context), the leading
-            // button becomes an xmark that dismisses the sheet — clearer than
-            // a back-chevron, which implies router navigation that doesn't
-            // exist here. Default path keeps the chevron + handleBackTap so
-            // the standalone profile screen behaves identically to before.
+            // When `onCancel` is set (workflow modal), the leading button is an xmark that dismisses the sheet; otherwise it
+            // keeps the chevron and `handleBackTap`.
             DynamicIslandBar(
                 title: editBuffer.draft.displayName,
                 icon: "cpu",
@@ -370,13 +337,8 @@ struct AgentConfigDetailView: View {
                 actionButtons
             }
 
-            // ⚠️ register B17 — OUTSIDE the ScrollView, directly under the pinned island bar
-            // that holds Save. It used to be the first child of the scrolling form, with a comment
-            // claiming it sat "where the user's eye already is after pressing Save" — untrue for
-            // anyone saving from the Advanced section of an 800-line page, who got a green success
-            // toast and an advisory several screens above them. Pinning it beside the control that
-            // produced it makes the channel reach the user regardless of scroll position, without
-            // a ScrollViewReader or an auto-scroll that would yank the page under them.
+            // Outside the ScrollView, directly under the pinned island bar that holds Save, so the advisory reaches the user
+            // regardless of scroll position.
             SaveAdvisoryBanner(advisories: saveAdvisories) {
                 withAnimation { saveAdvisories = [] }
             }
@@ -399,9 +361,8 @@ struct AgentConfigDetailView: View {
             Button("Delete", role: .destructive) {
                 do {
                     try profileService.deleteProfile(withId: editBuffer.draft.id)
-                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
-                    // "Profile Not Found — this profile may have been deleted": a deliberate,
-                    // confirmed action reported back to the user as an error.
+                    // Without this the container re-evaluates, finds no edit buffer and shows "Profile Not Found" after a confirmed
+                    // deletion.
                     router.returnToChat()
                 } catch {
                     toastManager.show(error.localizedDescription, style: .error)
@@ -409,17 +370,12 @@ struct AgentConfigDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            // ⚠️ register B10 — was "This action cannot be undone", which is true and useless:
-            // it names no consequence beyond the profile itself. A30 added the real warning and
-            // wired it only to the sidebar's hover-trash — the path A26's own note calls the least
-            // discoverable. Shared with all four delete entry points, never re-implemented.
+            // The deletion message names the real consequences and is shared by all four delete entry points.
             Text(ProfileReferenceIndex.deletionMessage(
                 for: editBuffer.draft, in: profileService.profiles))
         }
-        // NOTE: Auto-applying an Ollama preset on every modelName change was
-        // removed — it silently wiped any user customization the moment the
-        // model selector changed. Users now explicitly opt in via the "Apply
-        // Optimal" menu inside Advanced Configuration.
+        // An Ollama preset is not applied automatically on a model change, which would wipe user customization; "Apply
+        // Optimal" in Advanced Configuration is opt-in.
         .unsavedChangesBackGuard(
             isDirty: editBuffer.isDirty,
             showingAlert: $showingBackAlert,
@@ -686,11 +642,8 @@ struct AgentConfigDetailView: View {
         }
     }
 
-    /// ⚠️ NO IMPORT HERE. Skills live in a global library, a profile stores a REFERENCE, and
-    /// linking happens where the library is. Five profiles using one skill was five
-    /// copies that could disagree about what its description said.
-    ///
-    /// What is left is the honest summary plus the way through.
+    /// The skills summary and link to the library. Skills live in a global library and a profile stores a reference, so
+    /// linking happens there rather than here.
     private var skillsSection: some View {
         SettingsCard(title: "Skills", icon: "puzzlepiece", theme: theme) {
             VStack(alignment: .leading, spacing: 14) {
@@ -906,9 +859,8 @@ struct AgentConfigDetailView: View {
 
                 Divider()
 
-                // Loop Safety — circuit-breaker caps (repetition / clarification /
-                // idle / denial). Sibling group to Error Recovery; applies in chat
-                // and when a workflow node executes this agent.
+                // Loop Safety circuit-breaker caps (repetition, clarification, idle, denial); a sibling group to Error Recovery that
+                // applies in chat and when a workflow node executes this agent.
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Loop Safety")
                         .font(theme.fontSubheadline.weight(.semibold))
@@ -1006,19 +958,9 @@ struct AgentConfigDetailView: View {
         .padding(.top, 8)
     }
 
-    /// ⚠️ register B46 — FLUSH FIRST. `BackendProfileService.flushPendingEditorText`'s own doc
-    /// comment says "call this BEFORE reading `hasUnsavedEditorChanges` at an exit point", and
-    /// until now it had exactly one caller: `applicationShouldTerminate` (register B3). The
-    /// floating Advanced prompt editor holds typing in `@State` and writes back only on an explicit
-    /// commit, so a back tap read a CLEAN buffer and left with no prompt — the multi-thousand
-    /// character loss A27/A29/B3 exist to prevent, at the exit B3 did not cover.
-    ///
-    /// ⚠️ Placed in the tap ACTION, not in the `isDirty:` the guard modifier reads: that value is
-    /// computed during a view update, and committing there would mutate state mid-pass.
-    ///
-    /// A no-op in editors that register no commit hook (`SimplePromptWindowManager` syncs on every
-    /// keystroke, so it has nothing pending). It is here in all three anyway — the whole class of
-    /// B44/B46 defects is a fix that landed on the one site that had the bug.
+    // Why: flush in the tap action, not in the `isDirty:` value, which is computed during a view update; the floating prompt
+    // editor otherwise looks clean while holding unwritten typing.
+    /// Handles the back tap: flushes pending editor text before the dirty check, then leaves via `leaveEditor()`.
     private func handleBackTap() {
         profileService.flushPendingEditorText()
         if editBuffer.isDirty {
@@ -1028,12 +970,8 @@ struct AgentConfigDetailView: View {
         }
     }
 
-    /// The ONE way out of this editor.
-    ///
-    /// ⚠️ Register A28. The leading button used to be wired `onBack: onCancel ?? handleBackTap`,
-    /// so in the workflow sheet the xmark called `dismiss()` directly and never consulted
-    /// `editBuffer.isDirty` — the identical view, routed, prompted correctly. The dirty check now
-    /// happens for both hosts and only the EXIT differs: dismiss the sheet, or pop the router.
+    /// The single way out of this editor: checks `editBuffer.isDirty` for both hosts, and only the exit differs (dismiss
+    /// the sheet or pop the router).
     private func leaveEditor() {
         if let onCancel {
             onCancel()
@@ -1060,17 +998,12 @@ struct AgentConfigDetailView: View {
                 IslandPillButton(
                     title: "Revert",
                     style: .secondary,
-                    // ⚠️ register B12 — NO `.cancelAction`. Revert is destructive and discards
-                    // every unsaved edit without a prompt, so binding it to Esc gave a dirty editor
-                    // a silent one-keypress exit: Esc reverted, `isDirty` went false, and the
-                    // second Esc then passed `interactiveDismissDisabled(isDirty)` and closed the
-                    // sheet. A28's comment claimed "exactly one way out of a dirty editor, and it
-                    // is the one that prompts" — this was the second, and it prompted for nothing.
-                    // Esc now means close, which the unsaved-changes guard already governs.
+                    // No `.cancelAction`: Revert is destructive and discards edits without a prompt, so binding it to Esc would give a
+                    // dirty editor a silent exit; Esc means close, governed by the unsaved-changes guard.
                     accessibilityLabel: "Revert unsaved changes"
                 ) {
                     editBuffer.revert()
-                    // ⚠️ register B17 — the draft the advisory was about no longer exists.
+                    // The draft the advisory described has been discarded.
                     saveAdvisories = []
                     configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .agent)
                 }
@@ -1082,57 +1015,40 @@ struct AgentConfigDetailView: View {
                     accessibilityLabel: "Save profile changes",
                     keyboardShortcut: KeyboardShortcut("s", modifiers: .command)
                 ) {
-                    // Pre-flight: empty system instructions on a small/Q4 model
-                    // routinely produces looping or wandering behaviour. We don't
-                    // auto-fill a default anymore — the user must make a deliberate
-                    // choice — so block the save and surface the inline error.
-                    // ⚠️ Register A35: the rule and its wording now come from `ProfileValidator`,
-                    // the single definition. Each editor used to carry its own copy of both, and
-                    // every non-editor save path had neither.
+                    // Pre-flight: empty system instructions on a small model cause looping, so the save is blocked with an inline error.
+                    // The rule and wording come from `ProfileValidator`.
                     if ProfileValidator.instructionsAreMissing(instructionsBinding.wrappedValue) {
                         instructionsError = ProfileValidator.missingInstructionsMessage
-                        // ⚠️ register B17 — the save is being refused here, so any banner from an
-                        // earlier successful save is now describing a profile state this attempt
-                        // did not produce.
+                        // The save is refused here, so a banner from an earlier save does not describe the profile state.
                         saveAdvisories = []
                         return
                     }
                     instructionsError = nil
 
                     do {
-                        // ⚠️ Register A34: advisories are RETURNED now, not just logged. The
-                        // save succeeded either way — the banner explains what may not work, it
-                        // does not report a failure.
+                        // Advisories are returned for display; the save succeeded either way, so the banner explains what may not work
+                        // rather than reporting a failure.
                         saveAdvisories = try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
                         toastManager.show("Profile saved", style: .success)
                     } catch {
-                        // ⚠️ A toast and NOTHING else was the whole record of a failed save on the
-                        // primary user-data write path. It disappears in seconds, so "my agent
-                        // config won't stick" arrived with no profile id, no type and no error to
-                        // correlate against.
+                        // Logged with profile id, type and error: the toast disappears in seconds, so this is the only durable record of a
+                        // failed save.
                         logger.error(
                             "[PROFILE] Save FAILED for '\(editBuffer.draft.displayName)' "
                             + "(\(editBuffer.draft.id), agent): \(error.localizedDescription). "
                             + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
                             + "unchanged; the user's edits are still on screen but not on disk."
                         )
-                        // ⚠️ register B17 — clear on FAILURE too. `saveAdvisories` was assigned
-                        // only in the `do` branch and never reset, so a banner from an earlier
-                        // successful save stayed on screen reading "Saved — one thing worth
-                        // knowing" while an error toast reported that this write did not happen.
-                        // An advisory describes the state of a profile that WAS saved; after a
-                        // failure it describes nothing that exists.
+                        // Cleared on failure too: an advisory describes a profile that was saved, so it must not stay beside an error toast.
                         saveAdvisories = []
                         toastManager.show(error.localizedDescription, style: .error)
                     }
                 }
             }
 
-            // Trash is hidden in modal-cancel mode: workflow editing doesn't
-            // permit profile deletion (it would orphan every node referencing
-            // this profile across every workflow). Profile lifecycle stays
-            // owned by the standalone profile screen.
+            // Trash is hidden in modal-cancel mode: workflow editing does not permit profile deletion, which would orphan
+            // referencing nodes.
             if onCancel == nil {
                 IslandIconButton(
                     symbol: "trash",

@@ -4,11 +4,7 @@
 //  ChatMessageObservableTests.swift
 //  DevgenticTests
 //
-//  Created on 03/04/26.
-//
-//  Tests ChatMessage's @Observable migration — verifies property changes
-//  are tracked correctly, Codable conformance survives the macro,
-//  Equatable still works, and transient state behaves as expected.
+//  Created by Raj Singh.
 //
 
 import XCTest

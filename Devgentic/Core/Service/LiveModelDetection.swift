@@ -4,29 +4,16 @@
 //  LiveModelDetection.swift
 //  Devgentic
 //
-//  The detected capability of a LOCAL model (Ollama, MLX), looked up when a run starts instead of
-//  trusted from the profile.
-//
-//  ⚠️ WHY (2026-10-03). A profile stores what detection found when its model was PICKED —
-//  capability, tool-call dialect, context window, modalities — and every Ollama/MLX run used that
-//  stored copy as truth. Four ways it went wrong:
-//    1. Onboarding saved its profile with no detection at all, so the first "Local Assistant" ran
-//       on the text-only prompted path whatever the model could do.
-//    2. Opening the editor re-detected into the DRAFT only, so the editor showed "Parallel
-//       Actions" while runs kept using "Text Only" until Save.
-//    3. A hand-typed or unlisted model name kept the PREVIOUS model's values.
-//    4. A model re-pulled with a new template stayed stale — and scheduled runs, ChatOps and
-//       workflow nodes never open an editor, so they never refreshed.
-//  Every run now resolves through here. The stored values remain as a fallback for a model this
-//  lookup cannot find, and as what display surfaces show.
-//
-//  Measurements only. Preferences the user controls (Extended Thinking) are never touched.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "LiveModelDetection")
 
+/// Detects the capability of a local model (Ollama, MLX) when a run starts instead of trusting the stored profile.
+/// Stored values remain the fallback for a model this lookup cannot find, and what display surfaces show.
+/// Measurements only: user-controlled preferences such as Extended Thinking are never touched.
 @MainActor
 enum LiveModelDetection {
 
@@ -44,12 +31,8 @@ enum LiveModelDetection {
         guard let stored = profile.details.llmProviderConfig, !stored.apiProvider.usesCloudDefaults else {
             return profile
         }
-        // ⚠️ Never in the test host: loading would read the DEVELOPER's real Ollama server and MLX
-        // folder, and a test's profile would then resolve against whatever happens to be installed.
-        // Tests see only the caches they set.
-        // ⚠️ CR-8: the Ollama model cache holds ONE server's models — `OllamaService.ollamaBaseURL`.
-        // A profile pointed at another server must not be resolved against them: a same-named model
-        // there can be a different build with a different template.
+        // Never in the test host: loading would read the developer's real Ollama server and MLX folder.
+        // The Ollama cache holds one server's models; a profile on another server must not resolve against them.
         if stored.apiProvider == .ollama, !ollamaCacheServes(stored) {
             logger.notice("[MODEL_DETECT] Profile '\(profile.displayName)': its Ollama server \(InferenceEngine.normalizedOllamaURL(stored.baseURL)) is not the one live detection reads (\(InferenceEngine.normalizedOllamaURL(OllamaService.shared.ollamaBaseURL))). CONSEQUENCE: this run uses the values stored on the profile rather than another server's model data.")
             return profile
@@ -62,9 +45,7 @@ enum LiveModelDetection {
             logger.notice("[MODEL_DETECT] Profile '\(profile.displayName)': no live detection for \(stored.apiProvider.rawValue) model '\(stored.modelName)'. CONSEQUENCE: this run uses the values stored on the profile (capability \(stored.cognitiveCapability.rawValue)); they may be stale if the model changed since it was picked.")
             return profile
         }
-        // ⚠️ Names every field that differs. This line used to print only capability and dialect,
-        // so a profile whose stored METADATA was stale logged "stored Parallel Actions … detected
-        // Parallel Actions" — a difference report showing two identical values.
+        // Names every field that differs, so stale metadata is not reported as two identical values.
         let differences = differingMeasurements(stored: stored, detected: detected)
         if !differences.isEmpty {
             logger.notice("[MODEL_DETECT] Profile '\(profile.displayName)' (\(profile.id.uuidString.prefix(8))), model '\(stored.modelName)': stored copy differs from detection — \(differences.joined(separator: "; ")). CONSEQUENCE: this run uses the DETECTED values; the stored copy is refreshed when the model is next picked from the catalog and the profile saved.")
@@ -148,14 +129,9 @@ enum LiveModelDetection {
         case loadOnly
     }
 
-    /// What a run should do to get the Ollama model list.
-    ///
-    /// ⚠️⚠️ READINESS CR-8 (2026-10-10). This used to call `loadLocalModels()` unconditionally, which
-    /// returns at once unless `serverStatus == .connected` — and `.connected` is set only by
-    /// `checkServerStatusAndUpdateModels`, whose only caller is the Ollama store sheet. So after a cold
-    /// launch, until the user happened to open that sheet, live detection NEVER ran: scheduled, ChatOps
-    /// and composer runs all fell back to the stored capability and dialect — the four cases this file
-    /// exists to fix — and the 60 s throttle was armed regardless.
+    /// What a run should do to get the Ollama model list: nothing, probe the server then load, or just load.
+    /// Probes first when the server is not known to be connected; `loadLocalModels()` returns at once unless connected.
+    /// Returns `.none` when the list is loaded or the reload throttle has not elapsed.
     nonisolated static func ollamaLoadAction(serverConnected: Bool, hasModels: Bool,
                                              lastAttempt: Date?, now: Date) -> OllamaLoadAction {
         guard !hasModels else { return .none }

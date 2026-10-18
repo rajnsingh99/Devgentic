@@ -4,11 +4,7 @@
 //  FormatDriftDetector.swift
 //  Devgentic
 //
-//  Stage 2 of the Dialect-Anchored Cascade.
-//  Runs a ranked series of lightweight signal probes to detect whether the model
-//  drifted from its expected dialect into a known alternative format.
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

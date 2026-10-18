@@ -4,17 +4,7 @@
 //  WorkflowCanvasMutationTests.swift
 //  DevgenticTests
 //
-//  Register WF-CV5, WF-CV7, WF-CV10 — the canvas's mutation invariants.
-//
-//  These guards were all present and correct but ENTIRELY UNTESTED, so a regression in `addEdge`'s
-//  ordering or in the cycle predicate would ship silently: the user's first symptom is a workflow
-//  that saves fine and then refuses to run forever with `cycleDetected`, or a delete that leaves
-//  invisible dangling edges the validation panel is structurally unable to report.
-//
-//  Also covers the two things added 2026-08-15: the typed edge refusal (previously every rejection
-//  was a bare `return false` — no dialog, no log, three causes indistinguishable) and the undo stack
-//  (previously the only route back from an accidental delete was Revert, which discards every other
-//  unsaved edit too).
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,10 +4,7 @@
 //  ObservabilityCorrectnessTests.swift
 //  DevgenticTests
 //
-//  Pure-function regression coverage for the Phase A correctness fixes:
-//  the trace-status derivation (Gap #1) and the SHA-256 config hash (Gap #16).
-//  Both were extracted/made testable specifically so this file can pin them down
-//  without standing up the full ActiveStreamManager / config-capture machinery.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,13 +4,7 @@
 //  ReflectionEvaluator.swift
 //  Devgentic
 //
-//  Issues a single LLM call to evaluate whether an execution trial achieved the user's goal.
-//  Returns a ReflectionResult indicating acceptance or critique with revision suggestions.
-//
-//  Output format: Key-value lines (VERDICT / CRITIQUE / REVISION) — universal across model sizes.
-//  Tool results: Context-aware budgeting with failed-first priority.
-//
-//  Migrated from JSON output during the Reflection Resilience Migration.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -18,17 +12,11 @@ import OSLog
 
 private let logger = DGLogger(category: "ReflectionEvaluator")
 
-/// What one evaluation call produced — a real verdict, or nothing.
-///
-/// [WF-CC11] The `.inconclusive` case exists because the LLM-error catch used to manufacture a
-/// verdict: `isAcceptable: false` plus the fabricated advice "Retry the same approach with more
-/// careful tool usage." — asserting the agent's tool usage needed more care when nothing was ever
-/// evaluated. That forced a WHOLE extra agent trial (doubling latency, tokens and any tool side
-/// effects) off an infrastructure fault — an MLX slot race during the EVALUATOR's call — and fed
-/// the fabricated instruction into the next trial's prompt. With no evaluation there is no honest
-/// verdict; the caller keeps the trial it already has. Mirrors the `ClassifierOutcome`
-/// failed/unreadable split that closed WF-CC10: an infrastructure fault must never be reported as
-/// a content fault.
+// Why: an LLM-error catch must not fabricate a verdict: that forced a whole extra agent trial off an
+// infrastructure fault.
+/// What one evaluation call produced: a real verdict, or nothing (`.inconclusive`).
+/// With no evaluation there is no honest verdict, so the caller keeps the trial it already has.
+/// An infrastructure fault is never reported as a content fault.
 enum ReflectionEvaluation: Sendable {
     case verdict(ReflectionResult)
     /// The evaluation CALL failed (provider/transport/model-slot) — not the trial being judged.
@@ -85,15 +73,12 @@ struct ReflectionEvaluator: Sendable {
             let usage = reportedUsage ?? .estimated(inputChars: prompt.count, outputChars: response.count)
             return (.verdict(parseReflection(from: response, trial: trial)), usage)
         } catch is CancellationError {
-            // #18 (B): cancellation must propagate, not be swallowed. Folding it into a
-            // "not acceptable" verdict would record a bogus "evaluation failed" critique
-            // into reflexion memory and delay the user's Stop by a trial boundary. Mirrors
-            // the trial-stream catch in SelfReflectionCapability.
+            // Cancellation must propagate, not be swallowed: folding it into a "not acceptable" verdict would record a bogus
+            // critique into reflexion memory and delay the user's Stop by a trial boundary.
             throw CancellationError()
         } catch {
-            // [WF-CC11] Infrastructure fault, not a verdict. This used to return
-            // `isAcceptable: false` with fabricated revision advice, which forced a full extra
-            // agent trial — see `ReflectionEvaluation.inconclusive`'s doc for the whole story.
+            // Infrastructure fault, not a verdict: return `.inconclusive` (see `ReflectionEvaluation.inconclusive`), not a
+            // fabricated rejection.
             logger.warning("[REFLECTION] Evaluation LLM call for trial \(trial) failed: \(error.localizedDescription). CONSEQUENCE: the verdict is INCONCLUSIVE — the caller keeps the trial's answer as-is; no extra trial runs and no fabricated critique enters the next prompt.")
             return (.inconclusive(reason: error.localizedDescription), TokenUsage())
         }
@@ -101,11 +86,9 @@ struct ReflectionEvaluator: Sendable {
 
     // MARK: - Context-Aware Tool Result Budgeting
 
-    /// Computes the character budget for tool results based on model context window.
-    ///
+    /// Computes the character budget for tool results based on the model context window.
     /// Formula: `min(contextChars - fixedOverhead - responseReserve, 6000)`, floored at 800.
-    /// - Parameter contextWindow: Model context window in tokens.
-    /// - Returns: Budget in characters.
+    /// - Parameter contextWindow: model context window in tokens. Returns the budget in characters.
     static func computeToolBudget(contextWindow: Int) -> Int {
         let contextChars = contextWindow * 3  // ~3 chars per token approximation
         let fixedOverhead = 500               // prompt template + goal + format instructions
@@ -114,16 +97,9 @@ struct ReflectionEvaluator: Sendable {
         return min(max(raw, 800), 6000)
     }
 
-    /// Builds a budgeted tool results summary with failed-first priority.
-    ///
-    /// Failed results are allocated first (up to 60% of budget) since they carry
-    /// more diagnostic value for the evaluator. Remaining budget is split evenly
-    /// among successful results.
-    ///
-    /// - Parameters:
-    ///   - results: Tool results from the execution trial.
-    ///   - budget: Total character budget for all tool results combined.
-    /// - Returns: Formatted tool results string within the budget.
+    /// Builds a budgeted tool results summary with failed-first priority: failed results get up to 60% of the budget
+    /// since they carry more diagnostic value; the rest is split evenly among successful results.
+    /// - Parameters: `results` from the trial; `budget` is the total character budget. Returns the formatted string.
     static func budgetToolResults(results: [SynthesizedToolResult], budget: Int) -> String {
         guard !results.isEmpty else { return "No tools were executed." }
 
@@ -133,7 +109,7 @@ struct ReflectionEvaluator: Sendable {
         var remaining = budget
         var lines: [String] = []
 
-        // Phase 1: Failed results get priority (up to 60% of budget)
+        // Failed results get priority (up to 60% of budget).
         let failedBudget = Int(Double(budget) * 0.6)
         if !failed.isEmpty {
             let perFailedBudget = failedBudget / failed.count
@@ -145,7 +121,7 @@ struct ReflectionEvaluator: Sendable {
             }
         }
 
-        // Phase 2: Successful results share the rest
+        // Successful results share the rest.
         if !succeeded.isEmpty && remaining > 0 {
             let perSuccessBudget = max(remaining / succeeded.count, 50)
             for result in succeeded {
@@ -166,19 +142,9 @@ struct ReflectionEvaluator: Sendable {
 
     // MARK: - Key-Value Parser
 
-    /// Parses a key-value formatted LLM response into a ReflectionResult.
-    ///
-    /// Parse stages:
-    ///   1. OutputSanitizer — strip think blocks, fences, special tokens
-    ///   2. VERDICT extraction — regex match for PASS/RETRY variants
-    ///   3. CRITIQUE extraction — text after "CRITIQUE:" label
-    ///   4. REVISION extraction — text after "REVISION:" label (optional)
-    ///   5. Keyword fallback — positive/negative signal scan when no VERDICT found
-    ///
-    /// - Parameters:
-    ///   - response: Raw LLM output text.
-    ///   - trial: Current trial number for the result.
-    /// - Returns: Parsed ReflectionResult (never throws).
+    /// Parses a key-value formatted LLM response into a ReflectionResult (never throws).
+    /// Stages: sanitize, VERDICT match (PASS/RETRY), CRITIQUE and optional REVISION text, keyword fallback.
+    /// - Parameters: `response` is the raw output; `trial` is the number recorded on the result.
     func parseReflection(from response: String, trial: Int) -> ReflectionResult {
 
         // Stage 1: Sanitize — strip think blocks, fences, special tokens
@@ -215,9 +181,8 @@ struct ReflectionEvaluator: Sendable {
             )
         }
 
-        // Stage 5: Keyword fallback — no VERDICT line found
-        // The model expressed a judgment but not in the expected format.
-        // Scan for positive/negative signals instead of pessimistically defaulting to false.
+        // Keyword fallback when no VERDICT line was found: scan for positive/negative signals rather than pessimistically
+        // defaulting to false.
         logger.info("No VERDICT line found in reflection output. Attempting keyword fallback.")
 
         let isAcceptable = Self.keywordFallback(cleaned)

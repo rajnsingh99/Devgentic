@@ -4,32 +4,7 @@
 //  HistoryOrderGuardRailTests.swift
 //  DevgenticTests
 //
-//  Invariant #8 (`architecture_readme.md` §7) — "Ascending history only, from
-//  `BackendHistoryResolver`" — had NO executable check of any kind, and it is the one invariant
-//  in that register that was violated in shipped code.
-//
-//  That is not a coincidence, and the register itself shows why: #14 (`NativeToolCatalog` is the
-//  only place a native tool is declared) has `ToolRegistryDriftTests`, #15 (`ToolCapability`
-//  describes, never enforces) has `ToolCapabilityTests` checking in both directions. Both hold.
-//  #8 had only prose — plus `EpisodicFitGaugeAlignmentTests`, which proves the FORMATTER
-//  misreports on a descending array but could not fail when a caller handed one over. A policy
-//  test with no wiring behind it. (Callers can no longer hand one over at all; what remains
-//  worth detecting is the resolver itself returning an unordered merge.)
-//
-//  `ActiveStreamManager.startMessageStream` is the one chokepoint all seven run-start sites pass
-//  through. ⚠️ It does NOT receive `history` — an earlier version of this header said it did, and
-//  that was already false when the file was written: the same change set deleted `history`,
-//  `conversationID` and `userQuery` from the signature. History is DERIVED inside, so the
-//  guard-rail there is a SELF-check, not a caller check — production says so at its own site
-//  ("Callers no longer supply history… this is a regression in BackendHistoryResolver.merge, not
-//  a caller bug"). These tests pin the predicate behind it, which is what makes the check
-//  meaningful either way.
-//
-//  ⚠️ The guard-rail LOGS, it does not repair. Invariant #8: "Never re-add a `.reversed()` at a
-//  call site; if history arrives descending, the resolver is the bug." Sorting at the chokepoint
-//  would hide a caller that is also reading the wrong SOURCE — a pagination window, a private
-//  transcript — which no sort can fix. So these tests assert on DETECTION only; there is
-//  deliberately no "and then it fixed it" case to write.
+//  Created by Raj Singh.
 //
 
 import XCTest

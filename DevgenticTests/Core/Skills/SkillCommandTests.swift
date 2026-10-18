@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillCommandTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The `/` composer trigger: when it fires, and what it turns a message into.
-//
-//  ⚠️ The boundary rule is the whole risk here. `#` and `@` fire at the start of a line OR after
-//  whitespace, which is right for a mention. `/` with that rule fires on ordinary prose and paths —
-//  `cd /usr`, `and/or`, `24/7` — popping a picker over someone's sentence mid-thought. It is a
-//  trigger at offset 0 of the message and nowhere else, and the tests that say so are the ones to
-//  protect.
+//  Created by Raj Singh.
 //
 
 import XCTest

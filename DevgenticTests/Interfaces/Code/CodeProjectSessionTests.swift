@@ -4,15 +4,7 @@
 //  CodeProjectSessionTests.swift
 //  DevgenticTests
 //
-//  One permanent Code profile, everything else per project (2026-09-24).
-//
-//  ⚠️ THE DEFECT. Home used to DELETE the Code profile row, and every per-tool setting and every
-//  MCP tool enabled for Code lived on that row and nowhere else — so a Home press silently threw
-//  them away. Now the row is reset, never deleted, and each project's model, tools and limits are
-//  captured to `CodeQuickSettingsStore` when the project is left and loaded when it is reopened.
-//
-//  These drive the REAL `CodeSessionManager` against an in-memory store and a private defaults
-//  suite, as `CodeProfileSingletonTests` does.
+//  Created by Raj Singh.
 //
 
 import XCTest

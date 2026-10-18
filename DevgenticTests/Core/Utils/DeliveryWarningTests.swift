@@ -4,9 +4,7 @@
 //  DeliveryWarningTests.swift
 //  DevgenticTests
 //
-//  Pre-send warnings say which files the model will receive only part of, why, and what to do.
-//  They are only worth showing if they match what the send actually does — so the agreement
-//  tests drive the REAL backend assemblers and the transcript builder over the same files.
+//  Created by Raj Singh.
 //
 
 import XCTest

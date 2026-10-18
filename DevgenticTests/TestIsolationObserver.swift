@@ -4,13 +4,7 @@
 //  TestIsolationObserver.swift
 //  DevgenticTests
 //
-//  The test bundle's principal class (`NSPrincipalClass`, set by `INFOPLIST_KEY_NSPrincipalClass`):
-//  XCTest creates one instance when the bundle loads, before any test runs.
-//
-//  ⚠️ For process-wide state that NO test class can isolate on its own, because the leak crosses
-//  classes: a test's setUp cannot clean up after a class that ran earlier and never knew it needed
-//  to. Add a reset here only for state of that kind — everything else belongs in the owning test's
-//  setUp/tearDown.
+//  Created by Raj Singh.
 //
 
 import XCTest

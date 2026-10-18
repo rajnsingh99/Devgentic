@@ -4,12 +4,7 @@
 //  OrbResetCoverageTests.swift
 //  DevgenticTests
 //
-//  [Audit Batch 2 · #44] A source-reading guard so the reset list cannot fall behind a phase again.
-//
-//  It already did: `resetAll()` predated Phase 6 and silently skipped all five of its keys. That
-//  mattered more than a normal omission because those five controls live only inside the Developer
-//  card — so once Developer mode was switched back off, Reset was the ONLY way to turn voice
-//  approvals off, and it did not.
+//  Created by Raj Singh.
 //
 
 import XCTest

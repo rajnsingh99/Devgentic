@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGLifecycleTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Batch 5 of the RAG readiness register:
-//    RAG-5  — a deleted conversation's memory stays deleted: tombstones checked under the write
-//             lock, plus a launch sweep that collects strays.
-//    RAG-16 — the detached indexer reads a value snapshot, never the live `ChatMessage`.
-//    RAG-4b — choosing a response version re-indexes the message as that version.
+//  Created by Raj Singh.
 //
 
 import XCTest

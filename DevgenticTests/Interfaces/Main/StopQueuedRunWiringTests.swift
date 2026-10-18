@@ -2,12 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  StopQueuedRunWiringTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-4 — the WIRING. `ForegroundRunResolverTests` and `ConversationAdmissionTests` pin
-//  the rules; these pin that the three call sites still apply them. Each is a correct policy that
-//  does nothing if its call site is cut, and none of the three sites is reachable from a unit test
-//  without a live backend (`ActiveStreamManager` runs, `MessagingCoordinator`'s Stop).
+//  Created by Raj Singh.
 //
 
 import XCTest

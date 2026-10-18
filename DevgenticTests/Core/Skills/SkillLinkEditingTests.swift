@@ -2,17 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillLinkEditingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Linking, unlinking and pinning a skill on a profile.
-//
-//  ⚠️⚠️ THE STATED GOAL OF THE V6 REWRITE HAD NO TEST AT ALL. All three edits were closures passed
-//  inline to a private method of a SwiftUI view, so nothing could reach them: a regression in any
-//  would have been invisible until a user opened a profile and found their links gone.
-//
-//  The rule binding all three: an edit to ONE link must not disturb another. `SkillSelection`
-//  carries the user's own preferences — `isEnabled` and `pinnedVersionID` — and losing those
-//  silently is the failure mode that matters, not a crash.
+//  Created by Raj Singh.
 //
 
 import XCTest

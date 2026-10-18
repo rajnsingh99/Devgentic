@@ -4,12 +4,7 @@
 //  CodeProjectFollowUpTests.swift
 //  DevgenticTests
 //
-//  Gaps found on device 2026-09-24 after the permanent-profile change:
-//    #2 a run started for a conversation (wake, scheduler, resume) took the OPEN project's profile
-//    #3 model unloading was decided by profile, and every Code session shares one
-//    #4 unchanged settings still rewrote the profile row
-//    #5 MCP servers saw both projects' folders for a moment on every switch
-//  (#1, binding a session at creation, is wiring-only — see `CodeProjectWiringTests`.)
+//  Created by Raj Singh.
 //
 
 import XCTest

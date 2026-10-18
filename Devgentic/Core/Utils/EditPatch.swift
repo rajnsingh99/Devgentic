@@ -4,27 +4,15 @@
 //  EditPatch.swift
 //  Devgentic
 //
-//  The reversible record of one agent file write (2026-10-04, user decision) — what Undo applies
-//  backwards. Not the 4 KB `ActionEffect.diff` the model reads: that one is capped, has no line
-//  numbers (2 lines of context, and `}` repeats everywhere), and splits on any line break, so it
-//  cannot restore a file byte for byte.
-//
-//  This one:
-//    • lines KEEP their terminators, so `\r\n` vs `\n` and "no newline at end of file" survive
-//    • hunks carry line numbers plus `contextLines` of context on each side
-//    • no size cap — it is stored in its own file (`EditPatchStore`), never in the message blob
-//
-//  Reverting applies hunks bottom-up. Each hunk's AFTER side (context + what the agent wrote) must
-//  be found verbatim in the current file, nearest to where it was; then it is replaced by the
-//  BEFORE side. If the file is exactly as the agent left it, that reproduces the original exactly
-//  (checked against `beforeHash`). If it changed since, hunks still apply where their lines are
-//  intact — `git revert` semantics — and a hunk whose lines were edited is a conflict: nothing is
-//  guessed and the file is left alone.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import CryptoKit
 
+/// The reversible record of one agent file write, applied backwards by Undo. Lines keep their terminators and
+/// hunks carry line numbers plus `contextLines` of context, so a file restores byte for byte. Reverting
+/// applies hunks bottom-up; a hunk whose lines were edited is a conflict and is left alone.
 struct EditPatch: Codable, Equatable, Sendable {
 
     struct Hunk: Codable, Equatable, Sendable {
@@ -164,7 +152,7 @@ struct EditPatch: Codable, Equatable, Sendable {
         case content(String)
         /// The write created the file and it is still exactly as written: undoing deletes it.
         case deleteFile
-        /// Hunks whose lines are no longer in the file (1-based, for display). Nothing applied.
+        /// Hunks whose original lines are missing from the file (1-based, for display); nothing is applied.
         case conflict(hunks: [Int])
     }
 

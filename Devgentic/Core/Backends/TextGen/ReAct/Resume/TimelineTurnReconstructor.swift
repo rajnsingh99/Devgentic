@@ -4,16 +4,7 @@
 //  TimelineTurnReconstructor.swift
 //  Devgentic
 //
-//  [G1 Piece 2 — resume] Rebuilds an interrupted run's in-flight reasoning state from the persisted
-//  message timeline so a parked-HITL run can continue after restart. The persisted `timelineEvents`
-//  are a DIALECT-AGNOSTIC record of what happened (reasoning + each tool's name/args/output, grouped
-//  by `stepId`). This reconstructor turns them into provider-agnostic `ReconstructedStep`s; the
-//  executor then serializes those into native turns via the *currently re-resolved* `ToolTurnAdapter`
-//  — which is why a run parked under one provider can resume on any same-family provider.
-//
-//  The KV cache is dead on restart, so faithfulness here is SEMANTIC, not byte-identical: tool-call
-//  ids are freshly synthesized but kept internally consistent (each assistant `tool_use` paired with
-//  its `tool_result`), which every provider accepts.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,13 +4,13 @@
 //  ScrollerCustomizer.swift
 //  Devgentic
 //
-//  Forces native macOS overlay scrollers and eliminates scroller track / path backgrounds
-//  across all ScrollViews and NSScrollViews, producing a clean, modern Antigravity / Linear-style UI.
+//  Created by Raj Singh.
 //
 
 import AppKit
 import SwiftUI
 
+/// Forces native macOS overlay scrollers and removes scroller track backgrounds across ScrollViews and NSScrollViews.
 public enum ScrollerCustomizer {
     private static var isInstalled = false
     private static let lock = NSLock()

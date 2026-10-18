@@ -4,14 +4,14 @@
 //  ScheduledTask.swift
 //  Devgentic
 //
-//  Swift value-type mirror of ScheduledTaskEntity.
-//  Contains enums, entity conversion, and template variable resolution.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - Enums
 
+/// Whether a scheduled task is bound to a conversation or runs autonomously.
 enum TaskMode: String, Codable, CaseIterable, Identifiable {
     case conversationBound = "conversationBound"
     case autonomous = "autonomous"
@@ -32,12 +32,12 @@ enum TaskStatus: String, Codable, CaseIterable {
     case completed
     case failed
     case paused
-    /// The last run hit its execution limit (HITL Waiting Contract §3). Stored as a raw string and
-    /// read tolerantly, so an older build reads it as `.pending`.
+    /// The last run hit its execution limit.
+    /// Stored as a raw string and read tolerantly, so an older build reads it as `.pending`.
     case timedOut
     case cancelled
-    /// Its time passed while Devgentic was closed or the Mac was asleep, and it was skipped, not run
-    /// late (owner decision 2026-09-27, Timeout inventory D-22). The summary says which run(s).
+    /// Its time passed while Devgentic was closed or the Mac was asleep, and it was skipped, not run late.
+    /// The summary says which run(s).
     case missed
 }
 
@@ -65,13 +65,9 @@ struct ScheduledTask: Identifiable, Equatable {
     var profileID: UUID?
     var attachedFileURLs: [URL]
 
-    /// True when `attachedFileURLsJSON` could not be decoded, so `attachedFileURLs` is empty because
-    /// it was UNREADABLE rather than because the task has no attachments.
-    ///
-    /// ⚠️ Load-scoped, and excluded from `==`: it describes this read, not the task. The writer
-    /// checks it and refuses to null the stored column — otherwise one failed decode plus any routine
-    /// edit erased the user's attachment list permanently (G23). Same shape as
-    /// `ChatMessage.timelineDecodeFailed`.
+    // Why: otherwise one failed decode plus any routine edit erases the user's attachment list permanently
+    /// True when `attachedFileURLsJSON` could not be decoded, so `attachedFileURLs` is empty because it was unreadable.
+    /// Load-scoped and excluded from `==`; the writer checks it and refuses to null the stored column.
     var attachedFileURLsUnreadable: Bool = false
     var cronExpression: String?
     var scheduledAt: Date?
@@ -85,8 +81,8 @@ struct ScheduledTask: Identifiable, Equatable {
     var linkedConversationID: UUID?
     var contextWindowMode: ContextWindowMode
     var createdAt: Date
-    /// This task's own execution limit in seconds. nil = the profile's `executionTimeout`, else
-    /// `SchedulerCoordinator.defaultScheduledRunLimit` (HITL Waiting Contract §5).
+    /// This task's own execution limit in seconds.
+    /// nil uses the profile's `executionTimeout`, else `SchedulerCoordinator.defaultScheduledRunLimit`.
     var runLimit: TimeInterval? = nil
 
     var isRecurring: Bool { cronExpression != nil }

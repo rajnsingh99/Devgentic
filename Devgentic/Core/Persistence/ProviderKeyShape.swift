@@ -4,24 +4,14 @@
 //  ProviderKeyShape.swift
 //  Devgentic
 //
-//  Refuses to send an API key to a provider when the key's own prefix says it belongs to a
-//  different vendor.
-//
-//  ⚠️ WHY (2026-09-27). Keys were stored per PROFILE then, and `switchProvider(to:)` kept the key
-//  when the provider changed — so an Anthropic profile switched to OpenRouter sent its `sk-ant-…`
-//  key to openrouter.ai on the first request. Since 2026-10-03 keys live once per PROVIDER
-//  (`AppProviderKeyStore`), which removes that path, but not the root mistake: a key pasted into the
-//  wrong provider's field is now stored as THAT provider's key and sent on every request to it.
-//  This is the send-time backstop for both.
-//
-//  Deliberately narrow: it only speaks when a key carries a prefix that UNAMBIGUOUSLY names a vendor.
-//  A bare `sk-…` could be OpenAI, DeepSeek, a LiteLLM proxy or anything else, so it is never
-//  treated as evidence, and `.openAICompatible` is never checked — gateways legitimately accept
-//  other vendors' keys.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Refuses to send an API key to a provider when the key's own prefix says it belongs to a different
+/// vendor. Narrow: only an unambiguous vendor prefix counts; a bare `sk-` is never evidence and
+/// `.openAICompatible` is never checked.
 enum ProviderKeyShape {
 
     /// Prefixes that identify exactly one vendor. Order matters: `sk-ant-`/`sk-or-` before the

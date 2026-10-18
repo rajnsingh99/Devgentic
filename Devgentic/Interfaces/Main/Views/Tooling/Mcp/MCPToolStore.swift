@@ -4,9 +4,7 @@
 //  MCPToolStore.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 28/09/25.
-//
-//  Migrated to SwiftData on 26/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -23,11 +21,9 @@ final class MCPToolStore {
     // MARK: - Singleton Instance
     static let shared = MCPToolStore()
 
-    /// ⚠️ TEST SEAM (register KC-37, the KC-52 shape). When set, receives exactly the messages the
-    /// config-blob integrity paths log — an `updateTool`/`deleteTool` whose `mcpConfigData` cannot
-    /// yield an env-key set, and an `addTool` whose definition cannot be encoded. Those paths used
-    /// to be silent, and silence is the whole defect: an orphaned secret nobody was told about.
-    /// One message for the sink and the logger alike; the seam cannot drift from the log.
+    /// Test hook: when set, receives exactly the messages the config-blob integrity paths log.
+    /// Those are an `updateTool`/`deleteTool` with an unusable `mcpConfigData`, and an `addTool` that cannot encode.
+    /// The sink and the logger share one message, so they cannot drift.
     nonisolated(unsafe) static var blobIntegrityLogSinkForTesting: (@Sendable (String) -> Void)?
 
     private static func logBlobIntegrity(_ message: String) {
@@ -56,13 +52,8 @@ final class MCPToolStore {
         refreshNearExpiryOAuthBundles()
     }
 
-    /// Resolves the model context, LOGGING the user-visible consequence when it is missing.
-    ///
-    /// ⚠️ Every caller used a bare `guard let context = mainContext else { return }` — eight of them
-    /// (G53). `mainContext` is nil only when `configureContainer` has not run, which should not
-    /// happen after launch; but if it ever does, the user's action vanished with no error, no
-    /// message and nothing in the log. "Should not happen" is exactly when a log matters, because
-    /// there is nothing else left to diagnose from.
+    /// Resolves the model context, logging the user-visible consequence when it is missing.
+    /// `mainContext` is nil only before `configureContainer` has run; a bare guard would drop the user's action silently.
     private func requireContext(_ operation: String, consequence: String) -> ModelContext? {
         guard let context = mainContext else {
             logger.error(
@@ -79,14 +70,11 @@ final class MCPToolStore {
 
     // MARK: - Public CRUD Methods
 
-    /// Adds a new tool source. `secrets` carries the env values + auth token
-    /// the user typed into the form; we persist them to Keychain under the
-    /// newly-generated source ID, never inline. Returns the new source ID so
-    /// callers (e.g. the form) can clean up any temp-ID Keychain entries.
+    /// Adds a new tool source, persisting `secrets` (env values and auth token) to Keychain under its ID, never inline.
+    /// Returns the new source ID so callers (e.g. the form) can clean up any temp-ID Keychain entries.
     @discardableResult
-    /// - Parameter id: the new source's identity. Caller-supplied (defaulting to a fresh UUID) so a
-    ///   credential that must be written BEFORE the row exists — the OAuth bundle, register KC-5 —
-    ///   can be keyed on the final identity. See `MCPServerAddFlow`.
+    /// - Parameter id: the new source's identity, caller-supplied (defaulting to a fresh UUID) so a credential that must be
+    ///   written before the row exists, such as the OAuth bundle, can be keyed on it. See `MCPServerAddFlow`.
     func addTool(
         id newID: UUID = UUID(),
         serverName: String,
@@ -100,11 +88,8 @@ final class MCPToolStore {
                 + "form is told the add failed."
         ) else { return nil }
 
-        // Encode the definition BEFORE any secret is written. ⚠️ Register KC-38: the `try?` that
-        // used to build this blob could null it after `persistSecrets` had already stored the env
-        // values — creating exactly the row `deleteTool` cannot clean up, a source whose env-key
-        // names never reached disk while their secrets sit in the Keychain. Failing the add is
-        // cheap here: nothing has been written yet, so there is nothing to clean up.
+        // Encode the definition before any secret is written: a failed encode must fail the add while nothing is stored,
+        // since a secret saved without its env-key names could never be cleaned up by `deleteTool`.
         let configBlob: Data
         do {
             configBlob = BlobVersioning.stamped(
@@ -141,12 +126,8 @@ final class MCPToolStore {
         return newID
     }
 
-    /// Is `serverName` already taken by a DIFFERENT source?
-    ///
-    /// Adding a server checked for duplicates; renaming one did not, so an edit could
-    /// produce two servers with the same name. That name is the user's only handle on a
-    /// server in the sidebar, in tool categories and in every log line, so two of them is a
-    /// genuine ambiguity rather than a cosmetic one.
+    /// Whether `serverName` is already taken by a different source.
+    /// The name is the user's only handle on a server in the sidebar, tool categories and logs, so duplicates are ambiguous.
     func isServerNameTaken(_ serverName: String, excluding sourceID: UUID? = nil) -> Bool {
         let trimmed = serverName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty else { return false }
@@ -157,10 +138,7 @@ final class MCPToolStore {
     }
 
     /// Enables or disables a server without touching its configuration or secrets.
-    ///
-    /// Disabling disconnects immediately: leaving a live session behind would keep the
-    /// child process running and the tools callable, which is precisely what the user just
-    /// asked to stop.
+    /// Disabling disconnects immediately: a live session would keep the child process running and its tools callable.
     func setEnabled(_ enabled: Bool, sourceID: UUID) {
         guard let context = mainContext else {
             logger.error("""
@@ -228,15 +206,8 @@ final class MCPToolStore {
                 return
             }
 
-            // Capture the previous env-key set so we can purge any keys the
-            // user removed in this edit. Read before mutating mcpConfigData.
-            //
-            // ⚠️ Register KC-37: the `try?` that used to sit here turned an UNDECODABLE (or
-            // MISSING) blob into an empty key set, so the purge below silently skipped — any
-            // env-var secret the user had removed kept its Keychain entry with nothing left
-            // pointing at it, and nothing said why. An unknowable key set purges NOTHING (the
-            // key names live in the blob, and deleting on an uncertain read is the KC-1
-            // hazard), but the skip must be stated, not silent.
+            // Capture the previous env-key set to purge keys removed in this edit; read before mutating `mcpConfigData`.
+            // An undecodable or missing blob purges nothing (deleting on an uncertain read is unsafe), but the skip is logged.
             let previousEnvKeys: Set<String> = {
                 guard let data = item.mcpConfigData else {
                     Self.logBlobIntegrity(
@@ -265,10 +236,7 @@ final class MCPToolStore {
             }()
 
             item.serverName = serverName
-            // ⚠️ Assign only on success. `try?` here nulled the column on an encoder throw, replacing
-            // a WORKING saved configuration — command, args, envKeys, url, auth, transport — with
-            // nothing, silently and with no log. The server then failed to connect with no
-            // indication that its configuration had been erased rather than misconfigured (G90).
+            // Assign only on success: a failed encode must not null the column and erase a working saved configuration.
             do {
                 item.mcpConfigData = BlobVersioning.stamped(
                     try JSONEncoder().encode(serverDefinition), version: MCPToolItem.configBlobVersion)
@@ -281,8 +249,7 @@ final class MCPToolStore {
                 )
             }
 
-            // Cascade-delete child tool defs and rebuild from `newTools`.
-            // CR-64: read what must survive BEFORE the children are deleted.
+            // Cascade-delete child tool defs and rebuild from `newTools`; read what must survive before the children are deleted.
             let previousByName = Dictionary(item.tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
             let preserved = newTools.map { previousByName[$0.name]?.blobsToPreserve(whenRebuiltFrom: $0) }
             for existingTool in item.tools {
@@ -294,15 +261,9 @@ final class MCPToolStore {
                 item.tools.append(child)
             }
 
-            // Replace secrets atomically: purge removed env keys, then write
-            // the new set. Auth scopes are reconciled by `persistSecrets`.
-            //
-            // ⚠️ `delete`, NOT `clear`, and that is correct here — do not "fix" it. The KC-1 hazard
-            // is a secret being destroyed because its VALUE could not be read; these keys come from
-            // the blob (`previousEnvKeys` vs the form's `envKeys`), never from the Keychain, so an
-            // unreadable Keychain cannot fabricate a removal. Reaching this line means the user
-            // genuinely deleted the row from the form, and a guarded `clear` would refuse that
-            // legitimate removal during an outage and silently keep a secret they asked to drop.
+            // Why: use `delete`, not `clear`: removed keys come from the blob, not the Keychain, so an unreadable Keychain
+            // cannot fabricate a removal, and a guarded `clear` would keep a secret the user dropped.
+            // Replace secrets atomically: purge removed env keys, then write the new set; `persistSecrets` reconciles auth scopes.
             let newEnvKeys = Set(serverDefinition.envKeys ?? [])
             let removedEnvKeys = previousEnvKeys.subtracting(newEnvKeys)
             for key in removedEnvKeys {
@@ -330,16 +291,8 @@ final class MCPToolStore {
 
         do {
             if let item = try context.fetch(descriptor).first {
-                // ⚠️ These keys NAME the Keychain entries to purge, and they live INSIDE the blob
-                // being deleted. If the blob cannot be decoded we cannot know what to purge, and the
-                // secrets outlive the source with nothing left pointing at them (G22). Silent before;
-                // the row still gets deleted (the user asked for that), but the orphaning is stated.
-                //
-                // ⚠️ Register KC-38: the nil branch returned an empty key set in complete silence —
-                // a blob that was never persisted (the addTool defect, now fixed at the source)
-                // deleted its row while its env-var secrets stayed in the Keychain unnamed and
-                // unexplained. Same consequence as the undecodable case below, so it gets the same
-                // log: the row goes, the orphaning is stated, nothing is guessed at.
+                // These keys name the Keychain entries to purge and live inside the blob being deleted: if it is missing or undecodable,
+                // nothing can be purged, so the row is still deleted but the resulting orphaned secrets are logged.
                 let envKeys: Set<String> = {
                     guard let data = item.mcpConfigData else {
                         Self.logBlobIntegrity(
@@ -364,19 +317,15 @@ final class MCPToolStore {
                         return []
                     }
                 }()
-                // Tear the live session down BEFORE dropping the record. Deleting only the
-                // SwiftData row left the MCP client and its child process running with no
-                // owner and no UI entry — the server kept holding its port/pipes until the
-                // app quit, and the user had no way to reach it.
+                // Tear the live session down before dropping the record, or the MCP client and its child process would run with no
+                // owner and no UI entry, holding its port and pipes until the app quits.
                 Task { @MainActor in
                     await MCPClientService.shared.disconnect(sourceId: targetID)
                     logger.info("[MCP-LIFECYCLE] Disconnected session for deleted source \(targetID).")
                 }
 
-                // Withdraw the grant at the provider, not just locally. Purging Keychain
-                // alone left OAuth tokens valid at the issuer until natural expiry, so
-                // "remove this server" did not actually revoke the access the user granted
-                // it. Fire-and-forget: it reads the bundle before `purgeAll` deletes it.
+                // Withdraw the grant at the provider, not just locally, so removing a server revokes the access the user granted.
+                // Fire-and-forget; it reads the bundle before `purgeAll` deletes it.
                 if let bundle = MCPOAuthCoordinator.loadBundle(sourceID: targetID) {
                     Task { await MCPOAuthCoordinator.revokeTokens(sourceID: targetID, bundle: bundle) }
                 }
@@ -393,10 +342,8 @@ final class MCPToolStore {
         }
     }
 
-    /// Replace the tool list for an existing source without touching its
-    /// `mcpConfigData` or any Keychain secrets. Used by the
-    /// `tools/list_changed` listener — the underlying ServerDefinition,
-    /// auth, and env keys are unchanged; only the tools themselves moved.
+    /// Swaps the tool list for an existing source without touching its `mcpConfigData` or Keychain secrets.
+    /// Used by the `tools/list_changed` listener: only the tools changed, not the definition, auth or env keys.
     func replaceTools(forSourceID sourceID: UUID, with newTools: [ToolDefinition]) {
         guard let context = requireContext("replaceTools(forSourceID:)", consequence: "the freshly-discovered tool list was DISCARDED — this server keeps its previous tools, which may no longer match what it actually offers.") else { return }
 
@@ -410,7 +357,7 @@ final class MCPToolStore {
                 return
             }
 
-            // CR-64: read what must survive BEFORE the children are deleted.
+            // Read what must survive before the children are deleted.
             let previousByName = Dictionary(item.tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
             let preserved = newTools.map { previousByName[$0.name]?.blobsToPreserve(whenRebuiltFrom: $0) }
             for existingTool in item.tools {
@@ -432,21 +379,10 @@ final class MCPToolStore {
 
     // MARK: - Secret persistence
 
-    /// Writes every secret in `secrets` to Keychain under `sourceID`. The
-    /// `definition` is consulted only for the auth-scheme shape; we don't
-    /// persist auth tokens whose scheme was set to `.none`.
-    ///
-    /// Idempotency: clears every auth scope first, then writes the one that
-    /// matches the new scheme. This way a scheme change (bearer → apiKey,
-    /// oauth → none, etc.) never leaves orphaned secrets in Keychain.
-    /// The OAuth *bundle* is owned by the container layer (`AddMCPServerContainerView.handleAdd/Update`)
-    /// since it requires a richer Codable shape than this method handles —
-    /// we just clear it on scheme transitions away from oauth.
-    /// ⚠️ TEST SEAM (registers KC-1 / KC-17): deliberately not `private`. This function touches no
-    /// `ModelContext` — only `MCPSecretStore` — so a test can drive it directly with an injected
-    /// Keychain and prove the WIRING, not just the policy. That distinction is load-bearing here:
-    /// `MCPSecretStore.clear` refusing to delete an unreadable secret is worth nothing if this
-    /// function calls `delete` instead, and a test of `clear` alone cannot catch that.
+    // Why: not `private`: it touches only `MCPSecretStore`, so tests can drive it with an injected Keychain and prove the wiring.
+    /// Writes every secret in `secrets` to Keychain under `sourceID`; `definition` only supplies the auth-scheme shape.
+    /// Idempotent: clears every non-target auth scope first, so a scheme change never leaves orphaned secrets.
+    /// The OAuth bundle is owned by the container layer; it is only cleared here on scheme transitions away from oauth.
     func persistSecrets(
         _ secrets: MCPRuntimeSecrets,
         definition: ServerDefinition,
@@ -458,16 +394,8 @@ final class MCPToolStore {
             MCPSecretStore.shared.store(value, for: .envValue(key: key), sourceID: sourceID)
         }
 
-        // ⚠️⚠️ RECONCILE TO A TARGET — DO NOT WIPE FIRST. This used to delete `.bearerToken` and
-        // `.apiKeyHeaderValue` unconditionally and only THEN hit
-        // `guard let header = secrets.authorizationHeader else { return }`. So any save that failed
-        // to materialise a header — which is every save where the Keychain could not be read, since
-        // the form hydrates the field with `?? ""` and `buildRuntimeSecrets` only sets a header for
-        // a non-empty secret — destroyed the stored credential on its way to an early return. The
-        // user renamed a server and lost its token. Registers KC-1 and KC-17.
-        //
-        // Deciding the target state first makes the early return impossible: the scope that should
-        // hold the secret is never cleared on the way to writing it.
+        // Reconcile to a target, do not wipe first: a save that fails to materialise a header (every save where the Keychain
+        // could not be read) must not clear the stored credential on its way to an early return.
         let target: (scope: MCPSecretScope, value: String)? = {
             guard let header = secrets.authorizationHeader else { return nil }
             switch definition.auth {
@@ -486,20 +414,14 @@ final class MCPToolStore {
             }
         }()
 
-        // Clear every auth scope that is NOT the target, so a scheme change leaves no orphan.
-        // ⚠️ `clear`, never `delete`: an unreadable secret is kept, not destroyed.
+        // Why: `clear`, never `delete`: an unreadable secret is kept, not destroyed.
+        // Clear every auth scope that is not the target, so a scheme change leaves no orphan.
         for scope in [MCPSecretScope.bearerToken, .apiKeyHeaderValue] where scope != target?.scope {
             MCPSecretStore.shared.clear(scope: scope, sourceID: sourceID)
         }
         if case .oauth = definition.auth {
-            // ⚠️ Register KC-14: the bundle is owned by the container layer, but THIS layer
-            // reconciles its binding on every save. A bundle PROVABLY bound to a different
-            // URL than `definition` is cleared (a guarded clear — an unreadable bundle is
-            // kept, not destroyed), so a repurposed row can never keep riding on another
-            // host's tokens. Everything that cannot be proven — a legacy unbound bundle, an
-            // undecodable blob, an unparseable URL — is KEPT: `MCPOAuthBinding` refuses to
-            // attach those at the runtime layer instead, and the form gate is what demands
-            // a re-auth. This reconcile is hygiene; the attach check is the enforcement.
+            // The bundle is owned by the container layer, but this layer reconciles its binding on every save: a bundle provably
+            // bound to a different URL is cleared (guarded); anything unprovable is kept, and `MCPOAuthBinding` enforces at attach.
             if let storedJSON = MCPSecretStore.shared.retrieve(.oauthBundle, sourceID: sourceID),
                MCPOAuthBinding.isProvablyMisbound(storedJSON: storedJSON, serverURLString: definition.url) {
                 MCPSecretStore.shared.clear(scope: .oauthBundle, sourceID: sourceID)
@@ -519,11 +441,8 @@ final class MCPToolStore {
 
     // MARK: - Proactive OAuth refresh
 
-    /// Walks every persisted MCP source and refreshes any OAuth bundle that
-    /// is within 5 minutes of expiry. Runs on a background Task per source so
-    /// we don't serialize on the slowest provider, and swallows all errors —
-    /// failure here just means the next tool call will hit the reactive
-    /// refresh path in `DynamicMCPTool` instead.
+    /// Refreshes any OAuth bundle within 5 minutes of expiry, on a background Task per source.
+    /// Swallows all errors: a failure only means the next tool call takes the reactive refresh path in `DynamicMCPTool`.
     private func refreshNearExpiryOAuthBundles() {
         guard let context = requireContext("refreshNearExpiryOAuthBundles", consequence: "no near-expiry OAuth token is refreshed this launch; affected servers will fail on their next call until re-authenticated.") else { return }
         let descriptor = FetchDescriptor<MCPToolItem>()
@@ -551,9 +470,8 @@ final class MCPToolStore {
 
     // MARK: - Private Helper Methods
 
-    /// - Parameter preserving: stored blobs that could not be read and are being handed back as
-    ///   placeholders (`blobsToPreserve`, CR-64). Each non-nil one is written back byte-for-byte
-    ///   instead of encoding the placeholder over it.
+    /// - Parameter preserving: stored blobs that could not be read and are handed back as placeholders (`blobsToPreserve`).
+    ///   Each non-nil one is written back byte-for-byte instead of encoding the placeholder over it.
     private func createToolDefinitionModel(
         from tool: ToolDefinition,
         preserving keep: (parameters: Data?, icons: Data?, annotations: Data?)? = nil

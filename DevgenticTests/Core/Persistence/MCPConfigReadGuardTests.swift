@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MCPConfigReadGuardTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Covers G22: `mcpConfigData` was the last blob column read with a bare `try?`, which made an
-//  UNREADABLE configuration indistinguishable from an ABSENT one. Both produced
-//  `serverDefinition == nil`; the server then failed to connect with no command, URL or auth
-//  scheme, and nothing in the log said the stored bytes were the problem rather than the server.
-//
-//  The two cases need opposite responses — an absent config means "finish setting this up", an
-//  unreadable one means "do NOT delete this, its Keychain secrets are keyed off envKeys inside
-//  the blob" — so the test that matters is that they are now *distinguishable*.
+//  Created by Raj Singh.
 //
 
 import XCTest

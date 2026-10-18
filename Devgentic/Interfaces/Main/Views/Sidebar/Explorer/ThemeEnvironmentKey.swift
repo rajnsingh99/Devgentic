@@ -6,14 +6,12 @@
 //
 //  Created by Raj Singh.
 //
-//  Provides a custom SwiftUI EnvironmentKey so any view can read
-//  the current theme via `@Environment(\.appTheme)`.
-//
 
 import SwiftUI
 
 // MARK: - Environment Key
 
+/// Custom SwiftUI `EnvironmentKey` so any view can read the current theme via `@Environment(\.appTheme)`.
 private struct AppThemeKey: EnvironmentKey {
     static let defaultValue: any Theme = AppThemes.MaterialTheme()
 }

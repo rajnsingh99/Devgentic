@@ -4,27 +4,14 @@
 //  BackendProfileDetailView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 22/08/25.
-//
-//  Refactored on 26/08/25 to support unified BackendProfileModel.
-//  Updated on 05/09/25 to integrate AgentConfigDetailView.
-//
-//  Renamed from BackendProfilePanelView.swift on 06/08/26 (register G93). The
-//  `BackendProfilePanelView` this file was named after was DEAD: it hosted the old
-//  "AI Blueprints" window (id `backend-profiles`), which was removed in a3b831d on
-//  21/03/26 during the single-window refactor. Nothing constructed it afterwards except
-//  its own PreviewProvider, so it sat compiled-but-unreachable for four months while
-//  three of its file-mates stayed very much alive.
-//
-//  What remains here is all live and reached from the sidebar and the main content area:
-//    - BackendProfileDetailView — wrapped by ProfileDetailContainerView
-//    - ProfileRowView, DuplicateProfileSheet — used by ProfileSidebarListView
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Backend Profile Detail View
 
+/// Detail editor for a unified `BackendProfileModel`; wrapped by `ProfileDetailContainerView`.
 struct BackendProfileDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
@@ -32,31 +19,23 @@ struct BackendProfileDetailView: View {
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
-    /// ⚠️ Present ONLY to source the shared `WorkflowCanvasState` for a workflow profile — see the
-    /// `.workflow` case below. Injected at the app root (`DevgenticApp`), so it is available here
-    /// even though this view is reached through the Profiles destination rather than the chat area.
+    /// The app view model, present only to source the shared `WorkflowCanvasState` for a workflow profile.
+    /// Injected at the app root, so it is available even though this view is reached through the Profiles destination.
     @Environment(MainApplicationViewModel.self) private var mainViewModel
 
-    /// Set when this profile's stored blob could not be decoded — carries the surviving columns so
-    /// the warning can say what the profile actually was.
-    ///
-    /// ⚠️ `@State`, refreshed in `.task(id:)`, NEVER read from `body`: the query primes a JSON decode.
+    /// Set when this profile's stored blob could not be decoded; holds the surviving columns for the warning.
+    /// `@State`, refreshed in `.task(id:)` and never read from `body`, because the query primes a JSON decode.
     @State private var unreadable: BackendProfileStore.UnreadableProfileInfo?
     @State private var showingDiscardAlert = false
 
-    /// Register KC-22: the profile HAS an API key, but the Keychain would not hand it over (locked,
-    /// or an access prompt denied — most likely right after an update re-signed the app). Without
-    /// this the key field simply showed empty, identical to a profile that never had one, and the
-    /// obvious "fix" was to paste the key again. Same `@State`-not-`body` rule as `unreadable`.
+    /// True when the profile has an API key but the Keychain would not hand it over (locked, or an access prompt denied).
+    /// Without it the key field shows empty, like a profile with no key. Same `@State`-not-`body` rule as `unreadable`.
     @State private var providerKeyUnreadable = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // ⚠️ ABOVE the switch, so it covers every profile type in one place — and it must, because
-            // the switch itself is part of the problem: a corrupted Agent decodes to the `.bot`
-            // placeholder and gets routed to `BotConfigDetailView`, where tools, capabilities, skills
-            // and resilience are not rendered blank, they are NOT RENDERED. There is nothing missing
-            // on screen for the user to notice.
+            // Above the switch so it covers every profile type: a corrupted Agent decodes to the `.bot` placeholder and routes to
+            // `BotConfigDetailView`, where its tools and capabilities are not rendered at all, so nothing looks missing.
             if let unreadable {
                 unreadableConfigurationWarning(unreadable)
             }
@@ -71,30 +50,8 @@ struct BackendProfileDetailView: View {
                 case .agent:
                     AgentConfigDetailView(editBuffer: editBuffer, onDelete: onDelete)
                 case .workflow:
-                    // ⚠️ `editGuard` is not optional plumbing here — it is the ONLY channel by
-                    // which canvas dirt reaches the sidebar's navigation guard. Canvas geometry
-                    // lives in `WorkflowCanvasState`/`WorkflowLayoutSD`, never in
-                    // `editBuffer.draft`, so leaving this nil (as it was) meant `isDirty` stayed
-                    // false however much the user had drawn, and clicking another profile row
-                    // destroyed every unsaved node and edge with no prompt at all.
-                    //
-                    // ⚠️ `canvasState` is likewise NOT optional plumbing (WF-PE1). It MUST come from
-                    // `MainApplicationViewModel.workflowCanvasState(for:)` — the same call
-                    // `WorkflowDedicatedView` makes — so that both surfaces edit ONE state object
-                    // per workflow. While this argument was omitted, the view fell back to its own
-                    // `@State ownedCanvasState` and a second, independent graph existed for the same
-                    // profile: the profile editor loaded the DISK layout while the main Workflow
-                    // interface held unsaved edits, and at quit `persistDirtyWorkflowCanvases`
-                    // wrote the main interface's graph and `saveHook()` then wrote this stale one
-                    // straight over the same `WorkflowLayoutSD` row. The store has no
-                    // compare-and-swap, so the newer nodes were destroyed with no prompt, no undo
-                    // and no error log. Sharing the state makes that unrepresentable rather than
-                    // merely unlikely.
-                    //
-                    // Safe against a reload clobbering the other surface's work:
-                    // `loadLayout()` early-returns on `canvasState.acceptsDiskReload`
-                    // (`!hasUnsavedChanges`), so mounting this editor over an already-dirty shared
-                    // state does NOT re-read the disk layout.
+                    // `editGuard` is the only way canvas dirt reaches the sidebar's navigation guard; `canvasState` must come from
+                    // `MainApplicationViewModel.workflowCanvasState(for:)`, so every surface edits one state object per workflow.
                     WorkflowCanvasView(
                         profile: $editBuffer.draft,
                         onDelete: onDelete,
@@ -119,10 +76,8 @@ struct BackendProfileDetailView: View {
                 .first { $0.id == editBuffer.draft.id }
             providerKeyUnreadable = BackendProfileStore.shared.isProviderKeyUnreadable(for: editBuffer.draft.id)
         }
-        // ⚠️ Two different alerts, because the two reasons have OPPOSITE correct actions (G18).
-        // A from-the-future profile is intact and merely unreadable here, so its alert offers no
-        // destructive button at all — the fix would be worthless if the UI still steered the user
-        // into discarding data that a newer build can read perfectly.
+        // Two alerts, because the reasons have opposite correct actions: a profile from a newer build is intact but unreadable
+        // here, so its alert offers no destructive button.
         .alert(
             unreadable?.reason == .undecodable
                 ? "Discard the unreadable configuration?"
@@ -155,12 +110,8 @@ struct BackendProfileDetailView: View {
         }
     }
 
-    /// Warns without blocking.
-    ///
-    /// Deliberately NOT a save gate. The user can still edit and save — but now they know they are
-    /// overwriting recoverable data rather than fixing a profile that "reset itself", which is the
-    /// misreading the blank form invites. The one thing that MUST be visible is the type: the row
-    /// still says Agent while the form is showing Bot.
+    /// Warns without blocking; it is deliberately not a save gate, so the user knows they are overwriting recoverable data.
+    /// The type must be visible: the row still says Agent while the form shows Bot.
     @ViewBuilder
     private func unreadableConfigurationWarning(_ info: BackendProfileStore.UnreadableProfileInfo) -> some View {
         HStack(alignment: .top, spacing: 10) {
@@ -210,7 +161,7 @@ struct BackendProfileDetailView: View {
         )
     }
 
-    /// Warns without blocking, like the configuration warning above. Register KC-22.
+    /// Warns without blocking, like the configuration warning above.
     private var unreadableProviderKeyWarning: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "key.slash")
@@ -259,9 +210,8 @@ struct BackendProfileDetailView: View {
             return
         }
         providerKeyUnreadable = false
-        // ⚠️ Reload the draft only when it holds no edits — `load` would destroy them. A dirty
-        // draft still carries the key-less snapshot, but saving it is safe: the model's sticky
-        // clear-suppression (KC-20) refuses to treat that missing key as the user clearing it.
+        // Reload the draft only when it holds no edits, since `load` would destroy them; a dirty draft is safe to save because
+        // the model's sticky clear-suppression refuses to treat the missing key as the user clearing it.
         if !editBuffer.isDirty, let fresh = try? BackendProfileStore.shared.fetchProfile(byId: id) {
             editBuffer.load(fresh)
             toastManager.show("API key restored.", style: .success)
@@ -276,12 +226,8 @@ struct BackendProfileDetailView: View {
             for: unreadable.id, reason: "user chose Discard and Reconfigure in the profile editor"
         )
         guard didDiscard else {
-            // ⚠️ The store now genuinely logs every refusal path (it did not when this comment
-            // first claimed so). A toast is still needed here: the user accepted a DESTRUCTIVE
-            // confirmation, and leaving the banner up with no other feedback reads as a frozen
-            // button. Deliberately worded as "could not" rather than naming a cause — the benign
-            // case (the blob became readable in the meantime) and the hard failures are
-            // indistinguishable from this side, and the log carries the distinction.
+            // A toast is still needed: the user accepted a destructive confirmation and a lingering banner reads as a frozen button.
+            // The wording names no cause, since benign and hard failures look the same from here; the log carries the difference.
             toastManager.show(
                 "Could not reset this profile's configuration. See the log for details.",
                 style: .error

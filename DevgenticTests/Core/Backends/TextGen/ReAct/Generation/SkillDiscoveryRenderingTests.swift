@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillDiscoveryRenderingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The `<available_skills>` sanitization contract (S0).
-//
-//  ⚠️ These assert the INVARIANT — "no skill field reaches the model able to forge its section" —
-//  through the real prompt builder, not `SkillDiscoveryRendering` in isolation. A policy-only test
-//  here would stay green if the render site in `CognitiveGeneratorProtocol` went back to
-//  interpolating `$0.description` directly, which is exactly the regression worth catching: the
-//  sanitizer being correct and unused looks identical to the sanitizer being correct and wired.
+//  Created by Raj Singh.
 //
 
 import XCTest

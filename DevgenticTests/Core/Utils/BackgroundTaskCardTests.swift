@@ -4,11 +4,7 @@
 //  BackgroundTaskCardTests.swift
 //  DevgenticTests
 //
-//  Phase 1: the live timeline row for a background task.
-//
-//  ⚠️ Two halves, deliberately separated. The model/codec tests prove the row can be stored and
-//  read back; the OBSERVER tests prove something actually creates and updates it. F2 shipped
-//  non-functional with 163 green tests, all of the first kind.
+//  Created by Raj Singh.
 //
 
 import XCTest

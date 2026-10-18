@@ -4,7 +4,7 @@
 //  WebSearchKeyStoreTests.swift
 //  DevgenticTests
 //
-//  Register KC-2: the web-search API key lives in the Keychain, never in UserDefaults.
+//  Created by Raj Singh.
 //
 
 import XCTest

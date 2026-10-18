@@ -4,17 +4,15 @@
 //  ImageLightbox.swift
 //  Devgentic
 //
-//  Full-size image viewer. Chat caps images at `ChatUIConstants.imageMaxWidth`, which for
-//  a 1024² generated image means the user had only ever seen it at half size with no way
-//  to look closer — the whole point of generating it.
-//
-//  Presented from both image renderers via `.imageLightbox(...)`.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+/// Full-size image viewer: chat caps images at `ChatUIConstants.imageMaxWidth`, so this lets the user look closer.
+/// Presented from both image renderers via `.imageLightbox(...)`.
 struct ImageLightbox: View {
     let image: NSImage
     /// The image's own description — alt text, or an artifact label. Drives the title and
@@ -636,20 +634,10 @@ struct ImageLightbox: View {
         Self.suggestedBaseName(altText: altText, fileBaseName: fileBaseName)
     }
 
-    /// Name the file after what it depicts when we know, so Downloads doesn't fill up with
-    /// interchangeable "devgentic-image-a1b2c3" files.
-    ///
-    /// [bm-8] `fileBaseName` wins when the caller has a real filename, and is used VERBATIM:
-    /// slugifying "Screenshot 2026-09-11.png" gave "screenshot-2026-09-11-png", and
-    /// `saveToDownloads` then appended the sniffed extension, so saving from the lightbox
-    /// produced "screenshot-2026-09-11-png.png" while the same image saved from the card's
-    /// context menu produced "Screenshot 2026-09-11.png".
-    ///
-    /// ⚠️ The extension is stripped by the CALLER, not here. A blanket `deletingPathExtension`
-    /// inside this function would maul prose: "diagram.of.the.system" → "diagram.of.the"
-    /// (probed). A generated image's label is prose and must keep going through the slug path
-    /// below untouched, which is why this takes a separate parameter instead of a flag.
-    ///
+    // Why: a generated image's label is prose and must go through the slug path untouched; a blanket `deletingPathExtension`
+    // here would maul it (diagram.of.the.system).
+    /// Names the saved file after what the image depicts when known, so Downloads doesn't fill with interchangeable files.
+    /// `fileBaseName` wins when the caller has a real filename and is used verbatim; the caller strips the extension.
     /// `nonisolated static` so the naming rule is testable without presenting a sheet.
     nonisolated static func suggestedBaseName(altText: String?, fileBaseName: String?) -> String {
         if let fileBaseName {
@@ -672,17 +660,9 @@ struct ImageLightbox: View {
 // MARK: - Presentation
 
 extension View {
-    /// Opens `ImageLightbox` in a sheet when `isPresented`. Both image renderers attach
-    /// this so zoom behaves identically wherever an image appears.
-    ///
-    /// [CF-25] `onDismiss` is how a caller that decoded the full-size bitmap ONLY for this
-    /// sheet gets to drop it again. Without it there was no dismissal hook at all, so
-    /// `AttachedImageCardView` held every opened photo's pixels in row state for as long as the
-    /// conversation stayed on screen. Callers whose image is the one the bubble itself renders
-    /// (`MediaArtifactImageView`) leave it nil — that bitmap is not the sheet's to release.
-    /// [bm-8] `fileBaseName` names the SAVED FILE only — the title and the VoiceOver label
-    /// keep using `altText`. A caller whose `altText` is a filename passes the extension-less
-    /// form here rather than changing `altText`, which would have changed all three.
+    /// Opens `ImageLightbox` in a sheet when `isPresented`; both image renderers attach it so zoom behaves identically.
+    /// `onDismiss` lets a caller that decoded the full-size bitmap only for this sheet drop it again (nil otherwise).
+    /// `fileBaseName` names the saved file only; the title and VoiceOver label keep using `altText`.
     func imageLightbox(
         isPresented: Binding<Bool>,
         image: NSImage?,

@@ -4,14 +4,7 @@
 //  AnthropicRequestShapeTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Pins the Anthropic request contract that `ClaudeLLMProvider` emits per model generation.
-//
-//  ⚠️ These are REGRESSION tests for four shipped defects (register A20–A23), every one of which
-//  produced a 400 rather than a degraded response — meaning the failure mode was "this profile
-//  stopped working entirely", not "this setting had no effect". They are cheap and offline;
-//  keep them green rather than discovering the contract from a user's error toast.
+//  Created by Raj Singh.
 //
 
 import XCTest

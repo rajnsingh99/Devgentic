@@ -4,10 +4,7 @@
 //  ScheduledTaskSD.swift
 //  Devgentic
 //
-//  Created on 26/03/26.
-//
-//  SwiftData @Model class for scheduled task persistence.
-//  Replaces ScheduledTaskEntity. Flat entity, no relationships, no ValueTransformers.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -15,6 +12,7 @@ import SwiftData
 
 private let logger = DGLogger(category: "ScheduledTaskSD")
 
+/// SwiftData model for scheduled task persistence: a flat entity with no relationships or value transformers.
 @Model
 final class ScheduledTaskModel {
 
@@ -38,10 +36,9 @@ final class ScheduledTaskModel {
     var linkedConversationID: UUID?
     var contextWindowMode: String       // ContextWindowMode.rawValue
     var createdAt: Date
-    /// The task's own execution limit in seconds; nil = the profile's `executionTimeout`, else the
-    /// scheduler default (HITL Waiting Contract §5). ⚠️ OPTIONAL on purpose — added 2026-09-27 to
-    /// the still-unreleased V1 in place, which is only lightweight-safe for an optional attribute;
-    /// a store written before it reads nil. See `DevgenticSchemaVersions.swift`.
+    // Why: must stay optional: only an optional attribute is lightweight-safe to add to an existing store.
+    /// The task's own execution limit in seconds; nil falls back to the profile's `executionTimeout`,
+    /// else the scheduler default.
     var runLimitSeconds: Double?
 
     init(
@@ -91,20 +88,14 @@ final class ScheduledTaskModel {
 
 extension ScheduledTaskModel {
 
-    /// Current persisted shape of `attachedFileURLsJSON`.
-    ///
-    /// ⚠️ ENVELOPE, not an inline key: the payload is a bare `[String]` ARRAY. Written as
-    /// `VersionedBlob<[String]>`; the reader keeps accepting a bare array for as long as unwrapped
-    /// rows can exist, which is indefinitely (G19).
+    /// Current persisted shape of `attachedFileURLsJSON`: a `VersionedBlob<[String]>` envelope around the array of paths.
+    /// The reader still accepts a bare array, since unwrapped rows can exist indefinitely.
     static let attachedFilesBlobVersion = 1
 
     /// Converts to the `ScheduledTask` value type used by the service and UI.
     func toStruct() -> ScheduledTask {
-        // ⚠️ "No attachments" and "the attachment list could not be read" are DIFFERENT, and the
-        // previous `?? []` collapsed them (G23). That made the loss permanent on the next write:
-        // `init(from task:)` below nils the column whenever the in-memory list is empty, so one
-        // failed decode plus any routine edit of the task erased the paths for good — silently, with
-        // no log. Distinguish, log, and let the writer refuse.
+        // "No attachments" and "unreadable attachment list" are different states: distinguish and log, and let the
+        // writer refuse. Collapsing them with `?? []` plus any routine edit would erase the stored paths permanently.
         let decoded: [URL]? = {
             guard let json = attachedFileURLsJSON else { return [] }  // genuinely no attachments
             guard let data = json.data(using: .utf8) else {
@@ -115,9 +106,8 @@ extension ScheduledTaskModel {
                 )
                 return nil
             }
-            // ⚠️ ENVELOPE (G19): the payload is a bare `[String]` ARRAY, which has nowhere to put a
-            // version key. Decoded directly so a failure carries the real error for the caller to
-            // log, and the writer refuses, rather than silently reporting "no attachments".
+            // Decode the envelope directly so a failure carries the real error for the caller to log and the writer to refuse on,
+            // rather than silently reporting no attachments.
             do {
                 return try JSONDecoder().decode(VersionedBlob<[String]>.self, from: data).payload
                     .compactMap { URL(fileURLWithPath: $0) }
@@ -178,14 +168,8 @@ extension ScheduledTaskModel {
         createdAt = task.createdAt
         runLimitSeconds = task.runLimit
 
-        // ⚠️ REFUSE to null a column we could not read. `toStruct()` hands back an empty list when
-        // the stored JSON is undecodable, and this branch nils the column whenever the list is
-        // empty — so without the guard, one failed decode plus any routine edit (rename, pause,
-        // reschedule) erased the user's attachment list permanently.
-        //
-        // The rule is `unreadable && isEmpty`, matching the chat timeline and NOT the profile rule:
-        // an empty attachment list is a perfectly legal user state, so gating on emptiness alone
-        // would freeze the column and make "remove all attachments" impossible to persist.
+        // Refuse to null a column that could not be read: `toStruct()` yields an empty list for undecodable JSON.
+        // Gate on `unreadable && isEmpty`, not emptiness alone, or removing all attachments could never persist.
         if task.attachedFileURLsUnreadable && task.attachedFileURLs.isEmpty {
             logger.error(
                 "[PERSISTENCE] Refusing to null attachedFileURLsJSON for scheduled task "

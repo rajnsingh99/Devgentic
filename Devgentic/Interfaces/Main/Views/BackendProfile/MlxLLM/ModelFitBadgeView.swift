@@ -4,17 +4,13 @@
 //  ModelFitBadgeView.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// A compact badge that displays the model fit verdict with color coding.
-/// Reusable across MLX and Ollama model stores and pickers.
-///
-/// Styled to match `CapabilityBadge` — subtle neutral capsule with the verdict
-/// color expressed only as a small leading dot, so stacks of badges stay calm
-/// and the truly-critical verdicts (risky/incompatible) still read clearly.
+/// A compact badge showing the model fit verdict, reusable across MLX and Ollama stores and pickers.
+/// Styled like `CapabilityBadge`: a neutral capsule with the verdict colour as a small leading dot.
 struct ModelFitBadgeView: View {
     let assessment: ModelFitAssessment
     /// Compact mode shows only the verdict label. Full mode shows the RAM estimate.
@@ -33,19 +29,8 @@ struct ModelFitBadgeView: View {
         }
     }
 
-    /// Verdict + estimate in text. The badge used to encode the verdict in the dot's COLOUR
-    /// alone and show only a bare "2.9 GB" — which sat next to the card's disk size and read
-    /// as a duplicate of it, with nothing saying it meant RAM. Colour-only is also invisible
-    /// to anyone who can't distinguish these hues.
-    /// VoiceOver form of the badge.
-    ///
-    /// ⚠️ Returns `Text`, not `String`: `accessibilityLabel(_: String)` does not localize, so
-    /// this read `verdict.rawValue` out in English while the visible label beside it — already
-    /// converted to `localizedTitle` — was translated.
-    ///
-    /// ⚠️ Exhaustive, with no `default:`. The old `default:` arm both hid the raw value and
-    /// meant a verdict added later would silently fall into it, which is exactly how `.paused`
-    /// came to render as a raw string on the download rows.
+    /// The badge text and VoiceOver form: verdict plus estimate, so the verdict is not conveyed by colour alone.
+    /// Returns `Text`, not `String`, so the label localizes; the switch is exhaustive so a new verdict cannot fall through.
     private var accessibleLabel: Text {
         let verdict = Text(assessment.verdict.localizedTitle)
         switch assessment.verdict {
@@ -64,9 +49,8 @@ struct ModelFitBadgeView: View {
                 .font(.caption2)
                 .foregroundColor(badgeColor)
 
-            // Composed rather than interpolated into one string: the verdict is a
-            // translatable key, the RAM figure is a formatted number appended after it.
-            // `Text(label)` would have bound to the non-localizing overload and lost both.
+            // Composed rather than interpolated: the verdict is a translatable key and the RAM figure a number appended after it,
+            // since `Text(label)` binds to the non-localizing overload.
             Group {
                 if compact || assessment.estimatedRuntimeRAM <= 0 {
                     Text(assessment.verdict.localizedTitle)
@@ -198,9 +182,7 @@ struct ModelFitAdvisoryView: View {
                         .fontWeight(.semibold)
                         .foregroundColor(accentColor)
                 }
-                // This sheet models RAM only, but the user is about to commit multiple
-                // gigabytes of DISK. Showing free space here is the difference between an
-                // informed "Download Anyway" and one that fills the startup volume.
+                // The sheet models RAM only, so free disk space is shown to inform a multi-gigabyte download.
                 if let freeDisk {
                     VStack(spacing: 2) {
                         Text("Free Disk")

@@ -4,11 +4,7 @@
 //  DownloadSidebarView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//  Rewritten 2026-04-21 — fetches from `DownloadHistoryStore` so completed
-//  downloads now survive app relaunches. History is grouped by date;
-//  in-progress downloads sit above the groupings with a cancel affordance
-//  and live progress bar. Right-click on any row for Re-download / Remove.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -16,12 +12,9 @@ import SwiftData
 
 private let logger = DGLogger(category: "DownloadSidebarView")
 
-/// Bounded history query shared by the sidebar and the Downloads screen.
-///
-/// ⚠️ Both views previously used an UNBOUNDED `@Query`, loading every row ever written and then
-/// re-filtering the whole array in each computed property on every body pass. `fetchHistory`
-/// already capped at 200; these bypassed it entirely. The limit matches that cap so the two
-/// paths agree.
+// Why: an unbounded `@Query` loads every row ever written and re-filters the whole array on every body pass
+/// Bounded history query shared by the sidebar and the Downloads screen, capped at 200 rows to match
+/// `fetchHistory`.
 private let boundedDownloadRecords: FetchDescriptor<DownloadRecord> = {
     var descriptor = FetchDescriptor<DownloadRecord>(
         sortBy: [SortDescriptor(\DownloadRecord.updatedAt, order: .reverse)]
@@ -30,6 +23,8 @@ private let boundedDownloadRecords: FetchDescriptor<DownloadRecord> = {
     return descriptor
 }()
 
+/// The downloads sidebar: history from `DownloadHistoryStore` grouped by date, with in-progress downloads
+/// above showing a cancel affordance and live progress bar; right-click a row for Re-download / Remove.
 struct DownloadSidebarView: View {
 
     @Query(boundedDownloadRecords)
@@ -108,11 +103,8 @@ struct DownloadSidebarView: View {
                 downloadsScrollView
             }
         }
-        // ⚠️ Two different questions behind one menu item. For a completed or cancelled row,
-        // removing it really is a neutral tidy-up. For a PAUSED or interrupted one the partial
-        // folder is hidden from the installed list, so this row is the only handle the app has
-        // on those bytes — and the old copy ("The model file (if any) is not affected") told
-        // the user the opposite of what was about to happen.
+        // Removing a completed or cancelled row is a neutral tidy-up; for a paused or interrupted one the partial
+        // folder is hidden from the installed list, so this row is the only handle on those bytes.
         .alert(
             "Remove from history?",
             isPresented: Binding(
@@ -155,9 +147,8 @@ struct DownloadSidebarView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: { record in
-            // ⚠️ The fallback "the backend" is prose and never reached the String Catalog,
-            // because interpolating a `String` into a `Text` leaves it untranslatable. The
-            // product name itself stays `verbatim` — "Ollama" is "Ollama" everywhere.
+            // The fallback "the backend" is prose; interpolating a `String` into a `Text` would keep it out of the
+            // String Catalog. The product name stays `verbatim`.
             Text("Re-pull \(record.displayName) from \(record.backend.map { Text(verbatim: $0.rawValue) } ?? Text("the backend"))? Existing files will be overwritten.")
         }
         .alert(
@@ -359,12 +350,7 @@ struct DownloadSidebarView: View {
                 .font(theme.fontBody.weight(.semibold))
                 .foregroundColor(theme.primaryText)
             Spacer()
-            // ⚠️⚠️ THE DOWNLOAD MANAGER HAD NO ENTRY POINT. `DownloadManagerContainerView` exists,
-            // `MainApplicationView` renders it for `.downloadManager`, and
-            // `MainViewRouter.navigateToDownloadManager()` exists to get there — but nothing called
-            // it, so the whole screen was unreachable. This view even held
-            // `@Environment(MainViewRouter.self)` for a call that was never written: the dependency
-            // was injected, the navigation was not. Correct code, no caller.
+            // Opens the Download Manager screen via `MainViewRouter.navigateToDownloadManager()`.
             TactileIconButton(
                 icon: "arrow.down.circle",
                 tooltip: "Open the Download Manager",
@@ -467,12 +453,9 @@ struct DownloadSidebarView: View {
 
     // MARK: - Date grouping
 
+    // Why: a static case key is extractable into the String Catalog; a runtime
+    // `LocalizedStringKey(group.title)` is not and ships in English
     /// Date bucket for the history list.
-    ///
-    /// ⚠️ A `String` title fed `LocalizedStringKey(group.title)` at the call site — a RUNTIME
-    /// key, which the compiler cannot extract, so "Today"/"Yesterday"/"This Week"/"This Month"/
-    /// "Earlier" were all absent from the String Catalog and would have shipped in English
-    /// inside a translated sidebar. A case with a static key is extractable.
     private enum HistoryBucket: String, CaseIterable {
         case today, yesterday, thisWeek, thisMonth, earlier
 
@@ -494,10 +477,8 @@ struct DownloadSidebarView: View {
         var id: String { bucket.rawValue }
     }
 
-    /// Groups terminal records into Today / Yesterday / This Week / This Month /
-    /// Earlier buckets, matching the Conversation sidebar's pattern. Sort
-    /// within each group by `updatedAt` descending (already satisfied by the
-    /// outer @Query sort).
+    /// Groups terminal records into Today / Yesterday / This Week / This Month / Earlier buckets, matching the
+    /// Conversation sidebar's pattern; sorted within each group by `updatedAt` descending.
     private var groupedHistory: [HistoryGroup] {
         let calendar = Calendar.current
         let now = Date()
@@ -538,9 +519,8 @@ struct DownloadSidebarView: View {
 
     @ViewBuilder
     private func activeContextMenu(for record: DownloadRecord) -> some View {
-        // Pause is offered only for MLX: it is the backend whose transport (HubApi) resumes
-        // from `.incomplete` files. Offering it for a backend that would restart from zero
-        // would be a lie about what the button does.
+        // Pause is offered only for MLX: its transport (HubApi) resumes from `.incomplete` files, so offering it for
+        // a backend that restarts from zero would misstate what the button does.
         if record.backend == .mlx {
             Button {
                 MLXModelService.shared.pauseDownload()
@@ -600,8 +580,8 @@ struct DownloadSidebarView: View {
         return MLXModelService.resumableBytes(at: folder)
     }
 
-    /// Shared by the context menu and the removal alert. ⚠️ The row is dropped only once the
-    /// bytes are gone — after a refused reclaim it is the last handle on them.
+    /// Shared by the context menu and the removal alert. The row is dropped only once the bytes are gone: after a
+    /// refused reclaim it is the last handle on them.
     private func discardPartialFiles(for record: DownloadRecord) {
         if MLXModelService.shared.discardPartialDownload(repoId: record.modelIdentifier) {
             _ = DownloadHistoryStore.shared.delete(id: record.id)
@@ -797,8 +777,8 @@ private struct HistoryDownloadRowView: View {
 
             Spacer()
 
-            // ⚠️ Shown on hover or selection rather than only in the context menu: a paused or
-            // failed download's bytes were easy to forget when both actions were hidden there.
+            // Shown on hover or selection rather than only in the context menu, so a paused or failed download's bytes
+            // are not forgotten.
             if partialBytes != nil, isHovering || isSelected, let onResume, let onDiscard {
                 HStack(spacing: 4) {
                     SidebarRowActionButton(
@@ -826,26 +806,19 @@ private struct HistoryDownloadRowView: View {
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isHovering = hovering }
         }
         .accessibilityElement(children: .combine)
-        // ⚠️ `Text`, not a String: `accessibilityLabel(_: String)` does not localize, so this
-        // read the persisted `rawValue` out to VoiceOver in English inside otherwise-translated
-        // chrome — C2's trap, on the one surface where it is least noticeable.
+        // `Text`, not a String: `accessibilityLabel(_: String)` does not localize, so the persisted `rawValue` would
+        // be read to VoiceOver in English.
         .accessibilityLabel(Text(record.displayName) + Text(verbatim: ", ")
                             + Text((record.status ?? .interrupted).localizedTitle))
     }
 
-    // ⚠️ Composed as `Text`, not `String`. The old version built a `String` and fed it to
-    // `Text(_: StringProtocol)`, which does NOT localize — the exact C2 trap. It also switched
-    // over the status with a `default:` arm, so `.paused` (added by G2, in the same session)
-    // rendered as a bare capitalized rawValue while `DownloadRecordStatus.localizedTitle` and
-    // `ModelBackendType.localizedTitle` sat with zero call sites app-wide.
+    // Composed as `Text`, not `String`, because `Text(_: StringProtocol)` does not localize.
     private var subtitle: Text {
         let relative = RelativeDateTimeFormatter()
         relative.unitsStyle = .abbreviated
         let when = relative.localizedString(for: record.updatedAt, relativeTo: Date())
-        // ⚠️ The backend name is `verbatim`: "Ollama" / "MLX" / "Whisper" are product names, and
-        // putting them in the String Catalog invites a translator to localize a proper noun.
-        // The FALLBACK is prose and must be translatable — that was the actual defect, since a
-        // `String` interpolated into a `Text` never reaches the catalog at all.
+        // The backend name is `verbatim` ("Ollama" / "MLX" / "Whisper" are product names, not for translators); the
+        // fallback is prose and stays translatable.
         let backend = record.backend.map { Text(verbatim: $0.rawValue) } ?? Text("Unknown")
         // Switching over a non-optional means a status added later fails to compile here
         // rather than silently falling into a question-mark arm.

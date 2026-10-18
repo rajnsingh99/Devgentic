@@ -4,28 +4,13 @@
 //  TranscriptGrouping.swift
 //  Devgentic
 //
-//  Which messages the transcript draws as ONE turn (2026-09-27, user decision).
-//
-//  ⚠️ Why. A background task's report is stored as a machine-written "user" stub plus an agent
-//  reply — the stub is load-bearing (the history walk drops an agent row with no user row in front;
-//  see `ChatMessage.isSyntheticPrompt`). Drawn as stored, every report looked like a new exchange
-//  nobody started: a ruled divider, its own "Thought for N steps" header, its own action bar.
-//
-//  ⚠️ DISPLAY ONLY. Nothing here changes what is stored or what the model sees; it only decides how
-//  the transcript draws what is already there, so existing conversations regroup on load.
-//
-//  The rule: a GROUP is one human turn's reply plus every unprompted turn (a report today, a
-//  sub-agent's result later) that follows it until the next human message. Continuations join the
-//  group at the BOTTOM, in time order — the order the model sees — even when the task that produced
-//  them was started by an earlier turn. Inside a group:
-//    • the stub is not drawn; the report's timeline header carries it ("↳ … finished · 3 steps")
-//    • ONE action bar, after the last message of the group, acting for the human turn
-//    • reports from tasks an EARLIER attempt of the head started (the head was redone since) fold
-//      under one row, so they don't read as answers to the attempt on screen
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Which messages the transcript draws as one turn: a human turn's reply plus every unprompted turn (e.g. a background
+/// task's report) that follows it, with one action bar. Display only: stored messages and model history are unchanged.
 enum TranscriptGrouping {
 
     enum Role: Equatable {
@@ -131,10 +116,8 @@ enum TranscriptGrouping {
         return roles
     }
 
-    /// A turn nobody typed. ⚠️ Keyed on `isSyntheticPrompt` ALONE, not on the background-task
-    /// source: the transcript's invariant is that NO synthetic row is ever drawn as a user bubble,
-    /// and every such row is routed from here — narrowing this would hand a future unprompted
-    /// source (a sub-agent's result) straight to `ChatBubbleView`.
+    /// A turn nobody typed, keyed on `isSyntheticPrompt` alone: no synthetic row is ever drawn as a user bubble, and
+    /// narrowing this would hand a future unprompted source to `ChatBubbleView`.
     @MainActor
     static func isWakeStub(_ message: ChatMessage) -> Bool {
         message.sender == .user && message.isSyntheticPrompt

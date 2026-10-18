@@ -4,12 +4,7 @@
 //  MLXPauseResumeTests.swift
 //  DevgenticTests
 //
-//  G2 — pause/resume. swift-transformers already resumes from `.incomplete` files via a
-//  `Range: bytes=N-` header; the only thing that made resume impossible was that the sole stop
-//  control deleted the repo folder, and the `.incomplete` files live inside it at
-//  `<repo>/.cache/huggingface/download/`.
-//
-//  The invariant these tests exist to protect: **Pause keeps the bytes, Cancel discards them.**
+//  Created by Raj Singh.
 //
 
 import XCTest

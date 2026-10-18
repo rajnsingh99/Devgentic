@@ -4,10 +4,7 @@
 //  TimelineTurnReconstructorTests.swift
 //  DevgenticTests
 //
-//  G1 Piece 2 — proves the timeline → in-flight-state reconstruction (the de-risk core of resume):
-//  steps group by stepId with internally-paired ids, the dangling tool becomes the parked tool,
-//  args parse from the persisted JSON params, and loop bookkeeping (reading-gate, resume iteration)
-//  is re-derived faithfully.
+//  Created by Raj Singh.
 //
 
 import XCTest

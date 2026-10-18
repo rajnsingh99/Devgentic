@@ -4,36 +4,7 @@
 //  PreservedJSON.swift
 //  Devgentic
 //
-//  Created on 04/08/26.
-//
-//  Lossless carrier for a persisted value this build cannot model.
-//
-//  Shared by every blob that needs a forward-compatible catch-all: `TimelineEvent.unknown` and
-//  `MessageContent.unknown`. Named for what it does, not for its first caller.
-//
-//  WHY NOT `JSONValue` (Core/Utils/JSONValue.swift): that type is shared with tool dispatch and
-//  workflow JSON, and it has only `case number(Double)` — no integer arm. Measured 2026-08-04:
-//  ordinary integers survive it fine (`{"durationMs":1500}` round-trips byte-identically, and Int
-//  decoding still succeeds, so the commonly-repeated "integers come back as doubles" claim is
-//  wrong), but a value above 2^53 does NOT: `9007199254740993` → `9007199254740992`, silently.
-//  A carrier for payloads written by FUTURE builds cannot assume their integers stay small, and
-//  widening the shared type would ripple through unrelated subsystems.
-//
-//  WHY NOT RAW BYTES: capturing the underlying bytes of the current sub-object mid-decode is not
-//  reachable — swift-foundation's `JSONDecoderImpl` exposes no such accessor — and the out-of-band
-//  routes are themselves lossy (`JSONSerialization` mangles doubles, e.g. `0.1` →
-//  `0.10000000000000001`).
-//
-//  ⚠️ THE BAR IS SEMANTIC FIDELITY, NOT BYTE FIDELITY — and byte fidelity is unavailable anyway.
-//  Swift's keyed containers are Dictionary-backed, so `JSONEncoder` emits keys in an order that
-//  varies BETWEEN PROCESS RUNS for the very same value. Any test asserting on encoded bytes or on a
-//  golden string is flaky by construction; compare parsed objects instead.
-//
-//  ⚠️ INVARIANT: no `Decimal` may appear inside a preserved payload. `JSONEncoder` writes a
-//  Decimal's full significant digits, which this carrier would round through `Double`. Every other
-//  number in this blob is written by `JSONEncoder` from a Swift scalar, and `JSONEncoder` refuses to
-//  emit inf/nan, so `Int64 | UInt64 | Double` is provably sufficient for everything else. There is
-//  no `Decimal` anywhere in `Devgentic/` as of 2026-08-04.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -50,10 +21,8 @@ indirect enum PreservedJSON: Codable, Equatable, Hashable, Sendable {
     case array([PreservedJSON])
     case object([String: PreservedJSON])
 
-    /// ⚠️ ARM ORDER IS LOAD-BEARING: bool → int → uint → double → string → array → object.
-    /// Verified unambiguous — `1` never decodes as `Bool`, `true` never as `Int64`, `-1` never as
-    /// `UInt64`. `uint` sits after `int` so ordinary integers stay signed, and exists only to carry
-    /// values above `Int64.max`, which would otherwise degrade through `Double`.
+    /// Decodes in a fixed arm order: bool, int, uint, double, string, array, object; the order is unambiguous and must
+    /// not change. `uint` follows `int` so ordinary integers stay signed, and exists only for values above `Int64.max`.
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() { self = .null; return }
@@ -83,10 +52,8 @@ indirect enum PreservedJSON: Codable, Equatable, Hashable, Sendable {
         }
     }
 
-    /// The single key of a one-key object, if that is what this is.
-    ///
-    /// Swift synthesizes an enum-with-associated-values as `{"caseName": {payload}}`, so this is how
-    /// an unrecognised event's case name is recovered.
+    /// The single key of a one-key object, if that is what this is. Swift encodes an enum with associated values as
+    /// `{"caseName": {payload}}`, so this recovers an unrecognised case name.
     var singleKeyEntry: (key: String, value: PreservedJSON)? {
         guard case .object(let members) = self, members.count == 1, let only = members.first else {
             return nil
@@ -94,23 +61,17 @@ indirect enum PreservedJSON: Codable, Equatable, Hashable, Sendable {
         return (only.key, only.value)
     }
 
-    /// Sorted-key encoding — the only DETERMINISTIC serialization of this value.
-    ///
-    /// ⚠️ Not for persistence. `JSONEncoder`'s default key order comes from a `Dictionary` and
-    /// varies between process runs, so this exists purely to give equality and hashing something
-    /// stable to work on.
+    /// Sorted-key encoding, the only deterministic serialization of this value; not for persistence. Gives equality and
+    /// hashing a stable form, since `JSONEncoder`'s default key order varies between runs.
     var canonicalData: Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return (try? encoder.encode(self)) ?? Data()
     }
 
-    /// A UUID derived from the value itself, so it is identical on every load.
-    ///
-    /// Prefers an `id` member that already parses as a UUID (future cases are overwhelmingly likely
-    /// to carry one, matching every current case); otherwise derives one from a SHA-256 of the
-    /// canonical bytes. ⚠️ Must never be `UUID()` — SwiftUI's `ForEach` keys off it, so a fresh
-    /// identity per decode would churn the timeline on every reload.
+    /// A UUID derived from the value itself, identical on every load. Prefers an `id` member that parses as a UUID,
+    /// else derives one from a SHA-256 of the canonical bytes. Must never be `UUID()`, or `ForEach` churns on every
+    /// reload.
     var stableIdentity: UUID {
         if case .object(let members) = self,
            case .string(let raw)? = members["id"],

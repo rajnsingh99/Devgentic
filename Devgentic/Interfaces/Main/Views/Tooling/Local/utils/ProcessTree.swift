@@ -4,36 +4,7 @@
 //  ProcessTree.swift
 //  Devgentic
 //
-//  Killing a shell command means killing what it STARTED, not just the shell.
-//
-//  `batch_command` runs `/bin/zsh -c "xcodebuild …"`. SIGTERM to that zsh reaches the zsh. The
-//  compiler under it is a separate process that survives, gets re-parented to launchd, and keeps
-//  burning CPU — so `command_stop` reported "stopped" while the build ran on. Over a 15-minute
-//  bound that is the difference between stopped and invisible.
-//
-//  ── Why not killpg ─────────────────────────────────────────────────────────────────────
-//
-//  The obvious fix is a process group: give the child its own, then `killpg` it. We cannot,
-//  yet, and the reason matters. `Process` offers no way to set the child's process group, so a
-//  child spawned by it INHERITS OURS. `killpg(getpgid(child))` would therefore signal
-//  **Devgentic itself** — precisely the `pid == 0` case `kill_process` refuses by name.
-//
-//  Getting a real process group means `posix_spawn` with `POSIX_SPAWN_SETPGROUP`, which also
-//  means giving up `Process` — and with it `isRunning`, `terminationHandler` and
-//  `terminationStatus`. `isRunning` is the pid-reuse guard every signal in this codebase is
-//  built on, so trading it away to gain `killpg` would swap a known-safe kill for a
-//  hand-rolled one. Walking the tree keeps both.
-//
-//  ── Why the tree is snapshotted BEFORE anything is signalled ────────────────────────────
-//
-//  ⚠️ THE ORDERING IS THE WHOLE TRICK. Signal the root first and its children are re-parented
-//  to launchd (ppid 1) the moment it dies — at which point the ppid chain that identifies them
-//  as ours is GONE and they cannot be found at all. So: snapshot the descendants, and only
-//  then start signalling. Everything after the snapshot works from that list.
-//
-//  Best-effort by nature: a process forked between the snapshot and the signal is missed. That
-//  is a real limit, not a bug to be fixed by trying harder — only a process group closes it,
-//  and the trade above is why we do not have one.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -42,26 +13,22 @@ import os
 
 private let logger = DGLogger(category: "ProcessTree")
 
+/// Terminates a shell command's whole process tree, not just the shell: children survive a SIGTERM to
+/// `/bin/zsh -c`. A process group is not used because `Process` children inherit ours, so `killpg`
+/// would signal Devgentic itself.
 enum ProcessTree {
 
-    /// A process, identified in a way that survives being written down.
-    ///
-    /// ⚠️ pid ALONE IS NOT AN IDENTITY. macOS recycles pids, so a pid captured a minute ago may
-    /// name something entirely different by the time it is signalled — the hazard this codebase
-    /// guards against everywhere it holds a `Process` object instead of a number. Here there IS no
-    /// `Process` object to hold: these are grandchildren spawned by a shell. The start time closes
-    /// the gap, because two processes can share a pid over time but cannot share a pid AND the
-    /// microsecond they started.
+    /// A process identified in a way that survives being written down: pid plus start time.
+    /// pid alone is not an identity because macOS recycles pids; two processes cannot share a pid and a
+    /// start microsecond.
     struct ProcessIdentity: Hashable, Sendable {
         let pid: pid_t
         let startedAt: TimeInterval
     }
 
     /// Every live process on the machine, with its parent and its identity.
-    ///
-    /// `KERN_PROC_ALL` is sized then read, and the list can GROW between the two calls — so the
-    /// buffer carries headroom and the second call's returned size, not the first's, decides how
-    /// many entries are real. Reading the first call's count back would walk uninitialised memory.
+    /// `KERN_PROC_ALL` is sized then read and the list can grow between calls, so the second call's
+    /// returned size decides the count.
     private static func allProcesses() -> [(identity: ProcessIdentity, ppid: pid_t)] {
         var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
         var size = 0
@@ -90,20 +57,15 @@ enum ProcessTree {
         }
     }
 
-    /// `root`'s descendants, DEEPEST FIRST, excluding `root` itself.
-    ///
-    /// Deepest-first so a signalled parent cannot orphan a sibling subtree we have not reached —
-    /// the same reason the snapshot comes first, one level down.
+    /// `root`'s descendants, deepest first, excluding `root` itself.
+    /// Deepest first so a signalled parent cannot orphan a sibling subtree not yet reached.
     static func descendants(of root: pid_t) -> [pid_t] {
         descendantIdentities(of: root).map(\.pid)
     }
 
-    /// The same walk, keeping each descendant's identity so the result can be REMEMBERED.
-    ///
-    /// ⚠️ This is the fix for the orphan defect. Walking only at kill time fails when the root has
-    /// already exited: its children are re-parented to launchd and the ppid chain that identified
-    /// them as ours is gone, so the walk returns nothing and the bound kills a process that had
-    /// already left. Captured WHILE the root is alive, the list stays usable afterwards.
+    /// The same walk, keeping each descendant's identity so the result can be remembered.
+    /// Captured while the root is alive: once it exits, children re-parent to launchd and a later walk
+    /// finds nothing.
     static func descendantIdentities(of root: pid_t) -> [ProcessIdentity] {
         guard root > 1 else { return [] }
 
@@ -114,9 +76,8 @@ enum ProcessTree {
 
         var ordered: [ProcessIdentity] = []
         var frontier = childrenOf[root] ?? []
-        // Depth-bounded rather than `while !frontier.isEmpty`. A ppid table is a tree in practice,
-        // but it is read from live kernel state with no such guarantee, and a cycle here would
-        // hang the quit path inside a 3 s watchdog.
+        // Depth-bounded rather than `while !frontier.isEmpty`: the ppid table is live kernel state and a cycle
+        // would hang the quit path.
         var depth = 0
         var seen: Set<pid_t> = [root]
 
@@ -134,18 +95,9 @@ enum ProcessTree {
         return ordered.reversed()
     }
 
-    /// SIGTERM the tree, wait `grace`, SIGKILL whatever is left.
-    ///
-    /// `isRootRunning` is passed as a closure rather than re-derived from the pid, so the caller
-    /// can answer it from its retained `Process` — the pid-reuse guard. Descendants have no such
-    /// handle and are signalled by pid; the snapshot is taken microseconds earlier, which is the
-    /// narrowest window available without a process group.
-    ///
-    /// Returns the number of descendants it found, for the caller's log.
-    ///
-    /// `alsoKnown` is a set captured EARLIER, while the root was alive. Identities in it that are
-    /// no longer present — or whose pid has been recycled onto a different process — are dropped
-    /// before anything is signalled.
+    /// SIGTERMs the tree, waits `grace`, then SIGKILLs whatever is left; returns the descendants found.
+    /// `isRootRunning` is a closure so the caller can answer from its retained `Process`; `alsoKnown` holds
+    /// identities captured earlier, filtered for recycled pids.
     @discardableResult
     static func terminateTree(root: pid_t,
                               grace: TimeInterval,
@@ -153,8 +105,8 @@ enum ProcessTree {
                               alsoKnown: Set<ProcessIdentity> = []) -> Int {
         guard root > 1 else { return 0 }
 
-        // ⚠️ BEFORE any signal. See the type comment — killing the root first destroys the ppid
-        // chain that identifies its children as ours.
+        // Taken before any signal: killing the root first destroys the ppid chain that identifies its
+        // children.
         let tree = liveTargets(root: root, alsoKnown: alsoKnown)
 
         signal(tree, SIGTERM)
@@ -175,13 +127,8 @@ enum ProcessTree {
 
     // MARK: - Two-phase, for the quit path
 
-    /// Phase 1: snapshot every tree, SIGTERM all of them, and hand back the full set for phase 2.
-    ///
-    /// ⚠️ Split in two deliberately. The quit path has SEVERAL tasks and a 3 s watchdog over the
-    /// whole teardown, so a per-task `snapshot → TERM → sleep → KILL` would spend the grace once
-    /// per task and blow the budget on four of them — the app gets killed mid-teardown instead of
-    /// exiting cleanly, which is the orphan this code exists to prevent. One shared grace between
-    /// the phases costs it once.
+    /// First step: snapshots every tree, SIGTERMs all of them, and returns the full set for the second
+    /// step. Split in two so one shared grace covers all tasks inside the quit path's 3 s watchdog.
     static func requestTermination(roots: [pid_t], alsoKnown: Set<ProcessIdentity> = []) -> [pid_t] {
         var everything: [pid_t] = []
         for root in roots where root > 1 {
@@ -192,21 +139,14 @@ enum ProcessTree {
         return everything
     }
 
-    /// Phase 2: SIGKILL exactly what phase 1 signalled.
-    ///
-    /// Works from phase 1's list rather than re-walking: by now the roots may be dead and their
-    /// children re-parented to launchd, so a second walk would find nothing.
+    /// Second step: SIGKILLs exactly what the first step signalled, from its list rather than re-walking,
+    /// since the roots may be dead and their children re-parented.
     static func forceTermination(_ pids: [pid_t]) {
         signal(pids, SIGKILL)
     }
 
-    /// The pids to signal for `root`: a fresh walk, plus anything remembered from earlier that is
-    /// STILL THE SAME PROCESS.
-    ///
-    /// ⚠️ The validation is the point, not a formality. A remembered pid whose start time no
-    /// longer matches has been recycled onto something else — signalling it would kill an
-    /// unrelated process, which is a far worse failure than the orphan it was meant to catch.
-    /// One `sysctl` serves both the walk and the check.
+    /// The pids to signal for `root`: a fresh walk plus anything remembered that is still the same process.
+    /// A remembered pid whose start time differs was recycled and must not be signalled.
     private static func liveTargets(root: pid_t, alsoKnown: Set<ProcessIdentity>) -> [pid_t] {
         let fresh = descendantIdentities(of: root)
         guard !alsoKnown.isEmpty else { return fresh.map(\.pid) }
@@ -226,24 +166,17 @@ enum ProcessTree {
         return targets
     }
 
-    /// Filters a remembered set down to the identities that are still the same live process.
-    ///
-    /// Lets a caller keep its set bounded to what actually exists instead of accumulating every
-    /// process a long build ever spawned. A descendant whose CHAIN broke is still alive and
-    /// survives this — that is exactly what the set is for.
+    /// Filters a remembered set down to identities that are still the same live process, keeping it
+    /// bounded. A descendant whose chain broke is still alive and is kept.
     static func stillAlive(_ identities: Set<ProcessIdentity>) -> Set<ProcessIdentity> {
         guard !identities.isEmpty else { return [] }
         let alive = Set(allProcesses().map(\.identity))
         return identities.intersection(alive)
     }
 
-    /// ⚠️ The only place this file signals a pid, so the refusals live once.
-    ///
-    /// `pid <= 1` is never a target: in POSIX `kill`, 0 is the caller's own process group and -1
-    /// is every process the user owns. `getpid()` is excluded outright — a corrupt ppid table
-    /// naming us as our own descendant would otherwise have this method kill the app. Neither
-    /// has been observed; both cost one comparison, and `kill_process` has already paid for the
-    /// version of this lesson where the guard was missing.
+    /// The only place this file signals a pid, so the refusals live once.
+    /// `pid <= 1` is never a target (0 is our own group, -1 every user process) and `getpid()` is excluded
+    /// outright.
     private static func signal(_ pids: [pid_t], _ sig: Int32) {
         let own = getpid()
         for pid in pids where pid > 1 && pid != own {

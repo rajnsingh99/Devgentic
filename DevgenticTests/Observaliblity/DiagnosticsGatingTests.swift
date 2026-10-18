@@ -4,10 +4,7 @@
 //  DiagnosticsGatingTests.swift
 //  DevgenticTests
 //
-//  Regression coverage for the Phase B3 "always-on diagnostics" change (Gap #4):
-//   • the default-on opt-out consent flag
-//   • the DGLogger persistence gate (warning/error always, info gated, dev-mode records all)
-//   • TelemetrySanitizer correctness after the per-call → cached regex change (§12.9)
+//  Created by Raj Singh.
 //
 
 import XCTest

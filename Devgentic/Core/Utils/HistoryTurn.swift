@@ -4,25 +4,7 @@
 //  HistoryTurn.swift
 //  Devgentic
 //
-//  Neutral, modality-agnostic representation of ONE prior conversation turn
-//  fed back to the model as native history.
-//
-//  Replaces the previous `[String: String]` turn dicts. A String→String dict
-//  cannot carry image data, which is why prior-turn images were structurally
-//  unrepresentable: a user could attach an image, have the model describe it,
-//  then ask a follow-up one turn later and be told "no image was provided".
-//
-//  Adding a modality is now a new `Part` case, not a plumbing rewrite.
-//
-//  LIFECYCLE: ephemeral. Built per-request by `NativeHistoryConverter`, carried
-//  on `AgentInput`/`SemanticContext`, consumed at request-build. NEVER persisted
-//  — there is no store migration behind this type, and it deliberately does not
-//  conform to `Codable`.
-//
-//  BYTE-PARITY CONTRACT: `asWireDict()` is the single lowering back to the
-//  legacy `["role": …, "content": …]` shape. For a text-only turn it MUST
-//  reproduce exactly what the converter used to emit inline, or every existing
-//  conversation's KV-cache prefix shifts. See `HistoryTurnTests` for the pin.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -93,27 +75,15 @@ struct HistoryTurn: Sendable, Equatable {
 
     // MARK: - Lowering
 
-    /// Lowers to the legacy canonical wire dict.
-    ///
-    /// ⚠️ BYTE-PARITY SURFACE. Two consumers forward these dicts WHOLESALE rather
-    /// than by field — `ToolTurnAdapter.normalizeCanonical` (`message as [String: Any]`)
-    /// and the key-enumerating coercion in `LLMProviders`. Neither raises a compile
-    /// error if this type gains a part that the lowering forgets, so any new `Part`
-    /// case must be handled here deliberately.
-    ///
-    /// Media is intentionally DROPPED: the prompt-builder path (`[[String: String]]`)
-    /// has no seam that can carry an image. Images reach native providers via the
-    /// executor's splice, which reads `imageMedia` directly. See
-    /// `ReActAgentExecutor.spliceHistoryImages`.
+    // Why: two consumers forward these dicts wholesale (`ToolTurnAdapter`, `LLMProviders`); handle any new `Part` here.
+    /// Lowers to the legacy canonical wire dict; media is dropped, as that path has no seam to carry an image.
+    /// Images reach native providers via the executor's splice (`ReActAgentExecutor.spliceHistoryImages`).
     func asWireDict() -> [String: String] {
         ["role": role.rawValue, "content": text]
     }
 
-    /// Character weight for the history char budget.
-    ///
-    /// Text counts its real length; each image counts a flat token-realistic
-    /// equivalent rather than its base64 length. Weighing images at base64 size
-    /// would let one screenshot evict an entire conversation.
+    /// Character weight for the history char budget: text counts its length, each image a flat token-realistic equivalent.
+    /// Weighing images at base64 size would let one screenshot evict an entire conversation.
     var budgetChars: Int {
         text.count + ImageTokenHeuristic.budgetChars(imageCount: imageMedia.count)
     }

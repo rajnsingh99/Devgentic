@@ -4,12 +4,12 @@
 //  ContentNotFoundView.swift
 //  Devgentic
 //
-//  Shared empty/error state shown when a detail view's target entity
-//  (profile, prompt, task) can't be found.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Shared empty/error state shown when a detail view's target entity (profile, prompt, task) cannot be found.
 struct ContentNotFoundView: View {
     let icon: String
     let title: String

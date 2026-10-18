@@ -4,21 +4,14 @@
 //  CodeContextInspectorPopover.swift
 //  Devgentic
 //
-//  Project Context: what every Code run in the project is told about it, and where the user
-//  curates it.
-//
-//  • Memory — the entries in `.devgentic/memory/`, grouped by type, each with its evidence. The
-//    user can edit or delete any of them here; that is the review step that replaced the
-//    mid-task approval banner of the old `update_project_context` (2026-10-06).
-//  • Instructions — the repository's `AGENTS.md`, read-only: it belongs to the people who
-//    maintain the repo, and is opened in their editor to change.
-//
-//  Reads the disk on open and on every `.projectMemoryDidChange`, so what it shows is what the
-//  next run will be given.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Project Context: what every Code run in the project is told about it, and where the user curates it. Shows
+/// `.devgentic/memory/` entries (editable or deletable) and the repository's `AGENTS.md` (read-only); reloads from
+/// disk on open and on `.projectMemoryDidChange`.
 struct CodeContextInspectorPopover: View {
     let projectURL: URL?
 

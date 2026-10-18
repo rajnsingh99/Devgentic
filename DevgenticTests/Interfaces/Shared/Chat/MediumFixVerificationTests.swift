@@ -4,13 +4,7 @@
 //  MediumFixVerificationTests.swift
 //  DevgenticTests
 //
-//  Red-green verification tests for the 5 MEDIUM severity production-readiness fixes.
-//
-//  Fix 1: DiffUtility — prefix/suffix strip, rolling LCS, large-file fallback
-//  Fix 2: ImageView — DispatchQueue.asyncAfter → structured Task (no retain cycle)
-//  Fix 3: GapBuffer Equatable + CodeDocument value-based equality
-//  Fix 4: AgentTimelineView — early-exit group title (no Set allocation)
-//  Fix 5: ContentBlockView — forward incremental cursor for search highlighting
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,19 +4,7 @@
 //  MCPSamplingBroker.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — MCP `sampling/createMessage`.
-//
-//  Sampling lets a server ask the HOST to run an LLM call on its behalf. Devgentic is
-//  itself an LLM host, so the plumbing already existed; nothing bridged it to MCP, and the
-//  client advertised no sampling capability at all. Servers that delegate reasoning back to
-//  the client (summarisers, agentic servers, servers that ask the host to classify or
-//  draft) therefore either disabled those features or failed at call time, with nothing in
-//  the UI to explain why.
-//
-//  ⚠️ Sampling spends the USER's tokens on a THIRD PARTY's instruction. Every request is
-//  therefore gated on an explicit approval showing the server, the model, and the prompt —
-//  the MCP spec's human-in-the-loop guidance, and the only way the cost stays visible.
-//  There is deliberately no "always allow": approval is per request.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -25,31 +13,22 @@ import os
 
 private let logger = DGLogger(category: "MCPSamplingBroker")
 
-/// The LLM context a sampling request should be serviced with.
-///
-/// Registered by `AgentConnect` when it builds a run's tools, because that is where the
-/// resolved `ProviderConfig` and the conversation identity are both in scope. A sampling
-/// request arrives out-of-band on the client connection with no conversation attached, so
-/// this is what lets one be attributed.
+/// The LLM context a sampling request is serviced with, registered by `AgentConnect` when it builds a run's tools.
+/// A sampling request arrives out-of-band with no conversation attached; this context lets it be attributed.
 struct MCPSamplingContext: Sendable {
     let conversationID: UUID
     let providerConfig: ProviderConfig
     let profileID: UUID?
 
-    /// The agent message of the run that registered this context — "which run will a later
-    /// out-of-band sampling request belong to".
-    ///
-    /// ⚠️ RECORDED AT REGISTRATION BECAUSE THE REQUEST ITSELF CARRIES NOTHING. A server's
-    /// `sampling/createMessage` arrives on the client connection with no conversation and no run
-    /// attached, which is the same reason `conversationID` is recorded here. Without it the approval
-    /// — which names the server and previews the prompt — is un-attributable, and
+    /// The agent message of the run that registered this context: which run a later sampling request belongs to.
+    /// The request itself carries no conversation or run, so without this the approval cannot be attributed and
     /// `RemoteMirrorService` cannot tell whether it belongs to the run it is mirroring.
     let runMessageID: UUID?
 
     let registeredAt: Date
 
-    /// Identifies THIS registration, so the run that made it can withdraw exactly it — and not a
-    /// newer run's context for the same conversation that replaced it (CR-18).
+    /// Identifies this registration, so the run that made it withdraws exactly it and not a newer run's context
+    /// for the same conversation.
     let registrationID = UUID()
 }
 
@@ -75,17 +54,9 @@ final class MCPSamplingBroker {
         contexts[context.conversationID] = context
     }
 
+    // Why: an unwithdrawn context holds a full `ProviderConfig` (API key included) and would serve later out-of-run sampling.
     /// Withdraws a run's context when the run ends.
-    ///
-    /// ⚠️⚠️ THIS HAD NO CALLER (readiness CR-18, 2026-10-10). Every run registered and none withdrew,
-    /// so contexts — each holding a full `ProviderConfig`, API key included — piled up for the life of
-    /// the process. A server sampling OUTSIDE any run then fell back to the newest of them: the
-    /// approval appeared in an unrelated conversation and the call was billed to a finished run's
-    /// profile and key, stale even if the profile had since been edited; and the "no conversation —
-    /// REFUSED" branch could never fire after the first run.
-    ///
-    /// ⚠️ Matched on `registrationID`, not the conversation: a newer run in the same conversation
-    /// may have replaced this context, and ending the older run must not withdraw the newer one's.
+    /// Matched on `registrationID`, not the conversation: a newer run in the same conversation may have replaced this one.
     func unregister(_ context: MCPSamplingContext) {
         guard contexts[context.conversationID]?.registrationID == context.registrationID else { return }
         contexts[context.conversationID] = nil
@@ -132,9 +103,8 @@ final class MCPSamplingBroker {
         let promptPreview = Self.preview(parameters: parameters)
         let modelName = context.providerConfig.modelName
 
-        // 1. Consent. Reuses the standard tool-confirmation banner so this needs no new UI
-        //    and inherits the existing stale-park watchdog and cancel-by-conversation.
-        // ⚠️ NOBODY TO APPROVE (HITL Waiting Contract, decision C): refused, never auto-approved.
+        // Consent reuses the standard tool-confirmation banner, with its stale-park watchdog and cancel-by-conversation.
+        // With nobody to approve, the request is refused, never auto-approved.
         guard await ExecutionSuspensionService.shared.canReachAHuman(inConversation: context.conversationID) else {
             logger.notice("[MCP-SAMPLING] '\(serverLabel)' requested \(modelName) during an UNATTENDED run [conv \(context.conversationID)]. CONSEQUENCE: refused without parking — nobody can approve spending the user's tokens.")
             throw MCPError.invalidRequest("Nobody can approve this sampling request — the run is unattended.")

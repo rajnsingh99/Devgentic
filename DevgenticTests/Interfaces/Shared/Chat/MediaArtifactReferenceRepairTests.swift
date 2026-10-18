@@ -4,16 +4,7 @@
 //  MediaArtifactReferenceRepairTests.swift
 //  DevgenticTests
 //
-//  [CF-26] The legacy `"image"` decode shim maps every url-only message to `.remoteURL` —
-//  including the `file://` URLs older image-gen runs wrote to disk. `MediaReference.resolve()`
-//  refuses `.remoteURL` unconditionally, so those pictures, still sitting readable on disk,
-//  rendered developer text in a user-facing card ("Remote URL resolution requires explicit
-//  download via MediaStore. Convert to diskPath first.") next to a Retry that re-ran the same
-//  guaranteed refusal, forever.
-//
-//  `MediaArtifactImageView` now repairs the reference on its own side — Core's rule that a
-//  genuinely remote reference is never auto-fetched is deliberate and stays — and marks a truly
-//  remote one as unretriable so the card drops its button.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  DiscordEnvelopeDecodingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  DC-5. `DiscordRawJSON` sniffed for a dictionary, then an array, then nil — and its final `else`
-//  wrote the literal bytes `null` for everything remaining. Discord sends exactly one scalar payload:
-//  op 9 INVALID_SESSION's `d` is a bare `true`/`false` saying whether the session may be RESUMED.
-//  It was destroyed on arrival, so every invalid session degraded to a full re-IDENTIFY and the log
-//  could only ever print "resumable: false" — the defect erased its own evidence.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,35 +4,15 @@
 //  ConversationSwitchCoordinator.swift
 //  Devgentic
 //
-//  Owns the "what happens when the user switches conversations" pipeline.
-//  Extracted from `MainApplicationViewModel.setupConversationLoader()` — the
-//  behaviour wasn't really about *loading* a conversation, it was a
-//  multi-step selection-change response: debounce, web-search-active reset,
-//  conditional model unload, message load, backend profile rebind, workflow
-//  history fetch, and a delayed user-personal analysis trigger.
-//
-//  Putting this in its own file lets the coordinator own its own lifecycle
-//  state (the observation stream and the debounce task) instead of those
-//  living as loose properties on the VM.
-//
-//  On each `selectedConversationID` change:
-//
-//    1.  Cancel any in-flight load task and reset per-conversation ephemeral UI state.
-//    2.  Start a fresh 250 ms-debounced task that:
-//          a. Unloads MLX + Ollama models *only if* no stream is active
-//             AND the new conversation uses a different backend profile.
-//          b. Loads the new conversation's messages via `ChatHistoryViewModel`.
-//          c. Rebinds the backend profile selection to whatever the conversation
-//             had persisted (via `ConversationManagementCoordinator`).
-//          d. Lazy-loads workflow run history for the new conversation.
-//    3.  After 5 s, opportunistically invoke `UserPersonalService` to analyse
-//        the conversation the user just left — skipped if the cooldown gate
-//        inside that service says we're not due.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Owns the response to switching conversations: on each `selectedConversationID` change it cancels any in-flight
+/// load, resets per-conversation UI state and runs a 250 ms-debounced load of the new conversation (messages, backend
+/// profile, workflow run history). After 5 s it may analyse the conversation just left via `UserPersonalService`.
 @MainActor
 final class ConversationSwitchCoordinator {
 
@@ -40,11 +20,9 @@ final class ConversationSwitchCoordinator {
 
     // MARK: - Dependencies
 
-    /// Weak back-reference for shared VM state we don't own here:
-    /// `selectedConversationID` (observed + read),
-    /// `conversationManagementCoordinator` (for the backend rebind), and
-    /// `workflowRunHistory` (mutated by the lazy-load helper). A switch unloads no model
-    /// (local inference coordinator, decision D10), so it reads no stream state.
+    /// Weak back-reference for shared VM state not owned here: `selectedConversationID` (observed and read),
+    /// `conversationManagementCoordinator` (backend rebind) and `workflowRunHistory` (mutated by the lazy-load helper).
+    /// A switch unloads no model, so it reads no stream state.
     private weak var viewModel: MainApplicationViewModel?
 
     private let chatHistoryViewModel: ChatHistoryViewModel
@@ -80,9 +58,8 @@ final class ConversationSwitchCoordinator {
     }
 
     deinit {
-        // `observer` releases with us → its own deinit flips its active flag.
-        // `loadTask` is captured strongly here but the Task's closure captures
-        // `self` weakly, so cancelling here is sufficient.
+        // `observer` releases with us, so its own deinit flips its active flag. `loadTask` is captured strongly here but the
+        // Task's closure captures `self` weakly, so cancelling here is sufficient.
     }
 
     // MARK: - Public (called from VM init's wiring)
@@ -122,11 +99,8 @@ final class ConversationSwitchCoordinator {
             guard !Task.isCancelled else { return }
             guard let self else { return }
 
-            // ⚠️ A SWITCH UNLOADS NOTHING (local inference coordinator, decision D10). Looking at a
-            // conversation is not a request: models are swapped only when a run that needs a different
-            // one takes the local lock (`LocalInferenceCoordinator.didTakeLock`), and otherwise go on their engines'
-            // idle timers. This used to unload MLX AND every model on the Ollama server — including
-            // ones a parked run or another app was using — and made this load wait for the unloads.
+            // A switch unloads nothing: viewing a conversation is not a request. Models swap only when a run that needs a different
+            // one takes the local lock (`LocalInferenceCoordinator.didTakeLock`), and otherwise follow their engines' idle timers.
 
             await self.chatHistoryViewModel.loadConversation(id: conversationID)
 
@@ -155,23 +129,13 @@ final class ConversationSwitchCoordinator {
     private func loadWorkflowRunHistoryIfNeeded(for conversationID: UUID) {
         guard let vm = viewModel else { return }
 
-        // Load state is tracked EXPLICITLY. This used to guard on
-        // `vm.workflowRunHistory[conversationID] == nil`, inferring "already loaded from disk"
-        // from key presence — but `MessagingCoordinator.sendMessage` creates that key itself at
-        // run start (`workflowRunHistory[cid, default: []].insert(initialRecord, at: 0)`). This
-        // loader runs at the END of a debounced task (250 ms sleep, then `loadConversation` — the
-        // MLX/Ollama unloads that also sat in this window are gone, decision D10), so a send landing
-        // inside that window won the race and the
-        // disk load was then skipped FOREVER — the function has no other caller and no
-        // invalidation. The run picker, the "1/N" badge and the whole history list showed only
-        // the new run until relaunch.
+        // Load state is tracked explicitly: `workflowRunHistory` key presence proves nothing, since `sendMessage` creates
+        // the key at run start and a send in the debounce window would skip the load forever.
         guard !loadedRunHistoryConversationIDs.contains(conversationID) else { return }
         loadedRunHistoryConversationIDs.insert(conversationID)
 
-        // Decode OFF-MAIN (WF-UI6): this used to block the main thread for the full JSON decode
-        // of up to 20 run blobs on first visit. The once-only guard above ran synchronously, so
-        // the Task cannot double-load; the merge below is keyed by id and in-memory wins, so a
-        // run started while the decode was in flight survives regardless of ordering.
+        // Decode off-main: the once-only guard above runs synchronously so the Task cannot double-load, and the merge below
+        // is keyed by id with in-memory winning, so a run started during the decode survives.
         Task { [weak self] in
             // [workflow/vm-6] The loader strips node traces inside its own detached decode, so
             // the peak here is one record's traces rather than the whole page's.
@@ -182,14 +146,9 @@ final class ConversationSwitchCoordinator {
         }
     }
 
-    /// Merges disk records into the observable history — split out so the async load above stays
-    /// readable. MERGE rather than replace: an in-flight run inserted while we were loading is
-    /// newer than anything on disk and must survive. Keyed by id, in-memory wins.
-    /// - Parameter droppedAtLoad: events the LOADER already stripped ([workflow/vm-6]). The
-    ///   merge below strips again — idempotently — so its own count is 0 for these records, and
-    ///   the log would otherwise report "0 events left on disk" for a page that dropped
-    ///   thousands. Summed rather than replaced so a caller that hands in unstripped records
-    ///   (a test) still reports honestly.
+    /// Merges disk records into the observable history. Merge, not replace: a run inserted while loading is newer than disk.
+    /// - Parameter droppedAtLoad: events the loader already stripped; summed with this merge's own count so the log
+    /// reports honestly.
     private func applyLoadedRunHistory(_ records: [WorkflowRunRecord], droppedAtLoad: Int = 0,
                                        for conversationID: UUID, vm: MainApplicationViewModel) {
         guard !records.isEmpty else { return }
@@ -206,32 +165,9 @@ final class ConversationSwitchCoordinator {
         }
     }
 
-    /// [XUI-15] Frees the per-node traces of SETTLED runs in every conversation except the one
-    /// now on screen.
-    ///
-    /// ⚠️ `workflowExecutionStates` has the same never-evicted-per-conversation shape `XUI-11` was
-    /// filed for, one level over — and after `XUI-11` it holds essentially ALL of the app's
-    /// resident trace events, at `ChatMessage.maxTimelineEvents` (500), which is 25% ABOVE the
-    /// persisted cap. It was freed only by a Back press in the run view or by deleting the
-    /// conversation, so a user who navigates by SWITCHING conversations — the ordinary way — kept
-    /// one full run's trace per workflow conversation for the whole session.
-    ///
-    /// ⚠️ A SWEEP, not a "previous conversation" drop. `handleSelectionChange` does not track what
-    /// was left, and a state can be stranded by paths that never touch the selection at all
-    /// (a scheduled or ChatOps run finishing off-screen). Walking the map is O(conversations that
-    /// ran a workflow this session) once per switch, and it cannot miss one.
-    ///
-    /// ⚠️ Runs BEFORE the debounce, deliberately: it releases memory rather than reading state, so
-    /// it must not be cancelled along with the load task if the user keeps clicking.
-    /// The execution states whose conversation is no longer on screen.
-    ///
-    /// ⚠️ Extracted because the loop that used it lives on a method taking a
-    /// `MainApplicationViewModel`, which claims global singletons and cannot be built in a test —
-    /// so an inverted keep-test (sweeping the CURRENT conversation instead of the others, freeing
-    /// the traces of the run the user is looking at) survived the first mutation battery with
-    /// nothing able to reach it. Same shape, and same reason, as `mergeLoadedHistory`.
-    ///
-    /// A nil `current` means no conversation is selected, so every state is left behind.
+    /// The execution states whose conversation is not the one on screen: the set swept to free settled run traces on a
+    /// switch. A nil `current` means no conversation is selected, so every state is left behind. Static and pure so the
+    /// keep rule is testable without a `MainApplicationViewModel`, which claims global singletons.
     @MainActor
     static func statesLeftBehind(
         in states: [UUID: WorkflowExecutionState], keeping current: UUID?
@@ -252,31 +188,16 @@ final class ConversationSwitchCoordinator {
             }
         }
         guard releasedConversations > 0 else { return }
-        // [CF-28] Only runs whose record has already been FROZEN are counted here — the state's
-        // own guard refuses (and logs, with the run id) both a run still in flight and one that
-        // has settled but whose `finalize()` has not yet run, because for the latter the store
-        // holds only the `.running` stub and there is nothing to re-read.
+        // Only runs whose record is already frozen are counted: the state refuses (and logs) a run still in flight or settled
+        // but not yet finalized.
         logger.info("[WORKFLOW] Released \(releasedEvents) live node timeline event(s) across \(releasedConversations) conversation(s) left behind by this switch. CONSEQUENCE: returning to one of those runs re-reads its trace from the store (one off-main decode); the run's identity, status and HITL wiring are untouched. Every released run was FROZEN first — its traces were copied into the record value — but `upsertFinalized` awaits an off-main encode, so a re-read inside that window can still find the older row and render the Timeline tabs empty until the write lands. A run still in flight, or settled but not yet frozen, is skipped entirely.")
     }
 
-    /// What the in-memory mirror becomes after a disk load: existing rows first, then the loaded
-    /// ones that are not already present, all of them without their node traces.
-    ///
-    /// ⚠️ [XUI-11] THIS IS THE LEAK, and it is the reason the strip lives here rather than only at
-    /// finalize. This path brings in up to `WorkflowRunHistoryStore.maxRecordsPerConversation`
-    /// fully decoded records — each node carrying up to 400 timeline events, tool rows holding
-    /// whole outputs — on FIRST VISIT to a conversation, and nothing ever removes the key again.
-    /// The history list reads only counts and failure flags; `WorkflowRunDisplayData.from(record:)`
-    /// is the sole reader of a snapshot's trace and runs for the ONE selected run, which re-reads
-    /// it (`WorkflowRunHistoryStore.loadRecord(id:)`).
-    ///
-    /// ⚠️ MERGE, never replace, and in-memory wins on id: a run started while the decode was in
-    /// flight is newer than anything on disk. That rule predates this row and is not incidental —
-    /// see the load-once guard's comment for what happens when this path gets its ordering wrong.
-    ///
-    /// `nonisolated static` and pure (WF-UI5): the coordinator's method mutates a view model that
-    /// claims global singletons, so this is the only shape in which the rule can be tested — and
-    /// a mutant that stopped stripping here survived the first battery precisely because it wasn't.
+    // Why: strip node traces here, not only at finalize: a first visit loads up to `maxRecordsPerConversation` fully decoded
+    // records that nothing evicts; only the selected run re-reads its trace.
+    /// What the in-memory mirror becomes after a disk load: existing rows first, then loaded ones not already present,
+    /// all without their node traces. Merge, never replace, and in-memory wins on id. `nonisolated static` and pure so
+    /// the rule is testable.
     nonisolated static func mergeLoadedHistory(
         existing: [WorkflowRunRecord], loaded: [WorkflowRunRecord]
     ) -> (merged: [WorkflowRunRecord], droppedEvents: Int) {

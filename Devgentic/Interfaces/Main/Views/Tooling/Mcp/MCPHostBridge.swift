@@ -4,29 +4,7 @@
 //  MCPHostBridge.swift
 //  Devgentic
 //
-//  Created 2026-08-02 — the seam between `MCPClientService` and the rest of the app.
-//
-//  `MCPClientService` is the only part of the MCP subsystem that reached OUT of it. Three
-//  call sites did all the reaching:
-//
-//      MCPToolStore.shared.replaceTools(…)     → SwiftData
-//      MCPSamplingBroker.shared.handle(…)      → AgentConnect + HITL
-//      MCPElicitationBroker.shared.handle(…)   → InteractionCenter + HITL
-//
-//  Everything else in `Mcp/` is Foundation + the MCP SDK. Those three lines were therefore
-//  the entire reason the connect path could not be exercised outside a running app — which
-//  is why no test had ever spawned a real server. Routing them through this bridge makes
-//  the dependency one-directional and injectable: `MCPHarness/` installs no-op
-//  implementations and drives the REAL connect path against real child processes.
-//
-//  ⚠️ This is a seam, not an abstraction layer. It declares exactly what the client service
-//  needs from the host and nothing more. Conformances live with the concrete types
-//  (`MCPToolStore`, the two brokers); the app installs them once at launch via
-//  `MCPHostBridge.installAppImplementations()` in `AppDelegate.applicationDidFinishLaunching`.
-//
-//  ⚠️ A missing implementation is never silent. Each accessor logs what was dropped and what
-//  the user will observe as a result, because "nothing happened and nothing said why" is the
-//  exact failure mode this subsystem's logging standard exists to prevent.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -37,25 +15,18 @@ private let logger = DGLogger(category: "MCPHostBridge")
 // MARK: - What the client service needs from the host
 
 /// Where a freshly composed tool list goes.
-///
-/// Satisfied by `MCPToolStore` in the app (SwiftData + UI projection) and by a recording
-/// stub in `MCPHarness`. The client service composes the list; it does not care where it
-/// lands.
+/// Satisfied by `MCPToolStore` in the app (SwiftData + UI projection) and by a recording stub.
+/// The client service composes the list and does not care where it lands.
 @MainActor
 protocol MCPToolListSink: AnyObject, Sendable {
-    /// Replaces the persisted tool list for one source. Called on connect and on every
+    /// Overwrites the persisted tool list for one source. Called on connect and on every
     /// (debounced) `tools/list_changed`.
     func replaceTools(forSourceID sourceID: UUID, with newTools: [ToolDefinition])
 }
 
-/// Reads the configured MCP servers.
-///
-/// Deliberately SEPARATE from `MCPToolListSink` even though `MCPToolStore` satisfies both.
-/// `MCPClientService` gets the sink and nothing else — it composes tool lists, it has no
-/// business enumerating the user's servers. `MCPConnectionCoordinator`, whose entire job is
-/// deciding *which* servers to connect and when, gets both. Merging the two protocols would
-/// hand the client service a capability it does not need and cannot be trusted not to grow
-/// into.
+/// Reads the configured MCP servers. Kept separate from `MCPToolListSink` even though `MCPToolStore` satisfies both:
+/// `MCPClientService` gets only the sink, while `MCPConnectionCoordinator`, which decides which servers to connect,
+/// gets both.
 @MainActor
 protocol MCPSourceStore: AnyObject, Sendable {
     /// Every configured MCP server. Excludes the built-in tool catalogue, which has nothing
@@ -63,10 +34,9 @@ protocol MCPSourceStore: AnyObject, Sendable {
     var sources: [ToolSource] { get }
 }
 
-/// Services `sampling/createMessage` — a server asking the host to run an LLM call.
-///
-/// Satisfied by `MCPSamplingBroker`, which needs `AgentConnect` for the provider config and
-/// the InteractionCenter for the per-request approval.
+/// Services `sampling/createMessage`, a server asking the host to run an LLM call.
+/// Satisfied by `MCPSamplingBroker`, which needs `AgentConnect` for the provider config and the InteractionCenter
+/// for the per-request approval.
 @MainActor
 protocol MCPSamplingRequestHandling: AnyObject, Sendable {
     func handle(
@@ -91,10 +61,7 @@ protocol MCPElicitationRequestHandling: AnyObject, Sendable {
 // MARK: - The bridge
 
 /// Holds the host implementations `MCPClientService` calls out to.
-///
-/// Deliberately a plain holder rather than a container or a resolver: three slots, filled
-/// once at launch, read on the MainActor. Anything more would be architecture for its own
-/// sake.
+/// A plain holder: three slots, filled once at launch, read on the MainActor.
 @MainActor
 enum MCPHostBridge {
 
@@ -154,11 +121,9 @@ enum MCPHostBridge {
         return sink
     }
 
-    /// The configured MCP servers, or an EMPTY list with a log line saying why.
-    ///
-    /// Empty rather than nil: every caller iterates the result, so returning nil would only
-    /// move the same `?? []` to each of them. What must not happen is an empty list being
-    /// mistaken for "the user has no servers configured" — hence the log line.
+    /// The configured MCP servers, or an empty list with a log line saying why.
+    /// Empty rather than nil so callers need no `?? []`; the log line keeps an empty result from being mistaken for
+    /// "the user has no servers configured".
     static func configuredSources(context: String) -> [ToolSource] {
         guard let store = sourceStore else {
             logger.error("""

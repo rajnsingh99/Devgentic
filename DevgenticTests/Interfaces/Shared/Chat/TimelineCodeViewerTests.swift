@@ -4,10 +4,7 @@
 //  TimelineCodeViewerTests.swift
 //  DevgenticTests
 //
-//  Covers the agent-timeline → Code Viewer integration: opening a tool row's file as a
-//  named tab (with a pre-write diff when the snapshot exists), the preset-baseline diff
-//  toggle, the ToolExecutionData snapshot field's backward-compatible Codable, and the
-//  supporting helpers (extension → language hint, +N −M change counts).
+//  Created by Raj Singh.
 //
 
 import XCTest

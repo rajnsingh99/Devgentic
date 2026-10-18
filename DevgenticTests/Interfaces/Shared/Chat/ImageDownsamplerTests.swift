@@ -4,13 +4,7 @@
 //  ImageDownsamplerTests.swift
 //  DevgenticTests
 //
-//  ATT-2 (chat hardening round 3, 2026-07-19): attached images render as bounded
-//  thumbnails in the user bubble (`AttachedImageCardView`). The decode must cost
-//  what a thumbnail costs — `ImageDownsampler` goes through ImageIO's
-//  `CGImageSourceCreateThumbnailAtIndex`, so memory scales with the OUTPUT, not
-//  the 12 MB source photo. These tests pin the size bound, aspect preservation,
-//  and the nil-on-garbage contract (paired with a valid-input control so a broken
-//  harness can't read as a pass).
+//  Created by Raj Singh.
 //
 
 import XCTest

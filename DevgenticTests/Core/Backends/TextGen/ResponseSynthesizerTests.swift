@@ -4,13 +4,7 @@
 //  ResponseSynthesizerTests.swift
 //  DevgenticTests
 //
-//  Fast-path behavior after the final_answer-as-evidence fix: final_answer is a
-//  control signal and is no longer recorded into ExecutionSummary.toolResults,
-//  so conclusion-only runs must return the answer directly (no IC synthesis),
-//  and the deterministic fallback must stay honest about failed evidence.
-//
-//  Deliberately NO tests for the IC LLM synthesis branch — it requires a loaded
-//  IntelligenceCore model and would flake in CI.
+//  Created by Raj Singh.
 //
 
 import XCTest

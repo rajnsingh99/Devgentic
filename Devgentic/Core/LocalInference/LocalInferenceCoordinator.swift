@@ -4,27 +4,7 @@
 //  LocalInferenceCoordinator.swift
 //  Devgentic
 //
-//  One LOCAL run at a time, across every conversation and surface. Layer 2 beneath
-//  `ConversationAdmission` (one run per conversation).
-//
-//  ── Modes ────────────────────────────────────────────────────────────────────────────────────
-//
-//  ENFORCE (default, phase 2): a local run that finds the lock taken WAITS — queue, never drop — and
-//  starts by itself when the lock passes to it. Cloud-only runs never wait. A run is refused only
-//  when it cannot physically run (`LocalInferencePolicy`, rule 3) or is a local sub-agent run (D5).
-//
-//  SHADOW (phase 1, kept as a kill switch: UserDefaults `localInferenceCoordinatorMode` = "shadow"):
-//  nothing waits and nothing is refused; every decision is logged as if it were enforced, plus the
-//  COLLISION evidence of two local runs generating at once.
-//
-//  ⚠️ The lock belongs to the ROOT run for its whole life (decision D1) — EXCEPT while the run is
-//  waiting on a human and generating nothing (phase 4): it gives the lock up, and takes it back at
-//  its next local generation, from the front of the line, without interrupting whoever holds it then.
-//  Every wait is credited to the waiting branch's time bounds like a park
-//  (`ExecutionSuspensionService.beginQueueWait`), so a queued run is not timed out by its time in line.
-//
-//  ⚠️ `@MainActor` for the same reason `ConversationAdmission` is: the decision and the state change
-//  must not be split by a hop, or two runs can both see the lock free.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -34,20 +14,15 @@ private let logger = DGLogger(category: "LocalInferenceCoordinator")
 
 // MARK: - Run scope
 
-/// The run the current task belongs to, so code deep in a provider can say which run touched a model.
-///
-/// ⚠️ Bound around the run's Task CREATION in `ActiveStreamManager.startMessageStream`, the same way
-/// `WorkflowRunAttendance.$origin` is: an unstructured `Task {}` inherits task-locals from the context
-/// that creates it, and so does every `Task {}` the orchestration spawns beneath it. `Task.detached`
-/// does NOT inherit — a provider reached through one reports as "outside any run", which the
-/// coordinator logs rather than misattributes.
+/// The run the current task belongs to, so code deep in a provider can say which run touched a model. Bound around
+/// the run's Task creation in `ActiveStreamManager.startMessageStream`; unstructured child tasks inherit it, but
+/// `Task.detached` does not and reports "outside any run".
 enum LocalInferenceScope {
     @TaskLocal static var runID: UUID?
 
-    /// Called by the local providers once per generation request. Reads the task-local in the
-    /// CALLER's task (it must not be read inside a detached or actor-hopped closure).
-    /// - Parameter contextTokens: the context window the request asks for (Ollama's `num_ctx`), when
-    ///   known — a change of it reloads the model in Ollama, which the coordinator logs.
+    /// Called by the local providers once per generation request; reads the task-local in the caller's task, not in a
+    /// detached or actor-hopped closure. - Parameter contextTokens: the context window the request asks for (Ollama's
+    /// `num_ctx`), when known; a change reloads the model in Ollama and is logged.
     static func reportUse(engine: InferenceEngine, modelID: String, contextTokens: Int? = nil) {
         guard engine.isLocal else { return }
         let runID = Self.runID
@@ -67,10 +42,9 @@ enum LocalInferenceScope {
         }
     }
 
-    /// The gate every local generation passes (phase 4). Reports the use, makes sure this run HOLDS
-    /// the local lock — waiting for it, at the front of the line, when the run gave it up while parked
-    /// on a human — and counts the generation as in flight until `end()`.
-    /// - Throws: `CancellationError` when the wait was cancelled.
+    /// The gate every local generation passes: reports the use, ensures this run holds the local lock (waiting at the
+    /// front of the line if it gave it up while parked on a human), and counts the generation in flight until `end()`. -
+    /// Throws: `CancellationError` when the wait was cancelled.
     static func beginGeneration(engine: InferenceEngine, modelID: String,
                                 contextTokens: Int? = nil) async throws -> Generation {
         reportUse(engine: engine, modelID: modelID, contextTokens: contextTokens)
@@ -139,10 +113,9 @@ struct LocalWaitObserver {
     var onHold: @MainActor (_ position: Int, _ behind: UUID) -> Void = { _, _ in }
     /// The wait ended, admitted or withdrawn.
     var onWaitEnded: @MainActor (_ waited: TimeInterval) -> Void = { _ in }
-    /// Phase 7: the run is held until its user chooses Proceed or Stop; with no answer by `deadline`
-    /// it is auto-denied.
+    /// The run is held until its user chooses Proceed or Stop; with no answer by `deadline` it is auto-denied.
     var onConfirmationNeeded: @MainActor (_ concerns: [RunConcern], _ deadline: Date) -> Void = { _, _ in }
-    /// Phase 7: the user chose Proceed. The run now starts, or waits its turn (`onHold` follows).
+    /// The user chose Proceed. The run now starts, or waits its turn (`onHold` follows).
     var onConfirmed: @MainActor () -> Void = {}
     /// The run's place in line changed while it waits — the line moved, or a run ahead left it.
     var onPositionChanged: @MainActor (_ position: Int, _ holder: UUID?) -> Void = { _, _ in }
@@ -159,11 +132,9 @@ final class LocalInferenceCoordinator {
 
         static let defaultsKey = "localInferenceCoordinatorMode"
 
-        /// ENFORCE unless the hidden kill switch says "shadow" — and always SHADOW in the test host,
-        /// whatever the defaults say (tests share the app's defaults domain): a run one test leaves
-        /// unfinished would otherwise hold the process-wide lock for the rest of the suite, and every
-        /// later local run would HANG rather than fail. Enforcement is tested on instances built with
-        /// `.enforce` explicitly.
+        // Why: tests share the app's defaults domain, and a run left unfinished would hold the process-wide lock so later local
+        // runs hang; enforcement is tested on instances built with `.enforce`.
+        /// Enforce mode unless the hidden kill switch says "shadow"; always shadow in the test host.
         static var configured: Mode {
             if TestHost.isRunning { return .shadow }
             if let raw = UserDefaults.standard.string(forKey: defaultsKey), let mode = Mode(rawValue: raw) { return mode }
@@ -173,7 +144,7 @@ final class LocalInferenceCoordinator {
 
     let mode: Mode
 
-    // MARK: Phase 5 — the global ceiling
+    // MARK: The global ceiling
 
     /// 90 min: above the largest preset (Code, 60 min) plus `ExecutionBudget`'s 60 s reserve, so
     /// nesting never silently shortens a preset — a profile's own limit fires first.
@@ -212,7 +183,7 @@ final class LocalInferenceCoordinator {
     private var reportedFindings: Set<String> = []
     private var observers: [UUID: LocalWaitObserver] = [:]
 
-    // Phase 4 — a run that waits on a human gives the lock up and takes it back at its next generation.
+    // A run that waits on a human gives the lock up and takes it back at its next generation.
     /// Open HITL parks per run, by operation id.
     private var openParks: [UUID: Set<UUID>] = [:]
     /// Parks whose END was seen before their BEGIN (both arrive as separate main-actor hops).
@@ -222,18 +193,15 @@ final class LocalInferenceCoordinator {
     /// Runs that gave the lock up while parked and have not taken it back.
     private(set) var released: Set<UUID> = []
 
-    // Phase 3 — residency.
+    // Residency ledger of models loaded.
     /// Ollama models THIS APP has generated with, per server, with the context window last asked for.
     /// The only Ollama models the coordinator ever unloads: another app's models are not ours to evict.
     private(set) var ollamaModelsUsed: [String: [String: Int?]] = [:]
     private let residency: LocalResidencyActions
 
-    /// A run's place in line. One per WAITING run; several branches of one run (parallel workflow
-    /// nodes re-acquiring after a park) share it. Each branch's continuation is resumed on its own, so
-    /// cancelling one branch never fails another.
-    ///
-    /// ⚠️ The outcome is KEPT once settled: a branch that reaches its continuation after the lock
-    /// passed (it awaited the queue-wait credit in between) reads it instead of waiting forever.
+    /// A run's place in line, one per waiting run; several branches of one run share it, and each branch's continuation
+    /// is resumed on its own, so cancelling one never fails another. The outcome is kept once settled so a late branch
+    /// reads it instead of waiting forever.
     private final class Waiter {
         enum Outcome { case admitted, withdrawn, autoDenied }
         /// The send-path acquire, as opposed to a phase-4 re-acquire of a run already running.
@@ -253,8 +221,8 @@ final class LocalInferenceCoordinator {
     }
     private var waiters: [UUID: Waiter] = [:]
 
-    // Phase 7 — a run with a concern waits for its user's answer before it joins the line.
-    /// How long a run waits for Proceed before it is auto-denied (owner, 2026-10-08).
+    /// How long a run waits for Proceed before it is auto-denied; a run with a concern waits for its user's answer before
+    /// it joins the line.
     nonisolated static let defaultConfirmationTimeout: TimeInterval = 120
     private struct PendingConfirmation {
         /// Its place in line, kept from the moment it arrived: Proceed puts it back at that place.
@@ -305,14 +273,9 @@ final class LocalInferenceCoordinator {
 
     // MARK: Acquire
 
-    /// Takes the local lock for a run that has passed conversation admission, WAITING for it when
-    /// another local run holds it (enforce mode). Returns at once in shadow mode.
-    ///
-    /// ⚠️ Cancellation-aware: cancelling the calling task withdraws the run from the queue and returns
-    /// `.cancelled`. `withCheckedContinuation` alone is not — the lesson `ConversationAdmission`
-    /// learned the hard way (a parked waiter that is never resumed hangs everything awaiting it).
-    /// - Parameter observer: told when this run waits and when the wait ends — here and for every
-    ///   phase-4 re-acquire later in the run. Kept until the run unregisters.
+    /// Takes the local lock for a run that has passed conversation admission, waiting while another local run holds it
+    /// (enforce mode); returns at once in shadow mode. Cancelling the calling task withdraws the run and returns
+    /// `.cancelled`. `observer` is told when the run waits and when the wait ends.
     func acquire(_ manifest: InferenceRunManifest, observer: LocalWaitObserver = LocalWaitObserver()) async -> AcquireOutcome {
         let decision = register(manifest)
         guard mode == .enforce else { return .admitted(waited: 0) }
@@ -359,12 +322,11 @@ final class LocalInferenceCoordinator {
         }
     }
 
-    // MARK: Phase 7 — the user's answer
+    // MARK: The user's answer
 
-    /// The user chose Proceed for a run waiting on a concern: it starts now if the local lock is free,
-    /// or takes its place in line — the place it held from the moment it arrived.
-    /// - Returns: false when the run was not waiting for an answer (already started, stopped or
-    ///   auto-denied) — a late click.
+    /// The user chose Proceed for a run waiting on a concern: it starts now if the lock is free, or takes the place it
+    /// held since it arrived. - Returns: false when the run was not waiting for an answer (already started, stopped or
+    /// auto-denied).
     @discardableResult
     func proceed(runID: UUID) -> Bool {
         guard mode == .enforce, let pending = awaitingConfirmation.removeValue(forKey: runID) else {
@@ -393,7 +355,7 @@ final class LocalInferenceCoordinator {
         return true
     }
 
-    /// Nobody answered in time: the run is auto-denied (owner, 2026-10-08) — never started.
+    /// Nobody answered in time: the run is auto-denied and never started.
     private func expireConfirmation(_ runID: UUID) {
         confirmationTimers.removeValue(forKey: runID)
         guard let pending = awaitingConfirmation.removeValue(forKey: runID) else { return }
@@ -495,7 +457,7 @@ final class LocalInferenceCoordinator {
         logger.notice("[LOCAL-COORD] Run \(runID.uuidString.prefix(8)) withdrawn from the local queue after \(Int(waited))s (cancelled while waiting\(waiter.isInitial ? "" : " to take the lock back")). CONSEQUENCE: \(waiter.isInitial ? "it never started" : "its next local generation does not run"); \(self.lock.queue.count) run(s) still waiting.")
     }
 
-    // MARK: Phase 4 — release while parked, take back at the next generation
+    // MARK: Release while parked, take back at the next generation
 
     /// A HITL park opened in `runID` (from `ExecutionSuspensionService`).
     func parkBegan(runID: UUID, operationID: UUID) {
@@ -513,16 +475,13 @@ final class LocalInferenceCoordinator {
         releaseIfParked(runID)
     }
 
-    /// A HITL park in `runID` closed — answered, cancelled or drained.
-    ///
-    /// ⚠️ Deliberately does NOT take the lock back. The run carries on (an approved tool runs) and
-    /// takes the lock back at its NEXT local generation, through `beginLocalGeneration`. Taking it back
-    /// here would make the answer itself wait for another run to finish.
+    // Why: do not take the lock back here: the run takes it at its next local generation through `beginLocalGeneration`,
+    // otherwise the answer itself would wait for another run to finish.
+    /// A HITL park in `runID` closed (answered, cancelled or drained).
     func parkEnded(runID: UUID, operationID: UUID) {
         guard mode == .enforce else { return }
         guard openParks[runID]?.remove(operationID) != nil else {
-            // ⚠️ Only for a run still registered: `parkBegan` ignores any other, so an entry kept
-            // for one would never be claimed — one leaked id per park of a run that had ended.
+            // Only for a run still registered: `parkBegan` ignores any other, so an entry kept for one would never be claimed.
             if manifests[runID] != nil {
                 parksEndedEarly.insert(operationID)
                 logger.debug("[LOCAL-COORD] Run \(runID.uuidString.prefix(8)): park \(operationID.uuidString.prefix(8)) ended before its begin arrived. CONSEQUENCE: its begin will be ignored, so the lock is not given up for a wait that is already over.")
@@ -536,10 +495,9 @@ final class LocalInferenceCoordinator {
         logger.info("[LOCAL-COORD] Run \(runID.uuidString.prefix(8)): human wait (op \(operationID.uuidString.prefix(8))) is over; \(stillOpen) still open. CONSEQUENCE: \(self.released.contains(runID) ? "the run gave the local lock up while it waited, and takes it back at its next local generation — waiting at the front of the line if another run holds it now" : "the run still holds the local lock; nothing changes").")
     }
 
-    /// Before a local generation: make sure the run holds the lock, then count the generation.
-    /// - Returns: false when the wait for the lock was cancelled.
-    /// - Parameter model: the model the generation uses — declared into the run's manifest when it was
-    ///   missing, so a lock handover keeps it loaded.
+    /// Before a local generation: ensures the run holds the lock, then counts the generation. - Returns: false when the
+    /// wait for the lock was cancelled. - Parameter model: the model the generation uses, declared into the run's
+    /// manifest when missing so a lock handover keeps it loaded.
     func beginLocalGeneration(_ runID: UUID, model: ModelRequirement? = nil) async -> Bool {
         guard await ensureHeld(runID, model: model) else { return false }
         if mode == .enforce, manifests[runID] != nil { inFlight[runID, default: 0] += 1 }
@@ -557,15 +515,12 @@ final class LocalInferenceCoordinator {
         releaseIfParked(runID)
     }
 
-    /// Makes `runID` the holder, waiting at the FRONT of the line when it gave the lock up while parked.
-    /// Also takes the lock for a run that is using a local model its manifest did not declare, so a wrong
-    /// manifest cannot slip past the lock.
-    /// - Returns: false when the wait was cancelled.
+    /// Makes `runID` the holder, waiting at the front of the line when it gave the lock up while parked; also takes the
+    /// lock for a run using a local model its manifest did not declare. - Returns: false when the wait was cancelled.
     func ensureHeld(_ runID: UUID, model: ModelRequirement? = nil) async -> Bool {
         guard mode == .enforce, var manifest = manifests[runID] else { return true }
-        // ⚠️ BEFORE the lock is taken: `didTakeLock` keeps only the manifest's models, so an undeclared
-        // model would be unloaded at the very handover that admits the run about to use it (one
-        // pointless reload) — and model deletion, which consults the manifests, would not protect it.
+        // Before the lock is taken: `didTakeLock` keeps only the manifest's models, so an undeclared model would be unloaded
+        // at the handover that admits its run.
         if let model, model.engine.isLocal,
            !manifest.models.contains(where: { $0.residencyKey == model.residencyKey }) {
             manifest = manifest.declaring(model)
@@ -605,12 +560,8 @@ final class LocalInferenceCoordinator {
             logger.notice("[LOCAL-COORD] Run \(runID.uuidString.prefix(8)) stopped waiting to \(resuming ? "take the local lock back" : "take the local lock") after \(Int(waited))s — cancelled. CONSEQUENCE: its local generation is not started; the provider throws CancellationError and the run ends as cancelled.")
             return false
         }
-        // ⚠️ READINESS CR-36 (2026-10-12). `.admitted` says the lock was handed to this run WHEN the
-        // waiter settled — but `wait` then awaits `endQueueWait`, and in that gap another branch of
-        // the same run (parallel workflow branches) can park on a human, which releases the lock to
-        // the next run. Trusting the stale `.admitted` started a local generation WITHOUT the lock:
-        // two models loaded at once. Re-checked after the last suspension; if the lock moved on,
-        // wait for it again.
+        // Re-checks the holder after the last suspension: `.admitted` can be stale if another branch of the same run parked
+        // in the gap and released the lock. If it moved on, wait again.
         guard lock.holder == runID else {
             logger.notice("[LOCAL-COORD] Run \(runID.uuidString.prefix(8)) was admitted, but the local lock passed to \(self.lock.holder.map { String($0.uuidString.prefix(8)) } ?? "nobody") before this branch could start (another branch of the run parked on a human). CONSEQUENCE: this branch waits for the lock again instead of generating without it.")
             return await ensureHeld(runID, model: model)
@@ -782,12 +733,11 @@ final class LocalInferenceCoordinator {
         return next.runID
     }
 
-    // MARK: Phase 3 — residency
+    // MARK: Residency
 
-    /// A local run has just taken the lock: unload the local models it does not use (decision D10 —
-    /// the ONLY moment residency changes, apart from the engines' own idle timers and quit).
-    ///
-    /// ⚠️ Skipped when the run's manifest has unresolved nodes: an unknown need never evicts.
+    /// A local run has just taken the lock: unloads the local models it does not use. This is the only moment residency
+    /// changes, besides the engines' idle timers and quit. Skipped when the manifest has unresolved nodes, since an
+    /// unknown need never evicts.
     private func didTakeLock(_ runID: UUID) {
         guard mode == .enforce else { return }
         guard let manifest = manifests[runID] else {
@@ -837,12 +787,9 @@ final class LocalInferenceCoordinator {
 
     // MARK: Background Core Intelligence (decision D7)
 
-    /// Runs a background Core Intelligence feature (Morning Brief, User Personal) as a LOWEST-priority
-    /// local run: it waits for the local lock like any other, and holds it while it works.
-    /// - Throws: `CancellationError` when withdrawn while waiting, `LocalInferenceRefusal` when denied,
-    ///   or whatever `operation` throws.
-    /// - Parameter modelName: the Core Intelligence model; nil reads the user's setting. (Tests pass it:
-    ///   they share the app's defaults domain and must never write to it.)
+    /// Runs a background Core Intelligence feature (Briefing, User Personal) as a lowest-priority local run that
+    /// waits for and holds the lock. Throws `CancellationError` when withdrawn while waiting, `LocalInferenceRefusal`
+    /// when denied. `modelName` nil reads the user's setting.
     func runBackgroundIntelligence<T>(feature: String, modelName: String? = nil,
                                       operation: () async throws -> T) async throws -> T {
         let modelName = (modelName ?? UserDefaults.standard.string(forKey: AppSettings.coreIntelligenceModelKey) ?? "")
@@ -896,18 +843,9 @@ final class LocalInferenceCoordinator {
         var errorDescription: String? { "\(feature) skipped: the local model is busy (\(holder))." }
     }
 
-    /// Claims the local lock for an in-turn Core Intelligence call, or refuses at once.
-    ///
-    /// ⚠️ READINESS follow-up (2026-10-13; the "DEFERRED 2" item of the coordinator plan). The
-    /// rewrite and synthesis calls generated on the Core Intelligence MLX model with NO lock at all:
-    /// a CLOUD turn's rewrite ran while another conversation's local run was generating, which is
-    /// two models resident and competing for the GPU, the exact overlap the lock exists to stop
-    /// (and the coordinator never even saw it). They do NOT queue the way background work does: both
-    /// sit in front of the user's answer, and waiting behind someone else's local run could take
-    /// minutes. A busy slot SKIPS the step instead; each caller already has a fallback (the
-    /// original query; the deterministic answer).
-    ///
-    /// - Parameter callerRunID: `LocalInferenceScope.runID` read in the CALLER's task.
+    /// Claims the local lock for an in-turn Core Intelligence call, or refuses at once. A busy slot skips the step
+    /// instead of queueing, since the call sits in front of the user's answer; each caller has a fallback. - Parameter
+    /// callerRunID: `LocalInferenceScope.runID` read in the caller's task.
     func claimForInTurnIntelligence(feature: String, callerRunID: UUID?) throws -> InTurnIntelligenceSlot {
         let modelName = (UserDefaults.standard.string(forKey: AppSettings.coreIntelligenceModelKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -973,23 +911,11 @@ final class LocalInferenceCoordinator {
         }
     }
 
-    // MARK: Background work on a conversation's own model (CR-9)
+    // MARK: Background work on a conversation's own model
 
-    /// Runs background generation on `config`'s model — compaction, project-memory suggestions — as a
-    /// LOWEST-priority run of its own: it waits for the local lock like any other and holds it while
-    /// it works, and the work runs with `LocalInferenceScope.runID` set to THIS run.
-    ///
-    /// ⚠️⚠️ READINESS CR-9 (2026-10-10). These jobs ran AFTER the run that spawned them had ended, in a
-    /// `Task` that inherited that run's `LocalInferenceScope.runID`. Once the run unregistered,
-    /// `ensureHeld` returned true for an unknown id WITHOUT taking the lock, and the lock had already
-    /// passed to the next queued run — so a long MLX compaction and the next local run, on a different
-    /// model, had two models resident: the one thing this coordinator exists to prevent. Manual
-    /// "Compact now" carried no run id at all.
-    ///
-    /// A cloud model takes no lock — but the work still runs with the stale id CLEARED, so a finished
-    /// run's identity can never be borrowed.
-    /// - Throws: `CancellationError` when withdrawn while waiting, `LocalInferenceRefusal` when denied,
-    ///   or whatever `operation` throws.
+    /// Runs background generation on `config`'s model (compaction, project-memory suggestions) as a lowest-priority run
+    /// that waits for and holds the lock. The work runs with `LocalInferenceScope.runID` set to this run; a cloud model
+    /// takes no lock but the stale id is still cleared.
     func runBackgroundLocal<T>(feature: String, conversationID: UUID?, config: ProviderConfig,
                                operation: () async throws -> T) async throws -> T {
         let engine = InferenceEngine.of(config)
@@ -1037,8 +963,8 @@ final class LocalInferenceCoordinator {
         var found: [UseFinding] = []
         let model = ModelRequirement(engine: engine, modelID: modelID, role: .primary)
         if case .ollama(let baseURL) = engine {
-            // The ledger of what WE loaded. ⚠️ Ollama keeps a model per (model, num_ctx): a request
-            // asking for a different context window RELOADS it — silently, from the app's view.
+            // The ledger of what we loaded. Ollama keeps a model per (model, num_ctx), so a request with a different context
+            // window reloads it silently.
             if let previous = ollamaModelsUsed[baseURL]?[model.modelID] ?? nil,
                let contextTokens, contextTokens != previous {
                 found.append(.ollamaContextChanged)
@@ -1091,12 +1017,9 @@ final class LocalInferenceCoordinator {
 
 extension InferenceRunManifest {
 
-    /// A local model's estimated runtime footprint, from MEASUREMENTS only: its size on disk (the
-    /// input the MLX loader's own estimate uses), else its parameter count. nil when neither is known.
-    ///
-    /// ⚠️ Never the TIER fallback `ModelFitAdvisor.estimateRuntimeRAM` ends with: a flat per-tier
-    /// guess (20 GB for "medium") read off a profile's stored label, which put a 1.75 GB model at
-    /// 20 GB. Pure, for tests; the quiet estimator (`assess` logs per call; this runs on every send).
+    /// A local model's estimated runtime footprint from measurements only: size on disk, else parameter count; nil when
+    /// neither is known. Never the tier fallback in `ModelFitAdvisor.estimateRuntimeRAM`, which is a flat guess; quiet
+    /// (no per-call logging) because it runs on every send.
     nonisolated static func footprint(of config: ProviderConfig, onDiskBytes: Int64?) -> UInt64? {
         if let onDiskBytes, onDiskBytes > 0 {
             return ModelFitAdvisor.estimateRuntimeRAM(metadata: nil, diskSizeBytes: onDiskBytes)
@@ -1106,12 +1029,9 @@ extension InferenceRunManifest {
         return bytes > 0 ? bytes : nil
     }
 
-    /// The manifest for a run starting at `ActiveStreamManager.startMessageStream`, read from the
-    /// SwiftData stores (both `@MainActor`). Workflow layouts and node profiles are read the same way
-    /// `WorkflowExecutor` reads them at run start, so the two see one graph.
-    ///
-    /// ⚠️ An UNREADABLE layout resolves to nil — counted as an unresolved node — rather than to the
-    /// store's `.empty`, which would describe a broken workflow as one that needs nothing.
+    /// The manifest for a run starting at `ActiveStreamManager.startMessageStream`, read from the SwiftData stores;
+    /// layouts and node profiles are read as `WorkflowExecutor` reads them. An unreadable layout resolves to nil (an
+    /// unresolved node) rather than `.empty`, which would describe a broken workflow as needing nothing.
     @MainActor
     static func build(runID: UUID,
                       conversationID: UUID,

@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SettingsCategoryWiringTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Verifies that SettingsCategory cases (including MLX Model Store) are correctly configured,
-//  registered in allCases, have proper icons and subtitles, and are hooked up in the
-//  detail container and command palette.
+//  Created by Raj Singh.
 //
 
 import XCTest

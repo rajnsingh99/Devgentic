@@ -4,37 +4,29 @@
 //  HuggingFaceAccountCheck.swift
 //  Devgentic
 //
-//  `looksLikeToken` is a SHAPE check, so a wrong or revoked token saved cleanly and only
-//  failed later, inside a download — at the moment the user was least able to act on it.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "HuggingFaceToken")
 
+// Why: only `name` is declared on purpose: any other decoded field could be picked up by a log line, crash report or
+// state dump.
 /// The one field of `GET /api/whoami-v2` this app reads.
-///
-/// ⚠️ DELIBERATELY ONE FIELD. The real response also carries `email`, `emailVerified`,
-/// `avatarUrl`, `isPro` and the org list. Declaring only `name` means `JSONDecoder` discards the
-/// rest: the address never becomes a value this process holds, so there is nothing for a future
-/// log line, crash report or state dump to pick up by accident.
+/// The rest of the response (email, avatar, org list) is discarded by `JSONDecoder` and never held by this process.
 struct HFWhoAmI: Decodable {
     let name: String
 }
 
+// Why: keep the network out of the secrets store: a `URLSession` dependency would make it also the thing that talks to
+// the network, and a `SecureKeyStorage` prompt can hang a headless test run.
 /// Asks HuggingFace whether the saved token is one it actually accepts.
-///
-/// ⚠️ NOT part of `HuggingFaceTokenStore`: that type's whole job is one Keychain item, and giving
-/// a secrets store a `URLSession` dependency makes the thing that must never leak also the thing
-/// that talks to the network. It is also structurally untestable — `SecureKeyStorage` can raise a
-/// modal prompt that hangs a headless run. Not part of `MLXModelService` either: whoami is not a
-/// model operation, and Settings should not reach through the model manager to check a credential.
+/// Kept apart from `HuggingFaceTokenStore` (one Keychain item) and `MLXModelService` (whoami is not a model operation).
 enum HuggingFaceAccountCheck {
 
-    /// ⚠️ THREE OUTCOMES, NOT TWO. "the server said no" and "we could not ask" are different
-    /// facts, and collapsing them is the exact failure this check exists to avoid: telling a user
-    /// on a plane that their token is invalid sends them off to regenerate a credential that was
-    /// fine, and teaches them to distrust the check.
+    /// Three outcomes, not two: the server said no, and we could not ask, are different facts.
+    /// Telling an offline user their token is invalid would send them off to regenerate a working credential.
     enum Verdict: Equatable {
         /// 200 — the token authenticates, as this account.
         case valid(account: String)
@@ -47,10 +39,7 @@ enum HuggingFaceAccountCheck {
     // MARK: - Pure rules (the part tests can reach)
 
     /// Maps a classified transport failure onto a verdict.
-    ///
-    /// `nonisolated` and pure for the same reason `MLXModelStoreViewModel.searchDestination` is:
-    /// there is no `URLProtocol` stub or injected `URLSession` anywhere in this project, so the
-    /// only honest way to test the decision is to keep it out of the network call.
+    /// `nonisolated` and pure so the decision is testable without a network call (the project has no `URLProtocol` stub).
     nonisolated static func verdict(forFailure error: HFRequestError) -> Verdict {
         switch error {
         case .unauthorized:
@@ -61,9 +50,8 @@ enum HuggingFaceAccountCheck {
     }
 
     /// The sentence shown under the token field.
-    ///
-    /// ⚠️ INVARIANT: only `.rejected` may say anything about the TOKEN. Every other verdict
-    /// reports that the CHECK failed, and every one of them states the token was still saved.
+    /// Only `.rejected` may say anything about the token; every other verdict reports that the check failed,
+    /// and states that the token was still saved.
     nonisolated static func message(for verdict: Verdict) -> String {
         switch verdict {
         case .valid(let account):
@@ -79,16 +67,11 @@ enum HuggingFaceAccountCheck {
 
     // MARK: - The thin network call
 
-    /// Asks HuggingFace who the SAVED token belongs to.
-    ///
-    /// ⚠️ Verifies the token the app will actually USE, not the string the user typed:
-    /// `HFRequest.perform` reads `HuggingFaceTokenStore.shared.token` itself, so this exercises
-    /// the Keychain round-trip too. Call it only after `store(_:)` has returned true.
-    ///
-    /// ⚠️ `reloadIgnoringLocalCacheData` is load-bearing, not tidiness. `URLCache` keys on the
-    /// URL and ignores the `Authorization` header, so without it a cached 200 from a previous
-    /// token can answer the check for a revoked one — confirming a credential that does not work,
-    /// which is worse than today's silence.
+    // Why: `reloadIgnoringLocalCacheData` is load-bearing: `URLCache` ignores the `Authorization` header, so a cached 200
+    // from an earlier token could confirm a revoked one.
+    /// Asks HuggingFace who the saved token belongs to.
+    /// Verifies the token the app will actually use, read by `HFRequest.perform` from `HuggingFaceTokenStore`.
+    /// Call it only after `store(_:)` has returned true.
     static func verify() async -> Verdict {
         guard let url = URL(string: "https://huggingface.co/api/whoami-v2") else {
             return .inconclusive(.invalidURL)
@@ -99,7 +82,7 @@ enum HuggingFaceAccountCheck {
                 from: url,
                 cachePolicy: .reloadIgnoringLocalCacheData
             )
-            // ⚠️ The account name is returned for DISPLAY and is never logged.
+            // The account name is returned for display and is never logged.
             logger.notice("[MLXSTORE] HuggingFace token verified against /api/whoami-v2. CONSEQUENCE: gated and private repos are reachable and requests use the authenticated rate limit.")
             return .valid(account: who.name)
         } catch let error as HFRequestError {

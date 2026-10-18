@@ -4,14 +4,13 @@
 //  ClaudeToolTurnAdapter.swift
 //  Devgentic
 //
-//  Native-turn serializer for Anthropic's Messages API. Claude uses a
-//  content-block array on every message rather than top-level tool_calls:
-//    assistant turn → [{type: text}, {type: tool_use, ...}, ...]
-//    tool results   → user message with [{type: tool_result, ...}, ...]
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Native-turn serializer for Anthropic's Messages API: assistant turns are content-block arrays (text, tool_use),
+/// and tool results are a user message of `tool_result` blocks.
 struct ClaudeToolTurnAdapter: ToolTurnAdapter {
 
     func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?) -> [String: Any] {
@@ -41,9 +40,8 @@ struct ClaudeToolTurnAdapter: ToolTurnAdapter {
         ]
     }
 
-    /// ⚠️ CR-23: the previous response's thinking blocks go FIRST, exactly as received — Anthropic
-    /// rejects an assistant turn whose tool_use is not preceded by the thinking that produced it, and
-    /// a modified block fails its signature. See `ClaudeLLMProvider.thinkingReplay(in:)`.
+    /// The previous response's thinking blocks go first, exactly as received: Anthropic rejects a tool_use turn without
+    /// its thinking, and a modified block fails its signature. See `ClaudeLLMProvider.thinkingReplay(in:)`.
     func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?, replay: JSONValue?) -> [String: Any] {
         var turn = assistantTurn(toolCalls: toolCalls, reasoning: reasoning)
         guard case .array(let thinking)? = replay, !thinking.isEmpty,

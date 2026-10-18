@@ -4,22 +4,7 @@
 //  ProfileFetchWindowTests.swift
 //  DevgenticTests
 //
-//  Created on 31/08/26.
-//
-//  The 500-row fetch window versus node-owned profile rows.
-//
-//  ⚠️ `fetchProfiles()` caps at 500 rows sorted by `lastSelected` descending. That was a safe UI
-//  bound while the table held only profiles the user deliberately created; node-owned configuration
-//  makes it hold one row per bot/agent NODE across every workflow, so the table scales with graph
-//  size and the window becomes a cliff. Past it, three things failed silently: the save-time
-//  reconcile stopped collecting, the workflow-delete cascade orphaned rows and credentials, and —
-//  worst — the executor's profile map went short, so pre-flight reported nodes as "Profile not
-//  found" and refused ENTIRE runs over rows sitting on disk.
-//
-//  The fix is query-level predicates (`fetchOwnedProfiles`, `fetchProfiles(ids:)`, and a
-//  shared-only predicate under the picker cap). These tests seed PAST the cap against a real
-//  in-memory container, so the truncation is what they actually reproduce — a sub-cap fixture
-//  would pass against the broken code.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,41 +4,18 @@
 //  RemoteChunkedSend.swift
 //  Devgentic
 //
-//  Delivering a reply that does not fit one message.
-//
-//  ⚠️⚠️ WHAT THIS REPLACES, AND WHY IT WAS THE WORST BUG IN THE SEND PATH. All three API clients
-//  spelled a chunked send the same way:
-//
-//      for chunk in chunks { try await sendMessage(chunk) }
-//
-//  Three defects live in that line. (1) There is no pacing and no honouring of `Retry-After`: all
-//  three clients PARSE the header — `SlackAPIClient` and `DiscordAPIClient` even carry the value in
-//  `rateLimited(retryAfter:)` — and every one of them then throws it away, because the only readers
-//  of that case anywhere in the tree are `errorDescription` switches. Nothing sleeps and nothing
-//  retries. (2) A throw on chunk k abandons chunks k+1…n, so the user gets an answer that stops
-//  mid-sentence with no indication that more was written. (3) The caller's retry re-sends from chunk
-//  ONE, because nothing records how far the send actually got — so the mirror's retry duplicates
-//  every chunk that already arrived.
-//
-//  ⚠️ THE RESUME POINT IS THE POINT. `PartialDelivery.delivered` is what makes (3) fixable: a caller
-//  holding it can resume rather than restart. A boolean "it failed" cannot express the difference
-//  between "nothing arrived" and "the first four paragraphs arrived twice".
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - Rate-limit reporting
 
-/// An error that carries the platform's own "wait this long" instruction.
-///
-/// ⚠️ A PROTOCOL RATHER THAN A SHARED ERROR TYPE, because the three clients' error enums are public
-/// surface used elsewhere and re-typing them would be a much larger change than this fix deserves.
-/// Each conforms by answering one question, which is the only thing the send driver needs to know.
+/// An error that carries the platform's own wait-this-long instruction.
+/// Each client's error enum conforms by answering `retryAfterSeconds`, the only thing the send driver needs.
 protocol RemoteRateLimitedError: Error {
     /// Seconds the platform asked us to wait, or nil when this error is not a rate limit.
-    ///
-    /// ⚠️ `nil` for a NON-rate-limit error; a rate limit the platform did not quantify answers with
-    /// a value, not with nil — the driver cannot tell those apart otherwise.
+    /// A rate limit the platform did not quantify answers with a value, not nil, so the driver can tell them apart.
     var retryAfterSeconds: TimeInterval? { get }
 }
 
@@ -47,9 +24,7 @@ protocol RemoteRateLimitedError: Error {
 enum RemoteChunkedSend {
 
     /// Raised when some chunks landed and the rest did not.
-    ///
-    /// ⚠️ CARRIES THE COUNT, so a caller can resume from `delivered` instead of restarting. Nothing
-    /// could express that before, which is why the mirror's retry re-posted arrived chunks.
+    /// Carries `delivered`, so a caller can resume from it instead of restarting.
     struct PartialDelivery: LocalizedError {
         let delivered: Int
         let total: Int
@@ -61,29 +36,18 @@ enum RemoteChunkedSend {
         }
     }
 
+    // Why: the bound must exist: retrying forever makes a throttled channel an invisible loop; never retrying loses
+    // the reply's tail.
     /// How many times one chunk is retried after a rate limit before the send gives up.
-    ///
-    /// ⚠️ THREE, and the number matters less than the bound existing. Retrying forever turns a
-    /// throttled channel into an unbounded background loop the user cannot see or stop; not
-    /// retrying at all is what shipped, and it loses the tail of every throttled reply.
     static let rateLimitRetries = 3
 
-    /// The longest this will honour a platform's `Retry-After`.
-    ///
-    /// ⚠️ A HOSTILE OR ABSURD VALUE IS STILL A NUMBER THE PLATFORM SENT. Sleeping for a header-
-    /// supplied hour inside a send would look exactly like a hang, so the wait is clamped and the
-    /// send fails honestly instead of parking.
+    /// The longest this will honour a platform's `Retry-After`; a longer wait is clamped and the send fails instead of
+    /// parking.
     static let maxRetryAfter: TimeInterval = 30
 
     /// Sends `chunks` in order, pausing when the platform asks and reporting how far it got.
-    ///
-    /// - Parameters:
-    ///   - chunks: the pieces, already fitted to the platform's budget by `RemoteTextBudget.chunk`.
-    ///   - startingAt: the first index to send. A caller resuming a `PartialDelivery` passes its
-    ///     `delivered` count here so already-arrived chunks are not posted twice.
-    ///   - send: posts one chunk.
-    /// - Throws: `PartialDelivery` when at least one chunk landed, or the underlying error when the
-    ///   very first one failed (nothing arrived, so there is no partial state to describe).
+    /// - Parameters: `chunks` are pre-fitted by `RemoteTextBudget.chunk`; `startingAt` resumes after a `PartialDelivery`.
+    /// - Throws: `PartialDelivery` once a chunk landed, else the first failure's error.
     static func send(
         _ chunks: [String],
         startingAt startIndex: Int = 0,
@@ -102,8 +66,7 @@ enum RemoteChunkedSend {
                     delivered = index + 1
                     break
                 } catch {
-                    // ⚠️ ONLY a rate limit is retried. Retrying a 400 re-sends a message the
-                    // platform has already refused on its merits, which cannot start working.
+                    // Only a rate limit is retried: retrying a 400 re-sends a message the platform already refused on its merits.
                     guard let wait = (error as? RemoteRateLimitedError)?.retryAfterSeconds,
                           attempt < rateLimitRetries else {
                         guard delivered > startIndex else { throw error }

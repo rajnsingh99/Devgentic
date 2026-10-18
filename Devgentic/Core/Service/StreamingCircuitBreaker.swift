@@ -4,12 +4,7 @@
 //  StreamingCircuitBreaker.swift
 //  Devgentic
 //
-//  Safety mechanism for MLX on-device generation.
-//  Monitors the token stream in real-time and terminates generation early
-//  when it detects pathological repetition loops — preventing runaway
-//  generation that wastes compute and produces garbage output.
-//
-//  Created by Devgentic Architect.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,24 +12,9 @@ import OSLog
 
 private let logger = DGLogger(category: "CircuitBreaker")
 
-/// Monitors a token stream for repetitive loops and signals when generation
-/// should be terminated early.
-///
-/// ## How It Works
-///
-/// The breaker accumulates generated text and periodically scans for repeating
-/// blocks. It uses a **sliding window** approach: it checks whether a block of
-/// `N` characters at the end of the accumulated text also appears earlier,
-/// repeated consecutively. If the same block appears `repetitionThreshold`
-/// times in a row, the breaker trips.
-///
-/// Multiple window sizes are checked (small → large) to catch both short loops
-/// ("}\n{" repeated) and long loops (entire tool call blocks repeated).
-///
-/// ## Performance
-///
-/// Repetition checks are only performed every `checkInterval` characters of
-/// accumulated text, so the overhead per token is negligible.
+/// Monitors a token stream for repetitive loops and signals when generation should stop early. Scans every
+/// `checkInterval` characters for a block of `N` characters repeated `repetitionThreshold` times in a row, across
+/// several window sizes.
 struct StreamingCircuitBreaker {
 
     /// Result of feeding a chunk into the circuit breaker.
@@ -81,13 +61,9 @@ struct StreamingCircuitBreaker {
 
     // MARK: - Init
 
-    /// Creates a new circuit breaker for a single generation session.
-    ///
-    /// - Parameters:
-    ///   - repetitionThreshold: Consecutive repetitions before tripping. Default: 3.
-    ///   - checkInterval: Characters between checks. Default: 100.
-    ///   - windowSizes: Block sizes to scan. Default: [40, 80, 150, 300].
-    ///   - repeatedCallLimit: Copies of one tool call that trip the breaker. Default: 3.
+    /// Creates a circuit breaker for a single generation session. Defaults: three repetitions trip it, checked every
+    /// 100 characters over windows of 40, 80, 150 and 300; `repeatedCallLimit` copies of one tool call trip it (default
+    /// 3).
     init(
         repetitionThreshold: Int = 3,
         checkInterval: Int = 100,
@@ -103,13 +79,8 @@ struct StreamingCircuitBreaker {
 
     // MARK: - Feed
 
-    /// Feeds a new chunk of generated text into the breaker.
-    ///
-    /// Call this for every `.chunk(text)` received from the generation stream.
-    /// Returns `.tripped` if a repetition loop is detected, `.healthy` otherwise.
-    ///
-    /// - Parameter chunk: The newly generated text chunk.
-    /// - Returns: The breaker status after incorporating this chunk.
+    /// Feeds a chunk of generated text into the breaker; call it for every `.chunk(text)`. Returns `.tripped` when a
+    /// repetition loop is detected, `.healthy` otherwise.
     mutating func feed(_ chunk: String) -> Status {
         guard !hasTripped else {
             return .tripped(reason: "Circuit breaker already tripped")
@@ -139,25 +110,10 @@ struct StreamingCircuitBreaker {
 
     // MARK: - Repeated Tool Calls
 
-    /// Feeds one tool call the model wrote this turn. Returns `.tripped` when the same call has now
-    /// appeared `repeatedCallLimit` times; the caller must then NOT forward that copy and must stop
-    /// generating.
-    ///
-    /// ⚠️ WHY `feed(_:)` NEVER SAW THESE LOOPS. Calls the framework already decoded arrive as
-    /// `.toolCall` events, not text, so they bypassed the text check entirely. And a text check could
-    /// not have caught them anyway: it compares the last 40-300 characters with the block before,
-    /// which only matches when the loop's length is a multiple of the window. The device loops were
-    /// ~190 and ~350 characters per call. Qwen2.5-3B wrote the same `read_file` 46 times and the same
-    /// edit 17 times, each running to the 2,048-token limit (~50s of decode, 2026-10-06).
-    ///
-    /// Counted per turn, not only back to back, so an alternating A, B, A, B, A loop is caught too.
-    /// The executor already collapses duplicate calls before running them, so the copies withheld
-    /// here would never have run: stopping loses nothing but the wasted generation.
-    ///
-    /// - Parameters:
-    ///   - signature: the call's exact serialized form (name + arguments, keys sorted), or the raw
-    ///     text of a call the framework rejected.
-    ///   - name: the tool name, for the diagnostic only.
+    // Why: decoded tool calls arrive as `.toolCall` events, not text, so the text check in `feed(_:)` never sees them.
+    /// Feeds one tool call the model wrote this turn. Returns `.tripped` once the same call has appeared
+    /// `repeatedCallLimit` times. The caller must then drop that copy and stop generating. `signature` is the call's
+    /// serialized form; `name` is for diagnostics.
     mutating func feedToolCall(_ signature: String, name: String) -> Status {
         guard !hasTripped else {
             return .tripped(reason: "Circuit breaker already tripped")
@@ -174,12 +130,8 @@ struct StreamingCircuitBreaker {
 
     // MARK: - Repetition Detection
 
-    /// Checks whether the last `windowSize` characters of accumulated text
-    /// appear repeated `repetitionThreshold` times consecutively.
-    ///
-    /// Example with windowSize=50, threshold=3:
-    /// If the last 150 characters consist of the same 50-char block repeated 3 times,
-    /// the check returns a reason string.
+    /// Checks whether the last `windowSize` characters of accumulated text repeat `repetitionThreshold` times
+    /// consecutively. Returns a reason string when they do, nil otherwise.
     private func checkRepetition(windowSize: Int) -> String? {
         let text = accumulatedText
 
@@ -225,14 +177,8 @@ struct StreamingCircuitBreaker {
 
     // MARK: - Trim Output
 
-    /// Returns the accumulated text with the repetitive tail removed.
-    ///
-    /// When the breaker trips, the last `(repetitionThreshold - 1) * windowSize`
-    /// characters are likely garbage repetition. This method strips them,
-    /// returning only the first occurrence of the repeated block plus
-    /// everything before it.
-    ///
-    /// Call this after `.tripped` to get the clean output.
+    /// Returns the accumulated text with the repetitive tail removed, keeping the first occurrence of the repeated
+    /// block. Call after `.tripped` to get clean output.
     func trimmedOutput() -> String {
         guard hasTripped else { return accumulatedText }
 

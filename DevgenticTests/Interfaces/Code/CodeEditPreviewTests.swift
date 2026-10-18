@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  CodeEditPreviewTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The approval banner's file preview must reach the Code interface's own edit tools.
-//
-//  ⚠️⚠️ WHY THIS FILE EXISTS. `FileChange.parse` understood five tools — `write_file`,
-//  `delete_file`, `move_file`, `copy_file`, `create_folder` — every one of them `.library`,
-//  and `write_file` is `.libraryExceptCode`, i.e. HIDDEN from Code profiles. So the rich diff
-//  preview had never once rendered in Code mode: every approval there fell back to raw JSON.
-//
-//  Field-observed 2026-09-20: a user approved an `edit_code_batch` whose `old_string` was an
-//  entire method body, because serialized JSON does not look destructive. It deleted
-//  `greetRaj()`, left a second copy of `farewell()`, and produced three compile errors — and
-//  the run reported SUCCESS.
+//  Created by Raj Singh.
 //
 
 import XCTest

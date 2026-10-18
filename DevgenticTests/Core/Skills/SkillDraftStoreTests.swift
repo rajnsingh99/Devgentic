@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillDraftStoreTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  ⚠️⚠️ THE PROPERTY THAT REPLACES A MODAL. The skill detail used to be a sheet, which forced a
-//  decision on the way out. Inline, it can be left seven ways and one of them — the ⌘⌥7 tab switch —
-//  has no seam to intercept, so a prompt-based guard would protect six exits and silently destroy
-//  work on the seventh. Holding the draft outside the view makes every navigation exit lossless
-//  instead, which is exactly how profiles work: `editBuffer` lives on the service and nothing clears
-//  it on a tab switch.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,15 +4,7 @@
 //  TraceStoreBaselineSchemaTests.swift
 //  DevgenticTests
 //
-//  ⚠️ PINS THE SQUASHED BASELINE (2026-10-03). The trace database's eight incremental migrations
-//  were collapsed into one `v1_create_tables`. A database that already ran the old ladder keeps its
-//  tables and skips the baseline, so the baseline MUST produce exactly the schema the ladder did —
-//  otherwise a new install and an old one disagree about columns and one of them breaks at the first
-//  query that touches the difference.
-//
-//  `expected` was captured from a real database that had run all eight retired migrations, by the
-//  same column / foreign-key / index query `TraceStore.schemaFingerprint()` runs. Any future schema
-//  change goes in a NEW migration — update this fixture with it, never edit the baseline.
+//  Created by Raj Singh.
 //
 
 import XCTest

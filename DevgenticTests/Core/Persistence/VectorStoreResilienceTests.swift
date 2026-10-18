@@ -4,20 +4,7 @@
 //  VectorStoreResilienceTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards G73 — the SECOND store that could brick launch.
-//
-//  `VectorStoreService.init` ended in `fatalError("Could not initialize ObjectBox store")`, on the
-//  same cold launch path as the SwiftData container. A corrupt or unwritable vector-db therefore
-//  KILLED THE APP — no message, no path, no dialog — for a store the app does not need to function.
-//  The vector index is semantic-memory retrieval; without it chats, profiles, tools and workflows
-//  all work and only RAG recall degrades. That is a feature outage, not grounds for refusing to
-//  launch.
-//
-//  Its `wipeAndStamp` branch was separately the one place in the app that DELETED user data
-//  silently and without consent — and this data cannot be rebuilt, because there is no
-//  reindex-from-transcripts mechanism. It now quarantines instead.
+//  Created by Raj Singh.
 //
 
 import XCTest

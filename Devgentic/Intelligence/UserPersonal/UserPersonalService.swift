@@ -4,21 +4,16 @@
 //  UserPersonalService.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
 import SwiftData
 import os
 
-/// Orchestrates the User Personal profile lifecycle:
-/// 1. Gathers interaction patterns from recent conversations via pluggable sources.
-/// 2. Merges new observations into the existing profile using the Intelligence Core.
-/// 3. Persists the profile as a human-readable markdown file.
-/// 4. Provides the profile for agent prompt injection.
-///
-/// Architecture mirrors `MorningBriefService` with the same gate-check,
-/// gather, IC-merge, parse/save flow.
+/// Orchestrates the User Personal profile lifecycle: gathers interaction patterns from recent conversations via pluggable
+/// sources, merges them into the profile via the Intelligence Core, saves it as markdown and serves it to prompts.
+/// Mirrors `BriefingService`'s gate-check, gather, IC-merge, parse/save flow.
 @Observable @MainActor
 final class UserPersonalService {
 
@@ -127,7 +122,6 @@ final class UserPersonalService {
 
         logger.notice("[User Personal #\(analysisNum)] ═══ ANALYSIS START ═══")
 
-        // Phase 1: Fetch conversation data from SwiftData
         let gatherStart = CFAbsoluteTimeGetCurrent()
         let conversationData = await fetchRecentConversationData()
         let gatherDuration = CFAbsoluteTimeGetCurrent() - gatherStart
@@ -139,7 +133,6 @@ final class UserPersonalService {
 
         logger.notice("[User Personal #\(analysisNum)] Phase 1 (Fetch) — \(String(format: "%.2f", gatherDuration))s, \(conversationData.count) conversations")
 
-        // Phase 2: Gather observations from all sources
         let sourceStart = CFAbsoluteTimeGetCurrent()
         let fragments = await gatherAllFragments(from: conversationData)
         let sourceDuration = CFAbsoluteTimeGetCurrent() - sourceStart
@@ -151,7 +144,6 @@ final class UserPersonalService {
 
         logger.notice("[User Personal #\(analysisNum)] Phase 2 (Sources) — \(String(format: "%.2f", sourceDuration))s, \(fragments.count) fragments from \(Set(fragments.map(\.sourceID)).count) sources")
 
-        // Phase 3: IC merge into existing profile
         logger.notice("[User Personal #\(analysisNum)] Phase 3 (IC Merge) — Starting...")
         let mergeStart = CFAbsoluteTimeGetCurrent()
         let result = await mergeFragmentsIntoProfile(fragments: fragments, existingProfile: profileMarkdown)

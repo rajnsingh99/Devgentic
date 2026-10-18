@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ExtractionResultTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1: ExtractionResult metadata correctness.
+//  Created by Raj Singh.
 //
 
 import XCTest

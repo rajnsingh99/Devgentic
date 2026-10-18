@@ -4,27 +4,14 @@
 //  ModelDownloadStatusView.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//  Rewritten 2026-04-22 — dropped `@Query` with a captured-param predicate
-//  because SwiftUI didn't reliably rebuild the fetch when rows were
-//  recycled in `LazyVStack`, so the Download button could stay visible
-//  on a model that was actively downloading. Now reads from
-//  `DownloadManager.activeRecordIDsByKey` (observable stored dict) +
-//  `DownloadHistoryStore.fetch(id:)` for the actual record.
-//
-//  Unified per-model download-status component. Used in:
-//    · OllamaModelStoreView — registry browser rows
-//    · MLXModelStoreView    — HF model cards
-//    · GeneralSettingsView  — Whisper model rows
-//
-//  Renders one of three compact states:
-//    · Available  → "Download" button (accent pill)
-//    · Downloading→ progress bar + percentage + cancel + speed line
-//    · Installed  → "Installed" label + overflow menu (Re-download / Delete)
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Unified per-model download-status component shared by the Ollama and MLX store rows and the Whisper rows.
+/// Renders one of three states: Available (Download button), Downloading (progress, cancel, speed) or Installed (menu).
+/// Reads `DownloadManager.activeRecordIDsByKey` and `DownloadHistoryStore.fetch(id:)` rather than a `@Query`.
 struct ModelDownloadStatusView: View {
     let backend: ModelBackendType
     let modelIdentifier: String
@@ -33,14 +20,9 @@ struct ModelDownloadStatusView: View {
     var profileID: UUID? = nil
     var showInstalledLabel: Bool = true
 
-    /// Non-nil when this model can never be run by Devgentic (a decision/classifier model, or a
-    /// speech/image/embedding model). The Download pill is replaced by a disabled "Not supported"
-    /// pill carrying this text as its tooltip.
-    ///
-    /// ⚠️ Consulted ONLY after the in-progress and installed states. A copy already on disk (or a
-    /// download already running) must stay deletable/cancellable — an unsupported verdict that
-    /// stranded a multi-GB installed model with no Delete menu would be a worse bug than the one
-    /// it prevents.
+    /// Non-nil when Devgentic can never run this model (decision/classifier, speech, image or embedding model).
+    /// Swaps the Download pill for a disabled "Not supported" pill using this text as its tooltip.
+    /// Consulted only after the in-progress and installed states, so existing copies stay deletable and cancellable.
     var unsupportedReason: String? = nil
 
     /// Called when the user confirms a fresh download. If `nil`, the view
@@ -52,9 +34,7 @@ struct ModelDownloadStatusView: View {
     /// currently surface a delete UI should omit it rather than crash.
     var onDeleteRequested: (() -> Void)? = nil
 
-    /// Opens the model's folder. Supplied only for backends whose models live in a folder the
-    /// app knows about — the installed card previously showed the path as truncated caption
-    /// text with no way to act on it.
+    /// Opens the model's folder; supplied only for backends whose models live in a folder the app knows about.
     var onRevealRequested: (() -> Void)? = nil
 
     @Environment(ToastManager.self) private var toastManager
@@ -63,10 +43,8 @@ struct ModelDownloadStatusView: View {
     @State private var showingRedownloadAlert: Bool = false
     @State private var showingCancelAlert: Bool = false
 
-    /// MLX cancel path must wait for the in-flight HubApi task to observe
-    /// cancellation and then delete the partial folder — during that window
-    /// we show a "Cleaning up…" indicator instead of a frozen progress bar.
-    /// Other backends cancel atomically and don't need this state.
+    /// MLX cancel waits for the in-flight HubApi task to observe cancellation and then deletes the partial folder;
+    /// this drives a "Cleaning up..." indicator. Other backends cancel atomically.
     private var isCleaningUpCancel: Bool {
         backend == .mlx && MLXModelService.shared.isCancellingDownload(repoId: modelIdentifier)
     }
@@ -95,11 +73,8 @@ struct ModelDownloadStatusView: View {
         self.onRevealRequested = onRevealRequested
     }
 
-    /// Most-recent active record for this model, if any. Reading
-    /// `DownloadManager.shared.activeRecordIDsByKey` here registers view
-    /// observation on the @Observable dict so updates — start, progress
-    /// ticks (via the record's @Model observation), terminal transitions
-    /// — all trigger re-renders.
+    /// Most-recent active record for this model, if any.
+    /// Reading `activeRecordIDsByKey` registers observation so start, progress and terminal changes re-render.
     private var activeRecord: DownloadRecord? {
         DownloadManager.shared.activeRecord(
             backend: backend,
@@ -187,15 +162,11 @@ struct ModelDownloadStatusView: View {
     }
 
     private func downloadingView(record: DownloadRecord) -> some View {
-        // Live speed snapshot from DownloadManager's @Observable dict.
-        // Reading it in the view body means the row re-renders every time
-        // the sampler publishes a new MB/s value, ~1-2× per second.
+        // Live speed snapshot from `DownloadManager`'s observable dict; the row re-renders on each new MB/s sample.
         let snapshot = DownloadManager.shared.activeSpeeds[record.id]
         return VStack(alignment: .leading, spacing: 2) {
             if isCleaningUpCancel {
-                // Post-cancel cleanup: HubApi task is winding down and we're
-                // about to delete the partial folder. Replace the progress
-                // bar with a spinner so the user doesn't think it's stuck.
+                // Post-cancel cleanup: shows a spinner instead of the progress bar while the partial folder is deleted.
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Cleaning up…")
@@ -264,11 +235,8 @@ struct ModelDownloadStatusView: View {
                 Label("Installed", systemImage: "checkmark.seal.fill")
                     .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.successColor)
-                    // ⚠️ A pill must keep its intrinsic width. This is a SHARED component dropped
-                    // into rows with very different width budgets — the MLX store card has room,
-                    // the Whisper settings row does not — and without this the label wrapped and
-                    // hyphenated INSIDE the capsule ("In-stal / led"). `fixedSize` opts the label
-                    // out of the parent's compression; `lineLimit(1)` stops the wrap outright.
+                    // A pill must keep its intrinsic width: this shared component sits in rows with different width budgets.
+                    // `fixedSize` opts out of parent compression and `lineLimit(1)` stops wrapping inside the capsule.
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 10)
@@ -316,17 +284,8 @@ struct ModelDownloadStatusView: View {
 
     // MARK: - Download trigger
 
-    /// Whether the host's pre-download hook should handle this request instead of the
-    /// coordinator.
-    ///
-    /// ⚠️ Only a FRESH pull may be intercepted. The hook exists so the MLX store can raise its
-    /// RAM-fit advisory before starting a download; a forced re-download is an explicit repair
-    /// of a model already on disk, whose fit was accepted when it was first installed.
-    /// Delegating a forced request would drop the `force` flag — the host's closure calls the
-    /// coordinator without it, the install check short-circuits, and Re-download silently
-    /// becomes the no-op that A7 existed to fix.
-    ///
-    /// Static and free of view state so the rule is testable without building a view.
+    /// Whether the host's pre-download hook should handle this request instead of the coordinator.
+    /// Only a fresh pull is intercepted; delegating a forced re-download would drop the `force` flag. Free of view state.
     static func shouldDelegateToHost(force: Bool, hasHook: Bool) -> Bool {
         !force && hasHook
     }
@@ -359,9 +318,8 @@ struct ModelDownloadStatusView: View {
                 profileID: profileID
             )
         case .mlx:
-            // `force` must reach the coordinator: deleting the history record above is not
-            // enough, because the installed check reads the FILESYSTEM. Without this the
-            // Re-download button was a guaranteed no-op on any installed model.
+            // `force` must reach the coordinator: the installed check reads the filesystem,
+            // so deleting the history record is not enough.
             outcome = await DownloadCoordinator.startMLXDownloadIfNeeded(
                 repoId: modelIdentifier,
                 profileID: profileID,

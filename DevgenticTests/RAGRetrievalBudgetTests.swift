@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGRetrievalBudgetTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 11/07/26.
-//
-//  Covers the retrieval injection budget: retrieved parent texts are clamped
-//  (8K/parent, 24K total) and — critically — windowed AROUND the matched chunk,
-//  not head-clamped. The head-clamp bug made every symbol past a file's first
-//  8K chars unanswerable ("does not contain…") even though retrieval found the
-//  right document.
+//  Created by Raj Singh.
 //
 
 import XCTest

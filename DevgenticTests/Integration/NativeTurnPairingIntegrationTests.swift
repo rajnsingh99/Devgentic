@@ -4,18 +4,7 @@
 //  NativeTurnPairingIntegrationTests.swift
 //  DevgenticTests
 //
-//  Regression tests for the native turn-pairing invariant (audit #4): every
-//  tool call serialized into the assistant turn must have a matching tool
-//  result turn. executeToolCalls drops calls without producing observations
-//  (exact-duplicate dedup, same-path write dedup, final_answer siblings) —
-//  the executor must serialize the assistant turn from the EXECUTED calls,
-//  or Claude/OpenAI reject the history with a 400 and Gemini errors on the
-//  functionCall/functionResponse count mismatch.
-//
-//  MockLLMProvider receives the native turn array via the protocol's default
-//  downgrade: the assistant turn's `tool_calls` array arrives JSON-encoded as
-//  a string, and each tool result arrives as a `role:"tool"` message — so the
-//  pairing is observable by decoding the captured second request.
+//  Created by Raj Singh.
 //
 
 import XCTest

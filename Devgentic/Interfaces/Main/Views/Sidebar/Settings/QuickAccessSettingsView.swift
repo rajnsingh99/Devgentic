@@ -4,14 +4,13 @@
 //  QuickAccessSettingsView.swift
 //  Devgentic
 //
-//  [QA revival P1d] Settings pane for the QuickAccess floating panel: enable/disable, the
-//  configurable global shortcut (via HotkeyRecorderView), a sticky default chat profile, and
-//  the session-resume timeout. Reads/writes QuickAccessConfigManager (UserDefaults-backed) and
-//  asks AppDelegate to re-register the Carbon hotkey when activation settings change.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Settings pane for the QuickAccess floating panel: enable, global shortcut, default chat profile, resume timeout.
+/// Reads and writes `QuickAccessConfigManager`; asks `AppDelegate` to re-register the hotkey on activation changes.
 struct QuickAccessSettingsView: View {
     @Environment(\.appTheme) private var theme
     @State private var config = QuickAccessConfigManager.shared
@@ -55,9 +54,8 @@ struct QuickAccessSettingsView: View {
                                         config.setShortcut(carbonKeyCode: code, carbonModifiers: mods)
                                         AppDelegate.shared.applyHotkeyConfig()
                                     },
-                                    // [M3] Pause the live global hotkey while the recorder is armed so
-                                    // pressing the CURRENT combo to re-record it is captured here
-                                    // instead of summoning the panel over Settings.
+                                    // Pause the live global hotkey while the recorder is armed, so pressing the current combo to re-record it
+                                    // is captured here instead of summoning the panel.
                                     onRecordingStateChanged: { recording in
                                         AppDelegate.shared?.setHotkeyPaused(recording)
                                     }

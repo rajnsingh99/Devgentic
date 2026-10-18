@@ -4,6 +4,8 @@
 //  DeveloperDiagnosticTools.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import Foundation
 import os
@@ -31,10 +33,8 @@ struct ManageProcessesTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // `kill` was an action here until 2026-07-31. Listing processes is something an agent does
-        // constantly while diagnosing; `kill -9` is irreversible and cannot be caught by the
-        // target, so unsaved work is simply gone. One `requiresConfirmation` could not cover both
-        // — prompting on every listing is what teaches a user to approve without reading.
+        // `kill` is not an action of this tool: listing processes is routine while `kill -9` is irreversible, and
+        // one `requiresConfirmation` cannot cover both.
         if let action = arguments.action, action == "kill" {
             return "Error: 'kill' has moved to the `kill_process` tool, so it can carry its own "
                 + "confirmation setting. Call that tool with the pid or process name."
@@ -43,18 +43,8 @@ struct ManageProcessesTool: DevgenticTool {
             return "Error: Unknown action '\(arguments.action ?? "")'. This tool only lists processes."
         }
 
-        // `ps` invoked DIRECTLY, with the sort and the limit applied in Swift.
-        //
-        // The previous form was `zsh -c "ps -eo … | sort -k 2 -nr | head -n 10"`, which SILENTLY
-        // DISCARDED THE COLUMN HEADER: `sort` has no notion of a header row, so `PID %CPU %MEM
-        // COMM` was ordered along with the data, sorted to the bottom (field 2 reads as 0), and
-        // then cut by `head -n 10`. What reached the model was four unlabelled columns —
-        // `31363 48.7 0.1 /usr/…` — with nothing to say which number is CPU and which is memory.
-        // The tool's own description promises "by CPU and memory", so the model has to guess,
-        // and guessing wrong inverts the diagnosis.
-        //
-        // Sorting here rather than in a pipeline keeps the header, and drops a shell that was
-        // only ever hosting two pipes.
+        // `ps` is invoked directly with the sort and limit applied in Swift, because a `sort | head` shell pipeline
+        // discards the column header row and leaves the model unlabelled CPU/memory columns.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
         process.arguments = ["-eo", "pid,pcpu,pmem,comm"]
@@ -77,9 +67,8 @@ struct ManageProcessesTool: DevgenticTool {
             // `ps` always emits the header first; everything after it is data.
             let header = lines.removeFirst()
 
-            // %CPU is the second whitespace-separated field. A row that will not parse sorts
-            // last rather than being dropped — losing a process from a diagnostic listing is
-            // worse than showing it out of order.
+            // %CPU is the second whitespace-separated field. A row that will not parse sorts last rather than being
+            // dropped: losing a process from a diagnostic listing is worse than showing it out of order.
             let ranked = lines.sorted { lhs, rhs in
                 let l = Double(lhs.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first ?? "") ?? -1
                 let r = Double(rhs.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first ?? "") ?? -1
@@ -95,11 +84,9 @@ struct ManageProcessesTool: DevgenticTool {
     }
 }
 
-/// Terminating a process, as its own tool — split from `manage_processes` on 2026-07-31.
-///
-/// `SIGKILL` cannot be caught, blocked or ignored by the target, so there is no cleanup and no
-/// save. That is not the same kind of act as listing processes, and it should not inherit the same
-/// confirmation setting. Classified `.destructive` in `HITLRiskTier`.
+/// Terminates a process as its own tool, separate from `manage_processes`: `SIGKILL` cannot be caught or
+/// ignored, so there is no cleanup or save, and it should not share the listing tool's confirmation setting.
+/// Classified `.destructive` in `HITLRiskTier`.
 struct KillProcessTool: DevgenticTool {
     let name = "kill_process"
     let category = "System State"
@@ -124,30 +111,10 @@ struct KillProcessTool: DevgenticTool {
 
         let process = Process()
         if let pid = Int(target) {
-            // ⚠️ A pid must be POSITIVE. In POSIX `kill`, a non-positive pid is not a process:
-            //   -1  → every process the user has permission to signal (the whole login session)
-            //    0  → every process in the caller's process group (this app)
-            //   -N  → every process in process group N
-            // and `--` — added here so a process NAME beginning with `-` reaches the argv as a
-            // target rather than a flag (invariant 12) — is exactly what makes `-1` unambiguously
-            // a *target* instead of a malformed signal. The separator that fixes option injection
-            // is what arms this, so the two belong together: keep `--`, and reject the pids that
-            // are not one process. `target: "-1"` was a session-wide SIGKILL. (2026-07-31)
-            //
-            // ⚠️⚠️ A SPEED-BUMP AGAINST THE ACCIDENT, **NOT A BOUNDARY** — and the distinction is
-            // load-bearing, because the comment above reads like one. Tools are granted per
-            // profile, and any profile that also grants `batch_command`, `execute_shell` or
-            // `run_applescript` reaches `kill -9 -1` directly: neither `ShellCommandGuard`
-            // .refusalReason nor `BatchCommandTool.destructivePatterns` mentions `kill` at all.
-            // Those three are `.destructive` for the same reason this tool is, so the refusal
-            // below buys no extra gating either — `HITLRiskTier.classify` returns `.destructive`
-            // for anything in `ToolCapability.arbitraryCodeExecution`.
-            //
-            // What it does buy is real, and worth keeping: a model that meant one process and
-            // typed a signal spec does not take down the login session, and a profile granted
-            // this tool WITHOUT a shell genuinely cannot. What it must not do is read as the
-            // reason a shell-bearing profile is safe. `destructivePatterns` carries the same
-            // disclaimer for the same reason; the two were written apart and only one said it.
+            // Why: a speed bump against an accident, not a security boundary: a profile that also grants a shell tool
+            // reaches `kill -9 -1` directly
+            // A pid must be positive: in POSIX `kill`, -1 signals every process the user may signal, 0 the caller's
+            // process group. Keep `--` (a name starting with `-` is a target, not a flag) and reject non-positive pids.
             guard pid > 0 else {
                 logger.error("[KILLPROC] ⚠️ refused non-positive pid '\(target)' — this would have signalled a process GROUP (0 = this app's own group, -1 = every process the user owns), not one process. No signal sent.")
                 return "Error: '\(target)' is not a process id. A pid must be positive — "

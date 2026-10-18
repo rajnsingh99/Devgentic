@@ -4,14 +4,12 @@
 //  UserFeedback.swift
 //  Devgentic
 //
-//  The feedback a user attaches to a run's diagnostic-bundle export. Moved here
-//  2026-08-22 from ReportViewModel.swift, deleted with the old Developer/User
-//  report fork — the types outlived the view model because BundleExporter's
-//  user_feedback/ section is built from them.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The feedback a user attaches to a run's diagnostic-bundle export; `BundleExporter` builds its user_feedback section.
 enum FeedbackRating: String, Codable, CaseIterable {
     case positive = "positive"
     case negative = "negative"

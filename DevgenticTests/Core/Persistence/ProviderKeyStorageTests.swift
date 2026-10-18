@@ -4,13 +4,7 @@
 //  ProviderKeyStorageTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Regression tests for the credential-at-rest cluster (register A16, A17, A18).
-//
-//  ⚠️ The invariant these exist to hold: a cloud API key must not appear in `configData`. That blob
-//  lives in an unsandboxed Application Support directory, so anything written there is readable by
-//  any process running as the user and is swept into every backup.
+//  Created by Raj Singh.
 //
 
 import XCTest

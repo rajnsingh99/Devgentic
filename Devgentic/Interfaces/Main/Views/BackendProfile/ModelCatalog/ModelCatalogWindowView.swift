@@ -4,15 +4,15 @@
 //  ModelCatalogWindowView.swift
 //  Devgentic
 //
-//  Dedicated split-view window/sheet for browsing model catalog and selecting models.
-//  Features providers on the left, model catalog cards on the right, and one-time
-//  Keychain API key management.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 private let logger = DGLogger(category: "ModelCatalog")
 
+/// Split-view window for browsing the model catalog and selecting models.
+/// Providers on the left, model cards on the right, with one-time Keychain API key management.
 struct ModelCatalogWindowView: View {
 
     @Binding var providerConfig: ProviderConfig
@@ -141,12 +141,8 @@ struct ModelCatalogWindowView: View {
         applyModel(model, key: key, endpointOverride: endpoint)
     }
 
-    /// ⚠️ Order matters, and was wrong. The provider-change callback used to run LAST, after the
-    /// model's values were written, so its profile-type default (an agent on MLX or Ollama gets
-    /// `.singleAction`) overwrote the capability just measured for the picked model. And a provider
-    /// change reset nothing: the old provider's tuned generation settings and model measurements
-    /// rode along. Now: reset for the new provider, apply the profile-type defaults, then the
-    /// picked model's own values — the most specific answer is written last and wins.
+    // Why: the model's values must be written last, or the profile-type default overwrites its measured capability.
+    /// Applies a picked model: resets for the new provider, applies profile-type defaults, then the model's values.
     private func applyModel(_ model: CatalogModelItem, key: String?, endpointOverride: String? = nil) {
         let oldProvider = providerConfig.apiProvider
 

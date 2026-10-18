@@ -4,30 +4,7 @@
 //  SchedulerCoordinatorTests.swift
 //  DevgenticTests
 //
-//  The first tests this type has ever had. It is the surface that shipped the only live
-//  violation of `architecture_readme.md` §7 invariant #8 — "Ascending history only, from
-//  `BackendHistoryResolver`" — and it went unnoticed because nothing here was covered.
-//
-//  Two layers are covered here.
-//
-//  1. `persistScheduledQuestion` + `ActiveStreamManager.deriveHistory` — the two real steps of a
-//     scheduled run's pre-flight, in the real order. This is the half that carried the invariant
-//     #8 bug.
-//  2. `sendScheduledMessage` — the WHOLE path, driven for real through the `MessageStreamStarting`
-//     seam. This is the layer that could not be tested at all before: the method used to need a
-//     `MainApplicationViewModel` (whose init runs `ChatOpsCoordinator.bootstrap()` and opens real
-//     Telegram/Discord/Slack connections when the developer has them enabled), and it parks on a
-//     continuation only `startMessageStream`'s `onComplete` resumes — with `ActiveStreamManager`
-//     being `final`, there was nothing to intercept.
-//
-//  Both blockers are gone: the user-message factory is `MessagingCoordinator.makeUserMessage`
-//  (needs a `FileProcessorService`, not a view model), workflow bookkeeping takes the narrow
-//  `WorkflowRunRegistry`, and the stream boundary is `MessageStreamStarting`. A spy conforming to
-//  it captures the hand-off and resumes the continuation, so the real method runs to completion
-//  with no backend, no network and no view model.
-//
-//  Everything below asserts on ORDERED IDS, never on counts or character sums. A character sum
-//  is order-independent, which is exactly what let a descending array ship.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillAllowedToolsWiringTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  That the `allowed-tools` declaration actually reaches the places that show it — and reaches
-//  NOWHERE ELSE.
-//
-//  ⚠️ Policy-only tests go green over features that cannot run. `SkillToolDeclaration` being
-//  correct and unused looks identical to `SkillToolDeclaration` being correct and wired, and this
-//  codebase has shipped that exact shape before. Everything here goes through the real scanner, the
-//  real loader, or the real tool resolver.
+//  Created by Raj Singh.
 //
 
 import XCTest

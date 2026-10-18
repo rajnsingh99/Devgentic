@@ -4,8 +4,7 @@
 //  BalancedJSONScannerTests.swift
 //  DevgenticTests
 //
-//  Tests for the shared balanced-block scanner (#15 sub-issue 5), with emphasis on the
-//  string/escape edge cases that the old hand-rolled scanners got wrong.
+//  Created by Raj Singh.
 //
 
 import XCTest

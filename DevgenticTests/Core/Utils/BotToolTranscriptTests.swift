@@ -4,18 +4,7 @@
 //  BotToolTranscriptTests.swift
 //  DevgenticTests
 //
-//  `pairTurns` extracts tool actions from persisted timeline events with no profile gating,
-//  so switching an agent conversation to a BOT profile shipped the model a full tool-execution
-//  transcript — names, arguments, `<effect>` diffs — for tools it has no schemas for
-//  (`rawTools = []`) and no dispatch loop to run (`ChatExecutor` sends `tools: nil`).
-//
-//  Two problems, and only one is context waste. The sharper one is that the codebase already
-//  documents this pressure: when tool summaries were baked into assistant turns, models
-//  imitated the FORMAT instead of calling tools. A bot shown `<action tool="write_file">` with
-//  nothing to match it against is the same trap.
-//
-//  The actions are true history and stay. What goes is the revert instrument — a diff is for
-//  undoing, and a profile that cannot call `write_file` cannot undo anything.
+//  Created by Raj Singh.
 //
 
 import XCTest

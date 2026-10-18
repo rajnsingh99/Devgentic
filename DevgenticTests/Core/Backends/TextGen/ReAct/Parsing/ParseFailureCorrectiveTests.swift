@@ -4,24 +4,7 @@
 //  ParseFailureCorrectiveTests.swift
 //  DevgenticTests
 //
-//  `ParseFailureReason.modelCorrectiveAlert` must name the format THIS RUN parses back.
-//
-//  ⚠️ THE DEFECT THIS PINS — the sibling of invariant 80, on the path that actually fires. Five of
-//  the eleven arms stated a wire shape and every one of them stated the `.nativeJSON` envelope:
-//
-//      .schemaKeyMismatch  → "Correct shape: {\"name\": \"...\", \"arguments\": {...}}."
-//      .dialectDrift       → "…Emit JSON tool calls of shape {\"name\": …, \"arguments\": …}."
-//      .toolNameInProse    → "…Emit: {\"name\": \"X\", \"arguments\": {...}}."
-//      .noStructuredOutput → "Emit a JSON tool call…"
-//      .malformedJSON      → "…use double quotes, and produce strict JSON syntax."
-//
-//  `LLMRetryStrategy` carried the same text and was fixed first, but it only fires on UNCLASSIFIED
-//  thrown errors — generators return `.failed(reason)` rather than throwing, so this is the path a
-//  real parse failure takes and it fires far more often.
-//
-//  ⚠️ This file is also the FIRST test coverage `ParseFailureReason` has ever had: before it,
-//  `grep -rln 'ParseFailureReason' DevgenticTests/` returned nothing, which is how five arms came
-//  to agree on the wrong shape.
+//  Created by Raj Singh.
 //
 
 import XCTest

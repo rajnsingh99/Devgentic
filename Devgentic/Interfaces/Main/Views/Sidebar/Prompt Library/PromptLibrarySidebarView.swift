@@ -5,10 +5,6 @@
 //  Devgentic
 //
 //  Created by Raj Singh.
-//  Modernized on 17/02/26 with refined cards, tags, search, and micro-interactions.
-//  Overhauled on 2026-04-21 — split browse/edit VMs, lazy rows, hover actions,
-//  context menus, keyboard nav, delete confirm, sort + pin + tag filter,
-//  sheet (not popover) for create, error banner.
 //
 
 import SwiftUI
@@ -17,17 +13,14 @@ import os
 private let logger = DGLogger(category: "PromptLibrarySidebarView")
 
 // MARK: - Localized titles for the sort / source menus
-//
-// Both enums are declared in `Foundation`-only files (`PromptBrowseViewModel.swift`,
-// `PromptCategory.swift`), so the SwiftUI-dependent title lives here, in the file
-// that renders it, rather than forcing `import SwiftUI` into the model layer.
+// `PromptSortOrder` and `PromptSourceFilter` are declared in Foundation-only files, so their SwiftUI-dependent titles
+// live here, with the view that renders them, rather than importing SwiftUI into the model layer.
 
+/// SwiftUI-facing title for the sort-order menu.
 extension PromptSortOrder {
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)`
-    /// binds to the non-localizing `StringProtocol` overload, so every rawValue-sourced
-    /// label was invisible to the String Catalog extractor and would have shipped
-    /// untranslated inside otherwise-translated chrome. `rawValue` stays for
-    /// persistence (`UserDefaults` key `promptBrowse.sortOrder`) and logging only.
+    // Why: `Text(x.rawValue)` uses the non-localizing `StringProtocol` overload, so labels must come from here.
+    /// User-facing name, localizable through the String Catalog.
+    /// `rawValue` is kept for persistence (`UserDefaults` key `promptBrowse.sortOrder`) and logging only.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .alphabetical:    return "Alphabetical"
@@ -38,9 +31,8 @@ extension PromptSortOrder {
 }
 
 extension PromptSourceFilter {
-    /// User-facing name. ⚠️ Separate from `rawValue` on purpose — see
-    /// `PromptSortOrder.localizedTitle`. `rawValue` is persisted to `UserDefaults`
-    /// under `promptBrowse.selectedSource`, so it must never change.
+    /// User-facing name, separate from `rawValue` (see `PromptSortOrder.localizedTitle`).
+    /// `rawValue` is persisted under `promptBrowse.selectedSource`, so it must never change.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .all:     return "All"
@@ -139,9 +131,8 @@ struct PromptLibrarySidebarView: View {
                 if viewModel.deletePrompt(prompt) {
                     if focusedPromptID == prompt.id { focusedPromptID = nil }
                 } else {
-                    // Typically only happens if the prompt flipped to
-                    // built-in between alert-present and confirm, or if
-                    // persistence failed. Either way, surface the refusal.
+                    // Typically means the prompt flipped to built-in between alert-present and confirm, or persistence failed;
+                    // surface the refusal.
                     toastManager.show("Couldn't delete — prompt may be built-in", style: .error)
                 }
             }
@@ -199,10 +190,8 @@ struct PromptLibrarySidebarView: View {
         .padding(.bottom, 8)
     }
 
-    /// Combined sort + source filter menu. Kept together to avoid adding a
-    /// second header button — the two are both "list shaping" concerns so
-    /// grouping them reads naturally. Checkmarks on active items give
-    /// visual feedback without needing a segmented picker.
+    /// Combined sort and source filter menu, kept together to avoid a second header button;
+    /// checkmarks mark the active items.
     private func sortMenu(viewModel: PromptBrowseViewModel) -> some View {
         Menu {
             Section("Sort By") {
@@ -242,9 +231,7 @@ struct PromptLibrarySidebarView: View {
                         .fill(theme.surfaceOverlay)
                 )
                 .overlay(
-                    // Subtle dot indicator when a non-default source filter
-                    // is active — so users see at a glance that the list
-                    // isn't showing everything.
+                    // Dot indicator when a non-default source filter is active, so the list visibly isn't showing everything.
                     Circle()
                         .fill(theme.accentColor)
                         .frame(width: 4, height: 4)
@@ -254,10 +241,8 @@ struct PromptLibrarySidebarView: View {
         }
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        // ⚠️ Composed, not interpolated: `"\(x.localizedTitle)"` would not compile
-        // and `"\(x.rawValue)"` would silently bake an untranslated English word
-        // into an otherwise-translatable sentence. Nesting `Text` keeps the frame
-        // ("Sort: %@ · Show: %@") extractable *and* localizes both values.
+        // Composed, not interpolated: nesting `Text` keeps the frame ("Sort: %@ · Show: %@") extractable and localizes both
+        // values, whereas interpolating `rawValue` would bake an untranslated English word into the sentence.
         .help("Sort: \(Text(viewModel.sortOrder.localizedTitle)) · Show: \(Text(viewModel.selectedSource.localizedTitle))")
         // `accessibilityLabel(_: String)` does not localize — the `Text` overload does.
         .accessibilityLabel(
@@ -518,9 +503,7 @@ struct PromptLibrarySidebarView: View {
             isSelectionMode: isSelectionMode,
             isBatchSelected: selectedIDs.contains(prompt.id),
             onToggleBatchSelect: {
-                // Built-ins are undeletable, so block selection outright —
-                // that way the Delete pill's count always matches what will
-                // actually be removed and there's no "skipped" surprise.
+                // Built-ins are undeletable, so block selection outright; the Delete pill's count then always matches what is removed.
                 guard prompt.isUserDefined else {
                     toastManager.show("Built-in prompts can't be selected", style: .warning)
                     return
@@ -535,9 +518,7 @@ struct PromptLibrarySidebarView: View {
                 }
             },
             onEnterSelectionMode: {
-                // Only allow entering selection mode from a user-defined row —
-                // the first tap will also try to toggle that row on, so
-                // starting from a built-in would be immediately frustrating.
+                // Only enter selection mode from a user-defined row: the first tap also toggles that row on.
                 if prompt.isUserDefined {
                     isSelectionMode = true
                 } else {
@@ -548,12 +529,9 @@ struct PromptLibrarySidebarView: View {
         .id(prompt.id)
     }
 
-    /// Stages the prompt into the chat input and returns to chat. Shared
-    /// behavior with the detail view's overflow-menu action, but invokable
-    /// directly from the sidebar row (hover button + context menu) so users
-    /// don't have to open the prompt just to insert it. No-op with an error
-    /// toast if the prompt's text is empty (rare but possible for skeleton
-    /// user-created entries).
+    /// Stages the prompt into the chat input and returns to chat.
+    /// Invokable from the sidebar row (hover button, context menu) so the prompt need not be opened first.
+    /// No-op with an error toast if the prompt's text is empty.
     private func useInChat(_ prompt: DevPrompt) {
         if chatInputVM.stagePromptFromLibrary(prompt) {
             toastManager.show("Ready in chat input", style: .success)
@@ -565,9 +543,8 @@ struct PromptLibrarySidebarView: View {
 
     // MARK: - Batch Selection
 
-    /// Header shown when the user is in selection mode. Replaces the normal
-    /// search/chips chrome (no sense filtering when you're about to act on
-    /// a known set). Cancel exits, Delete opens the confirmation alert.
+    /// Header shown in selection mode, in place of the search/chips chrome.
+    /// Cancel exits; Delete opens the confirmation alert.
     private func batchHeaderRow(viewModel: PromptBrowseViewModel) -> some View {
         HStack(spacing: 10) {
             BatchHeaderTextButton(
@@ -612,9 +589,8 @@ struct PromptLibrarySidebarView: View {
     }
 
     private func selectAllVisible(viewModel: PromptBrowseViewModel) {
-        // Select All only picks user-defined rows — built-ins are undeletable,
-        // so including them in the selection would be misleading (the Delete
-        // pill would show a count higher than what actually gets removed).
+        // Select All picks only user-defined rows: built-ins are undeletable, so including them would overstate
+        // the Delete count.
         let selectableIDs = Set(
             viewModel.filteredPrompts
                 .filter { $0.isUserDefined }

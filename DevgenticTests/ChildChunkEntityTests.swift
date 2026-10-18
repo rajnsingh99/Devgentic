@@ -2,13 +2,10 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChildChunkEntityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created by Raj Singh on 12/03/26.
+//  Created by Raj Singh.
 //
-//  Tests for the `ChildChunkEntity` ObjectBox model, covering field defaults,
-//  HNSW schema constraints (optional embedding, 384-dim contract), and the
-//  denormalised `conversationID` field used for O(1) post-HNSW conversation scoping.
 
 import XCTest
 @testable import devgentic

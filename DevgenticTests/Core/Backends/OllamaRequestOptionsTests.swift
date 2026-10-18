@@ -2,28 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  OllamaRequestOptionsTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  ONE invariant, asserted end to end: the context window the app ASSUMES equals the num_ctx the
-//  request CARRIES.
-//
-//  ⚠️⚠️ Field-observed 2026-09-20. A Code session's gauge read `~2471/16384 tok (24%)` while the
-//  request ran under `numCtx: 8192`. Two resolvers, neither aware of the other:
-//
-//    • The request factory resolved a profile with no stored advanced configuration to the PRESET
-//      the Advanced panel displays. Every preset carries its own numCtx — 8192 at small/medium.
-//    • `EffectiveContextWindow` asked the policy about `advancedConfiguration`, which is nil in
-//      exactly that case, so it fell through to the auto-default and answered 16384.
-//
-//  Nothing had a stored advanced configuration, because that is the state of every profile whose
-//  Advanced panel was never opened. So the gauge, the compaction budget, the native-turn budget
-//  and the pre-send fit check ALL priced against a window twice the real one — and the overflow
-//  is HEAD-truncated by Ollama with the system prompt going first, which silently strips the
-//  workspace-boundary rules and the termination contract and makes the model look unreliable.
-//
-//  ⚠️ These tests deliberately do NOT assert "8192" or any other ladder value. Presets are a
-//  product decision and re-tuning one must not turn this file red. What must fail is the two
-//  numbers drifting apart again.
+//  Created by Raj Singh.
 //
 
 import XCTest

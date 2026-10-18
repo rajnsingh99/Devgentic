@@ -4,8 +4,7 @@
 //  NativeJSONParserTests.swift
 //  DevgenticTests
 //
-//  Tests for NativeJSONParser — the fast-path parser for models
-//  that emit well-formed OpenAI-compatible JSON tool call arrays.
+//  Created by Raj Singh.
 //
 
 import XCTest

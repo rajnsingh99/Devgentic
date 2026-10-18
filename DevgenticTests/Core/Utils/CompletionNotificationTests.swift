@@ -4,9 +4,7 @@
 //  CompletionNotificationTests.swift
 //  DevgenticTests
 //
-//  Device test 2026-10-10: closing the orb mid-answer cancelled the run, and the app then
-//  notified "Query Completed" — a cancel carries no error, and the title was chosen from the
-//  error alone.
+//  Created by Raj Singh.
 //
 
 import XCTest

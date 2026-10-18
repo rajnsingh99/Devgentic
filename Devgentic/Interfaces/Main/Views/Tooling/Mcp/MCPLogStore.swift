@@ -4,21 +4,7 @@
 //  MCPLogStore.swift
 //  Devgentic
 //
-//  Structured, per-source ring buffer of MCP log entries. Two roles:
-//
-//   1. Backs the bug-report bundle (Phase 8) — when the user clicks "Report
-//      Issue" we want the last N events scoped to that one MCP server, not
-//      the whole app's `os.log` firehose.
-//
-//   2. Powers the per-server logs panel (future) — same query path.
-//
-//  This lives alongside `DGLogger`; calls to `MCPLog.*` write to both. The
-//  ring buffer is in-memory (cap 200/source) so we don't need SQL migrations
-//  or retention sweeps. Lost on app restart, which is fine — bug reports are
-//  raised live, while the user is reproducing.
-//
-//  Secret-handling: helpers run inputs through `MCPRedaction` before writing
-//  here. Never log token bodies; only "shape" (issuer, scopes, expiry).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -26,8 +12,7 @@ import os
 
 private let logger = DGLogger(category: "MCP")
 
-/// One entry in the per-source ring buffer. Encodable so the Phase 8 bundler
-/// can write the buffer out as JSON in the report ZIP.
+/// One entry in the per-source ring buffer; Encodable so the bug-report bundler can write the buffer out as JSON.
 struct MCPLogEntry: Codable, Hashable, Sendable {
 
     /// Wall-clock time the event happened. ISO8601 strings in JSON for
@@ -89,10 +74,9 @@ final class MCPLogStore {
 
     // MARK: - Public API
 
-    /// Append one entry, scoped to a source. Trims to the per-source cap.
-    /// Pass a nil `sourceID` for events that don't belong to a specific
-    /// server (e.g. a global discovery probe before the source exists);
-    /// those are stored under a sentinel UUID.
+    /// Appends one entry scoped to a source, trimming to the per-source cap.
+    /// A nil `sourceID` is for events that belong to no specific server (e.g. a discovery probe before the source
+    /// exists); those are stored under a sentinel UUID.
     func append(_ entry: MCPLogEntry, sourceID: UUID?) {
         let key = sourceID ?? Self.unscopedSourceID
         var buffer = buffers[key] ?? []
@@ -103,8 +87,7 @@ final class MCPLogStore {
         buffers[key] = buffer
     }
 
-    /// All entries for one source, oldest first. Used by the bug-report
-    /// bundler in Phase 8.
+    /// All entries for one source, oldest first; used by the bug-report bundler.
     func entries(forSourceID sourceID: UUID) -> [MCPLogEntry] {
         return buffers[sourceID] ?? []
     }
@@ -115,9 +98,8 @@ final class MCPLogStore {
         return buffers.map { ($0.key, $0.value) }
     }
 
-    /// Drop the buffer for a deleted source. Called from `MCPToolStore.deleteTool`
-    /// so the bug-report bundle doesn't keep showing entries for servers
-    /// that no longer exist.
+    /// Drops the buffer for a deleted source. Called from `MCPToolStore.deleteTool` so the bug-report bundle
+    /// doesn't keep showing entries for deleted servers.
     func purge(sourceID: UUID) {
         buffers.removeValue(forKey: sourceID)
     }
@@ -208,11 +190,8 @@ enum MCPLog {
 
     // MARK: - Redaction guard
 
-    /// Defensive redaction. Even though every call site is supposed to feed
-    /// us pre-redacted strings, the stakes are too high to rely on that —
-    /// run the message through known secret patterns just in case. Field
-    /// values aren't redacted because they're caller-typed (caller must
-    /// promise they're safe).
+    /// Defensive redaction: runs the message through known secret patterns even though call sites should pass
+    /// pre-redacted strings. Field values aren't redacted: they're caller-typed and the caller promises they're safe.
     private static func redact(message: String, fields: [String: String]?) -> String {
         // Strip obvious "token=..." / "Authorization: Bearer ..." patterns.
         var msg = message

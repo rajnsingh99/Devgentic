@@ -4,7 +4,7 @@
 //  ChatSearchBar.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -16,11 +16,8 @@ struct ChatSearchBar: View {
     @State private var isPrevHovered: Bool = false
     @State private var isNextHovered: Bool = false
     @Environment(\.appTheme) private var theme
-    // [vm-3] Deliberately NO `ChatHistoryViewModel` here. The bar used to pull it from the
-    // environment for `unreachableMatchCount(in:)`, which walks the computed `searchCorpus` —
-    // and reading that from `body` made every keystroke rebuild the corpus and made the bar an
-    // observer of every resident message's text. The count now arrives on `searchViewModel`,
-    // written by `ChatHistoryViewModel.runSearch` alongside the matches it describes.
+    // No `ChatHistoryViewModel` here: reading the computed search corpus from `body` would rebuild it per keystroke.
+    // The unreachable count arrives on `searchViewModel`, written by `ChatHistoryViewModel.runSearch`.
 
     var body: some View {
         HStack(spacing: 10) {
@@ -64,10 +61,8 @@ struct ChatSearchBar: View {
                     }
             }
 
-            // Unreachable-match caption (CF-35): the active match exists in the stored
-            // history but lies past the resident window's cap, so Next/Previous landed on
-            // it without the transcript moving. Say so, rather than leave "N of M" pointing
-            // at nothing.
+            // Unreachable-match caption: the active match is in stored history but past the resident window's cap,
+            // so Next/Previous cannot move the transcript to it.
             if searchViewModel.totalMatchCount > 0, searchViewModel.currentMatchUnreachable {
                 Text("Older than the loaded history")
                     .font(.system(size: 10, weight: .medium))
@@ -161,12 +156,8 @@ struct ChatSearchBar: View {
         }
     }
 
-    // [CF-37] The unreachable count keeps "N of M" honest — without it the badge counted
-    // matches Next/Previous could never land on, with nothing distinguishing them from a
-    // reachable one until the user pressed toward one and hit the silent "Older than the
-    // loaded history" case CF-35 added below. [vm-3] Both badge strings now live on
-    // `ChatSearchViewModel` (`matchCountLabel`, `matchCountAccessibilityLabel`), built from the
-    // stored count, so they are unit-tested there.
+    // The unreachable count keeps "N of M" honest. Both badge strings live on `ChatSearchViewModel`
+    // (`matchCountLabel`, `matchCountAccessibilityLabel`), where they are unit-tested.
 
     /// Announced while typing, so it reports the COUNT rather than the position — which
     /// match you're on is meaningless until you start navigating.

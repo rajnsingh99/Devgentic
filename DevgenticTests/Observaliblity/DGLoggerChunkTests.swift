@@ -4,14 +4,7 @@
 //  DGLoggerChunkTests.swift
 //  DevgenticTests
 //
-//  Cover for `DGLogger.chunk`, the splitter behind the `[PROMPT-FULL]` / `[PROMPT-RENDERED]`
-//  verbatim dumps.
-//
-//  ⚠️ WHY THIS IS WORTH TESTING AT ALL. These dumps exist because sizes-only logging cost this
-//  project three wrong root causes in a row — the log kept reporting "system=1749 chars" while
-//  everyone guessed at the contents. A splitter that drops the tail, or tears a multi-byte
-//  character at a chunk seam, would put CORRUPTED evidence in front of the next investigation,
-//  which is worse than no evidence: it still looks authoritative.
+//  Created by Raj Singh.
 //
 
 import XCTest

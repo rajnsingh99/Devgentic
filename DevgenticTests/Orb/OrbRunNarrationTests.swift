@@ -4,9 +4,7 @@
 //  OrbRunNarrationTests.swift
 //  DevgenticTests
 //
-//  [Phase 6 · F1] Pins how a finished run is described OUT LOUD. All pure — no trace store, no
-//  audio device. The phrasing is the part that costs a device round-trip to check, so it is the
-//  part that gets tested here instead.
+//  Created by Raj Singh.
 //
 
 import XCTest

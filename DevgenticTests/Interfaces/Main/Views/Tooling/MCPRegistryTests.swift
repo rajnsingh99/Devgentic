@@ -4,9 +4,7 @@
 //  MCPRegistryTests.swift
 //  DevgenticTests
 //
-//  Gap 7 (Discover), 2026-08-01. The fixture below is REAL captured output from
-//  https://registry.modelcontextprotocol.io/v0/servers — not a hand-written approximation,
-//  so a schema drift that would empty the Discover list fails here first.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,7 +4,7 @@
 //  CognitiveCircuitBreaker.swift
 //  Devgentic
 //
-//  Created for ReAct Executor Modularization.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -22,23 +22,14 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     let maxConsecutiveToolFailures: Int
     let maxRepetitiveActions: Int
 
-    /// User denials are a HARD constraint ("do not retry") that small-capacity models
-    /// routinely ignore even when the directive appears in scratchpad. A dedicated
-    /// counter with a tighter cap catches denial-retry loops before they waste
-    /// iterations on HITL round-trips the user already rejected.
-    /// NOTE: clarification (ask_user) loops are no longer counter-governed — identical
-    /// re-asks are answered from RunInteractionMemory (deterministic replay), which makes
-    /// them visible to the repetition fingerprint below; distinct questions are legitimate
-    /// and bounded by the human in the loop + the iteration budget.
+    /// A dedicated counter with a tighter cap for user denials: a denial is a hard "do not retry" constraint that small
+    /// models ignore, so this catches denial-retry loops before they waste iterations on rejected HITL round-trips.
+    /// Clarification (ask_user) loops are not counter-governed: identical re-asks are answered from `RunInteractionMemory`.
     private let maxConsecutiveDenials: Int
 
-    /// Whether a detected loop actually ENDS this run — true only when the profile's
-    /// `ErrorRecovery.onToolFailure` is `.abort`. Code (`.fallbackPrompt`) and `.skipAndContinue`
-    /// only warn and nudge (owner decision 2026-09-27, Timeout inventory D-15).
-    ///
-    /// ⚠️ Decides the pre-warning's WORDING only. It used to tell the user and the model "one more
-    /// identical call will abort this run" in every profile, which was false wherever the loop
-    /// merely nudges.
+    /// Whether a detected loop actually ends this run: true only when the profile's `ErrorRecovery.onToolFailure`
+    /// is `.abort`. Code (`.fallbackPrompt`) and `.skipAndContinue` only warn and nudge. Decides the
+    /// pre-warning's wording only.
     let repetitionEndsRun: Bool
 
     init(maxConsecutiveToolFailures: Int = 3,
@@ -71,16 +62,12 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     private(set) var lastIterationFingerprint: String? = nil
     private(set) var consecutiveIdenticalIterations: Int = 0
 
-    /// Tracks per-tool invocation frequency across ALL iterations (regardless of
-    /// what other tools ran in the same iteration). Catches models that evade the
-    /// iteration-level fingerprint by alternating tool combinations while
-    /// repeating the same core action (e.g., read_file alone then read_file + list_directory).
-    /// Key: "toolName|argsHash|outputSignature", Value: total count across all iterations.
+    /// Tracks per-tool invocation frequency across all iterations, regardless of what else ran in the iteration.
+    /// Catches models that alternate tool combinations to evade the iteration-level fingerprint. Key:
+    /// "toolName|argsHash|outputSignature"; value: total count.
     private(set) var globalToolFrequency: [String: Int] = [:]
-    /// The global per-tool cap shares the repetition-tolerance knob (`maxRepetitiveActions`,
-    /// configurable via ResilienceOverrides) — both checks catch the same phenomenon at
-    /// different granularities, and a separate hardcoded cap made this the only abort
-    /// trigger the user couldn't govern.
+    /// The global per-tool cap shares the repetition-tolerance knob (`maxRepetitiveActions`, configurable via
+    /// `ResilienceOverrides`): both checks catch the same phenomenon at different granularities, so one setting governs both.
     private var maxGlobalToolRepetitions: Int { maxRepetitiveActions }
     
     // MARK: - Tool Loop Evaluation
@@ -110,11 +97,9 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         return .proceed
     }
 
-    /// Records a user-denied tool call. Unlike general failures (3-strike cap), denials
-    /// get a tighter 2-strike cap because the user has explicitly rejected the action —
-    /// a second consecutive denial is strong evidence the model is ignoring the constraint.
-    /// Each denial also counts toward the general failure counter so the existing 3-strike
-    /// path still fires for mixed denial+failure patterns.
+    /// Records a user-denied tool call. Denials get a tighter 2-strike cap than general failures (3-strike)
+    /// because the user explicitly rejected the action. Each denial also counts toward the general failure
+    /// counter, so mixed patterns still trip it.
     mutating func recordDenial() -> CircuitBreakerAction {
         consecutiveDenials += 1
         consecutiveToolFailures += 1
@@ -147,40 +132,17 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     
     // MARK: - Repetitive Action Detection (Gap B)
 
-    /// Evaluates whether the current iteration's observations are identical to previous iterations.
-    /// Call this once per iteration AFTER all tool observations are collected.
-    ///
-    /// Builds a fingerprint from (toolName, argsHash, observationHash) for every tool in the iteration.
-    /// If the same fingerprint repeats `maxRepetitiveActions` times consecutively, triggers abort.
-    ///
-    /// - Parameter observations: The tool observations from the current iteration.
-    /// - Returns: `.proceed` to continue, `.abort` if stuck in a degenerate loop.
+    /// Evaluates whether this iteration's observations repeat earlier ones; call once per iteration. Aborts when
+    /// the (toolName, argsHash, observationHash) fingerprint repeats `maxRepetitiveActions` times in a row.
+    /// - Returns: `.proceed` or `.abort` (stuck in a loop).
     mutating func evaluateRepetitiveActions(_ observations: [ToolObservation]) -> CircuitBreakerAction {
-        // Build a deterministic fingerprint for this iteration's tool calls + results.
-        //
-        // G3: Fixes to the fingerprint accuracy:
-        //   Fix 1 — Hash the FULL normalized output, not just the first 200 chars.
-        //           The old prefix sampled ≤2.5% of an 8KB tool output; a single
-        //           volatile token near the start (timestamp in a shell stdout, file
-        //           count in a tree header) would evade detection, and body-only
-        //           drift would hash-collide as identical. String.hashValue is O(n)
-        //           anyway, so hashing the full payload costs microseconds.
-        //   Fix 2 — Compound signal: "length:hash". Two outputs of different
-        //           lengths can never collide at this level regardless of hash.
-        //
-        // Normalization handles CRLF→LF and per-line trailing whitespace so that
-        // meaningless editor/tool artifacts don't produce false "different" hashes.
-        // Leading whitespace is preserved — code indentation still discriminates.
+        // Deterministic fingerprint of the iteration's calls and results: the full normalized output is hashed as
+        // "length:hash" so a volatile token cannot evade detection; CRLF and trailing whitespace are folded.
         let components = Self.iterationComponents(observations)
         let fingerprint = components.joined(separator: ";;")
 
-        // Increment the global per-tool frequency tally UNCONDITIONALLY before any
-        // early-return paths run. Previously the increment lived after the
-        // iteration-level checks, so when `.proceedWithWarning` returned (current
-        // == limit - 1), this iteration's contribution to the global counter was
-        // skipped. A model that alternated combos to evade the iteration-level
-        // fingerprint, then returned to a previously-warned pattern, could escape
-        // the global cap because the warning iteration's count was missing.
+        // Increment the global per-tool tally unconditionally before any early return, so a warning iteration's count is never
+        // skipped and a model returning to a warned pattern cannot escape the global cap.
         for key in components {
             globalToolFrequency[key, default: 0] += 1
         }
@@ -202,22 +164,14 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             return .abort(AbortTrigger(
                 kind: .repetitiveAction,
                 reason: "Detected \(current) consecutive identical tool calls [\(toolNames)] with the same results. Breaking degenerate loop.",
-                // ⚠️ Says SUCCEEDED, explicitly. These calls worked — the loop is the problem,
-                // not the tools. Telling the model its tools are failing is what made one read
-                // its own successful output as truncated and guess at an edit instead.
+                // Says SUCCEEDED explicitly: these calls worked and the loop is the problem; telling the model its tools failed
+                // made one misread its own output as truncated.
                 modelNarrative: "You called [\(toolNames)] \(current) times in a row with identical arguments and received identical results each time. Those calls SUCCEEDED — the results you already have are complete and correct. Repeating them will not produce anything new. Use what you have, or take a different approach."
             ))
         }
 
-        // --- Check 2: Per-tool global frequency (catches alternating combos) ---
-        // Runs BEFORE the limit-1 warning: aborts outrank warnings. With the old
-        // order, an iteration whose fingerprint counter sat at limit-1 returned the
-        // warning early and masked a global-cap abort until the next iteration.
-        // Tracks individual tool+args+output across ALL iterations — a model that
-        // alternates [read_file] and [read_file, list_directory] evades the
-        // iteration fingerprint but each read_file call is still identical.
-        // The increment already happened at the top of this method; here we
-        // only check whether any key has hit the cap.
+        // Check 2: per-tool global frequency (catches alternating combos). Runs before the limit-1 warning so aborts outrank
+        // warnings. The increment already happened at the top of this method; here we only check whether any key hit the cap.
         for key in components {
             let count = globalToolFrequency[key, default: 0]
             if count >= maxGlobalToolRepetitions {
@@ -235,11 +189,8 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             let toolNames = observations.map(\.toolName).joined(separator: ", ")
             logger.info("⚠️ Repetitive action warning: [\(toolNames)] repeated \(current) times. One more will trigger abort.")
 
-            // G2: Dual-channel warning.
-            //   UI message  = terse chip/toast for the human.
-            //   Model alert = directive injected into the next iteration's working
-            //                 memory so the model sees the warning BEFORE it calls
-            //                 the same tool a third time and gets killed.
+            // Dual-channel warning: a terse chip/toast for the human, and a directive injected into the next iteration's working
+            // memory so the model sees it before calling the same tool again and being aborted.
             let uiMessage = "Repetitive tool pattern detected: [\(toolNames)]. One more identical call \(nextRepeatConsequence.ui)."
 
             let modelAlert = """
@@ -261,10 +212,8 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             return .proceedWithWarning(uiMessage: uiMessage, modelAlert: modelAlert)
         }
 
-        // --- Check 2 warning (one strike before the global cap) ---
-        // The global per-tool check previously aborted COLD — unlike Check 1, a model that
-        // alternated tool combos never saw a warning before being killed. Give it the same
-        // dual-channel "switch / finalize / ask" alert one identical call early.
+        // Check 2 warning, one strike before the global cap: the same dual-channel "switch / finalize / ask" alert,
+        // one identical call early.
         if maxGlobalToolRepetitions >= 2 {
             for key in components where globalToolFrequency[key, default: 0] == maxGlobalToolRepetitions - 1 {
                 let toolName = key.components(separatedBy: "|").first ?? "unknown"
@@ -298,10 +247,8 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
 
     // MARK: - Replay Priming (G1 resume)
 
-    /// Re-primes the repetition bookkeeping from a resumed run's replayed iterations so the
-    /// fingerprint streak and per-tool global counts survive a park → resume cycle (the breaker
-    /// itself is a per-run local and would otherwise start from zero). Silent: updates counters
-    /// only, never returns an action — the original run already reacted to these iterations.
+    /// Re-primes the repetition bookkeeping from a resumed run's replayed iterations so the fingerprint streak and per-tool
+    /// global counts survive a park → resume cycle. Silent: updates counters only and never returns an action.
     mutating func primeReplayedIteration(_ observations: [ToolObservation]) {
         guard !observations.isEmpty else { return }
         let components = Self.iterationComponents(observations)
@@ -338,17 +285,10 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
 
     // MARK: - Output Normalization (G3)
 
-    /// Normalizes tool output for deterministic hashing. Collapses CRLF → LF
-    /// and strips trailing whitespace on each line. Leaves leading whitespace
-    /// untouched so code indentation still discriminates different files.
-    ///
-    /// Why these specific operations: tool outputs regularly differ by pure
-    /// artifact (shell `\r\n`, trailing spaces from a formatter, a blank line
-    /// at the end) while being semantically identical. Collapsing these
-    /// artifacts means identical runs hash identically, so repetition
-    /// detection fires when it should. We do NOT strip timestamps / UUIDs —
-    /// that gets fragile fast and risks false equals on legitimately different
-    /// outputs.
+    // Why: identical outputs often differ by pure artifacts (shell `\r\n`, formatter spaces); timestamps and UUIDs are
+    // not stripped, which is fragile and risks false equals on legitimately different outputs
+    /// Normalizes tool output for deterministic hashing: collapses CRLF to LF and strips trailing whitespace per line.
+    /// Leading whitespace is untouched so code indentation still discriminates different files.
     private static func normalizeForHashing(_ output: String) -> String {
         let unix = output
             .replacingOccurrences(of: "\r\n", with: "\n")

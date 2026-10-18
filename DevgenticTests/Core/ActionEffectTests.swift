@@ -4,15 +4,7 @@
 //  ActionEffectTests.swift
 //  DevgenticTests
 //
-//  Cover for the episodic `effect` field — the record of what a mutating tool actually
-//  changed.
-//
-//  Before this existed, `MemoryAction` carried the tool name, 200-char-truncated params and
-//  a status; output only ever reached `errorReason` on the FAILURE path. So a successful
-//  write left the agent knowing it had called `write_file` and nothing about the result.
-//  Asked to undo one, the model said "I do not have access to a version control system…
-//  restoring the file perfectly is impossible" — while the pre-write snapshot sat in the
-//  app the whole time (field-observed 2026-07-25).
+//  Created by Raj Singh.
 //
 
 import XCTest

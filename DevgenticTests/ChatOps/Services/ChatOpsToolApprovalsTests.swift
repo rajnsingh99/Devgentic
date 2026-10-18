@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsToolApprovalsTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  A standing "approve everything" grant must not cross a surface boundary.
-//
-//  ⚠️⚠️ CRIT-4, THE LEAK THIS CLOSES. `SessionToolApprovals`' autonomous grant was keyed on the
-//  conversation ALONE, and Orb publishes its conversation to ChatOps on purpose — its own code
-//  says "Bind the profile so restart-resume, ChatOps, and the sidebar all resolve it". So a user who
-//  chose Autonomous for VOICE had that grant served to a message arriving from their paired phone,
-//  and `execute_shell` ran with no prompt on ANY surface: `ToolExecutionLoop` skips the banner, so no
-//  `PendingHITL` is created and `RemoteMirrorService` has nothing to mirror either.
-//
-//  ⚠️ BOTH HALVES WERE DELIBERATE IN ISOLATION. Autonomous including `execute_shell` is owner-
-//  confirmed (2026-09-05); a ChatOps run satisfying `canReachAHuman` is load-bearing (WF-SE6/SE11),
-//  because refusing it would delete the shipped remote-approval flow. Nobody owned the composition.
-//  The four safeguards the autonomous switch documents — typed picker, in-memory, one conversation,
-//  `canReachAHuman` — say nothing about WHICH SURFACE the run came from.
+//  Created by Raj Singh.
 //
 
 import XCTest

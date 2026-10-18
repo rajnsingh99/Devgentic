@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PromptPrefixStabilityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  On the legacy path the whole message array is rebuilt every iteration. A KV cache (MLX's, or
-//  Ollama's own) can only skip re-reading the part of the prompt that is byte-identical to the
-//  previous iteration's. The system message is ~2k tokens and the chat template renders the ~3.5k
-//  token tool block AFTER it, so one changed byte in it costs a full re-read of both. On the
-//  2026-10-06 device run that was 7-11s per iteration on Qwen2.5-3B.
-//
-//  These pin the invariant, not where any particular layer lives: what changes during a run must
-//  not change the system message, and must still reach the model.
+//  Created by Raj Singh.
 //
 
 import XCTest

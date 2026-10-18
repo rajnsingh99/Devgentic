@@ -6,15 +6,12 @@
 //
 //  Created by Raj Singh.
 //
-//  Refactored on 27/08/25 to remove LLM Integration window and commands.
-//  Refactored on 27/08/25 to add Backend Profiles window and commands.
-//  Updated on 21/02/26 to fix multi-window spawning bug (WindowGroup -> Window).
-//
 
 import SwiftUI
 import SwiftData
 import UserNotifications
 
+/// The application entry point: configures the persistence container and declares the app's windows and commands.
 @main
 struct DevgenticApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -27,16 +24,12 @@ struct DevgenticApp: App {
     /// Unified SwiftData container for all subsystems (profiles, chat, scheduling, etc.).
     private let swiftDataContainer: ModelContainer = {
         do {
-            // The entity list lives in `DevgenticSchema` so the migration tests reference the
-            // SAME list the app opens, rather than a copy that can drift (see G54). Hash-neutral
-            // vs. the previous inline literal: `Schema(models)` defaults to Version(1, 0, 0).
+            // The entity list lives in `DevgenticSchema` so tests reference the same list the app opens rather than a drifting copy.
             let schema = DevgenticSchema.schema
             let storeURL = try DevgenticSchema.defaultStoreURL()
             let config = ModelConfiguration(DevgenticSchema.configurationName, schema: schema, url: storeURL)
-            // A migration plan gives every future schema change a NAMED source version to stage
-            // from. Today it declares one version and zero stages, which behaves identically to
-            // `migrationPlan: nil` — the point is that the scaffolding exists before the first
-            // change that needs it. See DevgenticSchemaVersions.swift.
+            // A migration plan gives every future schema change a named source version to stage from;
+            // with one version and no stages it behaves like `migrationPlan: nil`.
             let container = try ModelContainer(
                 for: schema,
                 migrationPlan: DevgenticSchema.migrationPlan,
@@ -47,9 +40,8 @@ struct DevgenticApp: App {
             DGLogger(category: "DevgenticApp").info(
                 "[STARTUP] SwiftData container opened — \(schema.entities.count) entities, store: \(storeURL.path)"
             )
-            // ⚠️ Decide ONCE, here, before anything destructive can run — and reuse the same value
-            // below: `recordSuccessfulOpen()` writes the fingerprint later in that same block, so a
-            // second evaluation would not agree with this one.
+            // Decide once, before anything destructive runs, and reuse the value below:
+            // `recordSuccessfulOpen()` later writes the fingerprint, so a second evaluation would disagree.
             let launchSweepDecision = DevgenticSchema.evaluateLaunchSweep()
 
             // Inject into singleton stores so non-SwiftUI code can access the container.
@@ -59,26 +51,17 @@ struct DevgenticApp: App {
             ChatPersistenceStore.shared.configureContainer(container)
             WorkflowLayoutStore.shared.configureContainer(container)
             WorkflowRunHistoryStore.shared.configureContainer(container)
-            // Download-history store is configured on the main actor; do it
-            // eagerly via Task so reconcileOrphans runs as soon as possible.
-            //
-            // ⚠️ D-25: captured BEFORE the skill sweep. The reconciles below run after it, and it
-            // can block for a volume's mount timeout; anything started in that window is live work
-            // from THIS session and must not be flipped to Interrupted.
+            // Captured before the skill sweep (which can block on a volume mount) so live work is never flipped to Interrupted.
             let launchInstant = Date()
             Task { @MainActor in
                 DownloadHistoryStore.shared.configureContainer(container)
 
-                // ⚠️ Configured synchronously, before anything below can ask the library for skills:
-                // a store asked before this answers `.containerUnavailable`, which once produced a
-                // permanently empty library.
+                // Configured synchronously, before anything can ask the library for skills: an earlier ask answers
+                // `.containerUnavailable`.
                 SkillStore.shared.configureContainer(container)
 
-                // Everything below MUTATES OR DELETES rows, so it runs only when the schema is
-                // unchanged since the last clean open. A lightweight migration can succeed
-                // STRUCTURALLY while dropping a renamed column's data or defaulting a new
-                // non-optional; sweeping such a store writes the degraded state back as
-                // authoritative before anyone can look at it (G44).
+                // Everything below mutates or deletes rows, so it runs only when the schema is unchanged since the last clean open:
+                // a lightweight migration can succeed structurally yet degrade data, and a sweep would persist that.
                 let startupLogger = DGLogger(category: "DevgenticApp")
                 switch launchSweepDecision {
                 case .run:
@@ -94,29 +77,23 @@ struct DevgenticApp: App {
                     // Retention: history is otherwise monotonic for the life of the install, and
                     // every row is scanned on each bridge reconcile and sidebar render.
                     DownloadHistoryStore.shared.pruneOldRecords()
-                    // Any workflow run still in .running at launch is from a prior
-                    // session that ended before the run could finalize. Flip to
-                    // .cancelled with "Interrupted" so the history list doesn't
-                    // show a phantom spinning record forever.
+                    // Any workflow run still `.running` at launch belongs to a session that ended before finalizing; flip it to `.cancelled`
+                    // with 'Interrupted' so history does not show a phantom spinning record.
                     WorkflowRunHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)
-                    // Conversation memory whose conversation is gone — a crash between the two
-                    // deletes, or a write that raced a delete before tombstones existed (RAG-5).
-                    // Destructive, so it lives behind this gate; the listing THROWS rather than
-                    // answering empty, and the sweep itself refuses an empty list.
+                    // Conversation memory whose conversation is gone (a crash between the two deletes, or a write that raced one).
+                    // Destructive, so gated; the listing throws rather than answering empty, and the sweep refuses an empty list.
                     do {
                         let liveConversations = try ChatPersistenceStore.shared.liveConversationIDs()
                         Task.detached(priority: .utility) {
                             VectorStoreService.shared.removeOrphanedConversations(liveConversationIDs: liveConversations)
                         }
-                        // [CR-65] Same listing, same refusal of an empty list: generated images of
-                        // conversations deleted before eviction existed, or whose eviction a crash cut.
+                        // Same listing and refusal of an empty list: generated images of conversations deleted before eviction or cut short by
+                        // a crash.
                         MediaStore.sweepOrphansInBackground(liveConversationIDs: liveConversations)
                     } catch {
                         startupLogger.error("[STARTUP] Conversation list unavailable for the memory orphan sweep: \(error.localizedDescription). CONSEQUENCE: memory of deleted conversations, if any, is not collected this launch.")
                     }
-                    // The Code Viewer purge that used to run here is gone: `CodeViewerSessionSD`
-                    // was retired 2026-08-04, so lightweight migration drops the whole table on
-                    // the first launch after the update — no row-by-row sweep needed.
+                    // `CodeViewerSessionSD` is retired, so lightweight migration drops its whole table; no row-by-row sweep is needed.
 
                 case .deferSchemaChanged(let previous, let current):
                     startupLogger.notice(
@@ -127,68 +104,36 @@ struct DevgenticApp: App {
                         + "downloads keep their 'running' status until the next launch, which will "
                         + "sweep normally. Workflow-run orphans ARE reconciled below — see that line."
                     )
-                    // [WF-RU2] Unlike the download-history sweep above, this one carries none of the
-                    // degradation risk the gate exists to guard against: the predicate matches only
-                    // rows already stored as `.running`, and it writes back just `statusRaw` /
-                    // `errorMessage` — no lightweight migration can PRODUCE a `.running` row (that
-                    // only happens while a run is actually executing), so there is nothing here for
-                    // a botched migration to have silently degraded. Left un-reconciled instead, an
-                    // orphan from a force-quit or crash renders as a LIVE run for the rest of this
-                    // session and every session after, on any conversation the user opens, until a
-                    // launch happens to take the `.run` branch — the header pill shows "Running" and
-                    // the history card ticks a `TimelineView(.periodic(...))` counter climbing from
-                    // the original start time, for a run that has been dead for days.
+                    // Safe despite the deferral: it matches only rows stored as `.running` and writes back `statusRaw` / `errorMessage`.
+                    // Left alone, a crash orphan renders as a live run in every later session.
                     startupLogger.info("[STARTUP] Reconciling workflow-run orphans despite the deferral — see the note above for why this one is safe.")
                     WorkflowRunHistoryStore.shared.reconcileOrphans(startedBefore: launchInstant)
 
                 case .skippedByEnvironment:
-                    // CONSEQUENCE: download-history retention and workflow-run orphan
-                    // reconciliation are skipped for this launch. Phantom "running" workflow rows
-                    // and unbounded download history are expected until the next launch without
-                    // the override.
+                    // CONSEQUENCE: download-history retention and workflow-run orphan reconciliation are skipped for this launch.
+                    // Phantom running rows and unbounded download history are expected until the next launch without the override.
                     startupLogger.warning(
                         "[STARTUP] Launch sweep SKIPPED — \(DevgenticSchema.skipLaunchSweepEnvKey) is set. "
                         + "No rows will be pruned, reconciled or purged this launch."
                     )
                 }
 
-                // A profile saved before a built-in was WITHDRAWN keeps its name, and nothing in
-                // the UI can remove it — the Tool Library renders from `UnifiedToolStore`, so a name
-                // with no matching source has no row to un-tick. Measured on device 2026-09-23: it
-                // cost a ⚠️ NOT RESOLVED error AND an un-priced tool schema on every send, the
-                // latter making the context gauge over-report headroom.
-                //
-                // ⚠️ OUTSIDE the sweep gate, deliberately — same argument the workflow-run
-                // reconcile makes for itself. The gate guards against a botched migration having
-                // silently degraded stored rows; no migration can INVENT a tool name that the
-                // compiled catalogue lacks, so there is nothing here for one to have degraded.
-                //
-                // ⚠️ Built-ins only — see `WithdrawnToolSweep` for why an absent MCP tool, whose
-                // server may merely be offline or unauthenticated, must never be pruned.
+                // Why: Outside the sweep gate on purpose: no migration can invent a tool name the compiled catalogue lacks.
+                // Built-ins only: an absent MCP tool may merely be offline (see `WithdrawnToolSweep`).
+                // A profile saved before a built-in tool was withdrawn keeps its name and nothing in the UI can remove it,
+                // costing an error and an un-priced tool schema on every send.
                 let prunedProfiles = WithdrawnToolSweep.run()
                 if prunedProfiles > 0 {
                     startupLogger.notice("[STARTUP] Pruned withdrawn built-in tool(s) from \(prunedProfiles) profile(s).")
                 }
 
-                // ⚠️ AFTER the sweep, never before. `reconcileOrphans()` is what flips last session's
-                // abandoned `.downloading` rows to `.interrupted`; priming first counts those dead
-                // rows as in-flight and the badge shows a phantom download for the whole session,
-                // because nothing recomputes `activeCount` afterwards. (It regressed to first when
-                // `reconcileOrphans` moved inside the gate — it used to run before the prime.)
-                //
-                // On a deferred/skipped launch the reconcile has NOT run, so the count is knowingly
-                // optimistic for one launch; that is the stated cost of the deferral.
+                // After the sweep, never before: `reconcileOrphans()` flips last session's `.downloading` rows to `.interrupted`,
+                // and priming earlier counts them as in-flight; on a deferred launch the count is knowingly optimistic.
                 DownloadManager.shared.primeActiveCount()
 
-                // Record AFTER the decision, and regardless of it, so a deferral lasts exactly one
-                // launch instead of becoming permanent.
-                //
-                // ⚠️ EXCEPT under the DEBUG environment override. The test host is the real app and
-                // `UserDefaults.standard` is the real `app.devgentic.macos` domain — only the STORE is
-                // redirected by `DEVGENTIC_STORE_URL`, not the defaults. Recording here would stamp
-                // the current schema's fingerprint on behalf of a temporary store the real app has
-                // never opened, so the developer's next real launch would see "unchanged" and sweep a
-                // freshly-migrated store — disarming the gate for the one person doing schema work.
+                // Why: Skip under the DEBUG override: `UserDefaults.standard` is the real domain, so recording would disarm the gate for
+                // the developer.
+                // Record after the decision and regardless of it, so a deferral lasts exactly one launch.
                 if launchSweepDecision == .skippedByEnvironment {
                     startupLogger.warning(
                         "[STARTUP] Schema fingerprint NOT recorded — \(DevgenticSchema.skipLaunchSweepEnvKey) "
@@ -200,30 +145,18 @@ struct DevgenticApp: App {
                     DevgenticSchema.recordSuccessfulOpen()
                 }
 
-                // Partial downloads left by paused, interrupted, failed or crashed MLX pulls.
-                // READ-ONLY on purpose: these folders are multi-gigabyte user data, a
-                // second app instance could be writing into one, and a user may have
-                // hand-placed files there — so the scan only lists them in the Download
-                // Manager and, past 1 GB, tells the user once. Deleting is the user's call.
+                // Partial downloads left by paused, interrupted, failed or crashed MLX pulls. The scan is read-only: these folders are
+                // multi-gigabyte user data another instance may be writing, so it only lists them and, past 1 GB, tells the user once.
                 MLXModelService.scanPartialDownloadsAtLaunch()
 
-                // Bring enabled MCP servers up now, rather than lazily on the agent's first
-                // tool call. That first call used to pay the entire connect cost inside a
-                // turn the user was waiting on — a cold `npx -y` fetch can take a minute —
-                // and a misconfigured server only revealed itself mid-conversation as a tool
-                // failure. Detached from the container setup: a slow or unreachable server
-                // must never delay the app becoming usable.
+                // Brings enabled MCP servers up now, not on the agent's first tool call, which would pay the connect cost mid-turn.
+                // Detached so a slow or unreachable server never delays the app.
                 Task { await MCPConnectionCoordinator.shared.connectEnabledServersAtLaunch() }
             }
             return container
         } catch {
-            // A store that won't open is almost always a migration failure after an update.
-            // The old behaviour — a bare fatalError — gave the user a crash dialog with no
-            // cause, no location, and no path forward, and gave support nothing to act on.
-            //
-            // Deliberately NOT recovering by deleting or moving the store: the file holds
-            // every conversation the user has, and silently starting fresh would look
-            // exactly like "the app ate my data". Tell them where it is and stop.
+            // A store that will not open is almost always a migration failure after an update; show the cause and location.
+            // Never recovers by deleting or moving the store: it holds every conversation.
             let storeURL = try? DevgenticSchema.defaultStoreURL()
             let path = storeURL?.path ?? "Application Support/\(DevgenticSchema.storeFilename)"
 
@@ -232,9 +165,8 @@ struct DevgenticApp: App {
             let incidentID = String(UUID().uuidString.prefix(8))
             let logger = DGLogger(category: "DevgenticApp")
 
-            // ── Side channel 1: classify from the store's own metadata ──────────────────────
-            // The thrown error is useless — every distinct cause arrives as SwiftDataError code 1
-            // with empty userInfo. Core Data's raw metadata API still returns real information.
+            // Side channel 1: classify from the store's own metadata, because the thrown error is always SwiftDataError code 1
+            // with empty userInfo while Core Data's raw metadata API still returns real information.
             let diagnosis = storeURL.map {
                 StoreOpenDiagnostics.classify(
                     storeURL: $0,
@@ -242,9 +174,8 @@ struct DevgenticApp: App {
                 )
             } ?? .indeterminate
 
-            // ── Side channel 2: recover Core Data's stderr-only reason ─────────────────────
-            // Deliberately re-attempts the open with stderr captured. Safe: the first attempt
-            // already failed without mutating anything, and a failed open is side-effect free.
+            // Side channel 2: recover Core Data's stderr-only reason by re-attempting the open with stderr captured;
+            // safe because a failed open is side-effect free.
             var detailLines: [String] = []
             var primaryReason: String?
             if let storeURL {
@@ -266,9 +197,8 @@ struct DevgenticApp: App {
                 }
             }
 
-            // ⚠️ The stderr reason OUTRANKS the metadata classification when both exist: metadata
-            // reports whatever DIFFERS, which is not always what BLOCKED the open. A store can
-            // carry a retired entity harmlessly while the real blocker is an attribute elsewhere.
+            // The stderr reason outranks the metadata classification: metadata reports what differs, not always what blocked the
+            // open.
             let headline = primaryReason ?? diagnosis.summary
             let detailBlock = detailLines.isEmpty
                 ? "(no further detail — Core Data printed nothing identifiable)"
@@ -291,23 +221,12 @@ struct DevgenticApp: App {
                 ]
             )
 
-            // A bricked launch is not a crash. Without this the sentinel stays false and the NEXT
-            // launch reports a phantom crash for a session that exited deliberately.
+            // A bricked launch is not a crash: without this the sentinel stays false and the next launch reports a phantom crash.
             CrashDiagnosticsCollector.markCleanExit()
 
-            // ⚠️ DO NOT FLUSH HERE. The flush must be the LAST thing before every `exit()` below,
-            // never before the alert.
-            //
-            // `LogRecorder.prepareForTermination()` cancels the periodic flush task and nils it out,
-            // so nothing flushes again afterwards. Flushing at this point therefore threw away every
-            // `[RECOVERY]` line the modal loop goes on to emit — including "the store is SPLIT
-            // between its original location and the quarantine name — do not create a new store until
-            // this is resolved by hand", the single most important sentence the app can produce. The
-            // one code path that exists for a catastrophic failure was the one that left no record.
-            //
-            // Deferring loses nothing: `exit()` is gated behind the blocking `runModal()`, and the
-            // recorder's 5 s periodic flush keeps running throughout the modal, so the FATAL line
-            // above reaches disk on its own well before any of these exits.
+            // Why: A flush here stops the periodic flush (`prepareForTermination`) and loses the `[RECOVERY]` lines the modal loop emits.
+            // The periodic flush keeps running during `runModal()`, so the FATAL line reaches disk on its own.
+            // Do not flush here: the flush must be the last thing before every `exit()` below.
 
             #if canImport(AppKit)
             guard DevgenticSchema.shouldPresentFatalAlert else {
@@ -332,9 +251,8 @@ struct DevgenticApp: App {
                 \(detailBlock)
                 """
 
-            // This alert runs from the App struct's stored-property initializer — BEFORE
-            // NSApp.run() and before the app has been activated. Without this, the only failure UI
-            // the app has can appear BEHIND whatever the user was looking at, and reads as a hang.
+            // This alert runs from the App struct's initializer, before `NSApp.run()` and activation; activate so it is not hidden
+            // behind other windows.
             NSApplication.shared.activate()
 
             // `-> Never`: every branch of the alert loop exits, each flushing immediately before it.
@@ -347,9 +265,7 @@ struct DevgenticApp: App {
                 logger: logger
             )
             #else
-            // No AppKit: no alert to present, so exit here — flushing last, as on every other exit
-            // from this path. (In the AppKit build this is unreachable, which is why it lives in the
-            // `#else` rather than after the `#endif` where it was dead code the compiler warned on.)
+            // No AppKit: no alert to present, so exit here, flushing last as on every other exit from this path.
             Self.flushDiagnosticsBeforeExit(logger: logger, incidentID: incidentID)
             exit(EXIT_FAILURE)
             #endif
@@ -357,16 +273,10 @@ struct DevgenticApp: App {
     }()
 
     #if canImport(AppKit)
-    /// Presents the fatal-database alert and services the recovery affordances until the user picks
-    /// a terminal action. Always exits.
-    ///
-    /// Loops on purpose: `NSAlert` dismisses on ANY button, but "Reveal in Finder" and
-    /// "Export a Copy…" are not decisions — a user who exports a backup still needs the dialog
-    /// afterwards to decide what to do next.
-    ///
-    /// ⚠️ Every panel here uses `runModal()`, never `begin { }`. This runs before `NSApp.run()`, so
-    /// a completion-handler-based panel would never fire its handler — the app would appear to hang
-    /// and then exit with nothing done (G42).
+    // Why: Panels use `runModal()`, never `begin { }`: this runs before `NSApp.run()`, so a completion handler would never fire.
+    /// Presents the fatal-database alert and services the recovery affordances until the user picks a terminal action.
+    /// Always exits.
+    /// Loops because 'Reveal in Finder' and 'Export a Copy…' dismiss the alert but are not decisions.
     private static func presentFatalStoreAlert(
         storeURL: URL?,
         path: String,
@@ -414,11 +324,10 @@ struct DevgenticApp: App {
 
             case .startFresh:
                 if startFresh(storeURL: storeURL, incidentID: incidentID, logger: logger) {
-                    // ⚠️ Flush LAST — `startFresh` has just logged which artifacts moved where, or
-                    // that the move failed and the store is split. Those lines are the only record of
-                    // what happened to the user's database, and `exit` drops anything unflushed.
+                    // Flush last: `startFresh` has just logged which artifacts moved, the only record of what happened to the database,
+                    // and `exit` drops anything unflushed.
                     flushDiagnosticsBeforeExit(logger: logger, incidentID: incidentID)
-                    exit(0)  // Recovered deliberately; the relaunch (if any) is already under way.
+                    exit(0)  // Recovery was a deliberate choice; any relaunch is already under way.
                 }
 
             case .quit, .none:
@@ -464,10 +373,8 @@ struct DevgenticApp: App {
         }
     }
 
-    /// Moves the current database aside so the next launch starts clean. Returns whether it happened.
-    ///
-    /// ⚠️ Deliberately explicit and reversible — the opposite of the silent wipe the launch path has
-    /// always refused to do. Nothing is deleted; the old database keeps its data under a new name.
+    /// Moves the current database aside so the next launch starts clean; returns whether it happened.
+    /// Explicit and reversible: nothing is deleted, the old database keeps its data under a new name.
     private static func startFresh(storeURL: URL?, incidentID: String, logger: DGLogger) -> Bool {
         guard let storeURL else { return false }
 
@@ -567,17 +474,11 @@ struct DevgenticApp: App {
     }
     #endif
 
+    // Why: Blocks the calling thread on purpose: `LogRecorder` and `TraceRecorder` are plain actors, so this cannot starve them.
+    // The timeout is a hard bound so a wedged recorder never holds the failure alert hostage.
     /// Forces the observability buffers to disk before an `exit()` that bypasses normal teardown.
-    ///
-    /// `exit(EXIT_FAILURE)` never reaches `applicationShouldTerminate`, which is the only place
-    /// `LogRecorder.prepareForTermination()` is normally called. Left alone, the fatal log line
-    /// depends on `LogRecorder`'s 5-second flush loop happening to fire while the modal alert is
-    /// up — so a user who dismisses the alert quickly loses the one record of what happened.
-    ///
-    /// ⚠️ Blocks the calling thread on purpose. `LogRecorder` and `TraceRecorder` are plain actors
-    /// (not `@MainActor`), so they run on the cooperative pool and cannot be starved by this wait.
-    /// The timeout is a hard bound: a wedged recorder must never hold the failure alert hostage,
-    /// because the alert is the only thing the user actually sees.
+    /// `exit(EXIT_FAILURE)` never reaches `applicationShouldTerminate`, so the fatal log line would depend on the periodic
+    /// flush.
     private static func flushDiagnosticsBeforeExit(logger: DGLogger, incidentID: String) {
         let timeout = DispatchTime.now() + .seconds(3)
         let finished = DispatchSemaphore(value: 0)
@@ -603,8 +504,7 @@ struct DevgenticApp: App {
     @State private var mainApplicationViewModel: MainApplicationViewModel
     @State private var chatHistoryViewModel: ChatHistoryViewModel
     @State private var mainViewRouter = MainViewRouter()
-    /// ⚠️ Constructed ONCE in `init()` and handed to `State(wrappedValue:)` — never a property
-    /// default. See the note at its construction.
+    /// Constructed once in `init()` and handed to `State(wrappedValue:)`, never a property default.
     @State private var backendProfileService: BackendProfileService
     @State private var toastManager = ToastManager()
     @State private var codeSessionManager = CodeSessionManager()
@@ -615,11 +515,9 @@ struct DevgenticApp: App {
     /// state survives the re-creation cascade caused by
     /// `MainApplicationView`'s `if !router.isShowingChat { destinationView }` gate.
     @State private var destinationCoordinator = DestinationCoordinator()
-    /// App-scoped so `ChatInputAreaView` recreations (driven by outer SwiftUI
-    /// identity churn that isn't trivial to fully eliminate) don't keep firing
-    /// `ChatInputViewModel.init()` — which logs, requests mic permission, and
-    /// re-subscribes WhisperKit. See `setupMainDelegateObservers()`'s idempotency
-    /// guard which makes repeated `.onAppear` wiring safe.
+    /// App-scoped so `ChatInputAreaView` recreations do not keep re-running `ChatInputViewModel.init()` (logging, mic
+    /// permission, WhisperKit).
+    /// `setupMainDelegateObservers()` is idempotent, so repeated `.onAppear` wiring is safe.
     @State private var chatInputViewModel = ChatInputViewModel()
 
     init() {
@@ -634,10 +532,8 @@ struct DevgenticApp: App {
             fileProcessorService: fileProcessor
         )
 
-        // A background task outlives the stream that started it, so its timeline row cannot be
-        // written by the stream. The observer holds the message directly instead — and it can only
-        // FIND that message while the run is still live, which is why the lookup is handed over
-        // here, once, rather than reached for later when `activeStreams` has already dropped it.
+        // A background task outlives the stream that started it, so the observer holds the message directly;
+        // it can only find it while the run is live, which is why the lookup is handed over here, once.
         MainActor.assumeIsolated {
             BackgroundTaskObserver.shared.start { conversationID in
                 streamManager.activeStreams.values.first {
@@ -646,8 +542,7 @@ struct DevgenticApp: App {
             }
         }
 
-        // The main window owns the Code Viewer: live agent tabs + session persistence.
-        // QuickAccess's view model deliberately does not (it mounts no viewer UI).
+        // The main window owns the Code Viewer (live agent tabs and session persistence); QuickAccess's view model does not.
         let chatHistoryVM = ChatHistoryViewModel(
             persistenceService: persistence,
             activeStreamManager: streamManager,
@@ -664,48 +559,18 @@ struct DevgenticApp: App {
         self._chatHistoryViewModel = State(wrappedValue: chatHistoryVM)
         self._mainApplicationViewModel = State(wrappedValue: mainVM)
 
-        // Tier 3: a background task whose caller set `notify_on_completion` gets a turn of its own
-        // when it finishes, instead of its result reaching nobody once the turn that started it
-        // ended. Report-only and unattended — see `BackgroundTaskWakeCoordinator`.
-        //
-        // ⚠️ Armed with the LOCAL `mainVM`, not `self._mainApplicationViewModel.wrappedValue`. The
-        // note below about reading a `@State` during `init()` applies here in full: that read can
-        // hand back an instance SwiftUI does not keep, and the coordinator would then drive a view
-        // model nothing renders.
+        // Why: Armed with the local `mainVM`: reading a `@State` in `init()` can return an instance SwiftUI discards.
+        // A background task whose caller set `notify_on_completion` gets a turn of its own on finish;
+        // report-only and unattended (`BackgroundTaskWakeCoordinator`).
         MainActor.assumeIsolated {
             BackgroundTaskWakeCoordinator.shared.start(viewModel: mainVM, persistence: persistence)
         }
 
-        // ⚠️⚠️ CodeSessionManager is DELIBERATELY NOT injected here any more.
-        //
-        // This used to read `self._codeSessionManager.wrappedValue` during `init()` and hand that
-        // object to the view model. Reading a `@State`'s wrapped value from `init()` yields the
-        // initial value of THIS struct evaluation, which is not necessarily the instance SwiftUI
-        // installs as the persistent storage — and the app's launch log proved it, printing
-        // `[CODE_PROFILE] Initialized…` twice from the single construction site above.
-        //
-        // The result was two live managers: the one the views mutate through
-        // `.environment(codeSessionManager)` (folder picker, model picker, quick settings) and a
-        // second, permanently blank one held by the view model. `prepareCodeProfileForSend` read
-        // the blank one, saw `isConfigured == false`, and returned early — so the Code system
-        // prompt was NEVER applied. The model then received only the generic
-        // "You are a helpful AI assistant." fallback plus the `<environment>` block naming the
-        // user's home directory, and did what it was told: it walked `/Users/<name>`.
-        //
-        // The binding now happens in `body` via `.task`, where reading the property (not the
-        // projected `_` value) returns the instance SwiftUI actually kept.
+        // `CodeSessionManager` is not injected here: reading a `@State` in `init()` can yield an instance SwiftUI discards.
+        // It is bound in `body` via `.task`, which reads the instance SwiftUI kept.
 
-        // ⚠️ Built as a LOCAL, wired, then installed — the `mainVM` pattern above. It used to be a
-        // `@State` property default with `onProfileDeleted` wired through
-        // `self._backendProfileService.wrappedValue`: the same read-a-@State-in-init shape as the
-        // CodeSessionManager note above. The launch trace showed the initializer running TWICE —
-        // a second full profile fetch (and a Keychain read per profile) for an instance nothing
-        // kept — and the delete cascade risked landing on the discarded one.
-        //
-        // Cascade a profile delete into the view model's per-profile canvas cache. Without this a
-        // deleted workflow's DIRTY canvas survives in memory and the quit-time drain re-creates its
-        // layout row as an orphan. `[weak mainVM]` because the closure is stored for the process
-        // lifetime.
+        // Built as a local, wired, then installed: reading a `@State` in `init()` can construct a discarded instance.
+        // The delete cascade clears the canvas cache so quit does not re-create a layout row; `[weak mainVM]` as it lives long.
         let profileService = BackendProfileService()
         profileService.onProfileDeleted = { [weak mainVM] profileID in
             mainVM?.discardWorkflowCanvasState(for: profileID)
@@ -729,17 +594,10 @@ struct DevgenticApp: App {
             SchedulerService.shared.mainViewModel = mainVM
             SchedulerService.shared.loadAllTasks()
             SchedulerService.shared.rescheduleAll()
-            // ⚠️ Catch up HERE, not only on `didBecomeActive` (G52).
-            //
-            // `rescheduleAll` arms timers for FUTURE dates only — a cron task gets its next
-            // occurrence and a past `scheduledAt` gets no timer at all — so anything already overdue
-            // depends entirely on this evaluation. The activation hook that used to be its only
-            // trigger fires during cold launch and can beat this Task, in which case it iterated an
-            // empty list and the overdue task was silently skipped until the user happened to switch
-            // away and back. Calling it here makes the catch-up a property of startup rather than of
-            // scheduling luck; a duplicate call is harmless (`runningTaskIDs` de-dupes).
+            // Catch up here, not only on `didBecomeActive`: `rescheduleAll` arms timers for future dates only.
+            // A duplicate call is harmless (`runningTaskIDs` de-dupes).
             SchedulerService.shared.evaluateAndFireDueTasks()
-            // Wake, clock and time-zone changes re-decide every task (D-22).
+            // Wake, clock and time-zone changes re-decide every task.
             SchedulerService.shared.startObservingSystemChanges()
         }
     }
@@ -784,20 +642,14 @@ struct DevgenticApp: App {
                 .modelContainer(swiftDataContainer)
                 .tint(themeManager.currentTheme.accentColor)
                 .task {
-                    // [QA revival P1a] Hand the AppKit-created QuickAccess panel the shared
-                    // object graph so it can stream through the real backend. Use the adaptor
-                    // property `appDelegate` — the REAL devgentic.AppDelegate instance. (Do NOT
-                    // use AppDelegate.shared here: under @NSApplicationDelegateAdaptor,
-                    // NSApplication.shared.delegate is SwiftUI's forwarding wrapper, not our
-                    // class, so a cast would trap.)
+                    // Hands the AppKit-created QuickAccess panel the shared object graph; uses the adaptor property `appDelegate`, the
+                    // real AppDelegate instance.
                     appDelegate.configureQuickAccess(
                         mainAppViewModel: mainApplicationViewModel,
                         themeManager: themeManager
                     )
-                    // ⚠️ Register A29: until this runs, `applicationShouldTerminate` has no view of
-                    // the profile editor and ⌘Q discards unsaved edits silently. Injected here for
-                    // the same reason the QuickAccess graph is — AppDelegate lives outside the
-                    // SwiftUI environment.
+                    // Until this runs `applicationShouldTerminate` cannot see the profile editor and Cmd-Q discards unsaved edits.
+                    // Injected here because AppDelegate lives outside the SwiftUI environment.
                     appDelegate.configureTerminationGuard(
                         profileService: backendProfileService,
                         mainAppViewModel: mainApplicationViewModel
@@ -1067,23 +919,15 @@ struct DevgenticApp: App {
                 .keyboardShortcut(",", modifiers: .command)
 
                 Button("Backend Profiles...") {
-                    // ⚠️ Register A33. This was `profiles.first?.id ?? UUID()` — on a first run, with
-                    // no profiles yet, it invented an ID that had never existed and navigated to it,
-                    // landing the user on "Profile Not Found" for a profile they never created. The
-                    // one state where the menu item most needs to help was the one it broke.
-                    // ⚠️ `sharedProfiles`. `profiles` is sorted by `lastSelected` DESCENDING and
-                    // `saveProfile` stamps that on every write — including when a workflow node
-                    // mints its private row — so the plain `.first` opened whichever node was added
-                    // most recently, in the profile editor, outside the workflow that owns it.
+                    // Uses `sharedProfiles`: `profiles` sorts by `lastSelected`, which saves stamp, so `.first` could be a node's row.
+                    // With no profiles it must not invent an id and land on 'Profile Not Found'.
                     if let firstProfile = backendProfileService.sharedProfiles.first {
                         mainViewRouter.navigateToProfile(
                             firstProfile.id,
                             activatingBufferOn: backendProfileService
                         )
                     } else {
-                        // Show the Profiles sidebar instead, where the empty state offers
-                        // "New Profile" — or, if the read FAILED rather than came back empty,
-                        // the "Couldn't Load Profiles" state with Retry (register A47).
+                        // Shows the Profiles sidebar instead, where the empty state offers 'New Profile' or, if the read failed, a Retry state.
                         UserDefaults.standard.set(
                             SidebarTab.backendProfiles.rawValue, forKey: SidebarTab.storageKey)
                         mainViewRouter.returnToChat()
@@ -1091,9 +935,7 @@ struct DevgenticApp: App {
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
 
-                // Phase E — Trends dashboard. Requires developer mode (gated internally
-                // by TrendsView itself). Listed here so developers can discover it via
-                // the app menu; the shortcut avoids collisions with standard macOS ones.
+                // Trends dashboard; requires developer mode (gated by `TrendsView`) and is listed here for discoverability.
                 Button("Observability Trends...") {
                     openWindow(id: "trends-window")
                 }
@@ -1146,10 +988,8 @@ struct DevgenticApp: App {
         }
 
         // MARK: - Trends Dashboard (Phase E)
-        // Developer-facing window showing per-tool reliability, per-category error
-        // frequency, per-model outcomes, and circuit-breaker stats. Reads from the
-        // TraceStore live (no pre-aggregation). Gated internally on developerMode;
-        // non-devs see a "turn on developer mode to unlock" placeholder.
+        // Developer-facing window: per-tool reliability, error frequency, per-model outcomes and circuit-breaker stats.
+        // Read live from `TraceStore`; gated on developer mode, others see an unlock placeholder.
         Window("Observability Trends", id: "trends-window") {
             TrendsView()
                 .environment(themeManager)
@@ -1176,9 +1016,7 @@ struct DevgenticApp: App {
         .windowResizability(.contentSize)
 
         // MARK: - Bundled Documents Window (Privacy Policy, License, Third-Party Notices)
-        // The bundled copies of the repo-root PRIVACY.md, LICENSE and THIRD_PARTY_NOTICES.md (see
-        // `BundledDocument`). One window per document: opening one that is already open brings it
-        // to the front.
+        // The bundled copies of PRIVACY.md, LICENSE and THIRD_PARTY_NOTICES.md (see `BundledDocument`); one window per document.
         WindowGroup("Document", id: BundledDocument.windowGroupID, for: BundledDocument.self) { $document in
             BundledDocumentView(document: document ?? .privacyPolicy)
                 .environment(themeManager)
@@ -1192,17 +1030,4 @@ struct DevgenticApp: App {
         .commandsRemoved()
     }
 
-    // DELETED 2026-08-04: `cleanupLegacyCoreDataStore()`.
-    //
-    // It was never called in any revision, and it would not have worked if it had been: it looked
-    // for `Application Support/DevgenticDB.sqlite` while the legacy CoreData store actually lives
-    // one level down, in `Application Support/Devgentic/DevgenticDB.sqlite` — still present and
-    // ~9.9 MB on a real install. It also force-unwrapped the directory lookup and swallowed every
-    // error with `try?`, so a failure would have been indistinguishable from success.
-    //
-    // Not replaced with a working version: silently deleting a user's old database at launch is
-    // exactly the behaviour the container-failure path deliberately refuses to do. If that store is
-    // ever to be reclaimed it belongs behind an explicit, reversible user action of the kind
-    // `StoreRecovery` now provides — not a launch-time sweep. Tracked in SWIFTDATA_GAP_REGISTER.md
-    // as G35.
 }

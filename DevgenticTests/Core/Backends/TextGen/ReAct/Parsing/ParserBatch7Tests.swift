@@ -4,15 +4,7 @@
 //  ParserBatch7Tests.swift
 //  DevgenticTests
 //
-//  Core readiness P2 batch 7 (2026-10-12): prompted-dialect parsing.
-//    CR-50  Command-R7B calls lost every argument (marker stripped before the parser ran)
-//    CR-52  a partial batch dropped its failed calls without telling anyone
-//    CR-53  the sanitizer kept only the first of two DIFFERENT JSON blocks
-//    CR-54  ReAct `Action:` matched inside prose ("transaction: history")
-//    CR-55  Command-R re-read the same array after a second `Action:`
-//
-//  Calls are driven through the REAL `CognitiveParsePipeline` (sanitizer first, as in production),
-//  because the CR-50 defect lived exactly in the gap between the sanitizer and the parser.
+//  Created by Raj Singh.
 //
 
 import XCTest

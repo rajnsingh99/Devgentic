@@ -4,18 +4,13 @@
 //  DeliveryWarning.swift
 //  Devgentic
 //
-//  Tells the user BEFORE a send which files the model will receive only part of — or none of —
-//  why, and what to do instead. Shown by the composer, QuickAccess and the profile editor's
-//  knowledge-source rows.
-//
-//  ⚠️ The preview runs the backend's exact read-then-plan (`readFileContentOrThrow` at
-//  `DirectInjectionBudget.readCap`, then `DirectInjectionPlan.allocate`), so a warning describes
-//  what WILL happen, not an estimate. A stat'd-size guess would warn on a 2 MB PDF that extracts
-//  to 30K characters and stay silent on multi-byte text.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Tells the user before a send which files the model will receive only part of, or none of, why, and what to do instead.
+/// The preview runs the backend's real read-then-plan, so a warning describes what will happen, not an estimate.
 struct DeliveryWarning: Identifiable, Equatable, Sendable {
     /// The file's path — stable across recomputes, so the view does not flicker.
     let id: String

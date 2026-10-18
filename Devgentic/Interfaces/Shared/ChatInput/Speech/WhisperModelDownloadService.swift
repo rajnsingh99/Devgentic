@@ -4,10 +4,7 @@
 //  WhisperModelDownloadService.swift
 //  Devgentic
 //
-//  Manages Whisper model download state: cache detection, download with
-//  progress tracking, deletion, and cancellation. Owns the download/delete
-//  lifecycle so that WhisperRecognitionService only deals with loading
-//  cached models.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -15,6 +12,8 @@ import WhisperKit
 import Hub
 import os
 
+/// Manages Whisper model download state: cache detection, download with progress, deletion and cancellation. Owns the
+/// download/delete lifecycle so `WhisperRecognitionService` only loads cached models.
 @MainActor
 @Observable
 final class WhisperModelDownloadService {
@@ -42,10 +41,8 @@ final class WhisperModelDownloadService {
     /// Non-nil when the most recent download failed. Cleared on next download start.
     private(set) var downloadError: String?
 
-    /// Bytes downloaded so far for the current pull, mirrored from the
-    /// `Progress` object WhisperKit hands the progress callback. Nil when
-    /// Progress hasn't emitted a usable value yet (e.g. during the initial
-    /// handshake where `totalUnitCount` is -1).
+    /// Bytes downloaded so far for the current pull, mirrored from the `Progress` WhisperKit hands the callback; nil
+    /// until it emits a usable value (`totalUnitCount` is -1 during the handshake).
     private(set) var downloadCompletedBytes: Int64?
 
     /// Total bytes the Progress object reports for the current pull. Nil
@@ -63,12 +60,9 @@ final class WhisperModelDownloadService {
 
     private let repo = "argmaxinc/whisperkit-coreml"
 
+    // Why: every `HubApi`/`WhisperKit` call must pass this; their default is `~/Documents/huggingface`, and merely checking
+    // it raises the macOS Documents-folder prompt.
     /// Where WhisperKit models are stored: Application Support, beside the MLX model store.
-    ///
-    /// ⚠️⚠️ EVERY `HubApi` / `WhisperKit` CALL MUST PASS THIS. Their default is
-    /// `~/Documents/huggingface`, and merely checking that path raises the macOS "access your
-    /// Documents folder" prompt. This service is built with the composer at launch, so the default
-    /// put that prompt on every first launch, before the user had touched voice input.
     nonisolated static let downloadBase = URL.applicationSupportDirectory
         .appending(path: "huggingface/whisperkit", directoryHint: .isDirectory)
 
@@ -111,10 +105,8 @@ final class WhisperModelDownloadService {
             return
         }
 
-        // Model variant folders follow the pattern: openai_whisper-<variant>/
-        // e.g. openai_whisper-base, openai_whisper-large-v3
-        // NOTE: WhisperKit uses the SAME folder for both "base" and "base.en" —
-        // the ".en" suffix is a runtime decoding option, not a separate download.
+        // Model variant folders follow `openai_whisper-<variant>/`. WhisperKit uses the same folder for "base" and
+        // "base.en"; the `.en` suffix is a runtime decoding option.
         for url in contents {
             guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
             let folderName = url.lastPathComponent
@@ -129,9 +121,8 @@ final class WhisperModelDownloadService {
                 // Anchored suffix match: folder must end with "-<baseName>"
                 guard folderName.hasSuffix("-\(baseName)") || folderName == baseName else { continue }
 
-                // Fix #7: Verify the folder has enough model files to be usable
-                // (not a partial download). WhisperKit needs at minimum:
-                // MelSpectrogram, AudioEncoder, TextDecoder — each as .mlmodelc/.mlpackage.
+                // Verifies the folder has enough model files to be usable (not a partial download): MelSpectrogram, AudioEncoder and
+                // TextDecoder, each as .mlmodelc/.mlpackage.
                 if let files = try? fm.contentsOfDirectory(atPath: url.path) {
                     let modelFiles = files.filter { $0.hasSuffix(".mlmodelc") || $0.hasSuffix(".mlpackage") }
                     if modelFiles.count >= minimumModelFileCount {
@@ -188,9 +179,8 @@ final class WhisperModelDownloadService {
                             ? Double(progress.completedUnitCount) / Double(progress.totalUnitCount)
                             : 0
                         self.downloadProgress = fraction
-                        // Expose raw byte counts for DownloadManager's
-                        // speed sampler. Progress can emit -1 for total
-                        // during handshake; filter that.
+                        // Exposes raw byte counts for `DownloadManager`'s speed sampler; Progress can emit -1 for total during the
+                        // handshake, so filter that.
                         self.downloadCompletedBytes = progress.completedUnitCount >= 0
                             ? progress.completedUnitCount
                             : nil
@@ -208,10 +198,8 @@ final class WhisperModelDownloadService {
 
                 logger.log("Download completed for '\(modelId)'")
 
-                // Refresh cache FIRST so isModelDownloaded() returns true
-                // before the notification triggers switchModel().
-                // refreshDownloadedModels() is synchronous (FileManager calls on MainActor),
-                // so downloadedModelIds is fully updated before we proceed.
+                // Refreshes the cache first so `isModelDownloaded()` is true before the notification triggers `switchModel()`; the
+                // refresh is synchronous.
                 self.refreshDownloadedModels()
                 self.lastDownloadEnding = RecordedDownloadEnding(modelID: modelId, ending: .succeeded)
                 self.resetDownloadState()
@@ -263,13 +251,9 @@ final class WhisperModelDownloadService {
 
     // MARK: - Delete
 
-    /// Deletes a downloaded model from the local HuggingFace cache.
-    ///
-    /// - Cancels any active download of this model first (awaiting completion).
-    /// - Tells `WhisperRecognitionService` to unload the model if it's currently loaded,
-    ///   preventing stale in-memory references to deleted CoreML bundles.
-    /// - Returns the ID of a remaining downloaded model to switch to, or nil if none remain.
-    ///   Returns nil and sets `deleteError` if the filesystem operation fails.
+    /// Deletes a downloaded model from the local HuggingFace cache, first cancelling any active download of it and
+    /// telling `WhisperRecognitionService` to unload it. Returns the ID of a remaining downloaded model to switch to, or
+    /// nil if none remain or the filesystem operation fails (which sets `deleteError`).
     @discardableResult
     func deleteModel(_ modelId: String) async -> String? {
         // If we're currently downloading this model, cancel and wait for teardown

@@ -4,15 +4,7 @@
 //  ImageAccessibilityTests.swift
 //  DevgenticTests
 //
-//  Alt text is parsed by the markdown parser, modelled on MessageContent, and threaded all
-//  the way to the render sites — then dropped at every one of them. AgentBubbleContentView
-//  destructured `case .image(_, _, let imageData)` and stamped a hardcoded
-//  "Generated image" label from OUTSIDE ImageView, which also clobbered ImageView's own
-//  "Loading image" / "Image failed to load" labels. The AsyncImage sites showed altText as
-//  a caption only WHILE loading, so the image that stays on screen had no description.
-//
-//  Result: every image announced identically to VoiceOver, and a screen-reader user could
-//  not tell two pictures apart.
+//  Created by Raj Singh.
 //
 
 import XCTest

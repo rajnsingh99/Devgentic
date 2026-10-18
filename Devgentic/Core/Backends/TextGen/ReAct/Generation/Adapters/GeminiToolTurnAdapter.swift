@@ -4,15 +4,14 @@
 //  GeminiToolTurnAdapter.swift
 //  Devgentic
 //
-//  Native-turn serializer for Google Gemini's generateContent API.
-//  Gemini differs from the OpenAI-family shapes in three ways:
-//    1. Role is "model" for assistant turns (not "assistant").
-//    2. Content lives inside `parts`, not `content`.
-//    3. Tool calls are `functionCall` parts; results are `functionResponse` parts.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Native-turn serializer for Google Gemini's generateContent API. Differs from OpenAI-family shapes: the assistant
+/// role is "model", content lives in `parts`, tool calls are `functionCall` parts and results are `functionResponse`
+/// parts.
 struct GeminiToolTurnAdapter: ToolTurnAdapter {
 
     func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?) -> [String: Any] {
@@ -37,7 +36,7 @@ struct GeminiToolTurnAdapter: ToolTurnAdapter {
         ]
     }
 
-    /// ⚠️ CR-23: each function-call part gets back the `thoughtSignature` the model sent with it. See
+    /// Each function-call part gets back the `thoughtSignature` the model sent with it. See
     /// `GeminiLLMProvider.thoughtSignatureReplay(in:)`.
     func assistantTurn(toolCalls: [PendingToolCall], reasoning: String?, replay: JSONValue?) -> [String: Any] {
         var turn = assistantTurn(toolCalls: toolCalls, reasoning: reasoning)
@@ -84,11 +83,8 @@ struct GeminiToolTurnAdapter: ToolTurnAdapter {
         ]
     }
 
-    /// Canonical `{role, content: string}` messages need to be converted to
-    /// `{role, parts: [{text}]}` for Gemini's message shape, and canonical
-    /// `assistant` role translated to Gemini's `model` role.
-    /// Role "system" passes through — the provider extracts it to the top-level
-    /// `systemInstruction` field.
+    /// Converts canonical `{role, content: string}` messages to `{role, parts: [{text}]}` and the `assistant` role to
+    /// `model`; "system" passes through, since the provider extracts it to `systemInstruction`.
     func normalizeCanonical(message: [String: String]) -> [String: Any] {
         let rawRole = message["role"] ?? "user"
         let content = message["content"] ?? ""

@@ -4,27 +4,7 @@
 //  SkillCommand.swift
 //  Devgentic
 //
-//  Reading `/skill-name the rest of the message` out of what the user typed.
-//
-//  ## What `/` does, stated plainly
-//
-//  It is a DIRECTIVE, not an invocation. Selecting `/code-review` rewrites the message so the model
-//  is told, in the user turn, to use that skill — and the model then calls `load_skill` the way it
-//  would have anyway. It does not pre-load the body, and it does not bypass the model's choice.
-//
-//  ⚠️ That distinction matters and must not be blurred in the UI. A capable model follows the
-//  directive essentially always; a small local one may ignore it, and the user should see a normal
-//  message that plainly says what was asked rather than believing a command was executed.
-//
-//  A deterministic pre-load — injecting the resolved body before the turn starts — is a separate
-//  change: it needs a field threaded from `AgentConnect` through `AgentInput` into `SemanticContext`
-//  and the prompt layer. This is the honest 80% that works with the machinery already shipped.
-//
-//  ## Why the parse lives here rather than in the composer
-//
-//  Three places need to agree about what "the message starts with a skill command" means: the
-//  trigger that offers the picker, the rewrite on send, and anything later that wants to show the
-//  user what was invoked. A regex in a SwiftUI view is a fourth definition waiting to disagree.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -63,10 +43,8 @@ struct SkillCommandOffer: Equatable, Sendable {
     /// The names a command may be rewritten for.
     var names: Set<String> { Set(skills.map(\.name)) }
 
-    /// One line per collision, naming the copy that is actually reachable.
-    ///
-    /// ⚠️ Said in the picker rather than only logged, because the picker is where the user makes the
-    /// choice the collision takes away from them.
+    /// One line per collision, naming the copy that is actually reachable. Shown in the picker rather than only logged,
+    /// because that is where the user makes the choice the collision takes away.
     var collisionNotes: [(name: String, note: String)] {
         collisions.compactMap { name in
             guard let reachable = skills.first(where: { $0.name == name }) else { return nil }
@@ -75,18 +53,9 @@ struct SkillCommandOffer: Equatable, Sendable {
     }
 }
 
-/// Which skills a `/` command can actually reach, for one profile.
-///
-/// ⚠️⚠️ ONE DEFINITION, USED BY BOTH SIDES, BECAUSE THEY DISAGREED — TWICE. First the picker listed
-/// the whole library while the send-path rewrite accepted only names the profile had LINKED. Then
-/// both sides read a SET OF NAMES while the picker filtered the library by name, so two skills both
-/// called `learn` each got a row (even an unlinked or disabled copy) while every row inserted the
-/// same `/learn` and the run loaded whichever skill id sorted first — picking "Spanish tutor" ran
-/// "Swift coach". This now asks `SkillResolution`, the function the RUN uses, so the picker offers
-/// exactly what the run will load: linked, enabled, resolvable, one copy per name, pin honoured.
-///
-/// ⚠️ Non-agent profiles reach nothing. Bot, workflow and imageGen runs register no `load_skill`, so
-/// a directive naming a skill would be an instruction the model cannot carry out.
+/// Which skills a `/` command can actually reach, for one profile. Asks `SkillResolution`, the function the run uses,
+/// so the picker offers exactly what the run will load: linked, enabled, resolvable, one copy per name, pin honoured.
+/// Non-agent profiles reach nothing, since their runs register no `load_skill`.
 enum SkillCommandReachability {
 
     /// What this profile's `/` can offer and expand.
@@ -96,13 +65,12 @@ enum SkillCommandReachability {
         let config: AgentConfig
         switch details {
         case .agent(let agentConfig): config = agentConfig
-        // ⚠️ `.code` persists selections but the runtime gives Code profiles no skills, so a
-        // directive there would name something the run cannot load. Offering it would be the same
-        // lie this type exists to prevent.
+        // `.code` persists selections but the runtime gives Code profiles no skills, so a directive there would name
+        // something the run cannot load.
         case .code, .bot, .workflow, .imageGen: return .none
         }
-        // ⚠️ `reporting: false` — the composer re-resolves on every keystroke, and the run's own
-        // resolution already reports unresolved links and collisions once per run.
+        // `reporting: false`: the composer re-resolves on every keystroke, and the run's own resolution already reports
+        // unresolved links and collisions once.
         guard let outcome = SkillResolution.resolve(for: config, profileName: "composer",
                                                     store: store, reporting: false) else { return .none }
         // `SkillManifest` carries no display label; the library does. A skill missing here falls
@@ -111,7 +79,7 @@ enum SkillCommandReachability {
         let displayNames = Dictionary(library.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
         return SkillCommandOffer(
             skills: outcome.manifests.map {
-                // ⚠️ `folderPath` carries the SKILL ID — see `SkillResolution.manifest(for:version:)`.
+                // `folderPath` carries the skill id; see `SkillResolution.manifest(for:version:)`.
                 OfferedSkillCommand(skillID: $0.folderPath, name: $0.name,
                                     displayName: displayNames[$0.folderPath] ?? $0.name,
                                     description: $0.description)
@@ -120,11 +88,8 @@ enum SkillCommandReachability {
         )
     }
 
-    /// Whether the `/` picker should appear at all for this profile.
-    ///
-    /// ⚠️ Distinct from "has no matches". A profile that cannot use skills should not show a picker
-    /// suggesting it might; a profile that can, but has linked none, SHOULD — with an empty state
-    /// that says how to link one.
+    /// Whether the `/` picker should appear at all for this profile. Distinct from having no matches: a profile that can
+    /// use skills but has none linked still shows the picker, with an empty state explaining how to link one.
     static func pickerApplies(to details: ProfileDetails?) -> Bool {
         guard let details else { return false }
         if case .agent = details { return true }
@@ -134,11 +99,8 @@ enum SkillCommandReachability {
 
 enum SkillCommandParser {
 
-    /// Extracts a command from message text, or nil when there is none.
-    ///
-    /// ⚠️ ONLY at offset 0, matching `TextTriggerAnalyzer`'s rule for `/`. A slash anywhere else is
-    /// ordinary text — a path, a date, an "and/or" — and treating it as a command would rewrite
-    /// someone's sentence. The two rules are deliberately identical; if one moves, the other must.
+    /// Extracts a command from message text, or nil when there is none. Only at offset 0, matching
+    /// `TextTriggerAnalyzer`'s rule for `/`; a slash elsewhere is ordinary text. The two rules must move together.
     static func parse(_ text: String) -> SkillCommand? {
         guard text.hasPrefix("/") else { return nil }
 
@@ -148,33 +110,23 @@ enum SkillCommandParser {
         let name = afterSlash.prefix { !$0.isWhitespace }
         guard !name.isEmpty else { return nil }
 
-        // ⚠️ Shape-validated, not merely non-empty. The charset is the same one every skill name
-        // passes at import, so `/../../etc` cannot parse as a command at all — and a user who typed
-        // a path fragment gets their text left alone rather than silently rewritten.
+        // Shape-validated with the same charset skill names pass at import, so a path fragment such as `/../../etc` never
+        // parses as a command and the text is left alone.
         guard (try? SkillFolderScanner.validateSkillNameShape(String(name))) != nil else { return nil }
 
         let arguments = afterSlash.dropFirst(name.count).trimmingCharacters(in: .whitespacesAndNewlines)
         return SkillCommand(skillName: String(name), arguments: arguments)
     }
 
-    /// Rewrites a command into the message actually sent.
-    ///
-    /// ⚠️ The user's own words come LAST and verbatim. An earlier shape put them inside the
-    /// directive sentence, which meant a multi-paragraph request was read as one clause of an
-    /// instruction — the model summarised it instead of doing it. Directive first, request after,
-    /// separated by a blank line, so the request is still the request.
-    ///
-    /// ⚠️ Says "if it applies". A skill the model judges irrelevant should be skipped, not forced:
-    /// `/` is the user pointing at a skill, not asserting it fits, and a model made to use a
-    /// mismatched skill produces confidently wrong work.
+    /// Rewrites a command into the message actually sent: a directive first, then the user's own words verbatim after a
+    /// blank line. The directive says "if it applies", since `/` points at a skill without asserting it fits.
     static func render(_ command: SkillCommand, availableNames: Set<String>) -> String {
         guard availableNames.contains(command.skillName) else {
-            // ⚠️ Logged because the user SEES their text left alone and cannot tell whether the
-            // picker misfired or the skill genuinely is not reachable from this profile.
+            // Logged because the user sees their text left alone and cannot tell whether the picker misfired or the skill is not
+            // reachable from this profile.
             logger.notice("[SKILL_COMMAND] '/\(command.skillName)' names a skill this profile cannot reach (reachable: \(availableNames.sorted().joined(separator: ", ").isEmpty ? "none" : availableNames.sorted().joined(separator: ", "))). CONSEQUENCE: the message is sent EXACTLY as typed, with no directive added — the model gets a literal slash-word, which is what makes a typo visible to the person best placed to notice it.")
-            // ⚠️ UNKNOWN SKILL: left EXACTLY as typed. Rewriting text that names a skill this
-            // profile cannot reach would send an instruction the model cannot follow, and hide the
-            // typo from the person best placed to notice it.
+            // Unknown skill: left exactly as typed, since rewriting would send an instruction the model cannot follow and hide
+            // the typo.
             return command.arguments.isEmpty
                 ? "/\(command.skillName)"
                 : "/\(command.skillName) \(command.arguments)"

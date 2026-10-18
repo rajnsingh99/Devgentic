@@ -2,17 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  TraceRecorderSeamTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  First-ever tests for TraceRecorder, enabled by the Phase-1 injection seam
-//  (`TraceRecorder(store:)`). Every test drives a REAL recorder actor against a
-//  hermetic `TraceStore(inMemory:)` — no mocks of the thing under test.
-//
-//  Covers the Phase-1 truth fixes:
-//    • call-site timestamps (`at:` defaults evaluated at the call site)
-//    • earliest-wins span ends (real end corrects endTrace's clamp, either order)
-//    • beginTrace persists the resolved model name → non-NULL estimatedCostUSD
-//    • fetchTrace(forMessageID:) returns the NEWEST attempt deterministically
+//  Created by Raj Singh.
 //
 
 import XCTest

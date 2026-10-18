@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  CSVExtractorTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1 + 2: CSV/TSV parsing with real fixture + programmatic edge cases.
+//  Created by Raj Singh.
 //
 
 import XCTest

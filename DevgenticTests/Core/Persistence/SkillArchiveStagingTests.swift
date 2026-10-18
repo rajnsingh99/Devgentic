@@ -2,29 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillArchiveStagingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Expanding a skill archive safely, and refusing the ones that should be refused.
-//
-//  ⚠️ These build REAL archives with `ditto` and run the REAL staging path. A test that asserted on
-//  entry-name strings would prove nothing about where bytes actually land — which is the only thing
-//  that matters here, and the reason the budget is enforced on the extracted tree rather than on the
-//  table of contents the archive declares.
-//
-//  The symlink test is the one to protect: it is the only test in the skills subsystem that
-//  exercises a genuine escape attempt, after an earlier symlink "finding" turned out to be
-//  Foundation's protection rather than ours (see SkillFolderScannerHygieneTests).
-//
-//  ⚠️ RENAMED FROM `SkillPackageInstallerTests` (V6). The promote half — install into Application
-//  Support, replace-on-reinstall, and the directory-locating step that renamed a contents-only
-//  archive — is gone, because the library owns skill content and there is nothing to promote. The
-//  tests for it went with it; their BEHAVIOURS did not, and are covered where they now live:
-//
-//    - "a contents-only archive still works"        → `testAContentsOnlyArchiveStillIngests`
-//    - "an archive with no SKILL.md is refused"     → `testAnArchiveWithNoSkillFileIsReported`
-//    - "export then re-import round-trips"          → `testExportThenIngestRoundTrips`
-//    - "a hostile frontmatter name cannot traverse" → `SkillMaterializerTests`, which is the only
-//      place a skill name becomes a filesystem path now.
+//  Created by Raj Singh.
 //
 
 import XCTest

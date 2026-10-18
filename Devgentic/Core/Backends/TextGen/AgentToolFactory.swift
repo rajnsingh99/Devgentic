@@ -4,17 +4,7 @@
 //  AgentToolFactory.swift
 //  Devgentic
 //
-//  Turns a concrete `DevgenticTool` into the type-erased `AgentTool` the executor runs.
-//
-//  This was `AgentConnect.wrapTool`, a private method, which meant the only way to obtain an
-//  `AgentTool` was to be inside `AgentConnect` — which is why the tool list had to be a switch
-//  there, and why a second list had to exist elsewhere for the UI. Lifting it out is what lets
-//  `NativeToolCatalog` be the single source of truth for both.
-//
-//  It is a free enum rather than a method because it uses no instance state: it reads the tool's
-//  own name, description and schema, and closes over the concrete `T` so `T.Arguments` can be
-//  decoded at call time. That capture of `T` is the whole reason a catalogue entry has to store a
-//  CLOSURE rather than an `any DevgenticTool` — type erasure would lose the argument type.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,6 +14,9 @@ import Foundation
 /// in the one stream an operator greps for tool problems.
 private let logToolExecution = DGLogger(category: "ToolExecution")
 
+/// Turns a concrete `DevgenticTool` into the type-erased `AgentTool` the executor runs, so `NativeToolCatalog` can be
+/// the single source of truth. A free enum that closes over the concrete `T` so `T.Arguments` can be decoded at call
+/// time; that is why catalogue entries store a closure rather than an `any DevgenticTool`.
 enum AgentToolFactory {
 
     /// Wraps a concrete tool, erasing its `Arguments` type behind a JSON-decoding closure.
@@ -50,15 +43,13 @@ enum AgentToolFactory {
             do {
                 args = try JSONDecoder().decode(T.Arguments.self, from: dataArgs)
             } catch let decodingError as DecodingError {
-                // The raw payload and the required keys are both in the message on purpose: a
-                // decoding failure is the model's mistake to fix, and it can only fix it if the
-                // observation says what it sent and what was expected.
+                // The raw payload and required keys are both in the message so the model can fix a decoding failure, which needs
+                // what it sent and what was expected.
                 let paramHint = requiredKeys.isEmpty ? "" : " Required parameters: [\(requiredKeys.joined(separator: ", "))]."
                 let rawJSON = String(data: dataArgs, encoding: .utf8) ?? "{}"
 
-                // ⚠️ READINESS CR-57 (2026-10-12). The LOG used to carry `rawJSON` too, at ERROR, the
-                // level that is always persisted: a `write_file` call's payload is the whole file. The
-                // log gets its size and the keys the model sent; the model still gets the raw payload.
+                // The log carries the payload size and the keys sent, not `rawJSON`: a `write_file` payload is the whole file. The
+                // model still gets the raw payload.
                 let sentKeys = ((try? JSONSerialization.jsonObject(with: dataArgs)) as? [String: Any]).map { $0.keys.sorted() }
                 logToolExecution.error("❌ Tool Argument Decoding Failed. Tool: \(toolName). Expected Keys: \(requiredKeys). Sent keys: \(sentKeys.map { "\($0)" } ?? "not a JSON object") (\(dataArgs.count) bytes). Error: \(decodingError.localizedDescription). CONSEQUENCE: the call does not run; the model is shown what it sent and what was expected, and retries.")
 

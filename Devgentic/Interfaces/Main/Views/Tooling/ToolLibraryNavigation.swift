@@ -4,25 +4,13 @@
 //  ToolLibraryNavigation.swift
 //  Devgentic
 //
-//  Created 2026-08-02 — shared navigation state for the Tool Library.
-//
-//  The library's navigation (category, Installed/Discover, Discover facets) used to be
-//  `@State` inside `ToolLibraryView`, which was fine while the nav lived inside that view.
-//  It now lives in the SIDEBAR PANE — a completely separate view tree — so the two halves
-//  need one source of truth between them.
-//
-//  Why the nav moved: the pane and the library's own inner sidebar were both listing MCP
-//  servers, side by side, with different affordances. That is nav-inside-nav, and it spent
-//  ~220pt of the content column duplicating what the app shell already provides.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// Which half of the library the pane is showing.
-///
-/// Renamed from Installed/Discover on 2026-08-02: that pair described where a server came
-/// from rather than what the row IS, and it put built-in tools and MCP servers under the same
-/// heading. Built-in vs MCP is the distinction the user actually navigates by.
+/// Which half of the library the pane is showing: built-in tools or MCP servers, the distinction users
+/// navigate by.
 enum ToolLibrarySection: String, CaseIterable, Identifiable {
     case builtIn, mcp
     var id: String { rawValue }

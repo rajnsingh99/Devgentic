@@ -4,29 +4,7 @@
 //  RunAdmissionPolicyTests.swift
 //  DevgenticTests
 //
-//  Cover for the INTERIM one-root-run-per-conversation rule — repo-root
-//  `LLM_Execution_Concurrency_Design.md` §0.5 and the increment-1 follow-up.
-//
-//  What this protects, in two parts:
-//
-//  1. ONE ROOT RUN PER CONVERSATION — the product model's invariant. Without it, "the conversation
-//     is the thing you stop" is a convention rather than a fact, and Stop is ambiguous.
-//
-//  2. THE SAME-MESSAGE TASK-HANDLE OVERWRITE. `ActiveStreamManager.activeTasks` is keyed by MESSAGE
-//     and is the only cancellable handle for an entire run tree. Redo and Resume stream into a
-//     pre-existing message (`updating:`), so two runs on ONE message means the second overwrites
-//     the first's handle, and that `Task` cannot be reached by `cancelStream(for:)` from anywhere,
-//     ever. Increment 1 removed the stored foreground slot and killed the clear-side clobber, but
-//     could not reach this: only refusing the second CLAIM does.
-//
-//  ⚠️ The trigger is NOT "press Redo while a message streams" — the action row is gated on
-//  `!message.isStreaming` (AgentBubbleContentView.swift:134) and the Resume chip likewise (`:98`),
-//  so neither control is offered on the message being written to. It is a DOUBLE-PRESS during the
-//  async history-resolve hop (MessagingCoordinator `regenerateResponse` / `resumeRun`), when the
-//  message has not started streaming yet and the control is still live. That is why both paths
-//  enforce this again AFTER the hop, not only at the entry point.
-//
-//  Constructs nothing — no view model, no ActiveStreamManager, no ChatMessage.
+//  Created by Raj Singh.
 //
 
 import XCTest

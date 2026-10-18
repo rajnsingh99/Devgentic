@@ -4,16 +4,7 @@
 //  MLXStoreCapabilityTests.swift
 //  DevgenticTests
 //
-//  Five MLX store capabilities added 2026-09-13:
-//    2  the installed revision is shown (it was computed, stored, and rendered nowhere)
-//    3  "Update available" became a button that names both revisions and clears when done
-//    4  the quantization choice goes into the HuggingFace QUERY, not a client-side sieve
-//    5  the sort choice drives the SERVER ranking, and pagination follows it
-//    6  an opt-in "Fits my Mac" filter over the existing RAM advisory
-//
-//  ⚠️ Every rule under test is a `nonisolated static` on purpose. `MLXModelStoreViewModel.init`
-//  scans the disk and fetches from huggingface.co, so the view model cannot be built in a test.
-//  The wiring that connects these rules to the UI is covered by the source tests at the bottom.
+//  Created by Raj Singh.
 //
 
 import XCTest

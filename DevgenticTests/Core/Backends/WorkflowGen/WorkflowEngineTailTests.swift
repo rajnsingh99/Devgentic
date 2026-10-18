@@ -4,21 +4,7 @@
 //  WorkflowEngineTailTests.swift
 //  DevgenticTests
 //
-//  Register `Workflow_Production_Readiness_Fresh.md`, engine cluster — the rows fixed 2026-09-01:
-//  `EXC-8` (a retry loop that TRAPPED on a negative count), `EXC-6` (a Stop manufacturing a routing
-//  decision), `EXC-4` (a cancelled structural node emitting no terminal event), `EIO-10` (classifier
-//  tokens matching inside ordinary words) and `EXA-5` (same-level variable writes never visible).
-//
-//  ⚠️ EVERY ONE of these governs an event or a code path that is STRUCTURALLY UNOBSERVABLE through
-//  the integration harness: they are reached only on a cancelled task tree, and the producer task is
-//  cancelled BY `continuation.onTermination`, so by the time a terminal event is yielded the stream
-//  is already torn down. That is the same wall `settledStreamEndStatus` and `UserSkipTeardownPolicy`
-//  hit, and the house answer is the same one: extract the DECISION and truth-table it here, then let
-//  the executor merely plumb it. A test that tried to assert on the stream event would hang or flake
-//  rather than fail, which is worse than no test — so it is not written.
-//
-//  What that leaves unverified, stated plainly: that each executor call site passes the right
-//  arguments to these functions. That is a reading check, not a test.
+//  Created by Raj Singh.
 //
 
 import XCTest

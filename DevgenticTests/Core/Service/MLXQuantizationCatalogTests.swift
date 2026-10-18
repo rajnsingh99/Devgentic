@@ -4,7 +4,7 @@
 //  MLXQuantizationCatalogTests.swift
 //  DevgenticTests
 //
-//  G5 (quantization awareness) and G7 (curated first run + non-LLM filtering).
+//  Created by Raj Singh.
 //
 
 import XCTest

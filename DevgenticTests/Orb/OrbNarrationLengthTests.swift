@@ -4,9 +4,7 @@
 //  OrbNarrationLengthTests.swift
 //  DevgenticTests
 //
-//  "Just the gist" + "tell me more". The point of these two together is that brevity becomes a
-//  CHOICE rather than a severed sentence — so what is pinned here is that the length request and
-//  the cap agree, and that the held-back part is recoverable.
+//  Created by Raj Singh.
 //
 
 import XCTest

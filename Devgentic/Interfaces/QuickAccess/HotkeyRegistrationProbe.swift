@@ -4,19 +4,14 @@
 //  HotkeyRegistrationProbe.swift
 //  Devgentic
 //
-//  [M1] The soffes/HotKey package swallows RegisterEventHotKey's OSStatus
-//  (HotKeysController.register: `guard registerError == noErr … else { return }`), so
-//  constructing a HotKey never signals failure — AppDelegate could only ever log "registered"
-//  unconditionally, even when the OS refused the combo. This does an independent best-effort
-//  Carbon probe (register → immediately unregister) so the app can log the truth and warn.
-//
-//  Scope note: many "dead" combos still register fine at the Carbon layer (e.g. ⌘Space, which
-//  Spotlight consumes upstream). Those are guarded at record time by HotkeyValidator; this probe
-//  only catches a HARD refusal (RegisterEventHotKey returning a non-zero OSStatus).
+//  Created by Raj Singh.
 //
 
 import Carbon.HIToolbox
 
+/// Best-effort Carbon probe of whether the OS accepts a hotkey combo (register, then immediately unregister).
+/// The HotKey package swallows RegisterEventHotKey's OSStatus, so the app could not otherwise log a refusal.
+/// Catches only a hard refusal (non-zero OSStatus); `HotkeyValidator` guards combos consumed upstream (e.g. Cmd-Space).
 enum HotkeyRegistrationProbe {
 
     /// True if the OS accepts a Carbon hotkey registration for this combo. Registers under a

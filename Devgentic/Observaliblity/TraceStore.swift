@@ -4,7 +4,7 @@
 //  TraceStore.swift
 //  Devgentic
 //
-//  Created by Antigravity on 19/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,18 +17,14 @@ final class TraceStore: Sendable {
 
     // MARK: - Shared singleton
 
-    /// Process-wide singleton. Multiple observability actors (TraceRecorder,
-    /// LogRecorder, MetricsAggregator) share this single SQLite connection pool
-    /// so migrations run exactly once and WAL concurrency works as expected.
-    /// Returns nil on init failure — callers must handle the nil case gracefully
-    /// (they all do, via `guard let store else { return }`).
+    /// Process-wide singleton shared by the observability actors (TraceRecorder, LogRecorder, MetricsAggregator).
+    /// One SQLite connection pool means migrations run once and WAL concurrency works. Nil on init failure; callers
+    /// handle it.
     static let shared: TraceStore? = {
         do {
             return try TraceStore()
         } catch {
-            // Can't use os.Logger directly here — use print as last resort.
-            // A TraceStore init failure is catastrophic for observability but
-            // must never crash the app.
+            // `os.Logger` is unavailable here, so `print` is the last resort; an init failure must never crash the app.
             print("⚠️ TraceStore.shared init failed: \(error.localizedDescription). Observability disabled.")
             return nil
         }
@@ -43,21 +39,15 @@ final class TraceStore: Sendable {
 
     // MARK: - Initialization
     
+    // Why: a test run launches the real app, whose launch sweep purges the store `TraceStore.shared` opened;
+    // without a redirect that is the developer's real traces.sqlite.
     /// Environment variable that redirects the trace store away from Application Support.
-    ///
-    /// ⚠️ DEBUG BUILDS ONLY — mirrors `DevgenticSchema.storeURLOverrideEnvKey` and exists for the
-    /// same reason: `TEST_HOST` for `devgenticTests` is `devgentic.app`, so running ANY test
-    /// launches the real app, whose AppDelegate launch sweep purges/reconciles whatever store
-    /// `TraceStore.shared` opened. Without a redirect that is the developer's REAL traces.sqlite.
+    /// Debug builds only.
     static let storePathOverrideEnvKey = "DEVGENTIC_TRACE_STORE_PATH"
 
     /// Resolves where `init()` opens the store.
-    ///
-    /// DEBUG order: explicit env override → XCTest-detected temp path → Application Support.
-    /// The XCTest fallback is a safety net, not a convenience: it fires even when a test run
-    /// forgot to set the env var, so a test host can never mutate the real trace DB. Release
-    /// builds always resolve Application Support (the `#if` compiles the overrides out, so a
-    /// shipped app cannot be pointed elsewhere by its environment).
+    /// Debug order: explicit env override, XCTest-detected temp path, Application Support. Release builds always use
+    /// Application Support.
     static func resolveStoreDirectoryAndPath() throws -> (directory: URL, path: String) {
         #if DEBUG
         if let override = ProcessInfo.processInfo.environment[storePathOverrideEnvKey], !override.isEmpty {
@@ -103,9 +93,7 @@ final class TraceStore: Sendable {
         #if DEBUG
         if TestHost.isRunning,
            ProcessInfo.processInfo.environment[Self.storePathOverrideEnvKey] == nil {
-            // CONSEQUENCE of the redirect: this process records real telemetry into a throwaway
-            // file, and the launch sweep prunes THAT file — the developer's traces.sqlite is
-            // untouched by test runs from this build forward.
+            // This process records telemetry into a throwaway file, so the launch sweep never touches the real traces.sqlite.
             logger.info("[TRACESTORE] XCTest detected with no explicit override — store redirected to \(dbPath); the real Application Support traces.sqlite is untouched by this process.")
         }
         #endif
@@ -115,7 +103,7 @@ final class TraceStore: Sendable {
     /// assert the DEBUG redirect actually fired and Settings can surface the location.
     var storagePath: String { dbPath }
 
-    // MARK: - Live observation (Run-Report Phase 4)
+    // MARK: - Live observation
 
     /// A compact fingerprint of everything the Run Report renders for one trace.
     /// Any write that should repaint the report changes this string; the observation
@@ -127,12 +115,9 @@ final class TraceStore: Sendable {
         let traceStatus: String?
     }
 
-    /// GRDB `ValueObservation` stream for the Run Report's live view — the panel
-    /// consumes it with `for try await` and reloads on each emission. Zero change to
-    /// the write path: the observation watches the same tables the writers already
-    /// touch. `removeDuplicates` keeps unrelated-trace writes from repainting (the
-    /// tracked region is table-level, so another run's insert still wakes the
-    /// observation — the fingerprint filters it back out).
+    /// GRDB `ValueObservation` stream for the Run Report's live view; the panel reloads on each emission.
+    /// `removeDuplicates` on the fingerprint filters out writes from other traces, since the tracked region is
+    /// table-level.
     func observeRun(traceID: String) -> AsyncValueObservation<RunFingerprint> {
         ValueObservation
             .tracking { db -> RunFingerprint in
@@ -147,10 +132,9 @@ final class TraceStore: Sendable {
             .values(in: dbPool)
     }
     
-    /// For unit testing: create an ephemeral, isolated database.
-    /// Backed by a unique temp file rather than `:memory:` — `DatabasePool`
-    /// requires WAL journaling, which SQLite cannot activate on an in-memory
-    /// database ("SQLite error 1: could not activate WAL Mode at path: :memory:").
+    /// Creates an ephemeral, isolated database for unit tests.
+    /// Backed by a unique temp file rather than `:memory:`, because `DatabasePool` requires WAL, which in-memory
+    /// databases cannot activate.
     init(inMemory: Bool) throws {
         var config = Configuration()
         config.prepareDatabase { db in
@@ -193,11 +177,9 @@ final class TraceStore: Sendable {
 
     // MARK: - Migrations
 
-    /// ⚠️ ONE BASELINE (2026-10-03 history reset, pre-release): the eight incremental migrations
-    /// that built this schema were squashed into the final shape below. The identifier stays
-    /// `v1_create_tables` ON PURPOSE: a database that already ran the old ladder has this id applied
-    /// and its tables already in this shape, so it opens unchanged — GRDB ignores the retired ids it
-    /// no longer knows. Add a NEW migration for any future schema change; never edit this one.
+    // Why: the identifier stays `v1_create_tables` so databases that already applied it open unchanged.
+    /// The single baseline schema migration.
+    /// Add a new migration for any future schema change; never edit this one.
     private var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
@@ -355,10 +337,9 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Stamps an existing audit row with its resolution. Guards on `resolvedAt IS NULL` so a late
-    /// duplicate notification can't overwrite the real outcome with a stale one. Returns the number of
-    /// rows changed (0 = the raise row hasn't landed yet, or it was already resolved) so the caller can
-    /// retry the rare resolve-before-raise race rather than stranding the outcome.
+    /// Stamps an existing audit row with its resolution, guarded on `resolvedAt IS NULL` so a late duplicate cannot
+    /// overwrite it.
+    /// Returns rows changed (0 = the raise row has not landed yet, or it was already resolved), so callers can retry.
     @discardableResult
     func resolveHITLAudit(operationID: String, resolvedAt: Date, outcome: String) throws -> Int {
         try dbPool.write { db in
@@ -383,11 +364,9 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// [G1 Piece 2] A parked-then-interrupted HITL was successfully resumed — flip its outcome from
-    /// `interrupted` to `resumed` so the audit log reflects the recovery instead of over-counting it as
-    /// an interruption. Guarded on `outcome = 'interrupted'` so it can ONLY rewrite a row the launch
-    /// reconcile stamped — never a genuine approve/deny/cancel outcome. Returns rows changed (0 = no
-    /// matching interrupted row, e.g. it had resolved cleanly before quit or was purged).
+    /// Flips a resumed HITL's outcome from `interrupted` to `resumed`, guarded so only a launch-reconciled row is
+    /// rewritten.
+    /// Returns rows changed (0 = no matching interrupted row, e.g. it resolved before quit or was purged).
     @discardableResult
     func markHITLAuditResumed(operationID: String) throws -> Int {
         try dbPool.write { db in
@@ -438,11 +417,8 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Inserts or replaces a config snapshot for a trace. One row per trace — if
-    /// `captureConfigSnapshot` is ever called twice with the same traceID (shouldn't
-    /// happen in practice), the second call overwrites. `insert` with
-    /// `.replace` conflict policy isn't available here, so we use `save` which falls
-    /// back to update-on-primary-key-conflict.
+    /// Inserts or replaces a config snapshot for a trace; one row per trace, so a second call overwrites.
+    /// Uses `save`, which updates on primary-key conflict.
     func saveConfigSnapshot(_ row: TraceConfigRow) throws {
         try dbPool.write { db in
             try row.save(db)
@@ -460,10 +436,7 @@ final class TraceStore: Sendable {
 
     // MARK: - Log Entries (v4)
 
-    /// Batch-inserts log entries in a single transaction. Called from `LogRecorder`
-    /// on threshold and periodic flushes. Using `insertedCopy` so auto-assigned
-    /// IDs can be read back if callers care (we don't, currently — caller drops
-    /// the entries post-insert).
+    /// Batch-inserts log entries in a single transaction; called from `LogRecorder` on threshold and periodic flushes.
     func insertLogEntries(_ entries: [LogEntry]) throws {
         guard !entries.isEmpty else { return }
         try dbPool.write { db in
@@ -474,32 +447,19 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Fetches persisted log entries for a time range. Primarily consumed by the
-    /// diagnostic export bundle and ReportInspector.
-    /// - Parameters:
-    ///   - since: lower-bound timestamp (inclusive)
-    ///   - minLevel: drop entries below this severity (nil = all levels)
-    ///   - limit: row cap (default 10k, tune via `LogRecorder.persistedRecent`)
+    /// Fetches persisted log entries for a time range, for the diagnostic export bundle and ReportInspector.
+    /// `since` is inclusive, `minLevel` drops lower severities (nil = all), `limit` caps rows (default 10k).
     /// - Returns: entries in ascending timestamp order (oldest first).
     func fetchLogEntries(since: Date, minLevel: LogLevel? = nil, limit: Int = 10_000) throws -> [LogEntry] {
         try dbPool.read { db in
-            // Compare as epoch seconds: a raw `Date` in a query-interface expression encodes
-            // as a TEXT datetime (the record-level date strategy does NOT apply here), and
-            // TEXT never matches the REAL column — the filter silently returned nothing.
+            // Compare as epoch seconds: a raw `Date` encodes as TEXT here and never matches the REAL column.
             var query = LogEntry.filter(LogEntry.Columns.timestamp >= since.timeIntervalSince1970)
             if let minLevel {
-                // Level comparison: include entries whose LogLevel ordinal is >= minLevel.
-                // GRDB can't compare strings by rank natively, so we filter to the set
-                // of levels that satisfy the criterion.
+                // GRDB cannot compare strings by rank, so filter to the set of levels at or above `minLevel`.
                 let allowed = LogLevel.allCases.filter { $0 >= minLevel }.map(\.rawValue)
                 query = query.filter(allowed.contains(LogEntry.Columns.level))
             }
-            // ⚠️ DESC + limit, then reversed — NOT `.asc.limit()`. Ordering ascending and
-            // capping returns the OLDEST `limit` rows and silently discards everything newer, so
-            // a window holding more than the cap gave you the START of the period and dropped
-            // exactly the entries around whatever you were investigating. The cap has to bite at
-            // the far end from the question being asked. The reverse restores this method's
-            // documented contract (oldest first) for its callers.
+            // DESC plus limit, then reversed: ascending plus a cap would return the oldest rows and discard the newest.
             return try query
                 .order(LogEntry.Columns.timestamp.desc)
                 .limit(limit)
@@ -522,43 +482,23 @@ final class TraceStore: Sendable {
     }
 
     // MARK: - Metrics Aggregation Queries (Phase E)
-    //
-    // All queries operate on the canonical trace + span_events + trace_configs tables.
-    // No separate pre-aggregation: at single-user scale (30-day retention) live queries
-    // run in single-digit ms against the indexed columns we added in v2/v3/v4.
-    // If profiling ever shows slowdowns, add rolling-counter tables here without
-    // changing the MetricsAggregator / TrendsView API above.
+    // All queries run live against the canonical trace, span_events and trace_configs tables; no pre-aggregation at
+    // single-user scale.
 
     /// Per-tool reliability stats (success/failure counts, latency percentiles,
     /// failure-category breakdown). Uses the `toolResult` event type + dev-mode-populated
     /// `durationMs` / `errorCategory` columns.
     func toolReliabilityStats(since: Date, until: Date = Date(), profileType: String? = nil) throws -> [ToolReliabilityStats] {
         try dbPool.read { db in
-            // P1-15 profileType filter: scope to the subset of traces matching the
-            // user's chosen profile type (Bot / Agent / Workflow / Code / ImageGen)
-            // by constraining `traceID IN (matching traces)`. Nil filter = no scope,
-            // queries behave as before.
+            // The `profileType` filter scopes queries to traces of the chosen profile type; nil means no scope.
             let typeFilter = profileType.map { _ in
                 "AND traceID IN (SELECT traceID FROM traces WHERE profileType = ?)"
             } ?? ""
             var baseArgs: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
             if let profileType { baseArgs.append(profileType) }
 
-            // 1. Per-tool aggregate counts + avg duration.
-            //
-            // ⚠️ Grouped by the STRUCTURED tool name, never by `content`. `emitToolResult` writes
-            // content as "\(name): success" / "\(name): failed" — a DISPLAY string with the
-            // outcome baked in — so `GROUP BY content` split every tool into two groups and the
-            // dashboard showed each tool TWICE: one row at 100% success, one at 0%, and the
-            // tool's actual reliability rate nowhere on screen. The whole feature reported the
-            // opposite of its purpose.
-            //
-            // `tool_name` is written at the top level of detailJSON by the ONLY emitter of
-            // `eventType = 'toolResult'`, so the extract is reliable; the COALESCE is a cheap
-            // floor for any row whose detailJSON is missing, which then keeps the OLD split
-            // behaviour rather than vanishing into a NULL group. Deliberately not "strip the
-            // suffix from content" — deriving structure by matching English out of a display
-            // string is this codebase's recidivist defect.
+            // Per-tool aggregate counts and average duration, grouped by the structured tool name, never by the display
+            // `content` string.
             let rows = try Row.fetchAll(db, sql: """
                 SELECT
                     COALESCE(json_extract(detailJSON, '$.tool_name'), content) AS tool_name,
@@ -637,7 +577,7 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Per-category error/warning frequency. Populated by Phase D sites + Phase 1 warnings.
+    /// Per-category error and warning frequency.
     func categoryFrequencyStats(since: Date, until: Date = Date(), profileType: String? = nil) throws -> [CategoryFrequencyStats] {
         try dbPool.read { db in
             let typeFilter = profileType.map { _ in
@@ -717,9 +657,7 @@ final class TraceStore: Sendable {
                     completedWithWarningsCount: completedWithWarnings,
                     failedCount: failed,
                     cancelledCount: cancelled,
-                    // App-quit/crash mid-run — not the model's fault; excluded from the
-                    // success-rate denominator (audit #6). Any remaining leftover (total
-                    // minus the four buckets) is still-running traces from THIS session.
+                    // Quit or crash mid-run: not the model's fault, so excluded from the success-rate denominator.
                     interruptedCount: interrupted,
                     avgDurationMs: avgDuration.map { Int($0) }
                 )
@@ -822,13 +760,8 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Per-workflow-node execution stats — rolled up by node display name across
-    /// every `workflowNode`-kind span in the window. Duration comes from the
-    /// span's `(endedAt - startedAt)` and status from the span's terminal state.
-    /// Drives the "Workflow Activity" panel in TrendsView. Profile-type filter is
-    /// implicit here (only `workflowNode` spans are queried, which only exist on
-    /// workflow traces); the `profileType` argument is accepted for API
-    /// consistency but additionally constrains via `traces` for safety.
+    /// Per-workflow-node execution stats, rolled up by node display name across `workflowNode` spans in the window.
+    /// Duration comes from the span's end minus start; `profileType` additionally constrains via `traces`.
     func workflowNodeStats(since: Date, until: Date = Date(), profileType: String? = nil) throws -> [WorkflowNodeStats] {
         try dbPool.read { db in
             let typeFilter = profileType.map { _ in "AND traceID IN (SELECT traceID FROM traces WHERE profileType = ?)" } ?? ""
@@ -935,14 +868,9 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Inserts the span when no row with its `spanID` exists; when a row already
-    /// exists, refreshes its descriptive identity (`name`, `kind`) while preserving
-    /// its lifecycle fields (`startedAt`, `endedAt`, `status`, `metadataJSON`).
-    /// Lets a later, better-informed caller (e.g. the workflow executor naming the
-    /// root span `workflow:<id>`) improve on a generic placeholder (`beginTrace`'s
-    /// auto-created "root") without clobbering timing or completion state.
-    /// Check + write run in one transaction, so concurrent callers can't double-insert.
-    /// - Returns: `true` if the span was inserted, `false` if an existing row was refreshed.
+    /// Inserts the span if no row has its `spanID`; otherwise refreshes `name` and `kind` and keeps lifecycle fields.
+    /// Check and write share one transaction.
+    /// - Returns: `true` if inserted, `false` if an existing row was refreshed.
     @discardableResult
     func ensureSpan(_ span: Span) throws -> Bool {
         try dbPool.write { db in
@@ -973,18 +901,11 @@ final class TraceStore: Sendable {
         }
     }
     
-    /// Updates an existing span (e.g., setting endedAt, status). EARLIEST end wins: the open
-    /// case (`endedAt IS NULL`) always writes, and a row already closed is overwritten only by
-    /// a STRICTLY EARLIER end time. Rationale: executors capture the real end at their `defer`
-    /// but deliver it through a fire-and-forget Task that can lose the race against endTrace's
-    /// `closeOpenSpans` clamp (which stamps every open span with the TRACE end). Under
-    /// only-if-open (audit #10), a lost race froze the clamp forever — the LAST iteration of a
-    /// run rendered as spanning the whole run. Earliest-wins lets the real, earlier end correct
-    /// the clamp in either arrival order, while a duplicate endSpan replay (same time — not
-    /// strictly earlier) and a later clamp both stay no-ops, so a span still ends exactly once.
-    /// `metadataJSON` (when non-nil) rides the same guarded write — COALESCE keeps an
-    /// existing blob when the closer has nothing to add, so a clamp can never blank
-    /// metadata a real end already wrote.
+    // Why: a late real end must be able to correct a trace-end clamp in either arrival order,
+    // while a replay or later clamp stays a no-op.
+    /// Updates an existing span; the earliest end wins: an open span always writes, a closed one only for a strictly
+    /// earlier end.
+    /// `metadataJSON`, when non-nil, rides the same guarded write and never blanks existing metadata.
     func updateSpan(spanID: String, endedAt: Date, status: SpanStatus, metadataJSON: String? = nil) throws {
         try dbPool.write { db in
             try db.execute(
@@ -1024,10 +945,7 @@ final class TraceStore: Sendable {
         }
     }
     
-    /// Fetches the trace record associated with a specific message. A regenerated (Redo) or
-    /// resumed message can own several traces; without an ORDER BY, SQLite returns an
-    /// ARBITRARY attempt — newest-first makes this deterministic and correct for "show me
-    /// this message's run".
+    /// Fetches the trace for a message; a regenerated or resumed message can own several, so the newest attempt wins.
     func fetchTrace(forMessageID messageID: String) throws -> TraceRecord? {
         try dbPool.read { db in
             try TraceRecord
@@ -1174,10 +1092,8 @@ final class TraceStore: Sendable {
     
     // MARK: - Maintenance
     
-    /// Deletes all traces for a conversation (FK cascades to spans/events/configs), plus
-    /// the conversation's log entries — `log_entries.traceID` has NO foreign key, so without
-    /// the explicit DELETE those content-bearing rows would outlive the conversation by up
-    /// to 30 days (audit #4). Called when the user deletes a conversation (§12.5).
+    /// Deletes all traces for a conversation (cascading to spans, events, configs) plus its log entries.
+    /// `log_entries.traceID` has no foreign key, so the log rows are deleted explicitly.
     func deleteTraces(forConversationID conversationID: String) throws {
         try dbPool.write { db in
             // Logs first — the subquery needs the trace rows to still exist.
@@ -1186,10 +1102,8 @@ final class TraceStore: Sendable {
                 arguments: [conversationID]
             )
             try db.execute(sql: "DELETE FROM traces WHERE conversationID = ?", arguments: [conversationID])
-            // hitl_audit carries its own conversationID and no FK (by design — it must
-            // survive trace PURGE), but a user deleting a CONVERSATION means "forget
-            // this" — its approval history goes with it. Before this line those rows
-            // outlived the conversation by up to 30 days.
+            // `hitl_audit` has no FK so it survives trace purges, but deleting a conversation also removes its approval
+            // history.
             try db.execute(sql: "DELETE FROM hitl_audit WHERE conversationID = ?", arguments: [conversationID])
         }
     }
@@ -1212,10 +1126,8 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Closes any spans still open (`endedAt IS NULL`) for a trace, stamping the given
-    /// end time and status. Used by `endTrace` to close the root span (which no executor
-    /// ends on the chat path) and by orphan reconciliation to close spans abandoned by a
-    /// dead process — without this they linger `running` forever (Gap #13).
+    /// Closes spans still open for a trace, stamping the given end time and status.
+    /// Used by `endTrace` for the root span and by orphan reconciliation for spans abandoned by a dead process.
     func closeOpenSpans(traceID: String, endedAt: Date, status: SpanStatus) throws {
         try dbPool.write { db in
             try db.execute(
@@ -1225,13 +1137,9 @@ final class TraceStore: Sendable {
         }
     }
 
-    /// Reconciles traces left `running` by a previous process (the app quit or crashed
-    /// mid-run, so `endTrace` never ran) to `.interrupted`, and closes their open spans.
-    /// Otherwise such traces linger `running` forever and pollute reliability stats (Gap #13).
-    ///
-    /// `before` MUST be a timestamp captured at launch, *before* this process creates any
-    /// trace: only traces that started earlier are touched, so a live trace from the
-    /// current process can never be clobbered. Returns the number of traces reconciled.
+    /// Reconciles traces left `running` by a previous process to `.interrupted` and closes their open spans.
+    /// `before` must be captured at launch before any trace is created, so a live trace is never touched. Returns the
+    /// count reconciled.
     @discardableResult
     func reconcileOrphanedTraces(before: Date, reason: String, now: Date = Date()) throws -> Int {
         try dbPool.write { db in

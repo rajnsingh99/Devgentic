@@ -4,14 +4,7 @@
 //  NodeOwnedProfileLifecycleTests.swift
 //  DevgenticTests
 //
-//  Created on 29/08/26.
-//
-//  Phase 3 of node-owned workflow configuration: when a node's private profile row is collected.
-//
-//  ⚠️ The central rule under test is that collection happens at SAVE time, never on node delete.
-//  Canvas undo restores deleted nodes, so deleting the row when the node disappeared would let Undo
-//  resurrect a node whose configuration is gone — and the executor refuses the whole run over a
-//  missing profile.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  The coordinator's lock state machine, driven through `register`/`unregister` in SHADOW mode: who
-//  holds the lock, who waits, who is admitted when the holder ends. Enforce mode acts on exactly this
-//  state; the waiting itself is covered by `LocalInferenceEnforcementTests`.
+//  LocalInferenceCoordinatorTests.swift
+//  DevgenticTests
+//
+//  Created by Raj Singh.
 //
 
 import XCTest

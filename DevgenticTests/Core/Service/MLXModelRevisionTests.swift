@@ -4,11 +4,7 @@
 //  MLXModelRevisionTests.swift
 //  DevgenticTests
 //
-//  G8 — revision tracking and update detection.
-//
-//  Both halves of the answer already existed and neither was read: HubApi writes the commit it
-//  fetched into `<repo>/.cache/huggingface/download/*.metadata`, and HuggingFace reports the
-//  current one as `sha`. These pin the reading and the comparison.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,24 +4,7 @@
 //  OrbLocalizationDriftTests.swift
 //  DevgenticTests
 //
-//  Keeps the Orb surface from drifting back to half-translated.
-//
-//  ⚠️ WHY THE DRIFT HAPPENED, because it explains what these scan for. SwiftUI localizes string
-//  LITERALS for free — `Text("STANDBY")`, `Button("Retry Voice")` and `.help("Switch profile")` all
-//  take a `LocalizedStringKey` and land in the String Catalogue with no ceremony. But every one of
-//  those APIs also has a `StringProtocol` overload, and passing a `String` variable silently selects
-//  it. So routing the same words through a `String`-returning property — `statusText`, `orbTooltip`
-//  — opted them out of localization with no warning, no error and nothing to see at the call site.
-//  That is how one subsystem ended up with `OrbRunNarration` fully translated and the orb's own
-//  status label not, in the same session.
-//
-//  ⚠️ WHAT IS DELIBERATELY *NOT* LOCALIZED, so a future reader does not "fix" it:
-//   • Wake-word variants, cancel phrases, voice commands and approval keywords. These are matched
-//     against ASR output, not shown to anyone. `wakeWordCanMatch(language:)` already documents that
-//     a non-English recognizer cannot produce a match — translating the vocabulary would not fix
-//     that and would break the English path.
-//   • `spokenStyleHint`. It is a prompt to the MODEL, not a sentence for the user.
-//   • Log strings. They are for whoever is reading a device log, and that is not the end user.
+//  Created by Raj Singh.
 //
 
 import XCTest

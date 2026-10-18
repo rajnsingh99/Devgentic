@@ -4,11 +4,7 @@
 //  OpenAIImageGenService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  OpenAI image generation using DALL-E and gpt-image APIs.
-//  Supports Text-to-Image via /v1/images/generations
-//  and Image-to-Image via /v1/images/edits (gpt-image-1 only).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -18,13 +14,14 @@ private let logger = DGLogger(category: "OpenAIImageGenService")
 
 // MARK: - OpenAI Image Generation Service
 
+/// OpenAI image generation using the DALL-E and gpt-image APIs: text-to-image via `/v1/images/generations` and
+/// image-to-image via `/v1/images/edits` (gpt-image-1 only).
 struct OpenAIImageGenService: ImageGenProvider, Sendable {
     let apiKey: String
     let modelName: String
     let baseURL: String?
 
-    /// ⚠️ register B21 — this was `URL(string: base)!` on a free-text endpoint field, i.e. a
-    /// force-unwrap crash on the first generate for any value that isn't a parseable URL.
+    /// The endpoint base URL; resolved with a fallback so a free-text endpoint that is not a parseable URL cannot crash.
     private var apiBaseURL: URL {
         ProviderDefaults.resolvedBaseURL(configured: baseURL, fallback: ProviderDefaults.openAIBaseURL)
     }
@@ -128,12 +125,11 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
         }
         bodyData.append(multipartField(name: "prompt", value: fullPrompt, boundary: boundary))
 
-        // Image file
-        // Source is normalized to JPEG upstream (BackendOrchestrationService imageGen
-        // path) so this fixed label is truthful — a raw HEIC/TIFF here would 400.
+        // Image file. The source is normalized to JPEG upstream (BackendOrchestrationService), so this fixed label is truthful;
+        // a raw HEIC/TIFF here would 400.
         bodyData.append(multipartFileField(name: "image", fileName: "input.jpg", mimeType: "image/jpeg", data: inputImage, boundary: boundary))
 
-        // Size, and only the fields this model accepts (CR-24).
+        // Size, and only the fields this model accepts.
         let shape = Self.requestShape(model: modelName, aspectRatio: options.aspectRatio, quality: options.quality)
         bodyData.append(multipartField(name: "size", value: shape.size, boundary: boundary))
         if let quality = shape.quality { bodyData.append(multipartField(name: "quality", value: quality, boundary: boundary)) }
@@ -201,15 +197,8 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
 
     // MARK: - Helpers
 
-    /// What one request may carry for `model`: a size it accepts, a quality value it accepts (or none),
-    /// and whether `response_format` may be sent.
-    ///
-    /// ⚠️⚠️ READINESS CR-24 (2026-10-10). Every non-DALL-E-3 model was sent `size` built from the raw
-    /// aspect ratio (`1024x576`, `1024x438`, `1024x768`…), which gpt-image accepts only as
-    /// 1024x1024 / 1536x1024 / 1024x1536 / auto and dall-e-2 only as square — so any non-square ratio
-    /// 400d, on generate AND edit. It was also sent `response_format` (gpt-image always returns base64
-    /// and rejects the field) and `quality: "hd"` (gpt-image takes low/medium/high/auto). Sizes snap to
-    /// the nearest allowed ORIENTATION; an unrecognised model is treated as gpt-image, the newest family.
+    /// What one request may carry for `model`: an accepted size, an accepted quality (or none), and whether `response_format`
+    /// may be sent. Sizes snap to the nearest allowed orientation; an unrecognised model is treated as gpt-image.
     static func requestShape(model: String, aspectRatio: ImageAspectRatio, quality: ImageQuality)
         -> (size: String, quality: String?, sendsResponseFormat: Bool) {
         let name = model.lowercased()

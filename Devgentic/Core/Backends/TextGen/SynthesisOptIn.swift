@@ -4,35 +4,16 @@
 //  SynthesisOptIn.swift
 //  Devgentic
 //
-//  Resolves whether IC-powered response synthesis runs for a given agent run.
-//
-//  Design (decided 2026-07-19): synthesis is STRICTLY OPT-IN, per provider family.
-//  It is never triggered automatically — not by tool failures, not by a circuit-
-//  breaker abort. Rationale:
-//
-//    • The IC model is small (≈3B) and its system prompt caps simple answers at
-//      three sentences. Handing it a finished answer from a larger model is a
-//      lossy rewrite: an on-device run produced a complete 7-row markdown table
-//      that one dead tool call turned into 3 rows, because the failure forced
-//      synthesis and punched through the native fast-path.
-//    • Failure communication no longer needs a narrator. The amber
-//      `completedWithWarnings` chip, the failed tool row with its category,
-//      `terminalReason`, and preserved partial prose all carry that job.
-//    • Raw output quality is the user's call, because the model is the user's
-//      choice — the same philosophy as the fail-open model picker.
-//
-//  A cleanup pass genuinely helps a small local model and is pure downside behind
-//  a large cloud model, so the opt-in is per family rather than global.
-//
-//  The deterministic template floor is unaffected: "raw output" only exists when
-//  the model produced output. Runs that end with nothing usable still fall back to
-//  `ResponseSynthesizer.buildDeterministicFallback` (no LLM, no IC).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "SynthesisOptIn")
 
+/// Resolves whether IC-powered response synthesis runs for an agent run: strictly opt-in, per provider
+/// family. Never triggered automatically, because rewriting a larger model's finished answer through
+/// the small IC model is lossy.
 enum SynthesisOptIn {
 
     // MARK: - Provider Family
@@ -45,9 +26,8 @@ enum SynthesisOptIn {
         case ollama
         case remote
 
-        /// Exhaustive by construction — deliberately no `default`, so adding a
-        /// provider to `ApiProvider` is a compile error here rather than a silent
-        /// landing in `.remote`.
+        /// Exhaustive by construction, with no `default`: adding a provider to `ApiProvider` is a compile error
+        /// here.
         init(apiProvider: ApiProvider) {
             switch apiProvider {
             case .mlx:    self = .mlx
@@ -77,16 +57,8 @@ enum SynthesisOptIn {
         let reason: String
     }
 
-    /// Resolves synthesis opt-in for one run.
-    ///
-    /// All three conditions must hold: Core Intelligence enabled, an IC model
-    /// actually selected, and the checkbox for THIS run's provider family on.
-    ///
-    /// - Parameters:
-    ///   - provider: The provider the run's LLM config resolved to.
-    ///   - icModelSelected: Whether `IntelligenceCoreService` has a model selected.
-    ///   - icEnabled: The Core Intelligence master toggle.
-    ///   - defaults: Injected for testability.
+    /// Resolves synthesis opt-in for one run: Core Intelligence enabled, an IC model selected, and this
+    /// provider family's checkbox on. `defaults` is injected for testability.
     static func resolved(
         provider: ApiProvider,
         icModelSelected: Bool,

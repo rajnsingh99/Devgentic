@@ -4,14 +4,7 @@
 //  BridgedToolsStoreTests.swift
 //  DevgenticTests
 //
-//  Cover for the instance-stability cache behind the chat template's `<tools>` block.
-//
-//  ⚠️ SCOPE — read the store's file header before trusting these tests. They pin what the store
-//  guarantees AT ITS OWN SEAM: equal content returns identical dictionary instances. They do NOT
-//  claim the rendered prompt is byte-stable — device evidence showed swift-jinja's `Value(any:)`
-//  rebuilds every dictionary via a value-type-changing cast (fresh storage, fresh per-instance
-//  seed), so the `<tools>` block still shuffles downstream. Context: Swift dictionaries iterate in
-//  per-INSTANCE order (measured: 30 identical builds kept alive → 30 distinct orders).
+//  Created by Raj Singh.
 //
 
 import XCTest

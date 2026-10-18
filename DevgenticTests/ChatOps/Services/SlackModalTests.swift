@@ -4,11 +4,7 @@
 //  SlackModalTests.swift
 //  DevgenticTests
 //
-//  Slice 4.3: Slack structured input via `views.open`.
-//
-//  ⚠️ `trigger_id` WAS DECODED AND USED NOWHERE. It sat on two payload structs, referenced by no
-//  other line in the repository, and it is the only key to `views.open` — so Slack had the highest
-//  structured-input ceiling of the three platforms and reached none of it.
+//  Created by Raj Singh.
 //
 
 import XCTest

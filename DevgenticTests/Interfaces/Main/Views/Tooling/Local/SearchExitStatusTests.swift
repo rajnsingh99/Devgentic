@@ -4,15 +4,7 @@
 //  SearchExitStatusTests.swift
 //  DevgenticTests
 //
-//  Invariant: a search tool reports "no matches" only when the search program said so (exit 0 or
-//  1). A run that exits with an error is reported as an error, and any results it did print are
-//  kept with a note that the search was incomplete.
-//
-//  Device run 2026-10-05: ripgrep rejected `\nfunction clamp\(.*?\)` (exit 2), `code_search_text`
-//  answered "No matches found", and the agent concluded `clamp` did not exist.
-//
-//  Every case runs against BOTH programs. Which one a user gets depends on whether ripgrep is
-//  installed, and each program's own error text is asserted, which proves the intended branch ran.
+//  Created by Raj Singh.
 //
 
 import XCTest

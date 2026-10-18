@@ -4,15 +4,7 @@
 //  AdvancedConfigDeliveryTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Regression tests for the "the panel says X, the request does Y" cluster (register A9, A19,
-//  A24, A25).
-//
-//  ⚠️ The shared shape: a setting the Advanced panel presents as live, which no request ever
-//  carried. None of these failed loudly — the user saw a configured value, got unconfigured
-//  behaviour, and had nothing to correlate. A19 is the worst of them because the dead knob was a
-//  SAFETY control.
+//  Created by Raj Singh.
 //
 
 import XCTest

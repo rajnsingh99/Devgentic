@@ -4,20 +4,7 @@
 //  PlanningFailureIntegrationTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF-CC9 — the last member of the
-//  "infrastructure fault reported as a content fault" family (CC6/CC10/CC11/CC12 all closed).
-//
-//  PlanningCapability's catch-all used to fold ANY plan-generation failure — an MLX model-slot
-//  race included — into a silent single-task fallback and then yield `.planGenerated`, i.e.
-//  report success: the user saw a plausible-looking 1-step plan card, the run proceeded
-//  undecomposed, and nothing anywhere said planning failed.
-//
-//  Contract now, mirroring the family:
-//    • `MLXService.ServiceError` gets ONE bounded 2s re-attempt (the same bound as
-//      `LLMRetryStrategy.modelSlotAction` and `TransportRetrier`), then the run FAILS honestly
-//      with the slot-race text — no fabricated plan, no false success.
-//    • A content fault keeps the single-task fallback, but LOUD: a `.warning(.midRunError)`
-//      lands on the timeline before the plan card.
+//  Created by Raj Singh.
 //
 
 import XCTest

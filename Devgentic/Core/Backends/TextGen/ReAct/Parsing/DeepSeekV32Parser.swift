@@ -4,23 +4,7 @@
 //  DeepSeekV32Parser.swift
 //  Devgentic
 //
-//  Phase 5 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.deepseekV32Dsml` dialect (DeepSeek V3.2).
-//
-//  Canonical output — brand new `<｜DSML｜...>` XML namespace (full-width pipes preserved):
-//
-//    <｜DSML｜function_calls>
-//    <｜DSML｜invoke name="get_weather">
-//    <｜DSML｜parameter name="location" string="true">Seattle</｜DSML｜parameter>
-//    <｜DSML｜parameter name="days" string="false">7</｜DSML｜parameter>
-//    </｜DSML｜invoke>
-//    </｜DSML｜function_calls>
-//
-//  Parameters carry a `string="true"|"false"` attribute that signals whether the body
-//  should be treated as a literal string vs parsed JSON/number/bool.
-//
-//  Completely abandons V3/V3.1's begin/end/sep sentinels — this is a ground-up redesign.
-//  Structurally similar to Claude's `<invoke>`/`<parameter>` tool use syntax.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -28,6 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "DeepSeekV32Parser")
 
+/// Primary parser for the `.deepseekV32Dsml` dialect (DeepSeek V3.2), which wraps calls in DSML XML.
+/// Each parameter's `string="true"|"false"` attribute says whether the body is a literal or parsed JSON.
 struct DeepSeekV32Parser: CognitiveParserProtocol {
 
     // Full-width pipe U+FF5C retained in the DSML namespace.

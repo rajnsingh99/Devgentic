@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
+//
+//  EvaluationLogger.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
 
 import Foundation
 
 class EvaluationLogger {
     static let shared = EvaluationLogger()
 
-    /// The span summary's Outcome field. Mirrors the executor's verdict, nothing else.
-    ///
-    /// It used to downgrade a zero-tool `.completed` to "PARTIAL ⚠️" as a
-    /// worth-a-second-look nudge — but zero tool calls is the NORMAL state for every
-    /// bot/chat run (their tool list is ~[ask_user]), so every clean reply printed
-    /// PARTIAL and the label stopped meaning anything. The zero-tool nuance isn't lost:
-    /// "Tool Calls: 0" is printed directly above it in the same summary.
-    ///
-    /// PARTIAL is reserved for `.completedWithWarnings`. If a run degrades some other way
-    /// (token-cap truncation, say), the EXECUTOR should report it as such — this logger
-    /// must not guess an outcome from tool counts it can't interpret.
+    // Why: this logger must not guess an outcome from tool counts it cannot interpret; the executor reports
+    // other degradations
+    /// The span summary's Outcome field: mirrors the executor's verdict and nothing else. `PARTIAL` is reserved
+    /// for `.completedWithWarnings`; zero tool calls is normal for bot/chat runs and "Tool Calls: 0" is printed
+    /// directly above.
     static func outcomeLabel(reported: String?, didFinishSuccessfully: Bool) -> String {
         guard let reported else {
             // Legacy executors that never report an outcome.
@@ -102,10 +102,8 @@ class EvaluationLogger {
                     metrics.totalIterations += 1
                 }
                 if detail == .finalizing {
-                    // The executor reports its honest terminal outcome as metadata.
-                    // A bare finalizing event no longer implies success — the old
-                    // unconditional `didFinishSuccessfully = true` printed SUCCESS ✅
-                    // even when the event's own content said "Task failed".
+                    // The executor reports its honest terminal outcome as metadata; a bare finalizing event does not imply
+                    // success, even if the event's own content says "Task failed".
                     if let outcome = log.metadata?["outcome"] {
                         metrics.reportedOutcome = outcome
                         metrics.didFinishSuccessfully =
@@ -115,26 +113,16 @@ class EvaluationLogger {
                         // Legacy behavior for executors that don't report an outcome.
                         metrics.didFinishSuccessfully = true
                     }
-                    // Prefer the authoritative loop counter the executor reports on its
-                    // terminal finalizing event. The event-derived count drifts: prose
-                    // exits emit no .reasoning row (undercount) and throttle-preflight
-                    // notices emit an extra one (overcount). The incremental count
-                    // remains as fallback for executors that don't report.
-                    //
-                    // ACCUMULATE across inner runs: Planning/Reflexion sessions complete
-                    // several ReAct loops, each reporting its own total — a plain
-                    // overwrite displayed only the LAST subtask's count (observed:
-                    // 8-iteration plan run printing "Iterations: 2"). Each report
-                    // replaces the event-derived drift for the run that just ended;
-                    // a final run that never reports (circuit-breaker abort path exits
-                    // without a finalizing event) keeps its incremental events on top.
+                    // Why: accumulate across inner runs: Planning/Reflexion sessions complete several ReAct loops, and
+                    // overwriting would show only the last count
+                    // Prefers the executor's authoritative loop counter on its terminal event; the event-derived count drifts
+                    // and remains the fallback for executors that do not report.
                     if let reported = log.metadata?["iterations"], let count = Int(reported), count > 0 {
                         metrics.confirmedIterations += count
                         metrics.totalIterations = metrics.confirmedIterations
                     } else if metrics.totalIterations == 0 {
-                        // Ensure at least 1 iteration is counted when the loop ran
-                        // but no .reasoning trace was emitted (e.g., null-termination
-                        // on first iteration where the model returned no tool calls).
+                        // Ensures at least 1 iteration is counted when the loop ran but no `.reasoning` trace was emitted (e.g.
+                        // null-termination on the first iteration with no tool calls).
                         metrics.totalIterations = 1
                     }
                 }

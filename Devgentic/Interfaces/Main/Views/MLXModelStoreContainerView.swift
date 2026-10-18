@@ -4,16 +4,13 @@
 //  MLXModelStoreContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  Inline wrapper for the MLX model store that renders within
-//  the single-window interface. Uses DynamicIslandBar for back
-//  navigation, search, and refresh. Content is centered at
-//  maxWidth: 1000 to match the DynamicIslandBar width.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Inline MLX model store rendered within the single-window interface, with a `DynamicIslandBar` for back navigation,
+/// search and refresh. Content is centered at maxWidth 1000 to match the bar.
 struct MLXModelStoreContainerView: View {
 
     let filterForTools: Bool
@@ -27,14 +24,8 @@ struct MLXModelStoreContainerView: View {
     /// The same surface `ModelCardView` uses to report a download start or a refusal.
     @Environment(ToastManager.self) private var toastManager
 
+    // Why: blocks a second press during the pre-flight: a duplicate task would replace the first download toast.
     /// True while `fetchByRepoId` is awaiting HuggingFace.
-    ///
-    /// ⚠️ The pre-flight is a model-info request plus a README fetch — easily a second or two —
-    /// during which nothing on screen changed and no toast had appeared yet. A second press
-    /// started a second task for the same id; the first began the pull and toasted
-    /// "Downloading X…", then the second was rejected deep in the service and REPLACED that toast
-    /// with "another model is already downloading" — naming another model when it is the same one,
-    /// and burying the only confirmation the user was going to get.
     @State private var isFetchingPastedRepo = false
 
     @State private var isSearchExpanded = false
@@ -49,20 +40,11 @@ struct MLXModelStoreContainerView: View {
         self.profileID = profileID
     }
 
-    /// Fetches a repo the user PASTED, rather than one they picked off a card.
-    ///
-    /// ⚠️ Routes through `DownloadCoordinator.startMLXDownloadIfNeeded` — the same entry point
-    /// `ModelCardView.startDownload()` uses — so the pasted path keeps the install
-    /// short-circuit, the single-slot refusal, the in-flight history check, the free-space
-    /// preflight and the `preSeedTotalBytes` that feeds the speed/ETA readout. Calling
-    /// `MLXModelService.downloadModel` directly would skip every one of them.
-    ///
-    /// ⚠️ The pre-flight is not belt-and-braces. `startMLXDownloadIfNeeded` validates the id for
-    /// EMPTINESS only, and the byte-size probe returns nil for a repo that does not exist exactly
-    /// as it does for a flaky network — so without this a typo passes preflight, shows
-    /// "Downloading …", and fails a round trip later with HubApi's `File not found: main`, which
-    /// names the REVISION rather than the repo. One reuse of `fetchModelDetail` turns that into
-    /// "That model doesn't exist on HuggingFace." before a download slot is taken.
+    // Why: the detail pre-check is needed: the id is validated for emptiness only, so a typo would fail after the
+    // download starts.
+    /// Fetches a repo the user pasted, rather than one picked off a card.
+    /// Goes through `DownloadCoordinator.startMLXDownloadIfNeeded`, like `ModelCardView.startDownload()`, so it keeps
+    /// the install short-circuit, single-slot refusal and free-space preflight.
     @MainActor
     private func fetchByRepoId(_ repoId: String) async {
         guard !isFetchingPastedRepo else { return }
@@ -78,20 +60,15 @@ struct MLXModelStoreContainerView: View {
             return
         }
 
-        // ⚠️ BEFORE any download slot is taken. The search listing already hides these, but a
-        // pasted id skips the listing entirely — `fetchModelDetail` has no `filter=mlx` — so a
-        // decision model (Laya, GLiNER2.5-Decide) could previously be pulled in full and fail at
-        // first use with an error that never named the cause.
+        // Checked before any download slot is taken: a pasted id skips the search listing, which hides unsupported models.
         if let reason = detail.unsupportedReason {
             unsupportedPastedRepos[repoId] = reason
             toastManager.show("\(repoId) is not supported. \(reason)", style: .warning)
             return
         }
 
-        // ⚠️ Appended to the ONE toast, never shown as a second `show` — a new toast replaces the
-        // live one, so two calls in a row means the first is never read. And a NOTE, not a gate:
-        // the same line the card's "Gated" capsule takes — the user may have accepted the licence,
-        // and refusing on a listing flag blocks a download that would work.
+        // Appended to the one toast, never a second `show` (a new toast replaces the live one).
+        // A note, not a gate: the user may have accepted the licence.
         let gatedNote = (detail.isGated && !HuggingFaceTokenStore.shared.hasToken)
             ? " It's gated — add a HuggingFace token in Settings › General if it fails."
             : ""
@@ -125,9 +102,8 @@ struct MLXModelStoreContainerView: View {
                     isSearching: viewModel.isLoading,
                     accessibilityIdentifier: "mlx.store.search",
                     onSubmit: {
-                        // Return fetches, but ONLY when the text is an identifier — for an
-                        // ordinary query it stays the no-op it is today. Mirrors the Ollama
-                        // store, whose box is likewise both a filter and a pull field.
+                        // Return fetches, but only when the text is an identifier; for an ordinary query it is a no-op.
+                        // Mirrors the Ollama store, whose box is both a filter and a pull field.
                         if let repoId = MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText) {
                             Task { await fetchByRepoId(repoId) }
                         }
@@ -154,16 +130,8 @@ struct MLXModelStoreContainerView: View {
                     .accessibilityLabel("Sort models")
                     .disabled(viewModel.isLoading)
 
-                    // Paste-a-repo-id. The box is otherwise a QUERY, so an exact id had to be
-                    // located in ranked results before it could be fetched.
-                    //
-                    // ⚠️ Gated on the TEXT being an identifier, NOT on `displayedModels.isEmpty`
-                    // the way the Ollama store gates its Pull button. Ollama's filter is
-                    // synchronous and client-side; this one is not — `refreshCategoryData`
-                    // assigns `displayedModels = []` on every remote refresh, so an
-                    // emptiness-gated button would appear and vanish on every typing pause. It
-                    // would also be missing in the case that matters most: a search that DID
-                    // return the repo, which the quantization / fit / tool-capable filters hid.
+                    // Paste-a-repo-id button, gated on the text being an identifier, not on `displayedModels.isEmpty`: remote refreshes
+                    // reset that array, so an emptiness gate would flicker and would miss a repo the filters hid.
                     if let repoId = MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText),
                        let reason = unsupportedPastedRepos[repoId] {
                         // The icon-only toolbar button is replaced by a labelled, inert pill —
@@ -185,10 +153,8 @@ struct MLXModelStoreContainerView: View {
                             style: .prominent,
                             help: "Download \(repoId) from HuggingFace (⌘↩)",
                             accessibilityLabel: "Download \(repoId) from HuggingFace",
-                            // ⚠️ ⌘↩, matching what the tooltip says. `.defaultAction` is a bare
-                            // Return, so the tooltip advertised a shortcut that did nothing —
-                            // and worse, Return ALSO fires the search field's own `onSubmit`,
-                            // which calls this same function, so one keypress had two triggers.
+                            // Command-Return, as the tooltip says: `.defaultAction` is a bare Return, which also fires the search field's
+                            // `onSubmit`, so one keypress would have two triggers.
                             keyboardShortcut: KeyboardShortcut(.return, modifiers: .command),
                             isLoading: isFetchingPastedRepo
                         ) {
@@ -217,9 +183,8 @@ struct MLXModelStoreContainerView: View {
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Pre-check a pasted repo id so the button reads "Not supported" BEFORE it's pressed.
-        // `.task(id:)` cancels and restarts on every keystroke that changes the id, so the sleep
-        // is the debounce: a half-typed `owner/rep` never reaches the network.
+        // Pre-checks a pasted repo id so the button reads Not supported before it is pressed.
+        // `.task(id:)` restarts on every keystroke, so the sleep is the debounce: a half-typed id never reaches the network.
         .task(id: MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText)) {
             guard let repoId = MLXModelStoreViewModel.repoIdToDownload(from: viewModel.searchText),
                   unsupportedPastedRepos[repoId] == nil else { return }
@@ -233,10 +198,8 @@ struct MLXModelStoreContainerView: View {
             if !viewModel.searchText.isEmpty {
                 isSearchExpanded = true
             }
-            // ⚠️ RE-ENTRY IS THE ONLY MOMENT THIS IS DETECTABLE. Neither store view model refetches
-            // on appear — that is deliberate, so returning to the store keeps your place — but the
-            // two cached instances share one result array, so the other one may have replaced it
-            // while you were away. Without this the grid shows its rows until you touch a control.
+            // Re-entry is the only moment this is detectable: neither store view model refetches on appear, and the two cached
+            // instances share one result array that the other may have replaced while the user was away.
             viewModel.refreshIfSharedPayloadIsForeign()
         }
     }

@@ -4,17 +4,7 @@
 //  NativeZeroCallVerdictTests.swift
 //  DevgenticTests
 //
-//  Invariant: on a native-tools API, a reply with ZERO tool calls is the final
-//  answer — unless its content declares an attempted call to one of the run's
-//  tools. Braces and brackets in prose decide nothing.
-//
-//  And: format failures are bounded whatever the output — the run never retries
-//  more than `maxConsecutiveFormatFailures` times in a row.
-//
-//  Field case (2026-10-04): gemma4 and deepseek-r1 wrote correct answers containing
-//  `{7, 1, 5, 3, 6, 4}` / `int[] prices`; the Ollama content fallback classified
-//  them `malformedJSON` and the executor retried 3× and 6× (the second until the
-//  user pressed Stop, losing everything).
+//  Created by Raj Singh.
 //
 
 import XCTest

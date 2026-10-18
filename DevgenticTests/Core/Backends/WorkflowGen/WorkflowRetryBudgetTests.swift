@@ -4,20 +4,7 @@
 //  WorkflowRetryBudgetTests.swift
 //  DevgenticTests
 //
-//  Register WF-EX2: Action-node retries were silently defeated.
-//
-//  The node's OUTER backstop (`executeStructuralNodeBounded`) and the PER-ATTEMPT bound inside the
-//  Action path were computed from the identical expression — `node.nodeConfig?.hardTimeout ??
-//  WorkflowConfig.nodeTimeout`. So attempt 1 consumed the entire node budget and the outer
-//  sentinel fired the instant attempt 2 began: a node configured "60s, 3 retries" got exactly ONE
-//  attempt. Any Action node whose tool failed more slowly than `limit / attempts` had its configured
-//  retries disabled, with nothing anywhere saying so — and slow failure (a hanging endpoint) is
-//  precisely the case retries exist for.
-//
-//  Worse, because the OUTER clock was what killed the node, the final attempt's failure reporting
-//  never ran: the tool's real error reached neither the timeline, nor the trace, nor per-tool
-//  reliability stats. The user was shown a generic node timeout instead of "the HTTP request
-//  failed".
+//  Created by Raj Singh.
 //
 
 import XCTest

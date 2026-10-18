@@ -4,7 +4,7 @@
 //  CoreIntelligenceSettingsView.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -24,7 +24,7 @@ struct CoreIntelligenceSettingsView: View {
     // Feature toggles
     @AppStorage(AppSettings.ciFeatureRAGRewritingKey) private var ragRewritingEnabled: Bool = true
     @AppStorage(AppSettings.ciFeatureSuggestionKey) private var suggestionEnabled: Bool = false
-    @AppStorage(AppSettings.ciFeatureMorningBriefKey) private var morningBriefEnabled: Bool = false
+    @AppStorage(AppSettings.ciFeatureBriefingKey) private var briefingEnabled: Bool = false
     @AppStorage(AppSettings.ciFeatureUserPersonalKey) private var userPersonalEnabled: Bool = false
     // Response Synthesis is opt-in per provider family. Default false everywhere —
     // the IC pass is a small-model rewrite of an answer a larger model already
@@ -154,10 +154,10 @@ struct CoreIntelligenceSettingsView: View {
                         Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         FeatureToggleRow(
-                            title: "Morning Brief",
+                            title: "Briefing",
                             description: "Generates a session recap card on launch summarizing what was accomplished, what's pending, and any uncommitted changes.",
                             icon: "sunrise.fill",
-                            isOn: $morningBriefEnabled,
+                            isOn: $briefingEnabled,
                             theme: theme
                         )
 
@@ -208,11 +208,11 @@ struct CoreIntelligenceSettingsView: View {
                         }
                     }
 
-                    // 3. Debug: Test Morning Brief
+                    // 3. Debug: Test Briefing
                     #if DEBUG
                     SettingsCard(title: "Debug — Test Intelligence Core", icon: "ant.fill", theme: theme) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Simulate a Morning Brief generation to verify IC load/generate/unload lifecycle and memory tracking in Console logs.")
+                            Text("Simulate a Briefing generation to verify IC load/generate/unload lifecycle and memory tracking in Console logs.")
                                 .font(theme.fontCaption2)
                                 .foregroundColor(theme.secondaryText)
                                 .lineSpacing(2.5)
@@ -230,14 +230,14 @@ struct CoreIntelligenceSettingsView: View {
                                 }
 
                                 TactileButton(
-                                    title: isTestRunning ? "Running…" : "Run Morning Brief",
+                                    title: isTestRunning ? "Running…" : "Run Briefing",
                                     icon: "play.fill",
                                     variant: .primary,
                                     size: .compact,
                                     isLoading: isTestRunning,
                                     isDisabled: isTestRunning || selectedModel.isEmpty
                                 ) {
-                                    runMorningBriefTest()
+                                    runBriefingTest()
                                 }
 
                                 TactileButton(
@@ -452,24 +452,24 @@ struct CoreIntelligenceSettingsView: View {
         }
     }
 
-    private func runMorningBriefTest() {
+    private func runBriefingTest() {
         guard !isTestRunning else { return }
         isTestRunning = true
         testLog.removeAll()
-        appendLog("Starting Morning Brief simulation...")
+        appendLog("Starting Briefing simulation...")
 
         Task {
             let overallStart = CFAbsoluteTimeGetCurrent()
 
             // Override the cooldown by temporarily clearing the last-shown date
-            let savedDate = UserDefaults.standard.object(forKey: AppSettings.lastMorningBriefDateKey)
-            UserDefaults.standard.removeObject(forKey: AppSettings.lastMorningBriefDateKey)
+            let savedDate = UserDefaults.standard.object(forKey: AppSettings.lastBriefingDateKey)
+            UserDefaults.standard.removeObject(forKey: AppSettings.lastBriefingDateKey)
 
             // Ensure toggles are set for the test
-            let wasEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureMorningBriefKey)
-            UserDefaults.standard.set(true, forKey: AppSettings.ciFeatureMorningBriefKey)
+            let wasEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureBriefingKey)
+            UserDefaults.standard.set(true, forKey: AppSettings.ciFeatureBriefingKey)
 
-            let briefService = MorningBriefService.shared
+            let briefService = BriefingService.shared
             let shouldShow = briefService.shouldShowBrief()
             appendLog("Gate check: \(shouldShow ? "PASSED" : "FAILED")")
 
@@ -496,10 +496,10 @@ struct CoreIntelligenceSettingsView: View {
 
             // Restore original state
             if let saved = savedDate {
-                UserDefaults.standard.set(saved, forKey: AppSettings.lastMorningBriefDateKey)
+                UserDefaults.standard.set(saved, forKey: AppSettings.lastBriefingDateKey)
             }
             if !wasEnabled {
-                UserDefaults.standard.set(false, forKey: AppSettings.ciFeatureMorningBriefKey)
+                UserDefaults.standard.set(false, forKey: AppSettings.ciFeatureBriefingKey)
             }
 
             let totalTime = CFAbsoluteTimeGetCurrent() - overallStart

@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsTurnAdmissionTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  BR-4. Nothing stopped a remote free-text message from starting a SECOND root run in a
-//  conversation that was already streaming. The Mac composer has guarded this since it shipped
-//  (`MessagingCoordinator.sendMessage` opens with `guard !chatHistoryViewModel.isSending`); the
-//  remote path read neither `isSending` nor `hasActiveRun`.
-//
-//  ⚠️⚠️ WHY THIS FILE ASSERTS ON THE BRIDGES' SOURCE AS WELL AS ON THE POLICY. The finding's own
-//  words: "a test of the policy alone cannot fail when the bridge does not call it." That is not
-//  hypothetical here — `RemoteConversationCommanding.submitRemote` already existed as a seam and
-//  all three bridges bypassed it, calling `vm.submitRemoteMessage` directly, which is exactly how
-//  the gap survived. A green policy test over a bypassed policy is the failure mode this subsystem
-//  has already shipped once (F2, 163 green tests over a feature that could not run).
+//  Created by Raj Singh.
 //
 
 import XCTest

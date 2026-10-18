@@ -4,7 +4,7 @@
 //  ShortcutModel.swift
 //  Devgentic
 //
-//  Data model and registry of all keyboard shortcuts and commands across Devgentic.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -12,6 +12,7 @@ import SwiftUI
 
 // MARK: - Category
 
+/// A category in the data model and registry of all keyboard shortcuts and commands across Devgentic.
 enum ShortcutCategory: String, CaseIterable, Identifiable {
     case all = "All"
     case general = "General"

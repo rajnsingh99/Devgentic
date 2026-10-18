@@ -4,23 +4,7 @@
 //  AdvancedConfigCodableTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Round-trip and compatibility tests for the six persisted `AdvanceConfig` Codables (register A69).
-//
-//  ⚠️ WHY THESE MATTER MORE THAN THEIR SIZE SUGGESTS. These structs are serialised into
-//  `ProviderConfig.advancedConfiguration` and stored inside the opaque `BackendProfile.configData`
-//  blob — the layer `BackendProfile.swift` itself calls out as the one SwiftData cannot see into,
-//  where "adding a field is not a schema change; the failure lands at READ time".
-//
-//  And the read-time failure is SILENT: `BackendProfileService.decodeConfig` returns nil on any
-//  throw, and all seven arms of `ProviderAdvancedConfigManager.load` answer that nil with
-//  `?? .default()`. So one unreadable field does not degrade one field — it replaces the user's
-//  ENTIRE advanced configuration with app defaults, and the panel then shows those defaults as if
-//  they were what the user chose.
-//
-//  Every struct here is therefore held to the same bar: a blob missing a key, carrying an extra
-//  key, or carrying a legacy wrong-typed value must still decode, preserving whatever IS readable.
+//  Created by Raj Singh.
 //
 
 import XCTest

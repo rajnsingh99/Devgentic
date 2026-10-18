@@ -4,9 +4,7 @@
 //  CognitiveParsePipelineTests.swift
 //  DevgenticTests
 //
-//  Integration tests for CognitiveParsePipeline — the 5-stage
-//  Dialect-Anchored Cascade orchestrator.
-//  Validates end-to-end flow: Sanitize → Primary → Drift → Fallback → Heuristic.
+//  Created by Raj Singh.
 //
 
 import XCTest

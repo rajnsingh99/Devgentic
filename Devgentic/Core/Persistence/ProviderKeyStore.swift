@@ -4,55 +4,30 @@
 //  ProviderKeyStore.swift
 //  Devgentic
 //
-//  Created on 07/08/26.
-//
-//  Keychain home for cloud-provider API keys, keyed on profile ID.
-//
-//  ⚠️ WHY THIS EXISTS. Every cloud key used to be persisted VERBATIM inside the SwiftData
-//  `configData` blob — `ProviderConfig.encode(to:)` wrote `apiKey` like any other field, so
-//  `strings ~/Library/Application\ Support/DevgenticSD.store | grep sk-ant` returned the live key.
-//  The app is not sandboxed, so that file (plus its `-wal`/`-shm` siblings) is readable by any
-//  process running as the user, and it is swept up by Time Machine, iCloud Drive, Dropbox and any
-//  log-collection or crash-reporting tool that grabs Application Support.
-//
-//  ⚠️ THE KEY IS STRIPPED AT THE PERSISTENCE SEAM, NOT IN `ProviderConfig.encode(to:)`. That was
-//  deliberate: `ProviderConfig` is a value type with no idea which profile owns it, so a Keychain
-//  round-trip inside its `Codable` conformance has nothing to key on. `BackendProfileSD` does know
-//  the profile id, so the strip-on-write / inject-on-read pair lives there and `ProviderConfig`
-//  stays an honest, fully round-trippable value — which matters because it is also encoded into
-//  in-memory snapshots that legitimately carry the key.
-//
-//  Mirrors `MCPSecretStore`'s shape. Keys are scoped per profile, so two profiles on the same
-//  provider can hold different credentials — which the old provider-scoped guesses could not.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Keychain home for cloud-provider API keys, keyed on profile ID.
+/// The key is stripped at the persistence seam (`BackendProfileSD`) and injected on read, never stored in the blob.
 enum ProviderKeyStore {
 
     private static let logger = DGLogger(category: "ProviderKeyStore")
 
-    /// Keychain service identifier. ⚠️ Changing this orphans every stored key — existing items are
-    /// looked up by (service, account) and nothing migrates them.
+    /// Keychain service identifier; changing it orphans every stored key, since items are looked up by (service, account).
     static let service = "com.devgentic.provider"
 
-    /// ⚠️ TEST SEAM (registers B2 / UNTESTED-12). This was `private static let SecureKeyStorage()`,
-    /// which meant the failure branches — a Keychain write that fails, and a READ that fails —
-    /// could not be exercised at all, so the load-bearing "strip only if the write succeeded" and
-    /// "never delete on a failed read" rules were asserted by comment alone. Mutated only by
-    /// `setStorageForTesting`; production never reassigns it.
+    /// The storage backend, replaceable so tests can exercise failed Keychain writes and reads.
+    /// Mutated only by `setStorageForTesting`; production never reassigns it.
     nonisolated(unsafe) private static var storage: KeychainAccessing = SecureKeyStorage()
 
     /// How long a failed read is answered from the cache before a fresh fetch asks again.
     static let failedReadRetryInterval: TimeInterval = 60
 
-    /// Process-wide answers, keyed by account (profile id). Same shape as `GlobalProviderKeys`.
-    ///
-    /// ⚠️ Why it exists: a `BackendProfile` instance caches its own decode, but SwiftData hands out
-    /// a NEW instance on every fetch — and the profile list refetches on most changes — so each
-    /// OpenAI-compatible profile was read from the Keychain again on every refetch. With the item
-    /// unreadable under a changed signature, each of those was a fresh access prompt.
+    // Why: SwiftData hands out a new profile instance per fetch, so without this every refetch re-reads the Keychain.
+    /// Process-wide answers keyed by account (profile id); same shape as `GlobalProviderKeys`.
     private enum Entry {
         case found(String)
         case notFound
@@ -80,12 +55,8 @@ enum ProviderKeyStore {
     static func save(_ key: String?, for profileID: UUID) -> Bool {
         let trimmed = key?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmed, !trimmed.isEmpty else {
-            // ⚠️ register B19 — this used to `delete(for:)` and hardcode `return true`, because
-            // `delete` was `Void` and swallowed its own `OSStatus`. So a FAILED delete was
-            // reported to the caller as a successful clear: the blob was written with no key, the
-            // Keychain item survived, and `primeDecodeState` re-injected the supposedly-removed
-            // credential on the very next read. A user who cleared a revoked key watched it come
-            // back and get sent on every request.
+            // Report the real outcome: a failed delete that reads as a successful clear lets the surviving Keychain item
+            // be re-injected into the profile on the next read.
             return delete(for: profileID, reason: .keyCleared)
         }
 
@@ -93,12 +64,8 @@ enum ProviderKeyStore {
         // On failure the item's state is unknown — drop the entry so the next read asks the Keychain.
         cache.withLock { $0[profileID.uuidString] = status == errSecSuccess ? .found(trimmed) : nil }
         guard status == errSecSuccess else {
-            // ⚠️ Registers KC-27 + KC-53. This log used to claim the key "stays where it already
-            // was" — true only when the profile ALREADY had a key, and false (and understated)
-            // on the fresh-profile path, where there is no previous value and the key is stored
-            // NOWHERE. State both cases, and name the disclosure-class consequence of the first:
-            // a live API key sitting in plaintext in the SwiftData blob is the exact threat model
-            // this store exists to close.
+            // State both cases: with an existing key it stays where it was, on a fresh profile it is stored nowhere.
+            // Name the consequence: a live API key in plaintext in the SwiftData blob is the threat this store exists to close.
             logger.error(
                 "[SECRETS] Failed to write the API key for profile \(profileID) to the Keychain "
                 + "(\(SecureKeyStorage.osStatusName(status))). CONSEQUENCE: the key was NOT stripped "
@@ -115,22 +82,16 @@ enum ProviderKeyStore {
         return true
     }
 
-    /// Reads the API key for a profile, or nil when none is stored **or the read failed**.
-    ///
-    /// ⚠️ Only for callers that merely need a value to send. Anything that WRITES based on the
-    /// answer must use `read(for:)` — see register B2.
+    /// Reads the API key for a profile, or nil when none is stored or the read failed.
+    /// Only for callers that need a value to send; anything that writes based on the answer must use `read(for:)`.
     static func load(for profileID: UUID) -> String? {
         guard case .found(let key) = read(for: profileID) else { return nil }
         return key
     }
 
     /// Reads the API key, distinguishing "none stored" from "the read failed".
-    ///
-    /// - Parameter bypassingFailedRead: ask the Keychain even when a recent read failed. For
-    ///   callers with their own retry policy — a profile's KC-20 re-read and Try Again — so the
-    ///   cache never stretches how long a profile stays "unreadable". A found or not-found answer
-    ///   is still served from the cache: it cannot have changed without passing through `save` or
-    ///   `delete` here.
+    /// - Parameter bypassingFailedRead: ask the Keychain even when a recent read failed, for callers that retry themselves.
+    /// Found and not-found answers are still served from the cache, since they change only through `save` or `delete`.
     static func read(for profileID: UUID, bypassingFailedRead: Bool = false) -> KeychainReadOutcome {
         let account = profileID.uuidString
         switch cache.withLock({ $0[account] }) {
@@ -175,11 +136,8 @@ enum ProviderKeyStore {
         case keyCleared
     }
 
-    /// Removes a profile's key. Called when the profile is deleted, so a key cannot outlive the
-    /// thing that owned it — and when the user clears the field.
-    ///
-    /// - Returns: whether the Keychain no longer holds the item (`errSecItemNotFound` counts as
-    ///   success — the desired end state is "gone", not "we did the deleting").
+    /// Removes a profile's key, when the profile is deleted or the user clears the field.
+    /// - Returns: whether the Keychain now lacks the item (`errSecItemNotFound` counts as success).
     @discardableResult
     static func delete(for profileID: UUID, reason: DeletionReason = .profileDeleted) -> Bool {
         let status = storage.delete(service: service, account: profileID.uuidString)
@@ -210,12 +168,8 @@ enum ProviderKeyStore {
 
 extension ProfileDetails {
 
-    /// Whether this profile type has a system-instructions field at all. Register B14.
-    ///
-    /// ⚠️ Distinct from "the field is empty", and the difference decides whether an advisory is
-    /// truthful: `.imageGen` and `.workflow` have no instructions to be missing, so treating their
-    /// `nil` as "no guidance configured" would banner on every image-generation send. Matches the
-    /// two arms `ProfileValidator` actually enforces the rule on.
+    /// Whether this profile type has a system-instructions field at all.
+    /// Distinct from an empty field: `.imageGen` and `.workflow` have none, so nil must not raise a guidance advisory.
     var supportsSystemInstructions: Bool {
         switch self {
         case .bot, .agent:              return true
@@ -270,10 +224,7 @@ extension ProfileDetails {
     }
 
     /// Returns a copy with the provider API key replaced (or removed, when nil).
-    ///
-    /// ⚠️ Used in both directions: with `nil` to strip before encoding, and with the Keychain value
-    /// to re-inject after decoding. Keeping it one function means the two halves cannot disagree
-    /// about which field they operate on.
+    /// Used both to strip before encoding and to re-inject after decoding, so both halves act on the same field.
     func settingProviderAPIKey(_ key: String?) -> ProfileDetails {
         switch self {
         case .bot(var c):      c.llmConfig.apiKey = key; return .bot(c)

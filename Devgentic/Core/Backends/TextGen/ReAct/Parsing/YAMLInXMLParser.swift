@@ -4,17 +4,7 @@
 //  YAMLInXMLParser.swift
 //  Devgentic
 //
-//  Fallback parser for YAML-in-XML format where tool calls are wrapped
-//  in <tool_calls> tags but the body uses YAML list syntax instead of JSON.
-//  Expected format:
-//    <tool_calls>
-//    - name: tool_name
-//      arguments:
-//        key1: value1
-//        key2: value2
-//    </tool_calls>
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

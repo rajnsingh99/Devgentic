@@ -4,16 +4,7 @@
 //  ChatTemplateFingerprinter.swift
 //  Devgentic
 //
-//  Phase 1 — Dialect taxonomy expansion (2026-04-22).
-//  Analyzes a raw Jinja chat_template string extracted from tokenizer_config.json
-//  and identifies the exact native tool-calling dialect the model was trained on.
-//  Takes precedence over special-token substring scans in MLXTokenizerAnalyzer
-//  because the chat template is ground truth for how the model renders tool calls.
-//
-//  Each rule inspects structural markers in the Jinja source itself (string literals,
-//  property references, tag names, key order) rather than special tokens alone —
-//  two models can share tool tokens but emit formats with different key semantics
-//  (e.g., Llama uses "parameters", Qwen uses "arguments").
+//  Created by Raj Singh.
 //
 
 import Foundation

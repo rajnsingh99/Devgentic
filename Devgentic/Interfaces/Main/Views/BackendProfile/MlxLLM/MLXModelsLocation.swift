@@ -4,14 +4,7 @@
 //  MLXModelsLocation.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for G14.
-//
-//  `modelsDirectory` was a private computed property with no override: 76 GB of models pinned
-//  to the boot volume on a machine that may have a fast external SSD, with no supported way to
-//  relocate them. LM Studio, Ollama (`OLLAMA_MODELS`), Jan and GPT4All all support this.
-//
-//  It also contained `urls(for:).first!` — an unlogged force-unwrap in a directory-resolution
-//  path that a user-configurable location makes genuinely fallible.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -20,17 +13,11 @@ import os
 private let logger = DGLogger(category: "MLXModelsLocation")
 
 /// Resolves where MLX models live, honouring a user override.
-///
-/// ⚠️ Resolution must never trap and never silently succeed with the wrong directory. A wrong
-/// answer here re-downloads gigabytes or, worse, points the partial-download cleanup at
-/// somewhere it shouldn't be. Every fallback logs why it was taken.
+/// Resolution never traps or silently returns the wrong directory; every fallback logs why it was taken.
 enum MLXModelsLocation {
 
-    /// Bookmark to the user's chosen directory.
-    ///
-    /// A bookmark rather than a plain path for two reasons: it survives the user moving or
-    /// renaming the folder, and it keeps working if the app is ever sandboxed (it is not
-    /// today — the entitlements carry only microphone access).
+    /// Bookmark to the user's chosen directory. A bookmark rather than a plain path, so it survives the user moving or
+    /// renaming the folder and keeps working if the app is sandboxed.
     private static let bookmarkKey = "mlx.models.directory.bookmark"
     /// Human-readable path, purely so settings can show the location without resolving the
     /// bookmark (which can prompt) on every render.
@@ -38,10 +25,7 @@ enum MLXModelsLocation {
 
     // MARK: - Resolution
 
-    /// The default location, inside Application Support.
-    ///
-    /// Returns nil only if Application Support itself cannot be resolved — previously a `!`
-    /// force-unwrap on the same lookup.
+    /// The default location, inside Application Support; nil only if Application Support itself cannot be resolved.
     static var defaultDirectory: URL? {
         guard let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
@@ -71,7 +55,7 @@ enum MLXModelsLocation {
         UserDefaults.standard.string(forKey: displayPathKey)
     }
 
-    /// Resolves the stored bookmark, or nil when none is set or it no longer works.
+    /// Resolves the stored bookmark, or nil when none is set or it has stopped working.
     private static func resolvedCustomDirectory() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
 
@@ -99,11 +83,8 @@ enum MLXModelsLocation {
         return url
     }
 
-    /// True when the app can actually read and write there.
-    ///
-    /// ⚠️ Worth checking explicitly: a folder under Desktop/Documents/Downloads is subject to
-    /// TCC, so the picker can hand back a URL the app then cannot use. Failing loudly here
-    /// beats a mysteriously empty model list.
+    /// True when the app can actually read and write there. Checked explicitly: a folder under Desktop/Documents/Downloads
+    /// is subject to TCC, so the picker can return a URL the app cannot use.
     static func isUsable(_ url: URL) -> Bool {
         let fm = FileManager.default
         var isDirectory: ObjCBool = false

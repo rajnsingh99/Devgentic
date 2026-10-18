@@ -4,17 +4,7 @@
 //  CallRecoveryGateTests.swift
 //  DevgenticTests
 //
-//  Invariant: before a reply is accepted as the final answer, the attempted-call grammar is
-//  asked. A complete call is recovered; a cut-off call is retried — never shown as the answer,
-//  and never executed with a value cut short. And the sanitizer leaves the markers the drift
-//  detector and parsers read.
-//
-//  Probe 2026-10-05, a paragraph of prose before the call:
-//    - cut-off calls were accepted as the answer on ~18 of 19 paths — the pipeline's first check
-//      only looks for closing braces, drift markers or short text naming a tool, so the drift
-//      detector and parsers were never asked;
-//    - VALID calls (`<tool_call>…</tool_call>` ending the reply, `<|python_tag|>{…}`) were accepted
-//      as the answer on 6 dialects — the sanitizer stripped the very markers the detector reads.
+//  Created by Raj Singh.
 //
 
 import XCTest

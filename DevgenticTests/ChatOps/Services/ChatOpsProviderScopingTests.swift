@@ -4,16 +4,7 @@
 //  ChatOpsProviderScopingTests.swift
 //  DevgenticTests
 //
-//  C6 of the ChatOps remote-interface plan: the Discord swap, and the two properties it turns on.
-//
-//  Both are structural and can only be checked by reading source. That is stated rather than
-//  disguised: `ProviderSessionContext` reaches `ChatOpsConfigManager.shared`, whose cursors forward
-//  to `UserDefaults.standard`, so a behavioural test would move the developer's own ChatOps state;
-//  and the two Discord dispatch paths are `private` inside a bridge no test may construct (its view
-//  model opens real network connections).
-//
-//  ⚠️ Every scan below regexes over the JOINED body, never line by line — a multi-line chain has
-//  already walked past a line-filtered scan in this repo.
+//  Created by Raj Singh.
 //
 
 import XCTest

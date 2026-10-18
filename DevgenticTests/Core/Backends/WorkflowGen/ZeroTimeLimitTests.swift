@@ -4,8 +4,7 @@
 //  ZeroTimeLimitTests.swift
 //  DevgenticTests
 //
-//  Timeout inventory D-05 (probe P9): a configured limit of 0 or less meant "time out instantly".
-//  It now means "not set" — the next setting in the priority chain applies.
+//  Created by Raj Singh.
 //
 
 import XCTest

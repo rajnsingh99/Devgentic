@@ -4,19 +4,7 @@
 //  DeepSeekV31Parser.swift
 //  Devgentic
 //
-//  Phase 5 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.deepseekV31Flat` dialect (DeepSeek-V3.1).
-//
-//  Canonical output: same full-width Unicode tokens as V3 but NO code fence —
-//  args follow `<｜tool▁sep｜>` directly as bare JSON.
-//
-//    <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>list_directory<｜tool▁sep｜>{"path":"/"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-//
-//  Differences from V3 (DeepSeekV3Parser):
-//   - V3 wraps args in ` ```json\n...\n``` ` code fence; V3.1 does not.
-//   - V3 has optional `function` type prefix before name; V3.1 is flat.
-//
-//  Kept as a separate parser (not a mode flag on DeepSeekV3Parser) for clarity.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,6 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "DeepSeekV31Parser")
 
+/// Parser for the `.deepseekV31Flat` dialect (DeepSeek-V3.1) tool calls.
+/// Arguments follow `<｜tool▁sep｜>` as bare JSON, with no code fence and no `function` type prefix (unlike V3).
 struct DeepSeekV31Parser: CognitiveParserProtocol {
 
     // Same full-width Unicode markers as V3.
@@ -126,13 +116,9 @@ struct DeepSeekV31Parser: CognitiveParserProtocol {
         return nil
     }
 
+    // Why: whole-payload regexes also rewrite file content carried in `write_file` arguments.
     /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    /// Delegates to the shared sanitizer, which repairs outside string values only.
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }

@@ -4,11 +4,7 @@
 //  ChatMessageSDTests.swift
 //  DevgenticTests
 //
-//  Created on 03/04/26.
-//
-//  Tests ChatMessageSD ↔ ChatMessage round-trip mapping fidelity.
-//  Validates that all fields survive the encode → persist → decode cycle,
-//  including complex nested types (AgentResponse, TimelineEvent, attachments).
+//  Created by Raj Singh.
 //
 
 import XCTest

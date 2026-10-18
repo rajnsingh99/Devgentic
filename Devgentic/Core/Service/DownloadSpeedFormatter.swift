@@ -4,16 +4,13 @@
 //  DownloadSpeedFormatter.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//
-//  Tiny formatting helpers for the live download speed + ETA display.
-//  Centralized here so the sidebar row, detail view card, and the
-//  shared `ModelDownloadStatusView` all use the same vocabulary
-//  ("12.4 MB/s · 3 min left" / "— · calculating…").
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Formatting helpers for the live download speed and ETA display, shared by the sidebar row, the detail card and
+/// `ModelDownloadStatusView` so they use the same vocabulary.
 enum DownloadSpeedFormatter {
 
     /// Localized bytes-per-second string ("12.4 MB/s", "844 KB/s").

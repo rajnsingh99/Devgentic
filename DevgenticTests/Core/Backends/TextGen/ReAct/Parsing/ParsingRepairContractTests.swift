@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ParsingRepairContractTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-19 … CR-22 — four ways the prompted parsers mangled or dropped a tool call.
-//
-//  CR-19: ReAct / MistralXML decoded arguments with no repair and sent the call with `[:]`, so a
-//         multi-line `final_answer` failed as "missing answer".
-//  CR-20: a SUBSTRING tool-name match turned prose ("forget", "digits"→git) into format failures.
-//  CR-21: Qwen3-Coder typed parameter values by what they looked like, not the tool's schema.
-//  CR-22: the Pythonic-list parser ate the backslash of an unknown escape.
+//  Created by Raj Singh.
 //
 
 import XCTest

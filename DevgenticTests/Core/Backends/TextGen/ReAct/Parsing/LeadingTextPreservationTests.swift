@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  LeadingTextPreservationTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-5: a reply that STARTS with non-English text keeps its opening.
-//
-//  ⚠️ THE DEFECT. `OutputSanitizer.stripLeadingArtifacts` was meant to remove a BOM and garbage
-//  bytes, but it dropped EVERY leading scalar outside printable ASCII: "Привет мир" became " мир",
-//  "Übersicht" became "bersicht", "✅ Done" lost its emoji — and an all-CJK reply became "", which
-//  the cascade reports as `.emptyOutput` and answers with a corrective retry, on every prompted
-//  generator, forever. Another member of the content-corruption class: a transform that removed
-//  text because of what its bytes looked like.
+//  Created by Raj Singh.
 //
 
 import XCTest

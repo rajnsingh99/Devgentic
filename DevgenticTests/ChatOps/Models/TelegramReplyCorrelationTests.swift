@@ -4,7 +4,7 @@
 //  TelegramReplyCorrelationTests.swift
 //  DevgenticTests
 //
-//  Slice 4: Telegram's structured-input affordance and the correlation it buys.
+//  Created by Raj Singh.
 //
 
 import XCTest

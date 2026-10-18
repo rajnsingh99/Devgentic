@@ -4,22 +4,21 @@
 //  LocalInferencePolicy.swift
 //  Devgentic
 //
-//  The coordinator's decisions, as pure functions over its state.
-//
-//  ⚠️ No side effects and no clock reads: `now` is a parameter. Everything the coordinator decides is
-//  decided here, so the whole decision table is testable without a run, a model or a main actor —
-//  the shape `RunAdmissionPolicy` and `ICReleasePolicy` already use.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The coordinator's decisions as pure functions over its state, with no side effects and no clock
+/// reads (`now` is a parameter). The whole decision table is testable without a run, a model or a main
+/// actor.
 enum CoordinatorDecision: Equatable, Sendable {
     case admit(AdmitReason)
     /// `behind` is the run holding the lock (or, if none, the head of the queue). `position` is 1-based.
     case hold(behind: UUID, position: Int)
-    /// Phase 7: the run raises a concern its user should see first. It is held — keeping its place in
-    /// line, never blocking it — until they choose Proceed (it then waits its turn like any run) or
-    /// Stop; with no answer it is auto-denied after `LocalInferenceCoordinator.confirmationTimeout`.
+    /// The run raises a concern its user should see first. It is held, keeping its place in line, until
+    /// they choose Proceed or Stop. With no answer it is auto-denied after
+    /// `LocalInferenceCoordinator.confirmationTimeout`.
     case confirm([RunConcern])
     case deny(DenyReason)
 }
@@ -46,19 +45,14 @@ enum AdmitReason: Equatable, Sendable {
     case lockFree
 }
 
-/// Why a run is refused. ⚠️ TWO cases, both owner decisions — and neither refuses a run on a
-/// concern WITHOUT ASKING:
-/// - D5, the sub-agent fallback guard (never expected: sub-agents are hidden);
-/// - phase 7, a concern the user was asked about and did not answer in time.
-///
-/// ⚠️⚠️ There is NO direct memory-fit deny, and there must not be one. It existed until 2026-10-08 and
-/// refused a 3B model (1.75 GB on disk) as "needs ~20 GB": the profile's stored metadata had no
-/// parameter count, so the estimate fell back to its TIER's flat guess. A concern now ASKS
-/// (`CoordinatorDecision.confirm`); the run is refused only when nobody answers.
+// Why: a stored-metadata estimate once refused a 3B model as needing ~20 GB; a concern must ask, never
+// refuse.
+/// Why a run is refused: the sub-agent fallback guard, or a concern the user was asked about and did
+/// not answer in time. There is no direct memory-fit deny; a concern asks the user instead.
 enum DenyReason: Equatable, Sendable, CustomStringConvertible {
     /// Decision D5 — sub-agents are withdrawn; a local delegating run is the fallback guard's case.
     case subAgentsUnsupportedLocally
-    /// Phase 7: the user was asked about `concerns` and chose neither Proceed nor Stop within `after`.
+    /// The user was asked about `concerns` and chose neither Proceed nor Stop within `after`.
     case notConfirmed(concerns: [RunConcern], after: TimeInterval)
 
     /// The title of the run's error card.
@@ -100,14 +94,14 @@ struct LocalLockState: Equatable, Sendable {
 
 enum LocalInferencePolicy {
 
-    /// Plan §3.4: a run that has waited this long moves up one class, so a busy composer cannot
-    /// starve a scheduled task indefinitely.
+    /// A run that has waited this long moves up one class, so a busy composer cannot starve a scheduled
+    /// task.
     static let defaultAgingInterval: TimeInterval = 5 * 60
 
     // MARK: - Decide
 
-    /// Rules in order (plan §3.3, phase 7). `budgetBytes` is the machine's effective model budget
-    /// (0 = unknown: no concern can be raised).
+    /// Applies the admission rules in order.
+    /// `budgetBytes` is the machine's effective model budget (0 means unknown: no concern can be raised).
     static func decide(_ manifest: InferenceRunManifest,
                        lock: LocalLockState,
                        budgetBytes: UInt64 = 0,
@@ -130,8 +124,8 @@ enum LocalInferencePolicy {
         let arriving = QueuedRun(runID: manifest.runID, priority: manifest.priority, enqueuedAt: now)
         let ordered = order(lock.queue + [arriving], now: now, agingInterval: agingInterval)
         let position = (ordered.firstIndex { $0.runID == manifest.runID } ?? ordered.count - 1) + 1
-        // ⚠️ `holder` can be nil with a non-empty queue for the instant between a release and the next
-        // admission; the run is then behind the queue's head, never behind nothing.
+        // `holder` can be nil with a non-empty queue between a release and the next admission; the run is then
+        // behind the queue's head.
         let behind = lock.holder ?? ordered.first { $0.runID != manifest.runID }?.runID ?? manifest.runID
         return .hold(behind: behind, position: position)
     }
@@ -148,9 +142,9 @@ enum LocalInferencePolicy {
         }
     }
 
-    /// Whether a run with concerns is held to ASK its user. Only a run someone is watching, on a
-    /// surface that can show the question (owner, 2026-10-08): a scheduled, ChatOps or background run
-    /// just runs, and so does an Orb run until the voice HUD can ask (deferred).
+    /// Whether a run with concerns is held to ask its user: only an attended run on a surface that can show
+    /// the question. Scheduled, ChatOps and background runs just run, and so does an Orb run until the
+    /// voice HUD can ask.
     static func asksBeforeRunning(_ manifest: InferenceRunManifest) -> Bool {
         manifest.attended && manifest.origin != .orb
     }

@@ -4,15 +4,7 @@
 //  LowFixVerificationTests.swift
 //  DevgenticTests
 //
-//  Red-green verification tests for the 7 LOW severity production-readiness fixes.
-//
-//  LOW #1:  SpeechService — pending delay task cancellation on stop()
-//  LOW #3:  ChatMessage — improved token count estimation for code content
-//  LOW #4:  Animation lifecycle — onDisappear cleanup + asyncAfter → Task
-//  LOW #7:  LazyVStack .id() — verified correct (no code change)
-//  LOW #8:  ChatSearchBar — Escape key hint
-//  LOW #9:  MarkdownParser — fallback for blank output on malformed input
-//  LOW #10: FileAttachmentCardView — extracted RGB colors to FileTypeColor constants
+//  Created by Raj Singh.
 //
 
 import XCTest

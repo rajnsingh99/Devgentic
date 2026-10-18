@@ -4,22 +4,14 @@
 //  BundleExportSheet.swift
 //  Devgentic
 //
-//  Modal sheet for configuring + triggering a Phase F diagnostic bundle export.
-//  Presented from ReportInspector (developer mode) when the user clicks
-//  "Export Bundle". Also reachable from UserFeedbackView — same engine, different
-//  default Includes preset.
-//
-//  Flow:
-//    1. User opens ReportInspector on a failed message / conversation.
-//    2. Clicks "Export Bundle".
-//    3. Sheet shows scope (preset to current trace), includes checkboxes, level picker.
-//    4. Clicks "Export" → BundleExporter runs → zip file in temp dir.
-//    5. On success → reveal in Finder so user can attach/move to their preferred share.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Modal sheet that configures a diagnostic bundle export (scope, includes, level) and runs it.
+/// On success the zip is revealed in Finder.
 struct BundleExportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
@@ -374,9 +366,7 @@ struct BundleExportSheet: View {
             try FileManager.default.copyItem(at: url, to: dest)
             dismiss()
         } catch {
-            // Clear `result` so the error view actually shows — the body's success branch
-            // otherwise wins and the failure would be invisible (audit #11). Retry re-runs
-            // the export, which is safe (it just rebuilds the zip).
+            // Clear `result` so the error view shows; the success branch would otherwise win and hide the failure.
             result = nil
             errorMessage = "Couldn't save the bundle: \(error.localizedDescription)"
         }

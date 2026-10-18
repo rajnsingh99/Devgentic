@@ -4,20 +4,7 @@
 //  CallbackTokenTests.swift
 //  DevgenticTests
 //
-//  The callback grammar, and the ceiling that governs it.
-//
-//  ⚠️⚠️ THIS FILE IS CITED BY `CallbackToken.swift` AND DID NOT EXIST. Its header pointed at
-//  "`CallbackTokenTests.testEveryTokenFitsTelegramsBudget`, which is a standing probe rather than a
-//  one-off calculation" — and there was no such file, no such test, and no caller anywhere for
-//  `fits(budget:)`, `telegramPayloadBudget` or `RemoteCapabilities.callbackPayloadBudget`. The
-//  64-byte ceiling that governs the grammar on all three platforms was asserted by nothing, and the
-//  header's promise that "a new case cannot be added without a way to check it" was not true.
-//
-//  ⚠️ WHY THE CEILING IS NOT ACADEMIC. Telegram silently rejects a `callback_data` over 64 bytes at
-//  send time, so the failure is not a truncated button — it is a message that never posts. The
-//  grammar is shared across all three platforms, so Telegram's limit binds Discord (100) and Slack
-//  (255) too. The file's own worked example — `use:<profile>:<conversation>` at 77 bytes — is a
-//  token someone could reasonably try to add, and nothing would have stopped them.
+//  Created by Raj Singh.
 //
 
 import XCTest

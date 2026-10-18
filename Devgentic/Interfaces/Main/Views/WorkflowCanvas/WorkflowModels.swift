@@ -4,9 +4,7 @@
 //  WorkflowModels.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  Data models for the visual workflow canvas: nodes, edges, ports, and DAG definition.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -14,6 +12,8 @@ import SwiftUI
 
 // MARK: - Port Type
 
+/// The kind of data a workflow node port carries (part of the canvas data models: nodes, edges, ports and the DAG
+/// definition).
 enum PortType: String, Codable, Hashable {
     case input
     case output
@@ -27,19 +27,9 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
     /// A Bot, Agent, Workflow, or ImageGen profile node.
     case profile(profileID: UUID, profileType: ProfileType)
 
-    /// The **Router** node — matches the upstream text against labelled rules and routes to the
-    /// matching output port. Renamed from "Condition" in the UI on 2026-08-13: with N labelled rules
-    /// and one port each it is a switch/router, not a boolean condition.
-    ///
-    /// ⚠️ THE SWIFT CASE NAME IS DELIBERATELY STILL `condition`, and must stay that way.
-    /// `WorkflowNodeKind` uses Swift's SYNTHESIZED enum `Codable`, which writes the case name as the
-    /// discriminator into every persisted layout blob. Renaming the case would turn every saved
-    /// Router into an `.unsupported` placeholder (per-element resilience, WF-PE4) — no longer a
-    /// lost layout, but still every workflow ever saved degrading to unrunnable in one rename.
-    ///
-    /// ⚠️ `ConditionRule` / `ConditionOp` / `ConditionField` also keep their names, and that is
-    /// correct rather than merely safe: the NODE is a Router; the RULES are conditions. It routes
-    /// by conditions.
+    // Why: the case name stays `condition`: `WorkflowNodeKind` uses synthesized Codable, which persists the case name, so
+    // renaming it would degrade every saved Router to `.unsupported`.
+    /// The Router node: matches the upstream text against labelled rules and routes to the matching output port.
     case condition(ConditionNodeConfig)
 
     /// Code/transform — deterministic non-LLM processing (regex, JSON, format).
@@ -54,37 +44,17 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
     /// Action/integration — invokes a tool directly and deterministically (no LLM).
     case action(ActionNodeConfig)
 
-    /// A node this build cannot understand — preserved, never lost. [WF-PE4]
-    ///
-    /// Produced ONLY by `WorkflowNode.init(from:)` when the stored `kind` fails to decode (a case
-    /// name written by a different build: a rollback after a node-kind addition, or a deleted
-    /// kind). `raw` is the kind's ORIGINAL JSON, and `WorkflowNode.encode(to:)`
-    /// writes it back verbatim — so re-saving the layout is lossless and the build that understands
-    /// the node reads it again untouched.
-    ///
-    /// Before this case existed, ONE unknown case name failed the whole `[WorkflowNode]` array
-    /// decode, which made the layout simultaneously unreadable (empty canvas + overlay), unrunnable
-    /// (executor refusal) and permanently unsaveable (the `WorkflowLayoutSD` setter refuses every
-    /// write while unreadable) — with the destructive `repairUnreadableLayout` as the only exit.
-    /// Now the graph opens with a visibly degraded placeholder card; everything else stays editable
-    /// and saveable, and only the RUN is refused (`WorkflowError.unsupportedNodes`, plus a blocking
-    /// validation issue) because an unknown node cannot be executed or honestly skipped.
-    ///
-    /// ⚠️ The case name `unsupported` is effectively reserved the same way `loop` is: a blob must
-    /// never legitimately contain `{"unsupported":{...}}`, because `WorkflowNode.encode` unwraps
-    /// this case to the RAW original — the wrapper itself is never persisted.
+    // Why: the case name `unsupported` is reserved: encode unwraps this case, so a blob must never contain
+    // `{"unsupported":{...}}`.
+    /// A node this build cannot understand, preserved rather than lost. Produced only by `WorkflowNode.init(from:)` when
+    /// the stored kind's case name is unknown; `raw` is the original JSON and `encode(to:)` writes it back verbatim. Such
+    /// a node renders as a degraded placeholder and blocks the run (`WorkflowError.unsupportedNodes`).
     case unsupported(raw: JSONValue)
 
-    /// The persisted discriminator (case name) of every REAL, persistable case — i.e. every case
-    /// above except `.unsupported` itself, which is never written to a blob (its `encode(to:)`
-    /// unwraps to `raw` instead). [WF-PE4, corrected on audit] Used only to distinguish "this
-    /// build has never heard of this case name" (true version skew — preserve as a placeholder)
-    /// from "this build knows the case but its payload failed to decode" (real corruption of a
-    /// fully-understood node — must NOT be silently reclassified as version skew; see
-    /// `WorkflowNode.init(from:)`).
-    ///
-    /// ⚠️ MUST be updated whenever a case is added, renamed, or removed here — a name missing
-    /// from this set would misclassify a genuinely corrupted node of that kind as version skew.
+    // Why: update it whenever a case is added, renamed or removed, or corrupted nodes are misclassified as version skew.
+    /// The persisted discriminator (case name) of every real, persistable case, i.e. all cases except `.unsupported`.
+    /// Distinguishes an unknown case name (version skew, kept as a placeholder) from a known case whose payload failed to
+    /// decode (corruption).
     fileprivate static let knownKindCaseNames: Set<String> = [
         "profile", "condition", "code", "gate", "trigger", "action",
     ]
@@ -92,11 +62,8 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
 
 // MARK: - Node Identity Colour (WF-CU10)
 
-/// The structural node kinds that carry an identity colour on the canvas.
-///
-/// ⚠️ Profile-backed nodes are NOT here. Their colour comes from `ProfileType.displayColor`, which
-/// is already a single shared source with several non-canvas consumers (chat input, QuickAccess,
-/// profile detail, pickers). Folding it in here would drag those surfaces into a canvas change.
+/// The structural node kinds that carry an identity colour on the canvas. Profile-backed nodes are excluded: their
+/// colour comes from `ProfileType.displayColor`, which has other consumers.
 enum WorkflowNodeRole: String, CaseIterable, Sendable {
     case router      // `.condition` — the Swift case name is frozen for Codable reasons
     case code
@@ -106,13 +73,8 @@ enum WorkflowNodeRole: String, CaseIterable, Sendable {
 }
 
 extension WorkflowNodeKind {
-    /// The card / port / edge / palette / legend colour for this node kind.
-    ///
-    /// ⚠️ SINGLE SOURCE. This mapping was open-coded in several places — `WorkflowNodeView`'s
-    /// `profileColor`, `WorkflowCanvasState.nodeColor(for:)` (which fed the EDGE gradient, so the
-    /// two had to agree for an edge to match the node it leaves), the Add-node palette and the
-    /// in-app legend. `ProfileType+Display.swift`'s own header records the last time this exact
-    /// class of duplication drifted.
+    /// The card, port, edge, palette and legend colour for this node kind. Single source for the canvas, edge gradients,
+    /// add-node palette and legend, so they cannot drift.
     func identityColor(in theme: any Theme) -> Color {
         switch self {
         case .profile(_, let pType): return pType.displayColor
@@ -121,7 +83,7 @@ extension WorkflowNodeKind {
         case .gate:      return theme.nodeIdentityColor(for: .gate)
         case .trigger:   return theme.nodeIdentityColor(for: .trigger)
         case .action:    return theme.nodeIdentityColor(for: .action)
-        // [WF-PE4] Deliberately colourless — the placeholder must read as "not one of ours".
+        // Colourless, so the placeholder reads as not one of ours.
         case .unsupported: return theme.secondaryText
         }
     }
@@ -172,17 +134,10 @@ extension WorkflowNodeKind {
         return identityColor(in: theme)
     }
 
-    /// The node inspector window's minimum content size for this kind (register INS-4).
-    ///
-    /// ⚠️ SINGLE SOURCE, and it must stay one: the inspector view's own root `.frame(minHeight:)`
-    /// and the AppKit host's `minSize` are the same quantity stated twice. They disagreed by up to
-    /// 160pt — the host passed one 800×520 for EVERY kind while Router declares 680, Action 620,
-    /// Gate 560 and Profile 540 — so the content was laid out taller than the window hosting it,
-    /// and the strip that gets clipped is the header carrying Cancel and Save.
-    ///
-    /// ⚠️ Total, with NO `default:`. Adding a node kind must be a compile error here rather than a
-    /// silently-wrong window. `.trigger` and `.unsupported` never reach an inspector — both writers
-    /// of `targetConfigNode` gate them out — but they still need an answer.
+    // Why: single source: the inspector's root `.frame(minHeight:)` and the AppKit host's `minSize` state the same quantity,
+    // and a mismatch clips the header with Cancel and Save.
+    /// The node inspector window's minimum content size for this kind. Total, with no `default:`, so a new node kind is a
+    /// compile error here; `.trigger` and `.unsupported` never reach an inspector but still need an answer.
     nonisolated var inspectorMinimumSize: CGSize {
         switch self {
         case .condition:   return CGSize(width: 800, height: 680)
@@ -197,27 +152,17 @@ extension WorkflowNodeKind {
 
 // MARK: - Node Kind Configs
 
-/// What a Router does when its evidence yields anything but exactly ONE winner — zero rules matched
-/// (EMPTY) or several matched (AMBIGUOUS). One setting, both triggers (user decision 2026-08-17).
-///
-/// ⚠️ EVERY CASE IS TOTAL — it means the same thing for EMPTY and for AMBIGUOUS. That property is
-/// load-bearing, not tidiness: it is what keeps the decision table free of per-situation footnotes.
-/// An earlier draft carried a `firstMatch` case ("take the first matching rule"), which was the one
-/// option that was NOT total — meaningful for ambiguity, undefined when nothing matched, requiring
-/// a special rule so it could not reinvent the WF-OB1 arbitrary-branch defect. **Dropped by user
-/// decision 2026-08-17. Do NOT reintroduce it**; an explicit default chosen from the dropdown is
-/// what replaced it, and the implicit "rule order is priority" behaviour it encoded was itself the
-/// kind of hidden coupling this redesign exists to remove (reordering rules on the canvas silently
-/// changed unattended routing).
+// Why: every case must mean the same thing for empty and ambiguous; do not add an implicit "first match wins" case, which
+// would make rule order silently change unattended routing.
+/// What a Router does when its evidence yields anything but exactly one winner: zero rules matched (empty) or several
+/// matched (ambiguous). One setting covers both triggers.
 enum RouterDecisionPolicy: Codable, Hashable, Sendable {
-    /// Route to this rule's port, as if it had matched. ⚠️ On AMBIGUOUS this OVERRIDES the matched
-    /// rules — the branches that did match will not run.
+    /// Route to this rule's port, as if it had matched. On ambiguous input this overrides the matched rules, so the
+    /// branches that did match do not run.
     case route(ruleID: UUID)
 
-    /// Pause and ask a human to pick. ⚠️ Attended runs only: an unattended run (scheduled, or
-    /// started from a chat bridge) renders no banner anyone can see, so it never parks — it takes
-    /// `fallback` immediately. The same `fallback` also covers an attended run nobody answers
-    /// (Stop, conversation closed), which must stay identical to the unattended path.
+    /// Pause and ask a human to pick. Attended runs only: an unattended run (scheduled, or started from a chat bridge)
+    /// takes `fallback` immediately, as does an attended run nobody answers.
     case ask(fallback: AskFallback)
 
     /// End this BRANCH gracefully — no active ports, downstream skips as "not chosen", and the
@@ -258,20 +203,9 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
         return label.range(of: "^[a-zA-Z0-9]+$", options: .regularExpression) != nil
     }
 
-    /// `label` if it is free, else the first `<base><n>` (n = 2…99) not already in `taken`.
-    ///
-    /// ⚠️ The numeric suffix REPLACES the tail; it never extends it. The de-dup used to build
-    /// `String("\(label)\(n)".prefix(10))`, which for an already-10-character label truncates
-    /// straight back to the SAME ten characters — so every one of the 98 candidates was already in
-    /// `taken`, the loop fell through, and the duplicate was written unchanged. That is a blocking
-    /// validator error the user then has to find and fix by hand. Replacing the tail also stops
-    /// suffixes 10…99 collapsing onto nine distinct candidates for a 9-character base.
-    ///
-    /// ⚠️ The result always ends in a digit, so it can never collide with
-    /// `WorkflowEdge.errorPortLabel` ("error"), which is a reserved port name.
-    ///
-    /// Returns `label` unchanged if all 98 candidates are taken — the caller cannot have 98 rules
-    /// (`maxRules` is 5), so that arm is unreachable in production and is a safe identity.
+    /// Returns `label` if it is free, else the first `<base><n>` (n = 2…99) not in `taken`; returns `label` unchanged if
+    /// all candidates are taken. The suffix replaces the tail of the label, so the result fits the length limit and
+    /// always ends in a digit, never colliding with `WorkflowEdge.errorPortLabel`.
     nonisolated static func deduplicatedLabel(_ label: String, taken: Set<String>) -> String {
         guard taken.contains(label) else { return label }
         let base = String(label.filter { $0.isLetter || $0.isNumber })
@@ -303,24 +237,9 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
     /// MLX model display name used for classification.
     var llmModelName: String? = nil
 
-    /// What this Router does when its evidence yields anything but exactly ONE winner.
-    ///
-    /// ⚠️ ONE setting, TWO triggers (user decision 2026-08-17): zero rules matched (EMPTY) and
-    /// several matched (AMBIGUOUS). They are mutually exclusive by construction, so a single
-    /// setting is coherent rather than a false merge.
-    ///
-    /// ⚠️ The AI Classifier INHERITS it: exactly one recognised token routes, zero is EMPTY, two or
-    /// more is AMBIGUOUS. That is what retires WF-OB2 — a multi-token reply used to resolve by
-    /// unordered `Dictionary` iteration, so the same input could take a different branch after an
-    /// app restart.
-    ///
-    /// ⚠️ TWO OUTCOMES STAY OUTSIDE THIS SETTING, deliberately. A classifier that CRASHED produced
-    /// no verdict, so it fails the node regardless of the policy (WF-CC10); a Stop settles the node
-    /// `.canceled` and routes nowhere (WF-CC13). This setting answers "the rules did not single out
-    /// one branch" — a statement about CONTENT — and neither of those is content.
-    ///
-    /// Defaults to asking, with "fail the node" when nobody can answer — the strict choice: an
-    /// undecided input never silently takes a branch nobody chose.
+    /// What this Router does when its evidence yields anything but exactly one winner (zero matched or several matched).
+    /// The AI Classifier inherits it; a classifier crash fails the node and a Stop cancels it regardless of this setting.
+    /// Defaults to asking, with "fail the node" when nobody can answer.
     var decisionPolicy: RouterDecisionPolicy = .ask(fallback: .failNode)
 
     /// Default initializer — all properties use their declared defaults.
@@ -353,23 +272,17 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
         llmFallbackEnabled = try c.decodeIfPresent(Bool.self, forKey: .llmFallbackEnabled) ?? false
         llmPrompt = try c.decodeIfPresent(String.self, forKey: .llmPrompt) ?? ""
         llmModelName = try c.decodeIfPresent(String.self, forKey: .llmModelName)
-        // `try?` deliberately: a policy shape from a NEWER build degrades to the default instead of
-        // taking the whole layout unreadable (WF24 — the blob has no per-element resilience). The
-        // `layoutBlobVersion` stamp refuses that build's save, so the degraded read is never written
-        // back over the newer value.
+        // `try?` on purpose: a policy shape from a newer build degrades to the default instead of making the whole layout
+        // unreadable; `layoutBlobVersion` stops that build's save being overwritten.
         decisionPolicy = (try? c.decodeIfPresent(RouterDecisionPolicy.self, forKey: .decisionPolicy))
             ?? .ask(fallback: .failNode)
     }
 
-    // MARK: - AI Classifier prompt (2026-08-17)
+    // MARK: - AI Classifier prompt
 
-    /// The placeholder that expands to this Router's rule labels at RUN TIME.
-    ///
-    /// ⚠️ A placeholder, not baked text, and that is the whole mechanism. Materialising the rule
-    /// list into the stored prompt would force a choice between two bad options: rewrite the user's
-    /// prompt whenever a rule is added or renamed (clobbering their edits), or leave it alone and
-    /// let it go stale (the model told about categories that no longer exist). Expanding at run
-    /// time means the prompt is always current AND never overwritten.
+    // Why: a placeholder, not baked text: materialising the rules into the stored prompt would clobber user edits or go stale
+    // as rules change.
+    /// The placeholder that expands to this Router's rule labels at run time.
     static let rulesPlaceholder = "{{rules}}"
 
     /// The prompt a Router starts with when its AI Classifier is switched on. Fully editable — the
@@ -380,12 +293,8 @@ struct ConditionNodeConfig: Codable, Hashable, Sendable {
         Answer with exactly one category.
         """
 
-    /// The instruction actually sent to the model: the stored prompt with `{{rules}}` expanded.
-    ///
-    /// ⚠️ Labels only — never the opaque 4-char tokens. Those are assigned per invocation and live
-    /// in the system-owned `<labels>` block; letting a user-editable field name them would break the
-    /// parse protocol, and letting the model answer in readable rule names would let unescaped
-    /// upstream text name a route into being (the open WF-SE2 interpolation).
+    /// The instruction actually sent to the model: the stored prompt with `{{rules}}` expanded. Uses rule labels only,
+    /// never the opaque per-invocation tokens, which live in the system-owned `<labels>` block.
     func resolvedRoutingPrompt() -> String {
         guard llmPrompt.contains(Self.rulesPlaceholder) else { return llmPrompt }
         var seen = Set<String>()
@@ -426,17 +335,9 @@ struct ConditionRule: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
-/// What a condition rule evaluates against.
-/// ⚠️ RAW-PRESERVING catch-all (WF-PE3), the pattern `WorkflowRunRecord.RunStatus` established.
-///
-/// These layout enums used to be plain `String, Codable`: ONE unknown rawValue — written by a newer
-/// build, read after a rollback — threw at decode, which failed the node, which failed the array,
-/// which failed the WHOLE layout. A 15-node graph became unreadable and unsaveable over a single
-/// string, and the only in-app escape was the total-loss Discard. `.other(raw)` decodes ANY value
-/// and re-encodes it VERBATIM — lossless by construction, so a round-trip through an older build
-/// preserves the newer build's data byte-for-byte. Consumers treat `.other` as inert-and-visible:
-/// the validator flags it, the engine never matches on it, and no picker offers it
-/// (`allCases` excludes it by hand — the synthesized one would).
+/// What a condition rule evaluates against. Raw-preserving: `.other(raw)` decodes any value and re-encodes it
+/// verbatim, so an unknown value from a newer build survives a round trip. Consumers treat `.other` as inert: the
+/// validator flags it, the engine never matches it, and `allCases` excludes it.
 enum ConditionField: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
     case upstreamOutput     // Concatenated text output of upstream nodes
     case variable           // A shared workflow variable by name
@@ -471,9 +372,8 @@ enum ConditionOp: RawRepresentable, Codable, Hashable, Sendable, CaseIterable {
     case isEmpty
     case isNotEmpty
 
-    // ⚠️ There is deliberately no "always matches" operator. A catch-all rule matches everything,
-    // so any input matching a real rule matches TWO rules and ambiguity arbitration fires on every
-    // ordinary input. Unmatched input is `ConditionNodeConfig.decisionPolicy`'s job.
+    // There is deliberately no "always matches" operator: a catch-all would match alongside every real rule and trigger
+    // ambiguity on every input. Unmatched input is `decisionPolicy`'s job.
 
     /// An operator this build cannot evaluate — a newer build's operator (WF-PE3). Preserved
     /// verbatim, never matches.
@@ -542,25 +442,17 @@ struct GateNodeConfig: Codable, Hashable, Sendable {
 
 struct TriggerNodeConfig: Codable, Hashable, Sendable { }
 
-/// Deterministic action/integration node — invokes a tool directly, with NO LLM.
-///
-/// At run time the node resolves `tool` to an executable tool, builds the tool's
-/// JSON arguments by resolving each `argumentBindings` template against the
-/// upstream data (`{{ input }}`, `{{ input.json.x }}`, `{{ var.y }}`), invokes it,
-/// and emits the tool's output + artifacts. This is the "do things" node:
-/// HTTP calls, file writes, notifications, MCP tool invocations — instant,
-/// free (no tokens), and deterministic, versus puppeteering an agent to do it.
+/// A deterministic action node that invokes a tool directly, with no LLM. It resolves each `argumentBindings`
+/// template against upstream data (`{{ input }}`, `{{ input.json.x }}`, `{{ var.y }}`), invokes the tool and emits
+/// its output and artifacts.
 struct ActionNodeConfig: Codable, Hashable, Sendable {
-    /// The selected tool reference (native or MCP), or nil when unconfigured.
-    /// Reuses the same `Tool` type profiles persist — carries the tool `name`,
-    /// `sourceId` (native vs MCP routing), and a snapshot of its `parameters`
-    /// schema (so the inspector can render one binding field per argument).
+    /// The selected tool reference (native or MCP), or nil when unconfigured. Uses the same `Tool` type profiles persist,
+    /// including a snapshot of its `parameters` schema for the inspector.
     var tool: Tool? = nil
 
-    /// Maps each tool-argument name → a template string resolved at run time.
-    /// e.g. `["url": "https://hooks.example.com", "body": "{{ input }}"]`.
-    /// Only bound arguments are sent; unbound optional args are omitted (and an
-    /// unbound *required* arg surfaces as a clear tool-decode failure at run time).
+    /// Maps each tool-argument name to a template string resolved at run time, e.g. `["url": "https://hooks.example.com",
+    /// "body": "{{ input }}"]`. Only bound arguments are sent; an unbound required argument surfaces as a tool-decode
+    /// failure.
     var argumentBindings: [String: String] = [:]
 
     init(tool: Tool? = nil, argumentBindings: [String: String] = [:]) {
@@ -580,37 +472,19 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
     /// Delay in seconds between node-level retries.
     var retryDelay: TimeInterval = 0
 
-    /// Hard timeout override for this node.
-    /// If nil (or 0 / negative — `TimeLimit.usable`), the node uses its profile's `executionTimeout`,
-    /// then the workflow's node timeout (`WorkflowConfig.nodeTimeout`); an enclosing scheduled run
-    /// can shorten it further (`ExecutionBudget`).
+    /// Hard timeout override for this node. If nil (or 0 / negative), the node uses its profile's `executionTimeout`,
+    /// then the workflow's `nodeTimeout`; an enclosing scheduled run can shorten it (`ExecutionBudget`).
     var hardTimeout: TimeInterval? = nil
 
-    /// [WF-SE6/SE11] EXPLICIT unattended approval: when true, tool confirmations raised by this
-    /// node during a run NOBODY CAN ANSWER (a scheduled fire) are auto-approved. This — never a
-    /// banner click — is the sanctioned way to let a scheduled workflow run a confirming tool:
-    /// interactive "Allow for this chat" grants are not served to such runs, and a confirmation
-    /// with no standing config is refused fast instead of parking to nobody until a deadline
-    /// kills the whole run.
-    ///
-    /// ⚠️ A CHATOPS run is NOT covered by this: a human is reachable there (the confirmation is
-    /// mirrored to Telegram/Slack/Discord with working Approve/Deny), so it still asks. See
-    /// `WorkflowRunAttendance.canReachAHuman`.
-    ///
-    /// ⚠️ Read only on the PROFILE-node path (via `WorkflowExecutionContext`) and the Action-node
-    /// arm. A sub-workflow node dispatches structurally and never reads it — the child graph's own
-    /// nodes carry their own settings, which is why the inspector hides the row there.
-    ///
-    /// nil = false.
+    /// Explicit unattended approval: when true, tool confirmations raised by this node in a run nobody can answer (a
+    /// scheduled fire) are auto-approved; nil = false. A ChatOps run is not covered because a human is reachable there.
+    /// Read only on the profile-node and Action-node paths; sub-workflow nodes never read it.
     var unattendedAutoApprove: Bool? = nil
 }
 
 // MARK: - WorkflowNodeConfig Codable
-//
-// `decodeIfPresent` with the property defaults, so a config written with only some keys (a node
-// whose user touched one control) loads with the rest at their defaults. Declared in an extension
-// so the memberwise initializer (`WorkflowNodeConfig()`) is preserved; `encode(to:)` stays
-// synthesized from these same keys.
+// `decodeIfPresent` with the property defaults, so a config with only some keys loads with the rest at defaults.
+// Declared in an extension so the memberwise initializer is preserved.
 extension WorkflowNodeConfig {
     private enum CodingKeys: String, CodingKey {
         case maxNodeRetries, retryDelay, hardTimeout, unattendedAutoApprove
@@ -685,26 +559,12 @@ struct WorkflowNode: Identifiable, Codable, Hashable {
                case .object(let fields) = raw,
                let discriminator = fields.keys.first, fields.count == 1,
                !WorkflowNodeKind.knownKindCaseNames.contains(discriminator) {
-                // [WF-PE4] Per-element resilience: an UNRECOGNIZED case name (a kind a newer build
-                // added, read here after a rollback) becomes a
-                // PRESERVED placeholder instead of failing the whole [WorkflowNode] array — which
-                // used to make the layout unreadable, unrunnable AND permanently unsaveable in one
-                // throw. The raw JSON round-trips through encode(to:), so nothing is lost on re-save.
-                //
-                // ⚠️ Found on adversarial audit: the ORIGINAL version of this arm fired on ANY
-                // undecodable `kind`, which conflated true version skew (an unknown case name) with
-                // real CORRUPTION of a case this build fully understands — a node-kind config with
-                // a synthesized `Codable` and a non-optional field (e.g. `ActionNodeConfig.
-                // argumentBindings`) throws the identical `kindError` shape on a missing/malformed
-                // key as an unknown case name does. Silently reclassifying that as "saved by a
-                // different version, update Devgentic" is actively misleading — updating changes
-                // nothing, and the corruption is never surfaced. The discriminator-name check above
-                // is the fix: only a case name THIS BUILD DOES NOT KNOW is version skew.
+                // An unrecognized case name (from a newer build) becomes a preserved placeholder instead of failing the node array.
+                // A known case whose payload fails to decode is corruption, not version skew, and rethrows.
                 kind = .unsupported(raw: raw)
             } else {
-                // Either not valid JSON under the key, or the discriminator names a case this
-                // build DOES understand whose payload still failed to decode — real corruption,
-                // not version skew. The unreadable-layout machinery is the honest surface for it.
+                // Either not valid JSON under the key, or a known case whose payload failed to decode: real corruption, surfaced by
+                // the unreadable-layout machinery.
                 throw kindError
             }
         }
@@ -719,9 +579,8 @@ struct WorkflowNode: Identifiable, Codable, Hashable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
-        // [WF-PE4] An unsupported node re-encodes its ORIGINAL kind JSON, not the placeholder
-        // wrapper — so the build that understands this node reads it back untouched, and the
-        // literal case name `unsupported` never reaches a persisted blob.
+        // An unsupported node re-encodes its original kind JSON, not the placeholder wrapper, so the literal case name
+        // `unsupported` never reaches a blob.
         if case .unsupported(let raw) = kind {
             try container.encode(raw, forKey: .kind)
         } else {
@@ -740,19 +599,10 @@ struct WorkflowNode: Identifiable, Codable, Hashable {
 /// For multi-port nodes (e.g., Condition), `sourcePortLabel` identifies which output port.
 struct WorkflowEdge: Identifiable, Codable, Hashable {
 
-    /// The reserved failure port label.
-    ///
-    /// ⚠️ ONE definition, deliberately. This string is load-bearing in two places that MUST agree —
-    /// `WorkflowCanvasState.outputPortLabels` (which port the canvas draws and the validator accepts)
-    /// and `WorkflowState.edgeIsLive` (which edge the engine follows on failure). A port the engine
-    /// activates but the canvas never renders is unwireable, which is exactly the defect WF61
-    /// recorded; a port the canvas draws but the engine never activates is a dead branch. Both are
-    /// invisible to pre-flight validation, because the validator checks edges against the canvas
-    /// list and can never see a runtime activation.
-    ///
-    /// ⚠️ It is also a RESERVED user-facing label: a Condition rule or Gate option named "error"
-    /// collides with it. `outputPortLabels` de-duplicates so no duplicate port renders, and the
-    /// validator warns — it does not block, since an existing workflow may already carry one.
+    // Why: one definition shared by `WorkflowCanvasState.outputPortLabels` and `WorkflowState.edgeIsLive`: a port the engine
+    // activates but the canvas never renders is unwireable.
+    /// The reserved failure port label; also a reserved user-facing label (a rule or Gate option named "error" collides,
+    /// and the validator warns).
     static let errorPortLabel = "error"
 
     let id: UUID
@@ -795,22 +645,12 @@ struct StickyNote: Identifiable, Codable, Hashable {
     var text: String
     var color: StickyNoteColor
 
-    /// The one size a sticky note may shrink to, in canvas points (register CVC-8).
-    ///
-    /// ⚠️ SINGLE SOURCE. The resize handle's live preview and `WorkflowCanvasState.resizeStickyNote`'s
-    /// clamp MUST both read this. They used to carry independent literals — 100×60 in the view,
-    /// 120×80 in the model — so every release in that band previewed a size the model refused and
-    /// the note visibly snapped back out from under the cursor.
-    ///
-    /// 120 is not arbitrary: the note header's colour-swatch row is ~114pt intrinsically wide, so a
-    /// 100pt card clips its own chrome. The committed size is unchanged by unifying on the higher
-    /// floor — `max(120, max(100, x)) == max(120, x)` — so only the preview stops lying.
+    /// The one size a sticky note may shrink to, in canvas points. The resize preview and
+    /// `WorkflowCanvasState.resizeStickyNote`'s clamp both read it; 120 fits the header's ~114pt colour-swatch row.
     static let minimumSize = CGSize(width: 120, height: 80)
 
-    /// The size a resize drag of `translation` from `base` resolves to — the ONLY resize arithmetic.
-    ///
-    /// Pure and nonisolated so the floor can be truth-tabled (WF-UI5): the two `DragGesture`
-    /// closures that used to hold this expression are unreachable from a test.
+    /// The size a resize drag of `translation` from `base` resolves to; the only resize arithmetic. Pure and nonisolated
+    /// so the floor can be tested.
     static func resizedSize(from base: CGSize, translation: CGSize) -> CGSize {
         CGSize(
             width: max(minimumSize.width, base.width + translation.width),
@@ -994,12 +834,8 @@ struct WorkflowLayout: Codable {
         return result.count == nodes.count ? result : nil
     }
 
-    /// Groups nodes into dependency levels for parallel execution.
-    /// Level 0 = entry nodes (no incoming edges).
-    /// Level N = nodes whose ALL upstream dependencies are in levels 0..N-1.
-    /// Returns `nil` if the graph has a cycle.
-    ///
-    /// Adapted from `PlanningCapability.computeExecutionLevels()`.
+    /// Groups nodes into dependency levels for parallel execution: level 0 is entry nodes, level N has all upstream
+    /// dependencies in levels 0..N-1. Returns `nil` if the graph has a cycle.
     func computeExecutionLevels() -> [[UUID]]? {
         let nodeIDs = Set(nodes.map(\.id))
         var inDegree: [UUID: Int] = [:]

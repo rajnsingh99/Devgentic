@@ -4,18 +4,15 @@
 //  QuickAccessSessionViewModel.swift
 //  Devgentic
 //
-//  [QA revival P1a] Replaces the dead OllamaConnect stub (old QuickAccessViewModel).
-//  Routes the floating panel through the app's REAL streaming stack: it owns a
-//  panel-scoped ChatHistoryViewModel bound to the SHARED ActiveStreamManager (so live
-//  streams merge but the message list stays panel-local), a panel-local
-//  BackendConfiguration (so the panel's profile choice never moves the main window), and
-//  mirrors MessagingCoordinator.submitRemoteMessage for the send path.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import SwiftData
 import os
 
+/// Drives the floating quick-access panel through the app's real streaming stack, with a panel-local history view model
+/// on the shared stream manager and a panel-local backend configuration.
 @Observable @MainActor
 final class QuickAccessSessionViewModel {
 
@@ -29,34 +26,17 @@ final class QuickAccessSessionViewModel {
     /// Panel-local search VM. Cheap; the shared bubble views require it in the environment.
     let searchViewModel = ChatSearchViewModel()
 
-    /// Panel-local profile selection — deliberately separate from the main window's
-    /// BackendConfiguration so choosing a profile in the panel doesn't move the main UI.
+    /// Panel-local profile selection, separate from the main window's `BackendConfiguration`.
     let backendConfiguration = BackendConfiguration()
 
     // MARK: - Injected graph (all reached through the one shared MainApplicationViewModel)
 
     @ObservationIgnored private weak var mainAppViewModel: MainApplicationViewModel?
 
-    /// ⚠️ The SEAM, not the concrete manager. The panel starts a run and cancels the one it
-    /// started — exactly the two members of `MessageStreamStarting` — so it depends on that and
-    /// nothing wider.
-    ///
-    /// ⚠️ WHAT THAT BUYS HERE, precisely: a COMPILE-TIME narrowing. It does not, on this surface,
-    /// let a test observe the hand-off — the init below takes a `MainApplicationViewModel` and
-    /// reads the manager off it, deliberately (see the note there), so no double can be
-    /// substituted. `SchedulerCoordinator` gets both benefits because its manager is injected;
-    /// this one gets the narrowing only, until `mainAppViewModel` itself is narrowed. An earlier
-    /// version of this comment claimed the observability benefit and was contradicted 90 lines
-    /// below by the init that makes it impossible.
+    /// The narrow stream-starting seam (start a run, cancel the one it started) rather than the concrete manager.
     @ObservationIgnored private let activeStreamManager: any MessageStreamStarting
 
-    /// ⚠️ The PROTOCOL, not `ChatPersistenceStore`. Every comparable type already takes it
-    /// (`ActiveStreamManager`, `ChatHistoryViewModel`, `ConversationSwitchCoordinator`,
-    /// `MessagingCoordinator`, `SchedulerCoordinator`); the panel was the last holdout, and a
-    /// parameter typed as the concrete class accepts only the real SwiftData store — so any test
-    /// that constructed this view model wrote to a real container. The one use that pinned it,
-    /// a `FetchDescriptor` over `modelContainer.mainContext`, now lives on the store itself as
-    /// `recentConversations(limit:)`.
+    /// The persistence protocol rather than the concrete store, so tests can substitute a double.
     @ObservationIgnored private let persistence: ChatPersistenceProtocol
     @ObservationIgnored private let logger = DGLogger(category: "QuickAccessSessionViewModel")
 
@@ -64,33 +44,21 @@ final class QuickAccessSessionViewModel {
 
     private(set) var conversationID: UUID?
 
-    /// Non-nil while a panel-originated stream is in flight (drives the Send/Stop toggle).
-    /// Deliberately panel-local — we do NOT touch the main window's streamingMessageID slot,
-    /// which would clobber a concurrent main-window stream.
+    /// Non-nil while a panel-originated stream is in flight; drives the Send/Stop toggle.
+    /// Panel-local so it never clobbers a concurrent main-window stream.
     private(set) var streamingMessageID: UUID?
     /// [C1] The conversation the in-flight stream belongs to. stop() drains THIS conversation's
     /// HITL suspension — not whichever conversation the panel currently shows (the user may have
     /// switched to another via the recents menu while the stream was still running).
     private(set) var streamingConversationID: UUID?
-    /// [M5] Synchronous re-entry guard for the async gap between accepting a send and the stream
-    /// actually starting. `streamingMessageID` is only known after `startMessageStream`, which
-    /// runs several `await`s deep inside `send()`; without a flag flipped *synchronously* at
-    /// accept time, a second submit during that gap would pass the `streamingMessageID == nil`
-    /// check and start a duplicate stream (two user messages, two streams) on one conversation.
+    /// Set synchronously on accepting a send, covering the async gap before `streamingMessageID` is known.
+    /// Without it a second submit in that gap would start a duplicate stream on the conversation.
     private(set) var isPreparingSend = false
     var isSending: Bool { streamingMessageID != nil || isPreparingSend }
 
-    /// [C3] The in-flight transcript load (prepareSession / openConversation). `send()` awaits it
-    /// before building its turn.
-    ///
-    /// ⚠️ NOT for history any more. This said the await stops a fast first send from "shipping
-    /// empty history"; the panel no longer assembles history at all — `ActiveStreamManager`
-    /// derives it from the STORE, so a half-loaded transcript cannot shrink what the model sees.
-    /// The await is still load-bearing for two other reasons, both verified: `openConversation`
-    /// sets `conversationID` inside this task, so a send that overtook it would file the turn
-    /// against a conversation the panel has not adopted; and the load assigns
-    /// `currentChatMessages`, so one landing after the panel inserts its user row would wipe that
-    /// row out of the visible transcript.
+    // Why: `openConversation` sets `conversationID` inside this task and the load assigns `currentChatMessages`;
+    // a send that overtook it would file the turn wrongly or have its user row wiped.
+    /// The in-flight transcript load; `send()` awaits it before building its turn.
     @ObservationIgnored private var loadTask: Task<Void, Never>?
 
     /// [C10] Observes external SwiftData writes so the panel transcript refreshes when another
@@ -104,31 +72,14 @@ final class QuickAccessSessionViewModel {
 
     // MARK: - Init
 
-    /// Profile types a chat-style quick-entry panel may use. Deliberately excludes
-    /// `.workflow` (a DAG, not a chat), `.code` (ephemeral, never in the store), and
-    /// `.imageGen` (image-output UX). This is why the panel never "runs a workflow".
+    /// Profile types a chat-style quick-entry panel may use; excludes workflow, code and imageGen profiles.
     static let allowedProfileTypes: Set<ProfileType> = [.bot, .agent]
 
-    /// The panel's user turn: the message that is persisted, displayed AND handed to the send
-    /// path — one object, so they cannot diverge.
-    ///
-    /// ⚠️ The panel sends NO `promptOverride`. Unlike Orb it does not decorate the query, so
-    /// the model's text and the displayed text are the same string — and the duplicate-query strip
-    /// keys on this message's ID either way. The absence is the contract: if a future change ever
-    /// gives the panel its own prompt decoration, it must travel as `promptOverride` rather than by
-    /// mutating this message, or the displayed row and the model's copy drift apart. That drift is
-    /// exactly what made every Orb voice turn arrive as an orphan.
-    ///
-    /// ⚠️ It also builds NO HISTORY. The panel used to hand over a reversed slice of
-    /// `currentChatMessages` — its PAGINATION WINDOW, a hard 20 rows that never grew because
-    /// QuickAccess never calls `loadMoreMessages` — as model history. `ActiveStreamManager` derives
-    /// history now, so the panel and the main window are given the same conversation.
-    ///
-    /// `static` + internal so the contract is testable without a `MainApplicationViewModel`
-    /// (constructing one runs `ChatOpsCoordinator.bootstrap()`, which opens real Telegram/Discord/
-    /// Slack connections). ⚠️ The store is no longer a blocker — `persistence` was widened to
-    /// `ChatPersistenceProtocol` on 2026-09-07 — but the view model is, so the contract still lives
-    /// here rather than being driven through `submitQuery`. Pinned by `QuickAccessDispatchTests`.
+    // Why: any prompt decoration must travel as `promptOverride`, not by mutating this message,
+    // or the displayed row and the model's copy drift apart.
+    /// Builds the panel's user turn: one message that is persisted, displayed and handed to the send path.
+    /// Sends no `promptOverride` and no history slice; history is derived by `ActiveStreamManager`.
+    /// `static` so the contract is testable without constructing a `MainApplicationViewModel`.
     static func panelTurn(
         query: String,
         conversationID: UUID,
@@ -150,14 +101,8 @@ final class QuickAccessSessionViewModel {
     init(mainAppViewModel: MainApplicationViewModel,
          persistence: ChatPersistenceProtocol = ChatPersistenceStore.shared) {
         self.mainAppViewModel = mainAppViewModel
-        // ⚠️ NOT injectable, deliberately — an `activeStreamManager:` parameter was added here on
-        // 2026-09-07 and removed the same day. It would have produced a CHIMERA: the panel's
-        // send/stop would reach the injected spy while `chatHistoryViewModel` below kept the real
-        // manager, because `ChatHistoryViewModel.init` requires the CONCRETE type (it needs
-        // `activeStreams` and `incompleteTurnIDs`, neither of which is on `MessageStreamStarting`
-        // — that protocol is scoped to owning ONE run). A spy would report a stream the panel's
-        // own transcript never reflects. Injecting it needs `ChatHistoryViewModel` widened first;
-        // until then this object holds exactly one manager.
+        // Not injectable: `ChatHistoryViewModel.init` requires the concrete manager, so an injected spy would
+        // diverge from the panel's own transcript.
         self.activeStreamManager = mainAppViewModel.activeStreamManager
         self.persistence = persistence
         self.chatHistoryViewModel = ChatHistoryViewModel(
@@ -166,10 +111,8 @@ final class QuickAccessSessionViewModel {
         )
         self.backendConfiguration.selectedProfileID = Self.resolveDefaultProfileID(mainAppViewModel: mainAppViewModel)
 
-        // [C10] Refresh the transcript on external writes to the panel's conversation (the
-        // deleted QuickAccessViewModel observed this; its replacement otherwise stays stale until
-        // reopened). Guarded + debounced in scheduleExternalRefresh. queue:.main → the block runs
-        // on the main thread, so assumeIsolated is safe.
+        // Refreshes the transcript on external writes to the panel's conversation (see `scheduleExternalRefresh`).
+        // `queue: .main` guarantees main-thread delivery, so `assumeIsolated` is safe.
         didSaveObserver = NotificationCenter.default.addObserver(
             forName: ModelContext.didSave, object: nil, queue: .main
         ) { [weak self] _ in
@@ -181,10 +124,8 @@ final class QuickAccessSessionViewModel {
         if let didSaveObserver { NotificationCenter.default.removeObserver(didSaveObserver) }
     }
 
-    /// Resolve the panel's default profile to a CHAT-type profile — never a workflow/code.
-    /// Order: remembered QuickAccess profile → the main window's selection *only if it is a
-    /// chat type* → first bot → first agent. (Inheriting the main window's selection blindly
-    /// is what made the panel pick up a workflow profile.)
+    /// Resolves the panel's default profile to a chat-type profile, never a workflow or code profile.
+    /// Order: remembered QuickAccess profile, the main window's selection if chat-type, first bot, first agent.
     private static func resolveDefaultProfileID(mainAppViewModel: MainApplicationViewModel) -> UUID? {
         // [Q6] Targeted fetches on the common path (remembered / main-window selection) instead of
         // materializing every profile on each summon; the full fetch runs only on first-run fallback.
@@ -209,11 +150,8 @@ final class QuickAccessSessionViewModel {
             ?? profiles.first(where: { $0.profileType == .agent })?.id
     }
 
-    /// [Q4] Memoized so the profile chip (which reads this 3× per render, on every keystroke)
-    /// doesn't hit SwiftData each time. Still reads `backendConfiguration.selectedProfileID`
-    /// first, so views re-render on change; the store fetch runs only when the id actually
-    /// changes. The VM is rebuilt per summon, so a profile *edit* mid-session is picked up on
-    /// the next open (acceptable for a transient panel).
+    /// Memoizes the selected profile so repeated reads per render don't hit SwiftData each time.
+    /// Reads `selectedProfileID` first so views re-render on change; the store fetch runs only when the id changes.
     @ObservationIgnored private var cachedProfile: (id: UUID, snapshot: BackendProfileModel?)?
 
     var selectedProfile: BackendProfileModel? {
@@ -233,11 +171,8 @@ final class QuickAccessSessionViewModel {
 
     // MARK: - Session lifecycle
 
-    /// Called when the panel appears. Resolves the persisted QuickAccess conversation (if
-    /// any) and loads its transcript. Does NOT create a conversation — creation is deferred
-    /// to the first send, so merely opening the panel never litters an empty conversation
-    /// the main window's New Chat could steal (recon bug #7).
-    /// Non-blocking: stores the load as `loadTask` so send() can await it (C3).
+    /// Called when the panel appears; resolves the persisted QuickAccess conversation and loads its transcript.
+    /// Creates no conversation (deferred to the first send); the load is kept as `loadTask` for `send()` to await.
     func prepareSession(resume: Bool = true) {
         loadTask = Task { @MainActor [weak self] in
             await self?.performPrepare(resume: resume)
@@ -245,9 +180,8 @@ final class QuickAccessSessionViewModel {
     }
 
     private func performPrepare(resume: Bool) async {
-        // [QA revival P1e] A timed-out (non-resumable) open starts a fresh session: rotate off
-        // the last conversation so the next send creates a new one. The old conversation stays
-        // in history — this only drops the "current QuickAccess conversation" pointer.
+        // A timed-out (non-resumable) open starts a fresh session by dropping the current-conversation pointer;
+        // the old conversation stays in history.
         guard resume else {
             startNewSession()
             return
@@ -301,28 +235,20 @@ final class QuickAccessSessionViewModel {
         await chatHistoryViewModel.loadConversation(id: id)
     }
 
-    /// [QA revival P2c] The N most-recent NON-empty conversations for the recents menu.
-    ///
-    /// The `FetchDescriptor` that used to live here moved onto `ChatPersistenceProtocol`
-    /// (2026-09-07) — it was the single use that forced this type to depend on the concrete
-    /// `ChatPersistenceStore`, and with it gone the panel can be built against a test double.
-    /// The bound and the Swift-side emptiness filter are documented at the implementation.
+    /// Returns the most recent non-empty conversations for the recents menu, up to `limit`.
     func recentConversations(limit: Int = 5) -> [(id: UUID, title: String)] {
         persistence.recentConversations(limit: limit)
     }
 
-    /// [C10] Coalesced reload after external SwiftData writes. Only when the panel is IDLE
-    /// (not mid-send — during its own stream, currentChatMessages + the live @Observable agent
-    /// message already reflect state and a reload would fight them). loadConversation re-merges
-    /// active streams, so an in-flight EXTERNAL stream on this conversation shows too.
+    /// Coalesces a reload after external SwiftData writes, only while the panel is idle.
+    /// During its own stream the live state already reflects reality and a reload would fight it.
     private func scheduleExternalRefresh() {
         guard let convID = conversationID, streamingMessageID == nil, !isPreparingSend else { return }
         externalRefreshTask?.cancel()
         externalRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            // [C10] Debounce save bursts (400ms). [L7] Also floor to ≥1s since the last reload so
-            // a steady drip of unrelated saves can't reload every time; because each save
-            // reschedules, the trailing reload still captures the final state.
+            // Debounces save bursts (400ms) and floors reloads to one per second so unrelated saves can't reload constantly;
+            // each save reschedules, so the trailing reload still sees the final state.
             let sinceLast = Date().timeIntervalSince(self.lastExternalReload)
             try? await Task.sleep(for: .seconds(max(0.4, 1.0 - sinceLast)))
             guard !Task.isCancelled,
@@ -355,9 +281,7 @@ final class QuickAccessSessionViewModel {
         let query = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         // Allow send with text OR attachments (e.g. an image for a vision model).
         guard !(query.isEmpty && files.isEmpty) else { return .rejectedEmpty }
-        // [M5] Re-entry guard: reject while a stream is in flight OR being prepared. Checking
-        // isPreparingSend (set synchronously below) closes the async gap that a bare
-        // streamingMessageID check leaves open.
+        // Re-entry guard: rejects while a stream is in flight or being prepared; `isPreparingSend` closes the async gap.
         guard streamingMessageID == nil, !isPreparingSend else { return .rejectedBusy }
         guard let mainVM = mainAppViewModel else {
             logger.error("send aborted — main view model unavailable.")
@@ -368,9 +292,7 @@ final class QuickAccessSessionViewModel {
             return .rejectedNoProfile
         }
 
-        // [M5] Reserve the in-flight slot SYNCHRONOUSLY, before the awaits below. A second submit
-        // arriving during loadTask / panelTurn / addMessage now sees isPreparingSend and is
-        // rejected (.rejectedBusy) instead of starting a duplicate stream.
+        // Reserves the in-flight slot synchronously, before the awaits below, so a second submit is rejected as busy.
         isPreparingSend = true
 
         Task { @MainActor in
@@ -378,9 +300,7 @@ final class QuickAccessSessionViewModel {
             // over by then, so isSending stays continuously true) or if we bail early.
             defer { isPreparingSend = false }
 
-            // [C3] Wait for any in-flight resume/open load to finish — for conversation IDENTITY
-            // and for the visible transcript, NOT for history (which is derived from the store;
-            // see the `loadTask` property comment).
+            // Waits for any in-flight resume/open load so the conversation identity and visible transcript are settled.
             await loadTask?.value
 
             let title = query.isEmpty ? (files.first?.name ?? String(localized: "Attachment")) : query
@@ -388,10 +308,7 @@ final class QuickAccessSessionViewModel {
             // Bind the profile so restart-resume (G1), ChatOps, and the sidebar all resolve it.
             persistence.updateBackendForConversation(id: convID, backendEntityId: config.profile.id)
 
-            // Factory does the same text/image attachment classification as the main send path.
-            // Built through `panelTurn` so the persisted row and the row handed to the send path
-            // are one object — see that function for why the absence of a `promptOverride` and the
-            // absence of a history slice are both part of the contract.
+            // Built through `panelTurn` so the persisted row and the row handed to the send path are one object.
             let userMessage = await Self.panelTurn(
                 query: query,
                 conversationID: convID,
@@ -402,22 +319,14 @@ final class QuickAccessSessionViewModel {
             await persistence.addMessage(userMessage, toConversation: convID)
             chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
 
-            // ⚠️ The reversed `currentChatMessages` slice that used to be built here is GONE.
-            // It was the panel's PAGINATION WINDOW — a hard 20 messages that never grew, since
-            // QuickAccess never calls `loadMoreMessages` — shipped as model history. The panel
-            // now gets exactly what the main window gets, because `ActiveStreamManager` derives
-            // it (`architecture_readme.md` §7 invariant #8: "Never substitute the view's
-            // `currentChatMessages`: that is a pagination window, not the conversation").
+            // History is not built here: `ActiveStreamManager` derives it from the store.
+            // `currentChatMessages` is a pagination window, not the conversation, and must not be substituted.
 
-            // [C2] Identity for the completion guard. ActiveStreamManager fires onComplete on
-            // EVERY termination (including a cancelled/stopped stream); without matching against
-            // this id, a stopped older stream's late completion would nil a NEWER stream's state
-            // and leave the newer stream unstoppable. Captured var is filled right after the call.
+            // Identity for the completion guard: `onComplete` fires on every termination, so a stopped older stream's late
+            // completion must not nil a newer stream's state. Filled right after the call.
             var thisStreamID: UUID?
-            // Workflow bookkeeping. ⚠️ Currently ALWAYS nil here: `allowedProfileTypes` is
-            // `[.bot, .agent]`, so the panel cannot select a workflow profile. Kept so the call
-            // shape is uniform across every `startMessageStream` site — if that filter ever
-            // widens, the panel gets run records for free instead of silently reintroducing WF20.
+            // Workflow bookkeeping; always nil today because `allowedProfileTypes` excludes workflow profiles.
+            // Kept so the call shape matches every other `startMessageStream` site.
             let workflowTicket = WorkflowRunBootstrap.begin(
                 config: config,
                 conversationID: convID,
@@ -436,10 +345,8 @@ final class QuickAccessSessionViewModel {
                 resumeState: nil,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
-                        // ⚠️ finalize BEFORE the identity guard. That guard exists so a stopped
-                        // older stream's late completion can't nil a NEWER stream's UI state —
-                        // but the older run's RECORD still has to be frozen, or it stays
-                        // `.running` on disk until the next launch reconciles it.
+                        // Finalize before the identity guard: a stopped older stream's record must still be frozen,
+                        // or it stays `.running` on disk until the next launch reconciles it.
                         workflowTicket?.finalize()
                         guard let self, self.streamingMessageID == thisStreamID else { return }
                         self.streamingMessageID = nil
@@ -461,9 +368,8 @@ final class QuickAccessSessionViewModel {
     func stop() {
         guard let id = streamingMessageID else { return }
         activeStreamManager.cancelStream(for: id)
-        // [C1] Drain the suspension for the conversation the STREAM belongs to — not the
-        // conversation the panel currently shows (the user may have switched via recents),
-        // which would force-resolve an unrelated HITL-parked run on that other conversation.
+        // Drains the suspension for the conversation the stream belongs to, not the one the panel currently shows,
+        // which could force-resolve an unrelated HITL-parked run.
         if let convID = streamingConversationID {
             Task { await ExecutionSuspensionService.shared.cancel(for: convID) }
         }
@@ -485,35 +391,12 @@ final class QuickAccessSessionViewModel {
         return center.current(for: convID)
     }
 
-    // [Q1] All answers route through MessagingCoordinator's wrappers (via the VM forwards) so
-    // panel HITL decisions are audit-logged ([HITL]/[ASK_USER]/[PLAN_REVIEW]/[GATE]) and share
-    // the main window's answer path, instead of calling ExecutionSuspensionService raw. The
-    // wrappers are keyed purely by operationID — no main-window-selection side effects — so
-    // they're safe for the panel's (possibly non-selected) conversation.
+    // All answers route through MessagingCoordinator's wrappers so panel HITL decisions are audit-logged and share
+    // the main window's answer path; they are keyed by operationID with no main-window selection side effects.
 
-    /// Routes a HITL decision to the view model, or reports that it went NOWHERE.
-    ///
-    /// (The two lines that used to open this block — "Approve a tool-confirmation. `allowForChat`
-    /// registers a durable per-conversation grant BEFORE resuming" — describe `approveTool`, not
-    /// this function, which has no `allowForChat` parameter and never touches
-    /// `SessionToolApprovals`. They were inserted above rather than below the existing
-    /// `approveTool` doc and silently annexed it. Moved back.)
-    ///
-    /// ⚠️ Every decision on this surface used to be a bare `mainAppViewModel?.submitX(…)` with no
-    /// else branch. When that reference is nil the user taps Approve and **nothing happens**: no
-    /// submission, no log line, no UI change — the run stays parked and the banner keeps waiting,
-    /// with nothing in the log to explain it. That is the exact shape the production-logging
-    /// directive calls a silent drop, and it is `.error` rather than `.warning` precisely because
-    /// the app carries on looking fine.
-    ///
-    /// Funnelling every decision through here also means a NEW decision kind cannot reintroduce
-    /// the silent path by forgetting the guard.
-    ///
-    /// ⚠️ One decision does not need the view model — gate CANCEL has no VM wrapper and goes
-    /// straight to `ExecutionSuspensionService`. It routes through `submitHITLDirect` rather than
-    /// calling the service inline, so it is still logged and still attributed to this surface;
-    /// four of five arms carrying a `[HITL]` line and the fifth carrying none showed up in the
-    /// field as three of four Escape presses.
+    /// Routes a HITL decision to the view model, or logs an error and reports that it went nowhere.
+    /// Funnelling every decision here keeps a missing view-model reference from silently dropping a user decision.
+    /// Gate cancel has no wrapper and goes through `submitHITLDirect`, which logs it the same way.
     private func submitHITL(_ decision: String,
                             operationID: UUID,
                             detail: String,
@@ -526,12 +409,8 @@ final class QuickAccessSessionViewModel {
         submit(vm)
     }
 
-    /// The same attribution and logging for a decision that reaches its service DIRECTLY.
-    ///
-    /// Gate cancel is the only one: `submitGateChoice` takes a non-optional option, so there is
-    /// no view-model wrapper for "no choice". That makes it the one arm with no VM to be missing
-    /// — hence no `.error` twin — but it is still a user decision that must be visible in a log
-    /// alongside the other four, with the same surface attribution.
+    /// Logs and attributes a decision that reaches its service directly (gate cancel, which has no view-model wrapper).
+    /// It is still a user decision that must be visible in the log alongside the others.
     private func submitHITLDirect(_ decision: String,
                                   operationID: UUID,
                                   detail: String,
@@ -540,16 +419,12 @@ final class QuickAccessSessionViewModel {
         Task { await submit() }
     }
 
-    /// Approve a tool-confirmation. `allowForChat` registers a durable per-conversation grant
-    /// BEFORE resuming — order matters, because the executor consults `SessionToolApprovals`
-    /// first, and a grant registered after the resume arrives too late for the run it was meant
-    /// to unblock.
+    // Why: the executor consults `SessionToolApprovals` first; a grant registered after the resume arrives too late.
+    /// Approves a tool confirmation; with `allowForChat`, registers a durable per-conversation grant before resuming.
     func approveTool(_ pending: PendingHITL, allowForChat: Bool) {
         let opID = pending.id
         if allowForChat, case .toolConfirmation(let c) = pending.kind, let convID = conversationID {
             Task { @MainActor in
-                // ⚠️ Order matters: the durable grant is registered BEFORE the resume, or the run
-                // continues and the next request for the same tool asks again anyway.
                 await SessionToolApprovals.shared.allow(toolName: c.toolName, risk: c.risk, conversationID: convID)
                 self.submitHITL("APPROVED", operationID: opID,
                                 detail: "tool \(c.toolName), DURABLE grant for this conversation — subsequent calls to this tool will NOT ask again until the conversation ends") {
@@ -573,7 +448,7 @@ final class QuickAccessSessionViewModel {
 
     func submitClarification(_ pending: PendingHITL, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // ⚠️ Length only — the answer is free text the user typed and re-enters the agent's context.
+        // Logs length only: the answer is free text that re-enters the agent's context.
         submitHITL("Answered clarification", operationID: pending.id,
                    detail: "\(trimmed.count) character(s)\(trimmed.isEmpty ? " (empty — treated as no answer)" : ""); the run resumes with this text in context") {
             $0.submitClarificationResponse(operationID: pending.id, response: trimmed.isEmpty ? nil : trimmed)
@@ -582,9 +457,7 @@ final class QuickAccessSessionViewModel {
 
     func resolvePlan(_ pending: PendingHITL, approved: Bool) {
         guard case .planReview(let plan) = pending.kind else {
-            // ⚠️ Dropped the click with no line anywhere. The pending item can be replaced between
-            // the render and the tap, and the button then simply does nothing — which reads as a
-            // dead button rather than as a race.
+            // Logged because the pending item can be replaced between render and tap, which otherwise looks like a dead button.
             logger.error("[HITL] Plan decision for op \(pending.id.uuidString.prefix(8)) IGNORED — the pending item is no longer a plan review. CONSEQUENCE: the click did nothing and the run stays parked; the request on screen changed underneath the user.")
             return
         }

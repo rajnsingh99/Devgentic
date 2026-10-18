@@ -4,7 +4,7 @@
 //  RAGIndexingService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -30,11 +30,9 @@ final class RAGIndexingService: @unchecked Sendable {
     
     // MARK: - Core Processing Logic
     
-    /// Processes a single message for RAG vectorization.
-    /// This should be called asynchronously as a fire-and-forget task when a message finishes streaming.
-    ///
-    /// Takes a SNAPSHOT, never the live `ChatMessage` — see `IndexableMessage` (RAG-16). Build it
-    /// where the message lives, before detaching.
+    /// Processes a single message for RAG vectorization; call it as a fire-and-forget task when a message finishes
+    /// streaming.
+    /// Takes an `IndexableMessage` snapshot, never the live `ChatMessage`; build it before detaching.
     func indexSingleMessage(_ message: IndexableMessage) async {
         // Filter out noise: Do not index error messages
         if message.isError {
@@ -42,11 +40,8 @@ final class RAGIndexingService: @unchecked Sendable {
             return
         }
 
-        // Synthetic stopped-run placeholders (cancelled/empty runs) carry no
-        // retrievable fact — indexing them polluted conversation memory (a cancelled
-        // run's "*Operation was stopped…*" was embedded and stored, observed
-        // on-device 2026-07-19). Exact-match gate: a message that merely quotes the
-        // phrase is real content and still indexes.
+        // Synthetic stopped-run placeholders carry no retrievable fact; the gate is an exact match, so a message that quotes
+        // the phrase still indexes.
         if let text = message.textContent, ChatMessage.isSyntheticPlaceholder(text) {
             logger.debug("[RAG] Skipping vectorization for message \(message.id.uuidString.prefix(8)): synthetic stopped-run placeholder, nothing retrievable.")
             return
@@ -98,16 +93,15 @@ final class RAGIndexingService: @unchecked Sendable {
                 failedEmbeds += 1
             }
         }
-        // RAG-38: a failed embed used to vanish without a word.
+        // A failed embed is logged, not dropped silently.
         if failedEmbeds > 0, !childEntities.isEmpty {
             logger.warning("[RAG] Message \(message.id.uuidString.prefix(8)) (conv \(message.conversationId.uuidString.prefix(8))): \(failedEmbeds) of \(chunks.count) chunk(s) could not be embedded. CONSEQUENCE: those passages are not retrievable; the rest of the message is.")
         }
 
         // Save the ParentDocumentEntity and its associated ChildChunkEntitys to ObjectBox
         if !childEntities.isEmpty {
-            // Replace-on-reindex: a re-finalized message (e.g. a resumed run) replaces
-            // its prior vectors instead of appending a duplicate copy — one transaction,
-            // so a failed write keeps the previous copy (the store logs why).
+            // Replace-on-reindex: a re-finalized message replaces its prior vectors in one transaction, so a failed write keeps
+            // the old copy.
             if vectorStoreService.replaceSemanticDocument(parent: parentDoc, children: childEntities) == .written {
                 logger.info("[RAG] Indexed message \(message.id.uuidString.prefix(8)) (conv \(message.conversationId.uuidString.prefix(8))) into \(childEntities.count) chunk(s).")
             }
@@ -116,15 +110,9 @@ final class RAGIndexingService: @unchecked Sendable {
         }
     }
 
-    /// Re-indexes an agent message as the response VERSION the user selected.
-    ///
-    /// The index holds whatever `content` was when the reply finalized — the newest variant. The
-    /// version picker only moves `selectedVariantIndex`, so after choosing an older answer the
-    /// conversation's memory still described the one the user had just rejected. Replace-on-
-    /// reindex keys on the message id, so this swaps the copy rather than adding one.
-    ///
-    /// Snapshot taken HERE, on the main actor; the work is detached. Returns the task so a test can
-    /// await it; callers ignore it.
+    /// Re-indexes an agent message as the response version the user selected, swapping the indexed copy rather than adding
+    /// one.
+    /// The snapshot is taken here on the main actor and the work is detached; returns the task so a test can await it.
     @MainActor @discardableResult
     static func reindexSelectedVariant(of message: ChatMessage) -> Task<Void, Never>? {
         guard let selected = message.currentAgentContent else {
@@ -141,21 +129,13 @@ final class RAGIndexingService: @unchecked Sendable {
 
     /// Prose chunk target (chars).
     static let proseChunkSize = 512
-    /// Code chunk target (chars). Code is symbol-dense — WordPiece burns ~3 chars
-    /// per token and the MiniLM embedder head-truncates at ~128 tokens, so code
-    /// chunks stay near 384 chars to keep the WHOLE chunk visible to semantic
-    /// search (a 512-char code chunk's tail is invisible to the embedding).
+    /// Code chunk target in chars: kept near 384 so the whole chunk stays visible to the embedder, which truncates at about
+    /// 128 tokens.
     static let codeChunkSize = 384
 
-    /// Routes an uploaded file to the right chunker. Source files become `.code`
-    /// blocks so SemanticChunker hands them to TreeSitterCodeChunker — AST-boundary
-    /// splits with a "[lang Context]:" prefix — instead of chunking code as prose.
-    /// (Previously EVERY upload was wrapped as one `.paragraph`, so the AST chunker
-    /// never ran on real files; functions were sliced mid-body at arbitrary 512-char
-    /// windows.) Markdown and plain text stay on the prose path — paragraph
-    /// boundaries suit them better than a syntax tree. Sizing is uniform across
-    /// message and upload indexing: SemanticChunker's `codeChunkSize` calibrates
-    /// code blocks; prose uses `maxChunkSize`.
+    /// Routes an uploaded file to the right chunker: source files become `.code` blocks for AST-boundary splitting by
+    /// `TreeSitterCodeChunker`.
+    /// Markdown and plain text stay on the prose path; code uses `codeChunkSize` and prose `maxChunkSize`.
     static func uploadContentBlocks(for url: URL, id: String, text: String) -> [ContentBlock] {
         let language = CodeLanguage.detectLanguageFrom(url: url)
         let proseLike: Set<TreeSitterLanguage> = [.plainText, .markdown, .markdownInline]
@@ -167,22 +147,9 @@ final class RAGIndexingService: @unchecked Sendable {
 
     // MARK: - Batch File Indexing (Awaitable)
 
-    /// Index multiple attached files for conversation-memory retrieval on LATER
-    /// turns. Runs post-retrieval in the orchestrator (Section 3b), so a file never
-    /// re-surfaces via RAG in the same turn it was injected.
-    /// Whether an attached file should be attempted for conversation-memory RAG
-    /// indexing. Static + pure so the eligibility contract is testable without
-    /// the embedding stack.
-    ///
-    /// ATT-1: this must mirror the backend's direct-injection rule (skip only
-    /// images) — the old `canExtract || isTextFile` gate was extension-keyed, so
-    /// extension-less files (Makefile, LICENSE, .env) that the model DID see on
-    /// turn 1 were unfindable by turn-2+ retrieval. Readability is decided by
-    /// the read probe at index time, not by the extension.
-    ///
-    /// Kind comes from `AttachmentClassifier`, shared with the transcript and the backend:
-    /// only content the model received as TEXT is indexed — never images, folders, or
-    /// binaries (whose text read fails, so there is nothing to chunk).
+    /// Whether an attached file should be attempted for conversation-memory RAG indexing; static and pure.
+    /// Mirrors the backend's rule: only content the model received as text is indexed, never images, folders or binaries.
+    /// Readability is decided by the read probe at index time.
     static func isRAGEligible(_ file: FileSystemItem, fileProcessor: FileProcessorService) -> Bool {
         switch AttachmentClassifier.classify(file) {
         case .text, .document:                  return true
@@ -191,11 +158,8 @@ final class RAGIndexingService: @unchecked Sendable {
     }
 
     /// - Parameters:
-    ///   - messageID: The user message that carried the files — NOT a fresh UUID, so a file's
-    ///     vectors can be traced to (and excluded with) the turn that delivered them.
-    ///   - messageTimestamp: That message's timestamp. The parent is dated to its TURN, not to
-    ///     when indexing finished: a Redo's cutoff (`RetrievalExclusion.indexedAtOrAfter`) must
-    ///     see a file as belonging to the turn it arrived in.
+    ///   - messageID: The user message that carried the files, so vectors can be traced to and excluded with that turn.
+    ///   - messageTimestamp: That message's timestamp; the parent is dated to its turn, not to when indexing finished.
     func indexAttachedFiles(
         files: [FileSystemItem],
         conversationID: UUID,
@@ -242,7 +206,7 @@ final class RAGIndexingService: @unchecked Sendable {
                     failedEmbeds += 1
                 }
             }
-            // RAG-38: a failed embed used to vanish without a word.
+            // A failed embed is logged, not dropped silently.
             if failedEmbeds > 0 {
                 logger.warning("[RAG] '\(file.name)': \(failedEmbeds) of \(chunks.count) chunk(s) could not be embedded (conv \(conversationID.uuidString.prefix(8))). CONSEQUENCE: \(childEntities.isEmpty ? "the file is NOT indexed at all" : "those passages are not retrievable; the rest of the file is").")
             }
@@ -258,9 +222,7 @@ final class RAGIndexingService: @unchecked Sendable {
                 sourceIdentifier: file.url.path
             )
 
-            // Replace-on-reindex: re-attaching the same file in this conversation
-            // replaces its prior vectors instead of appending a duplicate copy that
-            // would crowd the limit-3 retrieval slots — one transaction (see the store).
+            // Replace-on-reindex: re-attaching the same file replaces its prior vectors instead of crowding the retrieval slots.
             if vectorStoreService.replaceSemanticDocument(parent: parentDoc, children: childEntities) == .written {
                 logger.info("[RAG] Indexed attachment '\(file.name)' (conv \(conversationID.uuidString.prefix(8)), msg \(messageID.uuidString.prefix(8))) → \(childEntities.count) chunk(s).")
             }

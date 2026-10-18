@@ -4,11 +4,7 @@
 //  WorkflowRunSettlingTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the workflow-run settling fixes of 2026-08-10
-//  (Chat_Production_Readiness.md rows CH20, CH21).
-//
-//  The workflow-side twin of [TL-1]: nothing ever closed a workflow node or its nested tool
-//  rows when a run was stopped or threw, so the frozen record claimed work was still running.
+//  Created by Raj Singh.
 //
 
 import XCTest

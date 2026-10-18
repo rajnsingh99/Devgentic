@@ -4,26 +4,7 @@
 //  RemoteView.swift
 //  Devgentic
 //
-//  What a ChatOps command decided to show — C2 of the ChatOps remote-interface plan.
-//
-//  ⚠️ THE WHOLE POINT: A COMMAND RETURNS ONE OF THESE AND NEVER POSTS. Today all twelve handlers
-//  are `private func … -> Void` that run the SwiftData query, build the platform widget AND send the
-//  message in one body, so the only way to reuse a decision is to copy it — which is why there are
-//  three of everything and why Discord renders `/conversations` two different ways. Making the
-//  decision a VALUE is the entire refactor; everything else follows.
-//
-//  ⚠️ SEMANTICS, NOT WIDGETS. Nothing here names a keyboard, a block or an ActionRow. `isCurrent`
-//  is the load-bearing example: all three bridges currently write
-//  `let isActive = convID == config.activeConversationID ? "⭐ " : ""` INTO THE LABEL STRING, which
-//  forecloses Slack's native `initial_option` forever. Keeping it a Bool is what lets Slack render
-//  a pre-selected dropdown while Telegram renders the same star it does now, from one decision.
-//
-//  ⚠️ EVERYTHING IS `Codable`, AND THAT IS A SAFETY PROPERTY, NOT A CONVENIENCE. A remote view is
-//  posted to a third-party service, so it must not be able to carry a secret.
-//  `BackendProfileSnapshot` was deliberately made NON-`Codable` (BackendProfileSD.swift:503-515)
-//  because its `details` getter injects the decrypted provider API key from the Keychain. Requiring
-//  `Codable` here means the compiler refuses any view that reaches for one, instead of a reviewer
-//  having to notice. It also hands C3's golden wire-payload fixtures a free encoder.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -33,7 +14,7 @@ import Foundation
 /// The complete set of things a remote channel can be shown. Four cases, no more.
 enum RemoteView: Equatable, Sendable, Codable {
 
-    /// Nothing to post — but WHY, so the drop is logged rather than silent.
+    /// Nothing to post; the reason is carried so the drop is logged rather than silent.
     case silent(RemoteSilence)
 
     /// A message: a tone, an optional title, a body, and zero or more labelled fields.
@@ -42,33 +23,16 @@ enum RemoteView: Equatable, Sendable, Codable {
     /// A prompt with tappable options.
     case chooser(Chooser)
 
-    /// A human-in-the-loop request, reusing the shipped `HITLType` vocabulary verbatim.
-    ///
-    /// ⚠️ Its producer is `RemoteMirrorService`, which renders one of these whenever the
-    /// InteractionCenter raises a question — the debt this case carried from C2 to C8.5, when the
-    /// dedicated `sendHITLPrompt` method and its three implementations were deleted in favour of it.
-    ///
-    /// ⚠️ Rendering a prompt passes no parse mode ON TELEGRAM, and that is where the rationale ends:
-    /// the payload carries model-supplied tool names and parameters, and running those through a
-    /// Markdown parser is the 400 the notice path escapes to avoid.
-    ///
-    /// ⚠️⚠️ THIS WAS WRITTEN AS "the ONE path that does not escape its text" AND SLACK READ IT AS
-    /// PERMISSION. There is no parse mode to omit on Slack — `sectionBlock` declares `mrkdwn` itself,
-    /// so the text IS interpreted whatever this case does. Model text reached that block raw until
-    /// 2026-09-11: `<!channel>` fired a channel-wide notification and `<url|label>` rendered a
-    /// clickable link with model-chosen visible text, directly above the real Approve button.
-    /// `SlackRemoteRenderer.promptDraft` now escapes the model-supplied substrings only.
+    // Why: the payload carries model-supplied tool names and parameters: Slack always interprets mrkdwn, so
+    // `SlackRemoteRenderer.promptDraft` escapes them, and Telegram's prompt passes no parse mode.
+    /// A human-in-the-loop request, reusing the `HITLType` vocabulary verbatim.
+    /// `RemoteMirrorService` renders one whenever the InteractionCenter raises a question.
     case prompt(operationID: UUID, kind: HITLType)
 }
 
 // MARK: - Silence
 
-/// Why nothing is being posted.
-///
-/// ⚠️ This exists because the bridges currently have four naked `break`s — `.pairingAttempt`,
-/// `.unknown`, and both HITL resolution arms — that log nothing at all. The standing logging rule
-/// is that every silent drop names its CONSEQUENCE; a `break` cannot. Making the silence a value
-/// with a reason is how the rule becomes enforceable.
+/// Why nothing is being posted: making a silent drop a value with a reason lets every drop log its consequence.
 enum RemoteSilence: Equatable, Sendable, Codable {
 
     /// Another component owns this input. Carries which, for the log.
@@ -84,20 +48,10 @@ enum RemoteSilence: Equatable, Sendable, Codable {
     /// Bracket tag for the log line.
     var tag: String { "[CHATOPS/SILENT]" }
 
-    /// Whether this drop left the remote user with nothing — no reply, no way to tell the bot is
-    /// alive.
-    ///
-    /// ⚠️⚠️ THIS IS A LOG-LEVEL DECISION, AND THE LEVEL IS THE WHOLE DIFFERENCE BETWEEN A LINE THAT
-    /// REACHES A BUG REPORT AND ONE THAT DOES NOT. `DGLogger.shouldPersist` persists `.warning` and
-    /// above and nothing below it, so an `.info` line exists only in the live Console stream on the
-    /// user's own machine — which is precisely where a remote-control failure cannot be observed.
-    /// Logging all three cases at one level therefore either buries the dead-end among two routine
-    /// events, or floods every exported bundle with the routine ones. They are different events and
-    /// they get different levels.
-    ///
-    /// ⚠️ `.handledElsewhere` and `.resolvedInteraction` are NOT failures — each of their own
-    /// `consequence` strings says the silence is correct, because another component already replied.
-    /// Only `.unrecognized` describes a user staring at a chat that did not answer.
+    // Why: this decides the log level: `DGLogger.shouldPersist` keeps `.warning` and above,
+    // so an `.info` line never reaches a bug report.
+    /// Whether this drop left the remote user with nothing: no reply and no way to tell the bot is alive.
+    /// Only `.unrecognized` does; the other cases are correct silences because another component already replied.
     var strandsTheUser: Bool {
         switch self {
         case .handledElsewhere, .resolvedInteraction: return false
@@ -131,10 +85,8 @@ struct Notice: Equatable, Sendable, Codable {
         case failure
     }
 
-    /// ⚠️ THE SHAPE OF THIS TYPE WAS DECIDED BY THE REAL LITERALS, not the other way round. An
-    /// earlier draft offered only `title` / `body` / `fields`, and an adversarial pass against the
-    /// shipping strings found six it could not reproduce. Each affordance below exists for a
-    /// specific one; none is speculative.
+    /// A line of a notice body with an optional label, emphasis and inline placement.
+    /// Each option exists for a specific shipping reply format.
     struct Field: Equatable, Sendable, Codable {
 
         /// Optional: not every field is a `label: value` pair.
@@ -145,17 +97,12 @@ struct Notice: Equatable, Sendable, Codable {
         /// Bolds the VALUE. `⚡ Agent Streaming: *Yes*` shape.
         let emphasis: Bool
 
-        /// Bolds the LABEL **including its colon**.
-        ///
-        /// ⚠️ The colon must be inside the bold or `/help` ships `*Security Tier*: Full Access`
-        /// where it currently reads `*Security Tier:* Full Access`.
+        // Why: the colon must be inside the bold, or `/help` would render `*Security Tier*: Full Access`.
+        /// Bolds the label including its colon, e.g. `*Security Tier:* Full Access`.
         let labelEmphasis: Bool
 
-        /// Appends to the PREVIOUS line, separated by a single space, instead of starting a new one.
-        ///
-        /// ⚠️ Exists for `✅ Switched to: *<title>*` — emphasis mid-sentence. Without it the closest
-        /// reachable form breaks the line after the colon, which is a visible change to the most
-        /// common reply in the whole subsystem.
+        /// Appends to the previous line, separated by a single space, instead of starting a new one.
+        /// Used for mid-sentence emphasis such as `✅ Switched to: *<title>*`.
         let inline: Bool
 
         init(label: String? = nil, value: String, emphasis: Bool = false, labelEmphasis: Bool = false, inline: Bool = false) {
@@ -166,34 +113,23 @@ struct Notice: Equatable, Sendable, Codable {
             self.inline = inline
         }
 
-        /// A blank line. ⚠️ `/status` and `/help` both separate their heading from their body with
-        /// one, and this is the only way to express it — an empty `body` is skipped entirely.
-        /// Named rather than left as the idiom `Field(value: "")`, because the idiom is exactly what
-        /// a later tidy-up deletes.
+        /// A blank line; an empty `body` is skipped entirely, so this is the only way to express one.
+        /// Named rather than the idiom `Field(value: "")` so a later tidy-up does not delete it.
         static let spacer = Field(value: "")
     }
 
-    /// ⚠️ `tone` has exactly one reader today and it is not text: `render` logs a `.failure` notice
-    /// at `.error` and the rest at `.info`. None of the three platforms offers a colour or style
-    /// channel for a plain message, so it deliberately does NOT prepend an emoji — the emoji in
-    /// "✅ Switched to:" / "🛑 Cancelled…" is part of the body the command supplies, which is what
-    /// keeps slice 1 byte-identical.
+    /// `render` logs a `.failure` notice at `.error` and the rest at `.info`.
+    /// No emoji is prepended: platforms have no style channel for plain messages, so the emoji belongs to the supplied body.
     let tone: Tone
 
-    /// An emoji rendered BEFORE the bold title, outside the markers.
-    ///
-    /// ⚠️ Every shipping heading puts it there — `📊 *Devgentic Status*`, `🤖 *Devgentic ChatOps*`,
-    /// `📋 *Your Conversations:*` — so folding it into `title` would emit `*📊 Devgentic Status*`.
-    /// Visually identical on Telegram (emoji have no bold glyph) but not byte-identical, and this
-    /// commit's whole value is that nothing changes.
+    /// An emoji rendered before the bold title, outside the markers.
+    /// Folding it into `title` would emit `*📊 Devgentic Status*` instead of `📊 *Devgentic Status*`.
     let icon: String?
 
     let title: String?
 
-    /// ⚠️ PLAIN TEXT. The renderer owns markup, so this is escaped on the way out — which is what
-    /// closes the live Telegram bug where a conversation title containing an unbalanced `*` or `_`
-    /// is interpolated into a `parse_mode: Markdown` message and 400s the whole reply, swallowed by
-    /// `try?`. Emphasis is available through `fields`, never by embedding `*` here.
+    /// Plain text; the renderer owns markup and escapes it, so an unbalanced `*` or `_` cannot break a Markdown message.
+    /// Emphasis comes through `fields`, never by embedding `*` here.
     let body: String
 
     let fields: [Field]
@@ -225,17 +161,15 @@ struct Chooser: Equatable, Sendable, Codable {
         /// differs per platform and truncating early would throw away characters Discord could show.
         let label: String
 
-        /// A subtitle, where the platform has somewhere to put one. ⚠️ Telegram has nowhere, so it
-        /// drops this. Decoration; its loss is not logged, because a line per render for missing
-        /// decoration is noise.
+        /// A subtitle, where the platform has somewhere to put one; Telegram drops it, and the loss is not logged (decoration).
         let detail: String?
 
         let token: CallbackToken
 
-        /// ⚠️ A FLAG, NOT A `"⭐ "` PREFIX. See this file's header.
+        /// Marks the current entry; a flag rather than a text prefix, so each renderer decides how to show it.
         let isCurrent: Bool
 
-        /// ⚠️ Telegram has no button styles and drops this. Decoration.
+        /// Button style hint; Telegram has no button styles and drops it (decoration).
         let intent: Intent
 
         init(label: String, detail: String? = nil, token: CallbackToken, isCurrent: Bool = false, intent: Intent = .neutral) {
@@ -269,16 +203,9 @@ struct Chooser: Equatable, Sendable, Codable {
 
 extension RemoteView {
 
-    /// The same view with every user- or model-supplied string run through the credential floor.
-    ///
-    /// ⚠️ SANITISED AS A VIEW, NOT AS RENDERED TEXT, and that is the whole point. Cleaning
-    /// `Draft.text` alone would have left two holes: Slack renders its body into BLOCKS as well as
-    /// the fallback text, and every platform puts conversation titles and profile names on BUTTON
-    /// LABELS. A conversation's title is auto-set to the user's first prompt — so a prompt that
-    /// contained a key becomes a button label, on a surface no text-level pass would have touched.
-    ///
-    /// ⚠️ CALLBACK TOKENS ARE NOT TOUCHED. They are ids and fixed verbs minted by this app, never
-    /// user text, and rewriting one would break the round trip that makes the button work.
+    /// Returns the same view with every user- or model-supplied string run through the credential floor.
+    /// Applied to the view, not the rendered text: Slack builds blocks too, and button labels carry titles and profile names.
+    /// Callback tokens are app-minted ids and are left untouched; rewriting one would break the button's round trip.
     func sanitizedForEgress() -> RemoteView {
         func clean(_ text: String) -> String { RemoteEgressSanitizer.credentialsOnly(text) }
         func clean(_ text: String?) -> String? { RemoteEgressSanitizer.credentialsOnly(text) }
@@ -323,9 +250,7 @@ extension RemoteView {
             ))
 
         case .prompt(let operationID, let kind):
-            // ⚠️ THE MOST EXPOSED STRINGS IN THE APP. A tool confirmation carries the tool's raw
-            // ARGUMENTS — which is exactly where a key read out of a `.env` would appear, on its
-            // way to a chat service, for a user who only wanted to approve a file write.
+            // Most exposed strings: a tool confirmation carries raw arguments, where a key read from a `.env` can appear.
             let cleaned: HITLType
             switch kind {
             case .toolConfirmation(let toolName, let params):

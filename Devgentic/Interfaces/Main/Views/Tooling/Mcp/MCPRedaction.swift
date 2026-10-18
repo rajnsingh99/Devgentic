@@ -4,25 +4,21 @@
 //  MCPRedaction.swift
 //  Devgentic
 //
-//  Best-effort redaction of secrets in strings that are about to hit the log
-//  pipeline (Console.app, log files, crash reports). Heuristic-only — designed
-//  to catch the obvious cases (CLI flags, KEY=VALUE pairs, HTTP-style auth
-//  headers, URL userinfo and query params) without trying to be exhaustive.
-//
-//  Use at log boundaries only. Never use the redacted form for actual execution.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Best-effort, heuristic redaction of secrets in strings about to reach the log pipeline (CLI flags, KEY=VALUE
+/// pairs, auth headers, URL userinfo and query params). Use at log boundaries only; never use the redacted form for
+/// execution.
 enum MCPRedaction {
 
     /// Sentinel substituted for any value identified as a secret.
     static let redactedPlaceholder = "<REDACTED>"
 
-    /// Lowercased substrings that, when present in a flag, key, or header name,
-    /// mark the associated value as sensitive. Conservative on purpose — we'd
-    /// rather miss an exotic flag than redact something innocuous and confuse
-    /// debugging.
+    /// Lowercased substrings that mark a flag, key or header name as sensitive. Conservative on purpose: missing an
+    /// exotic flag is better than redacting something innocuous.
     private static let secretNameTokens: Set<String> = [
         "key", "token", "secret", "password", "passwd",
         "auth", "credential", "creds", "bearer", "apikey"
@@ -36,12 +32,8 @@ enum MCPRedaction {
 
     // MARK: - Public API
 
-    /// Returns a copy of `args` suitable for logging, with secret-looking values
-    /// replaced. Three patterns are recognized:
-    ///
-    /// 1. The argument following a secret-named long flag, e.g. `--api-key X`.
-    /// 2. `KEY=VALUE` (or `--flag=VALUE`) where the key name matches a secret token.
-    /// 3. An HTTP-style header in a single arg, e.g. `Authorization: Bearer X`.
+    /// Returns a copy of `args` suitable for logging, with secret-looking values replaced. Recognizes the argument after
+    /// a secret-named long flag, `KEY=VALUE` (or `--flag=VALUE`) pairs, and single-arg HTTP-style headers.
     static func redact(arguments args: [String]) -> [String] {
         var result: [String] = []
         result.reserveCapacity(args.count)
@@ -88,11 +80,8 @@ enum MCPRedaction {
         return result
     }
 
-    /// Returns a copy of `url` suitable for logging. Strips userinfo
-    /// (`user:pass@`) and replaces query-parameter values whose names look
-    /// sensitive. Falls back to the original string if the URL can't be
-    /// parsed — better to log a malformed URL than to fail silently and lose
-    /// the diagnostic.
+    /// Returns a copy of `url` suitable for logging, stripping userinfo and replacing query-parameter values whose names
+    /// look sensitive. Falls back to the original string if the URL cannot be parsed.
     static func redact(url: String) -> String {
         guard var components = URLComponents(string: url) else { return url }
 
@@ -114,17 +103,9 @@ enum MCPRedaction {
         return components.string ?? url
     }
 
-    /// Replaces path segments that look like credentials.
-    ///
-    /// Userinfo and query params used to be the only things stripped, which missed the
-    /// shape hosted MCP providers actually use: the key sits IN THE PATH, as in
-    /// `https://mcp.example.com/v1/sk-live-abc123.../sse`. Those URLs are logged on every
-    /// connect and shipped in bug reports, so the key travelled with them.
-    ///
-    /// Structural, not a keyword match — a segment is suspicious when it carries a known
-    /// token prefix, or when it is long and high-entropy enough that no human named a path
-    /// that. Ordinary segments (`v1`, `sse`, `mcp`, `messages`) are left readable, because
-    /// a redacted-to-uselessness URL defeats the point of logging it.
+    /// Replaces path segments that look like credentials, such as the key in
+    /// `https://mcp.example.com/v1/sk-live-abc123.../sse`. Structural: a segment is suspicious when it has a known token
+    /// prefix or is long and high-entropy; ordinary segments stay readable.
     private static func redactSecretPathSegments(_ path: String) -> String {
         guard !path.isEmpty else { return path }
 
@@ -160,18 +141,9 @@ enum MCPRedaction {
         return hasDigit && hasLetter
     }
 
-    /// Redacts secrets in FREE TEXT — child-process stderr, error messages, anything with
-    /// no known structure.
-    ///
-    /// Callers used to reach for `redact(url:)` for this, which is a shape mismatch:
-    /// `URLComponents(string:)` fails to parse a line of stderr, so the function returned
-    /// the input verbatim and the text was effectively unredacted. MCP server CLIs
-    /// routinely echo their configuration — including keys — to stderr on a failed start,
-    /// and that string is stored in `connectionState`, shown in the UI, and bundled into
-    /// bug reports.
-    ///
-    /// Four shapes are handled, in order: bare token literals with a well-known prefix,
-    /// `Header: value` auth lines, `KEY=VALUE` assignments, and `"key": "value"` JSON.
+    /// Redacts secrets in free text such as child-process stderr and error messages, where `redact(url:)` cannot parse
+    /// the input. Handles, in order: well-known token prefixes, `Header: value` auth lines, `KEY=VALUE` assignments and
+    /// `"key": "value"` JSON.
     static func redact(text: String) -> String {
         var result = text
 
@@ -179,9 +151,8 @@ enum MCPRedaction {
         let tokenLiteral = "(sk-|pk-|tok-|ghp_|gho_|ghu_|ghs_|github_pat_|xoxb-|xoxp-|xapp-|AKIA)[A-Za-z0-9_\\-]{8,}"
         result = replacing(pattern: tokenLiteral, in: result, with: redactedPlaceholder)
 
-        // 2. `Authorization: Bearer xyz`, `X-API-Key: xyz`, etc. Keep the header name.
-        //    Consumes to end of LINE, not just the next word: `\S+` would stop at the space
-        //    after `Bearer` and leave the token itself in the string.
+        // `Authorization: Bearer xyz`, `X-API-Key: xyz` and similar keep the header name. Consumes to the end of the line,
+        // since `\S+` would stop after `Bearer` and leave the token.
         let headerAssignment = "(?i)\\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)\\s*:\\s*.+"
         result = replacing(pattern: headerAssignment, in: result, with: "$1: \(redactedPlaceholder)")
 
@@ -210,9 +181,7 @@ enum MCPRedaction {
         return secretNameTokens.contains(where: lower.contains)
     }
 
-    /// True for long flags (`--something`) whose name matches a secret token.
-    /// Short flags (`-k`) are deliberately excluded — too ambiguous to redact
-    /// without false positives, and most MCP servers use long flags anyway.
+    /// True for long flags (`--something`) whose name matches a secret token; short flags are excluded as too ambiguous.
     private static func isSecretLongFlag(_ arg: String) -> Bool {
         guard arg.hasPrefix("--") else { return false }
         let name = arg.dropFirst(2).split(separator: "=", maxSplits: 1).first.map(String.init) ?? ""

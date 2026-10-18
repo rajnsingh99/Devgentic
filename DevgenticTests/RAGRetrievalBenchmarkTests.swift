@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGRetrievalBenchmarkTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  CR-29 measurement harness — NOT a regression test. Skipped unless RAG_BENCH=1:
-//    TEST_RUNNER_RAG_BENCH=1 xcodebuild test-without-building ... \
-//      -only-testing:devgenticTests/RAGRetrievalBenchmarkTests
-//
-//  Reproduces the body of `VectorStoreService.findNearestInConversation` (property fetch
-//  + `rankConversationChunks`) phase by phase against a temp store seeded to a realistic
-//  conversation shape: N chat turns plus attached files chunked at the production sizes
-//  (512-char prose, 50 overlap → ~462 chars of new text per chunk). In production this
-//  whole body runs synchronously on the main actor, so the end-to-end number IS the
-//  per-send main-thread block.
+//  Created by Raj Singh.
 //
 
 import XCTest

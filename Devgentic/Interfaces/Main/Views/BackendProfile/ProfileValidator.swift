@@ -4,16 +4,15 @@
 //  ProfileValidator.swift
 //  Devgentic
 //
-//  Created on 26/03/26.
-//
-//  Validates BackendProfileSnapshot before save.
-//  Returns a list of field-specific errors that the UI can display.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - Validation Constants
 
+/// Limits used when validating a `BackendProfileSnapshot` before save.
+/// Validation returns field-specific errors the UI can display.
 enum ProfileValidationLimits {
     static let maxDisplayNameLength = 100
     static let maxInstructionsLength = 50_000  // ~50K chars ≈ fits most context windows
@@ -26,21 +25,9 @@ struct ProfileValidationError: Identifiable, Equatable {
     let field: String
     let message: String
 
-    /// Whether this finding may STOP a save, or merely describes a likely problem.
-    ///
-    /// ⚠️ This distinction exists because it was missing, and its absence was a live defect (G92).
-    /// Every finding used to land in one flat array that both callers treated as fatal, so an
-    /// explicitly advisory sentence — "Agent features **may not** work correctly" — silently
-    /// acquired the force of "A model must be selected." The wording said warning; the placement
-    /// said error. A user could create a local agent profile and then never save an edit to it,
-    /// not even a rename, with an error toast whose text does not even claim the save failed.
-    ///
-    /// It also violated the project rule that a capability classification may LABEL or GROUP but
-    /// must never GATE an action — the classification here is a name-based heuristic that the
-    /// model picker itself calls "often wrong" while inviting the user to override it.
-    ///
-    /// Defaults to `.blocking` so every existing construction site keeps its current force, and a
-    /// new rule has to opt IN to being ignorable rather than opting out of being fatal.
+    // Why: A capability classification may label but never gate an action: it is a name-based heuristic users may override.
+    /// Whether this finding may stop a save (`.blocking`) or merely describes a likely problem (`.advisory`).
+    /// Defaults to `.blocking`; a new rule must opt in to being ignorable.
     let severity: Severity
 
     enum Severity: String, Sendable, Hashable {
@@ -56,10 +43,8 @@ struct ProfileValidationError: Identifiable, Equatable {
         self.severity = severity
     }
 
-    /// ⚠️ `severity` is deliberately EXCLUDED from equality, matching the existing exclusion of
-    /// `id`: two findings about the same field with the same message are the same finding. Nothing
-    /// in the app compares severities, and including it would make a rule's reclassification look
-    /// like a different error to any future diffing consumer.
+    /// `severity` is excluded from equality, like `id`: two findings about the same field with the same message are one
+    /// finding.
     static func == (lhs: ProfileValidationError, rhs: ProfileValidationError) -> Bool {
         lhs.field == rhs.field && lhs.message == rhs.message
     }
@@ -77,12 +62,9 @@ extension Array where Element == ProfileValidationError {
 
 struct ProfileValidator {
 
-    /// Validates a profile snapshot and returns all errors found.
-    /// An empty array means the profile is valid and can be saved.
-    ///
-    /// - Parameter strict: When `true`, enforces provider-readiness rules (model selected,
-    ///   API key present, workflow has nodes). Pass `false` for initial profile creation
-    ///   where the user hasn't configured provider details yet.
+    /// Validates a profile snapshot and returns all errors found; an empty array means it can be saved.
+    /// - Parameter strict: enforces provider-readiness rules (model, API key, workflow nodes); pass false for initial
+    /// creation.
     static func validate(_ profile: BackendProfileSnapshot, strict: Bool = false) -> [ProfileValidationError] {
         var errors: [ProfileValidationError] = []
 
@@ -117,34 +99,8 @@ struct ProfileValidator {
                 errors.append(contentsOf: validateInstructions(config.instructions, requirePresence: true))
                 errors.append(contentsOf: validateAdvancedConfiguration(config.llmConfig))
                 errors.append(contentsOf: validateToolReferences(config))
-                // Warn if local model lacks tool capabilities (cloud providers always support tools).
-                //
-                // ⚠️ ADVISORY, and it must stay advisory. `cognitiveCapability` is a detection
-                // verdict, and for MLX it can come from a Tier-0 match on the model NAME alone
-                // (deepseek-r1, qwq, gpt-oss, magistral) ahead of any tokenizer evidence. The MLX
-                // picker says so to the user's face — "often wrong for new or re-quantized models —
-                // if you know it supports tools, keep it selected" — so blocking the save on it
-                // makes that invitation unhonourable. It also strands the user with no escape when
-                // no tool-capable local model is installed: the picker deliberately lets the
-                // selection stand, and the save then refuses it.
-                //
-                // The describing still happens, in the places that can act on it: the model
-                // catalog's tools badge on each card and the Inference Capability badge. (The MLX
-                // and Ollama pickers that carried the alert and notice quoted above were deleted
-                // on 2026-10-09 — the catalog replaced them.) This finding adds the record; it does not
-                // add a gate.
-                // ⚠️ `.openAICompatible` is EXCLUDED ON PURPOSE, not by oversight (register G96,
-                // where this was filed as a gap and is refuted here). The list is not "local
-                // providers" — it is "providers whose capability is actually MEASURED". Only the
-                // Ollama (`/api/show`) and MLX (`MLXTokenizerAnalyzer`) paths run an analyzer;
-                // `.openAICompatible` has no picker to run one from (it is a free-text endpoint
-                // field), is seeded `.parallelActions` by `ProfileCapabilityFilter`, and is routed
-                // through `AgentConnect`'s cloud arm, which consults no capability at all.
-                //
-                // Adding it here would emit "does not support tool calling" from a value nothing
-                // ever measured — a confident claim about a user's private LM Studio or vLLM
-                // endpoint, derived from a default. A note that cannot be wrong in the user's favour
-                // is worse than no note.
+                // Warn if a local model lacks tool capabilities; advisory, because the verdict can come from a name match alone.
+                // Only providers whose capability is measured (Ollama, MLX) are listed; `.openAICompatible` is excluded on purpose.
                 let localProviders: [ApiProvider] = [.ollama, .mlx]
                 if localProviders.contains(config.llmConfig.apiProvider),
                    config.llmConfig.cognitiveProfile.capability == .none {
@@ -159,17 +115,12 @@ struct ProfileValidator {
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))
 
             case .workflow:
-                // No profile-level rule: "this workflow has nothing to run" belongs to
-                // `WorkflowValidator`, which reads the actual layout and reports an empty canvas
-                // before a run.
+                // No profile-level rule: an empty workflow canvas is reported by `WorkflowValidator` before a run.
                 break
 
             case .code(let config):
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))
-                // ⚠️ This line was MISSING while the lenient arm below had it (register G96), so
-                // `.code` validated its instructions the wrong way round relative to every other
-                // profile type: an over-long system prompt blocked CREATION and then passed every
-                // UPDATE. Strict must be a superset of lenient, never a different set.
+                // Strict must be a superset of lenient: `.code` instructions are validated here as in the lenient arm.
                 errors.append(contentsOf: validateInstructions(config.instructions))
             }
         } else {
@@ -203,10 +154,8 @@ struct ProfileValidator {
             ))
         }
 
-        // Rule 4: Cloud providers require an API key.
-        // NOTE: `.openAICompatible` is intentionally excluded — LM Studio, vLLM,
-        // and llama.cpp servers typically need no key. It instead requires a base
-        // URL (Rule 4b).
+        // Cloud providers require an API key. `.openAICompatible` is excluded (LM Studio, vLLM and llama.cpp usually need none);
+        // it requires a base URL instead.
         let cloudProviders: [ApiProvider] = [.openAI, .anthropic, .google, .openRouter]
         if cloudProviders.contains(config.apiProvider) {
             if let key = config.apiKey, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -249,17 +198,8 @@ struct ProfileValidator {
             }
         }
 
-        // Rule 5b: plain HTTP to a host that is not this machine (register A52).
-        //
-        // ⚠️ `.advisory`, never blocking. `http://localhost:11434` is how Ollama works and
-        // `http://127.0.0.1:1234/v1` is how LM Studio works — refusing here would break the app's
-        // own default local setup. A self-hosted gateway on a trusted LAN is also a legitimate
-        // choice. This describes the risk; it does not gate the save.
-        //
-        // ⚠️ Advisories currently have no return path to any UI (register A34, still open), so this
-        // rule alone would be invisible. The user-facing half is an inline warning under the API
-        // Endpoint field in `ProviderConfigSection` — the rule is here so the finding is recorded
-        // centrally and picked up for free when A34 lands.
+        // Plain HTTP to a non-local host is advisory, never blocking: local Ollama and LM Studio use http://localhost.
+        // Advisories have no UI return path yet; `ProviderConfigSection` shows the user-facing inline warning.
         if let warning = EndpointTransportSecurity.warning(
             for: EndpointTransportSecurity.evaluate(baseURL: config.baseURL, apiKey: config.apiKey)
         ) {
@@ -275,37 +215,15 @@ struct ProfileValidator {
 
     // MARK: - Instructions Validation
 
-    /// ⚠️ Deliberately BLOCKING, unlike the capability finding above — the distinction is worth
-    /// stating because both are "limits" and only one is a heuristic about a third party.
-    ///
-    /// This one is deterministic (count the characters), visible before it is hit (the editors show
-    /// a live counter that turns orange at 90% and red past the limit), and actionable by the person
-    /// who caused it (delete some text). A capability verdict is none of those: it is a guess about
-    /// someone else's model that the user can neither verify nor change. Blocking on the first is a
-    /// product cap; blocking on the second was the G92 defect.
-    /// - Parameter requirePresence: whether MISSING instructions is itself a finding (register
-    ///   A35). ⚠️ False by default and passed `true` only from the strict bot/agent arms. The
-    ///   lenient arm exists to check LENGTH at creation time, and a profile being created has not
-    ///   been given instructions yet — reporting their absence there would fire on every single new
-    ///   profile, which is neither true nor useful. `.code` is excluded for the same reason: code
-    ///   sessions are configured from the Code interface, not this editor.
+    /// Validates instruction length, and absence when `requirePresence` is true. Blocking, unlike the capability finding:
+    /// length is deterministic and actionable. `requirePresence` is passed only from the strict bot/agent arms;
+    /// a profile being created has no instructions yet, and `.code` is configured elsewhere.
     private static func validateInstructions(
         _ instructions: String?,
         requirePresence: Bool = false
     ) -> [ProfileValidationError] {
-        // ⚠️ Register A35. The "instructions are required" rule lived in TWO views and nowhere else,
-        // so every non-editor save path — creation from the + button, the capability chips, the
-        // Tool Library, `CodeSessionManager`, the thinking auto-heal, the quit-time save (A29) —
-        // wrote a profile with no instructions and nothing ever noticed. Defined here now: one rule,
-        // and every path at least RECORDS it.
-        //
-        // ⚠️ **Advisory, not blocking**, and the distinction is load-bearing. Making it blocking at
-        // the store would refuse every out-of-band write to such a profile — including
-        // `BackendOrchestrationService.disableThinkingOnProfile`, whose whole job is to stop a
-        // recurring provider 400. An agent created from + and not yet configured is exactly the
-        // profile this finding is about, so those saves are not hypothetical. The editors keep their
-        // hard block at Save, where the user is present and can act; everywhere else it is recorded
-        // and surfaced by the save-advisory banner (register A34).
+        // The "instructions are required" rule lives here so every save path at least records it. Advisory, not blocking:
+        // editors hard-block at Save; elsewhere the save-advisory banner surfaces it and out-of-band writes still succeed.
         if instructionsAreMissing(instructions) {
             guard requirePresence else { return [] }
             return [ProfileValidationError(
@@ -324,11 +242,9 @@ struct ProfileValidator {
         return []
     }
 
-    /// Instructions that name a tool this agent cannot call — not enabled, renamed, or removed.
-    ///
-    /// ⚠️ ADVISORY, never blocking (see `InstructionToolReferences`): the run still works, the model
-    /// just cannot follow that sentence. Agent profiles only — a Bot has no tools to enable, and a
-    /// Code profile's loadout comes from `CodeToolPreset`, not from `config.tools`.
+    /// Instructions that name a tool this agent cannot call (not enabled, renamed or removed).
+    /// Advisory, never blocking (see `InstructionToolReferences`); agent profiles only, since Bots and Code profiles have
+    /// no `config.tools` loadout.
     static func validateToolReferences(_ config: AgentConfig) -> [ProfileValidationError] {
         let enabled = Set(config.tools.filter(\.isEnabled).map(\.name))
         return InstructionToolReferences.check(instructions: config.instructions, enabledToolNames: enabled)
@@ -349,16 +265,8 @@ struct ProfileValidator {
 
     // MARK: - Advanced Configuration
 
-    /// Cross-field checks inside the opaque `advancedConfiguration` blob.
-    ///
-    /// ⚠️ Register A36. `ProfileValidator` never inspected `advancedConfiguration` AT ALL, so a
-    /// Thinking Budget of 64000 against a Max Output Tokens of 2048 saved cleanly — the panel's own
-    /// caption states the constraint and nothing enforced it. Anthropic rejects that request, so the
-    /// profile was saveable and unusable.
-    ///
-    /// ⚠️ Advisory rather than blocking: the two fields live in a blob this validator cannot decode
-    /// with certainty for every provider, and a false positive here would refuse a legitimate save.
-    /// It also cannot be reached by the out-of-band writers' fault — they do not touch these fields.
+    /// Cross-field checks inside the opaque `advancedConfiguration` blob, e.g. a Thinking Budget above Max Output Tokens.
+    /// Advisory: the blob cannot be decoded with certainty for every provider, so a false positive must not refuse a save.
     static func validateAdvancedConfiguration(_ config: ProviderConfig) -> [ProfileValidationError] {
         guard config.apiProvider == .anthropic,
               let advanced = config.advancedConfiguration,

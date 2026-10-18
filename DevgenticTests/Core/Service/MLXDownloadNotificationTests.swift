@@ -4,12 +4,7 @@
 //  MLXDownloadNotificationTests.swift
 //  DevgenticTests
 //
-//  G13 — completion notifications. Model downloads are the longest-running operation in the
-//  app (tens of minutes to hours) and the terminal transition used to write a SwiftData row
-//  and nothing else, so a user who switched away had to poll the sidebar.
-//
-//  These pin the POLICY, which is where the judgement lives. Delivery itself goes through
-//  `NotificationDispatcher`, which is already exercised elsewhere.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,38 +4,7 @@
 //  ConversationDestinationTests.swift
 //  DevgenticTests
 //
-//  "Which conversation do the rows and Code Viewer tabs ON SCREEN belong to?" — the question every
-//  consumer of a mid-switch event has to ask, and which the codebase answered six different ways.
-//  `ChatHistoryViewModel.destinationConversationID` is the answer; these tests pin it.
-//
-//  Its consumers are the Code Viewer's live-write guards (`handleAgentWriteBegan` /
-//  `handleAgentWriteCompleted`) and `ConversationSyncService`, which injects a live stream into the
-//  visible transcript. Both are VIEWER state, which is why the property is defined as
-//  `loadingConversationID ?? viewerOwningConversationID` and deliberately does NOT lead the user's
-//  SELECTION. ⚠️ It is not constant across a switch, though: `loadingConversationID` leads inside
-//  `loadConversation` itself, so during the load this names the INCOMING conversation while the
-//  array still holds the outgoing rows. That span is hidden behind the loading ProgressView and is
-//  not covered here — `testTheDestinationStaysWithTheDisplayedConversationUntilTheLoadSwapsIt`
-//  observes only the before and after states, because the middle needs a suspended load to see.
-//
-//  ⚠️ A `pendingDestinationConversationID` that DID lead the selection was added 2026-09-06 and
-//  removed 2026-09-07. Two things went wrong with it, and both are worth remembering because the
-//  idea is superficially attractive — it "fixes" a 250 ms window where the viewer names the
-//  outgoing conversation:
-//
-//    1. Folding it into this property broke the Code Viewer in BOTH directions. A live-write
-//       `completed` for the still-displayed conversation was dropped, leaving its tab pulsing
-//       "agent is writing this file" forever — the consequence that guard's own log line states —
-//       while a `began` for the incoming conversation was admitted into the outgoing viewer and
-//       then stashed under the wrong conversation. The window is not a bug: during the debounce the
-//       rows on screen really do belong to the outgoing conversation.
-//    2. Splitting it into a separate `routingDestinationConversationID` fixed that, and left a
-//       property no production code ever read — machinery set on every conversation switch and
-//       cleared on every load, for no reader. Tests passed. That is the shape the project's own
-//       memory records as "F2 shipped dead with 163 green tests".
-//
-//  If a SEND path ever needs "where is the user going?", that is a genuinely different question:
-//  add it for that consumer, with that consumer, and do not route viewer state through it.
+//  Created by Raj Singh.
 //
 
 import XCTest

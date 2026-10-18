@@ -4,13 +4,13 @@
 //  OnboardingFeaturesView.swift
 //  Devgentic
 //
-//  Opt-in switches for Quick Access and the Orb, each with its global shortcut. They apply
-//  immediately, through the same path as their Settings panes. Microphone access for the Orb is
-//  asked on the next step, alongside the other permissions, not here.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Onboarding step with opt-in switches for Quick Access and the Orb, each with its global shortcut.
+/// Changes apply immediately, through the same path as the Settings panes.
 struct OnboardingFeaturesView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(\.appTheme) private var theme

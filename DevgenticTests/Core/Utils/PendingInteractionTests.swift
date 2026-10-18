@@ -4,11 +4,7 @@
 //  PendingInteractionTests.swift
 //  DevgenticTests
 //
-//  Created on 03/04/26.
-//
-//  Comprehensive tests for the unified PendingInteraction enum —
-//  Codable round-trip, Equatable semantics, Identifiable contract,
-//  shim backward compatibility, mutual exclusivity, and edge cases.
+//  Created by Raj Singh.
 //
 
 import XCTest

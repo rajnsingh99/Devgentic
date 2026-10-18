@@ -4,11 +4,7 @@
 //  Theme.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 25/07/25.
-//
-//  Centralized Design Token system. Every color, font, spacing, and corner-radius
-//  value used by the app is defined here. Views read tokens through
-//  `@Environment(\.appTheme)` and never hard-code colors.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -16,6 +12,8 @@ import SwiftUI
 
 // MARK: - Accent Color Palette
 
+/// Centralized design-token system: every color, font, spacing and corner-radius value is defined here.
+/// Views read tokens through `@Environment(\.appTheme)` and never hard-code colors.
 enum AppAccentColor: String, CaseIterable {
     case `default` = "default"
     case blue = "blue"
@@ -208,9 +206,8 @@ struct ThemeDecorator: Theme {
 
     // Capability Accent Color (forwarded so a base theme may override the hues)
     func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color { base.capabilityColor(for: category) }
-    // ⚠️ Required for CORRECTNESS, not compilation: `ThemeDecorator` is hand-forwarded per token,
-    // and an unforwarded token still COMPILES (the protocol extension covers it) while silently
-    // serving the DEFAULT instead of the base theme's override.
+    // Hand-forwarded per token: an unforwarded token still compiles (the protocol extension covers it) but silently serves
+    // the default instead of the base theme's override.
     func nodeIdentityColor(for role: WorkflowNodeRole) -> Color { base.nodeIdentityColor(for: role) }
 
     // Syntax Highlighting
@@ -313,10 +310,8 @@ protocol Theme {
     /// Guarantees WCAG AAA legibility (> 8:1 contrast) across all themes.
     var warningForegroundColor: Color { get }
 
-    /// Hint to SwiftUI / AppKit about whether this theme is intended for
-    /// light or dark contexts — used by detached `NSWindow` editors that
-    /// can't infer the app's light/dark state from the parent environment.
-    /// `nil` defers to the system appearance.
+    /// Hint about whether this theme is intended for light or dark contexts, used by detached `NSWindow` editors
+    /// that cannot infer the app's appearance from the parent environment; `nil` defers to the system.
     var colorScheme: ColorScheme? { get }
     var isDark: Bool { get }
 
@@ -325,12 +320,8 @@ protocol Theme {
     /// milestone chips and the plan/reflection progress cards.
     func capabilityColor(for category: CapabilityMilestoneKind.MilestoneColor) -> Color
 
-    /// Identity colour for a structural workflow node kind. Single source for the canvas card, its
-    /// ports, its edges, the Add-node palette and the guideline legend (WF-CU10).
-    ///
-    /// ⚠️ Deliberately NOT derived from `errorColor` / `warningColor` / `successColor` /
-    /// `accentColor`: those already carry RUN STATUS on the same cards, so reusing them would make
-    /// "this is a Gate" and "this failed" the same colour on the same card.
+    /// Identity colour for a structural workflow node kind: single source for the card, ports, edges, palette and legend.
+    /// Deliberately not derived from the error/warning/success/accent colours, which carry run status on the same cards.
     func nodeIdentityColor(for role: WorkflowNodeRole) -> Color
 
     // ── Tier 2: Extended Color Tokens (defaults provided) ────────────
@@ -351,10 +342,7 @@ protocol Theme {
     var userBubbleBackground: Color { get }
 
     /// Foreground color for inline `code` spans, so they stand out from body text.
-    ///
-    /// Colour is the ONLY treatment: the filled background chip was retired 2026-07-27
-    /// (it read as noise in a paragraph naming several symbols, and competed with the
-    /// search highlight, which is the one background here that means something).
+    /// Colour is the only treatment; a filled background would compete with the search highlight.
     var inlineCodeHighlight: Color { get }
 
     /// A muted variant of the accent color.
@@ -442,12 +430,7 @@ protocol Theme {
     var syntaxTheme: SyntaxTheme { get }
 
     /// Name of the highlight.js CSS theme used for code blocks in chat bubbles.
-    ///
-    /// Separate from `syntaxTheme` because Highlightr can't be driven by it: `setTheme(to:)`
-    /// only loads a CSS file from Highlightr's OWN bundle, and `Theme(themeString:)` is
-    /// internal to that package — so our 15 colour tokens cannot be handed to it. Picking
-    /// the closest of its 271 bundled themes is the available lever, and it's the one that
-    /// matters: every theme used to get `atom-one-*`, so Dracula rendered Atom's palette.
+    /// Separate from `syntaxTheme`: Highlightr only loads CSS themes from its own bundle, so the closest one is chosen.
     var codeHighlightThemeName: String { get }
 }
 
@@ -456,22 +439,10 @@ protocol Theme {
 
 // MARK: - Workflow Node Identity Ramp (WF-CU10)
 
-/// The hues behind `Theme.nodeIdentityColor(for:)`.
-///
-/// ⚠️ THIS CANNOT BE ONE FIXED SET OF HUES, and that is the whole of WF-CU10. The node card's fill
-/// is `controlBackground`, and the themes put it at opposite ends of the luminance range: OneLight
-/// `#f0f0f0` (relative luminance 0.871) versus Dracula `#383A59` (0.046), with DefaultTheme's
-/// `.controlBackgroundColor` following the system appearance.
-///
-/// REASON for the split, measured: a colour clearing the WCAG 1.4.11 3:1 component bar against
-/// Dracula's card needs relative luminance L ≥ 0.238; clearing 3:1 against OneLight's needs
-/// L ≤ 0.257. That ~0.02-wide window also conflicts with the L ≤ 0.183 a white glyph drawn ON the
-/// colour would need. So there is no single ramp, and the branch below is not a preference.
-///
-/// ⚠️ The DARK arm is today's five values VERBATIM. Dracula, OneDark, CosmicDark and DefaultTheme
-/// in Dark Mode must not move — those hues already clear 3:1 on their own cards. Only the light arm
-/// is new, which is exactly where the defect lives: SwiftUI's `.yellow` on `#f0f0f0` measures
-/// **1.33:1**, i.e. an unselected Router's only edge was effectively invisible.
+// Why: the dark arm must not change: those hues already clear 3:1 on their own cards,
+// while SwiftUI's `.yellow` is only 1.33:1 on OneLight's `#f0f0f0`.
+/// The hues behind `Theme.nodeIdentityColor(for:)`, with separate dark and light arms.
+/// No single set clears the 3:1 component contrast bar on both light and dark card fills.
 enum WorkflowNodeIdentityRamp {
 
     /// Today's hues. Do not "improve" these without re-checking Dracula's `#383A59` card.
@@ -485,19 +456,15 @@ enum WorkflowNodeIdentityRamp {
         }
     }
 
-    /// Light-surface ramp. Every hue clears the 4.5:1 TEXT bar against OneLight's `#f0f0f0` card —
-    /// the stricter of the two bars, needed because some of these are drawn as small text, not only
-    /// as strokes and glyphs.
-    ///
-    /// Measured against `#f0f0f0`: router 6.22:1 · code 4.70:1 · gate 5.68:1 · action 4.80:1 ·
-    /// trigger 6.65:1. Against pure white each is higher still.
+    /// Light-surface ramp: every hue clears the 4.5:1 text contrast bar against OneLight's `#f0f0f0` card,
+    /// since some are drawn as small text, not only as strokes and glyphs.
     static func lightHex(_ role: WorkflowNodeRole) -> String {
         switch role {
         case .router:  return "#92400E"   // amber
         case .code:    return "#0E7490"   // cyan
         case .gate:    return "#B91C1C"   // red
         case .action:  return "#0F766E"   // teal
-        case .trigger: return "#475569"   // slate — an inert marker, deliberately neutral
+        case .trigger: return "#475569"   // slate: an inert marker, deliberately neutral
         }
     }
 
@@ -552,9 +519,8 @@ extension Theme {
     var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
     var streamingIndicator: Color { .blue }
     var shadowColor: Color { Color.black.opacity(0.18) }
-    // Find-in-conversation highlight hues (browser-find style). Kept in sync with
-    // `SearchHighlighter.defaultBase`/`.defaultActive`, which the theme-less static
-    // highlight entry points use.
+    // Find-in-conversation highlight hues; keep in sync with `SearchHighlighter.defaultBase`/`.defaultActive`,
+    // which the theme-less static entry points use.
     var searchHighlight: Color { Color.yellow.opacity(0.4) }
     var searchHighlightActive: Color { Color.orange.opacity(0.6) }
 
@@ -601,9 +567,7 @@ extension Theme {
     var spacing16: CGFloat { 16 }
     var spacing24: CGFloat { 24 }
 
-    // ── Capability Accent Color ──────────────────────────────────────
-    // (The backend-origin color token was REMOVED 2026-07-19 by user decision:
-    // no profile/backend colors in the sidebar — its only consumer.)
+    // Capability accent color for a milestone category.
 
     /// Defaults preserve the pre-token hardcoded hues (planning blue, reflection
     /// purple, delegation green, compaction orange). Themes may override.
@@ -681,9 +645,9 @@ extension AppThemes {
         let secondaryBackground: Color = Color(hex: "#1a1a1a")
         let tertiaryBackground: Color = Color(hex: "#2c2c2c")
 
-        let primaryText: Color = Color(hex: "#eeffff")
-        let secondaryText: Color = Color(hex: "#b0bec5")
-        let tertiaryText: Color = Color(hex: "#546e7a")
+        let primaryText: Color = .white                             // Crisp white (matches Cosmic Dark)
+        let secondaryText: Color = Color(hex: "#b3b3b3")           // Soft neutral gray for metadata (matches Cosmic Dark)
+        let tertiaryText: Color = Color(hex: "#535353")            // Muted neutral text (matches Cosmic Dark)
 
         let accentColor: Color = Color(hex: "#80cbc4") // Material Teal
         let dividerColor: Color = Color(hex: "#303030")
@@ -696,7 +660,7 @@ extension AppThemes {
         // Tier 2 — Material-specific overrides
         var controlBackground: Color { Color(hex: "#2c2c2c") }
         var textBackground: Color { Color(hex: "#212121") }
-        var placeholderText: Color { Color(hex: "#546e7a") }
+        var placeholderText: Color { Color(hex: "#b3b3b3") }
         var controlAccent: Color { Color(hex: "#80cbc4") }
         var userBubbleBackground: Color { Color(hex: "#80cbc4") }
         var inlineCodeHighlight: Color { Color(hex: "#c792ea") }    // Material Lilac
@@ -712,12 +676,12 @@ extension AppThemes {
                 background: NSColor(hex: "#1a1a1a"),
                 lineHighlight: NSColor(hex: "#212121"),
                 selection: NSColor(hex: "#353535"),
-                text: NSColor(hex: "#eeffff"),
+                text: NSColor(hex: "#f8f8f2"),
                 keywords: NSColor(hex: "#c792ea"),
                 commands: NSColor(hex: "#82aaff"),
                 types: NSColor(hex: "#ffcb6b"),
                 attributes: NSColor(hex: "#c792ea"),
-                variables: NSColor(hex: "#eeffff"),
+                variables: NSColor(hex: "#f8f8f2"),
                 values: NSColor(hex: "#f78c6c"),
                 numbers: NSColor(hex: "#f78c6c"),
                 strings: NSColor(hex: "#c3e88d"),

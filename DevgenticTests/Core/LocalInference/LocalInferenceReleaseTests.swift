@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  Phase 4: a run waiting on a human gives the local lock up, and takes it back — from the front of
-//  the line, never interrupting the holder — at its next local generation.
+//  LocalInferenceReleaseTests.swift
+//  DevgenticTests
 //
-//  ⚠️ Every wait is BOUNDED and every result is read from a box, never by awaiting the task: a broken
-//  waiter hangs rather than fails, and an unbounded await turns that into a stuck test runner.
+//  Created by Raj Singh.
 //
 
 import XCTest

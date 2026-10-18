@@ -4,14 +4,13 @@
 //  FileRetrievalError.swift
 //  Devgentic
 //
-//  Typed failure for reading/extracting an attached or upstream file/image.
-//  Replaces the silent `nil`/`try?` returns: every retrieval failure now carries
-//  a precise cause, maps to an `AgentErrorCategory` for telemetry, and projects
-//  to a `StructuredError` for reporting to the user.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// A typed failure for reading or extracting an attached or upstream file or image.
+/// Maps to an `AgentErrorCategory` for telemetry and projects to a `StructuredError` for the user.
 enum FileRetrievalError: Error, Sendable {
     case notFound(path: String)
     case accessDenied(path: String)

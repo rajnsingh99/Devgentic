@@ -4,12 +4,13 @@
 //  CommandPaletteView.swift
 //  Devgentic
 //
-//  Universal Command Palette (⌘K) for quick navigation, mode switching, and actions.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import SwiftData
 
+/// Universal Command Palette (⌘K) for quick navigation, mode switching and actions.
 struct CommandPaletteView: View {
 
     @Binding var isPresented: Bool
@@ -617,15 +618,8 @@ struct CommandPaletteView: View {
         )
 
         // MARK: - Recent Conversations
-        // ⚠️ Titles derive from `toRowStruct().displayTitle`, NOT the `ConversationSD.displayTitle`
-        // extension in ConversationSidebarView — that one is `userDefinedTitle` or the literal
-        // "New Conversation", with no first-message fallback, so every untitled conversation would
-        // render identically here and never match a search on its own content. The sidebar rows and
-        // the ChatOps `ConversationRow` bridge both render this one; matching them is deliberate.
-        //
-        // `toRowStruct()` decodes message blobs to find that fallback and `paletteItems` re-runs on
-        // every keystroke, so the projection stays lazy: the unfiltered path touches only 4
-        // conversations, and the filtered one stops at the 4th match.
+        // Titles use `toRowStruct().displayTitle` (with its first-message fallback), as the sidebar rows and ChatOps do;
+        // kept lazy because `toRowStruct()` decodes message blobs and this re-runs on every keystroke.
         let clean = searchText.trimmingCharacters(in: .whitespaces).lowercased()
         let titled = allConversations.lazy.map { (id: $0.id, title: $0.toRowStruct().displayTitle) }
         let matchingConversations: [(id: UUID, title: String)]

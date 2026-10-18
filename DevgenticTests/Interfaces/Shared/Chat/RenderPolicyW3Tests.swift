@@ -4,8 +4,7 @@
 //  RenderPolicyW3Tests.swift
 //  DevgenticTests
 //
-//  P3 batch W3, the render/view half: render/mc-10, render/mc-12, render/mc-13, timeline/tc-6,
-//  views/bm-2, views/bm-8. Each class below names the row it pins and what the defect was.
+//  Created by Raj Singh.
 //
 
 import XCTest

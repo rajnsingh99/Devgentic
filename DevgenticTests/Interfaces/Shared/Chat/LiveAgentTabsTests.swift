@@ -4,10 +4,7 @@
 //  LiveAgentTabsTests.swift
 //  DevgenticTests
 //
-//  Covers live agent tabs under the BADGE-ONLY policy: a starting file write opens or
-//  updates a background tab, the panel is never auto-opened, the active tab is never
-//  stolen (unless the follow toggle is on inside an open panel), and a tab holding user
-//  drafts is never touched. Plus the pure payload factories the stream layer posts.
+//  Created by Raj Singh.
 //
 
 import XCTest

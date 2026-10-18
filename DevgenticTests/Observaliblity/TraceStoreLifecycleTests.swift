@@ -4,11 +4,7 @@
 //  TraceStoreLifecycleTests.swift
 //  DevgenticTests
 //
-//  Regression coverage for the A2/A3 retention + lifecycle work:
-//   • reconcileOrphanedTraces — stamp prior-session zombies, never touch live traces (Gap #13)
-//   • closeOpenSpans          — close the root span without re-stamping already-closed spans (Gap #13)
-//   • modelReliabilityStats   — `.failed` buckets with errors; `.cancelled` counted explicitly
-//                               so running zombies stop masquerading as cancelled (Gap #1)
+//  Created by Raj Singh.
 //
 
 import XCTest

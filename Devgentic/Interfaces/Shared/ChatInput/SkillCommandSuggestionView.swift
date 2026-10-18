@@ -4,19 +4,13 @@
 //  SkillCommandSuggestionView.swift
 //  Devgentic
 //
-//  The `/` picker: the skills this profile can invoke by name.
-//
-//  ⚠️ Shaped after `PromptSuggestionView` deliberately — same row height, same keyboard selection
-//  contract, same scroll-to-selection. Three pickers that behave differently in the same composer is
-//  three things for a user to learn about one text field.
-//
-//  ⚠️ It shows the skill's DESCRIPTION, which is the text the model routes on. The user picking from
-//  this list and the model deciding whether the skill fits are reading the same sentence, so a
-//  description that reads badly here is one that routes badly there.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The `/` picker: the skills this profile can invoke by name.
+/// Matches `PromptSuggestionView` in row height and keyboard selection, and shows each skill's description.
 struct SkillCommandSuggestionView: View {
 
     let items: [SkillCommandItem]
@@ -35,17 +29,12 @@ struct SkillCommandSuggestionView: View {
 
     var body: some View {
         if items.isEmpty {
-            // ⚠️ An EMPTY STATE, not a hidden panel. `/` with no match means either a typo or a
-            // library with nothing linkable; silently showing nothing reads as the trigger being
-            // broken, which is the complaint that started this feature.
+            // Empty state rather than a hidden panel, so a `/` with no match does not look like a broken trigger.
             HStack(spacing: 6) {
                 Image(systemName: "puzzlepiece")
                     .font(.system(size: 11))
                     .foregroundStyle(theme.secondaryText)
-                // ⚠️ "Linked to this agent", not "in the library". The picker is scoped to what
-                // this profile can actually reach, so a full library with nothing linked here is
-                // the common case — and pointing at the library's contents would send the user
-                // looking for a problem that is not there.
+                // Worded "linked to this agent", since the picker is scoped to what this profile can reach.
                 Text(query.isEmpty
                      ? "No skills linked to this agent — link one in the Skills library."
                      : "No linked skill matches '\(query)'.")
@@ -119,8 +108,7 @@ struct SkillCommandSuggestionView: View {
                 .frame(width: 20)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 5) {
-                    // ⚠️ The NAME with its slash, monospaced — this is what gets typed into the
-                    // message, and it is not always the display name.
+                    // The skill name with its slash, monospaced; this is what gets typed and may differ from the display name.
                     Text("/\(item.name)")
                         .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .foregroundStyle(theme.primaryText)

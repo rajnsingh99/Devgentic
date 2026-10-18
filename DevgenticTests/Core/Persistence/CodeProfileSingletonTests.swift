@@ -4,25 +4,7 @@
 //  CodeProfileSingletonTests.swift
 //  DevgenticTests
 //
-//  Created on 18/09/26.
-//
-//  The code profile is a singleton, and until now nothing enforced that.
-//
-//  ⚠️ Its identity lived ONLY in a UserDefaults handle; `ensureCodeProfile()` never asked the store
-//  whether a `.code` row already existed. So every way of losing that handle minted a second "Code
-//  Session" and orphaned the first forever — nothing garbage-collects profiles, the Profiles
-//  sidebar filters `.code` out so there is no hand-removal path, and the Tool Library lists every
-//  tool-capable profile, so the orphans show up there under the identical name and tool enablement
-//  saved against one is a silent no-op. Three rows had accumulated on the author's machine.
-//
-//  Three handle losses are known to have fired: the `com.dev.devgentic` → `app.devgentic.macos`
-//  bundle-identifier change (UserDefaults is domain-scoped; `DevgenticSD.store` is not, so every
-//  row survived), `init()` reading a THROWN fetch as "row deleted", and `resetSession()` clearing
-//  the handle after a `try?`-swallowed delete failure.
-//
-//  ⚠️ These drive the REAL `CodeSessionManager` against a real in-memory store, not a re-derived
-//  copy of the adoption rule. Deleting the adopt block from `ensureCodeProfile()` has to turn this
-//  file red — a test that re-implements the policy it guards would stay green through the revert.
+//  Created by Raj Singh.
 //
 
 import XCTest

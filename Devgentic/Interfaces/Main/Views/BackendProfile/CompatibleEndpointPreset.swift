@@ -4,25 +4,14 @@
 //  CompatibleEndpointPreset.swift
 //  Devgentic
 //
-//  Known endpoints that already work through "Custom (OpenAI-Compatible)".
+//  Created by Raj Singh.
 //
 
 import Foundation
 
-/// One-click endpoints for the `.openAICompatible` provider.
-///
-/// ⚠️ THIS EXISTS BECAUSE THE CAPABILITY WAS ALREADY THERE AND UNFINDABLE. HuggingFace Inference
-/// Providers speak the OpenAI wire format at `https://router.huggingface.co/v1`, so the existing
-/// `.openAICompatible` path already drives them end to end — `OpenAILLMProvider` appends
-/// `chat/completions`, streams SSE, and `AgentConnect` routes it through the native tool-call
-/// generator, so Agent profiles work and not just Bot. Nothing needed building. What was missing
-/// was any way for a user to discover it: the field is a bare URL box with a localhost hint.
-///
-/// ⚠️ A PRESET, NOT AN `ApiProvider` CASE. An 8th case would have to be handled in 23 exhaustive
-/// switches across the app, and a profile saved under it cannot be decoded by an older build —
-/// `ProviderConfig.init(from:)` THROWS on an unknown provider rather than falling back. A preset
-/// buys the same user-visible capability for none of that, and leaves the door open to promote
-/// HuggingFace to a first-class provider later if it earns its own model picker and rate limits.
+// Why: `ProviderConfig.init(from:)` throws on an unknown provider, so a new case would break older builds
+/// One-click endpoints for the `.openAICompatible` provider, such as HuggingFace Inference Providers.
+/// A preset, not an `ApiProvider` case, so saved profiles stay decodable by other builds.
 enum CompatibleEndpointPreset {
 
     struct Preset: Equatable, Identifiable {
@@ -38,8 +27,7 @@ enum CompatibleEndpointPreset {
         var id: String { name }
     }
 
-    /// ⚠️ Order is the order shown. HuggingFace first: it is the one a user cannot otherwise
-    /// guess, while a local server's URL is printed in that server's own UI.
+    /// Presets in display order; HuggingFace is first because a user cannot otherwise guess its URL.
     nonisolated static let all: [Preset] = [
         Preset(
             name: "HuggingFace",
@@ -73,19 +61,12 @@ enum CompatibleEndpointPreset {
         ),
     ]
 
-    /// The preset a base URL currently matches, if any — so the UI can show which is selected and
-    /// offer the matching credential.
-    ///
-    /// Compares on the normalised origin+path so a trailing slash or a case difference in the
-    /// host does not lose the match. Pure and `nonisolated`, in the house style, so the rule is
-    /// testable without building any view.
+    /// The preset a base URL currently matches, if any, so the UI can show which is selected.
+    /// Compares the normalised origin and path, so a trailing slash or host case does not lose the match.
     nonisolated static func matching(_ baseURL: String?) -> Preset? {
         guard let baseURL else { return nil }
-        // ⚠️ SCHEME AND HOST ONLY. Lowercasing the whole string folded the PATH too, so
-        // `https://router.huggingface.co/V1` matched the preset: the chip tinted as selected and
-        // the "Use saved HuggingFace token" button appeared, asserting a known-good endpoint —
-        // while `OpenAILLMProvider` would POST to `/V1/chat/completions`, and HTTP paths are
-        // case-sensitive. Scheme and host are the only parts where case is insignificant.
+        // Why: folding the path would match `/V1` to the preset while the provider would POST to the wrong case-sensitive path
+        // Lowercases scheme and host only; the path stays case-sensitive.
         let normalise: (String) -> String? = { raw in
             var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             while s.hasSuffix("/") { s.removeLast() }

@@ -4,16 +4,7 @@
 //  MCPRegistryClient.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — read-only client for the official MCP Registry.
-//
-//  Search runs SERVER-SIDE. The registry indexes tens of thousands of servers; mirroring
-//  that locally would be a sync problem we have no reason to own, and a stale mirror is
-//  worse than no catalogue at all.
-//
-//  Everything here is read-only and unauthenticated. The registry is treated as UNTRUSTED
-//  third-party data end to end: entries are decoded leniently, URLs are scheme-checked
-//  before they reach the connect path, and nothing is ever launched without the user
-//  reviewing it first.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -21,6 +12,7 @@ import os
 
 private let logger = DGLogger(category: "MCPRegistryClient")
 
+/// Why a request to the MCP Registry failed: a bad HTTP status, a transport error or an unreadable response.
 enum MCPRegistryError: LocalizedError {
     case badResponse(status: Int)
     case transport(Error)
@@ -44,16 +36,12 @@ struct MCPRegistryClient {
     /// Official registry. API frozen at v0.1 since 2025-10.
     static let baseURL = URL(string: "https://registry.modelcontextprotocol.io")!
 
-    /// Page size. 100 is the API's ceiling — verified 2026-08-02: `limit=200` returns zero
-    /// servers rather than clamping, so asking for more is strictly worse than asking for max.
+    /// Page size: 100 is the API's ceiling; `limit=200` returns zero servers rather than clamping.
     private static let pageSize = 100
 
-    /// How much of the registry to hold locally for description search.
-    ///
-    /// The full registry is 6,000+ servers — measured 2026-08-02 at 60 pages, ~5 MB and
-    /// **97 seconds**. Fetching all of it to answer one search is out of the question, so the
-    /// corpus is bounded and loaded in the background after the first page paints. Ten pages
-    /// covers the common case; beyond it the server-side name search still reaches everything.
+    /// How many pages of the registry to hold locally for description search, loaded in the background after the first
+    /// page paints. The full registry (6,000+ servers) is too slow to fetch for one search; beyond the bound, the server-side
+    /// name search still reaches everything.
     private static let maxCorpusPages = 10
 
     private static let session: URLSession = {
@@ -68,12 +56,9 @@ struct MCPRegistryClient {
         let nextCursor: String?
     }
 
-    /// Last successful UNFILTERED first page, with the time it was fetched.
-    ///
-    /// `MCPDiscoverView` is torn down and rebuilt every time the user toggles
-    /// Installed↔Discover, so its `.task` re-ran and re-fetched ~38 KB each time — for a
-    /// catalogue that changes on the order of days. Searches and paged requests are never
-    /// cached; they are cheap to re-issue and staleness there is more confusing than a wait.
+    /// Last successful unfiltered first page, with its fetch time. `MCPDiscoverView` is rebuilt on every Installed/Discover
+    /// toggle, so caching avoids re-fetching ~38 KB for a catalogue that changes over days. Searches and paged requests are
+    /// never cached.
     private static var cachedFirstPage: (page: Page, fetchedAt: Date)?
     private static let cacheTTL: TimeInterval = 300
 
@@ -87,11 +72,7 @@ struct MCPRegistryClient {
     static var isCorpusComplete: Bool { corpusIsComplete }
     static var corpusCount: Int { corpus.count }
 
-    /// Drops everything cached so the next open re-fetches from scratch.
-    ///
-    /// No caller yet — a manual "Refresh" affordance in Discover is the intended one, listed
-    /// as an open gap. Kept because the corpus and page cache must be cleared TOGETHER, and
-    /// splitting that knowledge across a future call site is how they drift apart.
+    /// Drops everything cached so the next open re-fetches from scratch; the corpus and page caches must be cleared together.
     static func invalidateCache() {
         cachedFirstPage = nil
         corpusLoadTask?.cancel()
@@ -103,20 +84,9 @@ struct MCPRegistryClient {
 
     // MARK: - Search
 
-    /// Searches names AND descriptions.
-    ///
-    /// The registry's own `search` is a substring match on the NAME only, verified against the
-    /// live API — so a user looking for a capability ("database", "email") misses every server
-    /// that does not happen to carry the word in its name, and no parameter fixes it. This
-    /// combines two sources:
-    ///
-    ///   • **Server-side name search** — reaches the WHOLE registry, so a name match is never
-    ///     missed however little of the corpus has loaded.
-    ///   • **Local name+description filter** over the bounded corpus — catches the capability
-    ///     matches the API cannot express.
-    ///
-    /// Union, deduplicated by server name. Description coverage stays best-effort until the
-    /// corpus completes, which `isCorpusComplete` reports rather than papering over.
+    /// Searches names AND descriptions: the registry's own `search` matches names only, so this unions it with a local
+    /// name+description filter over the bounded corpus, deduplicated by server name.
+    /// Description coverage is best-effort until the corpus completes (`isCorpusComplete`).
     static func search(_ term: String) async -> [MCPRegistryServer] {
         let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return corpus }
@@ -225,10 +195,8 @@ struct MCPRegistryClient {
         cacheAsDefaultPage: Bool
     ) async throws -> Page {
         var components = URLComponents(url: baseURL.appendingPathComponent("v0/servers"), resolvingAgainstBaseURL: false)!
-        // `version=latest` collapses the registry's per-VERSION rows SERVER-side. Verified
-        // 2026-08-02: a 50-row page carried only 31 distinct servers without it, and 50 with.
-        // The client-side dedup below is kept as a belt-and-braces guard — it is cheap, and it
-        // still protects the `ForEach` identity that duplicates would corrupt.
+        // `version=latest` collapses the registry's per-version rows server-side; the client-side dedup below is a cheap
+        // guard that protects `ForEach` identity from duplicates.
         var items = [
             URLQueryItem(name: "limit", value: "\(pageSize)"),
             URLQueryItem(name: "version", value: "latest"),
@@ -289,9 +257,8 @@ struct MCPRegistryClient {
         let deduplicated = deduplicate(decoded.servers)
         let duplicatesCollapsed = decoded.servers.count - deduplicated.count
 
-        // Metadata-only entries have nothing to connect to. Listing them produces rows whose
-        // only possible outcome is a failure, so they are dropped — but counted, because a
-        // sudden spike means the schema changed under us.
+        // Metadata-only entries have nothing to connect to, so they are dropped, but counted: a sudden spike means the
+        // schema changed.
         let connectable = deduplicated.filter(\.isConnectable)
         let dropped = deduplicated.count - connectable.count
         let all = deduplicated
@@ -305,9 +272,8 @@ struct MCPRegistryClient {
             nextCursor=\(decoded.metadata?.nextCursor?.isEmpty == false ? "yes" : "none").
             """)
 
-        // The registry's first response of a session is routinely far slower than later ones
-        // (cold edge cache). Worth naming, because from the user's side it is indistinguishable
-        // from Discover being broken.
+        // The registry's first response of a session is routinely far slower (cold edge cache); logged so it is not
+        // mistaken for Discover being broken.
         let elapsed = Self.ms(since: started)
         if elapsed > 5000 {
             logger.warning("""
@@ -332,16 +298,8 @@ struct MCPRegistryClient {
         return page
     }
 
-    /// Collapses the registry's per-VERSION rows into one row per server.
-    ///
-    /// `/v0/servers` returns every published version, so a 50-entry page can hold only ~32
-    /// distinct servers — one publisher had four. Left unfiltered this is not just visual
-    /// noise: SwiftUI keys `ForEach` on the server name, and duplicate identities scramble
-    /// the grid into overlapping, mis-placed cells.
-    ///
-    /// Prefers the row the registry marks `isLatest`; anything without the flag falls back
-    /// to first-seen, so a server whose metadata shape has moved still appears exactly once
-    /// rather than vanishing.
+    /// Collapses the registry's per-version rows into one row per server: duplicate names scramble `ForEach` identity.
+    /// Prefers the row marked `isLatest`, falling back to first-seen so a server still appears exactly once.
     static func deduplicate(_ envelopes: [MCPRegistryEnvelope]) -> [MCPRegistryServer] {
         var seen = Set<String>()
         var result: [MCPRegistryServer] = []

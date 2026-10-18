@@ -4,13 +4,7 @@
 //  WorkflowGridTileTests.swift
 //  DevgenticTests
 //
-//  Register WF-CV9 — the dot grid as a cached, GPU-tiled bitmap.
-//
-//  The visual result can only be judged on a device, but the two pieces of quiet math CAN be
-//  pinned, and both fail silently if broken: a tile whose side is not an exact multiple of the
-//  major-dot period puts the major dots at a different offset in every repetition (a visibly
-//  drifting grid), and a wrong phase makes the grid slide relative to the canvas instead of
-//  moving with it.
+//  Created by Raj Singh.
 //
 
 import XCTest

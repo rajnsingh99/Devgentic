@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  NativeToolTemplateTriggerTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The MLX chat-template path appends a trigger as the last user turn of EVERY request. It used
-//  to end "Respond with one or more <tool_call> blocks…", so the last thing a small model read
-//  each turn was an order to call a tool. A plain reply has been accepted as the final answer
-//  since the answer-vs-call verdict, yet on 2026-10-05 Qwen2.5-3B explored the project on all
-//  three prompts that needed no tools, two of which said "Don't use any tools".
-//
-//  ⚠️ Not wording tests. They guard that the trigger offers a plain answer on every dialect, that
-//  the dialect's own format hint still reaches the model, and that the trigger is actually sent.
+//  Created by Raj Singh.
 //
 
 import XCTest

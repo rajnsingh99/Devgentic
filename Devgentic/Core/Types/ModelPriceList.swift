@@ -4,18 +4,7 @@
 //  ModelPriceList.swift
 //  Devgentic
 //
-//  What a cloud call cost, priced when its usage is read — per call, at that call's own model.
-//
-//  1. A provider-reported cost wins (OpenRouter returns `usage.cost`; we request usage accounting).
-//  2. Otherwise the bundled `ModelPrices.json` — generated from LiteLLM's price list by
-//     `scripts/update-model-prices.py`, refreshed before each release, never fetched at runtime.
-//  3. Otherwise no cost: local models, custom OpenAI-compatible endpoints, and models the list
-//     does not name.
-//
-//  ⚠️ EXACT model lookup, never a family or substring match. The hand-kept table this replaced
-//  matched `claude-opus` and `gemini-2`, so one row priced several generations — every Opus at the
-//  oldest Opus price, Gemini 2.5 at 2.0 Flash's. An unknown model now shows no cost and says so once
-//  in the log, which is honest; a near-miss price is not.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -115,8 +104,8 @@ final class ModelPriceList: @unchecked Sendable {
         }
     }
 
-    /// The list's entry for `key`, or nil. Tries the name as given, then without a trailing date
-    /// (`-20250929`, `-2024-08-06`) or `-latest` — nothing looser.
+    /// The list's entry for `key`, or nil. Tries the name as given, then without a trailing date suffix or `-latest`;
+    /// nothing looser.
     func price(for key: PricingKey) -> ModelPrice? {
         let prefix: String
         switch key.provider {

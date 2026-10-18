@@ -4,9 +4,7 @@
 //  ClaudeLLMProvider.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/02/26.
-//  Updated on 27/03/26: Config-driven parameters, CloudRequestPipeline, extended thinking,
-//  multi-tool support in generate(), and improved streaming.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -69,8 +67,7 @@ struct ClaudeLLMProvider: LLMProvider {
     }
 
     /// Budget tokens for thinking. Defaults to 10000.
-    /// ⚠️ Only consulted on `.legacyBudget` models — Opus 4.7+ / Sonnet 5 / Fable 5 reject
-    /// `budget_tokens` outright, and use `thinkingEffort` instead.
+    /// Only consulted on `.legacyBudget` models; Opus 4.7+ / Sonnet 5 / Fable 5 reject it and use `thinkingEffort`.
     private var thinkingBudget: Int {
         if case .number(let val) = config.options?["thinkingBudgetTokens"] { return Int(val) }
         return 10000
@@ -88,26 +85,17 @@ struct ClaudeLLMProvider: LLMProvider {
         AnthropicModelGeneration.classify(modelName: config.modelName)
     }
 
-    /// Max output tokens actually sent.
-    ///
-    /// ⚠️ On the legacy thinking path the API requires `max_tokens` to be strictly greater than
-    /// `budget_tokens`, so a profile configured with 4096/10000 would be rejected on arrival —
-    /// hence the floor. Adaptive-era models carry no budget, so the user's value is sent
-    /// verbatim rather than silently inflated (that would change what they are billed).
+    /// Max output tokens actually sent. On the legacy thinking path the API requires `max_tokens` > `budget_tokens`, so
+    /// the value is floored. Adaptive-era models carry no budget, so the user's value is sent verbatim (inflating it would
+    /// change what they are billed).
     private var effectiveMaxTokens: Int {
         guard extendedThinking, !generation.usesAdaptiveThinking else { return maxTokens }
         return max(maxTokens, thinkingBudget + 1024)
     }
 
-    /// Applies sampling parameters, gated on what the selected model actually accepts.
-    ///
-    /// ⚠️ Three separate contracts collide here, and getting any of them wrong is a 400 rather
-    /// than a degraded response:
-    ///   1. `temperature`/`top_p`/`top_k` are REMOVED on Opus 4.7+ / Sonnet 5 / Fable 5.
-    ///   2. Every Claude 4+ model rejects `temperature` and `top_p` sent together.
-    ///   3. Extended thinking does not permit sampling parameters on the models that still
-    ///      accept them otherwise.
-    /// `stop_sequences` is unaffected by all three and is always forwarded.
+    /// Applies sampling parameters, gated on what the selected model accepts; a wrong combination is a 400.
+    /// `temperature`/`top_p`/`top_k` are removed on Opus 4.7+ / Sonnet 5 / Fable 5, Claude 4+ rejects `temperature` with
+    /// `top_p`, and extended thinking forbids sampling parameters on the rest. `stop_sequences` is always forwarded.
     private func applyGenerationParams(to body: inout [String: Any]) {
         defer {
             if let stops = stopSequences, !stops.isEmpty { body["stop_sequences"] = stops }
@@ -155,19 +143,9 @@ struct ClaudeLLMProvider: LLMProvider {
         if let topK = topK { body["top_k"] = topK }
     }
 
-    /// Applies the thinking configuration in whichever shape the selected model accepts.
-    ///
-    /// ⚠️ Applied by EVERY request builder, not just the cognitive step. The toggle used to be
-    /// wired only into `generateCognitiveStep`, so a Bot profile with Extended Thinking on got no
-    /// thinking at all while still losing its temperature control — the toggle removed a setting
-    /// and delivered nothing.
-    ///
-    /// - Parameter requestSummary: whether to ask for readable reasoning via
-    ///   `display: "summarized"`. ⚠️ Adaptive-era models default to `"omitted"`, which streams
-    ///   thinking blocks with EMPTY text — so the cognitive-step builders, whose `thought` field
-    ///   the UI renders, must opt in or they would show a blank trace where the legacy shape
-    ///   showed reasoning. Builders that never read thinking leave it omitted so the summary is
-    ///   not generated into a response nobody displays.
+    /// Applies the thinking configuration in whichever shape the selected model accepts; every request builder calls it.
+    /// `requestSummary` asks for readable reasoning via `display: "summarized"`: adaptive-era models default to `omitted`,
+    /// which streams empty thinking text, so builders whose `thought` the UI renders opt in and others leave it off.
     private func applyThinking(to body: inout [String: Any], requestSummary: Bool = false) {
         guard generation.usesAdaptiveThinking else {
             // Legacy tier: thinking is opt-in via budget_tokens, and omitting the key means off.
@@ -180,19 +158,14 @@ struct ClaudeLLMProvider: LLMProvider {
         if !extendedThinking {
             switch generation.thinkingOffShape {
             case .disabled:
-                // ⚠️ Explicit disable, not omission. Thinking is ON BY DEFAULT on Opus 5 and
-                // Sonnet 5, so omitting the key would silently give the user thinking they just
-                // switched off. `output_config` is deliberately left unset here: the API's default
-                // effort is accepted alongside disabled thinking, whereas `xhigh`/`max` are not —
-                // so sending nothing is the only value that cannot 400.
+                // Explicit disable, not omission: thinking is on by default on Opus 5 and Sonnet 5. `output_config` stays unset
+                // because `xhigh`/`max` effort is rejected alongside disabled thinking, so sending nothing cannot 400.
                 body["thinking"] = ["type": "disabled"]
                 return
 
             case .betweenTools:
-                // ⚠️ Sonnet 5.5's "off". `disabled` is a 400 there. `between_tools` must be sent
-                // BARE — `display` alongside it is a 400, so `requestSummary` is ignored — and it
-                // is rejected at `xhigh`/`max`, so no effort is sent and the API default (`high`)
-                // applies, which is accepted.
+                // Sonnet 5.5's "off": `disabled` is a 400. `between_tools` is sent bare (`display` makes it a 400, so `requestSummary`
+                // is ignored) and is rejected at `xhigh`/`max`, so no effort is sent and the accepted default (`high`) applies.
                 body["thinking"] = ["type": "between_tools"]
                 if let effort = thinkingEffort {
                     logger.notice("""
@@ -205,12 +178,8 @@ struct ClaudeLLMProvider: LLMProvider {
                 return
 
             case .notOffered:
-                // ⚠️ Falling through with thinking OFF is deliberate: Fable 5 / Mythos 5 /
-                // Opus 5.5, where thinking cannot be turned off at all and `{"type": "disabled"}`
-                // is rejected with a 400 at every effort level. Adaptive is documented as
-                // equivalent to omitting the key, so it is the honest shape to send. The panel
-                // hides the toggle for these models; this log covers a profile that was configured
-                // on another model and then re-pointed, where the stored `false` survives.
+                // Falling through with thinking off is deliberate for Fable 5 / Mythos 5 / Opus 5.5, which cannot disable thinking:
+                // `disabled` is a 400 and adaptive equals omitting the key. The log covers a profile re-pointed from another model.
                 logger.notice("""
                     [ANTHROPIC] Extended Thinking is OFF in the profile but cannot be honoured for \
                     model '\(config.modelName)' (generation: \(generation.rawValue)) — thinking is \
@@ -241,10 +210,8 @@ struct ClaudeLLMProvider: LLMProvider {
 
     // MARK: - Request Body Builders
 
-    // ⚠️ These exist so the shape assertions in `AnthropicRequestShapeTests` exercise the SAME
-    // code the shipped builders run. A test that rebuilds the body itself only ever proves the
-    // test's copy is right — exactly how four contract defects (register A20–A23) reached users
-    // with a green suite.
+    // These let the shape assertions in `AnthropicRequestShapeTests` exercise the same code the shipped builders run;
+    // a test that rebuilds the body itself only proves its own copy.
 
     /// Body for the agent/cognitive-step path. Requests a thinking summary because this path
     /// parses thinking blocks into `ModernCognitiveStep.thought`.
@@ -294,12 +261,8 @@ struct ClaudeLLMProvider: LLMProvider {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // ⚠️ `anthropic-version` has exactly two valid values (2023-06-01, 2023-01-01) and is NOT
-        // a feature switch — every dated capability since ships behind `anthropic-beta`. This
-        // used to send "2025-04-14" whenever Extended Thinking was on, which is not a version the
-        // API recognises, so enabling the toggle rejected every request from the profile with an
-        // invalid_request_error — not just the thinking ones. Turning it back off "fixed" it,
-        // which made the cause near-impossible to attribute from the symptom.
+        // `anthropic-version` has only two valid values ("2023-06-01", "2023-01-01") and is not a feature switch: dated capabilities ship behind
+        // `anthropic-beta`. Any other value rejects every request from the profile.
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
 
         if let apiKey = config.apiKey {
@@ -342,8 +305,7 @@ struct ClaudeLLMProvider: LLMProvider {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let usage = json.flatMap { TokenUsage.fromAnthropic($0, pricing: pricingKey) }
 
-        // Defensive check: warn if response was truncated by max_tokens limit
-        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        // A refusal is HTTP 200, so it is checked before anything reads the content; then warn if max_tokens truncated.
         if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("⚠️ Anthropic response truncated (stop_reason: max_tokens). Configured max_tokens: \(self.maxTokens). Output may be incomplete — consider increasing maxTokens in advanced config.")
@@ -386,13 +348,11 @@ struct ClaudeLLMProvider: LLMProvider {
         return (textResponse.trimmingCharacters(in: .whitespacesAndNewlines), usage)
     }
 
-    // MARK: - Multimodal (Phase 3 — native image input)
+    // MARK: - Multimodal (native image input)
 
-    /// Translates provider-agnostic `[ProviderMessage]` into Anthropic messages,
-    /// emitting native content-block arrays (`{"type":"image","source":{"type":"base64",…}}`)
-    /// for any image blocks. Text-only messages stay as a plain content string.
-    /// Resolving image bytes can throw (file gone/unreadable) — the error propagates
-    /// to the caller (node failure / chat error), never a silent drop.
+    /// Translates provider-agnostic `[ProviderMessage]` into Anthropic messages, emitting native content-block arrays for
+    /// image blocks; text-only messages stay a plain content string. Resolving image bytes can throw, and the error
+    /// propagates to the caller, never a silent drop.
     private func translateProviderMessages(_ payload: [ProviderMessage]) async throws -> (system: String?, anthropicMessages: [[String: Any]]) {
         var systemPrompt = ""
         var anthropicMessages: [[String: Any]] = []
@@ -449,7 +409,7 @@ struct ClaudeLLMProvider: LLMProvider {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         logCacheUsage(json.flatMap { TokenUsage.fromAnthropic($0, pricing: pricingKey) }, path: "image")
 
-        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        // A refusal is HTTP 200, so it is checked before anything reads the content.
         if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("⚠️ Anthropic multimodal response truncated (stop_reason: max_tokens). Configured max_tokens: \(self.maxTokens).")
@@ -495,10 +455,8 @@ struct ClaudeLLMProvider: LLMProvider {
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
-        // Defensive check: warn if response was truncated by max_tokens limit.
-        // ⚠️ On the adaptive tier `max_tokens` caps thinking AND response text together, so a
-        // profile tuned before thinking was enabled can truncate without any budget being set.
-        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        // Warns if the response was truncated by max_tokens. On the adaptive tier `max_tokens` caps thinking and response text
+        // together, so a profile tuned before thinking was enabled can truncate. A refusal is HTTP 200, so it is checked first.
         if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("""
@@ -541,19 +499,17 @@ struct ClaudeLLMProvider: LLMProvider {
         let usage = json.flatMap { TokenUsage.fromAnthropic($0, pricing: pricingKey) }
         logCacheUsage(usage, path: "agent-text")
 
-        // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
-        // .toolCall events, not from this field. A placeholder here would pollute any
-        // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
+        // Empty reasoning stays empty: the UI derives "Executing <tool>..." labels from .toolCall events, not this field, and a
+        // placeholder would pollute any scratchpad injection with meaningless text.
         return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage,
                                    reasoningReplay: pendingTools.isEmpty ? nil : Self.thinkingReplay(in: contentBlocks))
     }
 
     // MARK: - Native-Turn Cognitive Step (G12)
 
-    /// Native-turn overload. Accepts provider-shape messages from `ClaudeToolTurnAdapter`
-    /// which may contain `content` arrays of `tool_use` / `tool_result` blocks, plus
-    /// canonical `{role, content: string}` messages from PromptBuilder.
-    /// Extracts `role: "system"` messages into Claude's top-level `system` field.
+    /// Native-turn overload. Accepts provider-shape messages from `ClaudeToolTurnAdapter` (which may contain `tool_use` /
+    /// `tool_result` content arrays) plus canonical `{role, content: string}` messages from PromptBuilder; extracts
+    /// `role: "system"` messages into Claude's top-level `system` field.
     func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         var systemPrompt = ""
         var anthropicMessages: [[String: Any]] = []
@@ -578,7 +534,7 @@ struct ClaudeLLMProvider: LLMProvider {
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
-        // ⚠️ CR-16: a refusal is HTTP 200 — checked before anything reads the content.
+        // A refusal is HTTP 200, so it is checked before anything reads the content.
         if let refusal = Self.refusalError(in: json) { throw refusal }
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
             logger.warning("""
@@ -680,7 +636,7 @@ struct ClaudeLLMProvider: LLMProvider {
                     return nil
                 }
             },
-            // ⚠️ The decoder itself, not a closure around it, so tests run exactly this.
+            // The decoder itself, not a closure around it, so tests run exactly this.
             handleLine: Self.anthropicStreamLine
         )
     }
@@ -699,14 +655,11 @@ struct ClaudeLLMProvider: LLMProvider {
             if delta["type"] as? String == "text_delta", let text = delta["text"] as? String {
                 return .emit(text)
             }
-            // ⚠️ `thinking_delta` is deliberately NOT emitted: this stream is the bot's visible reply
-            // and has no second sink, so reasoning would splice straight into the answer. The agent
-            // path keeps reasoning via `ModernCognitiveStep.thought`. `input_json_delta` is ignored
-            // in bot mode.
+            // `thinking_delta` is deliberately not emitted: this stream is the bot's visible reply with no second sink, so reasoning
+            // would splice into the answer. The agent path keeps reasoning via `ModernCognitiveStep.thought`.
             return .skip
         case "message_delta":
-            // ⚠️ CR-16: a refusal arrives HERE, as a stop reason on a 200 stream. Without this the
-            // stream simply ended and the user saw an empty or cut-off answer with no explanation.
+            // A refusal arrives here as a stop reason on a 200 stream; without this the stream ends with an empty or cut-off answer.
             if let refusal = refusalError(in: json) {
                 logger.notice("[ANTHROPIC] Stream ended in a REFUSAL (\(refusal.localizedDescription)). CONSEQUENCE: the turn fails with that reason instead of saving a silent partial answer; not retried.")
                 return .fail(refusal)
@@ -718,10 +671,8 @@ struct ClaudeLLMProvider: LLMProvider {
             let error = json?["error"] as? [String: Any]
             let type = error?["type"] as? String
             let message = error?["message"] as? String ?? "Anthropic stream error"
-            // ⚠️⚠️ CR-14: mapped to the HTTP status it stands for, so the retry classifier treats
-            // an in-stream `overloaded_error` exactly like the same failure sent as a 529. It used
-            // to become `.invalidResponse`, which nothing retries: "Invalid response: Overloaded"
-            // with zero retries, where the identical HTTP 529 got three.
+            // Mapped to the HTTP status it stands for, so the retry classifier treats an in-stream `overloaded_error` like the
+            // same failure sent as a 529.
             if let status = streamErrorStatus(forType: type) {
                 logger.notice("[ANTHROPIC] In-stream error '\(type ?? "?")' mapped to HTTP \(status). CONSEQUENCE: classified like that status — retried when transient (overloaded, rate limit, server error), fatal otherwise.")
                 return .fail(LLMProviderError.httpError(status, payload))
@@ -733,15 +684,9 @@ struct ClaudeLLMProvider: LLMProvider {
         }
     }
 
-    /// The response's `thinking` / `redacted_thinking` blocks, VERBATIM — signature and all — for
-    /// replay on the next tool turn, or nil when there are none.
-    ///
-    /// ⚠️⚠️ READINESS CR-23 (2026-10-10). Thinking was reduced to its text (`thought`, for the UI) and
-    /// the `signature` was discarded, while `ClaudeToolTurnAdapter` replayed only text + `tool_use`.
-    /// Anthropic requires the thinking blocks of the last assistant turn to be passed back UNCHANGED
-    /// when a tool loop continues on the same model: on the budget-thinking tier with thinking on,
-    /// iteration 2 failed ("Expected `thinking` … found `tool_use`"); on adaptive models the reasoning
-    /// continuity was lost. Only ever replayed into the same run, on the same model, unedited.
+    /// The response's `thinking` / `redacted_thinking` blocks verbatim, signature included, for replay on the next tool turn;
+    /// nil when there are none. Anthropic requires the last assistant turn's thinking blocks to be passed back unchanged when
+    /// a tool loop continues on the same model, so they are only replayed into the same run, on the same model, unedited.
     static func thinkingReplay(in blocks: [[String: Any]]) -> JSONValue? {
         let thinking = blocks.filter { ["thinking", "redacted_thinking"].contains($0["type"] as? String ?? "") }
         guard !thinking.isEmpty else { return nil }
@@ -821,8 +766,8 @@ struct ClaudeLLMProvider: LLMProvider {
 
 // MARK: - Test Seam
 
-// ⚠️ Thin pass-throughs to the private builders above — they add NO logic of their own, which is
-// the only reason asserting on them is equivalent to asserting on a live request.
+// Thin pass-throughs to the private builders above that add no logic, so asserting on them equals asserting on a
+// live request.
 extension ClaudeLLMProvider {
 
     /// Renders the agent/cognitive-step request body without issuing a request.

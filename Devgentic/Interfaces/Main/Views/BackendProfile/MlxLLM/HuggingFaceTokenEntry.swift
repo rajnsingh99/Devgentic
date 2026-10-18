@@ -4,27 +4,19 @@
 //  HuggingFaceTokenEntry.swift
 //  Devgentic
 //
-//  Three surfaces said "you need a HuggingFace token" and none of them could take one: the
-//  listing 401, the download 401 and the gated-model badge all pointed at Settings › General
-//  with no way to get there. This is the token field, at the place the failure happens.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// Enter (or replace) the HuggingFace access token without leaving the screen that needed it.
-///
-/// ⚠️ The token is written to the Keychain via `HuggingFaceTokenStore` and is NEVER held in this
-/// view beyond the draft the user is typing — the same rule Settings › General follows, which
-/// shows a masked form rather than reading a saved secret back into a field.
-///
-/// ⚠️ Verification reuses `HuggingFaceAccountCheck`, so this sheet and Settings cannot drift into
-/// two different opinions about what a working token is. As there, the save is unconditional and
-/// the verdict only changes what is SAID: a user on a bad network must still be able to paste one.
+/// Enter or replace the HuggingFace access token without leaving the screen that needed it.
+/// The token is stored in the Keychain via `HuggingFaceTokenStore` and never held beyond the user's draft.
+/// Verification reuses `HuggingFaceAccountCheck`; the save is unconditional and the verdict only changes what is said.
 struct HuggingFaceTokenEntrySheet: View {
 
+    // Why: fires on save, not on a `.valid` verdict: the token is in use either way, and gating would strand an
+    // inconclusive check.
     /// Called after a successful Keychain write, so the caller can retry whatever hit the 401.
-    /// ⚠️ Fires on SAVE, not on a `.valid` verdict — the token is in use either way, and gating
-    /// the retry on a network check would strand a user whose check was merely inconclusive.
     var onSaved: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -105,18 +97,8 @@ struct HuggingFaceTokenEntrySheet: View {
         saveFailed = false
         showsShapeWarning = false
 
-        // ⚠️ Shape check WARNS, it does not refuse — HuggingFace has shipped more than one token
-        // format, and refusing a valid one because it fails a guess is the worse failure.
-        //
-        // This comment previously described a check this file did not perform: `looksLikeToken`
-        // appeared nowhere here, so Settings warned on a malformed paste and the sheet did not —
-        // the exact drift the header claims sharing `HuggingFaceAccountCheck` prevents.
-        //
-        // ⚠️ Registers KC-49 + KC-50. BOTH used to run before the save result was known: the
-        // shape warning was set first (so a FAILED save showed "It has been saved anyway"
-        // beside "Couldn't save to the Keychain"), and `draft` was wiped first (so a failed
-        // save left nothing to retry). The step that can fail runs first; the annotations and
-        // the wipe only follow a confirmed store.
+        // Shape check warns, it does not refuse: HuggingFace has shipped more than one token format.
+        // The step that can fail runs first; the annotations and the draft wipe follow only a confirmed store.
         let stored = HuggingFaceTokenStore.shared.store(draft)
         guard stored else {
             saveFailed = true

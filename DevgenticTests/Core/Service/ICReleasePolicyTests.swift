@@ -4,11 +4,7 @@
 //  ICReleasePolicyTests.swift
 //  DevgenticTests
 //
-//  The IC model residency decision table. Pure — no MLX, no model load.
-//
-//  Two invariants matter more than any individual case:
-//    1. Never free while a generation is in flight.
-//    2. A turn's sequential IC features share ONE load (release is idle-debounced).
+//  Created by Raj Singh.
 //
 
 import XCTest

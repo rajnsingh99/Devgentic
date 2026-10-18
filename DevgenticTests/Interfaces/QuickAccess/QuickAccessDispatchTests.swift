@@ -4,34 +4,7 @@
 //  QuickAccessDispatchTests.swift
 //  DevgenticTests
 //
-//  ⚠️ THE FIRST TESTS THIS SURFACE HAS EVER HAD. Nine production files under
-//  `Devgentic/Interfaces/QuickAccess/` and, before this file, no test named
-//  `QuickAccessSessionViewModel`, `QuickAccessPanel` or `QuickAccessWindow` — while Orb, the
-//  other non-main surface, had 269 tests across 48 classes.
-//
-//  That gap mattered most exactly where it was widest. QuickAccess handed the send path a REVERSED
-//  SLICE OF `currentChatMessages` as model history — the panel's PAGINATION WINDOW, a hard 20 rows
-//  that never grew, because QuickAccess never calls `loadMoreMessages` (its only caller is the main
-//  window's `ChatHistoryView`). The panel therefore gave the model at most 20 messages where the
-//  main window gave up to `BackendHistoryResolver.messageLimit` (300), and it reset on every
-//  summon. `architecture_readme.md` §7 invariant #8 forbids exactly this in writing — "Never
-//  substitute the view's `currentChatMessages`: that is a pagination window, not the conversation"
-//  — and nothing could have caught the violation.
-//
-//  ⚠️ Why these test `panelTurn` and a source scan rather than `submitQuery`.
-//  `QuickAccessSessionViewModel.init` takes a `MainApplicationViewModel`, whose init runs
-//  `ChatOpsCoordinator.bootstrap()` — real Telegram/Discord/Slack connections when the developer
-//  has them configured. A unit test must never be able to do that, so the contract that carries
-//  the defect is extracted, as it was for `OrbSessionController.voiceTurn` and
-//  `SchedulerCoordinator.prepareScheduledRequest`.
-//
-//  ⚠️ The STORE is no longer a blocker: `persistence` was widened to `ChatPersistenceProtocol` on
-//  2026-09-07 (the `FetchDescriptor` that pinned it moved to `recentConversations(limit:)`), and
-//  `activeStreamManager` to `any MessageStreamStarting`. The view model is now ONE dependency away
-//  from being constructible here — `mainAppViewModel`, used for `backendConfiguration`,
-//  `messagingCoordinator.fileProcessor` and `WorkflowRunBootstrap`'s registry. Until that is
-//  narrowed the panel's orchestration stays untested: conversation bootstrap, the `[C3]` load wait,
-//  stop/cancel, and the completion identity guard.
+//  Created by Raj Singh.
 //
 
 import XCTest

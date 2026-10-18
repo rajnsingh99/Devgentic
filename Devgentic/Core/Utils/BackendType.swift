@@ -4,7 +4,7 @@
 //  BackendType.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import Foundation

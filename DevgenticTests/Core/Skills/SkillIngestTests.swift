@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillIngestTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Reading skills off disk into memory, and refusing what must not reach the database.
-//
-//  ⚠️ Two groups of tests here have a shared point: the things V4/V5 DROPPED SILENTLY. It indexed
-//  five hardcoded subdirectories and only captured files that decoded as UTF-8, which was survivable
-//  while the disk stayed authoritative. Under V6 a dropped file is one the user permanently loses,
-//  so "does every file arrive, byte-exact" is a correctness test, not a thoroughness one.
+//  Created by Raj Singh.
 //
 
 import XCTest

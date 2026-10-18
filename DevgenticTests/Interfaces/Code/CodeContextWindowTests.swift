@@ -4,12 +4,7 @@
 //  CodeContextWindowTests.swift
 //  DevgenticTests
 //
-//  Code's context window (2026-09-24). On device an 8K Ollama window held ~5.5K of Code prompt and
-//  tools before any work; step 5 of a run reached 8,051 of 8,192, Ollama dropped the start of the
-//  prompt, and the run ended without an answer.
-//    A — a per-project Context Size for Code, defaulting to the model's window capped at 32K
-//    B — the gauge warns when the fixed part fills most of the window, and reports a step the
-//        provider actually had to cut (from its real count, never the estimate)
+//  Created by Raj Singh.
 //
 
 import XCTest

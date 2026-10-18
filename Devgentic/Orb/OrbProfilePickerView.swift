@@ -4,13 +4,12 @@
 //  OrbProfilePickerView.swift
 //  Devgentic
 //
-//  [Orb] Stage 1 of the HUD: choose which Bot/Agent profile powers the
-//  session. Redesigned with Tactile Dark Glass card components, provider chips,
-//  and smooth hover feedback.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Stage 1 of the Orb HUD: choose which Bot/Agent profile powers the session, using profile cards with provider chips.
 struct OrbProfilePickerView: View {
     let controller: OrbSessionController
 

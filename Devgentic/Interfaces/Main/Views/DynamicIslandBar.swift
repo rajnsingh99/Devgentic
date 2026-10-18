@@ -4,17 +4,13 @@
 //  DynamicIslandBar.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  A contextual floating bar that sits above non-chat content.
-//  Houses a back button on the left, optional center content
-//  (e.g., search bar or title), and view-specific action buttons
-//  on the right (e.g., Delete/Save for profiles).
-//  Centered within the content column with rounded corners.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A contextual floating bar above non-chat content: a back button on the left, optional center content,
+/// and view-specific action buttons on the right.
 struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
 
     @Environment(MainViewRouter.self) private var router
@@ -29,11 +25,8 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
     /// and then call `router.goBack()` themselves). Defaults to `router.goBack()`.
     let onBack: (() -> Void)?
 
-    /// Override for the leading button's SF Symbol. Defaults to `chevron.left`
-    /// (the standard "back" affordance). Modal-context consumers (e.g. the
-    /// workflow profile editor) pass `xmark` so the leading button reads as
-    /// "cancel / dismiss this sheet" rather than "navigate back through the
-    /// router stack." Pair with a custom `onBack` that performs the dismiss.
+    /// Override for the leading button's SF Symbol; defaults to `chevron.left`.
+    /// Modal consumers pass `xmark` so the button reads as cancel/dismiss; pair it with a custom `onBack` that dismisses.
     let leadingSymbol: String
 
     init(
@@ -50,12 +43,8 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Back button — always present, prominent style with hover.
-            // Disabled + dimmed when the navigation stack is empty so the
-            // affordance stays visible but clearly inert.
-            // Help text and VoiceOver label both show the target route
-            // ("Back to Chat", "Back to Settings") so users know where
-            // they're about to land before committing.
+            // Back button: always present, disabled and dimmed when the navigation stack is empty.
+            // Help text and VoiceOver label name the target route ("Back to Chat").
             IslandIconButton(
                 symbol: leadingSymbol,
                 style: .prominent,
@@ -65,11 +54,8 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
             ) {
                 performBack()
             }
-            // Custom leading symbol = consumer is in modal-cancel mode; the
-            // router context-menu (Back to Chat / Back to Settings / etc.) is
-            // meaningless there, and the cancel action shouldn't be disabled
-            // just because the router stack is empty — modal dismiss is always
-            // available.
+            // A custom leading symbol means modal-cancel mode: the router context menu is meaningless and the cancel action
+            // stays enabled even when the router stack is empty.
             .disabled(leadingSymbol == "chevron.left" && !router.canGoBack)
             .contextMenu {
                 if leadingSymbol == "chevron.left" {
@@ -91,10 +77,8 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
         .padding(.vertical, 10)
         .modifier(IslandBackdropModifier(reduceTransparency: reduceTransparency, theme: theme))
         .overlay(
-            // `surfaceOverlayStrong` is theme-contrasting (white-tint on dark themes,
-            // black-tint on light) so the edge stays legible on any wallpaper
-            // bleeding through the glass — unlike dividerColor, which can match
-            // the backdrop on some themes and disappear.
+            // `surfaceOverlayStrong` contrasts with the theme, so the edge stays legible on any wallpaper behind the glass,
+            // unlike `dividerColor`.
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(theme.surfaceOverlayStrong.opacity(0.7), lineWidth: 0.5)
         )
@@ -222,13 +206,10 @@ extension DynamicIslandBar where CenterContent == EmptyView, TrailingContent == 
 
 // MARK: - Title Label Helper
 
-/// Title label for islands that have no search bar — used by Settings, Scheduler,
-/// Download Manager, User Profile. Replaces the hand-rolled `HStack + Image + Text`
-/// pattern that drifted across container views.
+/// Title label for islands that have no search bar (Settings, Scheduler, Download Manager, User Profile).
 struct IslandTitleLabel: View {
 
-    /// ⚠️ `LocalizedStringKey` — see `CategoryChip.title`. This is the header of every
-    /// container view, so a `String` here left the whole navigation chrome untranslated.
+    /// `LocalizedStringKey` so the navigation chrome of every container view is translatable.
     let title: LocalizedStringKey
     var icon: String? = nil
 
@@ -291,8 +272,7 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel {
 }
 
 extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingContent == EmptyView {
-    /// Island with just a title label — replaces bare `DynamicIslandBar()` calls
-    /// that previously left the capsule visually empty.
+    /// Island with just a title label.
     init(title: LocalizedStringKey, icon: String? = nil, onBack: (() -> Void)? = nil, leadingSymbol: String = "chevron.left") {
         self.onBack = onBack
         self.leadingSymbol = leadingSymbol
@@ -307,50 +287,16 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingCont
 
 // MARK: - Unsaved-changes back guard
 
-/// Attach to any detail-view container to block back-navigation when the
-/// editor has unsaved changes. Pass the result as `onBack:` to the island
-/// bar's initializer and this modifier handles the confirmation dialog +
-/// discard path.
-///
-/// Usage:
-/// ```
-/// @State private var showingBackAlert = false
-///
-/// body {
-///     VStack {
-///         DynamicIslandBar(onBack: handleBack) { ... }
-///         ...
-///     }
-///     .unsavedChangesBackGuard(
-///         isDirty: editBuffer.isDirty,
-///         showingAlert: $showingBackAlert,
-///         onDiscard: { editBuffer.revert() },
-///         onLeave: { leave() }
-///     )
-/// }
-///
-/// private func handleBack() {
-///     if editBuffer.isDirty { showingBackAlert = true }
-///     else { leave() }
-/// }
-/// ```
-///
-/// ⚠️ `handleBack` and the guard's `onLeave` must call the SAME exit. Wiring a second exit path
-/// around the guard is register A28: the workflow sheet's xmark went straight to `dismiss()`, so
-/// closing it destroyed every edit with no prompt while the identical view, routed, prompted
-/// correctly.
+// Why: `handleBack` and the guard's `onLeave` must call the same exit; a second path around the guard drops edits unprompted.
+/// Blocks back-navigation from a detail-view container while the editor has unsaved changes.
+/// Pass the result as `onBack:` to the island bar; this modifier handles the confirmation dialog and discard path.
 struct UnsavedChangesBackGuardModifier: ViewModifier {
     let isDirty: Bool
     @Binding var showingAlert: Bool
     var onDiscard: () -> Void = {}
 
-    /// How to actually LEAVE once the user has confirmed the discard.
-    ///
-    /// ⚠️ This used to be a hardcoded `router.goBack()` (register A28). The three detail views are
-    /// each hosted two ways — as a routed screen, and as a sheet inside the workflow canvas — and
-    /// `router.goBack()` is meaningless in the sheet. That is *why* the sheet's xmark was wired
-    /// straight to `dismiss()`, bypassing this guard entirely: the guard could not have dismissed
-    /// it. Parameterising the exit is what lets both hosts share one guard.
+    // Why: not a hardcoded `router.goBack()`: a workflow-canvas sheet host cannot use it; each host supplies its exit.
+    /// How to leave once the user has confirmed the discard.
     var onLeave: () -> Void
 
     func body(content: Content) -> some View {

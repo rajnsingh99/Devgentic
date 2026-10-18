@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  Phase 5: the global ceiling — the outermost COMPUTE limit on any run, opened at admission.
+//  GlobalCeilingTests.swift
+//  DevgenticTests
 //
-//  ⚠️ Waits are bounded and outcomes are read from boxes: a sentinel that never fires must fail a
-//  test, not hang the runner.
+//  Created by Raj Singh.
 //
 
 import XCTest

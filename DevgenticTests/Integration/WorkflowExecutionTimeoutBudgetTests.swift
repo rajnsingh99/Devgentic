@@ -4,18 +4,7 @@
 //  WorkflowExecutionTimeoutBudgetTests.swift
 //  DevgenticTests
 //
-//  WF-EX9 — end-to-end regression guard for the retry-loop restructuring in
-//  `executeStructuralNodeBounded`: ONE `withComputeTimeout` now wraps the WHOLE retry loop, so the
-//  compute-timeout sentinel's clock is cumulative across every attempt instead of being re-armed
-//  fresh inside the loop on each one. Previously a node configured "0.3s timeout, 2 retries" (3
-//  attempts, `limit` = 0.9s — already sized for the whole run) got a FRESH full 0.9s window on
-//  EVERY attempt, so real worst-case exposure was `outerAttempts × limit` (≈2.7s here), not
-//  `limit` (0.9s) — the quadratic-in-retries shape WF-EX9 describes.
-//
-//  Isolated into its own file rather than appended to WorkflowExecutorIntegrationTests.swift — this
-//  session's own established trap: `-only-testing:Class/Method` has silently returned zero test
-//  cases for newly-added methods in that (very large, repeatedly-edited) file before. `makeInnerBotWorkflow`
-//  is private there, so this file duplicates its ~6 lines inline rather than reaching across files.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,15 +4,13 @@
 //  OnboardingModelDownloadView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/09/26.
-//
-//  Pick one of five starter models and download it. The download is mandatory: Continue stays
-//  disabled until the model is on disk. If it fails, two retries are offered; after those, only
-//  "Skip for now" (see `OnboardingViewModel.downloadRecovery`).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Lets the user pick one of five starter models and download it; Continue stays disabled until the model is on disk.
+/// On failure two retries are offered, then only "Skip for now" (see `OnboardingViewModel.downloadRecovery`).
 struct OnboardingModelDownloadView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(\.appTheme) private var theme

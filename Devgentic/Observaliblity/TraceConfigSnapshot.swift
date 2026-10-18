@@ -4,29 +4,7 @@
 //  TraceConfigSnapshot.swift
 //  Devgentic
 //
-//  Per-trace capture of the COMPLETE effective request configuration. This is the
-//  single biggest missing piece for offline bug reproduction — without it, a trace
-//  tells us "what happened" but not "in what context." With it, the Report Inspector
-//  can show exactly which profile, model, tool set, capabilities, memory budget,
-//  retry policy, and hardware were in effect when the bug occurred.
-//
-//  Captured at `TraceRecorder.beginTrace(...)` via `captureConfigSnapshot(...)` and
-//  persisted to the `trace_configs` table (1 row per trace, FK cascade-deletes with
-//  the parent trace).
-//
-//  Privacy:
-//  - API keys / bot tokens NEVER captured (stripped at the ProviderConfig read).
-//  - Instructions are full-text per product decision (diagnostic value > privacy
-//    since this is on-device only).
-//  - File paths sanitized via `TelemetrySanitizer.sanitizeFull(level: .standard)`
-//    at the capture site.
-//  - Full snapshot also passes through sanitizer when serialized.
-//
-//  Extensibility:
-//  - Adding a new top-level field: add to the struct + `indexedFields` if it needs
-//    its own column, otherwise it lives in `snapshot_json` for free.
-//  - New indexed column: add to struct AND to the v3 migration AND to the snapshot
-//    JSON encoding. Three places, ~3 lines each.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -51,16 +29,8 @@ struct RetryPolicySnapshot: Codable, Sendable {
     let backoffStrategy: String         // "fixed" / "exponential"
 }
 
-/// The per-tier caps that can terminate a run, as RESOLVED for the run.
-///
-/// ⚠️ Register A38. `TraceConfigSnapshot` recorded none of these, so when a run was stopped by the
-/// parse-failure, tool-failure, repetition or denial breaker, the limit that stopped it was
-/// unrecoverable from telemetry — only the breaker's own log line survived, and that is not in the
-/// trace. Reconstructing it after the fact was impossible: `Auto` resolves through the profile's
-/// legacy `retryPolicy.maxRetries` (register A70), which may since have changed.
-///
-/// ⚠️ Stores the RESOLVED values, not the overrides. A stored `nil` means "Auto", and Auto is
-/// exactly the thing you cannot look up later.
+/// The per-tier caps that can terminate a run, as resolved for the run.
+/// Stores resolved values, not overrides: a stored nil means "Auto", which cannot be looked up later.
 struct ResilienceSnapshot: Codable, Sendable {
     let maxParseFailures: Int
     let maxConsecutiveToolFailures: Int
@@ -118,9 +88,7 @@ struct TraceConfigSnapshot: Codable, Sendable {
     let instructions: String?           // full text per product decision Q3
     let instructionsLength: Int
     let instructionsHash: String?       // SHA256, truncated — fast equality checks
-    /// ⚠️ Register A38: the RESOLVED cap, never nil for a profile type that has one. It used to
-    /// store the raw optional, so a profile on the default recorded `nil` — and "the run stopped at
-    /// its iteration limit" could not be checked against a number that was not written down.
+    /// The resolved iteration cap, never nil for a profile type that has one, so a stop at the limit can be checked.
     let maxIterations: Int?
     /// Whether `maxIterations` came from the profile or from the app default.
     let maxIterationsIsDefault: Bool
@@ -150,16 +118,8 @@ struct TraceConfigSnapshot: Codable, Sendable {
 
     // MARK: - Factory
 
-    /// Constructs a snapshot from a live BackendRequestConfig + runtime context.
-    /// All sensitive data (API keys, tokens) is omitted by design — this factory
-    /// never reads those fields off `ProviderConfig`.
-    ///
-    /// - Parameters:
-    ///   - traceID: the trace this snapshot belongs to
-    ///   - config: the request config (profile + llmConfig)
-    ///   - history: incoming conversation history (for turn count only)
-    ///   - files: attached files (for summary only)
-    ///   - codeMemory: Code mode's per-run project knowledge (AGENTS.md + memory listing) if active
+    /// Constructs a snapshot from a live `BackendRequestConfig` and runtime context.
+    /// Sensitive data (API keys, tokens) is omitted by design; this factory never reads those fields off `ProviderConfig`.
     static func capture(
         traceID: String,
         config: BackendRequestConfig,
@@ -170,10 +130,8 @@ struct TraceConfigSnapshot: Codable, Sendable {
 
         let profile = config.profile
 
-        // --- Per-type extraction ---
-        // Workflow profiles delegate to per-node profiles and have no single llmConfig.
-        // For those traces we use placeholder "workflow" values — the individual node
-        // traces will have their own full snapshots.
+        // Workflow profiles delegate to per-node profiles and have no single llmConfig, so placeholder "workflow" values
+        // are used; the node traces carry their own full snapshots.
         let llmConfig: ProviderConfig?
         let toolsEnabled: [String]
         let toolsRequireConfirmation: [String]
@@ -214,10 +172,7 @@ struct TraceConfigSnapshot: Codable, Sendable {
             if cfg.capabilities.agentDelegation != nil { caps.append("agentDelegation") }
             capabilitiesEnabled = caps
             instructions = cfg.instructions
-            // ⚠️ Register A38: the RESOLVED value. `cfg.maxIterations` is nil for a profile on the
-            // default, and a trace saying "nil" cannot answer "what stopped this run?". The
-            // fallback is the same constant the executor uses, so the number written here is the
-            // number that actually bounded the loop.
+            // Records the resolved value: `cfg.maxIterations` is nil on the default, and the fallback is the executor's constant.
             maxIterations = cfg.maxIterations ?? AgentExecutionDefaults.maxIterations
             maxIterationsIsDefault = cfg.maxIterations == nil
             executionTimeoutSec = cfg.executionTimeout
@@ -231,10 +186,7 @@ struct TraceConfigSnapshot: Codable, Sendable {
                     hasCustomFallbackMessage: $0.fallbackMessage != nil
                 )
             }
-            // ⚠️ Register A38. Resolved through the SAME function the runtime uses, so a trace
-            // records the caps that were actually in force — including when they came from `Auto`,
-            // which resolves via the profile's legacy `retryPolicy.maxRetries` (register A70) and
-            // is therefore not reconstructable after the profile changes.
+            // Resolved through the same function the runtime uses, so the trace records the caps in force, including `Auto`.
             let resolvedPolicy = ResolvedResiliencePolicy.resolved(
                 for: ProviderClass(apiProvider: cfg.llmConfig.apiProvider),
                 overrides: cfg.resilienceOverrides,
@@ -330,10 +282,8 @@ struct TraceConfigSnapshot: Codable, Sendable {
         let codeMemoryLength = codeMemoryContent?.count
         let codeMemoryHash = codeMemoryContent.flatMap { Self.shortHash($0) }
 
-        // --- Attached files summary (never content) ---
-        // File sizes are pulled from URL resource values at capture time. `try?` so
-        // unreadable / nonexistent files simply contribute 0 to the total, matching
-        // what a user would expect — we're capturing a snapshot, not validating files.
+        // Attached-files summary (never content): sizes come from URL resource values at capture time;
+        // unreadable or missing files contribute 0.
         let totalBytes = files.reduce(Int64(0)) { sum, item in
             let size = (try? item.url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
             return sum + size
@@ -344,9 +294,7 @@ struct TraceConfigSnapshot: Codable, Sendable {
             fileTypes: Array(Set(files.map { ($0.url.pathExtension).lowercased() }.filter { !$0.isEmpty })).sorted()
         )
 
-        // --- Advanced config: serialize JSONValue → String (keys + stringified values) ---
-        // Redacts common secret keys via TelemetrySanitizer.sanitizeJSONKeys at the
-        // serialization level, so nothing sensitive leaks through advancedConfiguration.
+        // Advanced config serialized to strings; common secret keys are redacted via `TelemetrySanitizer.sanitizeJSONKeys`.
         var advanced: [String: String] = [:]
         if let adv = llmConfig?.advancedConfiguration {
             for (key, value) in adv {
@@ -406,10 +354,8 @@ struct TraceConfigSnapshot: Codable, Sendable {
 
     // MARK: - Helpers
 
-    /// SHA-256 hash, first 8 bytes as 16 lowercase hex chars. Stable across launches
-    /// (unlike Swift's `hashValue`, whose `Hasher` seed is randomized per process),
-    /// so the cross-trace equality joins the partial index was built for actually work.
-    /// Enough for equality checks; not a cryptographic commitment.
+    /// SHA-256 hash, first 8 bytes as 16 lowercase hex chars. Stable across launches (unlike `hashValue`), so cross-trace
+    /// equality joins work. Enough for equality checks; not a cryptographic commitment.
     static func shortHash(_ s: String) -> String {
         let digest = SHA256.hash(data: Data(s.utf8))
         return digest.prefix(8).map { String(format: "%02x", $0) }.joined()

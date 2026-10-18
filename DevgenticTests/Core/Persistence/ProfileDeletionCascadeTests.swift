@@ -4,18 +4,7 @@
 //  ProfileDeletionCascadeTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Register A30 — deleting a profile cascaded only to its own workflow layout, leaving scheduled
-//  tasks and other workflows' nodes pointing at a dead ID.
-//
-//  ⚠️ Investigating the fix narrowed it. The WORKFLOW half turned out to be already covered:
-//  `WorkflowValidator.validateProfileNode` reports an unresolvable profile as a blocking `.error`,
-//  and `WorkflowExecutor` runs that same validation pre-flight and refuses to start — so every entry
-//  point is gated, not just the canvas UI. Those tests are here because that behaviour is now
-//  load-bearing for A30: if it ever regresses, deleting a profile silently breaks workflows again.
-//
-//  The genuinely uncovered half was the scheduler, which failed the task on every fire, forever.
+//  Created by Raj Singh.
 //
 
 import XCTest

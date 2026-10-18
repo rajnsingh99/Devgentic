@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillImportPlanTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  What happens when an import's name is already in the library.
-//
-//  ⚠️ This decision USED TO BE IMPLICIT in `SkillStore.create` always inserting, which meant
-//  re-importing a skill — the obvious way to update one — produced a second skill with the same
-//  name. Skills are addressed by NAME at run time, so one of the two became unreachable by
-//  `load_skill`: a library that looks right and an agent reading the wrong instructions. And with no
-//  delete UI at the time, the duplicate could not be removed.
+//  Created by Raj Singh.
 //
 
 import XCTest

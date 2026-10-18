@@ -4,19 +4,15 @@
 //  ProjectMemoryTools.swift
 //  Devgentic
 //
-//  `remember`, `forget` and `recall`: a Code run's only way to change or read project memory
-//  (`ProjectMemoryStore`). They replace `update_project_context`, which rewrote one whole file.
-//
-//  ⚠️ `remember` CHECKS what it is told before writing — the old tool wrote whatever it was given,
-//  and on the 2026-10-06 device run that put `python build -m math_utils` and a `cargo build` for
-//  a project with no Rust into every later conversation. A refusal returns an `Error:` line that
-//  says what to do instead, so the model gets a cheap, specific correction.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - remember
 
+/// `remember`, `forget` and `recall`: a Code run's only way to change or read project memory (`ProjectMemoryStore`).
+/// `remember` checks what it is told before writing; a refusal returns an `Error:` line saying what to do instead.
 struct RememberTool: DevgenticTool {
 
     let name = "remember"

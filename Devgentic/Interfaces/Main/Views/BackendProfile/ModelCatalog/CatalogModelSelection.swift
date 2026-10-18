@@ -4,37 +4,18 @@
 //  CatalogModelSelection.swift
 //  Devgentic
 //
-//  What picking a model from the catalog writes into a profile's provider config.
-//
-//  ⚠️ WHY (2026-10-09). The catalog wrote only capability, dialect and modalities. The model's
-//  metadata (tier, quantization, family, window), chat-template source and stop sequences were
-//  left as they were — the PREVIOUS model's values, or the `.medium` placeholder
-//  `MLXContextWindowHealer` creates for a profile with none. A Qwen2.5-3B agent profile was stored
-//  as "Medium" tier, and the coordinator, estimating from that tier, refused the run as needing
-//  ~20 GB. Saving did not repair it: the catalog never wrote the fields, so there was nothing new
-//  to save. Runs looked right only because `LiveModelDetection` re-detects at run start; anything
-//  reading the stored copy saw the stale one.
-//
-//  A pick now replaces every measured field. Nothing measured on the previous model survives.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// What picking a model from the catalog writes into a profile's provider config.
+/// A pick replaces every measured field (tier, quantization, family, window, template, stop sequences).
 enum CatalogModelSelection {
 
-    /// `config` with `model` picked: its provider and name, and every measurement describing it.
-    ///
-    /// A local model's measurements come from the analyzer result the catalog entry carries
-    /// (`detectedProfile`) — read from the profile's OWN Ollama server or MLX folder, so a
-    /// same-named model elsewhere cannot answer for it. A cloud model is not measured: it gets
-    /// the catalog's capability, dialect, modalities and window, and no local-only artifacts.
-    ///
-    /// The endpoint: an MLX model runs in-process, so it has none — a pick clears whatever an
-    /// earlier provider left (an MLX profile once stored Ollama's `http://localhost:11434`, shown in
-    /// every profile dump though nothing used it). Any other pick takes the user's saved endpoint
-    /// for the vendor, else the server the catalog listed the model from, else keeps the current one.
-    ///
-    /// Key and the provider-switch reset are the caller's.
+    /// Returns `config` with `model` applied: its provider, name and every measurement describing it.
+    /// Local measurements come from the entry's `detectedProfile`; cloud models are not measured.
+    /// An MLX pick clears the endpoint; other picks take the saved vendor endpoint, else the catalog's, else the current.
     static func applying(_ model: CatalogModelItem, to config: ProviderConfig,
                          savedEndpoint: String? = nil) -> ProviderConfig {
         var out = config

@@ -4,33 +4,17 @@
 //  GitRepositoryLocator.swift
 //  Devgentic
 //
-//  Answers "which repository would git actually operate on from here?" so the workspace
-//  boundary can check git's BEHAVIOUR rather than only its arguments.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "GitRepositoryLocator")
 
+// Why: `git -C <dir>` walks UP to the nearest `.git`, so validating the argument cannot catch an escape to a parent
+// repo; the boundary asks git where it would go and applies the policy to that answer.
 /// Resolves the repository root git would discover from a directory.
-///
-/// ⚠️⚠️ WHY THIS EXISTS. `WorkspaceBoundary` validates the path a tool was HANDED. That is
-/// sufficient for every other preset tool, because `read_file("<root>/x")` reads exactly
-/// `<root>/x`. It is not sufficient for `git`, because `git -C <dir>` does not operate on
-/// `<dir>` — it walks UP from `<dir>` until it finds a `.git`, and operates on whatever it finds.
-///
-/// Field-observed 2026-09-20: a Code session rooted at `…/cp-dsa/java` ran `git_tool(status)`
-/// with a perfectly compliant in-project path. The repository is at `…/cp-dsa`, one level ABOVE
-/// the project, so `status --short` returned the parent repo's changes — files the project folder
-/// does not contain — and the boundary had nothing to object to, because the ARGUMENT was fine.
-///
-/// **Argument validation structurally cannot catch this.** The escape is in git's discovery
-/// algorithm, not in the string. So the boundary asks git where it would go, and applies the
-/// ordinary policy to the ANSWER.
-///
-/// Injectable because the boundary decision must stay unit-testable without a real repository on
-/// disk — and because a test that had to `git init` a fixture to assert a policy would be
-/// asserting git's behaviour rather than ours.
+/// Injectable so boundary decisions are unit-testable without a real repository on disk.
 struct GitRepositoryLocator: Sendable {
 
     /// Returns the absolute repository toplevel for `directory`, or nil when it is not inside a
@@ -42,16 +26,13 @@ struct GitRepositoryLocator: Sendable {
     static let live = GitRepositoryLocator { directory in
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory, isDirectory: &isDirectory) else { return nil }
-        // `rev-parse` needs a DIRECTORY to walk up from. A file path (e.g. `blame` targeting a
-        // file) would make git resolve relative to the process cwd instead — which is not the
-        // project, and would silently answer about the wrong repository.
+        // `rev-parse` needs a directory to walk up from; a file path would resolve against the process cwd
+        // instead and silently answer about the wrong repository.
         let start = isDirectory.boolValue ? directory : (directory as NSString).deletingLastPathComponent
 
         do {
-            // ⚠️ The SAME hardening the tool itself applies. `rev-parse --show-toplevel` does not
-            // read the index or render a diff, so no repo-nominated program should fire here — but
-            // this runs against a repository the user has not vouched for yet, which is the one
-            // place not to rely on "should".
+            // Same hardening as the tool itself: this runs against a repository the user has not vouched for,
+            // so no repo-nominated program may fire.
             let run = try ProcessRunner.run(
                 executable: "/usr/bin/git",
                 arguments: ["-C", start] + GitCommandBuilder.hardening + ["rev-parse", "--show-toplevel"],

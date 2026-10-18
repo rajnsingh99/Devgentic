@@ -4,14 +4,7 @@
 //  LiveModelDetectionTests.swift
 //  DevgenticTests
 //
-//  A local model's capability is resolved when a run starts, not trusted from the profile.
-//
-//  ⚠️ The defect class these hold off (2026-10-03): the profile stored what detection found when
-//  its model was picked, and every Ollama/MLX run treated that copy as truth. The onboarding
-//  profile was saved with NO detection (so it ran text-only), the editor re-detected into the
-//  draft only (editor said "Parallel Actions", runs used "Text Only"), a typed model name kept the
-//  previous model's values, and a re-pulled model stayed stale forever for runs that never open
-//  an editor (scheduled, ChatOps, workflow nodes).
+//  Created by Raj Singh.
 //
 
 import XCTest

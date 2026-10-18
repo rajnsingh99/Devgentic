@@ -4,8 +4,7 @@
 //  FloatingPillStackTests.swift
 //  DevgenticTests
 //
-//  Per-mode membership of the floating pill stack. Build 102.7 dropped the Background Tasks and
-//  Code Viewer pills from Code mode by sharing QuickAccess's Chat-only gate; these pin the matrix.
+//  Created by Raj Singh.
 //
 
 import XCTest

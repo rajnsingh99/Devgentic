@@ -4,28 +4,20 @@
 //  QuickAccessScreenCaptureService.swift
 //  Devgentic
 //
-//  [QA revival P3] Screenshot capture for the QuickAccess panel. Runs the system's
-//  interactive capture (`screencapture -i`): crosshair region-select, spacebar toggles to
-//  window-pick — the native UX, covering both "capture a region" and "capture a window"
-//  with one flow. The panel is ordered out during capture so it never occludes the shot
-//  (works because Phase 0 made the panel non-activating: the user's app is still frontmost).
-//
-//  Permission: Screen Recording TCC. The app never called CGRequestScreenCaptureAccess
-//  anywhere (recon bug #9) — without one request the app doesn't even appear in
-//  System Settings → Privacy & Security → Screen Recording for manual enablement.
-//  Note: macOS applies a first-time grant only after the app is relaunched.
+//  Created by Raj Singh.
 //
 
 import AppKit
 import CoreGraphics
 
+/// Screenshot capture for the QuickAccess panel via the system's interactive `screencapture -i` (region or window pick).
+/// Needs Screen Recording permission; a first-time grant takes effect only after the app is relaunched.
 @MainActor
 enum QuickAccessScreenCaptureService {
 
     enum PermissionState {
         case granted
-        /// Just prompted (or previously denied) — not usable this launch; a fresh grant
-        /// takes effect after relaunch.
+        /// Just prompted (or denied earlier): not usable this launch; a fresh grant takes effect after relaunch.
         case denied
     }
 
@@ -37,19 +29,9 @@ enum QuickAccessScreenCaptureService {
 
     // MARK: - Temp-file cleanup [H1]
 
-    /// True if `url` is one of our interactive-capture temp files (lives in the temporary
-    /// directory and carries the capture prefix).
-    /// Uses `sameLocation` rather than `URL` equality. **This is hardening, not a bug fix** —
-    /// the previous `==` on two `standardizedFileURL`s was correct here, and measured to be:
-    /// both sides are directory-flavoured (`deletingLastPathComponent()` and
-    /// `temporaryDirectory` both produce trailing slashes), and `standardizedFileURL` already
-    /// strips a `/private` prefix, so the `/private/var/folders/…` form matched too.
-    ///
-    /// It is changed because the guard fails in the UNSAFE direction — a false negative means
-    /// `deleteCaptureTempFileIfNeeded` silently no-ops and an unsent screenshot, which
-    /// routinely contains secrets, lingers in $TMPDIR. `sameLocation` additionally resolves
-    /// real symlinks (`standardizedFileURL` does not), so a caller that hands us a path through
-    /// a symlinked directory still gets swept. The prefix check confines deletion to our files.
+    // Why: a false negative leaves an unsent screenshot, which may hold secrets, in $TMPDIR
+    /// True if `url` is one of our interactive-capture temp files (in the temporary directory, with the capture prefix).
+    /// Uses `sameLocation`, which also resolves symlinks, so a path through a symlinked directory is still swept.
     nonisolated static func isCaptureTempFile(_ url: URL) -> Bool {
         url.deletingLastPathComponent().sameLocation(as: FileManager.default.temporaryDirectory)
             && url.lastPathComponent.hasPrefix(captureFilePrefix)
@@ -103,9 +85,8 @@ enum QuickAccessScreenCaptureService {
         let panel = AppDelegate.shared?.contentWindow
         panel?.orderOut(nil)
         defer {
-            // [C5] Only restore the panel we hid. If the user re-summoned during the (interactive,
-            // possibly long) capture, a NEW panel replaced it — re-showing this now-stale one would
-            // leave a zombie panel on screen. Identity-guard against the current contentWindow.
+            // Restores only the panel we hid: if the user re-summoned during capture a new panel replaced it, and re-showing
+            // the stale one would leave a zombie. Identity-guarded against the current contentWindow.
             if let panel, panel === AppDelegate.shared?.contentWindow {
                 panel.makeKeyAndOrderFront(nil)
             }

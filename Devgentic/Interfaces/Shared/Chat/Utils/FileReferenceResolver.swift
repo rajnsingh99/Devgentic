@@ -4,51 +4,30 @@
 //  FileReferenceResolver.swift
 //  Devgentic
 //
-//  Decides which inline `code` spans in a chat message are FILE REFERENCES the user can tap
-//  to open in the Code Viewer.
-//
-//  A model's prose is full of inline code that looks file-ish but isn't — `Double.NaN`,
-//  `System.out.println`, `array.map`, `AbstractionDemo`. A shape rule ("has a dot and an
-//  extension") would linkify most of them, and every dead link costs more trust than the live
-//  ones earn. So a span qualifies only two ways, and NEITHER is shape alone:
-//
-//    1. ABSOLUTE PATH — rooted at `/` or `~/`, no whitespace, not a directory.
-//    2. BARE FILENAME — matches, exactly, a file this conversation actually read or wrote
-//       (see `fileIndex(from:)`). Membership in that index is the filter; `Double.NaN` was
-//       never a tool argument, so it can never resolve.
-//
-//  Both then require a readable regular file to exist at the resolved path RIGHT NOW.
-//
-//  SILENT BY DESIGN: a span that doesn't qualify stays plain text. There is no "couldn't open"
-//  state, because there is no link to tap in the first place.
-//
-//  Candidate extraction here is PURE and synchronous — it does no I/O, so it is safe to call
-//  from a view body. Existence checking is separate and belongs off the main thread; see
-//  `verifyExisting(_:)` and its caller in `ContentBlockView`.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "FileReferenceResolver")
 
+/// Decides which inline code spans in a chat message are file references the user can tap to open in the Code Viewer.
+/// A span qualifies as an absolute path or as a bare filename the conversation read or wrote; the file must exist.
+/// Candidate extraction is pure (no I/O); existence checking is separate and belongs off the main thread.
 enum FileReferenceResolver {
 
     /// Longest span still considered — well past any real path, short enough that a pasted
     /// blob of code inside backticks is rejected before any per-character work.
     static let maxPathLength = 1024
 
-    /// True when `span` is SHAPED like an absolute file path. Pure, no filesystem access.
-    ///
-    /// Rejects, in order: over-long spans, anything not rooted at `/` or `~/`, spans with
-    /// interior whitespace or newlines (prose, shell command lines, `cd /tmp && ls`), and
-    /// directories written with a trailing slash — the viewer opens files, not folders.
+    /// Returns true when `span` is shaped like an absolute file path; pure, no filesystem access.
+    /// Rejects over-long spans, anything not rooted at `/` or `~/`, interior whitespace, and trailing-slash directories.
     static func looksLikeAbsolutePath(_ span: String) -> Bool {
         let trimmed = span.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= maxPathLength else { return false }
         guard trimmed.hasPrefix("/") || trimmed.hasPrefix("~/") else { return false }
-        // A path with a space in it is legal on macOS, but inside a markdown code span it is
-        // far more often a command (`/usr/bin/env python x.py`). Requiring no whitespace is
-        // the conservative read, and matches how these paths are actually emitted.
+        // A path with a space is legal, but in a code span it is far more often a command (`/usr/bin/env python x.py`),
+        // so requiring no whitespace is the conservative read.
         guard !trimmed.contains(where: { $0.isWhitespace }) else { return false }
         guard !trimmed.hasSuffix("/") else { return false }
         // Bare `/` and `~/` are roots, not files.
@@ -70,12 +49,8 @@ enum FileReferenceResolver {
     /// at 255 bytes, so anything longer cannot be one.
     static let maxFileNameLength = 255
 
-    /// True when `span` could be a bare filename — no directory part, no whitespace.
-    ///
-    /// Deliberately permissive, because shape is NOT the filter here: a bare name only
-    /// resolves if the conversation actually touched a file called that (see
-    /// `candidatePath(_:in:)`). Trying to recognise "looks like a filename" by shape is what
-    /// linkifies `Double.NaN` and `array.map`; membership in the index cannot.
+    /// Returns true when `span` could be a bare filename (no directory part, no whitespace).
+    /// Deliberately permissive: a bare name only resolves if the conversation touched a file of that name.
     static func looksLikeBareFileName(_ span: String) -> Bool {
         let trimmed = span.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= maxFileNameLength else { return false }
@@ -100,19 +75,14 @@ enum FileReferenceResolver {
         candidateLinks(inCodeSpans: codeSpans(inMarkdown: text), index: index)
     }
 
-    /// Every distinct candidate path in a rendered block, in no particular order.
-    ///
-    /// Takes the already-parsed runs rather than re-scanning the markdown, so a path in
-    /// ordinary prose is ignored: only text the author marked as code is eligible.
+    /// Returns every distinct candidate path in a rendered block, in no particular order.
+    /// Takes already-parsed code spans rather than re-scanning markdown, so only text marked as code is eligible.
     static func candidates(inCodeSpans spans: [String]) -> Set<String> {
         Set(spans.compactMap(candidatePath))
     }
 
-    /// [mc-11] `candidateLinks` over spans the caller ALREADY parsed.
-    ///
-    /// The span→path DICTIONARY, not the `Set` the sibling above returns: a bare filename cannot
-    /// be re-derived from its path, so the renderer needs the key to decide which run becomes a
-    /// link. Swapping in the `Set` version to save the parse would leave every run unlinked.
+    /// Maps each code span to its candidate path, for spans the caller has already parsed.
+    /// A dictionary rather than a `Set`: a bare filename cannot be re-derived from its path.
     static func candidateLinks(inCodeSpans spans: [String], index: [String: String]) -> [String: String] {
         var links: [String: String] = [:]
         for span in spans {
@@ -123,24 +93,14 @@ enum FileReferenceResolver {
         return links
     }
 
-    /// The text of every inline `code` span in a markdown string.
-    ///
-    /// Parses with the same call `ContentBlockView.createStyledString` uses, so the spans
-    /// verified here are exactly the runs that will be considered for linking. Deriving them
-    /// from a different parse would let the two drift and produce links on the wrong ranges.
+    /// Returns the text of every inline code span in a markdown string.
+    /// Uses the same parse as `ContentBlockView.createStyledString`, so verified spans match the runs considered for links.
     static func codeSpans(inMarkdown text: String) -> [String] {
         guard let parsed = try? AttributedString(markdown: text) else { return [] }
         return parsed.runs.compactMap { run in
             guard (run.inlinePresentationIntent ?? []).contains(.code) else { return nil }
-            // ⚠️ An author's link whose LABEL is inline code — `[`Main.java`](https://…)` — is
-            // NOT a hazard here, and a guard against it was written and then removed. PROBED on
-            // this machine (macOS 26): Foundation's `AttributedString(markdown:)` drops the
-            // `.code` intent on a link label, emitting ONE run with `link` set and
-            // `inlinePresentationIntent` empty. So such a span never reaches this test, can
-            // never become a candidate, and the renderer's `.code` branch never sees it either —
-            // it falls to the ordinary-link branch and gets the accent colour and underline.
-            // Pinned in `LinkedCodeSpanTests`. Do not add a `run.link == nil` guard on the
-            // strength of reasoning about markdown: this parser does not work that way.
+            // A link whose label is inline code never reaches here: `AttributedString(markdown:)` drops `.code` on link labels,
+            // so no `run.link == nil` guard is needed (pinned by `LinkedCodeSpanTests`).
             return String(parsed[run.range].characters)
         }
     }
@@ -151,11 +111,8 @@ enum FileReferenceResolver {
         candidates(inCodeSpans: codeSpans(inMarkdown: text))
     }
 
-    /// Filters `candidates` down to those that are readable REGULAR files right now.
-    ///
-    /// BLOCKING — every entry is a `stat`. Call it off the main thread. A path on an
-    /// unresponsive network mount can hang this for seconds, which is exactly why it must
-    /// never sit in a view body.
+    /// Filters `candidates` down to readable regular files that exist right now.
+    /// Blocking: every entry is a `stat`, so call it off the main thread (a network mount can hang for seconds).
     static func verifyExisting(_ candidates: Set<String>) -> Set<String> {
         var verified: Set<String> = []
         for path in candidates {
@@ -169,24 +126,12 @@ enum FileReferenceResolver {
 
     // MARK: - The conversation's own files
 
-    /// Params beyond this are not scanned for a path.
-    ///
-    /// A write's params carry the ENTIRE file as `content`, so JSON-decoding every tool call
-    /// in a long conversation would parse megabytes to find a handful of paths. Writes don't
-    /// need it — they already carry `effect.path` — so the cap only ever skips calls whose
-    /// path is already known by a cheaper route.
+    /// Params longer than this are not scanned for a path.
+    /// A write's params carry the whole file as `content`, and writes already carry `effect.path`, so skipping them is free.
     static let maxParamsScanLength = 2_048
 
-    /// `basename → absolute path`, built from the files this conversation actually touched.
-    ///
-    /// This index is the whole reason bare filenames are safe. A shape rule ("has a dot and an
-    /// extension") would linkify `Double.NaN`, `System.out.println` and `array.map`; requiring
-    /// the name to match a file the agent genuinely read or wrote cannot, because those names
-    /// were never tool arguments.
-    ///
-    /// AMBIGUITY IS DROPPED, NOT GUESSED. If a conversation touched both `src/Main.java` and
-    /// `test/Main.java`, a bare `Main.java` is genuinely unresolvable — and opening the wrong
-    /// file is worse than not linking, because it is silent. The name is excluded entirely.
+    /// Returns `basename → absolute path` for files this conversation actually read or wrote; membership is the filter.
+    /// Ambiguous basenames (same name in two directories) are dropped, since opening the wrong file is worse than no link.
     static func fileIndex(from messages: [ChatMessage]) -> [String: String] {
         var index: [String: String] = [:]
         var ambiguous: Set<String> = []
@@ -224,10 +169,8 @@ enum FileReferenceResolver {
 
     // MARK: - Link URLs
 
-    /// Private scheme, deliberately not `file:`. An unhandled `file:` link would be opened by
-    /// the SYSTEM — launching Xcode, or worse, whatever is registered for that extension —
-    /// on any surface where our `OpenURLAction` isn't installed. An unhandled private scheme
-    /// does nothing, which is the correct failure for a silent feature.
+    /// Private link scheme, deliberately not `file:`: an unhandled `file:` link would be opened by the system,
+    /// whereas an unhandled private scheme does nothing.
     static let scheme = "devgentic-file"
 
     /// The link URL for a verified path. Percent-encodes so spaces and unicode survive.
@@ -239,14 +182,9 @@ enum FileReferenceResolver {
         return components.url
     }
 
-    /// The path carried by one of our link URLs, or nil if this isn't one of ours.
-    ///
-    /// ⚠️ [CR18] "One of ours" means THE SHAPE IS OURS — nothing more. This is a parser, not an
-    /// authorisation check, and a caller must not treat a non-nil return as permission to open
-    /// the path. A model can write `[x](devgentic-file://open?path=/anything)` in an ordinary
-    /// reply and it reaches here indistinguishable from a link we minted. The caller has to
-    /// check the path against the set it actually verified — `ContentBlockView` does that against
-    /// `resolvedFileLinks`.
+    /// Returns the path carried by one of our link URLs, or nil if the URL is not ours.
+    /// This is a parser, not an authorisation check: a model can write such a link, so callers must check the path
+    /// against the set they actually verified (`ContentBlockView` uses `resolvedFileLinks`).
     static func path(fromLinkURL url: URL) -> String? {
         guard url.scheme == scheme, url.host == "open" else { return nil }
         guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?

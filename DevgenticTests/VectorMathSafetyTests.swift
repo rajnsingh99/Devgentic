@@ -4,10 +4,7 @@
 //  VectorMathSafetyTests.swift
 //  DevgenticTests
 //
-//  TDD: RAG Tier 1 — VectorMath Defensive Safety (R1 + R2)
-//
-//  R1: dotProduct silently returns 0.0 on dimension mismatch → should return nil or signal error
-//  R2: l2Normalize returns zero vector unchanged → violates HNSW unit-vector contract
+//  Created by Raj Singh.
 //
 
 import XCTest

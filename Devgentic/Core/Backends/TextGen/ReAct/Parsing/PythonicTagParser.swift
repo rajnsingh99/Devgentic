@@ -4,12 +4,7 @@
 //  PythonicTagParser.swift
 //  Devgentic
 //
-//  Fallback parser for the <|python_tag|> format used by Llama 3.1 variants.
-//  Expected formats:
-//    <|python_tag|>{"name": "tool", "parameters": {"key": "val"}}
-//    <|python_tag|>[{"name": "tool", "parameters": {"key": "val"}}]
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

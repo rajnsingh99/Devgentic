@@ -2,24 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  OllamaContentSplitTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  `OllamaLLMProvider.splitProseAndJSON` must never lose a character of the model's answer.
-//
-//  ⚠️⚠️ WHY THIS FILE EXISTS (F4). On the no-native-tool-calls path the provider splits `content`
-//  into prose and a leaked-tool-call JSON block, then hands the BLOCK to the parser. Two defects
-//  combined to destroy output:
-//
-//    1. The splitter accepted any BALANCED `{…}`/`[…]` as the block. `[truncated]`, `[the docs]`,
-//       `[1]`, `[a-z]`, `[INFO]` are all balanced and all ordinary prose.
-//    2. The scanner returned only the text BEFORE the block, so everything after it was dropped.
-//
-//  Field-observed 2026-09-20: a 474-byte answer reached the parser as the 11-byte string
-//  "[truncated]" — which is exactly `"[truncated]".count`. Measured against the pre-fix splitter,
-//  a single markdown link cost 81% of the response.
-//
-//  ⚠️ These assert at the PROVIDER level on purpose. `BalancedJSONScannerTests` pins the scanner's
-//  contract; this pins what the user actually receives, which is the thing that was wrong.
+//  Created by Raj Singh.
 //
 
 import XCTest

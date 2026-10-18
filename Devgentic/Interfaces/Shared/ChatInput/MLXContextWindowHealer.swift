@@ -4,21 +4,14 @@
 //  MLXContextWindowHealer.swift
 //  Devgentic
 //
-//  Heals MLX profiles saved BEFORE the trained context window was read from config.json.
-//  Their persisted `modelMetadata.contextWindow` is nil, so the context gauge and every
-//  window-derived budget (compaction / RAG / native-turn) fall back to the conservative
-//  8K guess — the "why is my 131K model showing 8K?" case.
-//
-//  MLX metadata is derived once at model-pick time and then frozen in the saved profile;
-//  there's no re-derivation on load. Rather than force a manual re-pick, this looks the
-//  real window up from the on-disk model (via MLXModelService, which rescans at launch and
-//  already includes the config.json read) and — once per profile per session — writes it
-//  back into the profile so the budgets stop using 8K too.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Heals MLX profiles whose stored `modelMetadata.contextWindow` is nil, using the on-disk model's real window.
+/// Looks it up via `MLXModelService` and, once per profile per session, writes it back to the profile.
 @MainActor
 enum MLXContextWindowHealer {
 
@@ -44,10 +37,8 @@ enum MLXContextWindowHealer {
         return window
     }
 
-    /// Writes the healed window into the persisted profile so compaction / RAG / native-turn
-    /// budgets (which read the stored metadata, not the gauge) also stop using the 8K
-    /// fallback. Re-running is a no-op. Best-effort: a failure still leaves the gauge correct
-    /// for the session (the lookup above is independent), and the backfill retries next launch.
+    /// Writes the healed window into the persisted profile so compaction / RAG / native-turn budgets use it too.
+    /// Re-running is a no-op. Best-effort: a failure leaves the gauge correct and the backfill retries next launch.
     private static func persistBackfill(window: Int, profileID: UUID, modelName: String) {
         do {
             guard var snapshot = try BackendProfileStore.shared.fetchProfile(byId: profileID) else { return }
@@ -82,21 +73,10 @@ enum MLXContextWindowHealer {
         healedConfig(config, window: window)
     }
 
+    // Why: an optional-chained window write onto nil `modelMetadata` silently does nothing; create the metadata first.
     /// The config with its window healed, or nil when there is nothing to do.
-    ///
-    /// ⚠️ `modelMetadata` can be entirely nil, not merely missing its window. The previous
-    /// guard was `modelMetadata?.contextWindow == nil`, which is ALSO true in that case — so
-    /// the optional-chained assignment silently did nothing while `saveProfile` still ran and
-    /// logged success. Those profiles were therefore never healed, while a sibling profile on
-    /// the same model that happened to have metadata was: a permanent 8K-vs-real divergence,
-    /// with a log line claiming the opposite.
-    ///
-    /// Creating the metadata uses `.medium`, which is exactly what every tier consumer already
-    /// substitutes for nil (`AgentConnect`: `modelMetadata?.tier ?? .medium`), so nothing that
-    /// depends on tier changes behaviour — only the window is healed. Re-picking the model from
-    /// the catalog derives the real tier, quantization and family (`CatalogModelSelection`).
-    /// ⚠️ Until 2026-10-09 it did NOT: the catalog wrote no metadata, so this `.medium`
-    /// placeholder outlived every re-pick and save — a 3B model stored as "Medium" tier.
+    /// Creates `modelMetadata` when it is entirely nil, using `.medium`, the tier consumers already substitute for nil.
+    /// Only the window is healed; re-picking the model derives the real tier, quantization and family.
     private static func healedConfig(_ config: ProviderConfig, window: Int) -> ProviderConfig? {
         guard config.apiProvider == .mlx else { return nil }
         var healed = config

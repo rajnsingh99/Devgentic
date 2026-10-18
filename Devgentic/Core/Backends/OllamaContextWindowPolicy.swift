@@ -4,30 +4,14 @@
 //  OllamaContextWindowPolicy.swift
 //  Devgentic
 //
-//  Created on 12/07/26.
-//
-//  Single source of truth for the context window Ollama requests actually run
-//  under. Ollama allocates `num_ctx` tokens of KV cache per request — NOT the
-//  model's trained maximum. When no num_ctx is sent (and none is baked into the
-//  Modelfile), the server default (~4K) applies, and oversized prompts are
-//  silently HEAD-truncated — system prompt first — with no client-visible
-//  signal. Used by BOTH the request factory (what we send) and the retrieval
-//  budget (what we assume), so the two can never disagree.
-//
-//  ⚠️ That claim was FALSE until 2026-09-20 — see `OllamaRequestOptions` at the
-//  foot of this file for how the preset ladder let them disagree by 2x, and why
-//  the ladder now lives here rather than in `AgentConnect`.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
-/// Resolves the context window a request will EFFECTIVELY run under, per
-/// provider class — the ONE resolver behind the retrieval budget, the pre-flight
-/// fit check, and AgentConnect's memory/compaction + native-turn budgets, so
-/// they can never disagree about how much room a model actually has.
-/// (Before this, compaction budgets assumed 128K for ANY model missing metadata —
-/// including local ones whose real allocation was Ollama's ~4K default, so
-/// native turn arrays never compacted and Ollama silently truncated mid-run.)
+/// Resolves the context window a request will effectively run under, per provider class.
+/// The one resolver behind the retrieval budget, the pre-flight fit check and AgentConnect's compaction budgets,
+/// so they cannot disagree about how much room a model has.
 enum EffectiveContextWindow {
 
     /// The model's TRAINED maximum, when known (scan metadata, else catalog).
@@ -36,18 +20,10 @@ enum EffectiveContextWindow {
             ?? KnownModelContextWindows.lookup(config?.modelName ?? "")
     }
 
-    /// The window requests actually get: Ollama → the `num_ctx` in the options the
-    /// request factory will send; MLX → trained max (the app owns the prompt),
-    /// conservative 8K when unknown; cloud → trained/catalog, 128K when unknown
-    /// (overflow errors loudly there anyway).
-    ///
-    /// ⚠️⚠️ `flavour` is consulted for Ollama ONLY, and it is required rather than
-    /// defaulted on purpose. This function used to read `config.advancedConfiguration`
-    /// directly — which is nil for every profile whose Advanced panel was never opened,
-    /// i.e. the normal case — and so never saw the PRESET the factory materialises in
-    /// its place. The gauge read 16384 while the request ran at 8192. A default value
-    /// here would have let a caller keep skipping the question silently; making it
-    /// required is what forces each call site to say which ladder its profile is on.
+    // Why: profiles never opened in Advanced have no stored config and the factory materialises a preset,
+    // so the preset must be read through `flavour` or the gauge disagrees with the request.
+    /// The window requests actually get: Ollama `num_ctx` from the request options; MLX trained max (8K if unknown);
+    /// cloud trained/catalog (128K if unknown). `flavour` is consulted for Ollama only and is required, not defaulted.
     static func resolve(for config: ProviderConfig?, flavour: OllamaConfigDefaultProfile) -> Int {
         let trained = trainedWindow(for: config)
         switch config?.apiProvider {
@@ -74,10 +50,9 @@ enum EffectiveContextWindow {
 
 enum OllamaContextWindowPolicy {
 
-    /// Ceiling for the auto-default. KV cache costs real memory (roughly another
-    /// 0.5–1 GB for a 7B model at 8K), so we don't blindly allocate a
-    /// 128K-trained model's maximum; users can exceed this deliberately via the
-    /// profile's Advanced settings.
+    /// Ceiling for the auto-default.
+    /// KV cache costs real memory (roughly 0.5–1 GB more for a 7B model at 8K), so a 128K-trained model's maximum is
+    /// not allocated blindly; users can exceed this via the profile's Advanced settings.
     static let autoDefaultCap = 16_384
 
     /// What Ollama allocates when no num_ctx reaches it: 2,048 on older servers,
@@ -111,23 +86,10 @@ enum OllamaContextWindowPolicy {
     }
 }
 
-/// The options an Ollama request will ACTUALLY carry — the one place that answers it.
-///
-/// ⚠️⚠️ WHY THIS EXISTS. `OllamaContextWindowPolicy` above claims the request factory and the
-/// budgets "can never disagree", and for five weeks they did. The factory resolves a profile
-/// with no stored advanced configuration to the PRESET the Advanced panel displays, and every
-/// preset carries its own `numCtx` — 8192 for a small/medium model. `EffectiveContextWindow`
-/// asked the policy about `advancedConfiguration`, which is nil in exactly that case, so it fell
-/// through to the auto-default and answered 16384.
-///
-/// Field-observed 2026-09-20 on a Code session: the gauge read `~2471/16384 tok (24%)` while the
-/// request ran under `numCtx: 8192`. The direction is the harmful one — Ollama HEAD-truncates an
-/// oversized prompt, system instructions first, so the workspace-boundary rules and the
-/// termination contract are the first things dropped, and the model then "deviates" for reasons
-/// no log explains.
-///
-/// The fix is not another resolver. It is that the fallback ladder lives HERE, and both the
-/// factory and the budgets read the same resolved dictionary.
+// Why: a profile with no stored config runs under its preset's `numCtx`;
+// Ollama head-truncates oversized prompts, dropping system rules first.
+/// The options an Ollama request will actually carry: the one place that answers it.
+/// The fallback ladder lives here; the request factory and the context budgets read the same resolved dictionary.
 enum OllamaRequestOptions {
 
     /// What the factory resolved, and how — so `AgentConnect` can log the same lines it always
@@ -143,16 +105,9 @@ enum OllamaRequestOptions {
         var overrideNumCtx: Int? = nil
     }
 
-    /// Resolves stored configuration → preset ladder → `num_ctx` auto-default, in that order.
-    ///
-    /// ⚠️ `flavour` picks the ladder and is NOT cosmetic: `OllamaAdvancedConfig.default()` is the
-    /// AGENT preset, and handing it to a Bot pins a conversational profile to temperature 0.1
-    /// with a fixed seed, so every repeated prompt returns a byte-identical reply.
-    ///
-    /// The two ladders happen to agree on `numCtx` at every tier today, which is exactly why the
-    /// original defect stayed invisible — nothing downstream could be wrong about the window by
-    /// picking the other ladder. `EffectiveContextWindow.resolve` now takes the flavour too, so a
-    /// future divergence stays correct instead of quietly reintroducing the 2x gap.
+    // Why: handing the agent preset to a Bot pins a conversational profile to temperature 0.1 with a fixed seed.
+    /// Resolves stored configuration, then preset ladder, then `num_ctx` auto-default, in that order.
+    /// `flavour` picks the ladder and is not cosmetic; `EffectiveContextWindow.resolve` takes it too.
     static func resolve(
         stored: [String: JSONValue]?,
         metadata: ModelMetadata?,
@@ -166,11 +121,8 @@ enum OllamaRequestOptions {
         if let stored {
             options = stored
         } else {
-            // [advanced-config default] The Advanced panel DISPLAYS a preset whenever a profile
-            // has no stored configuration. Nothing persisted it, so the request used to carry no
-            // options at all and Ollama ran at its own ~0.8 default with random sampling: the
-            // agent produced exactly the loose, non-deterministic tool calls the preset exists to
-            // prevent, while the UI insisted it was at 0.10.
+            // The Advanced panel displays a preset whenever a profile has no stored configuration, so the request carries
+            // the same options instead of Ollama's own default sampling.
             let fallback: OllamaAdvancedConfig = metadata.map {
                 .recommended(for: $0, profile: flavour)
             } ?? (flavour == .agent ? .default() : .botPreset(for: .smallMedium))
@@ -179,10 +131,8 @@ enum OllamaRequestOptions {
             presetApplied = flavour
         }
 
-        // [num_ctx auto-default] When nothing above supplied a context window, send one sized to
-        // the model instead of inheriting Ollama's ~4K server default — which silently
-        // HEAD-truncates oversized prompts. min(trained max, cap) keeps KV-cache memory bounded;
-        // the value flows through the provider's existing numCtx → num_ctx mapping.
+        // When nothing above supplied a context window, send one sized to the model instead of Ollama's ~4K default,
+        // which head-truncates oversized prompts: min(trained max, cap) keeps KV-cache memory bounded.
         var autoNumCtx: Int?
         if OllamaContextWindowPolicy.configuredNumCtx(in: options) == nil,
            let auto = OllamaContextWindowPolicy.autoNumCtx(
@@ -194,9 +144,8 @@ enum OllamaRequestOptions {
             autoNumCtx = auto
         }
 
-        // [Code context size] Applied LAST so it wins over everything above — it is the one value
-        // the user set for exactly this run's project. Still in this function, not in a caller,
-        // so the request and every budget read the same window (see the note on this type).
+        // Applied last so it wins over everything above: the user set it for exactly this run's project. Kept in this
+        // function so the request and every budget read the same window.
         if let override = numCtxOverride, override > 0 {
             var merged = options ?? [:]
             merged["numCtx"] = .number(Double(override))

@@ -4,12 +4,7 @@
 //  BackgroundPollFoldingTests.swift
 //  DevgenticTests
 //
-//  Device test 2026-09-21: asked to "check on it periodically", the model produced NINE
-//  `command_status` calls in ~40 seconds — one every few seconds, because nothing lets it wait.
-//  ⚠️ That tool was withdrawn 2026-09-23; the folding now applies to `get_task_output`, which is
-//  the only remaining read path and is polled the same way.
-//  Each rendered as its own "Command bg_1" row, stacked above a card already showing the same
-//  status live.
+//  Created by Raj Singh.
 //
 
 import XCTest

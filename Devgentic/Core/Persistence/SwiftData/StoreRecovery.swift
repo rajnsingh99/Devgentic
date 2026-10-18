@@ -4,35 +4,7 @@
 //  StoreRecovery.swift
 //  Devgentic
 //
-//  Created on 04/08/26.
-//
-//  File operations behind the "can't open the database" recovery affordances.
-//
-//  ⚠️ THE STORE IS FOUR ARTIFACTS, NOT ONE FILE (SWIFTDATA_GAP_REGISTER.md G27):
-//      DevgenticSD.store          the SQLite database
-//      DevgenticSD.store-wal      write-ahead log — holds committed rows not yet checkpointed
-//      DevgenticSD.store-shm      shared-memory index
-//      .DevgenticSD_SUPPORT/      hidden sibling holding every @Attribute(.externalStorage)
-//                                 payload; on a real install it is LARGER than the store itself
-//
-//  Two consequences drive everything in this file:
-//
-//  1. A copy that takes only `.store` hands the user a backup missing their newest rows AND every
-//     image attachment. This machine already contained a real instance of that bug
-//     (`DevgenticSD.store.pre-revision-backup`, with no matching `-wal`).
-//
-//  2. Core Data derives the support directory's name from the store's BASE NAME. Renaming
-//     `DevgenticSD.store` does NOT rename `.DevgenticSD_SUPPORT` — so a fresh store created
-//     afterwards silently ADOPTS the quarantined store's external blobs and owns their lifecycle,
-//     which breaks the "this is reversible" promise (G29). The support directory must be renamed
-//     to match, in the same operation.
-//
-//  ⚠️ A PARTIAL MOVE IS WORSE THAN NO MOVE. If `.store` moves and `-wal` does not, the quarantined
-//  copy is silently incomplete AND the original location keeps an orphaned WAL that a newly created
-//  store could misinterpret. Every mutation here is therefore all-or-nothing with rollback.
-//
-//  This is UI-free on purpose so the risky part is unit-testable without a running app —
-//  `StoreRecoveryTests` exercises collisions, rollback, and the support-directory rename directly.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -47,11 +19,8 @@ struct QuarantineResult: Equatable {
     let movedArtifacts: [URL]
 }
 
-/// Companion stores that a SwiftData reset does NOT touch.
-///
-/// Named explicitly so the confirmation dialog can be honest: resetting the conversation database
-/// leaves the vector index, the media cache and the diagnostics database referencing conversations
-/// that no longer exist (G32).
+/// Companion stores that a SwiftData reset does not touch (vector index, media cache, diagnostics database), named so
+/// the confirmation dialog can warn they will reference conversations that are gone.
 struct CompanionStore: Equatable {
     let label: String
     let url: URL
@@ -85,10 +54,8 @@ enum StoreRecovery {
 
     // MARK: Artifact discovery
 
-    /// Every artifact belonging to `storeURL` that actually exists on disk.
-    ///
-    /// Ordered store-last: a move applies sidecars first so an interruption can never leave a
-    /// store file stranded without its WAL at the destination.
+    /// Every artifact belonging to `storeURL` that exists on disk, ordered store-last so a move applies sidecars first
+    /// and never strands a store file without its WAL.
     static func existingArtifacts(for storeURL: URL) -> [URL] {
         let artifacts = DevgenticSchema.storeArtifactURLs(for: storeURL)
         return [artifacts.support, artifacts.wal, artifacts.shm, artifacts.store]
@@ -119,10 +86,8 @@ enum StoreRecovery {
         return total
     }
 
-    /// The other persistent stores a SwiftData reset leaves untouched.
-    ///
-    /// Returned whether or not they exist, so the caller can filter and report accurately rather
-    /// than silently implying a reset was more complete than it was.
+    /// The other persistent stores a SwiftData reset leaves untouched. Returned whether or not they exist, so the caller
+    /// can filter and report accurately.
     static func companionStores(bundleIdentifier: String?) -> [CompanionStore] {
         guard let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
@@ -145,12 +110,8 @@ enum StoreRecovery {
 
     // MARK: Export
 
-    /// Copies the COMPLETE artifact set into a new folder inside `destinationDirectory`.
-    ///
-    /// A folder rather than a single file because the store genuinely is four things; flattening
-    /// them into one place the user chose is the only honest export.
-    ///
-    /// - Returns: the created folder.
+    /// Copies the complete artifact set into a new folder inside `destinationDirectory`; a folder because the store is
+    /// several files. - Returns: the created folder.
     @discardableResult
     static func exportCopy(
         of storeURL: URL,
@@ -197,14 +158,9 @@ enum StoreRecovery {
 
     // MARK: Quarantine ("start fresh")
 
-    /// Moves the COMPLETE artifact set aside so the app can create a new, empty store.
-    ///
-    /// All-or-nothing: if any artifact fails to move, everything already moved is put back and the
-    /// error says whether the rollback succeeded. Never deletes anything — the point of this
-    /// affordance is that it is reversible, unlike the silent wipe it replaces.
-    ///
-    /// - Parameter suffix: caller-supplied uniquifier (a timestamp), so this stays deterministic
-    ///   and therefore testable.
+    /// Moves the complete artifact set aside so the app can create a new, empty store. All-or-nothing: on a failed move,
+    /// everything already moved is put back and the error says whether the rollback succeeded. Never deletes anything.
+    /// `suffix` is a caller-supplied uniquifier so the result is deterministic.
     @discardableResult
     static func quarantine(storeURL: URL, suffix: String) throws -> QuarantineResult {
         let fileManager = FileManager.default
@@ -228,9 +184,8 @@ enum StoreRecovery {
         var completed: [(from: URL, to: URL)] = []
 
         for artifact in artifacts {
-            // ⚠️ The support directory is `.<base>_SUPPORT`, NOT `<base>.store<suffix>`, so it needs
-            // its own mapping. Renaming it in step with the store is what keeps the quarantined
-            // copy self-contained and stops a NEW store from adopting these blobs (G29).
+            // The support directory is `.<base>_SUPPORT`, not `<base>.store<suffix>`, so it needs its own mapping; renaming it
+            // in step keeps the quarantined copy self-contained and stops a new store adopting its blobs.
             let destination = destinationURL(
                 for: artifact,
                 originalBase: originalBase,
@@ -311,12 +266,8 @@ enum StoreRecovery {
         return fullyRestored
     }
 
-    /// A base name for which NO destination artifact already exists in `directory`.
-    ///
-    /// ⚠️ Checks all four destinations — store, `-wal`, `-shm` and the support directory — not just
-    /// the store. An interrupted earlier quarantine can leave a stray `-wal` behind with no store
-    /// beside it; treating that base name as free means the sidecar move fails mid-sequence and
-    /// forces a rollback that should never have been needed. Found by `StoreRecoveryTests`.
+    /// A base name for which no destination artifact exists in `directory`. Checks all four destinations (store, `-wal`,
+    /// `-shm`, support directory), since a stray `-wal` from an interrupted quarantine would force a rollback.
     private static func uniqueBaseName(in directory: URL, preferred: String, pathExtension: String) -> String {
         let fileManager = FileManager.default
         func isTaken(_ base: String) -> Bool {

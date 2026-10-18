@@ -4,10 +4,7 @@
 //  UIConstants.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
-//
-//  Centralized constants for the single-window interface.
-//  Prevents magic numbers from scattering across views.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,7 +4,7 @@
 //  WhisperModelCatalogTests.swift
 //  DevgenticTests
 //
-//  Tests for WhisperModelCatalog and WhisperModelInfo.
+//  Created by Raj Singh.
 //
 
 import XCTest

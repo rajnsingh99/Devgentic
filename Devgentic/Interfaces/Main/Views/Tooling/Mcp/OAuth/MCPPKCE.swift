@@ -4,16 +4,7 @@
 //  MCPPKCE.swift
 //  Devgentic
 //
-//  RFC 7636 / RFC 8252 PKCE helpers for the OAuth authorization-code flow.
-//  PKCE replaces the client-secret in public clients (desktop, mobile) by
-//  binding the auth-code exchange to a randomly-generated proof.
-//
-//  Flow:
-//    1. Client generates `codeVerifier` (random URL-safe string, 43-128 chars)
-//    2. Client computes `codeChallenge = base64url(SHA256(codeVerifier))`
-//    3. Client sends `codeChallenge` + `codeChallengeMethod=S256` on /authorize
-//    4. After redirect, client sends `codeVerifier` on /token
-//    5. Server hashes verifier and matches against the original challenge
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,7 +15,7 @@ import CryptoKit
 /// embedded in the authorize URL and is safe to hand to the OS browser.
 struct MCPPKCEPair: Sendable {
 
-    /// Random URL-safe string, 43-128 characters per RFC 7636 §4.1.
+    /// A random URL-safe string of 43-128 characters, per RFC 7636 section 4.1.
     let verifier: String
 
     /// `base64url(SHA256(verifier))` — what we send to the authorization
@@ -69,8 +60,8 @@ enum MCPPKCE {
 // MARK: - base64url helper
 
 extension Data {
-    /// RFC 4648 §5 base64url encoding: standard base64 with `+`→`-`, `/`→`_`,
-    /// and trailing padding stripped. Required by RFC 7636 for PKCE.
+    /// RFC 4648 section 5 base64url encoding: standard base64 with `+` to `-`, `/` to `_` and padding
+    /// stripped, as PKCE requires.
     func base64URLEncodedString() -> String {
         var s = base64EncodedString()
         s = s.replacingOccurrences(of: "+", with: "-")

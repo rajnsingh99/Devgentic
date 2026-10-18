@@ -4,14 +4,7 @@
 //  MCPOAuthTokenExchange.swift
 //  Devgentic
 //
-//  Two POSTs to the AS token endpoint:
-//
-//   - Authorization-code exchange: trade the redirect-handed `code` (plus
-//     PKCE verifier) for an access_token + (optionally) refresh_token.
-//   - Refresh exchange: trade a refresh_token for a fresh access_token.
-//
-//  Both use the public-client form (no client secret) — `client_id` goes in
-//  the body, `token_endpoint_auth_method=none`. Per RFC 6749 §4.1.3 / §6.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,6 +12,7 @@ import os
 
 private let logger = DGLogger(category: "MCPOAuthTokenExchange")
 
+/// Errors raised by the OAuth token endpoint exchanges (authorization code and refresh).
 enum MCPOAuthTokenExchangeError: LocalizedError {
     case http(status: Int, body: String?)
     case malformedResponse(String)
@@ -42,9 +36,8 @@ enum MCPOAuthTokenExchangeError: LocalizedError {
     }
 }
 
-/// RFC 6749 §5.1 token response. We model the success-shape; on non-2xx the
-/// AS returns a different shape (`{ error, error_description, error_uri }`)
-/// which we decode into `OAuthErrorResponse` and surface as a typed error.
+/// RFC 6749 token response (success shape). On non-2xx the server returns `{ error, error_description, error_uri }`,
+/// decoded into `OAuthErrorResponse` and surfaced as a typed error.
 private struct OAuthTokenResponse: Decodable {
     let accessToken: String
     let tokenType: String                // expected "Bearer"
@@ -101,9 +94,8 @@ struct MCPOAuthTokenExchange {
         return resolve(response: response)
     }
 
-    /// Refresh an access token using a previously-issued refresh token.
-    /// Throws `missingRefreshToken` if the bundle has no refresh token —
-    /// caller should fall back to a full re-auth.
+    /// Refreshes an access token using an earlier-issued refresh token.
+    /// Throws `missingRefreshToken` if the bundle has none; the caller should fall back to a full re-auth.
     static func refresh(
         bundle: MCPOAuthCredentialBundle,
         metadata: MCPOAuthMetadata,
@@ -127,15 +119,9 @@ struct MCPOAuthTokenExchange {
         return resolve(response: response, fallbackScopes: bundle.grantedScopes)
     }
 
-    /// Best-effort RFC 7592 §2.3 registration deletion, used when the user deletes an MCP
-    /// server whose client was dynamically registered. Register KC-64: the registration access
-    /// token used to be persisted and NEVER read — the client registration lived on at the
-    /// provider forever, with a valid credential for managing it sitting unused in the Keychain.
-    ///
-    /// Deliberately non-throwing and best-effort, exactly like `revoke`: deleting a server must
-    /// succeed even when the provider is unreachable or does not implement RFC 7592 (an AS that
-    /// does not will answer 405 per §2.3, or 501). The injection point keeps it testable without
-    /// a network.
+    /// Best-effort RFC 7592 registration deletion, used when the user deletes an MCP server with a dynamic client.
+    /// Non-throwing like `revoke`: deleting a server must succeed even when the provider is unreachable or lacks RFC 7592.
+    /// The injection point keeps it testable without a network.
     static func deleteRegistration(
         registrationClientUri: URL,
         registrationAccessToken: String,
@@ -171,11 +157,8 @@ struct MCPOAuthTokenExchange {
     }
 
     /// Best-effort RFC 7009 revocation, used when the user deletes an MCP server.
-    ///
-    /// Purging the Keychain only makes Devgentic forget the token; the token itself stays
-    /// valid at the provider until it expires. Revoking tells the AS to invalidate it now.
-    /// Deliberately non-throwing: deleting a server must succeed even when the provider is
-    /// unreachable or does not implement revocation.
+    /// Purging the Keychain only forgets the token; revoking tells the provider to invalidate it now.
+    /// Non-throwing: deleting a server must succeed even when the provider is unreachable or lacks revocation.
     static func revoke(
         token: String,
         tokenTypeHint: String,
@@ -199,7 +182,7 @@ struct MCPOAuthTokenExchange {
 
             let (_, response) = try await session.data(for: req)
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            // RFC 7009 §2.2: the AS returns 200 even for an unknown token.
+            // RFC 7009: the AS returns 200 even for an unknown token.
             if (200..<300).contains(status) {
                 logger.info("[MCP-OAUTH] Revoked \(tokenTypeHint) at \(MCPRedaction.redact(url: revocationEndpoint.absoluteString)).")
             } else {
@@ -219,15 +202,9 @@ struct MCPOAuthTokenExchange {
 
     // MARK: - Private
 
-    /// `application/x-www-form-urlencoded` POST per RFC 6749 §3.2.
-    ///
-    /// The token endpoint must be HTTPS for any non-loopback issuer. That IS now
-    /// enforced — `MCPOAuthDiscovery.validateDocument` scheme-checks every endpoint in
-    /// the metadata document before it is ever handed here. Until 2026-08-01 this comment
-    /// claimed the same thing but it was not true: discovery only validated the issuer URL
-    /// the caller passed in, never the endpoints the server returned, so an
-    /// attacker-supplied `"token_endpoint": "http://…"` would have been posted to in the
-    /// clear, carrying the authorization code and PKCE verifier.
+    /// `application/x-www-form-urlencoded` POST per RFC 6749.
+    /// The token endpoint must be HTTPS for any non-loopback issuer; `MCPOAuthDiscovery.validateDocument` checks every
+    /// endpoint before it reaches here.
     private static func postForm(
         to endpoint: URL,
         params: [(String, String)],
@@ -256,9 +233,8 @@ struct MCPOAuthTokenExchange {
             throw MCPOAuthTokenExchangeError.malformedResponse("Non-HTTP response.")
         }
 
-        // OAuth errors come back with status 4xx and a structured JSON body.
-        // Decode that shape preferentially before falling back to a raw HTTP
-        // error so we can surface `invalid_grant` / `invalid_client` cleanly.
+        // OAuth errors arrive as 4xx with a structured JSON body; decode that before falling back to a raw HTTP error,
+        // so `invalid_grant` / `invalid_client` surface cleanly.
         if !(200..<300).contains(http.statusCode) {
             if let oauthErr = try? JSONDecoder().decode(OAuthErrorResponse.self, from: data) {
                 throw MCPOAuthTokenExchangeError.oauthError(error: oauthErr.error, description: oauthErr.errorDescription)
@@ -290,8 +266,7 @@ struct MCPOAuthTokenExchange {
             }
             return fallbackScopes
         }()
-        // Token shape (issuer/aud/exp) is *deliberately* not logged — only
-        // the fact of success and the expiry. Token text never hits the log.
+        // Token text and claims are deliberately not logged, only the fact of success and the expiry.
         logger.info("Token exchange OK — expiresIn=\(Int(expiresIn))s scopes=\(scopes.joined(separator: ","))")
         return (response.accessToken, response.refreshToken, expiresAt, scopes)
     }

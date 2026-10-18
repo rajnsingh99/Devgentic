@@ -4,19 +4,15 @@
 //  CodeToolsGuideView.swift
 //  Devgentic
 //
-//  Premium macOS split-view guide highlighting the built-in tools assigned to the Code interface.
-//
-//  ⚠️ `tools` below is a HAND-MAINTAINED SECOND LIST of what `CodeToolPreset` grants — the shape
-//  `NativeToolCatalog` exists to remove. It stays hand-written because it carries prose the
-//  catalogue has no room for (`whySplit`, per-parameter detail), but it is `static` and internal
-//  so `CodeToolsGuideDriftTests` can assert every preset tool has an entry. It had neither when
-//  three tools were added on 2026-09-21 and the guide silently kept describing sixteen.
-//  Details each tool's domain, description, parameters, and confirmation safety policy.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// A split-view guide to the built-in tools assigned to the Code interface: domain, description, parameters
+/// and confirmation policy. `tools` is a hand-maintained list of what `CodeToolPreset` grants, static and
+/// internal so a test can assert every preset tool has an entry.
 struct CodeToolsGuideView: View {
 
     @Environment(\.dismiss) private var dismiss

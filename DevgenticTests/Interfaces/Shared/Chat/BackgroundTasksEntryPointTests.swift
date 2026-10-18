@@ -4,20 +4,7 @@
 //  BackgroundTasksEntryPointTests.swift
 //  DevgenticTests
 //
-//  Two gaps that shipped together, both invisible to the existing suites.
-//
-//  ── 1. The panel had ONE door ───────────────────────────────────────────────────────────
-//
-//  `showBackgroundTasks(` had a single call site: tapping a `BackgroundTaskCard`. That card is
-//  pinned to the turn that produced it, so a build started six turns ago scrolls out of view and
-//  takes the panel's only entry point with it. The panel's own empty state was unreachable by
-//  construction — nothing could open it except a card, and a card only exists once a task has run.
-//
-//  ── 2. `discard(conversationID:)` had ZERO production call sites ─────────────────────────
-//
-//  It terminated the process tree and removed the log directory, and nothing ever called it. A
-//  conversation deleted while a dev server was running left that server holding CPU and appending
-//  to a log no surface could reach — the list view is keyed by conversation — until quit.
+//  Created by Raj Singh.
 //
 
 import XCTest

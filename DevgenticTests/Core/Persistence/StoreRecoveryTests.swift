@@ -4,17 +4,7 @@
 //  StoreRecoveryTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards the recovery affordances offered when the database cannot be opened.
-//
-//  These operations run at the worst possible moment — the app is already failing, the user is
-//  already alarmed, and the file being moved holds every conversation they have. The two failure
-//  modes that matter are silent INCOMPLETENESS (an "export" missing the WAL and the image blobs)
-//  and silent PARTIALITY (a move that leaves the store split across two names). Both are tested
-//  here directly, without a running app.
-//
-//  See SWIFTDATA_GAP_REGISTER.md G27, G29, G30, G31, G33.
+//  Created by Raj Singh.
 //
 
 import XCTest

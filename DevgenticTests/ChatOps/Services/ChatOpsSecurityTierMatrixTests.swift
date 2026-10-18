@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsSecurityTierMatrixTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The whole tier table, pinned.
-//
-//  ⚠️⚠️ WHY THIS FILE EXISTS. `ChatOpsSecurityGate.canExecute` is the entire authorization policy
-//  for untrusted remote input, and before 2026-09-10 exactly ONE of its arms was asserted anywhere
-//  in the suite — `DiscordChatOpsBridgeTests` exercised the `.unknown` case. Nothing pinned which
-//  verb sat in which tier, so a verb added to the always-allowed arm could not turn anything red.
-//  That is precisely how `.conversationHistory` — which renders every message's BODY — came to be
-//  served at `.readOnly`, the shipped default, whose own UI string promises "Can only view status
-//  and list conversations".
-//
-//  ⚠️ THIS IS A TABLE, SO A TABLE TEST IS THE RIGHT SHAPE, but a table test is policy-only by
-//  nature: it proves the gate ANSWERS correctly, never that a caller ASKS. `testEveryInboundPath...`
-//  at the bottom reads the real bridge sources for that half, and `ChatOpsReplyCorrelationGateTests`
-//  covers the one path that used to skip the gate entirely.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  QueryRewriteGuardTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 11/07/26.
-//
-//  Covers the rewrite topic-retention guard: a rewrite must EXPAND the query
-//  (resolve references by adding history context), never replace its topic.
-//  Both rejected cases below were observed on-device from the Qwen2.5-3B
-//  rewriter; the guard falls back to the raw query, which is always safe.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,15 +4,13 @@
 //  MLXUIComponents.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/02/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
-/// Circular progress indicator used on MLX model cards during an in-flight
-/// download. Shows percentage in the center by default; on hover, swaps to an
-/// X icon so the user can request cancellation with a single click.
-/// The parent is responsible for confirming the cancel action via alert.
+/// Circular progress indicator for an in-flight MLX model download; shows the percentage and swaps to
+/// an X on hover. The parent confirms the cancel action via an alert.
 struct MLXDownloadProgressCircle: View {
     let progress: Double
     let onCancelRequested: () -> Void
@@ -22,9 +20,7 @@ struct MLXDownloadProgressCircle: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        // A real Button, not a tap gesture on a shape. `onTapGesture` puts nothing in the
-        // accessibility tree and cannot be reached by keyboard or VoiceOver, so cancelling a
-        // download was pointer-only.
+        // A real Button rather than a tap gesture, so cancelling is reachable by keyboard and VoiceOver.
         Button(action: onCancelRequested) {
             circleBody
         }
@@ -37,10 +33,8 @@ struct MLXDownloadProgressCircle: View {
                 isHovered = hovering
             }
         }
-        // ⚠️ The old code push/popped `NSCursor` from `onHover`. Any exit event that never
-        // arrives — the view being removed mid-hover, which is exactly what happens when a
-        // download completes — leaks a pushed cursor onto the stack for the whole app.
-        // `pointerStyle` is tied to the view's lifetime instead.
+        // `pointerStyle` is tied to the view's lifetime; pushing and popping `NSCursor` from `onHover` leaks a
+        // cursor if the exit event never arrives.
         .pointerStyle(.link)
         .help("Cancel download")
     }

@@ -4,18 +4,7 @@
 //  MicrophoneSelection.swift
 //  Devgentic
 //
-//  Which microphone dictation records from (2026-09-27). Before this every session opened macOS's
-//  DEFAULT input: WhisperKit's `AudioStreamTranscriber` calls `startRecordingLive` with no device,
-//  and nothing above it passed one — the only way to change it was System Settings → Sound.
-//
-//  ⚠️ Remembered by device UID, never by `AudioDeviceID`. The numeric id is assigned per boot and
-//  per plug-in; the UID is stable. It is resolved to an id at the moment a session starts.
-//
-//  ⚠️ Orb is NOT covered, deliberately. Its echo-cancelling engine (voice processing) builds its
-//  own aggregate over the system default input; forcing another device onto it is unreliable, and
-//  that engine has already been seen to go silent without throwing (OrbAudioProcessor's dead-tap
-//  watchdog). Only a session on WhisperKit's own engine — the composer, QuickAccess, and Orb when
-//  its duplex engine is off — uses the choice.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -244,11 +233,8 @@ final class MicrophoneSelection {
 }
 
 /// WhisperKit's recorder, pointed at a chosen input device.
-///
-/// ⚠️ Why a wrapper and not a fork: `AudioStreamTranscriber` calls `startRecordingLive` WITHOUT a
-/// device, so the default input is baked in above the recorder. `AudioProcessing` is WhisperKit's
-/// public seam (Orb's duplex engine uses it too); this forwards everything to the real recorder
-/// and supplies the device only where the caller gave none.
+/// A wrapper rather than a fork: `AudioStreamTranscriber` starts recording without a device, so this forwards
+/// everything to the real recorder through `AudioProcessing` and supplies the device only where none was given.
 final class InputDeviceAudioProcessor: AudioProcessing {
 
     private var base: any AudioProcessing
@@ -283,7 +269,7 @@ final class InputDeviceAudioProcessor: AudioProcessing {
     func pauseRecording() { base.pauseRecording() }
     func stopRecording() { base.stopRecording() }
 
-    // ⚠️ On the transcription HOT PATH (see OrbAudioProcessor): forwarded, never stubbed.
+    // On the transcription hot path (see OrbAudioProcessor): forwarded, never stubbed.
     func padOrTrim(fromArray audioArray: [Float], startAt startIndex: Int, toLength frameLength: Int) -> (any AudioProcessorOutputType)? {
         base.padOrTrim(fromArray: audioArray, startAt: startIndex, toLength: frameLength)
     }

@@ -4,10 +4,7 @@
 //  MockLLMProvider.swift
 //  DevgenticTests
 //
-//  Scriptable mock LLMProvider for integration tests.
-//  Supports both generate() (used by PlanGeneratorStrategy) and
-//  generateCognitiveStep() (used by ReAct executor).
-//  Deterministic, sub-second, no real model inference.
+//  Created by Raj Singh.
 //
 
 import Foundation

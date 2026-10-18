@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillResolutionTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  What a run actually gets, resolved against the V6 library.
-//
-//  The test worth reading first is `testTheLibraryIsAuthoritativeForDescription`. That is the entire
-//  reason a profile stores a REFERENCE instead of a copy — `description` is what the model routes
-//  on, and under the old copy model editing a skill changed behaviour only for whichever profile
-//  happened to press Rescan.
-//
-//  ⚠️ REWRITTEN 2026-09-14 from the registry-backed version. These were quarantined, not deleted,
-//  because the behaviours they encode are still owed by the replacement: library authority for
-//  description, deterministic name-collision handling, and unresolved selections being REPORTED
-//  rather than silently dropped. One behaviour is new and did not exist before — version pinning.
+//  Created by Raj Singh.
 //
 
 import XCTest

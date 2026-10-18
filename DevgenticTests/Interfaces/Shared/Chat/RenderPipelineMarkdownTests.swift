@@ -4,21 +4,7 @@
 //  RenderPipelineMarkdownTests.swift
 //  DevgenticTests
 //
-//  Parser-level cover for two render-pipeline defects (Chat_Production_Readiness_Fresh):
-//
-//   • CF-3 — `fromTrailingProse` claimed a filename from the last WORD of any short
-//     paragraph or heading, so "…runs on Node.js:", "…built with ASP.NET:" and "…, e.g.:"
-//     all became the code block's file badge, card title, viewer tab name and Save-As
-//     default filename. A claim now needs the author's own markup — plus two corrections
-//     the first pass at that gate got wrong: a LABEL inside the marked-up run
-//     ("**File: src/Main.java**") must not defeat the claim, and markup alone must not
-//     rescue a dotted identifier (`java.util.List`, **ASP.NET**) that is not a file.
-//
-//   • CF-4 — `<br>` produced no line break anywhere. In prose it was rewritten to "\n",
-//     a CommonMark SOFT break that `AttributedString(markdown:)` renders as a SPACE;
-//     `<br/>`, `<br />` and `<BR>` were not rewritten at all and reached the reader as
-//     literal tag text; and table cells never passed through the rewrite, including
-//     tables the app itself serialises through `TableMarkdown.escapeCell`.
+//  Created by Raj Singh.
 //
 
 import XCTest

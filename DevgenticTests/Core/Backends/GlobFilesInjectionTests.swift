@@ -4,23 +4,7 @@
 //  GlobFilesInjectionTests.swift
 //  DevgenticTests
 //
-//  `glob_files` built a `zsh -c` string with the caller's pattern interpolated inside double
-//  quotes — `-name "\(pattern)"`. A pattern containing a double quote closes that quote and
-//  everything after it is shell syntax:
-//
-//      pattern = a" ; touch /tmp/pwned ; echo "
-//      →  find "…" -type f -name "a" ; touch /tmp/pwned ; echo "" ! -path …
-//
-//  `pattern` and `path` are TOOL ARGUMENTS. They come from the model, so anything that can
-//  influence the model — a fetched web page, a file it was told to read, a poisoned dependency
-//  manifest — could reach a shell through this tool. It is enabled on profiles that
-//  deliberately withhold `execute_shell`, which is exactly where this matters.
-//
-//  The fix is structural: `find` is invoked through `execve` argv, so a pattern is one
-//  argument whatever characters it contains and there is no parser to break out of. These
-//  tests fire real payloads and assert the side effect never happens — a quoting-based fix
-//  would pass some of them and fail others, which is the point of testing it this way rather
-//  than asserting on the constructed string.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,58 +4,24 @@
 //  WorkflowNodeSkipStore.swift
 //  Devgentic
 //
-//  The UI→engine channel for per-node SKIP requests — Phase A of the per-node skip design
-//  (`LLM_Execution_Concurrency_Design.md` §0.6 D2.1, owner-ratified 2026-08-21).
+//  Created by Raj Singh.
 //
-//  A request means: when dispatch reaches this node, do not execute it — record it as
-//  `.skipped(.byUser)` and forward its INPUT downstream unchanged. Requests target PENDING nodes
-//  only in Phase A; the timeline row's button toggles them freely until dispatch consumes them,
-//  which is why no confirmation dialog exists — an un-consumed request is always undoable.
-//
-//  KEYED ON THE RUN TOKEN (`WorkflowRunScope.token`), not the conversation. [WF-CC14] This file
-//  used to be conversation-keyed on the one-root-run-per-conversation invariant (§0.5) with its
-//  own header warning "If that invariant ever falls, this store must move to run-ID keying in the
-//  same change" — and the invariant was never enforced on the inbound start paths (chat, ChatOps,
-//  scheduler, Orb carry no admission check; `RunAdmissionPolicy` is deliberately Redo/Resume-
-//  only until increment 4). A scheduled re-run of the SAME workflow into the same conversation
-//  has IDENTICAL node IDs, so under conversation keying run 2's start-clear silently discarded
-//  the user's requests for run 1, run 2 could consume a request aimed at run 1 (skipping a node
-//  in an unattended run the user never touched), and run 2's racer registration COLLIDED with
-//  run 1's live waiter for the same node — leaking the continuation. Token keying makes each
-//  run's namespace disjoint by construction:
-//
-//    • The ENGINE passes its `runToken` explicitly — a superseded run keeps consuming its OWN
-//      requests, and can never see a successor's.
-//    • The UI stays conversation-keyed (it acts on "the run this conversation currently shows")
-//      and the store resolves conversation → `activeRun` token at write time. Writes landing
-//      before any run is live go to a STAGED per-conversation set that the next `beginRun`
-//      adopts — the integration shape "request already present when dispatch reaches the node".
-//      The live UI cannot actually write pre-run (every Skip surface is gated on a state that
-//      only the first `workflowNodeStarted` sets, which the executor emits after `beginRun`),
-//      so staging is a defensive seam, not a user path.
-//    • A previous run's namespace is NOT swept at `beginRun` — it dies at that run's own
-//      `endRun`, which every terminal exit of the executor now calls (success, cancel, and both
-//      failure arms — the missing cancel/error releases were WF-OB15) and which is token-guarded
-//      so a superseded run's late end cannot wipe its successor's requests.
-//
-//  `@MainActor @Observable` rather than an actor (the `ExecutionSuspensionService` shape) because
-//  this store has a UI half the suspension service does not: the timeline button's label derives
-//  from `isRequested`, and Observation gives that re-render for free when the view reads it in
-//  `body`. The executor pays one MainActor hop per profile-node dispatch, which is noise against
-//  the model call that follows.
-//
+
 import Foundation
 import Observation
 
 private let logger = DGLogger(category: "WorkflowNodeSkipStore")
 
+/// The UI-to-engine channel for per-node skip requests, keyed on the run token (`WorkflowRunScope.token`).
+/// A pending request makes dispatch record the node as `.skipped(.byUser)` and forward its input unchanged;
+/// a running-skip interrupts a node in flight. The UI stays conversation-keyed and resolves to the active run's token.
 @MainActor
 @Observable
 final class WorkflowNodeSkipStore {
 
     static let shared = WorkflowNodeSkipStore()
 
-    // MARK: - Run scoping [WF-CC14]
+    // MARK: - Run scoping
 
     /// conversationID → the token of the run that currently OWNS the conversation's skip UI.
     /// Written by `beginRun`/`endRun`; read by every conversation-keyed (UI) entry point.
@@ -68,9 +34,8 @@ final class WorkflowNodeSkipStore {
     /// runToken → the node IDs whose next dispatch should skip.
     private(set) var requested: [UUID: Set<UUID>] = [:]
 
-    /// Root run start: claim the conversation's skip UI and adopt anything staged for it.
-    /// Replaces the old start-CLEAR — a fresh token has no leftovers by construction, and a
-    /// concurrent run's namespace is deliberately left alone (it dies at that run's `endRun`).
+    /// Root run start: claims the conversation's skip UI and adopts anything staged for it.
+    /// A concurrent run's namespace is left alone; it ends at that run's `endRun`.
     func beginRun(conversationID: UUID, runToken: UUID) {
         if let previous = activeRun[conversationID], previous != runToken {
             let previousPending = requested[previous]?.count ?? 0
@@ -98,9 +63,8 @@ final class WorkflowNodeSkipStore {
         for key in waiterOutcomes.keys.filter({ $0.runToken == runToken }) {
             waiterOutcomes.removeValue(forKey: key)
         }
-        // A waiter surviving to its OWN run's end is an invariant violation (every waiter lives
-        // inside a node's racer group, which the run awaits before reaching any terminal arm) —
-        // resume it so the continuation cannot leak, and log the violation rather than hiding it.
+        // A waiter surviving to its own run's end is an invariant violation: resume it so the continuation
+        // cannot leak, and log it.
         let staleWaiters = runningWaiters.keys.filter { $0.runToken == runToken }
         for key in staleWaiters {
             if let cont = runningWaiters.removeValue(forKey: key) {
@@ -152,10 +116,8 @@ final class WorkflowNodeSkipStore {
 
     // MARK: - Pending-skip channel (engine half — token-keyed)
 
-    /// Engine-side check-and-remove, called once per profile node at dispatch. Consuming (rather
-    /// than reading) is what makes the request single-shot: it cannot linger and silently skip
-    /// the same node in a later run. Reads ONLY the caller's own namespace — a concurrent run's
-    /// requests are invisible by construction [WF-CC14].
+    /// Engine-side check-and-remove, called once per profile node at dispatch.
+    /// Consuming makes the request single-shot, and only the caller's own run namespace is read.
     func consume(nodeID: UUID, conversationID: UUID, runToken: UUID?) -> Bool {
         guard let runToken else { return false }
         guard requested[runToken]?.remove(nodeID) != nil else { return false }
@@ -176,22 +138,10 @@ final class WorkflowNodeSkipStore {
     }
 
     // MARK: - Running-skip channel (Phase B increment 5, D2.1)
-    //
-    // The SECOND channel, deliberately separate from `requested`. A pending-skip is freely
-    // undoable until dispatch consumes it — that undoability is the whole no-confirmation-dialog
-    // rationale in the header. A RUNNING-skip is not undoable: it interrupts work in flight the
-    // moment the node's racer child observes it. Overloading `requested`/`consume` would blur the
-    // two contracts; two channels keep each one's semantics honest.
-    //
-    // Signal path: the UI calls `requestRunningSkip`; the node's racer child awaits
-    // `awaitRunningSkip`. Requests BUFFER (a request landing between retry attempts, or in the
-    // instants before the racer child registers, is honoured by the next registration) and fire
-    // exactly once. `firedRunningSkips` records consumption for the executor's verdict repair —
-    // "did a skip fire for this node?" — and for the UI's non-undoable "Skipping…" state.
+    // Running-skip channel, separate from `requested`: a pending skip is undoable until dispatch, a running one is not.
+    // Requests buffer until the node's racer child registers via `awaitRunningSkip`, and fire exactly once.
 
-    /// One running-skip key. Token-scoped [WF-CC14]: two runs of the same workflow have IDENTICAL
-    /// node IDs, so a conversation-scoped key let run 2's racer registration overwrite run 1's
-    /// LIVE continuation — a leak that parked run 1's node forever.
+    /// One running-skip key, scoped to the run token: two runs of one workflow share node IDs.
     struct RunningSkipKey: Hashable {
         let runToken: UUID
         let nodeID: UUID
@@ -202,14 +152,8 @@ final class WorkflowNodeSkipStore {
     private var pendingRunningRequests: Set<RunningSkipKey> = []
     /// Continuations of racer children currently awaiting a signal.
     private var runningWaiters: [RunningSkipKey: CheckedContinuation<Void, Never>] = [:]
-    /// Why THIS await's continuation was resumed: `true` = a request fired it, `false` = the
-    /// group cancelled it. Written by the resumer (both run on MainActor, before resuming),
-    /// consumed by the awaiter after its continuation returns.
-    ///
-    /// ⚠️ Per-AWAIT, deliberately not `firedRunningSkips`: that marker is per-NODE and persists
-    /// for the run (the verdict repair needs it), so a later stray registration for an
-    /// already-fired node would read it and report a firing that never touched this waiter —
-    /// a cancelled await claiming success.
+    /// Why this await's continuation resumed: `true` = a request fired it, `false` = the group cancelled it.
+    /// Written by the resumer on MainActor before resuming; per-await, unlike `firedRunningSkips`.
     private var waiterOutcomes: [RunningSkipKey: Bool] = [:]
     /// runToken → nodes whose running-skip has FIRED. Observable — drives the UI's
     /// "Skipping…" state — and consulted by the executor's cancellation verdict repair.
@@ -254,17 +198,9 @@ final class WorkflowNodeSkipStore {
             || firedRunningSkips[token]?.contains(nodeID) == true
     }
 
-    /// The racer child's wait. Returns when a running-skip fires for this node; throws
-    /// `CancellationError` when the node finishes first (the group cancels the child).
-    ///
-    /// Also the PENDING-request bridge: a Phase A toggle that landed after dispatch's pre-flight
-    /// consult (the row still said "Waiting" when the user clicked, but the node had started) would
-    /// otherwise sit inert until run end while the row misleadingly shows "Undo skip". Consuming it
-    /// here converts that near-miss into the running-skip the user visibly asked for.
-    ///
-    /// A `nil` token registers under a fresh unfireable key: no `requestRunningSkip` can ever
-    /// resolve it, so the await parks until the racer group cancels it — exactly the semantics of
-    /// "this run has no skip channel" with none of the special-casing.
+    /// The racer child's wait: returns when a running-skip fires for this node, throws `CancellationError` if it ends first.
+    /// Also consumes a pending request made after dispatch's pre-flight check, turning it into a running-skip.
+    /// A nil token registers under a fresh unfireable key, so the await parks until the racer group cancels it.
     func awaitRunningSkip(nodeID: UUID, conversationID: UUID, runToken: UUID?) async throws {
         let key = RunningSkipKey(runToken: runToken ?? UUID(), nodeID: nodeID)
 
@@ -290,9 +226,7 @@ final class WorkflowNodeSkipStore {
         } onCancel: {
             Task { @MainActor in WorkflowNodeSkipStore.shared.cancelRunningWaiter(key) }
         }
-        // Both resumers run on MainActor and mutate `waiterOutcomes` BEFORE resuming, so this
-        // read is deterministic: true ⇒ the request fired THIS waiter; anything else ⇒ the group
-        // cancelled it.
+        // Both resumers run on MainActor and set `waiterOutcomes` before resuming, so this read is deterministic.
         guard waiterOutcomes.removeValue(forKey: key) == true else {
             throw CancellationError()
         }

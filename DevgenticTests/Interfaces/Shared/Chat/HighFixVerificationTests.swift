@@ -4,17 +4,7 @@
 //  HighFixVerificationTests.swift
 //  DevgenticTests
 //
-//  Red-green verification tests for the 8 HIGH severity production-readiness fixes.
-//
-//  Fix 1: AgentBubbleContentView — cached markdown during streaming
-//  Fix 2: ChatSearchViewModel — debounced, query-time search (extraction at query
-//         time; the earlier pre-computed index went stale on in-place mutations)
-//  Fix 3: MarkdownTableView — large table row virtualization
-//  Fix 4: UserMessageView — cached truncation detection
-//  Fix 5: ChatHistoryView — displayMessages cache invalidation
-//  Fix 6: ChatBubbleView — safe variant index bounds checking
-//  Fix 7: CodeBlockCardView/FileAttachmentCardView/ErrorMessageView — accessibility
-//  Fix 8: ChatHistoryViewModel — transaction-safe file writes
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,18 +4,14 @@
 //  ProfileSelectorPopover.swift
 //  Devgentic
 //
-//  Redesigned profile selector aligned with the Antigravity macOS UI:
-//  - Solid, clean surface background (no blurry glass bleed-through).
-//  - Minimal header and compact category pills.
-//  - Streamlined search input.
-//  - Clean list rows with model metadata and right-aligned checkmarks.
-//  - Subtle full-width hover highlight (no bouncy scaling).
-//  - Actionable footer row ("Manage Profiles...") separated by a hairline divider.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// A popover for choosing a profile: category pills, a search field, list rows with model metadata and a footer
+/// row to manage profiles.
 struct ProfileSelectorPopover: View {
 
     var configuration: BackendConfiguration

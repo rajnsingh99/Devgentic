@@ -4,12 +4,12 @@
 //  SpeechControlIsland.swift
 //  Devgentic
 //
-//  A floating glassmorphism control bar for Read Aloud playback.
-//  Provides pause/resume, skip, speed, voice selection, and progress.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A floating glass control bar for Read Aloud playback: pause/resume, skip, speed, voice selection and progress.
 struct SpeechControlIsland: View {
     private var speechService = SpeechService.shared
     @Environment(\.appTheme) private var theme
@@ -120,24 +120,6 @@ struct SpeechControlIsland: View {
         .padding(.vertical, 8)
         // MARK: Liquid Glass
         .glassEffect(.regular, in: .capsule)
-        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-        // .background(.ultraThinMaterial)
-        // .clipShape(Capsule())
-        // .overlay(
-        //     Capsule()
-        //         .stroke(
-        //             LinearGradient(
-        //                 gradient: Gradient(colors: [
-        //                     Color.white.opacity(0.3),
-        //                     Color.white.opacity(0.05)
-        //                 ]),
-        //                 startPoint: .topLeading,
-        //                 endPoint: .bottomTrailing
-        //             ),
-        //             lineWidth: 1
-        //         )
-        // )
-        // .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
         .onHover { hovering in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHovering = hovering
@@ -167,16 +149,9 @@ struct SpeechControlIsland: View {
         .buttonStyle(IslandButtonStyle())
     }
 
-    /// ⚠️ [sa-6] TWO decimals, trailing zeros trimmed — not `%.1f`.
-    ///
-    /// `SpeechService.speedPresets` is `[0.5, 0.75, 1.0, 1.25, 1.5, 2.0]`, and one decimal
-    /// rendered the two QUARTER steps as "0.8x" and "1.2x": the menu offered a speed, and the
-    /// badge then reported a different one, for a value the user picked from a fixed list. All
-    /// three call sites — the menu item, the badge and the VoiceOver label — go through here, so
-    /// the wrong number appeared in all of them at once.
-    ///
-    /// `nonisolated static` so it is testable without a view; it is a pure formatter and its
-    /// three callers are the only consumers. Integers keep their old rendering ("1x", "2x").
+    // Why: one decimal would show the 0.75 and 1.25 presets as "0.8x" and "1.2x"
+    /// Formats a playback rate with up to two decimals and trailing zeros trimmed; integers render as "1x", "2x".
+    /// Pure and `nonisolated static`, so it is testable without a view.
     nonisolated static func formatRate(_ rate: Float) -> String {
         var text = String(format: "%.2f", rate)
         while text.contains("."), text.hasSuffix("0") { text.removeLast() }

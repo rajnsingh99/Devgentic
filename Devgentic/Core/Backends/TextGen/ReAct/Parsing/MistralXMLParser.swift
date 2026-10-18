@@ -4,11 +4,7 @@
 //  MistralXMLParser.swift
 //  Devgentic
 //
-//  Step 3.2: Parser for the .mistralXML dialect.
-//  Target: Pseudo-XML wrapping used by some Mistral variants.
-//  Extracts the content, tool_name, and JSON arguments payload residing between <tool_call>...</tool_call> boundaries.
-//
-//  Created by Raj Singh on 06/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -16,6 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "MistralXMLParser")
 
+/// Parser for the `.mistralXML` dialect: pseudo-XML used by some Mistral variants.
+/// Extracts content, tool name and the JSON arguments between `<tool_call>` boundaries.
 struct MistralXMLParser: CognitiveParserProtocol {
 
     // Schemas for the old legacy JSON payload fallback
@@ -34,9 +32,8 @@ struct MistralXMLParser: CognitiveParserProtocol {
 
         if !toolCalls.isEmpty {
             logger.info("MistralXMLParser: Extracted \(toolCalls.count) tool call(s).")
-            // Filter template-stub narration ("Calling X…") out of the with-tools reasoning so
-            // it doesn't pollute the working-memory scratchpad (#15 / G7). The termination path
-            // below is deliberately NOT filtered — there the text is the final answer.
+            // Filters template-stub narration ("Calling X...") out of the with-tools reasoning so it stays out of working memory;
+            // the termination path is not filtered, since there the text is the final answer.
             return ModernCognitiveStep(reasoning: ReasoningQualityFilter.filter(reasoning), toolCalls: toolCalls)
         }
 
@@ -155,7 +152,7 @@ struct MistralXMLParser: CognitiveParserProtocol {
         // Try decoding the JSON arguments inside the <arguments> tag
         let cleanArgs = argsString.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanArgs.isEmpty && cleanArgs != "{}" {
-            // CR-19: the shared repairs (raw newlines, invalid escapes, trailing commas) first.
+            // The shared repairs (raw newlines, invalid escapes, trailing commas) run first.
             if let decoded = JSONStructuralSanitizer.decodeObject(cleanArgs) {
                 arguments = decoded
             } else {

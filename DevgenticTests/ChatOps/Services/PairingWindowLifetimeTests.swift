@@ -2,25 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PairingWindowLifetimeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Who owns a pairing window, and what it is allowed to do when it ends.
-//
-//  ⚠️⚠️ THE FAILURE THIS PINS. `pollForPairing` is an instance method, so its `Task` retains the
-//  service for the full 300-second window — but the service itself was `@State` inside
-//  `ChatOpsSettingsView`, which is torn down by clicking Chat or any other settings category. The
-//  window therefore outlived its owner: coming back rebuilt a FRESH, idle service while
-//  `connectionState` (on the shared config) still said `.awaitingPairing`, so the PIN card rendered
-//  with a Cancel button that cancelled a nil task. Starting again ran TWO windows against one bot
-//  token, and the user's correct PIN was consumed by whichever poll held the connection — recorded
-//  as a FAILED attempt against their own origin by the orphan. At t=300s the orphan then reset the
-//  connection state and DELETED the bot token belonging to the newer, successful pairing.
-//
-//  ⚠️ A SECOND, SEPARATE DEFECT SHARED THE SAME THREE LINES. Discord and Slack evaluated their
-//  deadline as the first statement of a `for await` BODY, so it could only run when the stream
-//  yielded — and neither stream emits anything periodic. On a quiet channel the window never expired
-//  at all, and the first message to arrive after the deadline was consumed by the expiry check and
-//  discarded, so a user returning late and typing the correct PIN saw it silently do nothing.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,8 +4,7 @@
 //  ChatMessageSD.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 03/04/26.
-//  SwiftData model replacing ChatMessageEntity (CoreData).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,36 +18,20 @@ final class ChatMessageSD {
     var conversationId: UUID
     var timestamp: Date
 
-    /// Every hot read is "this conversation's messages, by time" — page loads, the per-send
-    /// history resolve, the context gauge, search, export, counts. Without this index each one
-    /// was a FULL scan of every conversation's messages plus a temp B-tree sort, mostly on the
-    /// main actor (measured on a 50k-row copy: 23 ms per fetch → under 0.1 ms; RAG-10 / CR-66).
-    /// Composite so the same index serves the predicate AND the sort.
-    ///
-    /// ⚠️ An EXISTING store does NOT gain this index. SwiftData/Core Data leave indexes out of the
-    /// model's version hash, so a store written before it opens as already-compatible: no
-    /// migration runs and no index is built (probed 2026-10-11 on a copy of a real store: opened
-    /// clean, 151 rows intact, index absent). Only stores CREATED by a build that declares it
-    /// have it. Fine before the first release; after it, adding an index to existing stores
-    /// needs a forced migration (a new schema version or `@Attribute(hashModifier:)`).
+    // Why: SwiftData leaves indexes out of the model's version hash, so an existing store opens fine but never gains the index.
+    /// Every hot read is 'this conversation's messages, by time'; the composite index serves the predicate and the sort.
+    /// Only stores created by a build that declares it have it.
     #Index<ChatMessageSD>([\.conversationId, \.timestamp])
     var senderType: String
     var traceID: String?
     var profileTypeRaw: String?
 
-    /// The rawValue of `MessageSource` — what CAUSED this turn (typed here, sent from Telegram,
-    /// fired by the scheduler, woken by a finished background task).
-    ///
-    /// ⚠️ Optional so rows written before the column decode as nil → `.localUI`, which is the
-    /// honest answer: those rows never recorded a source. Added when the UI began to branch on
-    /// it; before that the field was in-memory only and nothing but logging read it.
+    /// The rawValue of `MessageSource`: what caused this turn (typed here, Telegram, scheduler, background task).
+    /// Optional so rows written before the column decode as nil, read as `.localUI`.
     var messageSourceRaw: String?
 
-    /// True for a machine-authored stub that exists so the exchange PAIRS — see
-    /// `ChatMessage.isSyntheticPrompt` for why an unpaired assistant row is silently dropped.
-    ///
-    /// ⚠️ Optional, not `Bool = false`, to match every other column added to this model after
-    /// the fact. Legacy rows decode as nil → false.
+    /// True for a machine-authored stub that exists so the exchange pairs; see `ChatMessage.isSyntheticPrompt`.
+    /// Optional so legacy rows decode as nil, read as false.
     var isSyntheticPrompt: Bool?
 
     // Content stored as JSON Data — no ValueTransformer needed
@@ -57,23 +40,17 @@ final class ChatMessageSD {
     var timelineEventsData: Data?
     var tokenUsageData: Data?
 
-    /// Terminal outcome of the agent run that produced this message.
-    /// Stored as the rawValue of `ExecutionOutcome` so older rows decode as `nil`
-    /// when the field didn't exist. Used by `EpisodicHistoryFormatter` to mark
-    /// turns with the authoritative status (e.g. circuit-breaker abort) instead
-    /// of inferring from action statuses, which mis-classify aborts as "completed"
-    /// when all tool calls technically succeeded.
+    /// Terminal outcome of the agent run, as the rawValue of `ExecutionOutcome`; nil for older rows.
+    /// `EpisodicHistoryFormatter` uses it to mark turns with the authoritative status instead of inferring from action
+    /// statuses.
     var terminalOutcomeRaw: String?
 
     /// Optional human-readable reason accompanying `terminalOutcomeRaw`.
-    /// Surfaced as a `<termination>` element in the next turn's episodic XML so
-    /// the model gets explicit negative reinforcement after circuit-breaker aborts
-    /// or iteration exhaustion, not just an opaque "failed" status.
+    /// Surfaced as a `<termination>` element in the next turn's episodic XML, e.g. after circuit-breaker aborts.
     var terminalReason: String?
 
-    // G1 Piece 1 — lifecycle + run-identity persistence. All optional, so legacy rows
-    // (written before these columns existed) decode as nil → `MessageLifecycleState.restore`
-    // maps that to `.final`. `parkedOperationID` is the message↔HITL join key for resume.
+    // Lifecycle and run-identity persistence; all optional, so legacy rows decode as nil, which
+    // `MessageLifecycleState.restore` maps to `.final`.
     var lifecycleStateRaw: String?
     var parkedOperationID: String?
     var apiProvider: String?
@@ -90,18 +67,12 @@ final class ChatMessageSD {
 
     // MARK: - Mapping
 
-    /// - Parameter omittingImageBytes: [mm-4] true to build each attached image WITHOUT its
-    ///   external-storage `binaryData` (name, size, url and extension only). Every other field
-    ///   decodes exactly as before. Off by default: the transcript renders images from these
-    ///   bytes; only projections that never draw them (export) opt out.
+    /// - Parameter omittingImageBytes: true builds each attached image without its external-storage `binaryData`
+    ///   (name, size, url and extension only). Off by default; only projections that never draw images (export) opt out.
     func toChatMessage(omittingImageBytes: Bool = false) -> ChatMessage {
-        // [P6] Blob-decode failures used to degrade SILENTLY: content became a card
-        // indistinguishable from an agent error, the timeline vanished, variants and
-        // token usage disappeared — with no log line to say the STORE was the problem.
-        // Every fallback below now states what was lost. NOTE the standing hazard:
-        // a decoded fallback is what gets RE-ENCODED on the next save of this message,
-        // overwriting the original (possibly recoverable) bytes — the log is the only
-        // trace the original ever existed.
+        // Why: A decoded fallback is re-encoded on the next save and overwrites the original, possibly recoverable, bytes; the log
+        // is the only trace.
+        // Blob-decode failures are logged, each fallback stating what was lost.
         let content: MessageContent
         var decodeFailurePlaceholder: MessageContent?
         do {
@@ -113,8 +84,7 @@ final class ChatMessageSD {
                 + "shown in its place, and the stored bytes are now PROTECTED from being overwritten "
                 + "by that card; they are preserved for a build that can read them."
             )
-            // Title is pinned by ChatMessageSDTests; details are honest about the cause
-            // (deliberately unlocalized — persisted + RAG-fed, must stay stable).
+            // Title is pinned by tests; details are deliberately unlocalized because they are persisted and fed to RAG.
             content = .error(title: "Decode Error", details: "This message's stored content couldn't be read (\(contentData.count) bytes). The rest of the conversation is unaffected.")
             decodeFailurePlaceholder = content
         }
@@ -135,9 +105,8 @@ final class ChatMessageSD {
 
         message.traceID = traceID
         message.profileType = profileTypeRaw.flatMap { ProfileType(rawValue: $0) }
-        // ⚠️ `?? .localUI` rather than leaving the default in place: identical result, but it
-        // states that an unreadable or absent source is DELIBERATELY read as local, so a future
-        // rename of a `MessageSource` case degrades to "typed here" instead of crashing.
+        // `?? .localUI` states that an unreadable or absent source is read as local, so a renamed `MessageSource` case degrades
+        // to 'typed here' instead of crashing.
         message.messageSource = messageSourceRaw.flatMap { MessageSource(rawValue: $0) } ?? .localUI
         message.isSyntheticPrompt = isSyntheticPrompt ?? false
 
@@ -145,11 +114,8 @@ final class ChatMessageSD {
             do {
                 message.agentResponse = try JSONDecoder().decode(AgentResponse.self, from: data)
             } catch {
-                // ⚠️ Marking the message is not cosmetic — same reasoning as the timeline below.
-                // The writers persist `agentResponse` as-is, and nil is what this branch produces,
-                // so WITHOUT the flag the next flush of the enclosing conversation replaced the
-                // stored bytes with NULL and the variants were gone permanently rather than merely
-                // unrendered for this load.
+                // Marking the message is required: writers persist `agentResponse` as-is, so without the flag the next flush would
+                // replace the stored bytes with NULL and lose the variants permanently.
                 message.agentResponseDecodeFailed = true
                 logger.error(
                     "[PERSISTENCE] [DECODE] Message \(self.id.uuidString.prefix(8)): agentResponseData "
@@ -158,10 +124,8 @@ final class ChatMessageSD {
                     + "the stored bytes are now PROTECTED from being nulled by that empty state; they "
                     + "are preserved for a build that can read them."
                 )
-                // Explicit nil, matching the old `try?` assignment: ChatMessage.init
-                // auto-creates a default response for agent messages, and the pinned
-                // contract (testCorruptedAgentResponseDataIgnored) is that corrupt
-                // stored data yields NO response, not the synthesized default.
+                // Explicit nil: `ChatMessage.init` auto-creates a default response for agent messages, but corrupt stored data yields
+                // none.
                 message.agentResponse = nil
             }
         }
@@ -170,11 +134,8 @@ final class ChatMessageSD {
             do {
                 message.timelineEvents = try Self.decodeTimeline(from: data)
             } catch {
-                // ⚠️ Marking the message is not cosmetic. Both writers null this column whenever the
-                // in-memory timeline is empty, so WITHOUT this flag the next flush of the enclosing
-                // conversation would replace the bytes with nil and the run's whole timeline would
-                // be gone — not just unrendered. The previous wording here ("renders empty for this
-                // load") understated that: the loss was permanent from the next save.
+                // Marking the message is required: both writers null this column when the in-memory timeline is empty,
+                // so without the flag the next flush would permanently erase the timeline.
                 message.timelineDecodeFailed = true
                 logger.error(
                     "[DECODE] Message \(self.id.uuidString.prefix(8)): timelineEventsData undecodable "
@@ -189,7 +150,7 @@ final class ChatMessageSD {
             do {
                 message.tokenUsage = try JSONDecoder().decode(TokenUsage.self, from: data)
             } catch {
-                // CR-63: marked, so neither writer turns the nil this produces into a NULL column.
+                // Marked so neither writer turns the nil this produces into a NULL column.
                 message.tokenUsageDecodeFailed = true
                 logger.error(
                     "[PERSISTENCE] [DECODE] Message \(self.id.uuidString.prefix(8)): tokenUsageData "
@@ -208,24 +169,9 @@ final class ChatMessageSD {
             parkedOperationID: parkedOperationID.flatMap { UUID(uuidString: $0) }
         )
 
-        // [CF-44] Settle tool rows the process never got to close.
-        //
-        // `flushInFlight` persists the in-flight message at every tool boundary, so a crash or
-        // force-quit mid-tool leaves `isExecuting == true` on disk. The only repair was
-        // `closeDanglingToolRows`, whose sole caller is `ActiveStreamManager.finalizeMessage` —
-        // a path a force-quit never reaches — so the row rendered an animating spinner forever,
-        // with no output, no failure badge, and permanently non-disclosable (`isDisclosable`
-        // requires `!isExecuting`). Decode is the one place every reader goes through.
-        //
-        // ⚠️ `.streaming` ONLY — deliberately NOT `lifecycleState.isInterrupted`, which is also
-        // true for `.parkedHITL`. A parked run's dangling row is LOAD-BEARING: `resumeRun` calls
-        // `TimelineTurnReconstructor.reconstruct`, which identifies the parked tool by exactly
-        // `data.isExecuting || data.output == nil` and hands it back as `parkedTool`; resume then
-        // REFUSES ("The interrupted state is incomplete and can't be resumed") when that is nil.
-        // Closing the row here would therefore turn a resumable park into a permanently
-        // unresumable one — strictly worse than the spinner this fixes. A `.streaming` resume
-        // passes `dropDanglingTool: true` and wants the row gone, so closing it changes nothing
-        // it depends on.
+        // Why: Closing a parked run's dangling row would make a resumable park permanently unresumable.
+        // Settles tool rows a crash or force-quit left `isExecuting == true`; decode is the one place every reader goes through.
+        // `.streaming` only, not `isInterrupted`: a `.parkedHITL` run's dangling row identifies the parked tool for `resumeRun`.
         if case .streaming = message.lifecycleState {
             let stopped = DanglingToolRowCloser.markInterruptedByProcessDeath(&message.timelineEvents)
             if stopped > 0 {
@@ -239,43 +185,30 @@ final class ChatMessageSD {
         return message
     }
 
-    /// Current persisted shape of `contentData`.
-    ///
-    /// ⚠️ BUMP THIS whenever `MessageContent`'s on-disk shape changes — a renamed key, a
-    /// restructured case payload, a changed discriminator. That is what lets a future reader ASK
-    /// what it is holding instead of trying shapes until one decodes (G19). A guess that succeeds
-    /// incorrectly is silent data loss, and JSON decoding succeeds incorrectly all the time.
-    ///
-    /// Version 1 = the shape as of 2026-08-05: hand-written codec keyed on `type`, with
-    /// `.unknown(type:payload:)` preserving anything it does not recognise.
+    // Why: Bump whenever `MessageContent`'s on-disk shape changes, so a reader can ask what it holds rather than guess.
+    /// Current persisted shape of `contentData`: hand-written codec keyed on `type`, with `.unknown` preserving
+    /// unrecognised cases.
     static let contentBlobVersion = 1
 
-    /// Current persisted shape of `agentResponseData` (`AgentResponse` → object root, inline key).
-    /// ⚠️ Bump on any change to `AgentResponse` / `ResponseMessageVariant`'s persisted shape.
+    /// Current persisted shape of `agentResponseData` (object root, inline key).
+    /// Bump on any change to `AgentResponse` / `ResponseMessageVariant`'s persisted shape.
     static let agentResponseBlobVersion = 1
 
     /// Current persisted shape of `tokenUsageData` (`TokenUsage` → object root, inline key).
     static let tokenUsageBlobVersion = 1
 
-    /// Current persisted shape of `timelineEventsData`.
-    ///
-    /// ⚠️ ENVELOPE, not an inline key: the payload is a bare `[TimelineEvent]` ARRAY, and an array has
-    /// nowhere to put a sibling key. Written as `VersionedBlob<[TimelineEvent]>`; the reader must keep
-    /// accepting a bare array for as long as unwrapped rows can exist — which is indefinitely, since a
-    /// row is only rewritten when its message is touched.
+    /// Current persisted shape of `timelineEventsData`: a versioned envelope, since a bare array has nowhere for a version
+    /// key.
+    /// The reader keeps accepting a bare array, because a row is only rewritten when its message is touched.
     static let timelineBlobVersion = 1
 
     /// Encodes message content, never emitting an empty blob.
-    ///
-    /// ⚠️ The previous `(try? encode(x)) ?? Data()` turned a transient ENCODE failure into a
-    /// PERMANENT one: empty `Data` is itself undecodable, so the next load produced a Decode Error
-    /// card. Falling back to a readable error keeps the row legible and says what happened.
+    /// On an encode failure it falls back to a readable error: empty `Data` is itself undecodable and would turn a
+    /// transient failure permanent.
     static func encodeContent(_ content: MessageContent, messageID: UUID) -> Data {
         do {
-            // Stamped, not wrapped: `MessageContent` encodes to an OBJECT, so the version rides as a
-            // sibling key. The blob keeps its shape, every existing reader still parses it, and no
-            // type gains a `schemaVersion` property (which would be the G13 trap — a synthesized
-            // decoder demands the key and every already-persisted blob would throw `keyNotFound`).
+            // Stamped, not wrapped: `MessageContent` encodes to an object, so the version rides as a sibling key
+            // and no type gains a `schemaVersion` property that a synthesized decoder would demand.
             return BlobVersioning.stamped(try JSONEncoder().encode(content), version: contentBlobVersion)
         } catch {
             logger.error(
@@ -293,19 +226,17 @@ final class ChatMessageSD {
         }
     }
 
-    /// What to do with an optional auxiliary blob column after trying to encode its value.
-    ///
-    /// ⚠️ Exists to distinguish "this value is legitimately nil" from "encoding THREW", which
-    /// `try? JSONEncoder().encode(x)` collapses into the same `nil`. On an UPDATE that collapse is
-    /// data loss: the column is set to NULL and the previously-good bytes are gone, silently.
+    // Why: Distinguishes 'legitimately nil' from 'encoding threw'; collapsing them on an UPDATE sets the column to NULL and
+    // loses good bytes.
+    /// What to do with an optional auxiliary blob column after encoding its value.
     enum AuxiliaryBlobEncoding: Equatable {
         /// Encode succeeded, or the value really was nil. Safe to assign.
         case write(Data?)
         /// Encode threw. The caller MUST leave the column untouched.
         case preserveExisting
 
-        /// The value to assign on an INSERT, where there is nothing to preserve either way.
-        /// ⚠️ Never use this on an UPDATE — that is precisely the collapse this enum exists to stop.
+        // Why: Never use on an UPDATE: that is the collapse this enum exists to stop.
+        /// The value to assign on an INSERT, where there is nothing to preserve.
         var dataToWrite: Data? {
             switch self {
             case .write(let data):   return data
@@ -314,15 +245,8 @@ final class ChatMessageSD {
         }
     }
 
-    /// Encodes one of the optional auxiliary blobs (`agentResponse`, `tokenUsage`, `timelineEvents`),
-    /// reporting an encode failure instead of laundering it into `nil`.
-    ///
-    /// The read side of these columns is already guarded (`canPersistContent`, `canPersistTimeline`);
-    /// this closes the matching write side, which was still `try?` → `nil` (G21).
+    // Why: An empty timeline is deliberately stored as NULL; `canPersistTimeline` is built on that meaning.
     /// Wraps the timeline for persistence, or nil when there is nothing to write.
-    ///
-    /// ⚠️ The empty→nil collapse is deliberate and pre-existing: an empty timeline is stored as NULL,
-    /// not as an empty array. Keep it — `canPersistTimeline` is built on exactly that meaning.
     static func wrappedTimeline(_ events: [TimelineEvent]) -> VersionedBlob<[TimelineEvent]>? {
         guard !events.isEmpty else { return nil }
         return VersionedBlob(schemaVersion: timelineBlobVersion, payload: events)
@@ -335,11 +259,9 @@ final class ChatMessageSD {
         try JSONDecoder().decode(VersionedBlob<[TimelineEvent]>.self, from: data).payload
     }
 
-    /// - Parameter version: stamped into the encoded blob (G19) so a future reader can ASK what shape
-    ///   it is holding rather than trying shapes until one decodes. Object roots get an inline key;
-    ///   non-object roots pass through untouched, which is why array-rooted columns wrap their
-    ///   payload in `VersionedBlob` BEFORE calling this — the wrapper is itself an object, and its
-    ///   `schemaVersion` makes the stamp below an idempotent no-op.
+    /// Encodes one of the optional auxiliary blobs, reporting an encode failure instead of laundering it into nil.
+    /// - Parameter version: stamped into the blob so a reader can ask what shape it holds; object roots get an inline key.
+    /// Array-rooted columns wrap their payload in `VersionedBlob` first, which makes the stamp an idempotent no-op.
     static func encodeAuxiliaryBlob<T: Encodable>(
         _ value: T?,
         column: String,
@@ -362,25 +284,18 @@ final class ChatMessageSD {
 
     static func from(_ message: ChatMessage) -> ChatMessageSD {
         let contentToEncode = message.currentAgentContent ?? message.content
-        // ⚠️ The old `?? Data()` wrote an EMPTY blob when encoding failed — which is itself
-        // undecodable, so it turned a transient encode failure into a permanent Decode Error card.
-        // Fall back to a readable error instead, and never emit empty.
+        // Never emit an empty blob: on an encode failure fall back to a readable error, since empty data is undecodable.
         let contentData = Self.encodeContent(contentToEncode, messageID: message.id)
-        // On a fresh INSERT there are no prior bytes, so `.preserveExisting` and `.write(nil)` both
-        // mean "leave it null" — but routing through the helper still gets the failure LOGGED, which
-        // the bare `try?` never did.
-        //
-        // `canPersistAgentResponse` is honoured here too: this path is also reached for messages
-        // REBUILT from a load, where an unreadable response blob must not be written back as nil.
+        // On a fresh INSERT there are no prior bytes, but routing through the helper still logs a failure.
+        // `canPersistAgentResponse` also applies: this path is reached for messages rebuilt from a load.
         let agentResponseData: Data? = message.canPersistAgentResponse
             ? Self.encodeAuxiliaryBlob(
                 message.agentResponse, column: "agentResponseData", messageID: message.id,
                 version: Self.agentResponseBlobVersion
               ).dataToWrite
             : nil
-        // `canPersistTimeline` is false only when the timeline is empty BECAUSE the stored blob
-        // could not be decoded. On a fresh insert there is nothing to protect, but this path is
-        // also reached for messages rebuilt from a load, so honour it here too.
+        // `canPersistTimeline` is false only when the timeline is empty because the stored blob could not be decoded;
+        // honoured here too since this path is reached for messages rebuilt from a load.
         let timelineEventsData: Data? = message.canPersistTimeline
             ? Self.encodeAuxiliaryBlob(
                 Self.wrappedTimeline(message.timelineEvents),
@@ -388,7 +303,7 @@ final class ChatMessageSD {
                 version: Self.timelineBlobVersion
               ).dataToWrite
             : nil
-        // CR-63: `canPersistTokenUsage`, for the same rebuilt-from-a-load reason as the two above.
+        // `canPersistTokenUsage`, for the same rebuilt-from-a-load reason as the two above.
         let tokenUsageData: Data? = message.canPersistTokenUsage
             ? Self.encodeAuxiliaryBlob(
                 message.tokenUsage, column: "tokenUsageData", messageID: message.id,

@@ -4,25 +4,7 @@
 //  WorkflowTimelineRowPresentationTests.swift
 //  DevgenticTests
 //
-//  Register `Chat_Production_Readiness_Fresh.md`, workflow run views — the P3 rows fixed
-//  2026-09-03: `CF-56` (the expanded node panel re-deriving its edge colour and so dropping every
-//  override but did-not-run), `CF-58` (an untruncated node output handed to a one-line `Text` on
-//  every body pass), `CF-59` (up to 128 KB of tool output re-normalised per body pass, hover
-//  included) and `CF-60` (the auto-focused failed node never scrolled into view).
-//
-//  ⚠️ What is NOT covered here, stated so this file is not mistaken for full coverage:
-//  • CF-56's WIRING. That the expanded panel now paints `rowColor` — rather than a colour of its
-//    own — is a `@ViewBuilder` argument no unit test can read back; only the DECISION it consumes
-//    (`nodeColorRole`) is testable. This is the same blind spot the file's own XUI-1 note describes,
-//    and it is why the fix is shaped as "compute once at the call site, pass down".
-//  • CF-59's CACHE HIT. Nothing observable distinguishes a memo hit from a recomputation — the
-//    answers are equal by construction. What IS testable, and is the whole risk the memo adds, is
-//    that the key discriminates: the three `…Recomputes…` tests below fail against a memo keyed on
-//    the node id alone, and the third also fails against the round-2 key (node id + body + event
-//    COUNT), which a later run of the same node hits outright.
-//  • CF-60's SCROLL. `ScrollViewProxy.scrollTo` is SwiftUI runtime behaviour with no headless seam;
-//    only the rule deciding whether to call it is pinned here. Needs an on-device check.
-//  • CF-61 (the run-history card's unreachable selected state) is a deletion — nothing to pin.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,6 +4,8 @@
 //  SystemStateTools.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import Foundation
 import AppKit
@@ -114,17 +116,8 @@ struct PushLocalNotificationTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // ⚠️ ROUTED THROUGH THE DISPATCHER, NOT `UNUserNotificationCenter` DIRECTLY. This tool used
-        // to build its own `UNMutableNotificationContent` and call `center.add(request)`, which made
-        // it the one notification path in the app that no user setting could stop: neither the
-        // "Enable Notifications" master switch nor the per-channel switches in Settings had any
-        // effect on it, because it never touched the dispatcher they gate. An agent could notify a
-        // user who had switched notifications off.
-        //
-        // ⚠️ It also called `requestAuthorization` itself, prompting for system permission from
-        // inside a tool call. `LocalNotificationChannel.send` already handles every authorization
-        // state — including `.denied`, which it reports with a message naming System Settings —
-        // so that prompt is not lost, it is just no longer duplicated here.
+        // Dispatched through `NotificationDispatcher`, not `UNUserNotificationCenter`, so Settings' notification switches apply.
+        // `LocalNotificationChannel.send` handles every authorization state, so no permission request is made here.
         let delivered = await NotificationDispatcher.shared.dispatch(
             AppNotificationPayload(
                 title: arguments.title,

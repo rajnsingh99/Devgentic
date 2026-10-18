@@ -4,12 +4,7 @@
 //  SemanticChunkerEdgeCaseTests.swift
 //  DevgenticTests
 //
-//  TDD: RAG Tier 1 — SemanticChunker Edge Cases (R3–R6)
-//
-//  R3: Empty code blocks can produce prefix-only chunks ("[swift Context]:\n")
-//  R4: Table cell content with | corrupts table structure
-//  R5: getOverlapText fails on word boundaries for code/CJK
-//  R6: splitLargeText can produce single-character chunks
+//  Created by Raj Singh.
 //
 
 import XCTest

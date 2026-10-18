@@ -4,29 +4,7 @@
 //  AgentErrorCategory.swift
 //  Devgentic
 //
-//  Canonical error taxonomy for structured telemetry.
-//
-//  The agent pipeline has ~80 distinct failure/warning sites spread across parsing,
-//  LLM providers, tool execution, circuit-breaker safety, capabilities, memory, and
-//  workflow orchestration. Before this type, each layer had its own category enum
-//  (WarningCategory, ToolFailureCategory) and many failures had no classification
-//  at all — just stringified messages. That made deduplication, aggregation, and
-//  post-hoc bug analysis impossible.
-//
-//  `AgentErrorCategory` is a single flat enum covering every classifiable failure
-//  point in the pipeline. A SpanEvent's `error_category` column stores its rawValue
-//  so analytics can `GROUP BY` without parsing JSON. The enum is stable — adding a
-//  case never removes one, and mapping extensions from the legacy enums keep existing
-//  code compiling.
-//
-//  Design principles:
-//  - FLAT. No nested enums. Makes SQLite GROUP BY trivial.
-//  - NAMED BY MACHINE. `providerRateLimit` not `rate_limit_429`. Human-readable UI
-//    labels come from `displayName`; the rawValue is for storage + querying.
-//  - SHORT PREFIXES. `cb` = circuit breaker, `wf` = workflow, `mem` = memory.
-//    Prevents noisy long names while remaining unambiguous.
-//  - EXTENSIBLE. Adding a new case + updating the four property switches is all it
-//    takes to onboard a new failure mode.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -60,16 +38,9 @@ enum ExecutionPhase: String, Codable, Sendable, CaseIterable, DatabaseValueConve
 
 // MARK: - Agent Error Category
 
-/// Canonical failure classification across the entire agent pipeline.
-///
-/// Each case represents a distinct, analyzable failure mode. The rawValue is the
-/// stable storage key; `displayName` is the human-readable label for UI.
-///
-/// When adding a new case, also update:
-/// - `severity` (which bucket: informational / recoverable / fatal)
-/// - `phase` (which execution phase it belongs to)
-/// - `isRetryable` (can the agent automatically retry?)
-/// - `displayName` (human-readable label)
+/// Canonical failure classification across the agent pipeline.
+/// The rawValue is the stable storage key; `displayName` is the UI label.
+/// A new case also needs `severity`, `phase`, `isRetryable` and `displayName`.
 enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueConvertible {
 
     // MARK: Parsing (6)
@@ -332,10 +303,8 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
 
 // MARK: - Mapping from existing enums
 
-/// `WarningCategory` → `AgentErrorCategory`. Mappings are approximate — the existing
-/// enum was designed for UI affordance, not analytics, so the canonical cases are
-/// often more specific. When a new warning site lands, emit the canonical category
-/// directly rather than going through `WarningCategory` first.
+/// Maps a `WarningCategory` to the nearest `AgentErrorCategory`.
+/// Mappings are approximate: the canonical cases are often more specific than the UI-oriented warning cases.
 extension WarningCategory {
     var agentErrorCategory: AgentErrorCategory {
         switch self {
@@ -348,9 +317,8 @@ extension WarningCategory {
         case .circuitBreaker:   return .cbRepetitiveAction     // most common CB trigger
         case .resourceUnavailable: return .fileReadFailed      // attachment/file couldn't be read
         case .midRunError:      return .executionFailed        // demoted mid-run `.error` card (ASM-1) — original category is in the event text
-        // ⚠️ The generic bucket, not a specific one. A category from a newer build must not be
-        // mis-attributed to a concrete failure mode — that would corrupt the analytics it feeds.
-        // The raw value survives on the event itself for anyone reading the timeline.
+        // The generic bucket: a category from a newer build must not be attributed to a concrete failure mode.
+        // The raw value survives on the event itself.
         case .other:            return .executionFailed
         }
     }
@@ -367,10 +335,8 @@ extension ToolFailureCategory {
         case .invalidArgs:        return .toolArgInvalid
         case .notFound:           return .toolNotFound
         case .cancelled:          return .toolUserDenied      // semantic overlap — user skipped ask_user
-        // A category written by a newer build. `.toolSemanticFail` is the least-specific tool-tier
-        // bucket: honest that it failed, without inventing a specific cause the telemetry would
-        // then group it under. Never map this to a SPECIFIC category — that is how an unknown
-        // becomes a confident wrong classification in the error dashboards.
+        // A category from a newer build maps to the least-specific tool-tier bucket, never to a specific category,
+        // so unknowns are not confidently misclassified.
         case .other:              return .toolSemanticFail
         }
     }

@@ -4,7 +4,7 @@
 //  StreamingTranscriptionStateTests.swift
 //  DevgenticTests
 //
-//  Tests for StreamingTranscriptionState.fullText computation.
+//  Created by Raj Singh.
 //
 
 import XCTest

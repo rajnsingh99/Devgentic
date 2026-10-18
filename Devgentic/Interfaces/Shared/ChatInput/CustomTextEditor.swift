@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
-// CustomTextEditor.swift
+//
+//  CustomTextEditor.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
+
 import SwiftUI
 import AppKit
 import os
@@ -8,15 +14,7 @@ import os
 private let customTextEditorLogger = DGLogger(category: "CustomTextEditor")
 
 /// Whether a keystroke belongs to an open suggestion picker rather than to the text.
-///
-/// ⚠️⚠️ EXTRACTED BECAUSE ITS OMISSION SHIPPED. Inline in `keyDown` this read `prompt || file` when
-/// the `/` skill picker was added, so that picker was invisible to the keyboard: arrows did not move
-/// the selection, and Return fell through to `onCommit` and SENT the half-typed `/co do the thing`
-/// as literal text. The picker rendered and highlighted correctly throughout, which is exactly why
-/// it looked finished — and being a `let` inside an `NSTextView` subclass, no test could reach it.
-///
-/// Every trigger that can open a picker must be a parameter here. Adding a case to
-/// `TextTriggerAnalyzer` without adding one here yields a mouse-only trigger, silently.
+/// Every trigger that can open a picker must be a parameter here, or it becomes a mouse-only trigger.
 enum ComposerSuggestionKeyRouting {
     static func anyPickerIsOpen(prompt: Bool, file: Bool, skill: Bool) -> Bool {
         prompt || file || skill
@@ -52,19 +50,14 @@ struct CustomTextEditor: NSViewRepresentable {
     var onNavigateQueryHistory: ((MainApplicationViewModel.QueryNavigationDirection) -> Void)?
     var onTextManuallyChanged: (() -> Void)?
 
-    /// Called AFTER trigger analysis has written the query and range for this keystroke.
-    ///
-    /// ⚠️⚠️ ORDER IS THE WHOLE POINT. `onTextManuallyChanged` fires at the TOP of `textDidChange`,
-    /// before the analyzer runs, so anything that filters against the trigger query from there sees
-    /// the PREVIOUS keystroke's state. The `/` picker did exactly that: on the first `/` its
-    /// `isShowing` guard had not been set yet so it returned early and rendered "No skills in the
-    /// library yet" on a full library, and every keystroke after that filtered one character behind.
+    /// Called after trigger analysis has written the query and range for this keystroke.
+    /// Order matters: `onTextManuallyChanged` fires before the analyzer runs, so anything filtering on the trigger
+    /// query from there sees stale state.
     var onTriggerStateChanged: (() -> Void)?
 
-    /// When true, Escape is forwarded to the window instead of NSTextView's default handling
-    /// (which maps Escape → `complete:`, the word-completion popup). The QuickAccess panel needs
-    /// Escape to reach its `cancelOperation` (dismiss / HITL-deny). Default false — the main
-    /// composer keeps standard behavior.
+    /// When true, Escape is forwarded to the window instead of NSTextView's default `complete:` word-completion
+    /// handling.
+    /// The QuickAccess panel needs Escape to reach its `cancelOperation`. Default false.
     var escapePassesThrough: Bool = false
 
     let logger = DGLogger(category: "CustomTextEditor_Input")
@@ -249,10 +242,8 @@ struct CustomTextEditor: NSViewRepresentable {
             let utf16Length = (self.text as NSString).length
             let newLocation = min(currentSelectedRange.location, utf16Length)
 
-            // External binding sync (send-clear, query-history nav, draft restore):
-            // replace everything AND drop the now-inconsistent undo history. See
-            // `replaceEntireContents` — without the undo reset, a post-send ⌘Z applies a
-            // stale typing-undo range and crashes (NSRangeException in NSUndoTyping).
+            // External binding sync (send-clear, history nav, draft restore) also drops the undo history; a stale typing-undo
+            // range crashes on ⌘Z.
             textView.replaceEntireContents(with: attributedString, selecting: NSRange(location: newLocation, length: 0))
 
             textView.typingAttributes = defaultTypingAttributes
@@ -316,13 +307,9 @@ struct CustomTextEditor: NSViewRepresentable {
             disableAutomaticTextRewriting()
         }
 
-        /// macOS rewrites text as you type unless told otherwise, and NSTextView inherits that
-        /// system-wide setting: `"` becomes `“”`, `--` becomes an em dash. In a composer that
-        /// carries code and shell commands that is silent corruption — `npm install --save-dev`
-        /// reaches the model as `—save-dev`, and pasted source arrives with curly quotes that
-        /// won't compile. Prose loses typographic niceties; correctness wins.
-        ///
-        /// AdvancedPromptEditor already does this for the prompt field.
+        /// Turns off automatic text rewriting (smart quotes, dashes), which NSTextView inherits from the system.
+        /// In a composer that carries code and shell commands the rewriting silently corrupts input, e.g. `--save-dev`
+        /// becomes an em dash.
         func disableAutomaticTextRewriting() {
             isAutomaticQuoteSubstitutionEnabled = false
             isAutomaticDashSubstitutionEnabled = false
@@ -330,19 +317,9 @@ struct CustomTextEditor: NSViewRepresentable {
             isAutomaticSpellingCorrectionEnabled = false
         }
 
-        /// Replaces the ENTIRE contents from an external source (the SwiftUI binding
-        /// changing under us: send-clear, query-history navigation, draft restore) and
-        /// then drops the undo history.
-        ///
-        /// The replacement is a direct `textStorage` mutation that bypasses NSTextView's
-        /// own undo registration, so any open typing-coalescing group keeps a range into
-        /// the OLD text. After a send-clear the text is empty, so a subsequent ⌘Z applies
-        /// that stale range and crashes — `NSRangeException`, `Range {0, N} out of bounds;
-        /// string length 0`, inside `-[NSUndoTyping undoRedo:]` (reproduced). These are
-        /// external replacements, not user edits, so there is no meaningful typing-undo to
-        /// preserve; clear it. NB `breakUndoCoalescing()` alone does NOT fix this — the
-        /// stale action is already registered, so the coalescing group must be discarded,
-        /// not merely closed.
+        /// Swaps in the entire contents from an external source (send-clear, history nav, draft restore) and drops the undo
+        /// history.
+        /// A direct `textStorage` mutation bypasses undo registration; a stale typing range would crash a later ⌘Z.
         func replaceEntireContents(with attributed: NSAttributedString, selecting selection: NSRange) {
             textStorage?.replaceCharacters(
                 in: NSRange(location: 0, length: textStorage?.length ?? 0),
@@ -392,14 +369,8 @@ struct CustomTextEditor: NSViewRepresentable {
         }
 
         override func cancelOperation(_ sender: Any?) {
-            // NSTextView's default cancelOperation invokes complete: (word completions). When the
-            // host opts in (QuickAccess panel), hand Escape to the window so its cancelOperation
-            // (panel dismiss / HITL-deny) runs instead.
-            //
-            // `super` only when NSTextView actually implements it: on macOS 26 it does not, and the
-            // super call raised "unrecognized selector" on every Escape in the composer
-            // (2026-10-06 device run). Otherwise Escape goes up the responder chain, which is
-            // what AppKit does with a command this view would not have handled.
+            // When the host opts in, hand Escape to the window; call `super` only if NSTextView implements it, else go up the
+            // responder chain.
             if coordinator?.parent.escapePassesThrough == true {
                 self.window?.cancelOperation(sender)
             } else if NSTextView.instancesRespond(to: #selector(NSResponder.cancelOperation(_:))) {
@@ -459,22 +430,9 @@ struct CustomTextEditor: NSViewRepresentable {
             insertText(attrStr, replacementRange: selectedRange())
         }
 
-        /// Applies a list Enter (continuation or termination) through
-        /// `insertText(_:replacementRange:)` rather than writing to `textStorage` directly.
-        ///
-        /// The previous path mutated the storage from inside `shouldChangeTextIn` and
-        /// returned `false`, which bypassed NSTextView's undo registration entirely: list
-        /// edits weren't undoable, and each one desynced the typing-undo stack — the same
-        /// stale-range hazard that made a post-send ⌘Z abort the process. `insertText` runs
-        /// the full editing machinery (shouldChangeText → mutate → didChangeText), so every
-        /// edit registers undo and `textDidChange` syncs the binding for free.
-        ///
-        /// Doing this from `keyDown` (rather than the delegate) matters: there is no edit
-        /// in flight here, so calling into the editing machinery can't re-enter the
-        /// `shouldChangeTextIn` callback that would otherwise be on the stack.
-        ///
-        /// The whole Enter — renumbering included — is ONE undo group, so a single ⌘Z
-        /// reverses it instead of peeling off one renumbered marker at a time.
+        /// Applies a list Enter (continuation or termination) through `insertText(_:replacementRange:)`, not `textStorage`
+        /// directly.
+        /// That runs the full editing machinery, so edits register undo; the whole Enter is one undo group.
         private func applyListEdit(
             replacing target: NSRange,
             with text: String,
@@ -484,9 +442,8 @@ struct CustomTextEditor: NSViewRepresentable {
             let attrs = coordinator?.defaultTypingAttributes ?? typingAttributes
             breakUndoCoalescing()
             undoManager?.beginUndoGrouping()
-            // Renumber edits are ordered last-first and every range sits AFTER `target`,
-            // so applying them first keeps both their own ranges and `target` valid —
-            // even when a rewrite widens the marker (9 → 10).
+            // Renumber edits are applied last-first and sit after `target`, so their ranges and `target` stay valid even when
+            // a marker widens (9 to 10).
             for edit in renumbering {
                 insertText(NSAttributedString(string: edit.replacement, attributes: attrs),
                            replacementRange: edit.range)
@@ -498,13 +455,8 @@ struct CustomTextEditor: NSViewRepresentable {
         }
 
         override func keyDown(with event: NSEvent) {
-            // While an input method has MARKED (composing) text, Return confirms the
-            // candidate and the arrow keys move through the candidate list — they belong
-            // to the IME, not to us. Intercepting them made the composer unusable in
-            // Japanese / Chinese / Korean: Return sent the half-composed message instead
-            // of committing the candidate, and arrows hijacked candidate selection for
-            // suggestions / query history. Defer everything to AppKit until composition
-            // ends; normal handling resumes on the next key once `hasMarkedText()` is false.
+            // While an input method has marked text, Return and arrow keys belong to the IME; defer to AppKit until
+            // composition ends.
             if hasMarkedText() {
                 super.keyDown(with: event)
                 return
@@ -526,9 +478,7 @@ struct CustomTextEditor: NSViewRepresentable {
             
             let isAtStart = self.selectedRange().location == 0
             let isEmpty = self.string.isEmpty
-            // Query history nav on bare Up/Down only — any modifier (shift for
-            // selection extension, option for paragraph jump, etc.) must pass
-            // through to AppKit's standard text-editing commands.
+            // Query history navigation only on bare Up/Down; any modifier passes through to AppKit's text-editing commands.
             let hasModifier = !event.modifierFlags.intersection([.shift, .option, .command, .control]).isEmpty
             if !hasModifier && event.keyCode == 126 && (isEmpty || isAtStart) { coordinator?.parent.onNavigateQueryHistory?(.up); return }
             if !hasModifier && event.keyCode == 125 && (isEmpty || self.selectedRange().location == self.string.count) { coordinator?.parent.onNavigateQueryHistory?(.down); return }
@@ -638,14 +588,8 @@ struct CustomTextEditor: NSViewRepresentable {
             isTyping = false
             if let tv = notification.object as? NSTextView, parent.text != tv.string { parent.text = tv.string }
         }
-        // NB list continuation/termination is NOT handled here any more. It lived in this
-        // delegate callback and mutated `textStorage` directly before returning `false`,
-        // which bypassed NSTextView's undo registration — the edits weren't undoable and
-        // they desynced the typing-undo stack. It now runs in `CustomNSTextView.keyDown`
-        // via `insertText(_:replacementRange:)` (see `applyListEdit`), where no edit is in
-        // flight and undo registers normally. Consequence: a newline arriving from a path
-        // OTHER than the main Return key (numeric-keypad Enter, pasting a bare "\n") now
-        // inserts a plain newline instead of continuing the list.
+        // List continuation runs in `CustomNSTextView.keyDown` via `applyListEdit`, so a newline from another path inserts
+        // a plain newline.
 
         func textDidChange(_ notification: Notification) {
             guard let textView = self.textView else { return }

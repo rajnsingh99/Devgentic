@@ -4,10 +4,7 @@
 //  ChatOpsNotificationChannelTests.swift
 //  DevgenticTests
 //
-//  Slice 3: app notifications delivered to the paired chat channels.
-//
-//  ⚠️ Every test drives the real channel against fake announcers — no bridge, no transport, no
-//  network. The channel resolves its targets through a closure precisely so this is possible.
+//  Created by Raj Singh.
 //
 
 import XCTest

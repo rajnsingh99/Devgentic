@@ -4,21 +4,7 @@
 //  SyntaxHighlightLanguageResolutionTests.swift
 //  DevgenticTests
 //
-//  CF-2 (Chat_Production_Readiness_Fresh.md): `SyntaxHighlightService.highlight` resolved a
-//  bare / unknown fence info string to nil and then passed that nil STRAIGHT THROUGH to
-//  `highlightr.highlight(_:as:)`, whose nil branch is `highlightAuto` — a guess across all
-//  ~192 bundled grammars, once per streaming flush, colouring a `plaintext`-badged block as
-//  whatever grammar won (`let x = 1` → `abnf`). Two doc comments in the file described a
-//  guard that did not exist.
-//
-//  The fix makes the resolution a pure `nonisolated static func resolvedLanguage(_:supported:) -> LanguageResolution`
-//  and has `highlight` return nil BEFORE Highlightr is asked anything when it resolves to
-//  nil, plus a `Task.isCancelled` check at the top so a flush that has already been
-//  superseded does not run to completion on the serialised actor.
-//
-//  Discrimination: the pure tests pin the rule; the actor tests are the ones that fail on
-//  the old code — with the pass-through, `highlight(_, language: "")` returned a NON-nil
-//  `highlightAuto` result, and a pre-cancelled task still produced a highlight.
+//  Created by Raj Singh.
 //
 
 import XCTest

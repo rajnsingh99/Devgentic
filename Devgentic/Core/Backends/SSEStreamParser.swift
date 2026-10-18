@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
+//
+//  SSEStreamParser.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
 
 import Foundation
 
-/// Decision a provider's per-line decoder returns for each streamed line.
-///
-/// The shared transport owns the *mechanics* (reading lines, cancellation, stall
-/// timeout, SSE `event:` framing); the provider owns only the *semantics* of one
-/// `data:`/JSON line via a pure function that returns one of these directives.
+/// The decision a provider's per-line decoder returns for each streamed line. The shared transport owns reading
+/// lines, cancellation, stall timeout and SSE `event:` framing; the provider owns only the semantics of one line.
 enum SSELineDirective {
     /// Yield this text chunk to the consumer and keep reading.
     case emit(String)
@@ -22,48 +25,18 @@ enum SSELineDirective {
     case fail(Error)
 }
 
-/// Shared transport for line-delimited streaming responses (SSE and NDJSON).
-///
-/// This consolidates the read loop that used to be copy-pasted across the cloud
-/// providers (audit #14) and is the single place that owns streaming resilience
-/// (audit #13):
-///   1. **Cancellation** — the read runs in a task that `onTermination` cancels, and
-///      every iteration re-checks `Task.checkCancellation()`. Tapping Stop therefore
-///      tears down the underlying network read instead of leaking it (stops remote
-///      token billing / frees the local GPU) rather than only halting the UI.
-///   2. **Stall timeout** — a watchdog bounds the gap *between* lines. The request's
-///      own `timeoutInterval` only covers the initial response; a server that accepts
-///      the request then goes silent used to hang the turn forever. A stall surfaces as
-///      `URLError(.timedOut)` so the existing `ProviderErrorClassifier` handles it.
-///   3. **The `for try await line in bytes.lines` loop + SSE `event:` framing.**
-///
-/// Providers supply `openBytes` (build the request and return the validated byte
-/// stream) and a pure `handleLine` decoder.
+/// Shared transport for line-delimited streaming responses (SSE and NDJSON), and the single owner of streaming
+/// resilience. Cancellation: Stop tears down the underlying network read. Stall timeout: a watchdog bounds the gap
+/// between lines (`URLError(.timedOut)`). Providers supply `openBytes` and a pure `handleLine`.
 enum SSEStreamParser {
 
-    /// Max seconds to wait for the *next* line before failing the stream. Guards the
-    /// gaps between lines only — opening the request (rate-limiter wait, connect, headers) is
-    /// bounded by the request's `timeoutInterval`, and the watchdog is paused for it. 60s between tokens is already pathological, so this will not
-    /// false-trip on a slow-but-alive stream.
+    /// Max seconds to wait for the next line before failing the stream. Guards gaps between lines only: opening the
+    /// request is bounded by `timeoutInterval`, and the watchdog is paused for it.
     static let defaultStallTimeout: TimeInterval = 60
 
-    /// Builds a cancellable, stall-guarded text stream from a line-delimited source.
-    ///
-    /// - Parameters:
-    ///   - stallTimeout: bound on the wait between lines (see ``defaultStallTimeout``).
-    ///   - beforeOpen: an admission wait that must finish before the request is sent (the local
-    ///     inference coordinator's lock). ⚠️ The stall watchdog is PAUSED for its whole duration: a
-    ///     generation waiting its turn behind another run is not a silent connection, and a wait longer
-    ///     than `stallTimeout` used to fail the stream with a time-out before it ever started.
-    ///   - onClose: called exactly ONCE when the stream's reader ends, whatever ended it — the last
-    ///     line, an error, the stall watchdog, or the consumer going away. Lets a caller pair an
-    ///     acquisition made in `beforeOpen` with its release (the local inference coordinator counts a
-    ///     generation in flight until it ends).
-    ///   - openBytes: builds the request and returns the validated byte stream. Runs
-    ///     inside the managed task so request-build and connect errors flow through the
-    ///     same teardown path as mid-stream errors.
-    ///   - handleLine: maps one raw line to a directive. `event` carries the most recent
-    ///     SSE `event:` value; for NDJSON providers it is always "".
+    /// Builds a cancellable, stall-guarded text stream from a line-delimited source. `beforeOpen` is an admission wait
+    /// during which the stall watchdog is paused; `onClose` runs exactly once when the reader ends. `openBytes` runs
+    /// inside the managed task; `handleLine` maps a line (with the latest SSE `event:`) to a directive.
     static func stream(
         stallTimeout: TimeInterval = defaultStallTimeout,
         beforeOpen: (@Sendable () async throws -> Void)? = nil,
@@ -84,21 +57,16 @@ enum SSEStreamParser {
                         try await beforeOpen()
                         await heartbeat.resume()
                     }
-                    // ⚠️ READINESS CR-25 (2026-10-11): paused while the request is OPENED too. `openBytes`
-                    // covers the rate limiter's wait and the wait for response headers — an Ollama
-                    // cold-load of a large model, or a limiter queue, is longer than `stallTimeout`
-                    // and failed with a time-out at 60 s although nothing was connected yet to stall.
-                    // That phase is bounded by the request's own `timeoutInterval`.
+                    // Paused while the request is opened too: the rate limiter's wait or a cold model load can exceed `stallTimeout`
+                    // before anything is connected, and that phase is bounded by `timeoutInterval`.
                     await heartbeat.pause()
                     let bytes = try await openBytes()
                     await heartbeat.resume()
 
                     var currentEvent = ""
                     var accumulatedUsage: TokenUsage?
-                    // Reports the accumulated usage exactly once, on a clean end of stream
-                    // (never on error/cancel). Accumulation lets a provider emit usage as
-                    // partials — e.g. Claude's input on `message_start` + output on
-                    // `message_delta` — that sum to the full count.
+                    // Reports the accumulated usage exactly once, on a clean end of stream (never on error or cancel); accumulation lets
+                    // a provider emit usage as partials that sum to the full count.
                     func reportUsageIfNeeded() {
                         if let onUsage, let accumulatedUsage { onUsage(accumulatedUsage) }
                     }
@@ -145,9 +113,8 @@ enum SSEStreamParser {
                 }
             }
 
-            // Watchdog: fails the stream (and tears down the reader) if no line has
-            // arrived within `stallTimeout`. Checks frequently enough to react promptly
-            // without busy-waiting.
+            // Watchdog: fails the stream and tears down the reader if no line arrives within `stallTimeout`; checks often enough
+            // to react promptly without busy-waiting.
             let checkInterval = min(stallTimeout, 5)
             let watchdog = Task {
                 while true {

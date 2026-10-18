@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RunReportProjectionTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Truth-table tests for the Run Report's pure projection — persisted rows in,
-//  display values out. Every claim the report UI makes is decided here, so every
-//  claim is pinned here (the WorkflowRunDisplayData pattern).
+//  Created by Raj Singh.
 //
 
 import XCTest

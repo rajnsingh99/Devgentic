@@ -4,19 +4,7 @@
 //  MCPOAuthDiscovery.swift
 //  Devgentic
 //
-//  Fetches OAuth Authorization Server Metadata (RFC 8414) for an MCP server's
-//  issuer URL. Used in two places:
-//
-//   1. Auto-detect: when the user pastes a remote URL into the Add MCP form,
-//      we probe `/.well-known/oauth-authorization-server` and offer OAuth
-//      automatically if we get a valid metadata document back.
-//
-//   2. Connect-time: when materializing an OAuth-configured server, we re-
-//      fetch metadata to pick up endpoint rotations (token endpoint moved,
-//      registration revoked, etc.).
-//
-//  Only HTTPS issuers are accepted — except for `localhost` / `127.0.0.1`,
-//  per RFC 8252 §7.3 (loopback exemption for dev).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,6 +12,7 @@ import os
 
 private let logger = DGLogger(category: "MCPOAuthDiscovery")
 
+/// Errors raised while discovering and validating OAuth authorization-server metadata (RFC 8414).
 enum MCPOAuthDiscoveryError: LocalizedError {
     case invalidIssuerURL(String)
     case insecureScheme(String)
@@ -31,7 +20,7 @@ enum MCPOAuthDiscoveryError: LocalizedError {
     case malformedResponse(String)
     case unsupportedServer(String)
     case transport(Error)
-    /// RFC 8414 §3.3 — the `issuer` in the document must equal the issuer we asked.
+    /// The `issuer` in the metadata document must equal the issuer that was requested (RFC 8414).
     case issuerMismatch(requested: String, returned: String)
     /// An endpoint inside the metadata document is not HTTPS.
     case insecureEndpoint(name: String, url: String)
@@ -54,20 +43,10 @@ enum MCPOAuthDiscoveryError: LocalizedError {
 
 struct MCPOAuthDiscovery {
 
-    /// The RFC 8414 §3.1 authorization-server metadata URL for an issuer.
-    ///
-    /// ⚠️ NOT AN APPEND (register KC-44). §3.1 builds the well-known URI by INSERTING
-    /// `/.well-known/oauth-authorization-server` between the HOST component and the PATH
-    /// component of the issuer identifier — `https://as.example.com/realms/acme` discovers at
-    /// `https://as.example.com/.well-known/oauth-authorization-server/realms/acme`. Appending the
-    /// segment to the whole issuer instead asks for
-    /// `…/realms/acme/.well-known/oauth-authorization-server`, which no conforming server serves,
-    /// so discovery 404'd for every issuer that carries a path (Keycloak realms, Auth0 tenants,
-    /// Okta custom URL spaces) and OAuth presented as unavailable.
-    ///
-    /// The OIDC fallback keeps its append (`{issuer}/.well-known/openid-configuration`) — that is
-    /// the construction OpenID Connect Discovery 1.0 specifies, so the two fallbacks legitimately
-    /// differ. Pure function; table-tested in MCPOAuthDiscoveryWellKnownTests.
+    // Why: appending to the whole issuer 404s for issuers with a path (Keycloak realms, Auth0 tenants, Okta).
+    /// The RFC 8414 authorization-server metadata URL for an issuer.
+    /// Inserts `/.well-known/oauth-authorization-server` between host and path (`https://as.example.com/realms/acme` ->
+    /// `https://as.example.com/.well-known/oauth-authorization-server/realms/acme`); the OIDC fallback appends instead.
     static func wellKnownURL(for issuer: URL) -> URL? {
         var components = URLComponents(url: issuer, resolvingAgainstBaseURL: false)
         let issuerPath = components?.path ?? ""
@@ -79,25 +58,19 @@ struct MCPOAuthDiscovery {
         return components?.url
     }
 
-    /// Best-effort discovery: try the OAuth metadata path first, then the
-    /// OIDC path as a fallback (many providers serve the same document at
-    /// both URLs). Returns nil for "no metadata found, but the server
-    /// is otherwise reachable" — i.e. server doesn't advertise OAuth, so the
-    /// caller should not auto-select OAuth as the auth scheme. Throws for
-    /// transport-level failures (network down, TLS error, etc.).
+    /// Best-effort discovery: tries the OAuth metadata path, then the OIDC path as a fallback. Returns nil when no metadata
+    /// is found but the server is reachable (it does not advertise OAuth); throws for transport failures (network, TLS).
     static func probe(issuer: URL, session: URLSession = .shared) async throws -> MCPOAuthMetadata? {
         try validate(issuer: issuer)
 
-        // RFC 8414 §3.1 insertion for the OAuth document; the OIDC fallback appends, per its
-        // own spec — see `wellKnownURL`.
+        // RFC 8414 insertion for the OAuth document; the OIDC fallback appends, per its own spec (see `wellKnownURL`).
         guard let oauthPath = Self.wellKnownURL(for: issuer) else {
             throw MCPOAuthDiscoveryError.invalidIssuerURL(issuer.absoluteString)
         }
         let oidcPath   = issuer.appendingPathComponent(".well-known/openid-configuration")
 
-        // Try OAuth first, fall through to OIDC. We only swallow 404 — any
-        // other transport failure escapes so the caller knows something's
-        // structurally wrong with the URL.
+        // Try OAuth first, fall through to OIDC. Only 404 is swallowed; any other transport failure escapes so the caller
+        // knows something is structurally wrong with the URL.
         for url in [oauthPath, oidcPath] {
             do {
                 if let metadata = try await fetch(from: url, expectedIssuer: issuer, session: session) {
@@ -115,7 +88,7 @@ struct MCPOAuthDiscovery {
     /// is OAuth-configured (the issuer was committed to `MCPAuthenticationScheme.oauth`).
     static func fetch(issuer: URL, session: URLSession = .shared) async throws -> MCPOAuthMetadata {
         try validate(issuer: issuer)
-        // RFC 8414 §3.1 insertion — see `wellKnownURL`.
+        // RFC 8414 insertion; see `wellKnownURL`.
         guard let url = Self.wellKnownURL(for: issuer) else {
             throw MCPOAuthDiscoveryError.invalidIssuerURL(issuer.absoluteString)
         }
@@ -141,9 +114,8 @@ struct MCPOAuthDiscovery {
     ) async throws -> MCPOAuthMetadata? {
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        // 8 seconds is enough for any reasonable AS — too long becomes a
-        // bad UX (user staring at the form). Caller can wrap in a longer
-        // timeout if it's a known-slow link.
+        // 8 seconds is enough for any reasonable AS and avoids the user staring at the form;
+        // callers can wrap a longer timeout for slow links.
         req.timeoutInterval = 8
 
         let data: Data
@@ -168,13 +140,8 @@ struct MCPOAuthDiscovery {
         do {
             let metadata = try JSONDecoder().decode(MCPOAuthMetadata.self, from: data)
 
-            // Validate the CONTENTS of the document, not just the URL we fetched it from.
-            // Until 2026-08-01 nothing checked these: `validate(issuer:)` vetted the input
-            // URL's scheme and then every endpoint inside the response was trusted verbatim.
-            // `MCPOAuthTokenExchange.postForm` even documented the opposite ("discovery
-            // already validated this, so we don't re-check here"), so a document advertising
-            // `"token_endpoint": "http://attacker.example/collect"` would have received the
-            // authorization code AND the PKCE verifier in clear text.
+            // Validate the contents of the document, not just the URL it came from: every advertised endpoint is otherwise trusted.
+            // A hostile `http://` token endpoint would receive the authorization code and PKCE verifier in clear text.
             try validateDocument(metadata, requestedIssuer: expectedIssuer)
 
             // Reject up-front rather than letting the caller try authorize
@@ -193,13 +160,9 @@ struct MCPOAuthDiscovery {
         }
     }
 
-    /// RFC 8414 §3.3 identity check plus a transport check on every advertised endpoint.
-    ///
-    /// Deliberately does NOT require endpoints to share the issuer's host: that is not a
-    /// spec requirement and would break real providers (Google issues from
-    /// `accounts.google.com` but serves tokens from `oauth2.googleapis.com`). The issuer
-    /// match pins WHO the document speaks for, and HTTPS pins the channel — together those
-    /// are what stop an endpoint from being redirected to an attacker.
+    /// RFC 8414 identity check plus a transport check on every advertised endpoint.
+    /// Endpoints need not share the issuer's host (Google issues from `accounts.google.com`, serves tokens elsewhere).
+    /// The issuer match pins who the document speaks for; HTTPS pins the channel.
     private static func validateDocument(_ metadata: MCPOAuthMetadata, requestedIssuer: URL) throws {
         // Compare on a normalized form: a trailing slash is not an identity difference,
         // and comparing raw strings would reject correct servers.
@@ -230,7 +193,7 @@ struct MCPOAuthDiscovery {
         }
     }
 
-    /// HTTPS, or plain HTTP on loopback for local development (RFC 8252 §7.3).
+    /// HTTPS, or plain HTTP on loopback for local development (RFC 8252).
     private static func isSecureEndpoint(_ url: URL) -> Bool {
         let scheme = url.scheme?.lowercased()
         if scheme == "https" { return true }
@@ -238,8 +201,7 @@ struct MCPOAuthDiscovery {
         return scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
     }
 
-    /// Refuse non-HTTPS issuers in production. `localhost` / `127.0.0.1` are
-    /// exempted per RFC 8252 §7.3 (loopback) so the local test rig works.
+    /// Refuses non-HTTPS issuers; `localhost` and `127.0.0.1` are exempt (RFC 8252 loopback) so a local test rig works.
     private static func validate(issuer: URL) throws {
         guard let scheme = issuer.scheme?.lowercased() else {
             throw MCPOAuthDiscoveryError.invalidIssuerURL(issuer.absoluteString)

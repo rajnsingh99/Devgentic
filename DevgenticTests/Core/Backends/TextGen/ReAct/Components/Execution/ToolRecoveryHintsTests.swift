@@ -4,15 +4,7 @@
 //  ToolRecoveryHintsTests.swift
 //  DevgenticTests
 //
-//  `ToolRecoveryHints.enrich` runs on EVERY failed tool call — both the semantic-failure branch
-//  and the thrown-error branch of `ToolExecutionMediator.executePreparedTool` — and it REWRITES
-//  the observation the model then reasons on. Until now it had no tests at all.
-//
-//  Its own header states five safety guarantees, and each is load-bearing in a different way:
-//  self-exclusion stops a retry loop, available-intersection stops the tool inventing a call the
-//  model cannot make, and the empty-suggestion fallback is explicitly there because "inventing a
-//  suggestion for a tool the model can't call would cause hallucination — the exact failure mode
-//  we're trying to prevent." A guard written to prevent hallucination, which was itself unverified.
+//  Created by Raj Singh.
 //
 
 import XCTest

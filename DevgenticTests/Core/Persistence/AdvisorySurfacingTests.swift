@@ -4,15 +4,7 @@
 //  AdvisorySurfacingTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Registers A34 (advisories computed on every save and discarded), A66 (agent delegation injected
-//  at runtime with its off switch deleted) and A67 (`parallelSubtasks` claimed to be "forced to
-//  false" by a comment, with nothing forcing it).
-//
-//  ⚠️ A66 and A67 are the same defect in two places: a capability was withdrawn from the UI, and the
-//  RUNTIME was left doing whatever the stored blob said. The tests that matter are the ones proving
-//  a persisted `true` no longer decides anything.
+//  Created by Raj Singh.
 //
 
 import XCTest

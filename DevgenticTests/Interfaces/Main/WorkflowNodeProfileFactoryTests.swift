@@ -4,11 +4,7 @@
 //  WorkflowNodeProfileFactoryTests.swift
 //  DevgenticTests
 //
-//  Created on 29/08/26.
-//
-//  Phase 1 of node-owned workflow configuration: the rules that make a node's config DETACHED.
-//  These are pure-function tests by design — the factory was extracted from the view precisely so
-//  the detachment rules are assertable without a view-inspection harness.
+//  Created by Raj Singh.
 //
 
 import XCTest

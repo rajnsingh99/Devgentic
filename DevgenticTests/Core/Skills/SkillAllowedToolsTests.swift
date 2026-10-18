@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillAllowedToolsTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The `allowed-tools` frontmatter declaration: parsed, carried, classified, and NEVER enforced.
-//
-//  Three groups, and the third is the one that matters most:
-//
-//    1. `YAMLFrontmatterParserTests` additions — the sequence spellings a real SKILL.md uses.
-//    2. `SkillToolDeclarationTests` — classification, sanitization, and the no-translation rule.
-//    3. `SkillAllowedToolsNonEnforcementTests` — that the declaration changes NOTHING about which
-//       tools a run gets. That test is the reason this feature is allowed to exist at all; if it
-//       ever goes green by accident, the app has started letting an imported file decide a
-//       capability. Mutation-check it by making the field gate and confirming it goes red.
+//  Created by Raj Singh.
 //
 
 import XCTest

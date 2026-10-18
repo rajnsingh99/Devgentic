@@ -4,12 +4,7 @@
 //  WorkflowExecutorIntegrationTests.swift
 //  DevgenticTests
 //
-//  Integration tests for WorkflowExecutor DAG orchestration.
-//  Exercises real WorkflowExecutor, WorkflowState, WorkflowInputAssembler, and DAG
-//  algorithms with a mock stream provider (no LLM/network calls).
-//
-//  Red-green approach: synthetic real-world scenarios covering single, chained,
-//  branching, and complex workflows with condition, code, and gate nodes.
+//  Created by Raj Singh.
 //
 
 import XCTest

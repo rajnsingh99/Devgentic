@@ -4,55 +4,27 @@
 //  SkillRuntimeFiles.swift
 //  Devgentic
 //
-//  Putting a skill's bundled files somewhere a shell command can actually reach them.
-//
-//  ## Why this exists
-//
-//  ⚠️⚠️ A SKILL COULD BUNDLE `scripts/analyze.py`, SAY "run `python scripts/analyze.py`", AND HAVE
-//  NO FILE ANYWHERE ON DISK. Since V6 a skill's files live in the database as `SkillFileSD.content`
-//  blobs. `load_skill` handed the model their TEXT and nothing more, so the instruction named a path
-//  that did not exist. Worse, the presence of `scripts/` is one of the two triggers that offers the
-//  profile a shell tool (`SkillCapabilityHints`) — so the app asked the user to grant shell access
-//  for scripts it had not written down. The offer was real and the file was not.
-//
-//  This materialises a resolved version to a real directory and hands back the root, so the paths in
-//  the instructions resolve and the granted shell tool has something to run.
-//
-//  ## What it is NOT
-//
-//  ⚠️ Not a cache of the library and not a writable working copy. It is a read-oriented projection
-//  of ONE immutable version. Versions never change, so a directory that already exists for a version
-//  id is already correct and is reused rather than rewritten — which is also what keeps repeated
-//  `load_skill` calls in one conversation cheap.
-//
-//  ⚠️ Nothing reads these files back into the library. An agent that edits a materialised file has
-//  changed a projection, not the skill; `update_skill` remains the only path that writes a version.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "SkillRuntimeFiles")
 
+/// Materialises a resolved skill version's bundled files into a real directory, so paths in its instructions resolve
+/// and a granted shell tool can run them. A read-only projection of one immutable version, reused when it exists;
+/// not a library cache or a writable copy. `update_skill` is the only path that writes a version.
 enum SkillRuntimeFiles {
 
-    /// Root of the per-run projection area.
-    ///
-    /// ⚠️ Under the system temporary directory on purpose: it is derived data that the OS may
-    /// reclaim, and losing it costs one re-materialisation rather than any user content.
+    /// Root of the per-run projection area, under the system temporary directory.
+    /// It is derived data the OS may reclaim; losing it costs one re-materialisation.
     static var root: URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("devgentic-skill-files", isDirectory: true)
     }
 
-    /// Writes a version's bundled files to disk and returns the directory holding them.
-    ///
-    /// Returns nil when the version bundles nothing — there is no directory to name, and naming an
-    /// empty one would invite the model to look for files that do not exist.
-    ///
-    /// ⚠️ TOTAL. A skill whose files cannot be written must still load: the instructions are the
-    /// part that matters, and refusing the whole skill because a projection failed would turn a
-    /// degraded run into no run. The failure is logged with its consequence and the caller simply
-    /// gets nil.
+    /// Writes a version's bundled files to disk and returns the directory holding them, or nil if it bundles nothing.
+    /// Total: a write failure is logged with its consequence and yields nil, so the skill's instructions still load.
     @MainActor
     static func materialize(version: SkillVersionSD, name: String) -> URL? {
         guard !version.orderedFiles.isEmpty else { return nil }
@@ -62,16 +34,8 @@ enum SkillRuntimeFiles {
         let parent = root.appendingPathComponent(version.id, isDirectory: true)
         let expected = parent.appendingPathComponent(name, isDirectory: true)
 
-        // Already projected by an earlier call in this run (or an earlier run): versions are
-        // immutable, so what is there is what we would write.
-        //
-        // ⚠️⚠️ THIS CHECK IS ONLY SOUND BECAUSE `SkillMaterializer.write` WRITES SKILL.md LAST.
-        // It used to be written FIRST, which made this a sentinel that lied: a write that threw on
-        // a bundled file left SKILL.md behind, and this branch then handed the caller a directory
-        // containing nothing else — so the first call returned nil honestly and the second claimed
-        // success, silently, for a tree whose `scripts/run.py` did not exist. If anyone moves that
-        // write back above the file loop, this returns to being a bug; `SkillMaterializerTests`
-        // guards the ordering.
+        // Already projected by an earlier call: versions are immutable, so what is there is what would be written.
+        // Sound only because `SkillMaterializer.write` writes SKILL.md last; moving it above the file loop breaks this check.
         if FileManager.default.fileExists(atPath: expected.appendingPathComponent("SKILL.md").path) {
             return expected
         }

@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGChunkingQualityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Batch 4 of the RAG readiness register:
-//    RAG-3  — no prose chunk exceeds the cap; a PDF page after the first is no longer one chunk.
-//    RAG-23 — a code line longer than a chunk is cut, not embedded whole; `<think>` never indexed.
-//    RAG-35 — the splitter never drops text (its old failsafe `break` did).
-//    RAG-36 — CRLF is one line break, so code chunks carry no phantom blank lines.
-//
-//  The embedder reads ~128 tokens (~500 chars); text past the cap is invisible to semantic search,
-//  so "no chunk exceeds the cap" IS the retrieval-quality invariant.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,10 +4,7 @@
 //  LLMProviders.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
-//
-//  URLSession-based LLM provider implementations replacing
-//  OllamaLanguageModel, OpenAILanguageModel, and MLXLanguageModel.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -23,20 +20,13 @@ private let logger = DGLogger(category: "LLMProviders")
 protocol LLMProvider: Sendable {
     var modelName: String { get }
 
-    /// Generates a complete response for the given conversation.
-    /// - Parameters:
-    ///   - messages: An array of message dictionaries in OpenAI chat format:
-    ///     `[{"role": "system"|"user"|"assistant", "content": "..."}]`
-    ///   - tools: An optional array of tool dictionaries in the provider's native format.
-    ///   - responseSchema: An optional JSON Schema dictionary for structured output enforcement.
-    ///     Providers that support it (OpenAI, Ollama) embed this in the API request body.
-    /// - Returns: The full text response from the model.
+    /// Generates a complete response for the given conversation and returns the full text.
+    /// `messages` use OpenAI chat format; `tools` use the provider's native format; `responseSchema` is a JSON Schema
+    /// for structured output, embedded in the request body by providers that support it (OpenAI, Ollama).
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String
 
-    /// Streams a response token-by-token for the given conversation.
-    /// - Parameter messages: An array of message dictionaries in OpenAI chat format.
-    /// - Parameter tools: An optional array of tool dictionaries in the provider's native format.
-    /// - Returns: An async stream of string chunks (deltas) as they are generated.
+    /// Streams a response token-by-token for the given conversation, as an async stream of string deltas.
+    /// `messages` use OpenAI chat format; `tools` use the provider's native format.
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error>
 
     /// Generates a strictly typed cognitive step, bypassing string parsing.
@@ -47,36 +37,24 @@ protocol LLMProvider: Sendable {
 
     // MARK: - Native-Turn Overload (G12 Refactor)
 
-    /// Generates a cognitive step from a native-turn message array that carries
-    /// provider-specific structural content (tool_calls arrays, tool_use blocks,
-    /// functionCall parts). Used by the native-turn path which threads a growing
-    /// `assistant(tool_calls) → tool(result)` conversation across ReAct iterations,
-    /// instead of re-serializing working memory as a user message each turn.
-    ///
-    /// Default implementation downgrades each message to `{role, content: String}`
-    /// by coercing the `content` field to a string — safe fallback for providers
-    /// that haven't yet implemented the native path, but drops any structural
-    /// tool-call content. Native-tool providers (Ollama, OpenAI, Claude, Gemini)
-    /// should override to pass the rich messages through directly.
+    /// Generates a cognitive step from native-turn messages that carry provider-specific content (tool_calls arrays,
+    /// tool_use blocks, functionCall parts). The default coerces each message to `{role, content: String}`, dropping
+    /// structural tool-call content; native-tool providers (Ollama, OpenAI, Claude, Gemini) override it.
     func generateCognitiveStep(
         nativeMessages: [[String: Any]],
         tools: [[String: Any]]?
     ) async throws -> ModernCognitiveStep
 
-    /// The native-turn step, STREAMED: `onTextDelta` receives the model's visible text as it is
-    /// generated, and the call still returns the complete step (tool calls, thinking trace, usage)
-    /// when the response ends.
-    ///
-    /// Default: the non-streaming call, and `onTextDelta` is never invoked — so a provider without a
-    /// streaming implementation behaves exactly as before. Only the text is streamed; tool calls are
-    /// meaningless until complete, so they arrive with the returned step.
+    /// The native-turn step, streamed: `onTextDelta` receives visible text as it is generated, and the call still
+    /// returns the complete step. The default calls the non-streaming variant and never invokes `onTextDelta`.
+    /// Tool calls arrive only with the returned step.
     func generateCognitiveStepStreaming(
         nativeMessages: [[String: Any]],
         tools: [[String: Any]]?,
         onTextDelta: @escaping @Sendable (String) -> Void
     ) async throws -> ModernCognitiveStep
 
-    // MARK: - Multimodal Overloads (Phase 6)
+    // MARK: - Multimodal Overloads
 
     /// Generates a complete response from multimodal ProviderMessages.
     /// Default implementation downgrades to legacy format.
@@ -88,11 +66,8 @@ protocol LLMProvider: Sendable {
 
     // MARK: - Usage-Reporting Overloads (#10b)
 
-    /// Like ``generate(messages:tools:responseSchema:)`` but also returns the provider-reported
-    /// token usage when the API exposes it. The default implementation reports `nil` usage (callers
-    /// then estimate via `chars/4`); cloud providers override to surface real counts so cost
-    /// accounting isn't tainted as estimated. A parallel method (mirroring the `payload:` /
-    /// `nativeMessages:` overloads), not a widening of the `-> String` signature.
+    /// Like `generate(messages:tools:responseSchema:)` but also returns provider-reported token usage when the
+    /// API exposes it. The default reports nil usage (callers estimate via `chars/4`); cloud providers override it.
     func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?)
 
     /// Multimodal counterpart of ``generateWithUsage(messages:tools:responseSchema:)``.
@@ -132,14 +107,8 @@ extension LLMProvider {
         stream(messages: messages, tools: tools)
     }
 
-    /// Default fallback — coerces native messages to legacy `[[String: String]]`.
-    /// Loses any structural tool-call content. Native-tool providers override.
-    ///
-    /// Non-string values (tool_calls arrays, content-block arrays, nested dicts) are
-    /// JSON-encoded rather than `String(describing:)`-ed, so the downstream legacy
-    /// path still receives valid JSON fragments as string content. This is a fallback
-    /// shape, not the intended path — providers that actually handle native turns
-    /// should override this method.
+    /// Default fallback that coerces native messages to `[[String: String]]`, dropping structural tool-call
+    /// content. Non-string values are JSON-encoded so the legacy path still gets valid JSON fragments.
     func generateCognitiveStep(
         nativeMessages: [[String: Any]],
         tools: [[String: Any]]?
@@ -207,11 +176,9 @@ struct LLMProviderConfig: Sendable {
     }
 }
 
-/// ⚠️ Never prints the key. `ReActAgentExecutor` logs `String(describing: model)`, and the default
-/// reflection of a provider struct walks into this config and printed `apiKey: Optional("sk-…")`
-/// verbatim. `TelemetrySanitizer` happened to catch the `sk-` shape, but a key with no known vendor
-/// prefix (common on OpenAI-compatible gateways) would have gone straight to the log. Reflection
-/// renders a child through `debugDescription`, so conforming here covers every enclosing provider.
+// Why: logging a provider via `String(describing:)` reflects into this config, and reflection renders children through
+// `debugDescription`; conforming here covers every enclosing provider, even keys with no known vendor prefix.
+/// Redacts the API key from `description` and `debugDescription`.
 extension LLMProviderConfig: CustomStringConvertible, CustomDebugStringConvertible {
     var description: String {
         let key = apiKey.map { $0.isEmpty ? "empty" : "set (\($0.count) chars)" } ?? "none"
@@ -234,20 +201,16 @@ enum LLMProviderError: LocalizedError {
     /// Thrown when an Ollama model rejects `think: true` with HTTP 400.
     /// Caught by `BackendOrchestrationService` to auto-disable + retry transparently.
     case thinkingUnsupported(modelName: String)
-    /// Thrown when an Ollama model rejects the `tools` parameter with HTTP 400
-    /// ("does not support tools"). Reasoning-only models (deepseek-r1, o1 family)
-    /// land here. The retry strategy routes this to an immediate abort — there's
-    /// no format correction that can fix a capability gap, so burning the retry
-    /// budget is just latency. User-facing message suggests switching profile
-    /// type or model.
+    /// Thrown when an Ollama model rejects the `tools` parameter with HTTP 400 ("does not support tools"), as reasoning-only
+    /// models (deepseek-r1, o1 family) do. Retrying cannot fix a capability gap, so the retry strategy aborts immediately;
+    /// the message suggests switching profile type or model.
     case toolsUnsupported(modelName: String)
-    /// The provider's own safety system declined the request — Anthropic `stop_reason: "refusal"`,
-    /// Gemini `promptFeedback.blockReason` or a safety `finishReason`. HTTP 200, so nothing upstream
-    /// saw a failure: the user got an empty or cut-off answer with no explanation (readiness CR-16).
-    /// Deterministic for the same request, so never retried.
+    /// The provider's own safety system declined the request (Anthropic `stop_reason: "refusal"`, Gemini
+    /// `promptFeedback.blockReason` or a safety `finishReason`). It arrives as HTTP 200 and is deterministic for the
+    /// same request, so it is never retried.
     case refused(provider: String, detail: String)
-    /// A stream that closed cleanly but never said it had finished (no `finish_reason`): cut off
-    /// upstream, by a proxy or gateway. Transient — the same request normally completes (CR-26).
+    /// A stream that closed cleanly but never reported it had finished (no `finish_reason`), cut off upstream by a proxy or
+    /// gateway. Transient: the same request normally completes.
     case streamEndedEarly(provider: String)
 
     var errorDescription: String? {

@@ -4,14 +4,14 @@
 //  SettingsButtonComponents.swift
 //  Devgentic
 //
-//  Unified, premium button components designed for macOS Settings, toolbars, and inspection cards.
-//  Replaces bare SwiftUI `.buttonStyle(.bordered)` which renders with near-zero contrast on dark themes.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Button Variants
 
+/// Button variants for macOS Settings, toolbars and inspection cards, with enough contrast on dark themes.
 enum SettingsButtonVariant {
     /// Solid high-contrast call-to-action (e.g. Save, Create).
     case primary

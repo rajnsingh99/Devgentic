@@ -4,11 +4,7 @@
 //  CognitiveParserProtocol.swift
 //  Devgentic
 //
-//  Step 3: Protocol contract for dialect-specific response parsers.
-//  Each concrete parser handles one ModelDialect and converts raw LLM text
-//  into a fully-structured ModernCognitiveStep.
-//
-//  Created by Raj Singh on 06/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

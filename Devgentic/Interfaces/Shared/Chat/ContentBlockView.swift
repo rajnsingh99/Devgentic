@@ -4,10 +4,8 @@
 //  ContentBlockView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 10/08/25.
+//  Created by Raj Singh.
 //
-//  Phase 5: Motion & Polish - Added Blinking Cursor & Text Smoothing.
-//  Step 5: Equatable Conformance for High-Performance Memoization.
 
 import SwiftUI
 import AppKit
@@ -15,6 +13,8 @@ import os
 
 private let logger = DGLogger(category: "ContentBlockView")
 
+/// A rendered chunk of a chat message's markdown (paragraph, heading, code, list, table, image, and so on).
+/// Equatable so views can memoize unchanged blocks.
 struct ContentBlock: Identifiable, Equatable, Hashable {
     let id: String // e.g., "block-0", "block-1"; children are "block-0.1"
     let type: BlockType
@@ -25,9 +25,8 @@ struct ContentBlock: Identifiable, Equatable, Hashable {
     }
 
     /// A table column's `:--` / `:-:` / `--:` alignment.
-    ///
-    /// Mirrors `Markdown.Table.ColumnAlignment` rather than re-exporting it, so the view
-    /// layer doesn't import the parser's vocabulary. GFM's unspecified default is leading.
+    /// Mirrors `Markdown.Table.ColumnAlignment` so the view layer does not import the parser's vocabulary; the default
+    /// is leading.
     enum ColumnAlignment: Equatable, Hashable {
         case leading, center, trailing
 
@@ -48,31 +47,15 @@ struct ContentBlock: Identifiable, Equatable, Hashable {
         }
     }
 
-    /// The block model is RECURSIVE: a list item and a blockquote own child blocks.
-    ///
-    /// It used to be flat — `listItem` held a `String`, and there was no blockquote —
-    /// so the parser dumped an item's children into that string as raw markdown via
-    /// `format()`. `createStyledString` then fed that to `AttributedString(markdown:)`,
-    /// which consumed the `-`/`>`/fence markers (and the newlines!) into BLOCK-level
-    /// `presentationIntent` that the renderer never read. Result on screen:
-    /// "1. Install dependenciesRun npm installVerify with npm -v". Modelling children
-    /// as blocks is what makes nested lists, code-in-list, multi-paragraph items and
-    /// blockquotes renderable at all.
-    ///
-    /// (No `indirect` needed: the recursion passes through `Array`, which already
-    /// provides the heap indirection.)
+    /// The block model is recursive: a list item and a blockquote own child blocks.
+    /// Modelling children as blocks is what makes nested lists, code in lists, multi-paragraph items and blockquotes
+    /// renderable.
     enum BlockType: Equatable, Hashable {
         case paragraph(String)
         case code(language: String, content: String, fileName: String?)
         case heading(level: Int, text: String)
-        /// `blocks` = everything the item contains, IN DOCUMENT ORDER — its paragraphs,
-        /// its code fences, and any nested list (as further `.listItem` children).
-        ///
-        /// Order matters: an earlier version partitioned an item's children into
-        /// "own content" vs "nested lists" and emitted the former first, which silently
-        /// REORDERED output — a fence written after the sub-bullets rendered above them.
-        /// There is no `indentation` parameter because nesting depth IS the indentation;
-        /// the renderer's marker+VStack layout indents children for free.
+        /// `blocks` is everything the item contains in document order: paragraphs, code fences and nested lists.
+        /// Nesting depth is the indentation, so there is no `indentation` parameter.
         case listItem(prefix: String, blocks: [ContentBlock], checkbox: Checkbox?)
         case blockquote(blocks: [ContentBlock])
         case horizontalRule
@@ -119,10 +102,7 @@ struct ContentBlockView: View, Equatable {
     let message: ChatMessage
     var isLastBlock: Bool = false
     var searchQuery: String = ""
-    /// The active match's location within the MESSAGE, resolved locally against this block's
-    /// own id. Previously this was a bare `Int` counted across the whole message and handed
-    /// to every block, which then compared it against its own offsets — so the active
-    /// highlight painted a different occurrence than the one being navigated to, or nothing.
+    /// The active match's location within the message, resolved locally against this block's own id.
     var activeMatch: ActiveSearchMatch? = nil
 
     /// [mc-11] What a file-reference verification depends on. `isStreaming` is part of the key
@@ -143,24 +123,14 @@ struct ContentBlockView: View, Equatable {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
-    /// `code span → absolute path` for the spans in this block that name a readable file RIGHT
-    /// NOW — the only ones that become tappable. Filled off-main by `verifyFileReferences`;
-    /// empty until it lands and whenever nothing resolves, which is the feature's silent default.
-    ///
-    /// Keyed by SPAN, not path: a bare filename like `AbstractionDemo.java` cannot be
-    /// re-derived from the resolved path at render time, so the mapping has to be carried.
-    ///
-    /// Deliberately `@State` and NOT part of `==`: the memoized equality below exists to skip
-    /// re-rendering unchanged blocks, and state changes re-run `body` regardless.
+    // Why: `@State` and not part of `==`: the memoized equality skips unchanged blocks, and state changes re-run `body`
+    // anyway.
+    /// Maps code span to absolute path for spans naming a readable file right now; only those are tappable.
+    /// Filled off-main by `verifyFileReferences`; keyed by span because a bare filename cannot be re-derived.
     @State private var resolvedFileLinks: [String: String] = [:]
 
     /// Why the last tap on a file reference in this block opened nothing, or nil.
-    ///
-    /// The open can fail after the span was verified — the file moves, loses read
-    /// permission, or stops being UTF-8 text — and until this existed the failure was a log
-    /// line only: the link stayed underlined and tapping it did nothing visible, forever,
-    /// because `resolvedFileLinks` re-verifies on `.task(id: text)` and a settled block's
-    /// text never changes again. Cleared on the next successful open.
+    /// The open can fail after verification (file moved, unreadable, not UTF-8); cleared on the next successful open.
     @State private var fileOpenFailureReason: String?
 
     /// Code sits a step below body prose (the same convention `MarkdownTableView` uses for
@@ -188,11 +158,7 @@ struct ContentBlockView: View, Equatable {
                 .padding(.bottom, theme.spacingSmall)
 
         case .code(let lang, let codeContent, let fileName):
-            // Counted and built via CodeSnippet so this card, and the snippet the viewer
-            // opens when it's tapped, are derived identically — see CodeSnippet.isLarge.
-            // [mc-12] Counted ONCE per body pass and reused for the branch, the card and the
-            // accessibility label. It used to be three separate walks of the same unbounded
-            // string — `isLarge` internally counts too — on every streaming flush of the block.
+            // Counted once per body pass via `CodeSnippet` and reused for the branch, the card and the accessibility label.
             let codeLines = CodeSnippet.lineCount(codeBlockContent: codeContent)
             if codeLines > ChatUIConstants.codeBlockLineLimit {
                 CodeBlockCardView(language: lang, lineCount: codeLines, fileName: fileName, content: codeContent) {
@@ -201,17 +167,12 @@ struct ContentBlockView: View, Equatable {
                 }
                 .accessibilityLabel("\(lang) code block, \(codeLines) lines. Tap to open in viewer.")
             } else {
-                // The inline Viewer button gets the SAME origin identity the card branch
-                // above passes through `openMessageInCodeViewer`, so re-opening a block
-                // refreshes its tab instead of appending a second one. The ordinal is
-                // resolved in the closure — on the click, not on every streamed body pass.
+                // The inline Viewer button passes the same origin identity as the card branch, so re-opening refreshes the tab.
                 CodeBlockView(language: lang, content: codeContent, fileName: fileName, fontSize: codeFontSize,
                               originMessageID: message.id,
                               resolveOriginBlockIndex: { [message] in
-                                  // The message's text is read HERE, not in the capture list:
-                                  // reading an @Observable property inside `body` would make
-                                  // every settled block a dependency of the streaming text and
-                                  // defeat the `.equatable()` memoization this file is built on.
+                                  // The message text is read here, not in the capture list: reading an `@Observable` property in `body` would defeat
+                                  // `.equatable()` memoization.
                                   Self.codeBlockOrdinal(forContent: codeContent, in: message)
                               })
                     .padding(.bottom, theme.spacingMedium)
@@ -223,29 +184,18 @@ struct ContentBlockView: View, Equatable {
             renderTextView(text: text, font: fontForHeading(level: level), weight: fontWeightForHeading(level: level))
                 .padding(.top, theme.spacingMedium)
                 .padding(.bottom, theme.spacingXSmall)
-                // Headings were size and weight only — visual structure a VoiceOver user
-                // couldn't see or navigate. With the trait they populate the rotor, so a
-                // long reply can be skimmed section by section instead of read start to end.
-                // Explicit element because `renderTextView` returns an HStack (text +
-                // streaming cursor), and traits on a bare container don't reliably reach the
-                // Text inside. The cursor is `.accessibilityHidden`, so nothing else merges in.
+                // Header trait feeds VoiceOver's rotor; an explicit element because traits on a bare HStack may not reach the
+                // Text.
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityHeading(Self.headingLevel(level))
 
         case .listItem(let prefix, let blocks, let checkbox):
-            // `.firstTextBaseline` keeps the marker (number/bullet/checkbox) on the FIRST
-            // line of a wrapped item; `.top` floated it above the text's cap height and
-            // `.center` floated it to the vertical middle of a multi-line item. (This used to
-            // point at `renderPathListItem` for the `.center` half — that helper was deleted as
-            // dead code in the same 2026-09-12 pass; see the note at its former site.)
+            // `.firstTextBaseline` keeps the marker on the first line of a wrapped item; `.top` and `.center` misalign it.
             HStack(alignment: .firstTextBaseline, spacing: theme.spacingSmall) {
                 listMarker(prefix: prefix, checkbox: checkbox)
 
-                // Everything the item contains, in document order — so a fenced code
-                // block inside an item is a real code block, a multi-paragraph item
-                // keeps its paragraphs, and a NESTED list renders here as child items.
-                // The marker + this VStack supply the indentation; no manual padding.
+                // Everything the item contains in document order; the marker and this VStack supply the indentation.
                 VStack(alignment: .leading, spacing: theme.spacingXXSmall) {
                     ForEach(blocks) { child in
                         childBlock(child)
@@ -277,8 +227,7 @@ struct ContentBlockView: View, Equatable {
                 .padding(.vertical, theme.spacingMedium)
 
         case .table(let headers, let rows, let alignments):
-            // One step below the chat body size — tables at full prose size read
-            // oversized (and previously hard-coded 15pt regardless of the setting).
+            // One step below the chat body size; tables at full prose size read oversized.
             MarkdownTableView(headers: headers, rows: rows, alignments: alignments, cellFontSize: max(11, themeManager.chatFontSize - 2))
                 .transaction { $0.animation = nil }
 
@@ -295,9 +244,7 @@ struct ContentBlockView: View, Equatable {
                             .aspectRatio(contentMode: .fit)
                             .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                             .overlay(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium).stroke(theme.dividerColor, lineWidth: 1))
-                            // altText reached this view but was only ever shown as a caption
-                            // WHILE loading — the loaded image, the one that stays on screen,
-                            // had no description at all.
+                            // `altText` is the accessibility label for the loaded image.
                             .accessibilityLabel(altText?.isEmpty == false ? altText! : String(localized: "Image"))
                             .accessibilityAddTraits(.isImage)
                     case .failure(_):
@@ -336,11 +283,9 @@ struct ContentBlockView: View, Equatable {
 
     // MARK: - Nested Blocks
 
-    /// Renders a child block (list-item content, blockquote content).
-    ///
-    /// The streaming cursor belongs on the very last glyph of the message, so
-    /// `isLastBlock` only propagates into the LAST child of a last block. Search
-    /// highlighting threads through unchanged.
+    /// Renders a child block (list-item or blockquote content).
+    /// `isLastBlock` propagates only into the last child of a last block, so the streaming cursor sits on the final
+    /// glyph.
     @ViewBuilder
     private func childBlock(_ child: ContentBlock) -> some View {
         ContentBlockView(
@@ -348,9 +293,7 @@ struct ContentBlockView: View, Equatable {
             message: message,
             isLastBlock: isLastBlock && child.id == lastChildID,
             searchQuery: searchQuery,
-            // Forwarded verbatim: the child resolves it against its own `block.id`, which is
-            // the entire nesting fix — a nested paragraph used to receive the message-global
-            // integer and compare it against its own local offsets.
+            // Forwarded verbatim: the child resolves it against its own `block.id`.
             activeMatch: activeMatch
         )
         .equatable()
@@ -370,8 +313,7 @@ struct ContentBlockView: View, Equatable {
     @ViewBuilder
     private func listMarker(prefix: String, checkbox: ContentBlock.Checkbox?) -> some View {
         if let checkbox {
-            // `- [x]` / `- [ ]` used to be discarded entirely — both rendered as a
-            // plain bullet, so done and not-done were indistinguishable.
+            // A task-list checkbox renders as a checked or unchecked square so done and not-done are distinguishable.
             Image(systemName: checkbox == .checked ? "checkmark.square.fill" : "square")
                 .font(themeManager.chatFont)
                 .foregroundColor(checkbox == .checked ? theme.accentColor : theme.secondaryText)
@@ -399,7 +341,6 @@ struct ContentBlockView: View, Equatable {
                     // Smooth out text updates slightly to avoid harsh token jitter
                     .animation(.linear(duration: 0.05), value: text.count)
 
-                // Phase 5: The Blinking Cursor
                 if message.isStreaming && isLastBlock {
                     BlinkingCursor()
                         .padding(.leading, 2)
@@ -413,18 +354,10 @@ struct ContentBlockView: View, Equatable {
                 fileOpenFailureCaption(fileOpenFailureReason)
             }
         }
-        // Existence checking is a `stat` per candidate and can hang for seconds on an
-        // unresponsive network mount, so it never runs in `body`. Until this lands the set
-        // is empty and the spans render as ordinary inline code — the silent default.
-        //
-        // ⚠️ [mc-11] Keyed on (text, isStreaming), and the work is SKIPPED while streaming.
-        // Keyed on `text` alone it re-ran the whole main-actor prologue on every flush — a
-        // fresh `fileIndex` over every loaded message plus a markdown parse of the block — for
-        // a block whose paths were still arriving a character at a time. The composite key is
-        // what makes the settle itself an event: `ContentBlock.id` is POSITIONAL, so a settled
-        // block keeps its identity and, when its final text equals its last streamed text, a
-        // task keyed on text alone would never fire again — no reference in it would ever
-        // linkify, and `openFileReference` below depends on exactly that standing task.
+        // Why: keyed on (text, isStreaming) and skipped while streaming: settling must re-fire the task,
+        // since a settled block keeps its positional id and unchanged text.
+        // Existence checks stat each candidate and can hang on an unresponsive mount, so they never run in `body`.
+        // Until the task lands the spans render as ordinary inline code.
         .task(id: VerifyKey(text: text, isStreaming: message.isStreaming)) {
             await verifyFileReferences(in: text)
         }
@@ -432,20 +365,8 @@ struct ContentBlockView: View, Equatable {
             guard let path = FileReferenceResolver.path(fromLinkURL: url) else {
                 return .systemAction
             }
-            // ⚠️ [CR18] The scheme is NOT an authorisation check, and treating it as one let a
-            // MODEL open any file on this machine.
-            //
-            // Everything upstream of here gates which inline CODE SPANS become links:
-            // `verifyFileReferences` resolves a span against the conversation's own file index
-            // and `stat`s it, and only then does `linkURL(forVerifiedPath:)` mint a URL. None of
-            // that constrains a link the author WROTE. A reply containing
-            // `[click here](devgentic-file://open?path=/Users/you/.ssh/id_rsa)` parses to a run
-            // whose `link` carries that URL verbatim — probed: Foundation preserves a custom
-            // scheme through `AttributedString(markdown:)` — it lands here, passes the
-            // scheme/host test, and the path is opened. The reply is untrusted input.
-            //
-            // So the path must be one WE minted for this block. `resolvedFileLinks` is exactly
-            // that set: filled off-main from this block's own verified spans.
+            // The URL scheme is not authorisation: only paths minted for this block (`resolvedFileLinks`) may open; reply text
+            // is untrusted.
             guard Self.isVerifiedForThisBlock(path, verifiedPaths: resolvedFileLinks.values) else {
                 // `.handled`, not `.systemAction`: refusing must not hand the URL back to the
                 // system to open by some other route.
@@ -458,11 +379,9 @@ struct ContentBlockView: View, Equatable {
         })
     }
 
-    /// [CR18] Whether a tapped link's path is one THIS block verified.
-    ///
-    /// Extracted so the rule is testable: the handler that calls it lives in a SwiftUI `body` and
-    /// cannot be reached from a test, and this is the check that decides whether message content
-    /// gets to choose a path on disk.
+    /// Whether a tapped link's path is one this block verified.
+    /// Separate from the SwiftUI handler so the rule that decides whether message content can choose a path is
+    /// testable.
     nonisolated static func isVerifiedForThisBlock(_ path: String,
                                                    verifiedPaths: some Collection<String>) -> Bool {
         verifiedPaths.contains(path)
@@ -498,23 +417,15 @@ struct ContentBlockView: View, Equatable {
     }
 
     /// Resolves which inline-code spans in `text` are openable files, off the main thread.
-    ///
-    /// Two kinds resolve: an absolute path by its shape, and a bare filename by matching a file
-    /// this conversation actually read or wrote. Either way the file must STILL be a readable
-    /// regular file, so a reference to something the agent has since deleted quietly reverts to
-    /// plain text.
+    /// An absolute path resolves by shape and a bare filename by matching a file this conversation read or wrote;
+    /// either way it must still be a readable regular file.
     private func verifyFileReferences(in text: String) async {
         guard chatHistoryViewModel.canPresentCodeViewer else { return }
-        // [mc-11] Exactly one verification per block, at settle. A streaming block's paths are
-        // still arriving, so every intermediate answer is provisional and the final one is the
-        // only one that can be right — and the re-key above guarantees this fires again when
-        // `isStreaming` flips.
+        // Verifies once per block at settle: paths in a streaming block are still arriving.
         guard !message.isStreaming else { return }
 
-        // The index is built on the main actor because it reads the loaded messages. It is a
-        // plain walk of already-decoded timeline events — writes contribute `effect.path` with
-        // no parsing at all, and only small param blobs are decoded (see `maxParamsScanLength`),
-        // so a write carrying a whole file never gets JSON-parsed here.
+        // The index is built on the main actor because it reads the loaded messages; only small param blobs are
+        // JSON-decoded.
         let index = FileReferenceResolver.fileIndex(from: chatHistoryViewModel.currentChatMessages)
         // ONE markdown parse, shared: `createStyledString` will parse this text again to render
         // it, but the second parse inside `candidateLinks(inMarkdown:)` was pure duplication.
@@ -533,8 +444,7 @@ struct ContentBlockView: View, Equatable {
 
         guard !Task.isCancelled, resolved != resolvedFileLinks else { return }
         if resolved.count < candidates.count {
-            // Named a file that is no longer there. Silent on screen by design, but the reason
-            // a span the user expected to be tappable isn't should be visible somewhere.
+            // The file is gone; silent on screen, but the unlinked span is logged.
             let missing = candidates.filter { !existing.contains($0.value) }.values.sorted()
             logger.debug("[FileRef] \(missing.count) reference(s) left unlinked — no readable file at: \(missing.joined(separator: ", ")).")
         }
@@ -542,13 +452,9 @@ struct ContentBlockView: View, Equatable {
         resolvedFileLinks = resolved
     }
 
-    /// Reads the file and hands it to the Code Viewer. Mirrors `AgentTimelineView.openInViewer`
-    /// — same off-main read, same explicit failure path. A file can be moved or deleted
-    /// between the verification above and the tap.
-    ///
-    /// `blockText` is this block's own text, re-verified after a failure so a link that has
-    /// gone dead reverts to plain inline code instead of staying underlined and inert: the
-    /// standing `.task(id: text)` never fires again for a settled block.
+    /// Reads the file and hands it to the Code Viewer, with the same off-main read and failure path as
+    /// `AgentTimelineView.openInViewer`.
+    /// `blockText` is re-verified after a failure so a dead link reverts to plain inline code.
     private func openFileReference(_ path: String, inBlockText blockText: String) {
         let viewModel = chatHistoryViewModel
         Task {
@@ -579,13 +485,8 @@ struct ContentBlockView: View, Equatable {
         }
     }
 
-    /// Turns a read error into something the user can act on. `CocoaError` codes are checked
-    /// rather than the message, so the distinction survives localization.
-    ///
-    /// Deliberately a local copy of `AgentTimelineView.openFailureText` rather than a shared
-    /// helper: the two surfaces are being fixed independently and hoisting one file's private
-    /// static into the other is a bigger change than either row asked for. Keep the wording
-    /// in step if one of them changes.
+    /// Turns a read error into something the user can act on, checking `CocoaError` codes so it survives localization.
+    /// A local copy of `AgentTimelineView.openFailureText`; keep the wording in step with it.
     nonisolated static func openFailureText(for error: Error, path: String) -> String {
         let name = (path as NSString).lastPathComponent
         switch (error as? CocoaError)?.code {
@@ -600,16 +501,6 @@ struct ContentBlockView: View, Equatable {
         }
     }
 
-    // [mc-9] `isPathContent` and `renderPathListItem` were DELETED here on 2026-09-12. They had
-    // had zero callers since the ContentBlock model went recursive — the folder/file icon
-    // treatment for path list items stopped rendering then and nobody noticed, which is the
-    // honest measure of how much it was worth.
-    //
-    // Deleted rather than re-wired: `renderPathListItem` takes a single `String` and ends in
-    // `renderTextView(text:)`, so calling it from the `.listItem` branch would have rendered only
-    // the item's first paragraph and SILENTLY DROPPED its other children — nested lists, extra
-    // paragraphs, fenced code. Restoring an icon by losing content is not a fix.
-
     private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
         // Capture theme colors for use inside AttributedString manipulation
         let textColor = theme.primaryText
@@ -621,39 +512,19 @@ struct ContentBlockView: View, Equatable {
             attributedString = parsed
             for run in attributedString.runs {
                 let intent = run.inlinePresentationIntent ?? []
-                // NB: every branch here ASSIGNS `.font`, which overrides whatever
-                // SwiftUI would otherwise infer from the intent — so italic has to be
-                // applied explicitly. It previously fell into the generic `else` below
-                // and was silently dropped (`*text*` rendered upright).
+                // Every branch assigns `.font`, which overrides SwiftUI's inference, so italic must be applied explicitly.
                 if intent.contains(.code) {
-                    // Colour + monospace ONLY — no background chip. The filled pill read as
-                    // visual noise in a paragraph that names a handful of symbols, and it
-                    // fought with the search highlight, which is the one background in this
-                    // string that carries meaning.
+                    // Colour and monospace only, with no background chip, which would compete with the search highlight.
                     attributedString[run.range].foregroundColor = inlineCodeHighlight
-                    // `font.monospaced()` rather than `.system(.body, …)`: the hardcoded body
-                    // size ignored the surrounding context, which the chip used to disguise.
-                    // Inline code in a heading now matches the heading.
+                    // `font.monospaced()` so inline code matches the surrounding context, including headings.
                     attributedString[run.range].font = font.weight(weight).monospaced()
 
-                    // Tappable when — and only when — this span resolved to a file that
-                    // exists. `resolvedFileLinks` is filled off-main by `verifyFileReferences`,
-                    // so an unresolved span simply isn't a link. `.link` is the only per-run
-                    // interactive attribute a `Text` supports.
-                    //
-                    // ⚠️ The underline is set EXPLICITLY. This comment used to claim `.link`
-                    // brought one with it — an ImageRenderer pixel probe showed it does not once
-                    // the run carries an explicit `foregroundColor`, and we re-assert one two
-                    // lines below. So a verified, tappable file reference was rendering
-                    // byte-identical to ordinary inline code, with no affordance at all.
+                    // Tappable only for a verified file; the underline is explicit because `.link` adds none once `foregroundColor` is
+                    // set.
                     let span = String(attributedString[run.range].characters)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    // ⚠️ No `run.link != nil` case here, deliberately: a link whose LABEL is
-                    // inline code does not reach this branch at all. Probed — Foundation drops
-                    // the `.code` intent on a link label, so that run has `link` set and no
-                    // intent, and falls to the ordinary-link branch below. See
-                    // `FileReferenceResolver.codeSpans` for the probe and `LinkedCodeSpanTests`
-                    // for the pin.
+                    // No `run.link != nil` case: Foundation drops the `.code` intent on a link label, so those runs take the
+                    // ordinary-link branch.
                     if let path = resolvedFileLinks[span],
                        let url = FileReferenceResolver.linkURL(forVerifiedPath: path) {
                         attributedString[run.range].link = url
@@ -672,13 +543,7 @@ struct ContentBlockView: View, Equatable {
                     attributedString[run.range].font = font.weight(weight).italic()
                     attributedString[run.range].foregroundColor = textColor
                 } else if run.link != nil {
-                    // An ordinary markdown link. It carries NO `inlinePresentationIntent`, so
-                    // before this branch existed it fell into the `else` below — which assigns
-                    // `foregroundColor = textColor`, overwriting the accent tint SwiftUI would
-                    // otherwise give a link. With no underline either, `[docs](https://…)`
-                    // rendered pixel-identical to the prose around it: the only clickable thing
-                    // in the paragraph was invisible. Colour ALONE is not enough here, which is
-                    // why the underline is explicit (see the file-reference note above).
+                    // An ordinary markdown link carries no inline intent; colour and underline are both explicit so it stays visible.
                     attributedString[run.range].font = font.weight(weight)
                     attributedString[run.range].foregroundColor = linkColor
                     attributedString[run.range].underlineStyle = .single
@@ -714,32 +579,14 @@ struct ContentBlockView: View, Equatable {
         )
     }
 
-    /// The filesystem path a markdown image reference names, or nil when it is a genuine URL
-    /// that belongs on the `AsyncImage` path. Absolute for every shape but `./` and `../` —
-    /// see the warning below.
-    ///
-    /// `URL(string:)` happily returns a SCHEME-LESS URL for `/abs/chart.png`, `./out/chart.png`
-    /// and `~/chart.png`, and `AsyncImage` loads through URLSession, which rejects anything
-    /// without a scheme — so those references could only ever reach the "Failed to load image"
-    /// card. Confirmed for all three shapes.
-    ///
-    /// Only the shapes an author writes when they mean a path are claimed. A bare relative
-    /// reference ("images/a.png") reads equally as a relative URL, so it stays on the remote
-    /// path exactly as before rather than being guessed at.
-    ///
-    /// ⚠️ `./` and `../` ARE claimed — nothing else could have loaded them — but they are
-    /// returned verbatim, and nothing here can resolve them: `expandingTildeInPath` is a no-op
-    /// on them and the app has no base directory for a chat transcript. `FileManager` then
-    /// resolves them against the PROCESS working directory ("/" for a Finder-launched app),
-    /// not against the agent's workspace, so they normally miss. `localImageFailureText` is
-    /// what keeps that honest — the chip must not tell the reader a file that exists is gone.
+    /// Returns the filesystem path a markdown image reference names, or nil when it is a URL for `AsyncImage`.
+    /// Claims `/abs`, `./`, `../` and `~/` shapes; `./` and `../` are returned verbatim and resolve against the working
+    /// directory.
     nonisolated static func localImagePath(forSource source: String) -> String? {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        // The scheme test tolerates a nil URL and falls through. NOTE: a space does NOT make
-        // `URL(string:)` fail — it percent-encodes it ("/Users/a b/x.png" → "/Users/a%20b/x.png"),
-        // which is the reason the claim below is taken from the SOURCE STRING and never from a
-        // round trip through `URL`: the encoded form names no file on disk.
+        // A space does not make `URL(string:)` fail; the claim is taken from the source string, never a round trip through
+        // `URL`.
         if let url = URL(string: trimmed), let scheme = url.scheme {
             // A `file:` URL names a local file too; read it directly instead of round-tripping.
             return scheme.caseInsensitiveCompare("file") == .orderedSame ? url.path : nil
@@ -750,14 +597,7 @@ struct ContentBlockView: View, Equatable {
     }
 
     /// The chip caption for a local image reference that produced no picture.
-    ///
-    /// Three outcomes, not two. "This file is no longer here." is a confident, specific claim,
-    /// and for a RELATIVE reference it is not one we can make: `./out/chart.png` is claimed as
-    /// a path because nothing else could ever have loaded it, but there is no base to resolve
-    /// it against, so `FileManager` uses the process working directory — "/" for a
-    /// Finder-launched app, never the agent's workspace. The read then misses a file that is
-    /// on disk, and the chip (which shows only the last path component) gave the reader no way
-    /// to see that Devgentic had looked somewhere else entirely.
+    /// Three outcomes: exists but undecodable, missing, and a relative reference the app cannot resolve against a base.
     nonisolated static func localImageFailureText(path: String, fileExists: Bool) -> String {
         if fileExists {
             return String(localized: "This file isn't an image Devgentic can display.")
@@ -768,37 +608,16 @@ struct ContentBlockView: View, Equatable {
         return String(localized: "This file is no longer here.")
     }
 
-    /// The ordinal of a rendered code block, resolved against the text the bubble is
-    /// ACTUALLY showing.
-    ///
-    /// `displayedContent`, not `content`: the blocks on screen come from
-    /// `ChatBubbleView.contentToDisplay`, and after a Retry the two diverge — the streaming
-    /// path writes only `variants[selected]` while `content` keeps the ORIGINAL answer. Read
-    /// against `content`, a regenerated message's blocks are not found at all, the ordinal is
-    /// nil, and the inline button falls back to exact-code dedup — which is precisely the
-    /// duplicate-tab defect CF-5 filed.
-    ///
-    /// ⚠️ `ChatHistoryViewModel.openMessageInCodeViewer` enumerates `message.displayedContent`
-    /// too (ChatHistoryViewModel.swift, `switch message.displayedContent`), so the inline path
-    /// and the card path number the same blocks on a regenerated message as on any other. That
-    /// agreement is what makes the shared `(message.id, ordinal)` origin key safe: if the two
-    /// ever read different expressions again, they would stamp the same key onto DIFFERENT
-    /// code and a card open would overwrite an inline tab's contents.
+    /// Returns the ordinal of a rendered code block, resolved against the text the bubble is actually showing.
+    /// Uses `displayedContent`, not `content`, since they diverge after a Retry.
+    /// `openMessageInCodeViewer` enumerates the same expression so the `(message.id, ordinal)` origin key is safe.
     nonisolated static func codeBlockOrdinal(forContent content: String, in message: ChatMessage) -> Int? {
         codeBlockOrdinal(forContent: content, in: message.displayedContent)
     }
 
-    /// Where a code block sits among its message's code blocks, numbered the way
-    /// `openMessageInCodeViewer` numbers them — enumerated over `CodeSnippetExtractor.extract`
-    /// for markdown, and index 0 for a single `.codeBlock` message.
-    ///
-    /// The two numberings must agree, because a block that crosses the 50-line card threshold
-    /// while it streams is opened from the inline button before the threshold and from the
-    /// card after it; disagreeing ordinals would leave the user with two tabs for one block,
-    /// the older holding the truncated fragment.
-    ///
-    /// Two byte-identical blocks in one message resolve to the same ordinal (`firstIndex`).
-    /// They share a tab, which is what content-equality dedup already did for them.
+    /// Returns where a code block sits among its message's code blocks, numbered as `openMessageInCodeViewer` numbers
+    /// them.
+    /// The numberings must agree so inline and card opens share one tab; identical blocks share an ordinal.
     nonisolated static func codeBlockOrdinal(forContent content: String, in messageContent: MessageContent) -> Int? {
         let normalized = CodeSnippet.normalizedCode(content)
         guard !normalized.isEmpty else { return nil }
@@ -812,11 +631,8 @@ struct ContentBlockView: View, Equatable {
         }
     }
 
-    /// The heading's TRUE level, not the font bucket.
-    ///
-    /// `fontForHeading` collapses h3–h6 into one size, but the document structure is still
-    /// real: VoiceOver's rotor can navigate by level, so an h4 nested under an h3 should say
-    /// so even where they look identical on screen.
+    /// Returns the heading's true level, not the font bucket.
+    /// `fontForHeading` collapses h3-h6 into one size, but VoiceOver's rotor navigates by level.
     static func headingLevel(_ level: Int) -> AccessibilityHeadingLevel {
         switch level {
         case 1: return .h1
@@ -849,16 +665,8 @@ struct ContentBlockView: View, Equatable {
 // MARK: - Local Markdown Image
 
 /// A markdown image whose source names a file on disk instead of a URL.
-///
-/// `AsyncImage` cannot render one — see `ContentBlockView.localImagePath` — so every chart an
-/// agent wrote to disk and then referenced showed the "Failed to load image" card. Reads and
-/// decodes off-main through `ImageDownsampler`, the same bounded ImageIO path attached images
-/// use, so a 12 MB PNG costs a thumbnail rather than a full bitmap on the render thread.
-///
-/// When the file is missing or isn't decodable it shows a FILE CHIP naming it, not a generic
-/// failure card: "this file isn't here any more" is actionable, "failed to load image" is not.
-/// The three reasons a chip can carry — including the one for a relative reference the app has
-/// no base for — live in `ContentBlockView.localImageFailureText`.
+/// Decodes off-main through `ImageDownsampler`; shows a file chip when missing or undecodable (see
+/// `localImageFailureText`).
 private struct LocalMarkdownImageView: View {
     let path: String
     let altText: String?
@@ -945,9 +753,7 @@ private struct LocalMarkdownImageView: View {
             return
         }
 
-        // Only reached when there is nothing to draw, so the extra stat costs nothing that
-        // matters and turns one useless card into three distinguishable ones — see
-        // `ContentBlockView.localImageFailureText` for why "relative" is one of them.
+        // Only reached when there is nothing to draw, so the extra stat is cheap and yields distinct failure cards.
         let exists = await Task.detached(priority: .utility) {
             FileManager.default.fileExists(atPath: target)
         }.value
@@ -979,9 +785,7 @@ struct BlinkingCursor: View {
             .frame(width: 8, height: 16)
             .opacity(isVisible ? 1 : 0)
             .onAppear {
-                // Under Reduce Motion the caret stays solid rather than blinking for the
-                // whole reply. Use a cancellable Task instead of repeatForever() so the
-                // animation stops when the view is removed from the hierarchy.
+                // Under Reduce Motion the caret stays solid; a cancellable Task stops the blink when the view is removed.
                 guard !reduceMotion else { return }
                 animationTask = Task { @MainActor in
                     while !Task.isCancelled {

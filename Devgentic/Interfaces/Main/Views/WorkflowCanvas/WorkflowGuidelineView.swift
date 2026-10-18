@@ -4,15 +4,7 @@
 //  WorkflowGuidelineView.swift
 //  Devgentic
 //
-//  The in-app workflow manual, opened from the canvas's "Guide" button. One place that explains
-//  every node kind and the execution model — including the behaviours a user cannot infer from the
-//  canvas: unattended (scheduled / chat-bridge) differences, failure routing, timeouts, and what
-//  becomes the final output.
-//
-//  ⚠️ EVERY CLAIM IN HERE MUST MATCH THE ENGINE. This file is user-facing documentation of
-//  `WorkflowExecutor` behaviour, and the register has a filed lesson (WF63) about inspector copy
-//  derived from stale facts shipping wrong advice. When engine behaviour changes, this file changes
-//  in the SAME commit — treat it like `architecture_readme.md`, but for users.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -20,6 +12,9 @@ import AppKit
 
 // MARK: - Navigation Hierarchy
 
+/// The in-app workflow manual, opened from the canvas's Guide button: every node kind and the execution model,
+/// including behaviours the canvas does not show (unattended runs, failure routing, timeouts, final output).
+/// Every claim must match `WorkflowExecutor`; when engine behaviour changes, this file changes in the same commit.
 enum GuideSection: String, CaseIterable, Identifiable {
     case all = "all"
     case overview = "overview"
@@ -1256,13 +1251,10 @@ struct WorkflowGuidelineView: View {
         }
     }
 
-    /// A monospaced mini-diagram. Horizontal scroll keeps long lines intact instead of wrapping
-    /// them into nonsense; the box makes it read as an illustration, not body text.
-    /// ⚠️ `String`, NOT `LocalizedStringKey`, and deliberately so: this is monospaced ASCII art whose
-    /// alignment IS its meaning. Translating it would reflow the box drawing into nonsense, and the
-    /// extractor would offer a translator a diagram they cannot safely touch. Every OTHER copy
-    /// helper in this file takes a `LocalizedStringKey` (register CVV-8) — this is the one
-    /// exception, recorded here so it does not read as an oversight.
+    // Why: `String`, not `LocalizedStringKey`: the ASCII art's alignment is its meaning, and translating it would reflow
+    // the drawing.
+    /// A monospaced mini-diagram; horizontal scroll keeps long lines intact, and the box reads as an illustration, not body
+    /// text.
     private func diagram(_ art: String) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Text(art)

@@ -4,25 +4,7 @@
 //  RetryRefusalSpeechTests.swift
 //  DevgenticTests
 //
-//  Register CF-42 — a disabled Retry told VoiceOver nothing.
-//
-//  `.help(refusal?.userFacingReason ?? …)` is a hover tooltip, i.e. mouse-only, while
-//  `.accessibilityLabel("Retry generating response")` was a constant. `.disabled(refusal != nil)`
-//  had already removed the button from the actionable set, so a screen-reader user met a control
-//  that would not respond and offered no reason.
-//
-//  Scope: this pins the string handed to the modifier. That the modifier reaches the user is a
-//  VoiceOver (⌘F5) check — see the note in ChatAccessibilitySemanticsTests.
-//
-//  ⚠️ FOLLOW-UP (audit). On the `.error` block path that label was reaching nobody. The error
-//  card and this button sat in a VStack carrying `.accessibilityElement(children: .combine)`
-//  followed by an explicit `.accessibilityLabel("Error: … . …")`: `.combine` merges the children
-//  into ONE element and drops their individual labels, and the explicit label then replaced the
-//  merged one — taking this button's refusal reason and `ErrorMessageView`'s suggestion line
-//  with it. `AgentBubbleContentView.swift:219` is now `.contain` with no hand-written label,
-//  matching the ASM-2 Retry above it, which was already under `.contain` and where the label did
-//  land. Accessibility modifiers cannot be read back from a hosted view, so that half of the row
-//  stays a ⌘F5 check; the strings below are the testable half.
+//  Created by Raj Singh.
 //
 
 import XCTest

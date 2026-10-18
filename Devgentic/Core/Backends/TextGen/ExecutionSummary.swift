@@ -4,15 +4,7 @@
 //  ExecutionSummary.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 21/02/26.
-//
-//  A structured, clean record of what the agent actually did during a single execution run.
-//
-//  Design contract:
-//  - Records ONLY factual outcomes: tool name, params, output, success flag.
-//  - NEVER contains scratchpad strings, system escalation messages, or internal monologue.
-//  - This object is the sole source of truth passed to ResponseSynthesizer.
-//  - It is scoped to a single user query and reset on every new request.
+//  Created by Raj Singh.
 //
 
 import Foundation

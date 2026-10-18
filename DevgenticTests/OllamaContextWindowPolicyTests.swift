@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  OllamaContextWindowPolicyTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 12/07/26.
-//
-//  Covers the shared num_ctx resolution used by BOTH the Ollama request factory
-//  (what gets sent) and the retrieval budget (what gets assumed) — the pair must
-//  never disagree, or retrieval sizes itself for a window the request doesn't have.
+//  Created by Raj Singh.
 //
 
 import XCTest

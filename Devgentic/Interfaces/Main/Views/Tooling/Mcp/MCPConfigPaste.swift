@@ -4,19 +4,7 @@
 //  MCPConfigPaste.swift
 //  Devgentic
 //
-//  Created 2026-08-02 — parsing a pasted `mcpServers` block.
-//
-//  Pasting the JSON block from a server's README is how most servers actually get added, and
-//  it is the path where a whole configuration can be silently altered: `ServerDefinition`
-//  deliberately carries no secrets, so it models env as `envKeys` (names only), while every
-//  README in the wild ships `"env": { "API_KEY": "sk-…" }` — a key→VALUE map. `Codable`
-//  ignores an unknown key, so a working config used to produce a server with its credentials
-//  quietly stripped, which then failed to authenticate with no hint as to why.
-//
-//  Extracted from `AddMCPServerView` on 2026-08-02, unchanged in behaviour except where
-//  noted below. It lived inside the view as two private methods, which meant the one parse
-//  in the subsystem that can silently discard credentials was the one thing no test could
-//  reach. `MCPHarness/ConfigMatrixTests` now drives it directly.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -72,13 +60,8 @@ enum MCPConfigPaste {
         }
     }
 
-    /// Parses a pasted `mcpServers` block.
-    ///
-    /// - Parameter preferredServerName: which entry to take when the block holds several.
-    ///   Nil selects the alphabetically first — **deterministically**. `mcpServers.first` on
-    ///   a Dictionary was previously used, and Swift's Dictionary ordering is seeded per
-    ///   process, so pasting a two-server block configured a *different* server on different
-    ///   launches with nothing to indicate a choice had been made.
+    /// Parses a pasted `mcpServers` block. - Parameter preferredServerName: which entry to take when the block holds
+    /// several; nil selects the alphabetically first, deterministically (Dictionary ordering is seeded per process).
     static func parse(
         _ text: String,
         preferredServerName: String? = nil
@@ -150,9 +133,8 @@ enum MCPConfigPaste {
         )
     }
 
-    /// Fields the standard `mcpServers` block carries that `ServerDefinition` deliberately
-    /// does not model (it holds no secrets). Read straight off the raw JSON so a pasted
-    /// config keeps its credentials instead of losing them to Codable's unknown-key handling.
+    /// Fields the standard `mcpServers` block carries that `ServerDefinition` does not model (it holds no secrets), read
+    /// straight off the raw JSON so a pasted config keeps its credentials.
     private static func parseSidecarFields(
         rawJSON: Data,
         serverName: String

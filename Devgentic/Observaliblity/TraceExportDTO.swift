@@ -4,22 +4,14 @@
 //  TraceExportDTO.swift
 //  Devgentic
 //
-//  Export/import representation of a fully-hydrated trace.
-//
-//  The GRDB-backed `TraceRecord`/`Span` deliberately EXCLUDE their hydrated children
-//  (`rootSpans`/`events`/`children`) from `CodingKeys`, because that same Codable
-//  conformance drives DB row mapping and the tables have no such columns. As a result
-//  JSON-encoding a `TraceRecord` drops every span and event — the exported `trace.json`
-//  was hollow (observability Gap #2).
-//
-//  These DTOs are a SEPARATE Codable surface that DOES serialize the full
-//  rootSpans → spans → events tree. `BundleExporter.writeTrace` encodes them; the
-//  in-app bundle viewer (`BundleViewer`) decodes them. Enum-typed fields are flattened
-//  to their `rawValue` strings for forward-compatible, human-readable JSON.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Export/import representation of a fully hydrated trace, serializing the whole rootSpans, spans and
+/// events tree. Separate from the GRDB records, whose `CodingKeys` omit hydrated children; enum fields
+/// are flattened to `rawValue` strings.
 struct TraceExportDTO: Codable, Identifiable, Sendable {
     let traceID: String
     let conversationID: String
@@ -35,10 +27,8 @@ struct TraceExportDTO: Codable, Identifiable, Sendable {
     let errorSummary: String?
     let metadataJSON: String?
 
-    // v5 columns (build attribution + token/cost accounting). These were silently
-    // DROPPED from every export until 2026-08-22 — the DTO predates the migration
-    // and nobody extended it, so bundles carried no version or spend data. All
-    // optional, so old bundles decode unchanged in the viewer.
+    // Build attribution and token/cost accounting columns; all optional, so older bundles decode
+    // unchanged.
     let appVersion: String?
     let buildNumber: String?
     let inputTokens: Int?

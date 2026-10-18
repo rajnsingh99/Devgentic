@@ -4,10 +4,7 @@
 //  ResilienceBoundedRetryIntegrationTests.swift
 //  DevgenticTests
 //
-//  Executor-level proof for the Phase-A resilience fix (audit #5): provider
-//  errors terminate the run honestly and boundedly. Before the fix, a 5xx
-//  storm retried forever (iteration refunded, zero delay) and a 401 burned
-//  three "parse failure" retries before blaming the model.
+//  Created by Raj Singh.
 //
 
 import XCTest

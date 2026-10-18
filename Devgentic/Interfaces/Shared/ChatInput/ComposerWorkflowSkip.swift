@@ -4,21 +4,7 @@
 //  ComposerWorkflowSkip.swift
 //  Devgentic
 //
-//  The composer's per-node SKIP surface — Phase B increment 7 of the per-node skip design
-//  (`LLM_Execution_Concurrency_Design.md` §0.6 D2.1). The composer renders OUTSIDE the interface
-//  mode switch, so it is the ONLY skip surface for a workflow run started from chat mode, where
-//  the timeline is off-screen.
-//
-//  Two pieces, split on the `ForegroundRunResolver` shape (policy in a pure function, effects in
-//  the view): `ComposerSkipResolver` decides WHAT the button is from plain values —
-//  fully unit-testable without SwiftUI or the executor — and `ComposerWorkflowSkipButton` is a
-//  LEAF view that does all the observable reads in its own `body`.
-//
-//  ⚠️ OBSERVATION CONFINEMENT IS THE POINT OF THE LEAF VIEW. `WorkflowExecutionState.nodeResults`
-//  mutates on every node event; reading it in `ChatInputAreaView.body` would re-run the whole
-//  composer (text editor, gauge, suggestion pipelines) per event and per keystroke-scale timeline
-//  append. The composer passes a plain `UUID?` down and this view pays the re-evaluation alone —
-//  a capsule's worth of body per workflow event.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -27,16 +13,17 @@ private let logger = DGLogger(category: "ComposerWorkflowSkip")
 
 // MARK: - Policy
 
+/// The composer's per-node skip surface for a workflow run started from chat mode, where the timeline is off-screen.
+/// `ComposerSkipResolver` decides what the button is from plain values (unit-testable without SwiftUI);
+/// `ComposerWorkflowSkipButton` is a leaf view so `nodeResults` reads (per node event) don't re-run the composer body.
 enum ComposerSkipResolver {
 
     /// One RUNNING node, snapshotted to plain values by the view.
     struct RunningNode: Equatable, Sendable {
         let nodeID: UUID
         let displayName: String
-        /// Bot/agent only — sub-workflow nodes run down the structural path the running-skip
-        /// racer never enters, so offering them here would offer an action the engine cannot
-        /// honour. The caller derives this from the layout join (same rule as the timeline's
-        /// `isRunningSkippable`).
+        /// Bot/agent only: sub-workflow nodes run down the structural path the running-skip racer never enters, so offering them
+        /// would offer an action the engine cannot honour. Derived from the layout join, like the timeline `isRunningSkippable`.
         let isRunningSkippable: Bool
     }
 
@@ -84,10 +71,8 @@ struct ComposerWorkflowSkipButton: View {
     @Environment(MainApplicationViewModel.self) private var mainViewModel
     @Environment(\.appTheme) private var theme
 
-    /// Layout cache for the kind join (`nodeResults` carries no node kind — running rows must be
-    /// joined against the canvas layout to know bot/agent from structural/sub-workflow).
-    /// Keyed by profile so a different workflow re-loads; a store read per body would be a disk
-    /// decode per node event.
+    /// Layout cache for the kind join (`nodeResults` carries no node kind, so running rows are joined against the layout).
+    /// Keyed by profile so a different workflow re-loads; a store read per body would be a disk decode per node event.
     @State private var cachedLayout: (profileID: UUID, layout: WorkflowLayout)?
 
     var body: some View {
@@ -154,9 +139,8 @@ struct ComposerWorkflowSkipButton: View {
         guard let profileID else { return nil }
         if let cached = cachedLayout, cached.profileID == profileID { return cached.layout }
         let loaded = WorkflowLayoutStore.shared.load(for: profileID)
-        // ⚠️ Not assigned during body — @State writes mid-render are discarded with a runtime
-        // warning. Defer to the next tick; until it lands, each body pays one load (bounded by
-        // how often the verdict is non-hidden with a cold cache).
+        // Not assigned during body: @State writes mid-render are discarded with a runtime warning. Defer to the next tick;
+        // until it lands, each body pays one load.
         Task { @MainActor in cachedLayout = (profileID, loaded) }
         return loaded
     }
@@ -164,9 +148,8 @@ struct ComposerWorkflowSkipButton: View {
     // MARK: Action
 
     private func press(renderedNodeID: UUID, conversationID: UUID) {
-        // Re-resolve at press time: the rendered target may have finished (and another node
-        // started) between render and click — skipping the WRONG node on stale state would be
-        // worse than a no-op.
+        // Re-resolve at press time: the rendered target may have finished (and another node started) since render, and
+        // skipping the wrong node on stale state would be worse than a no-op.
         let verdict = currentVerdict(conversationID: conversationID)
         guard case .enabled(let nodeID, let nodeName) = verdict else {
             logger.warning("[NODE-SKIP] Composer skip press resolved to \(String(describing: verdict)) at press time (rendered target \(renderedNodeID.uuidString.prefix(8)) is stale). CONSEQUENCE: no-op — nothing is skipped; the button re-renders from current state.")

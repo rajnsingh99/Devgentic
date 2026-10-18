@@ -4,22 +4,13 @@
 //  BackgroundTasksFloatingButton.swift
 //  Devgentic
 //
-//  The second way into the Background Tasks panel — and for most of a task's life, the only one.
-//
-//  ⚠️ THE PANEL HAD EXACTLY ONE ENTRY POINT: tapping a `BackgroundTaskCard` in the timeline. That
-//  card is pinned to the turn that produced it, so a build started six turns ago scrolls away and
-//  takes the panel's only door with it. The panel's own empty state — "no commands yet" — was
-//  literally unreachable, because nothing could open it except a card, and a card only exists once
-//  a task has run.
-//
-//  So this pill is not decoration. It is what makes a persistent list persistent.
-//
-//  Mounted at the app-window level beside `CodeViewerFloatingButton`, for the same reason that one
-//  is: the panel is not in the view tree while it is closed.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A floating pill that opens the Background Tasks panel from anywhere in the conversation.
+/// Mounted at the app-window level beside `CodeViewerFloatingButton`, since the panel is not in the tree while closed.
 struct BackgroundTasksFloatingButton: View {
 
     /// Read from `ChatHistoryViewModel.viewerOwningConversationID` by the caller, so the pill and
@@ -34,12 +25,8 @@ struct BackgroundTasksFloatingButton: View {
 
     private var runningCount: Int { tasks.filter(\.isRunning).count }
 
-    /// Hidden when the panel is already open (it would point at itself) and when this conversation
-    /// has never run anything.
-    ///
-    /// ⚠️ Deliberately NOT hidden once every task has finished. The list is history — "what did
-    /// that build actually print" is asked after the run, not during — and a pill that vanishes on
-    /// completion would take the answer with it.
+    /// Hidden when the panel is already open and when this conversation has never run anything.
+    /// Stays visible once every task has finished, since the list is history.
     private var isVisible: Bool {
         Self.shouldShow(hasConversation: conversationID != nil,
                         taskCount: tasks.count,
@@ -48,11 +35,8 @@ struct BackgroundTasksFloatingButton: View {
                             || chatHistoryViewModel.isGitChangesPanelPresented)
     }
 
-    /// The rule itself, promoted out of the view body.
-    ///
-    /// ⚠️ A `private var` inside a SwiftUI `View` cannot be exercised without rendering, so a test
-    /// would have to TRANSCRIBE the condition — and a transcribed predicate stays green when the
-    /// production one is neutered. Named here so both sides read the same expression.
+    // Why: a `private var` in a `View` is untestable without rendering, and a transcribed predicate stays green when broken
+    /// The visibility rule, kept out of the view body so tests exercise the same expression.
     static func shouldShow(hasConversation: Bool, taskCount: Int, panelIsOpen: Bool) -> Bool {
         hasConversation && taskCount > 0 && !panelIsOpen
     }
@@ -61,9 +45,7 @@ struct BackgroundTasksFloatingButton: View {
         Group {
             if isVisible { pill } else { EmptyView() }
         }
-        // ⚠️ History, not just this launch: the saved cards are fetched on appear and on every
-        // conversation switch. Before 2026-09-26 this read the in-memory registry alone, so after a
-        // relaunch the pill vanished and the list it opens could not be reached at all.
+        // Saved cards are fetched on appear and on every conversation switch, so the pill reflects history.
         .task(id: conversationID) {
             reload()
             guard let conversationID else { return }

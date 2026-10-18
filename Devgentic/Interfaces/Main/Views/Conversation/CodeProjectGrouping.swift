@@ -4,15 +4,13 @@
 //  CodeProjectGrouping.swift
 //  Devgentic
 //
-//  The Code sidebar lists sessions under their PROJECT, not under a date (2026-09-24). A Code
-//  session is bound to one folder (`ConversationSD.projectPath`), so the folder is the question the
-//  user is asking when they look for one — "where was I working on X?".
-//
-//  Pure and generic so the ordering rules are testable without SwiftData or a view.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The Code sidebar lists sessions under their project, not a date: a session is bound to one folder (`projectPath`).
+/// Pure and generic so the ordering rules are testable without SwiftData or a view.
 enum CodeProjectGrouping {
 
     /// Sessions a project shows before "Show N more".

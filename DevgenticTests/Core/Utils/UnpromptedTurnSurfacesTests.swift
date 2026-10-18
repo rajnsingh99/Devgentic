@@ -4,14 +4,7 @@
 //  UnpromptedTurnSurfacesTests.swift
 //  DevgenticTests
 //
-//  What survives a relaunch, and what the two "expect more here" surfaces agree on.
-//
-//  ⚠️ THE DURABILITY HALF IS NOT COSMETIC. Every UI branch for a woken report keys off
-//  `messageSource` / `isSyntheticPrompt`. Before the columns existed both reset on load, so the
-//  divider became a user bubble and the trimmed action row grew its Redo back — the same message
-//  rendering differently depending on when you looked at it. A round-trip test is the only thing
-//  standing between that and a silent regression, because nothing else fails when a column is
-//  dropped from a writer.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,14 +4,7 @@
 //  ImageTranscodeTests.swift
 //  DevgenticTests
 //
-//  Covers the HEIC-and-friends transcode path: `ImageConstraints.transcodeToJPEG` /
-//  `supportedWebMimeType` / `ensureJPEG` (the ImageIO layer) and
-//  `VisionImageFormat.resolveSendable` (the single BYTE-TRUTHFUL policy choke point every
-//  image builder routes through: real-jpeg/png/webp → passthrough, other decodable
-//  container → JPEG transcode, undecodable → omit). Decisions are made from the actual
-//  bytes, never the filename, so a mislabeled .jpg-that-is-HEIC can't slip through and
-//  400. TIFF stands in for HEIC (unsupported-on-the-wire yet ImageIO-decodable, and
-//  synthesizable without a HEIF encoder).
+//  Created by Raj Singh.
 //
 
 import XCTest

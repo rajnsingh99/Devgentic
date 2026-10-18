@@ -2,23 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsTestHostGuardTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The test host must not open the developer's real chat connections.
-//
-//  ⚠️⚠️ THE CONVENTION THIS REPLACED NEVER PROTECTED ANYTHING. Eight comments across the codebase
-//  forbade tests and previews from constructing `MainApplicationViewModel`, because doing so
-//  bootstraps ChatOps. But the XCTest host IS the real app: `DevgenticApp.init` constructs the view
-//  model on every `test-without-building` run whatever the tests do. Confirmed empirically on
-//  2026-09-11 — fifteen consecutive test runs each logged the three "ChatOps is disabled" lines from
-//  `bootstrap()`. They said *disabled* only because the developer's toggles were off; with them on,
-//  every one of those runs would have opened real Telegram, Discord and Slack listeners against live
-//  bot tokens.
-//
-//  ⚠️ AND THE DAMAGE IS NOT HYPOTHETICAL. Telegram serves ONE `getUpdates` poller and answers 409 to
-//  the other, so commands the developer sends while a test runs are swallowed at random by the test
-//  host — and executed there, creating conversations and running agents in a process about to be
-//  killed, with nothing in the build output mentioning it.
+//  Created by Raj Singh.
 //
 
 import XCTest

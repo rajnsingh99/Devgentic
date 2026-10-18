@@ -4,8 +4,7 @@
 //  W4ClusterTests.swift
 //  DevgenticTests
 //
-//  P3 batch W4: model/mm-5, render/mc-11, speech/sa-8, workflow/vm-2, workflow/vm-4, views/bm-5.
-//  render/mc-14 has its own file (`StreamingFenceBoundaryTests`); viewmodel/vm-9 was a deletion.
+//  Created by Raj Singh.
 //
 
 import XCTest

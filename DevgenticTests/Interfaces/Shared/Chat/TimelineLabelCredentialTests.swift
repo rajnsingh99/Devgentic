@@ -4,31 +4,7 @@
 //  TimelineLabelCredentialTests.swift
 //  DevgenticTests
 //
-//  CR25 (2026-09-13 cold-read register, re-triaged 2026-09-17).
-//
-//  `ToolArgFormatter.primaryLabel`'s fallback — the branch every tool with no `case` in the
-//  switch lands on, which is every MCP tool plus `http_request` — surfaced credentials two ways.
-//
-//   1. A URL's QUERY STRING, verbatim and uncapped. `pathShaped` is `contains("/") && !contains(" ")`,
-//      true of every URL, and it routed to `basename`, the one branch with no length cap. So
-//      `https://api.openweathermap.org/data/2.5/weather?appid=SECRETKEY&q=London` labelled
-//      `weather?appid=SECRETKEY&q=London` — into the chip AND into `ConversationExporter`, which
-//      has no redaction pass of its own and produces the file a user hands to someone else. The
-//      same branch threw the HOST away, so a call to `evil.example.com/steal` exported as `steal`.
-//   2. A CREDENTIAL-NAMED KEY, deterministically preferred. The sorted sweep that makes the label
-//      a function of the params alone is a TOTAL order, so `api_key` beat `topic` every time.
-//
-//  ⚠️ CR25 also alleged a third half — that the fallback "erases the only identifying argument for
-//  payload-shaped third-party tools". That half is REFUTED and deliberately not fixed here: an
-//  empty label for a payload-only tool is the stated policy (fallback property 2) and is pinned by
-//  `SplitToolTimelineLabelTests.testAnUnknownToolWithOnlyPayloadParamsLabelsNothing`, which says so
-//  in words. Widening identity is the remedy if one is ever wanted; relaxing `payloadParamKeys`
-//  is not.
-//
-//  Every expected string below was produced by RUNNING the helper, not reasoned about. Each test
-//  names the mutation that must kill it. Where a negative assertion appears it always sits beside
-//  a positive equality — an `XCTAssertFalse(contains("SECRET"))` alone passes vacuously against a
-//  mutant that returns "" for the wrong reason.
+//  Created by Raj Singh.
 //
 
 import XCTest

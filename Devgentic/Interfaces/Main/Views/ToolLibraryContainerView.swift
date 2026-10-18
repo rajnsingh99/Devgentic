@@ -4,16 +4,14 @@
 //  ToolLibraryContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  Wraps ToolLibraryView for display in the main content area.
-//  DynamicIslandBar houses search, select-all, add-MCP, and done actions.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 private let logger = DGLogger(category: "ToolLibraryContainer")
 
+/// Hosts `ToolLibraryView` in the main content area; the island bar houses search, select-all, add-MCP and done actions.
 struct ToolLibraryContainerView: View {
 
     /// Profile supplied by the route, if any. Nil when opened from the Tools rail tab.
@@ -74,10 +72,8 @@ struct ToolLibraryContainerView: View {
                 }
                 .padding(.bottom, 8)
 
-                // The container itself takes whatever width is offered. The
-                // inner ToolLibraryView caps itself at 1200pt (20% wider than
-                // the global content column) so the sidebar + table can breathe
-                // without dragging the island bar wider than its standard.
+                // The container takes whatever width is offered; the inner `ToolLibraryView` caps itself at 1200pt
+                // so the sidebar and table have room without widening the island bar.
                 ToolLibraryView(
                     configuredTools: toolsBinding,
                     instructions: currentInstructions,
@@ -93,8 +89,7 @@ struct ToolLibraryContainerView: View {
             .id(profileID ?? ToolSource.builtInSourceID)
             .onAppear {
                 // Deep-link from the Tools sidebar: select the server the user clicked.
-                // One-shot — it clears itself so a later plain navigation does not inherit
-                // a stale selection.
+                // One-shot: consuming it clears the selection so a later plain navigation does not inherit it.
                 if let pending = MCPToolLibrarySelection.shared.consume() {
                     ToolLibraryNavigationState.shared.selectedSidebar = .mcp(pending)
                     logger.info("[TOOLLIB] Opened preselected on MCP source \(pending) from the Tools sidebar.")
@@ -123,9 +118,8 @@ struct ToolLibraryContainerView: View {
         HStack(spacing: 6) {
             IslandSearchToggleButton(isExpanded: $isSearchExpanded)
 
-            // Selection mode and Select All write tool enablement into a profile. With none
-            // targeted they would be controls with nowhere to write, so they are hidden
-            // rather than shown disabled — the profile selector below is the way back.
+            // Selection mode and Select All write tool enablement into a profile; with none targeted they are hidden,
+            // not disabled. The profile selector below is the way back.
             if canConfigureTools {
                 IslandIconButton(
                     symbol: isSelectionMode ? "checklist.checked" : "checklist",
@@ -152,16 +146,8 @@ struct ToolLibraryContainerView: View {
 
     // MARK: - Profile Selector
 
-    /// Always present, never conditional.
-    ///
-    /// A selector that only appeared when nothing was chosen would be a dead control the
-    /// instant you chose something. Kept permanent, it doubles as the way to SWITCH profiles
-    /// without leaving — which is the common case when pointing several agents at one new
-    /// MCP server.
-    ///
-    /// Disabled (not hidden) when the route pinned a profile: arriving from a profile's own
-    /// config is an explicit statement about what you are configuring, and silently letting
-    /// it be changed there would write to a profile the user did not open.
+    /// The profile selector, always present so the user can switch profiles without leaving.
+    /// Disabled (not hidden) when the route pinned a profile, so a change cannot write to a profile the user did not open.
     @ViewBuilder
     private var profileSelector: some View {
         let pinned = routeProfileID != nil
@@ -174,9 +160,8 @@ struct ToolLibraryContainerView: View {
                 }
                 Divider()
             }
-            // Only agent and code profiles carry a tools list — `writeTools` returns the
-            // details unchanged for anything else, so offering those here would produce a
-            // selection that silently saves nothing.
+            // Only agent and code profiles carry a tools list (`writeTools` returns other details unchanged),
+            // so offering the rest would produce a selection that silently saves nothing.
             ForEach(toolCapableProfiles, id: \.id) { profile in
                 Button {
                     rememberedProfileIDRaw = profile.id.uuidString
@@ -253,8 +238,7 @@ struct ToolLibraryContainerView: View {
         return Self.codeScopeLabel(profileName: profile.displayName, projectFolder: codeSessionManager.projectPath)
     }
 
-    /// "Code Session · <project>" — the Code profile's tools are saved per project (2026-09-24),
-    /// so a bare "Code Session" left the user guessing which project a change would land in.
+    /// "Code Session · <project>": the Code profile's tools are saved per project, so the label names the project.
     static func codeScopeLabel(profileName: String, projectFolder: URL?) -> String {
         "\(profileName) · \(projectFolder?.lastPathComponent ?? String(localized: "No Project Selected"))"
     }
@@ -266,12 +250,8 @@ struct ToolLibraryContainerView: View {
         return String(localized: "No project is selected. Tools you enable here go to the next project you open.")
     }
 
+    // Why: uses `sharedProfiles`: a workflow node's private agent must not be editable here; `currentProfile` stays unfiltered.
     /// Profiles that actually have a tools list to write into.
-    ///
-    /// ⚠️ `sharedProfiles` — this is a user-facing chooser. A workflow node's own row is an agent,
-    /// so the unfiltered list offered every node's private configuration for tool editing here,
-    /// outside the workflow that scopes it. `currentProfile` below stays on the unfiltered list
-    /// because it resolves BY ID and must keep finding an owned row.
     private var toolCapableProfiles: [BackendProfileModel] {
         profileService.sharedProfiles.filter { profile in
             switch profile.details {
@@ -317,12 +297,8 @@ struct ToolLibraryContainerView: View {
 
     /// Writes a tools list back into either an `.agent` or `.code` profile detail case.
 
-    /// Surfaces save advisories that are ABOUT tools on the screen where tools are edited.
-    ///
-    /// ⚠️ register B16. Filtered rather than shown wholesale: this screen can also produce the
-    /// endpoint-transport and missing-instructions advisories, and neither is actionable from a
-    /// tool list — showing them here would be noise that trains the user to ignore the one warning
-    /// that matters. The profile editors' banner (A34) remains the surface for the rest.
+    /// Surfaces save advisories about tools on the screen where tools are edited.
+    /// Filtered to `modelCapabilities`: endpoint-transport and missing-instructions advisories are not actionable here.
     private func showToolAdvisories(_ advisories: [ProfileValidationError]) {
         for advisory in advisories where advisory.field == "modelCapabilities" {
             toastManager.show(advisory.message, style: .warning)
@@ -658,8 +634,8 @@ struct ToolLibraryContainerView: View {
                 // Also write to profile service for persistence
                 guard let idx = self.profileService.profiles.firstIndex(where: { $0.id == self.profileID }) else { return }
                 self.profileService.profiles[idx].details = self.writeTools(newTools, into: self.profileService.profiles[idx].details)
-                // ⚠️ Same as above — the binding's setter has already mutated both the edit buffer
-                // and the service array, so a swallowed throw desynchronises the UI from disk.
+                // The binding's setter already mutated both the edit buffer and the service array,
+                // so a swallowed throw would desynchronise the UI from disk.
                 do {
                     // register B16 — same surfacing as the bulk path above.
                     let advisories = try self.profileService.saveProfile(self.profileService.profiles[idx])

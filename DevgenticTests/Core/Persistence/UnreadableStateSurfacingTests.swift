@@ -4,18 +4,7 @@
 //  UnreadableStateSurfacingTests.swift
 //  DevgenticTests
 //
-//  Created on 05/08/26.
-//
-//  Guards the PRODUCT half of the blob-decode guards (SWIFTDATA_GAP_REGISTER.md G12/G77).
-//
-//  The storage half — refuse to overwrite bytes we could not read — shipped 2026-08-04 and is
-//  covered by BlobWriteRefusalTests. But every accessor it added had ZERO non-test consumers, so the
-//  user saw nothing: a corrupted Agent rendered as a blank Bot, an unreadable canvas rendered as the
-//  new-workflow invitation, and a dead search index answered questions with no indication it was
-//  down. The blank UI then invited the one edit that destroys the preserved bytes.
-//
-//  These tests pin the QUERIES the UI binds to. The SwiftUI wiring itself is not unit-testable here;
-//  what is testable — and what actually broke — is whether the signal can reach a view at all.
+//  Created by Raj Singh.
 //
 
 import XCTest

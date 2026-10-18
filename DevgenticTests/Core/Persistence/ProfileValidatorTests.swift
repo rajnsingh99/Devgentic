@@ -4,9 +4,7 @@
 //  ProfileValidatorTests.swift
 //  DevgenticTests
 //
-//  Created on 26/03/26.
-//
-//  Unit tests for ProfileValidator — validates BackendProfileSnapshot before save.
+//  Created by Raj Singh.
 //
 
 import XCTest

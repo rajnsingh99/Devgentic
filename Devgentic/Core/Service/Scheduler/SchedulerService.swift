@@ -4,10 +4,7 @@
 //  SchedulerService.swift
 //  Devgentic
 //
-//  Central service for managing scheduled tasks: CRUD, timer management,
-//  and task execution (fire logic for both conversation-bound and autonomous tasks).
-//
-//  Migrated to SwiftData on 26/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,6 +14,8 @@ import os
 
 private let logger = DGLogger(category: "SchedulerService")
 
+/// Central service for scheduled tasks: CRUD, timer management and task execution (fire logic for conversation-bound
+/// and autonomous tasks).
 @MainActor
 @Observable
 final class SchedulerService {
@@ -28,9 +27,8 @@ final class SchedulerService {
     private var timers: [UUID: DispatchSourceTimer] = [:]
     private var runningTaskIDs: Set<UUID> = []
 
-    /// How late a run may start and still count as on time. Past this it is MISSED: skipped and
-    /// recorded, never run late (owner decision 2026-09-27, Timeout inventory D-22). Covers timer
-    /// coalescing and launch/wake latency, not a closed app or a sleeping Mac.
+    /// How late a run may start and still count as on time. Past this it is missed: skipped and recorded, never run late.
+    /// Covers timer coalescing and launch/wake latency, not a closed app or a sleeping Mac.
     nonisolated static let missedRunGrace: TimeInterval = 5 * 60
 
     /// Notes to append to a task's next run summary: runs missed just before a caught-up one, and
@@ -54,11 +52,8 @@ final class SchedulerService {
     /// The shared model container, injected during app init.
     private var modelContainer: ModelContainer?
 
-    /// True once `loadAllTasks()` has populated `scheduledTasks` from the store.
-    ///
-    /// ⚠️ Distinct from "the container is configured": the container can be set while the array is
-    /// still empty, and every scheduling decision reads the ARRAY. Without this, an early
-    /// `evaluateAndFireDueTasks()` looks like "nothing is due" rather than "nothing is loaded yet".
+    /// True once `loadAllTasks()` has populated `scheduledTasks` from the store. Distinct from the container being
+    /// configured: the container can be set while the array is empty, and every scheduling decision reads the array.
     private(set) var hasLoadedTasks = false
 
     /// Set when an evaluation was requested before the tasks were loaded, so the bootstrap can
@@ -100,9 +95,8 @@ final class SchedulerService {
             logger.info("Loaded \(self.scheduledTasks.count) scheduled task(s).")
             reconcileInterruptedRuns()
 
-            // ⚠️ Replay an evaluation that arrived too early. `didBecomeActive` fires during a cold
-            // launch and can beat this method; without the replay that request was dropped and an
-            // overdue task silently never ran (G52).
+            // Replays an evaluation that arrived too early: `didBecomeActive` fires during a cold launch and can beat this
+            // method.
             if pendingEvaluationAfterLoad {
                 pendingEvaluationAfterLoad = false
                 logger.info("[SCHEDULER] Replaying the catch-up evaluation that arrived before load.")
@@ -159,22 +153,9 @@ final class SchedulerService {
 
     // MARK: - State Changes
 
-    /// Stops a task whose backend profile no longer exists, instead of letting it fail on every fire.
-    ///
-    /// ⚠️ Register A30. Deleting a profile cascades only to its own workflow layout, so a task bound
-    /// to that profile kept its dangling `profileID`. This guard marked the run `.failed` and
-    /// returned — and then the timer fired again on the next schedule, and the next, indefinitely.
-    /// A nightly task failed every night with "Backend profile not found." and nothing ever stopped
-    /// it or said why in terms the user could act on.
-    ///
-    /// ⚠️ Disabled, **not deleted**. A scheduled task is user-authored work — its prompt, its cron,
-    /// its conversation binding. Deleting it as a side effect of deleting a profile is data loss the
-    /// user never asked for. Disabling is recoverable: repoint it at another profile and switch it
-    /// back on.
-    ///
-    /// ⚠️ Reached by more than deletion — a store that fails to read, or a profile removed by any
-    /// other route, lands here too. That is deliberate: whatever the cause, a task that cannot
-    /// resolve its profile cannot run, and retrying on a schedule will not change that.
+    /// Stops a task whose backend profile is gone, instead of letting it fail on every fire. Disabled, not deleted: a
+    /// task is user-authored work, and disabling is recoverable by repointing it at another profile. Reached by any cause
+    /// that leaves the profile unresolvable, since retrying on a schedule cannot change that.
     private func disableTaskWithMissingProfile(_ task: ScheduledTask) {
         let profileDescription = task.profileID.map(\.uuidString) ?? "none set"
         logger.error(
@@ -234,9 +215,8 @@ final class SchedulerService {
     // MARK: - Scheduling (Timers)
 
     func rescheduleAll() {
-        // ⚠️⚠️ GUARDED HERE RATHER THAN AT THE CALL SITE, because the call site is the app's launch
-        // and the test host RUNS THE APP'S LAUNCH. An armed timer outlives the test that provoked
-        // it: a suite taking minutes gives a cron task its next occurrence and fires it mid-run.
+        // Guarded here rather than at the call site, because the call site is the app's launch and the test host runs it; an
+        // armed timer would outlive its test and fire mid-run.
         guard TestHost.permits("arm scheduled-task timers", logger: logger) else { return }
 
         // Cancel all existing timers
@@ -244,9 +224,8 @@ final class SchedulerService {
             cancelTimer(for: id)
         }
 
-        // ⚠️ A task whose stored time has already passed is DECIDED first (run if within the grace,
-        // else recorded as missed). Arming it straight away recomputed `nextRunAt` from now and
-        // erased the passed slot, so a cron run missed while the app was quit left no trace (D-22).
+        // A task whose stored time has passed is decided first (run if within the grace, else recorded as missed); arming it
+        // directly would recompute `nextRunAt` and erase the missed slot.
         let now = Date()
         for task in scheduledTasks where task.isEnabled && !task.isPaused {
             if let next = task.nextRunAt, next <= now {
@@ -260,12 +239,8 @@ final class SchedulerService {
 
     // MARK: - System clock changes
 
-    /// Re-decides every task when the Mac wakes, the clock is changed or the time zone changes.
-    ///
-    /// ⚠️ D-22: the timer used to be the only trigger, and a timer is armed as an interval. A Mac
-    /// asleep through 9:00 ran the job late; a clock or time-zone change left the old instant armed.
-    /// Cron follows the Mac's CURRENT local time, so a time-zone change re-derives the next run;
-    /// a one-shot is an absolute instant and keeps it.
+    /// Re-decides every task when the Mac wakes, the clock changes or the time zone changes. Cron follows the Mac's
+    /// current local time, so a time-zone change re-derives the next run; a one-shot is an absolute instant and keeps it.
     func startObservingSystemChanges() {
         guard TestHost.permits("observe wake / clock / time-zone changes for scheduled tasks", logger: logger),
               systemObservers.isEmpty else { return }
@@ -294,8 +269,7 @@ final class SchedulerService {
     }
 
     private func scheduleTimer(for task: ScheduledTask) {
-        // ⚠️ Replaces any armed timer. `fireTask` used to arm a second one after `updateTask` had
-        // already armed the first, orphaning a live DispatchSource that fired the task again.
+        // Replaces any armed timer so a second `DispatchSource` is never left armed to fire the task again.
         cancelTimer(for: task.id)
         guard task.isEnabled, !task.isPaused else { return }
 
@@ -332,8 +306,7 @@ final class SchedulerService {
         let taskID = task.id
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        // ⚠️ WALL deadline: an uptime deadline stops counting while the Mac sleeps, so a 9:00 job
-        // fired at 11:00 after a two-hour sleep (D-22). Waking past the slot now fires at once and
+        // Uses a wall deadline: an uptime deadline stops counting during sleep. Waking past the slot fires at once and
         // `processDue` records it as missed.
         timer.schedule(wallDeadline: .now() + interval)
         timer.setEventHandler { [weak self] in
@@ -350,28 +323,12 @@ final class SchedulerService {
 
     // MARK: - Catch-up (App Foreground)
 
-    /// Fires anything already overdue — the catch-up path for tasks whose moment passed while the
-    /// app was closed or in the background.
-    ///
-    /// ⚠️ THIS IS THE ONLY WAY AN OVERDUE ONE-SHOT TASK EVER RUNS. `scheduleTimer` arms a timer only
-    /// for a FUTURE date: a cron task gets its next future occurrence (the missed one is skipped),
-    /// and a `scheduledAt` in the past falls through to "no valid schedule" and gets no timer at all.
-    ///
-    /// ⚠️ ORDERING (G52). It is called from `didBecomeActive`, which fires during a cold launch —
-    /// potentially BEFORE the bootstrap `Task` has run `loadAllTasks()`. When that happened this
-    /// method iterated an EMPTY `scheduledTasks`, did nothing, and said nothing: a task due at 3pm
-    /// with the app opened at 4pm was silently skipped, recovering only if the user happened to
-    /// switch away and back. The bootstrap now calls this itself after loading, and an early call
-    /// records that it must be replayed rather than being lost.
+    /// Fires anything already overdue: the catch-up path for tasks whose moment passed while the app was closed or in the
+    /// background. The only way an overdue one-shot task runs, since timers are armed only for future dates. An early
+    /// call before `loadAllTasks()` is recorded and replayed.
     func evaluateAndFireDueTasks() {
-        // ⚠️⚠️ THE MOST EXPENSIVE UNGUARDED LINE IN THE LAUNCH PATH. This fires overdue tasks, and
-        // firing one is a REAL agent turn against the user's REAL API key — money, on every
-        // `test-without-building` run. It is reached twice: `DevgenticApp` at launch, and again on
-        // `didBecomeActive`, which a test host also triggers.
-        //
-        // ⚠️ AND IT COMPOUNDS, which is what makes it more than a one-off. `/tmp/devgentic-testhost.store`
-        // PERSISTS BETWEEN RUNS, so a task any test writes is still there next time, overdue, and
-        // fires then — a test that scheduled something once keeps spending money afterwards.
+        // Guarded: firing an overdue task is a real agent turn against the user's real API key, and the test host's
+        // persistent store would keep re-firing tasks written by earlier tests.
         guard TestHost.permits("fire due scheduled tasks (each one is a real agent turn against the user's real API key)", logger: logger) else { return }
 
         guard hasLoadedTasks else {
@@ -496,12 +453,9 @@ final class SchedulerService {
         updateTask(updated)
     }
 
-    /// A task left `.running` by a previous process was interrupted — Devgentic quit, crashed or was
-    /// killed mid-run. It is marked Cancelled and NOT run again: it may already have done its side
-    /// effects (owner decision 2026-09-27; the same rule as "never auto-retry a timed-out tool").
-    ///
-    /// ⚠️ Once per process, and never for a task this process is running: `loadAllTasks` is also
-    /// called by the sidebar, while a run may be live.
+    /// A task left `.running` by a previous process was interrupted. It is marked Cancelled and not run again, since it
+    /// may already have done its side effects. Once per process, and never for a task this process is running, because
+    /// `loadAllTasks` is also called by the sidebar.
     private func reconcileInterruptedRuns() {
         guard !didReconcileInterruptedRuns else { return }
         didReconcileInterruptedRuns = true
@@ -612,9 +566,8 @@ final class SchedulerService {
         )
         let summary = result.summary
 
-        // ⚠️ Post-run bookkeeping is applied to the task AS IT IS NOW, and only to the run's own
-        // fields. Writing back the copy taken at the start reverted anything the user changed
-        // during the run — the prompt, the schedule, a pause, a disable (D-22).
+        // Post-run bookkeeping is applied to the task as it is now, and only to the run's own fields, so changes the user
+        // made during the run are not reverted.
         guard let current = scheduledTasks.first(where: { $0.id == task.id }) else {
             runningTaskIDs.remove(task.id)
             pendingRunNotes[task.id] = nil
@@ -627,9 +580,8 @@ final class SchedulerService {
         updatedTask.runCount = current.runCount + 1
         updatedTask.lastRunAt = Date()
         updatedTask.lastRunSummary = ([String(summary.prefix(100))] + notes).joined(separator: " ")
-        // ⚠️ The run's REAL outcome. This was `.completed` for everything — a timeout, an error
-        // card, a missing conversation (Timeout inventory D-13). A recurring task still returns to
-        // `.pending` below; its summary and notification carry the outcome.
+        // The run's real outcome (timeout, error card, missing conversation); a recurring task still returns to `.pending`
+        // below, and its summary and notification carry the outcome.
         updatedTask.status = switch result.outcome {
         case .completed, .completedWithWarnings: .completed
         case .failed:    .failed

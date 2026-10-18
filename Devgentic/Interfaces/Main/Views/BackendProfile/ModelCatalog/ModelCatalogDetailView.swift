@@ -4,11 +4,12 @@
 //  ModelCatalogDetailView.swift
 //  Devgentic
 //
-//  Right detail pane in Model Catalog split view showing search, filter chips, and model cards.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Right detail pane of the Model Catalog split view: search, filter chips and model cards.
 struct ModelCatalogDetailView: View {
 
     let category: ModelCatalogProviderCategory

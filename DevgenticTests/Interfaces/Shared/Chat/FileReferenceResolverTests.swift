@@ -4,14 +4,7 @@
 //  FileReferenceResolverTests.swift
 //  DevgenticTests
 //
-//  Inline `code` spans that name an absolute path become tappable and open in the Code Viewer.
-//
-//  The load-bearing half of this feature is what it REFUSES. A model's prose is dense with
-//  code spans that look file-ish — `Double.NaN`, `System.out.println`, `array.map` — and every
-//  dead link costs more trust than the live ones earn. Two routes qualify, and neither is
-//  shape alone: an ABSOLUTE PATH (rooted, no whitespace, not a directory), or a BARE FILENAME
-//  that matches a file the conversation actually read or wrote. Both then require a readable
-//  regular file to exist right now. Anything else stays plain text, silently.
+//  Created by Raj Singh.
 //
 
 import XCTest

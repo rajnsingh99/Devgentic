@@ -4,35 +4,7 @@
 //  ClassifiedAgentError.swift
 //  Devgentic
 //
-//  Renamed from AgentExecutionError to avoid a collision with the pre-existing
-//  throwing error in AgentModel.swift (which wraps AgentFailureReason). This type
-//  is the observability-carrier — every failure site classifies a raw Error into
-//  a ClassifiedAgentError via `.classify(...)` before emitting telemetry.
-//
-//  Structured error wrapper that preserves the full diagnostic chain from where an
-//  error is first caught through every handler that re-emits or propagates it.
-//
-//  Problem this solves:
-//    Swift errors traveling through the agent pipeline get stringified ~20 times
-//    (mostly `error.localizedDescription`), losing:
-//      - NSError domain + code
-//      - NSError.userInfo keys
-//      - the original Error object (for `as?` re-classification later)
-//      - the causal chain ("this timeout caused that abort which triggered this
-//        synthesis-best-effort")
-//    By the time analytics see it, we have a sanitized string and no way to tell
-//    whether "File not found" was from our ReadFileTool guard or an underlying NSError.
-//
-//  Design:
-//    - `ClassifiedAgentError` is THE carrier type. Every failure site catching a raw
-//      Error classifies it with `.classify(as:phase:origin:)` and wraps it.
-//    - Every re-emission in a higher layer reuses the original `chainID` so analytics
-//      can collapse propagation duplicates via `GROUP BY error_chain_id`.
-//    - `diagnostics` holds the forensic data: NSError domain/code, userInfo keys,
-//      top-of-stack signature. Only populated when developer mode is on — keeps
-//      production-mode memory overhead near zero.
-//    - `underlying` preserves the original Error for callers that want to downcast
-//      (e.g., `if case let cpe as CloudProviderError = agentErr.underlying`).
+//  Created by Raj Singh.
 //
 
 import Foundation

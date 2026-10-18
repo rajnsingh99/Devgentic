@@ -4,27 +4,13 @@
 //  KnowledgeSourceRow.swift
 //  Devgentic
 //
-//  Created on 07/08/26.
-//
-//  One attached reference document, as shown in the agent and bot editors.
-//
-//  ⚠️ Register A65. The icon was `source.exists ? warningColor : errorColor` — so a file that is
-//  perfectly FINE was drawn in the warning colour, and "this file is healthy" (orange) sat one shade
-//  away from "this file is missing" (red). Both read as alarm states, and on the icon the colour was
-//  the only thing separating them.
-//
-//  The fix changes the SYMBOL as well as the colour, so the two states are distinguishable without
-//  perceiving colour at all — which matters here beyond taste: the same panel is the subject of A61
-//  (every control unlabeled to VoiceOver), and colour-only status is the same class of defect.
-//
-//  ⚠️ Extracted because the two editors held byte-identical copies of this row and had already
-//  drifted — the bot's used a hardcoded `.orange` where the agent's used `theme.warningColor`, so
-//  the two panels rendered the same state in two different oranges. Same duplication that produced
-//  A60 in the importer directly above it.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// One attached reference document, as shown in the agent and bot editors.
+/// Healthy and missing files differ by symbol as well as colour, so the states read without perceiving colour.
 struct KnowledgeSourceRow: View {
     let source: KnowledgeSource
     let theme: any Theme
@@ -34,11 +20,7 @@ struct KnowledgeSourceRow: View {
     let onRemove: () -> Void
 
     /// `doc.text.fill` for a healthy document, a warning triangle for a missing one.
-    ///
-    /// Deliberately a SHAPE difference, not just a tint — see the file comment. Exposed (rather than
-    /// inlined into `body`) so that intent is assertable: a SwiftUI body is not reachable from a
-    /// test, and "the two states differ by more than colour" is exactly the property that silently
-    /// regresses when someone tidies two symbols into one.
+    /// A shape difference, not just a tint; exposed rather than inlined into `body` so a test can assert it.
     static func iconName(forExistingFile exists: Bool) -> String {
         exists ? "doc.text.fill" : "exclamationmark.triangle.fill"
     }
@@ -117,10 +99,9 @@ struct KnowledgeSourceRow: View {
     }
 }
 
-/// The knowledge-source rows of an agent or bot editor, each warned when the profile will send
-/// only part of it. ⚠️ Warnings come from `DeliveryWarnings.outcomes` — the backend's own read
-/// and plan, in the backend's order — so a row says exactly what the next send will do.
-/// Recomputed when the sources or the profile's file strategy / tools / type change.
+/// The knowledge-source rows of an agent or bot editor, each warned when the profile will send only part of it.
+/// Warnings come from `DeliveryWarnings.outcomes`, the backend's own read and plan, so a row says what the next
+/// send does. Recomputed when the sources or the profile's file strategy / tools / type change.
 struct KnowledgeSourceList: View {
     @Binding var sources: [KnowledgeSource]
     let profile: BackendProfileModel

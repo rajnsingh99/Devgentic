@@ -4,11 +4,7 @@
 //  URLPathComparisonTests.swift
 //  DevgenticTests
 //
-//  `URL` equality is not location equality, and four separate places in this codebase compared
-//  file URLs with `==` after `standardizedFileURL` and got it wrong. These pin the two rules.
-//
-//  Found by writing a real test for A14's identity check — the assertion failed, and it was the
-//  production code that was wrong, not the expectation.
+//  Created by Raj Singh.
 //
 
 import XCTest

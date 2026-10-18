@@ -4,23 +4,7 @@
 //  MCPElicitationBroker.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — MCP `elicitation/create`.
-//
-//  Elicitation is the in-protocol way for a server to ask the USER something mid-tool-call:
-//  a missing parameter, a confirmation, a choice. Devgentic advertised no elicitation
-//  capability and answered with `methodNotFound`, so servers had to fail the call or guess,
-//  and the user saw an opaque tool error instead of a question they could have answered.
-//  Servers written against the 2025-06-18+ spec that gate features on `elicitation` hid
-//  those features from Devgentic entirely.
-//
-//  The app already owns a standardized human-in-the-loop surface (InteractionCenter +
-//  ExecutionSuspensionService). This routes elicitation into it rather than inventing a
-//  second one.
-//
-//  Scope note: only FORM-mode elicitation is serviced, and it is answered as free text
-//  mapped onto the requested schema's fields. URL-mode elicitation is declined explicitly
-//  — servicing it means opening a third-party URL for the user to complete a flow in, which
-//  is a browser-trust decision that should not be made silently here.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -29,6 +13,9 @@ import os
 
 private let logger = DGLogger(category: "MCPElicitationBroker")
 
+/// Services MCP `elicitation/create`: the in-protocol way for a server to ask the user something mid-tool-call.
+/// Routes elicitation into the app's human-in-the-loop surface (InteractionCenter + ExecutionSuspensionService).
+/// Only form-mode is serviced, answered as free text mapped onto the schema's fields; URL-mode is declined explicitly.
 @MainActor
 final class MCPElicitationBroker {
 
@@ -105,9 +92,8 @@ final class MCPElicitationBroker {
             return CreateElicitation.Result(action: .cancel, content: nil)
         }
 
-        // ⚠️ NOBODY TO ASK (HITL Waiting Contract, decision C). A scheduled or woken run shows no
-        // banner, so this question would park until the run's limit ended it. Cancelled at once;
-        // the server learns no answer is coming.
+        // Nobody to ask: a scheduled or woken run shows no banner, so this question would park until the run's limit ended it.
+        // Cancelled at once; the server learns no answer is coming.
         guard await ExecutionSuspensionService.shared.canReachAHuman(inConversation: conversationID) else {
             logger.notice("[MCP-ELICIT] '\(serverLabel)' asked a question during an UNATTENDED run [conv \(conversationID)]. CONSEQUENCE: cancelled without parking — nobody can answer it.")
             return CreateElicitation.Result(action: .cancel, content: nil)
@@ -148,10 +134,8 @@ final class MCPElicitationBroker {
             return CreateElicitation.Result(action: .cancel, content: nil)
         }
 
-        // Map the answer onto the requested schema. A single requested field takes the
-        // whole answer; multiple fields cannot be split reliably from free text, so the
-        // answer is attached to the first field and the rest are left absent — the server
-        // sees a partial accept rather than fabricated values.
+        // Map the answer onto the requested schema: one field takes the whole answer; with several, free text can't be split
+        // reliably, so it goes to the first field and the rest stay absent (a partial accept, not fabricated values).
         var content: [String: Value] = [:]
         if let first = fields.first {
             content[first] = .string(answer)

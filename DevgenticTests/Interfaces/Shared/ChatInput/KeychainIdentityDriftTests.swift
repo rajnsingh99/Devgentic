@@ -2,27 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  KeychainIdentityDriftTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Registers KC-56 and KC-62 — the two edits that would silently change WHERE every stored
-//  credential lives, with nothing going red.
-//
-//  ⚠️ KC-56 — the (service, account) pair IS the credential's address. Rename either and every item
-//  written by an earlier build becomes unreachable: the user's keys still sit in their Keychain,
-//  and the app presents every store as "never configured" — ChatOps shipped exactly this once (the
-//  2faad1c bundle-id rename). So these tests pin the
-//  LITERAL strings each store writes under, observed through its test seam — never the constant it
-//  reads from, because the constant is exactly what a rename changes.
-//
-//  If you are changing one of these deliberately once the app has users: the old address must be
-//  migrated in the same commit (copy-then-delete, gated on a successful write), and only then is
-//  the pin below updated.
-//
-//  ⚠️ KC-62 — nothing this app stores may be iCloud-synchronizable, and no Keychain traffic may
-//  bypass the one primitive where that is enforced. Adding `kSecAttrSynchronizable: true` reads
-//  like a feature ("cross-device parity") and would push every API key, bot token and OAuth refresh
-//  token to iCloud Keychain. This is pinned by SOURCE SCAN on purpose: a read-back of the attribute
-//  on the legacy file keychain proves nothing (see the §7 note on KC-62 in the readiness doc).
+//  Created by Raj Singh.
 //
 
 import XCTest

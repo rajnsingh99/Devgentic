@@ -4,7 +4,7 @@
 //  SkillFolderScannerTests.swift
 //  DevgenticTests
 //
-//  Unit tests for SkillFolderScanner and YAMLFrontmatterParser.
+//  Created by Raj Singh.
 //
 
 import XCTest

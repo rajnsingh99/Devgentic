@@ -4,29 +4,7 @@
 //  WorkflowLayoutForwardCompatTests.swift
 //  DevgenticTests
 //
-//  Register WF-PE3 + WF-PE4 — the layout blob's decode resilience and its diagnostics.
-//
-//  Before this: five plain `String, Codable` enums in the blob had no unknown-rawValue handling,
-//  so ONE value written by a newer build (read after a rollback — Sparkle self-distribution makes
-//  that a real path) threw at decode, failed the node, failed the array, failed the WHOLE layout:
-//  a 15-node graph unreadable and unsaveable over a single string, total-loss Discard the only
-//  in-app escape. And when the failing element was a modern node's `kind`, the `try?` fallback
-//  swallowed the real error and logged `keyNotFound(profileID)` — a key with nothing to do with
-//  the failure.
-//
-//  The catch-alls are RAW-PRESERVING (`WorkflowRunRecord.RunStatus`'s established pattern): an
-//  unknown value decodes to `.other(raw)` and re-encodes VERBATIM, so a round-trip through an
-//  older build preserves the newer build's unknown enum VALUES verbatim.
-//
-//  ⚠️ THAT IS THE WHOLE GUARANTEE — it does NOT extend to unknown KEYS. Every Codable in
-//  `WorkflowModels.swift` encodes a fixed `CodingKeys` set with no extras bag, so a FIELD added by
-//  a newer build is dropped on decode and absent on re-encode. What protects an added field is
-//  `WorkflowLayoutSD.layoutBlobVersion` and the WF-PE2 write refusal, not this file. See
-//  `testUnknownKeysAreNotPreserved_soTheVersionStampIsTheOnlyProtection` at the bottom.
-//
-//  ⚠️ The round-trip halves of these
-//  tests are the load-bearing ones: decode-without-throwing alone would also pass for a lossy
-//  "map unknowns to a default" implementation, which is the exact defect class this forbids.
+//  Created by Raj Singh.
 //
 
 import XCTest

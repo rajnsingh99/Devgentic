@@ -4,19 +4,7 @@
 //  RemoteChannel.swift
 //  Devgentic
 //
-//  Where a remote view is going — C2 of the ChatOps remote-interface plan.
-//
-//  WHY THIS EXISTS. The three bridges disagree about what a channel even IS: the Telegram handlers
-//  take `chatID: Int64`, Discord and Slack take `channelID: String`. That difference is the reason
-//  no handler signature can be shared, and it is not a real difference — `ChatOpsTransport` already
-//  settled the question by making every id a `String`, precisely so Slack channel ids like
-//  `"C0123456789"` and ts values like `"1716307200.123456"` fit.
-//
-//  ⚠️ `TelegramTransport` force-unwraps its way back (`Int64(chatID)!` at :33, :37, :45 and
-//  `Int(messageID)!` at :146). That is safe today only because the sole producer builds the string
-//  from an `Int64` in the first place. Anything that starts minting Telegram channel ids from
-//  another source must fix those unwraps first — a non-numeric id crashes the app rather than
-//  throwing.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -50,12 +38,8 @@ struct RemoteChannel: Hashable, Sendable, Codable {
 
 extension RemoteChannel.Provider {
 
+    // Why: single mapping so bridges cannot disagree; `messageSource` is the only record that a run started remotely
     /// The `MessageSource` a run started from this provider is stamped with.
-    ///
-    /// ⚠️ ONE mapping, here. Today each bridge passes its own literal (`.telegram` / `.discord` /
-    /// `.slack`) at its own `submitRemoteMessage` call site, which is three places that must agree
-    /// and no way to notice when they stop. `messageSource` is the only record that a run was
-    /// started remotely rather than typed.
     var messageSource: MessageSource {
         switch self {
         case .telegram: return .telegram
@@ -66,12 +50,8 @@ extension RemoteChannel.Provider {
 }
 
 extension MessageSource {
+    // Why: optional on purpose: local sources have no remote channel, and a default would address the wrong platform
     /// The provider a remote-originated message came from, or nil for a local surface.
-    ///
-    /// ⚠️ `RemoteSessionInfo` stores a `MessageSource` rather than a provider, so the mirror needs
-    /// this to address a channel. Deliberately optional: `.localUI`, `.quickAccess`, `.orb`,
-    /// `.scheduled` and `.backgroundTask` are real sources with no remote channel, and forcing
-    /// them to a default would silently address the wrong platform.
     var remoteProvider: RemoteChannel.Provider? {
         switch self {
         case .telegram: return .telegram

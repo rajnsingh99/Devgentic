@@ -4,10 +4,7 @@
 //  WorkflowTaskProtocol.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  In-process A2A-inspired protocol types for inter-node communication.
-//  These types flow between the WorkflowExecutor (orchestrator) and inner executors (nodes).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -42,10 +39,8 @@ struct NodeResultEnvelope: Sendable, Identifiable {
     /// The synthesized text response from the inner executor.
     let output: String
 
-    /// Structured form of the output, when the node produced JSON (object/array).
-    /// Populated by auto-detection (parsing `output`) or by a Code node that emits
-    /// JSON. Enables downstream `{{ input.json.path }}` access and field routing.
-    /// `nil` when the output is plain text.
+    /// Structured form of the output when the node produced JSON (object/array), from auto-detection of `output` or a
+    /// Code node. Enables `{{ input.json.path }}` access and field routing; nil when the output is plain text.
     let structuredOutput: JSONValue?
 
     /// Media artifacts produced during execution.
@@ -54,16 +49,13 @@ struct NodeResultEnvelope: Sendable, Identifiable {
     /// Execution metadata (timing, token usage, tools invoked).
     let metadata: NodeExecutionMetadata
 
-    /// Ids of the `.document` artifacts in `artifacts` whose text has ALREADY been inlined into a
-    /// node on the path that delivered them here (this node, or one upstream of it). See
-    /// `WorkflowExecutor.documentsAlreadyRead`. Empty means "nobody has read them": the safe
-    /// default, which inlines again exactly as before CR-49.
+    /// Ids of the `.document` artifacts in `artifacts` whose text was already inlined into a node on the path that
+    /// delivered them here. See `WorkflowExecutor.documentsAlreadyRead`. Empty means nobody has read them, so they are
+    /// inlined again.
     let readDocumentIDs: Set<UUID>
 
-    /// Explicit initializer (replaces the synthesized memberwise init) so that
-    /// `structuredOutput` can default to `nil` — the many synthetic envelope
-    /// construction sites (skips, profile-not-found, structural nodes) keep
-    /// compiling unchanged; only producers that detect JSON pass the argument.
+    /// Explicit initializer so `structuredOutput` defaults to `nil`; envelope construction sites that do not detect JSON
+    /// stay unchanged.
     init(
         taskID: UUID,
         nodeID: UUID,
@@ -108,23 +100,9 @@ enum NodeExecutionStatus: Sendable {
     /// Node did not run. See `NodeSkipReason` — "did not run" is NOT one thing.
     case skipped(reason: NodeSkipReason)
 
-    /// Whether this node CONSUMED its upstream's output — i.e. whether a path that actually ran
-    /// continues through it.
-    ///
-    /// ⚠️ Not the same question as "did it succeed". A `.failed` node ran: it took its input,
-    /// tried, and ended the path itself, so its upstream is not the end of anything. That is why
-    /// this is a separate predicate rather than a `case .completed` check.
-    ///
-    /// ⚠️ `.skipped(.byUser)` is TRUE, and it is the only skip that is — the same split
-    /// `NodeSkipReason.keepsDownstreamAlive` makes, for the same reason: a user-skipped node
-    /// forwards its input as its own output, and `terminalOutputs`' caller surfaces that
-    /// pass-through text. Calling it "did not consume" would put the upstream back in the terminal
-    /// set and print the same content twice — once bare, once under the skipped node's heading.
-    ///
-    /// Every other skip means this node never took the input, so whatever fed it is still the end
-    /// of a path that ran and still owns an answer nobody else will print.
-    ///
-    /// Exhaustive on purpose: no `default`, so a new status cannot inherit an answer.
+    /// Whether this node consumed its upstream's output, i.e. whether a path that actually ran continues through it. A
+    /// `.failed` node consumed its input; `.skipped(.byUser)` is the only skip that counts, since it forwards its input
+    /// as its own output. Exhaustive, with no `default`.
     var consumedUpstreamOutput: Bool {
         switch self {
         case .completed, .failed: return true
@@ -136,21 +114,8 @@ enum NodeExecutionStatus: Sendable {
 
 // MARK: - Node Skip Reason
 
-/// Why a node did not run.
-///
-/// ⚠️ TYPED, and deliberately so. This was `skipped(reason: String)` carrying the single literal
-/// "Upstream dependency failed" for FOUR structurally different causes, which had two consequences:
-///
-/// 1. **The message was false in two of the four cases.** A Router choosing a different branch, and
-///    an `error` handler correctly not firing on a SUCCESSFUL node, both reported an upstream
-///    failure on a run where nothing failed at all.
-/// 2. **Consumers had to string-match English prose to tell "did not run" from "crashed."** Nine UI
-///    surfaces called `detail.hasPrefix("Upstream dependency")`; six got it right and three did not,
-///    so the same node read "Not run" on screen and "Failed" to VoiceOver. Rewording the message
-///    would have silently broken every failure count in the app.
-///
-/// The enum is the fix for both: the cause is carried structurally, and the wording lives in exactly
-/// one place (`displayText`).
+/// Why a node did not run. Typed so consumers do not string-match prose to tell "did not run" from "crashed"; the
+/// wording lives in one place (`displayText`).
 enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
     /// A Condition/Router or Gate activated a different port. Completely normal routing.
     case notChosen
@@ -164,23 +129,13 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
     case upstreamCancelled
     /// The run ended before this node was reached.
     case notReached
-    /// The user pressed Skip on this node (Phase A, §0.6 D2.1). ⚠️ THE ONE SKIP WHOSE DOWNSTREAM
-    /// RUNS: the node's INPUT was forwarded as its output, no port was activated, and every
-    /// default edge below it stayed live. Every other case in this enum means the subtree below
-    /// is dead — matchers that assume "skipped ⇒ downstream never ran" must treat this case
-    /// separately (`edgeIsLive`, `WorkflowInputAssembler`, and the cascade classifier already do).
+    /// The user pressed Skip on this node. The only skip whose downstream runs: the input is forwarded as output, no port
+    /// is activated, and default edges below stay live. Every other case means the subtree below is dead (see
+    /// `keepsDownstreamAlive`).
     case byUser
 
-    /// Whether the subtree BELOW this node stayed live.
-    ///
-    /// ⚠️ The rule this type's own `byUser` doc comment demands ("matchers that assume
-    /// `skipped ⇒ downstream never ran` must treat this case separately"), given a name so the
-    /// next matcher reads it instead of re-deriving it. Three sites already complied by hand
-    /// (`edgeIsLive`, `WorkflowInputAssembler`, the cascade classifier) and a fourth — the canvas
-    /// run overlay — did not, painting the outgoing edge of a user-skipped node "not taken" even
-    /// though the node below it ran and received that node's input over exactly that edge.
-    ///
-    /// Exhaustive on purpose: no `default`, so a new skip reason cannot inherit an answer.
+    /// Whether the subtree below this node stayed live; true only for `.byUser`. Exhaustive, with no `default`, so a new
+    /// skip reason cannot inherit an answer.
     var keepsDownstreamAlive: Bool {
         switch self {
         case .byUser: return true
@@ -189,18 +144,9 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
         }
     }
 
-    /// Whether the run actually DECIDED anything about this branch, as opposed to never getting here.
-    ///
-    /// ⚠️ Only `.notReached` is "never got here", and the distinction is load-bearing for the canvas
-    /// run overlay: an edge touching a node the run never reached must stay NEUTRAL, because nothing
-    /// about that branch was decided. Before CF-29 such a node had no snapshot at all, so the overlay
-    /// left it `.undetermined` by falling through its `nodeStatus` lookup — the invariant
-    /// `testUnknownEndpointIsUndetermined` was written to protect. CF-29 then began synthesizing
-    /// `.skipped(.notReached)` rows for exactly those nodes (so a stopped run still shows the pipeline
-    /// shape), which re-entered the overlay through a different door and painted every edge below the
-    /// stop "this branch was not taken" — a claim about ROUTING, in a run the user had simply stopped.
-    ///
-    /// Exhaustive on purpose: no `default`, so a new skip reason cannot inherit an answer.
+    /// Whether the run actually decided anything about this branch, as opposed to never getting here (only `.notReached`
+    /// is false). An edge touching a node the run never reached must stay neutral in the canvas overlay. Exhaustive, with
+    /// no `default`.
     var decidedTheBranch: Bool {
         switch self {
         case .notChosen, .errorPortNotTaken, .upstreamFailed,
@@ -209,11 +155,8 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
         }
     }
 
-    /// Whether this skip traces back to something going WRONG, as opposed to ordinary routing.
-    ///
-    /// Drives presentation only — a skip is NEVER counted as a failure, whatever this returns.
-    /// The distinction the user needs is "the Router went the other way" (nothing to do) versus
-    /// "something upstream broke" (worth looking at), and before this existed both looked identical.
+    /// Whether this skip traces back to something going wrong, as opposed to ordinary routing. Presentation only: a skip
+    /// is never counted as a failure.
     var indicatesProblem: Bool {
         switch self {
         case .notChosen, .errorPortNotTaken, .notReached, .byUser: return false
@@ -221,21 +164,14 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
         }
     }
 
-    /// Tolerant decoding (owner requirement, D2.1 — the loop-node deletion is the cautionary
-    /// tale). The synthesized conformance for a String-raw enum THROWS on an unknown rawValue,
-    /// which takes the entire containing record down with it. The run-record layer already guards
-    /// its own seam (`WorkflowRunRecord.NodeStatus.init(rawValue:)` falls back to `.notChosen`);
-    /// this covers every OTHER present or future direct `Codable` crossing, so the NEXT new case
-    /// is safe by construction rather than by remembering to guard each consumer.
-    /// `.notChosen` as the fallback matches the record layer's choice: the neutral reason —
-    /// a future cause must never decode as something going wrong.
+    /// Tolerant decoding: an unknown raw value decodes as `.notChosen`, the neutral reason, instead of throwing and
+    /// taking the containing record down.
     init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = NodeSkipReason(rawValue: raw) ?? .notChosen
     }
 
-    /// The user-facing sentence. ⚠️ THE ONLY PLACE THIS WORDING LIVES — the previous arrangement had
-    /// producers and consumers agreeing on a literal by convention, and they drifted.
+    /// The user-facing sentence; the only place this wording lives.
     var displayText: String {
         switch self {
         case .notChosen:
@@ -251,9 +187,8 @@ enum NodeSkipReason: String, Sendable, Codable, Equatable, CaseIterable {
         case .notReached:
             return String(localized: "Not run — the workflow ended first")
         case .byUser:
-            // Owner-decided wording (D2.1). Deliberately NOT "Not run — …": the consequence half
-            // (input passed through, downstream RAN) is the part the user needs, because a
-            // transformer node's skip means downstream operated on untransformed input.
+            // The wording names the consequence (input passed through, downstream ran), since a transformer node's skip means
+            // downstream operated on untransformed input.
             return String(localized: "Skipped by you — its input was passed downstream unchanged.")
         }
     }

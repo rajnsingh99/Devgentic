@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  BackgroundLocalRunAndDetectionTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-8 and CR-9.
-//
-//  CR-8: live Ollama model detection never ran after a cold launch — `loadLocalModels()` returns at
-//        once unless the server status is `.connected`, and only the Ollama store sheet probed it. It
-//        also read the default server's list for a profile pointed at another server.
-//  CR-9: compaction and project-memory suggestions generated on the conversation's local model AFTER
-//        the run had ended, under that run's stale id — outside the local lock — so a queued run on a
-//        different model could load alongside: two models resident.
+//  Created by Raj Singh.
 //
 
 import XCTest

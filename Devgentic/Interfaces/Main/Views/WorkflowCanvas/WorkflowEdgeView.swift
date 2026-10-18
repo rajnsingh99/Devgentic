@@ -4,10 +4,7 @@
 //  WorkflowEdgeView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  Bezier curve connections between workflow nodes.
-//  Renders both committed edges and the in-progress drag preview.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -16,6 +13,7 @@ private let edgeLogger = DGLogger(category: "WorkflowEdgeView")
 
 // MARK: - Committed Edge
 
+/// Bezier curve connections between workflow nodes; renders committed edges and the in-progress drag preview.
 struct WorkflowEdgeView: View {
     let edge: WorkflowEdge
     let sourcePoint: CGPoint
@@ -31,18 +29,11 @@ struct WorkflowEdgeView: View {
     @Environment(\.appTheme) private var theme
     @State private var dashOffset: CGFloat = 0
 
-    /// Run treatment. A Router with three ports drew three IDENTICAL curves before this existed, so
-    /// the branch that actually fired was unknowable from the canvas — the one thing a graph view
-    /// is better placed to show than a timeline.
-    ///
-    /// Untaken branches recede instead of disappearing: the connection is still part of the design
-    /// and must stay selectable and deletable while the run is on screen.
+    /// Run treatment: untaken branches recede instead of disappearing, so the branch that fired is visible.
+    /// The connection stays selectable and deletable while the run is on screen.
     private var runOpacityScale: Double { Self.runOpacityScale(for: runState) }
 
-    /// ⚠️ `nonisolated static` and pure (WF-UI5) so the curve and the arrowhead that terminates it
-    /// can be PROVEN to fade by the same factor. They could not before: the line multiplied
-    /// `baseEdgeOpacity` by this scale while `arrowHead` carried its own parallel constant ladder
-    /// and no scale at all, and nothing forced the two ladders to agree.
+    /// `nonisolated static` and pure so the curve and the arrowhead can be proven to fade by the same factor.
     nonisolated static func runOpacityScale(
         for runState: WorkflowCanvasRunOverlay.EdgeState
     ) -> Double {
@@ -53,13 +44,8 @@ struct WorkflowEdgeView: View {
         }
     }
 
-    /// The arrowhead's opacity multiplier on `targetColor`: `baseEdgeOpacity`'s
-    /// selected → error → ordinary precedence, times the SAME run scale the curve gets.
-    ///
-    /// ⚠️ The run scale used to stop at the curve (register CVV-5). A `.notTaken` branch faded its
-    /// line to 0.196 while its arrow stayed at 0.70 — ~3.6× the curve — so the brightest surviving
-    /// element on a dead branch was the arrow landing on its target, and the canvas still read as
-    /// if that branch had delivered. That defeats the one question the graph view exists to answer.
+    /// The arrowhead's opacity multiplier on `targetColor`: `baseEdgeOpacity`'s selected, error, ordinary precedence,
+    /// times the same run scale the curve gets, so a `.notTaken` branch does not keep a bright arrowhead.
     nonisolated static func arrowOpacity(
         isSelected: Bool,
         isErrorEdge: Bool,
@@ -98,15 +84,10 @@ struct WorkflowEdgeView: View {
         return 0.70
     }
 
-    /// ⚠️ Resolved HERE rather than on `WorkflowCanvasState`, which has no `@Environment` and
-    /// therefore no theme (WF-CU10). This view already holds one, and it was the only caller of the
-    /// state's two `nodeColor` overloads — a verbatim copy of `WorkflowNodeView.profileColor` that
-    /// had to agree with it for an edge to match the node it leaves.
+    /// Resolved here rather than on `WorkflowCanvasState`, which has no `@Environment` and therefore no theme.
     private func color(ofNode id: UUID, end: String) -> Color {
         guard let kind = canvasState.nodes.first(where: { $0.id == id })?.kind else {
-            // ⚠️ Was a silent `return .gray` — the SAME literal the Trigger kind used — so an edge
-            // whose endpoint had been deleted rendered as a perfectly ordinary Trigger-coloured
-            // connection and reported nothing.
+            // A missing endpoint logs an error instead of silently drawing an ordinary Trigger-coloured connection.
             edgeLogger.error(
                 "[WF_CANVAS] Edge \(edge.id) has no \(end) node \(id) on the canvas — drawing it "
                 + "neutral. CONSEQUENCE: the edge is orphaned; it still renders and is still "
@@ -117,11 +98,8 @@ struct WorkflowEdgeView: View {
         return kind.identityColor(in: theme)
     }
 
+    // Why: `String(localized:)` is required: `.accessibilityLabel(_: S)` binds a non-localizing overload.
     /// Composed by `WorkflowCanvasState` so the wording is testable.
-    ///
-    /// ⚠️ `String(localized:)`, not bare literals (WF-CU8): this value is handed to
-    /// `.accessibilityLabel(_: S)`, which binds the non-localizing `StringProtocol` overload, so
-    /// the String Catalog extractor never sees these and they would ship untranslated.
     private var accessibilityDescription: String {
         let suffix: String?
         switch runState {
@@ -139,7 +117,7 @@ struct WorkflowEdgeView: View {
         let c1 = CGPoint(x: sourcePoint.x + controlOffset, y: sourcePoint.y)
         let c2 = CGPoint(x: targetPoint.x - controlOffset, y: targetPoint.y)
         
-        // B(0.5) = (P0 + 3*C1 + 3*C2 + P3) / 8
+        // Cubic Bezier midpoint at t = 0.5: (start + 3*c1 + 3*c2 + end) / 8.
         let x = (sourcePoint.x + 3 * c1.x + 3 * c2.x + targetPoint.x) / 8
         let y = (sourcePoint.y + 3 * c1.y + 3 * c2.y + targetPoint.y) / 8
         return CGPoint(x: x, y: y)

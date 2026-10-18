@@ -4,8 +4,7 @@
 //  ModelCatalogService.swift
 //  Devgentic
 //
-//  Aggregates models from local engines (Ollama, MLX) and curated remote providers
-//  (Hugging Face, Anthropic, OpenAI, Google Gemini, OpenRouter).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -13,6 +12,8 @@ import SwiftUI
 
 private let logger = DGLogger(category: "ModelCatalogService")
 
+/// Aggregates models from local engines (Ollama, MLX) and curated remote providers
+/// (Hugging Face, Anthropic, OpenAI, Google Gemini, OpenRouter).
 @Observable
 @MainActor
 final class ModelCatalogService {

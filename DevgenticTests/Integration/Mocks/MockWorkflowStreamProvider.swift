@@ -4,10 +4,7 @@
 //  MockWorkflowStreamProvider.swift
 //  DevgenticTests
 //
-//  Scriptable mock for WorkflowStreamProvider.
-//  Maps profile UUIDs to pre-configured event sequences or errors,
-//  enabling deterministic workflow integration tests without LLM calls.
-//  Thread-safe for concurrent parallel node invocations.
+//  Created by Raj Singh.
 //
 
 import Foundation

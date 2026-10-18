@@ -2,10 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RunReportLiveAndExportTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Run-Report Phase 4: the live observation stream, flush-on-open, deep search,
-//  and the two export fixes (conversation-scope hydration; v5 fields in the DTO).
+//  Created by Raj Singh.
 //
 
 import XCTest

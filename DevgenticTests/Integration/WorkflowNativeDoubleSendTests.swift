@@ -4,18 +4,7 @@
 //  WorkflowNativeDoubleSendTests.swift
 //  DevgenticTests
 //
-//  Created on 31/08/26.
-//
-//  Register EIO-2: a workflow AGENT node on the native path sent its input TWICE — once as the
-//  `<input>`-wrapped, escaped user message `compileMessages` builds from
-//  `WorkflowExecutionContext.userMessagePrefix`, and again raw inside the kickoff user turn the
-//  native executor appends (`parts.append(input.userInput)`). Two consecutive user turns, the same
-//  payload in two encodings, on every iteration of every retry — for a 10 KB upstream, 20 KB per
-//  request.
-//
-//  Observed at the ReAct seam: `MockLLMProvider` captures the exact message array the executor
-//  sends, so the doubled payload is directly assertable — unlike the workflow-executor seam, where
-//  the WF-CC1 note applies.
+//  Created by Raj Singh.
 //
 
 import XCTest

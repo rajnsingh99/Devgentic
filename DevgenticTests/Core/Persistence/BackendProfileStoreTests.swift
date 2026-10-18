@@ -4,11 +4,7 @@
 //  BackendProfileStoreTests.swift
 //  DevgenticTests
 //
-//  Created on 26/03/26.
-//
-//  Tests BackendProfile round-trip persistence via SwiftData (in-memory container).
-//  Validates create, read, update, delete, ProfileDetails encode/decode,
-//  schema versioning, and store-level validation.
+//  Created by Raj Singh.
 //
 
 import XCTest

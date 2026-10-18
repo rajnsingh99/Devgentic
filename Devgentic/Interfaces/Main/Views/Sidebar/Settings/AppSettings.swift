@@ -4,7 +4,7 @@
 //  AppSettings.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/05/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -30,22 +30,20 @@ struct AppSettings {
     // Core Intelligence Feature Toggles
     static let ciFeatureRAGRewritingKey = "ciFeatureRAGRewriting"
     static let ciFeatureSuggestionKey = "ciFeatureSuggestion"
-    static let ciFeatureMorningBriefKey = "ciFeatureMorningBrief"
+    static let ciFeatureBriefingKey = "ciFeatureBriefing"
     static let ciFeatureUserPersonalKey = "ciFeatureUserPersonal"
     static let ciFeatureHistoryCompactionKey = "ciFeatureHistoryCompaction"
     static let ciCustomPromptKey = "ciCustomPrompt"
 
-    // Response Synthesis opt-in, per provider family. A run synthesizes only when the key
-    // matching ITS provider family is on: an IC-sized cleanup pass measurably helps
-    // small local models, but behind a large cloud model it compresses a better
-    // answer than it produces. Default false — synthesis is never automatic.
+    // Response Synthesis opt-in, per provider family: a run synthesizes only when the key for its own family is on.
+    // Default false; synthesis is never automatic.
     static let ciFeatureResponseSynthesisMLXKey = "ciFeatureResponseSynthesisMLX"
     static let ciFeatureResponseSynthesisOllamaKey = "ciFeatureResponseSynthesisOllama"
     static let ciFeatureResponseSynthesisRemoteKey = "ciFeatureResponseSynthesisRemote"
 
-    // Morning Brief
-    static let lastMorningBriefDateKey = "lastMorningBriefDate"
-    static let morningBriefIncludeAISummaryKey = "morningBriefIncludeAISummary"
+    // Briefing
+    static let lastBriefingDateKey = "lastBriefingDate"
+    static let briefingIncludeAISummaryKey = "briefingIncludeAISummary"
 
     // User Personal
     static let lastUserPersonalAnalysisDateKey = "lastUserPersonalAnalysisDate"
@@ -56,8 +54,8 @@ struct AppSettings {
     static let notificationChannelsKey = "notificationChannels"
     static let notificationPerConversationKey = "notificationPerConversation"
 
-    // [CF-39] Conversation id → the ChatOps service that created it. See
-    // `RemoteConversationOriginStore` for why this is not a `ConversationSD` column.
+    // Conversation id → the ChatOps service that created it; see `RemoteConversationOriginStore` for why this is
+    // not a `ConversationSD` column.
     static let remoteConversationOriginsKey = "remoteConversationOrigins"
 
     // Chat Font
@@ -68,10 +66,8 @@ struct AppSettings {
     // Chat & Execution Timeline
     static let showTimelineThoughtsKey = "showTimelineThoughts"
 
-    // Orb — the voice HUD.
-    // ⚠️ Key VALUES must stay free of "key"/"token"/"secret"/"auth"/"path": `BundleExporter`'s
-    // allowlist is asserted by `ObservabilityHygieneTests.testAllowlistContainsNothingSecretShaped`,
-    // which matches on the value, not the symbol. Hence `orbShortcutCode`, not `…KeyCode`.
+    // Orb voice HUD. Key VALUES must avoid "key"/"token"/"secret"/"auth"/"path": the `BundleExporter` allowlist test
+    // matches on the value, not the symbol (hence `orbShortcutCode`, not `…KeyCode`).
     static let orbEnabledKey = "orbEnabled"
     static let orbActivationModeKey = "orbActivationMode"
     static let orbWakeWordKey = "orbWakeWord"
@@ -82,29 +78,27 @@ struct AppSettings {
     static let orbFollowUpKey = "orbFollowUp"
     static let orbEarconsKey = "orbEarcons"
     static let orbToolApprovalsKey = "orbToolApprovals"
-    /// Developer-mode escape hatch for the Phase 4 duplex audio graph. Default OFF.
+    /// Developer-mode escape hatch for the duplex audio graph. Default off.
     static let orbDuplexAudioKey = "orbDuplexAudio"
-    // [Phase 6 · F3] Ambient run-completion announcements.
+    // Ambient run-completion announcements.
     static let orbAmbientAnnouncementsKey = "orbAmbientAnnouncements"
     static let orbAmbientThresholdKey = "orbAmbientThresholdSeconds"
-    // [Phase 6 · F2] Spoken tool approvals.
+    // Spoken tool approvals.
     static let orbVoiceApprovalsKey = "orbVoiceApprovals"
-    // ⚠️ DELIBERATELY NOT IN `BundleExporter.exportablePreferenceKeys`. These two hold free-form
-    // text the USER TYPED, and that allowlist's contract is that none of its entries carry user
-    // content. The diagnostic value is near zero — which words were configured is inferable from
-    // the approval log lines, which already record counts rather than content.
+    // Deliberately not in `BundleExporter.exportablePreferenceKeys`: these two hold free-form user-typed text, and that
+    // allowlist carries no user content.
     static let orbApprovalKeywordsKey = "orbApprovalKeywords"
     static let orbDenialKeywordsKey = "orbDenialKeywords"
     /// Which speech recognizer Orb uses. Developer-mode until device-proven. Default WhisperKit.
     static let orbRecognizerKey = "orbRecognizer"
-    /// Locale for Apple Speech. Empty = follow the system. ⚠️ Apple's models are per-LOCALE and
-    /// must be reserved + installed before use, so this is a model choice, not a preference.
+    /// Locale for Apple Speech; empty follows the system. A model choice rather than a preference: Apple's models are
+    /// per-locale and must be reserved and installed before use.
     static let orbSpeechLocaleKey = "orbSpeechLocale"
     /// Empty string is the sentinel for "same voice as chat Read Aloud" — see OrbVoiceOutput.
     static let orbNarratorVoiceKey = "orbNarratorVoice"
     static let orbNarratorRateKey = "orbNarratorRate"
-    /// ⚠️ Pre-existing value, written by OrbSessionController since the MVP. The STRING must
-    /// not change or every user silently loses their remembered profile.
+    /// The persisted Orb profile id, written by `OrbSessionController`.
+    /// The key string must not change, or users lose their remembered profile.
     static let orbProfileIDKey = "orbProfileID"
 
     // Speech Playback (Read Aloud)
@@ -137,26 +131,20 @@ struct AppSettings {
     static let developerModeKey = "developerMode"
 
     // Remote (first-party cloud) model visibility
-    /// Key for the General Settings toggle that reveals the first-party remote
-    /// providers — Gemini, OpenAI, Anthropic — in every provider picker (agent/bot/
-    /// workflow/image-gen profile config and the Code interface backend selector).
-    /// Default OFF: the providers ship hidden, and the toggle is the way back in.
+    /// Key for the General Settings toggle that reveals the first-party remote providers (Gemini, OpenAI, Anthropic) in every
+    /// provider picker (agent/bot/workflow/image-gen config and the Code backend selector). Default off.
     static let showRemoteModelsKey = "showRemoteModels"
-    /// Whether remote-model providers appear in provider pickers. Absence of the key
-    /// means hidden. Read by `ProfileCapabilityFilter` (Foundation-only call sites),
-    /// so it is a computed UserDefaults lookup rather than an `@AppStorage` binding —
+    /// Whether remote-model providers appear in provider pickers; an absent key means hidden.
+    /// Read by Foundation-only call sites such as `ProfileCapabilityFilter`, so it is a computed UserDefaults lookup;
     /// views that need live re-rendering bind their own `@AppStorage` to the key.
     static var showRemoteModels: Bool {
         UserDefaults.standard.object(forKey: showRemoteModelsKey) as? Bool ?? false
     }
 
     // Diagnostics consent (default-ON opt-out)
-    /// Opt-out for on-device error/warning diagnostics: warning+ log buffering, v2 error-
-    /// analytics columns, and crash-diagnostic capture. NOTE: basic execution traces
-    /// (`beginTrace`/`emit`) are NOT gated — they always record locally (30-day purge) and
-    /// power the Report inspector; the Settings/PRIVACY copy says exactly that. Default-ON
-    /// (absence of the key means enabled). Developer mode additionally records info/debug
-    /// verbosity regardless of this flag.
+    /// Opt-out for on-device error/warning diagnostics: warning+ log buffering, error-analytics columns and crash capture.
+    /// Basic execution traces are not gated: they always record locally and power the Report inspector. Default on
+    /// (an absent key means enabled); developer mode additionally records info/debug verbosity regardless.
     static let diagnosticsEnabledKey = "diagnosticsEnabled"
 
     /// One-time WelcomeView disclosure that on-device diagnostics are recorded.

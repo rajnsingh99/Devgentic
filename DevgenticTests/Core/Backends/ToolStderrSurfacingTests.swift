@@ -4,31 +4,7 @@
 //  ToolStderrSurfacingTests.swift
 //  DevgenticTests
 //
-//  The `ProcessRunner` migration replaced 27 hand-rolled subprocess reads. Five of the sites it
-//  touched had previously pointed BOTH streams at one pipe (`process.standardError = outPipe`),
-//  so the single read they did returned stdout and stderr together. Rewritten as
-//  `ProcessRunner.run(process).standardOutput` they compiled, passed the entire suite, and
-//  silently stopped reporting stderr — `xcode_orchestrator` handed back builds with the
-//  compiler errors removed, `dns_lookup` returned blank for every failed lookup.
-//
-//  Nothing in the suite could have caught it. `ProcessRunnerTests` proves the TYPE keeps both
-//  streams, which stayed true the whole time; the defect was in what each call site asked for.
-//  No test invoked a migrated tool at all, so the gap was between the two.
-//
-//  This file closes it from the other end — through the tool's own `call`, so the assertion is
-//  about what the AGENT receives, which is the thing that was wrong.
-//
-//  A source-level check was considered and rejected: "the pre-migration code merged the
-//  streams" is a fact about history, and today's source has no memory of it. Reading stdout
-//  alone is correct at plenty of sites (`pwd`, hashing), so there is no static invariant to
-//  assert. It has to be behavioural.
-//
-//  Coverage is partial, and named rather than implied:
-//    ✅ preview_file       `/usr/bin/head` on a missing path — stderr, empty stdout, offline
-//    ❌ xcode_orchestrator needs a real `xcodebuild` run
-//    ❌ dns_lookup         needs the network
-//    ❌ run_mac_shortcut   needs the `shortcuts` CLI and a named shortcut to exist
-//    ❌ get_wifi_info      depends on whether this machine still ships the `airport` stub
+//  Created by Raj Singh.
 //
 
 import XCTest

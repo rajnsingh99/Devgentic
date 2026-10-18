@@ -4,44 +4,7 @@
 //  ProcessRunner.swift
 //  Devgentic
 //
-//  One correct way to run a subprocess and collect BOTH its streams.
-//
-//  Every tool that shelled out had hand-rolled this, and 28 of those hand-rolls drained the
-//  pipe only after `waitUntilExit()`. A pipe holds ~64 KB; once it fills, the child blocks in
-//  `write()` while the parent blocks in `wait()`, and nothing breaks the tie. Reproduced at
-//  288 KB: indefinite that way, 0.027 s the correct way.
-//
-//  Sites with SEPARATE stdout and stderr pipes have a second, sharper version of the same
-//  bug — reading one to EOF while the other fills simply relocates the deadlock to stderr, so
-//  the obvious "swap the two lines" fix looks right and is not. Both handles must be drained
-//  CONCURRENTLY. That is the whole reason this type exists rather than a comment telling 13
-//  call sites to be careful.
-//
-//  ── Why this does not wait for EOF ──────────────────────────────────────────────────────
-//
-//  The first version of this type drained concurrently and then waited for EOF on both pipes.
-//  EOF arrives only when EVERY holder of the write end closes it, and a command that
-//  backgrounds a descendant (`cmd &`) hands that write end to the descendant. Measured:
-//
-//      zsh -c "echo hello"           0.07 s
-//      zsh -c "echo done; sleep 4 &" 4.08 s   ← the parent exited instantly
-//
-//  It also defeated the bound outright: `run(_:timeout: 1)` on `"echo done; sleep 6 &"`
-//  returned after 6.08 s with `timedOut == false`. The watchdog is guarded on
-//  `process.isRunning`, the child had already exited, so the watchdog correctly no-oped —
-//  and nothing else was bounding anything. The join was holding the call, not the child.
-//
-//  So the completion signal is the CHILD BEING REAPED, never EOF. `terminationHandler` +
-//  a semaphore, deliberately not `waitUntilExit()`: on Darwin that polls the caller's run
-//  loop, and there are real main-thread call sites (`DeviceControlTools`, `SystemToggleTools`,
-//  `MacOSUtilityTools`). Measured on the main thread during a 5 s command — `waitUntilExit()`
-//  delivered 101 re-entrant run-loop callbacks; this delivers 0.
-//
-//  After the child is reaped we keep draining for `descendantGrace`, because a forked worker
-//  that writes its result 50 ms later is a normal shape and dropping it silently would be a
-//  content bug, not a performance win. Past that we stop, and `Result.outputComplete` says so.
-//  Truncation that does not announce itself is the failure this codebase has already paid for
-//  three times.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -49,6 +12,10 @@ import os
 
 private let logger = DGLogger(category: "ProcessRunner")
 
+// Why: draining only after waitUntilExit() deadlocks once a pipe fills (~64 KB);
+// EOF never arrives while a backgrounded descendant holds the write end.
+/// One correct way to run a subprocess and collect both of its streams.
+/// Both pipes are drained concurrently, and completion is the child being reaped, never EOF.
 enum ProcessRunner {
 
     /// Both streams plus the exit status, with the streams kept separate — callers that need
@@ -59,21 +26,12 @@ enum ProcessRunner {
         let standardError: String
         let exitCode: Int32
 
-        /// False when a descendant still held the pipe after the child was reaped and the
-        /// grace expired, so reading stopped with bytes possibly still to come.
-        ///
-        /// Exists because the alternative is lying. The old behaviour was to block until the
-        /// descendant exited, which is why `execute_shell` could hang forever; the new
-        /// behaviour returns promptly, and this is how a caller can tell the difference
-        /// between "that was all of it" and "that was all of it so far".
+        /// False when a descendant still held the pipe after the child was reaped and the grace expired.
+        /// Reading then stopped with bytes possibly still to come, so "that was all of it" is not guaranteed.
         let outputComplete: Bool
 
-        /// Bytes dropped from the MIDDLE of stdout by the head/tail capture cap; 0 when stdout is
-        /// whole. Independent of `outputComplete` (that one is about descendants holding the pipe).
-        ///
-        /// Exists for callers that PARSE stdout. The gap is otherwise marked only by inline text,
-        /// and a structured parser reading across it sees a corrupted record and a plausible-looking
-        /// partial list — the Git Changes panel would present some files as all of them.
+        /// Bytes dropped from the middle of stdout by the head/tail capture cap; 0 when stdout is whole.
+        /// Independent of `outputComplete`. For callers that parse stdout: the gap is otherwise marked only by inline text.
         let standardOutputElidedBytes: Int
 
         var succeeded: Bool { exitCode == 0 }
@@ -90,10 +48,8 @@ enum ProcessRunner {
         }
     }
 
-    /// A bounded run's outcome. `timedOut` is reported SEPARATELY from the exit code because a
-    /// killed child still has one (SIGTERM/SIGKILL), and "we killed it" is a different fact
-    /// from "it chose to exit non-zero" — collapsing them is how a timeout gets misread as a
-    /// command failure.
+    /// A bounded run's outcome. `timedOut` is reported separately from the exit code because a killed child still has one,
+    /// and "we killed it" differs from "it exited non-zero".
     struct TimedResult: Sendable {
         let result: Result
         let timedOut: Bool
@@ -105,25 +61,17 @@ enum ProcessRunner {
     /// unwind, short enough that a wedged one cannot extend the caller's bound noticeably.
     private static let sigkillGrace: TimeInterval = 2
 
-    /// How long we keep reading after the child is reaped, for descendants that inherited the
-    /// write end. A forked worker writing within this window is captured; past it we stop and
-    /// report `outputComplete == false`.
-    ///
-    /// 0.25 s is not tuned to a throughput number — at most ~64 KB can be in flight in a pipe,
-    /// so this is about scheduling latency, and it was never the limiting factor in any
-    /// measured case. It is the price of not silently dropping a forked worker's output, and
-    /// it still returns 16× faster than waiting for the descendant.
+    /// How long to keep reading after the child is reaped, for descendants that inherited the write end.
+    /// A forked worker writing within this window is captured; past it reading stops and `outputComplete` is false.
+    /// 0.25 s covers pipe scheduling latency (at most ~64 KB is in flight), not a throughput number.
     static let descendantGrace: TimeInterval = 0.25
 
     /// Ceiling on the join after we cancel the sources. Cancellation is prompt, so reaching
     /// this means something is badly wrong; returning beats hanging.
     private static let joinBackstop: TimeInterval = 1.0
 
-    /// Per-stream capture cap, split head/tail. Unbounded accumulation is not theoretical:
-    /// `yes` under a 2 s bound captured 7.2 GB and grew RSS by 1.9 GB on the old code — enough
-    /// to take the app down. Head AND tail rather than head-only because under a flooding
-    /// descendant the newest bytes are the child's own final lines, which is exactly the
-    /// evidence worth keeping.
+    /// Per-stream capture cap, split head/tail so unbounded output cannot exhaust memory.
+    /// Head and tail rather than head-only: under a flooding descendant the newest bytes are the child's own final lines.
     private static let headKeep = 8 << 20
     private static let tailKeep = 8 << 20
 
@@ -134,13 +82,8 @@ enum ProcessRunner {
     // MARK: - Drain
 
     /// One pipe read end, drained continuously on its own serial queue.
-    ///
-    /// `@unchecked Sendable`: `bytes`/`tail`/`elided`/`sawEOF` are guarded by `lock` on EVERY
-    /// path — including the caller's snapshot — because the backstop is the one path that can
-    /// read without a completed join, so the group cannot be used as the barrier the way the
-    /// old code did. `fd` and `buf` are immutable after init and touched only on `queue`: by
-    /// the event handler, and by the cancel handler, which libdispatch guarantees runs after
-    /// the last event handler and never concurrently with one.
+    /// `@unchecked Sendable`: `bytes`/`tail`/`elided`/`sawEOF` are guarded by `lock` on every path, snapshots included.
+    /// `fd` and `buf` are immutable after init and touched only on `queue`.
     private final class PipeDrain: @unchecked Sendable {
         private let lock = NSLock()
         private var bytes = Data()
@@ -153,21 +96,15 @@ enum ProcessRunner {
         private var source: DispatchSourceRead!
 
         init(reading handle: FileHandle, label: String, group: DispatchGroup) {
-            // OUR descriptor. Arming a source on the FileHandle's own number risks the handle
-            // deinitialising, the allocator recycling that number, and the source then reading
-            // an unrelated file — observed at 400/400 in a probe, not a theoretical race.
+            // Our own descriptor: arming a source on the FileHandle's number risks the handle deinitialising, the number being
+            // recycled, and the source reading an unrelated file.
             fd = dup(handle.fileDescriptor)
             buf = .allocate(byteCount: 65_536, alignment: 1)
             // Read end only. `pipe(2)` gives the two ends separate open file descriptions, so
             // the child's `write(2)` stays blocking and back-pressure still works.
             _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)
-            // Its OWN serial queue. Sharing one between the two streams lets a busy stdout
-            // handler starve stderr until stderr's 64 KB fills and its writer blocks — the
-            // original deadlock, relocated.
-            // ⚠️ `.userInitiated`, matching the caller. `run` blocks on `group.wait` until these
-            // pumps finish, so a default-QoS queue here makes a user-initiated thread wait on
-            // lower-priority work — which Thread Performance Checker reports as a priority
-            // inversion on every `git` call, and which genuinely slows the wait under load.
+            // Its own serial queue: sharing one lets a busy stdout handler starve stderr until its pipe fills and blocks the writer.
+            // `.userInitiated` to match the caller: `run` blocks on `group.wait`, so a lower QoS here is a priority inversion.
             source = DispatchSource.makeReadSource(
                 fileDescriptor: fd,
                 queue: DispatchQueue(label: label, qos: .userInitiated))
@@ -272,10 +209,8 @@ enum ProcessRunner {
 
         try process.run()
 
-        // ⚠️ AFTER `run()` — there is no pid before it — and after the pipes are attached, which
-        // must happen first or the output is lost. This is the only moment a caller can take a
-        // handle on a running foreground process: `execute` blocks until the command finishes, so
-        // anything wanting to stop it, or clean it up at quit, has to be handed it here.
+        // After `run()` (there is no pid before it) and after the pipes are attached. The only moment a caller can take a
+        // handle on a running foreground process, since `execute` blocks until the command finishes.
         onStarted?(process)
 
         let group = DispatchGroup()
@@ -290,33 +225,13 @@ enum ProcessRunner {
         var watchdog: DispatchWorkItem?
         if let timeout {
             let item = DispatchWorkItem {
-                // ⚠️ THE GUARD STAYS FIRST — but NOT for the reason it looks like, and the
-                // difference was established by mutation rather than argued.
-                //
-                // Removing it passes all 28 ProcessRunnerTests, including the one that pins a
-                // deliberately-backgrounded daemon surviving. That case never reaches here: the
-                // command's own process exits, `exited.wait` returns, and `watchdog?.cancel()`
-                // lands long before the deadline, so this item simply never runs. Watchdog
-                // CANCELLATION is what protects `cmd &`, not this line.
-                //
-                // What this line does cover is the narrow race where the item had already begun
-                // executing when `cancel()` arrived — `cancel()` only prevents a start. Without
-                // it, a command that finished right at its bound would be marked `timedOut` AND
-                // have its descendants killed: a false statement plus a real side effect, on a
-                // run that actually succeeded. Too narrow for a behavioural test to reach
-                // reliably, so the order is pinned in `testTheWatchdogChecksLivenessBeforeActing`.
+                // The guard stays first: it covers the race where the item had already started when `cancel()` arrived (cancel only
+                // prevents a start), so a command finishing at its bound is not marked `timedOut` with its descendants killed.
                 guard process.isRunning else { return }
                 killed.set()
 
-                // The whole job tree, not just the shell. `zsh -c "xcodebuild …"` puts the
-                // compiler in a separate process, so signalling only the zsh left the build
-                // running past a bound that had already expired — the foreground twin of the
-                // defect `ProcessTree` was written for on the background path. A 900 s
-                // `batch_command` that times out used to leave the build burning CPU.
-                //
-                // SIGTERM is a request; `ProcessTree` escalates to SIGKILL after `sigkillGrace`
-                // on its own queue, for the same reason the old inline version did — the caller
-                // is blocked on `exited` with a bound that depends on this firing on time.
+                // The whole job tree, not just the shell: `zsh -c "xcodebuild …"` puts the compiler in a separate process.
+                // SIGTERM is a request; `ProcessTree` escalates to SIGKILL after `sigkillGrace` so the bound fires on time.
                 ProcessTree.terminateTree(root: process.processIdentifier,
                                           grace: sigkillGrace,
                                           isRootRunning: { process.isRunning })
@@ -345,9 +260,8 @@ enum ProcessRunner {
         // `terminationStatus` raises on a live process, which the hard ceiling can reach.
         let exitCode = process.isRunning ? -1 : process.terminationStatus
 
-        // Lossy, never nil. `String(data:encoding:.utf8)` returns nil for ANY invalid UTF-8, so
-        // a tool emitting binary or mixed-encoding bytes handed its caller an empty string —
-        // measured: 100,000 bytes read, 0 characters returned.
+        // Lossy, never nil: `String(data:encoding:.utf8)` returns nil for any invalid UTF-8, which would hand a caller an
+        // empty string for binary or mixed-encoding output.
         let result = Result(
             standardOutput: String(decoding: out.data, as: UTF8.self),
             standardError: String(decoding: err.data, as: UTF8.self),
@@ -365,12 +279,8 @@ enum ProcessRunner {
         if killed.isSet {
             logger.info("[PROC] '\(label.prefix(120))' — killed at the \(Int(timeout ?? 0))s bound; \(out.data.count)B stdout, \(err.data.count)B stderr collected before the kill. Partial output is returned rather than discarded.")
         } else if !result.succeeded {
-            // ⚠️ On a NON-ZERO exit, print the head of stderr — that is the line that says WHY.
-            // This logged sizes only, so a device log read "exited 1 — 0B stdout, 57B stderr" and
-            // the 57 bytes carrying the reason never appeared anywhere. Bounded to 200 chars: enough
-            // for a shell diagnostic, short enough that a chatty command cannot flood the log. The
-            // command itself is already logged in full at the dispatch site, so this reveals nothing
-            // the log did not already carry.
+            // On a non-zero exit print the head of stderr (200 chars) since it says why; the command itself is already logged
+            // in full at the dispatch site.
             let stderrHead: String = {
                 guard exitCode != 0, !err.data.isEmpty else { return "" }
                 let text = String(decoding: err.data.prefix(200), as: UTF8.self)
@@ -388,9 +298,7 @@ enum ProcessRunner {
     // MARK: - API
 
     /// Runs `executable` to completion, draining stdout and stderr concurrently.
-    ///
-    /// Synchronous and blocking, matching the call sites it replaces — this fixes the deadlock,
-    /// it does not alter anyone's threading.
+    /// Synchronous and blocking; the caller's threading is unchanged.
     static func run(
         executable: String,
         arguments: [String],
@@ -406,31 +314,16 @@ enum ProcessRunner {
                            label: "\(executable) \(arguments.joined(separator: " "))").result
     }
 
-    /// Runs an ALREADY-CONFIGURED process — executable, arguments, working directory already
-    /// set by the caller — and collects both streams correctly.
-    ///
-    /// Exists for the migration: most call sites build their own `Process` and only got the
-    /// *collection* wrong, so this lets them keep their setup and drop the broken part. Any
-    /// `standardOutput` / `standardError` the caller assigned is REPLACED, which is the point:
-    /// the common `process.standardError = Pipe()` idiom looks like "discard stderr" and is
-    /// actually "buffer stderr into 64 KB that nobody ever drains, then hang".
+    /// Runs an already-configured process (executable, arguments and working directory set by the caller).
+    /// Collects both streams; any `standardOutput` / `standardError` the caller assigned is replaced.
+    /// A caller-assigned `Pipe()` would buffer into 64 KB that nobody drains and then hang.
     static func run(_ process: Process) throws -> Result {
         try execute(process, timeout: nil, label: process.executableURL?.lastPathComponent ?? "process").result
     }
 
-    /// A bounded run: same concurrent drain, plus a watchdog that actually kills the child.
-    ///
-    /// The bound applies to the PROCESS. Reading stops when the child is reaped (plus
-    /// `descendantGrace`), so a backgrounded descendant can no longer hold the call open past
-    /// the deadline — the failure that made the first version of this bound decorative.
-    ///
-    /// - Warning: a descendant that inherited the write end keeps running, and loses its reader.
-    ///   It will take SIGPIPE on its next write. Redirect it (`cmd > log 2>&1 &`) if it is meant
-    ///   to outlive the call.
-    ///
-    /// - Parameter descendantGrace: how long to keep draining after the child is reaped. Callers
-    ///   leave the default; a test widens it to pin the MECHANISM (drain past exit, stop at EOF)
-    ///   without racing the scheduler against a 0.25 s window.
+    /// A bounded run: the same concurrent drain, plus a watchdog that kills the child.
+    /// Reading stops once the child is reaped (plus `descendantGrace`); a surviving descendant gets SIGPIPE on write,
+    /// so redirect it (`cmd > log 2>&1 &`) to outlive the call.
     static func run(_ process: Process, timeout: TimeInterval,
                     descendantGrace: TimeInterval = descendantGrace,
                     onStarted: ((Process) -> Void)? = nil) throws -> TimedResult {

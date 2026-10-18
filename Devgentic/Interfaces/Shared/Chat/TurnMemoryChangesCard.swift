@@ -4,15 +4,14 @@
 //  TurnMemoryChangesCard.swift
 //  Devgentic
 //
-//  "Saved 1 memory" under a finished Code answer: what the run's `remember` / `forget` calls
-//  changed in project memory, each with Undo — and, when the project has memory suggestions on,
-//  what the end-of-run pass proposes, each with Accept / Dismiss. Sits beside `TurnFileChangesCard`; memory is kept
-//  out of that card on purpose — it is not an edit to the user's code, and Undo works differently
-//  (a whole entry is put back from the ledger, not a patch applied).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Logic for the card under a finished Code answer showing what the run's `remember` / `forget` calls changed
+/// in project memory, each with Undo; with suggestions on, also the end-of-run proposals with Accept / Dismiss.
+/// Kept apart from `TurnFileChangesCard`: memory is not a code edit, and Undo restores a whole entry from the ledger.
 enum TurnMemoryChanges {
     static func showsCard(for message: ChatMessage) -> Bool {
         message.sender == .agent && message.profileType == .code && !message.isStreaming

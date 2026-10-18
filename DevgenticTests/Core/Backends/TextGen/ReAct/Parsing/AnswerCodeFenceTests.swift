@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  AnswerCodeFenceTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  A plain-text answer keeps its code blocks. The cascade parses fence-free text, and the answer
-//  used to BE that text: on the 2026-10-06 device run T2's JSON example and `[7, 1, 5]` reached the
-//  user without their ``` blocks. Parsing is unchanged; only the shown text of a final answer is.
+//  Created by Raj Singh.
 //
 
 import XCTest

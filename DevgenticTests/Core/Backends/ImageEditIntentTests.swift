@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ImageEditIntentTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-13 — image generation decided "is this an edit?" by SUBSTRING and then a capability
-//  GUESSED from the model's name refused it.
-//
-//  ⚠️ Two standing rules broken at once: capability metadata may LABEL, never GATE; and shape-matching
-//  a payload ("ladder" contains "add") is the defect class this codebase keeps paying for.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,10 +4,7 @@
 //  TransportRetrierTests.swift
 //  DevgenticTests
 //
-//  Phase-C resilience: the bot-path transport retrier (audit #9). Pure decision
-//  logic — bounded transient/throttle budgets, typed fatal verdicts, shared
-//  classification with the agent path, and Retry-After sanitization. Mirrors the
-//  agent-path contract proven in LLMRetryStrategyTests.
+//  Created by Raj Singh.
 //
 
 import XCTest

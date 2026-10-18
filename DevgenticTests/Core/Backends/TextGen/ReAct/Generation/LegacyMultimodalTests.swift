@@ -4,14 +4,7 @@
 //  LegacyMultimodalTests.swift
 //  DevgenticTests
 //
-//  Covers image support on the LEGACY/dialect agent path — the path where
-//  `input.generatorStrategy as? NativeStructuredGenerator` fails (MLX generators,
-//  Ollama at .singleAction, JSON/XML/Markdown). Before this, current-turn images
-//  were silently dropped there and prior-turn history images with them.
-//
-//  The seam is `CognitiveGenerator.buildMultimodalMessages(from:iteration:)`:
-//    - returns nil for a text-only turn  → caller keeps the byte-identical text path
-//    - returns [ProviderMessage] with images attached when the turn carries any
+//  Created by Raj Singh.
 //
 
 import XCTest

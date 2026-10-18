@@ -4,8 +4,7 @@
 //  ContextCutStrategyTests.swift
 //  DevgenticTests
 //
-//  "If a tool result doesn't fit, keep …" — the gauge's global setting and each tool's override
-//  (2026-09-24).
+//  Created by Raj Singh.
 //
 
 import XCTest

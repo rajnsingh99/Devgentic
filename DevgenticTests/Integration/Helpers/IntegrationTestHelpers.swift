@@ -4,9 +4,7 @@
 //  IntegrationTestHelpers.swift
 //  DevgenticTests
 //
-//  Reusable factory helpers for integration tests.
-//  Provides minimal, valid instances of AgentInput, AgentTool,
-//  TraceContext, and event collection utilities.
+//  Created by Raj Singh.
 //
 
 import Foundation

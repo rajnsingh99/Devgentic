@@ -9,7 +9,7 @@ You create **backend profiles**. Each one binds a model to a set of capabilities
 
 A developer's map of how the app is put together — components, key flows, persistence, security model — is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-> **Status: pre-release.** Free software under the GNU AGPL v3 — see [Licence](#licence) — and please [read this first](#before-you-use-this).
+> **Version 1.0.0 — the first public release.** Free software under the GNU AGPL v3 — see [Licence](#licence) — and please [read this first](#before-you-use-this).
 
 ## What it does
 
@@ -88,7 +88,7 @@ generated/              committed ObjectBox codegen output
 
 ## Before you use this
 
-This is pre-release software that drives shell commands, edits files and automates the UI on your machine, with your user's privileges. The human-in-the-loop approval system exists for that reason: read what a tool is asking to do before approving it, and be deliberate about turning on autonomous mode. [`SECURITY.md`](SECURITY.md) spells out what is and isn't considered a vulnerability in a tool built on that trust model — and where to report one.
+Devgentic drives shell commands, edits files and automates the UI on your machine, with your user's privileges. The human-in-the-loop approval system exists for that reason: read what a tool is asking to do before approving it, and be deliberate about turning on autonomous mode. [`SECURITY.md`](SECURITY.md) spells out what is and isn't considered a vulnerability in a tool built on that trust model — and where to report one.
 
 ## Privacy
 

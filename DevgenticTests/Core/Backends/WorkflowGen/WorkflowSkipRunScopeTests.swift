@@ -4,18 +4,7 @@
 //  WorkflowSkipRunScopeTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF-CC14 (filed 2026-08-23).
-//
-//  `WorkflowNodeSkipStore` was conversation-keyed on the one-root-run-per-conversation invariant
-//  (§0.5), which nothing enforces on the inbound start paths — a scheduled or ChatOps run can
-//  start a second root run in a conversation whose first run is still live, and a scheduled
-//  re-run of the SAME workflow has IDENTICAL node IDs. Under conversation keying that meant:
-//    (a) run 2's start-clear silently discarded the user's pending skip requests for run 1;
-//    (b) run 2 could CONSUME a request the user aimed at run 1, skipping a node in an unattended
-//        run they never touched — a silently wrong scheduled result;
-//    (c) run 2's racer registration for node N collided with run 1's LIVE waiter for the same
-//        key, overwriting (leaking) the continuation.
-//  The store is now keyed by run token (`WorkflowRunScope.token`); these tests pin the isolation.
+//  Created by Raj Singh.
 //
 
 import XCTest

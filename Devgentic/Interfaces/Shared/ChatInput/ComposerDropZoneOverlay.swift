@@ -4,14 +4,13 @@
 //  ComposerDropZoneOverlay.swift
 //  Devgentic
 //
-//  Tactile animated drop zone overlay for Devgentic's composer surfaces.
-//  Provides immediate visual and optical glass feedback styled in the user's
-//  active accent color when dragging files or folders over the input area,
-//  without obstructing touch/mouse hit testing.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// An animated drop-zone overlay for composer surfaces: gives visual feedback in the accent color while files
+/// or folders are dragged over the input area, without obstructing hit testing.
 struct ComposerDropZoneOverlay: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.surfaceStyle) private var surfaceStyle

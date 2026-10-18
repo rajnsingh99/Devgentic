@@ -4,22 +4,7 @@
 //  ConversationManagementCoordinator.swift
 //  Devgentic
 //
-//  Owns conversation CRUD: creation (with reuse-of-empty heuristic), selection,
-//  pin toggling, rename, delete (single + bulk), overlay transfer, export, and
-//  the backend-profile <-> conversation mapping that travels with each
-//  conversation. Extracted from `MainApplicationViewModel` as part of the
-//  Gap C god-object split — before extraction these methods accounted for
-//  ~175 of the VM's lines.
-//
-//  Dependency posture is identical to `MessagingCoordinator`:
-//
-//  - Services the coordinator uses directly (persistence, backendConfig,
-//    chatHistoryViewModel) are injected explicitly.
-//  - Shared state that still lives on `MainApplicationViewModel`
-//    (`selectedConversationID`, `interfaceMode`, `workflowExecutionStates`,
-//    `workflowRunHistory`, `codeSessionManager`, attached files) is reached
-//    via a weak VM back-reference. Moving that state here would be a
-//    different kind of refactor (observable-binding churn across views).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -27,6 +12,9 @@ import SwiftUI
 import SwiftData
 import os
 
+/// Owns conversation lifecycle: creation (reusing an empty one), selection, pinning, rename, delete (single and bulk),
+/// overlay transfer, export and the per-conversation backend-profile mapping.
+/// Services are injected; state still owned by `MainApplicationViewModel` is reached through a weak back-reference.
 @MainActor
 final class ConversationManagementCoordinator {
 
@@ -57,11 +45,8 @@ final class ConversationManagementCoordinator {
 
     func startNewConversation() {
         guard let vm = viewModel else { return }
-        // NB no `clearAttachedFiles()` here any more. The composer's per-conversation
-        // draft restore clears the box when the new (empty) conversation is selected —
-        // and clearing HERE actively broke it: this ran BEFORE the id changed, so the
-        // draft saved for the conversation being left captured zero attachments and the
-        // user lost them. See ComposerDraftStore.
+        // No attachment clearing here: the composer's per-conversation draft restore clears the box on selection,
+        // and clearing before the id changes would lose the attachments of the conversation being left.
         let newConversationID = createAndSelectNewConversation()
         logger.info("Started new conversation with ID \(newConversationID.uuidString).")
     }
@@ -69,9 +54,8 @@ final class ConversationManagementCoordinator {
     /// Deselect the currently-open conversation and return to the welcome screen.
     func deselectConversationAndShowWelcome() {
         guard let vm = viewModel else { return }
-        // As in `startNewConversation`: the draft restore owns clearing the composer, and
-        // clearing before the id changes would discard the attachments of the very
-        // conversation we're stepping away from.
+        // The draft restore owns clearing the composer; clearing before the id changes would discard the attachments
+        // of the conversation being left.
         vm.selectedConversationID = nil
         backendConfiguration.selectedProfileID = nil
         chatHistoryViewModel.currentChatMessages = []
@@ -86,12 +70,8 @@ final class ConversationManagementCoordinator {
     }
 
     // MARK: - Code projects
-    //
-    // ⚠️ A Code conversation is bound to ONE project folder: recorded on its first send
-    // (`MessagingCoordinator`), reopened when it is selected (`ConversationSwitchCoordinator`), and
-    // never changed afterwards. A different folder means a different session — the model's view of
-    // "the project" is spread through the whole history, so re-pointing it at other files would
-    // leave it reasoning about files that are not there.
+    // A Code conversation is bound to one project folder: recorded on its first send, reopened when selected, never changed.
+    // A different folder means a different session, since the model's view of the project is spread through the history.
 
     /// The folder the conversation is bound to, or nil when it has not run yet (or predates the field).
     func recordedProjectPath(of conversationID: UUID?) -> String? {
@@ -102,17 +82,15 @@ final class ConversationManagementCoordinator {
     /// Opens `url` in the Code session and the Explorer.
     func openCodeProject(_ url: URL) {
         guard let vm = viewModel else { return }
-        // ⚠️ FIRST, before either slot's own publish is queued — see `MCPRootsProvider.setWorkspace`.
+        // Set the workspace first, before either slot's own publish is queued (see `MCPRootsProvider.setWorkspace`).
         Task { await MCPRootsProvider.setWorkspace(url) }
         vm.codeSessionManager?.updateProjectPath(url)
         vm.syncExplorerToInterfaceMode()
     }
 
-    /// The user picked a folder from the composer or the welcome screen.
-    ///
-    /// The folder is fixed once the session has a message. Before that it simply follows the pick —
-    /// an empty session has no history that describes another project. After it, a different
-    /// folder starts a new session and the old one keeps its own.
+    /// Handles the user picking a folder from the composer or the welcome screen.
+    /// Until the session has a message the folder simply follows the pick;
+    /// afterwards a different folder starts a new session and the old one keeps its own.
     func chooseCodeFolder(_ url: URL) {
         guard let vm = viewModel else { return }
         let conversationID = vm.selectedConversationID
@@ -158,11 +136,9 @@ final class ConversationManagementCoordinator {
         vm.syncExplorerToInterfaceMode()
     }
 
-    /// Why a send from the selected Code conversation must not run, or nil when it may.
-    ///
-    /// The one case: the conversation is bound to a folder that is not the open one — its folder
-    /// was moved or deleted, so `restoreCodeProjectForSelectedConversation` could not reopen it.
-    /// Running anyway would carry on that session's work inside a different project.
+    /// Returns why a send from the selected Code conversation must not run, or nil when it may.
+    /// The one case: the conversation's bound folder is not the open one (it was moved or deleted and could not reopen).
+    /// Running anyway would carry that session's work into a different project.
     func codeSendRefusal(openFolder: URL?) -> String? {
         guard let vm = viewModel, vm.interfaceMode == .code,
               let bound = recordedProjectPath(of: vm.selectedConversationID) else { return nil }
@@ -201,19 +177,15 @@ final class ConversationManagementCoordinator {
         return newConversation.id
     }
 
-    /// Tags a freshly-created or freshly-reused conversation with the current mode's
-    /// profile type so it appears in the matching sidebar immediately. Chat mode is
-    /// intentionally left untagged — chat hosts multiple profile types (bot/agent/imageGen)
-    /// and the exact one isn't resolved until send time. This eliminates the "new code
-    /// conversation invisible in sidebar until first message" edge case.
+    /// Tags a new or reused conversation with the current mode's profile type so the matching sidebar lists it at once.
+    /// Chat mode is left untagged because chat hosts several profile types and the exact one resolves at send time.
     private func tagConversationWithCurrentMode(_ conversationID: UUID) {
         guard let vm = viewModel else { return }
         switch vm.interfaceMode {
         case .code:
             persistenceService.updateProfileType(for: conversationID, profileTypeRaw: ProfileType.code.rawValue)
-            // Bound at CREATION when a folder is open, not on the first send: a session started
-            // from a project's "+" otherwise listed under "No project" until it was used (seen on
-            // device 2026-09-24). An empty session may still be re-pointed — see `chooseCodeFolder`.
+            // Bound at creation when a folder is open, so a session started from a project's "+" never lists under "No project".
+            // An empty session may still be re-pointed; see `chooseCodeFolder`.
             if let folder = vm.codeSessionManager?.projectPath?.path {
                 persistenceService.updateProjectPath(for: conversationID, projectPath: folder)
             } else {
@@ -226,11 +198,8 @@ final class ConversationManagementCoordinator {
         }
     }
 
-    /// Finds the most recent empty conversation (zero messages) that can be reused.
-    ///
-    /// ⚠️ Only one that belongs HERE (2026-09-24). This used to take the most recent empty
-    /// conversation of any kind and re-tag it — so a project's "+" in Code could claim an empty
-    /// Chat conversation, or another project's empty session, and pull it into this project.
+    /// Finds the most recent empty conversation (zero messages) that belongs to the current mode and can be reused.
+    /// A project's "+" in Code must not claim an empty Chat conversation or another project's empty session.
     private func findReusableEmptyConversation() -> UUID? {
         guard let vm = viewModel,
               let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
@@ -255,9 +224,7 @@ final class ConversationManagementCoordinator {
     }
 
     /// Whether an empty conversation may be reused for a new one in `mode`.
-    ///
-    /// Code: a Code session that is unbound or bound to the open folder. Workflow: a workflow one.
-    /// Chat: anything not claimed by Code or Workflow (Chat leaves conversations untagged).
+    /// Code: an unbound session or one bound to the open folder. Workflow: a workflow one. Chat: the rest.
     nonisolated static func isReusableEmptyConversation(profileTypeRaw: String?, projectPath: String?,
                                                         mode: MainApplicationViewModel.InterfaceMode,
                                                         openFolder: String?) -> Bool {
@@ -310,11 +277,8 @@ final class ConversationManagementCoordinator {
     func transferSelectedConversationToOverlay() {
         guard let vm = viewModel else { return }
         guard let conversationID = vm.selectedConversationID else { return }
-        // [QA revival P0] Use the shared constants, not literals. The panel is created
-        // by AppDelegate reading GlobalConstants.quickAccessOverlayConversationId, and
-        // AppDelegate observes GlobalConstants.showQuickAccessPanelNotification
-        // ("devgentic.showQuickAccessPanel") — the old literal "showQuickAccessPanel"
-        // was never received, so the transfer flow silently did nothing.
+        // Uses the shared constants rather than literals: AppDelegate creates the panel from
+        // `GlobalConstants.quickAccessOverlayConversationId` and observes `GlobalConstants.showQuickAccessPanelNotification`.
         UserDefaults.standard.set(conversationID.uuidString, forKey: GlobalConstants.quickAccessOverlayConversationId)
         NotificationCenter.default.post(
             name: GlobalConstants.showQuickAccessPanelNotification,
@@ -331,15 +295,12 @@ final class ConversationManagementCoordinator {
         persistenceService.togglePinStatus(for: conversationId)
     }
 
-    /// [HITL/P5] Tear down any live run for a conversation before it is deleted. With the per-HITL
-    /// watchdog gone, a run parked on a HITL would otherwise strand forever (deletion is terminal —
-    /// there is no "switch back and answer"). Cancelling the stream cascades to the suspension's
-    /// cancellation handler (deny / nil); `cancel(for:)` (which also posts `.hitl*Resolved`) and
-    /// `resolveAll` are belt-and-suspenders so the unified queue is cleared even on the remote path.
+    /// Tears down any live run for a conversation before it is deleted, so a run parked on a HITL does not strand.
+    /// Cancelling the stream cascades to the suspension's cancellation handler; the explicit cancel and `resolveAll`
+    /// calls make sure the unified queue is cleared even on the remote path.
     private func drainLiveExecution(conversationID: UUID, vm: MainApplicationViewModel) {
         let short = conversationID.uuidString.prefix(8)
-        // Four separate teardowns, each previously silent. Deleting a conversation with a
-        // run in flight is exactly when you need to see them.
+        // Each teardown is logged: deleting a conversation with a run in flight is exactly when they are needed.
         vm.activeStreamManager.cancelStreams(forConversation: conversationID)
         vm.interactionCenter.resolveAll(conversationID: conversationID)
         logger.info("[DELETE] \(short) — cancelled in-flight streams and resolved pending interactions.")
@@ -353,43 +314,24 @@ final class ConversationManagementCoordinator {
             await SessionToolApprovals.shared.clear(conversationID: conversationID)
             logger.info("[DELETE] \(short) — cleared 'Allow for this chat' tool grants.")
         }
-        // Background tasks: kill anything still running and remove the log directory.
-        //
-        // ⚠️ HERE rather than in `deleteConversation`, deliberately. `deleteMultipleConversations`
-        // is a SECOND teardown that re-lists the same side stores by hand — draft, origin store,
-        // remote bindings, traces, workflow state — and a cleanup added to one path and not the
-        // other is the standard way this file grows a leak. Both paths call this function; only
-        // one of them calls the other's body.
-        //
-        // A running build outliving the conversation that started it is not merely untidy: it
-        // holds CPU, keeps writing to a log nobody can now reach (the list view is keyed by
-        // conversation), and is killed at quit by `terminateAll` rather than by anything the user
-        // can see. `discard` terminates the whole process tree and takes the directory with it.
+        // Kills background tasks still running for the conversation and removes their log directory.
+        // Lives here, not in `deleteConversation`, so both delete paths (single and bulk) share it.
         BackgroundProcessRegistry.shared.discard(conversationID: conversationID)
         logger.info("[DELETE] \(short) — background tasks terminated and their logs removed. CONSEQUENCE: any build or dev server this conversation started is stopped now, rather than running on with no surface left that can list or stop it.")
     }
 
 
-    /// Clears the ChatOps cursor for a conversation that no longer exists.
-    ///
-    /// ⚠️⚠️ THE CURSOR OUTLIVING ITS CONVERSATION IS NOT INERT — IT MISDIAGNOSES EVERY LATER
-    /// MESSAGE. The three bridges' free-text path guards `activeConversationID != nil`, then asks
-    /// `profile(boundTo:)`, which collapses "the conversation row is gone" into "no profile bound"
-    /// — so the bot answers "⚠️ No agent profile found for this conversation" forever, while
-    /// `/status` in the same chat correctly reports "Active Conversation: None". Two surfaces, two
-    /// answers, neither actionable.
-    ///
-    /// ⚠️ Cleared for EVERY provider whose cursor points here, not just the current one: three
-    /// bridges can be bound to the same conversation at once.
+    /// Clears the ChatOps cursor for a deleted conversation.
+    /// A stale cursor makes bridges reply "no agent profile found" forever while `/status` reports no active conversation.
+    /// Cleared for every provider whose cursor points here, since several bridges can be bound to one conversation.
     private func forgetRemoteBindings(conversationID: UUID) {
         for provider in RemoteChannel.Provider.allCases
         where RemoteSessionStore.shared.activeConversation(for: provider) == conversationID {
             RemoteSessionStore.shared.setActiveConversation(nil, for: provider)
             logger.info("[DELETE] \(conversationID.uuidString.prefix(8)) — cleared the \(provider.rawValue) ChatOps cursor, which pointed at it. CONSEQUENCE: the next remote message is answered with 'no active conversation' and a prompt to pick one, instead of a misleading 'no agent profile found' repeated indefinitely.")
         }
-        // ⚠️ The mirror's session is an address book keyed by conversation; a deleted conversation
-        // can never legitimately be mirrored again, and `unregisterSession` had no callers at all
-        // until this one.
+        // The mirror's session is an address book keyed by conversation; a deleted conversation is never mirrored again,
+        // so its session is unregistered.
         guard let vm = viewModel else { return }
         for mirror in [vm.chatOpsBridge?.remoteMirrorService,
                        vm.discordChatOpsBridge?.remoteMirrorService,
@@ -406,26 +348,19 @@ final class ConversationManagementCoordinator {
         // Unsent draft text shouldn't outlive the conversation it belonged to.
         ComposerDraftStore.shared.discard(for: conversationID)
         logger.info("[DELETE] \(short) — discarded any unsent composer draft.")
-        // [CF-39] Same reasoning as the draft above: a side store keyed by conversation id must
-        // not outlive the conversation.
+        // A side store keyed by conversation id must not outlive the conversation.
         RemoteConversationOriginStore.forget(conversationID: conversationID)
         forgetRemoteBindings(conversationID: conversationID)
         persistenceService.deleteConversation(with: conversationID)
-        // Privacy: delete the conversation's traces too (FK cascades spans/events/configs),
-        // so its raw content doesn't linger in traces.sqlite after deletion (§12.5).
-        //
-        // The failure was swallowed by `try?`: a throw here left the conversation's raw
-        // prompts and responses in traces.sqlite with nothing said, which defeats the
-        // privacy guarantee this line exists to provide.
+        // Privacy: delete the conversation's traces too (foreign-key cascades cover spans, events and configs),
+        // so raw content does not linger in traces.sqlite; a failure is logged, not swallowed.
         do {
             try TraceStore.shared?.deleteTraces(forConversationID: conversationID.uuidString)
             logger.info("[DELETE] \(short) — traces removed from traces.sqlite (spans/events/configs cascade).")
         } catch {
             logger.error("[DELETE] \(short) — FAILED to delete traces: \(error.localizedDescription). The conversation's raw prompts and responses REMAIN in traces.sqlite.")
         }
-        // Same for its vector memory (chunks + parents): without this the RAG store
-        // is append-only — the deleted conversation's content would linger in the
-        // HNSW index, and on disk, forever.
+        // Also deletes its vector memory (chunks and parents); otherwise the RAG store is append-only and content lingers.
         Task.detached(priority: .utility) {
             VectorStoreService.shared.deleteDocuments(forConversation: conversationID)
         }
@@ -446,7 +381,7 @@ final class ConversationManagementCoordinator {
         for id in ids {
             drainLiveExecution(conversationID: id, vm: vm)
             ComposerDraftStore.shared.discard(for: id)
-            RemoteConversationOriginStore.forget(conversationID: id)   // [CF-39]
+            RemoteConversationOriginStore.forget(conversationID: id)
             forgetRemoteBindings(conversationID: id)
             persistenceService.deleteConversation(with: id)
             do {
@@ -472,7 +407,7 @@ final class ConversationManagementCoordinator {
         }
     }
 
-    /// Saved by the store (RAG-39) — this used to set the model and never save it.
+    /// Renames the conversation and saves the change through the store.
     func renameConversation(conversationID: UUID, newTitle: String) {
         persistenceService.setTitle(newTitle, for: conversationID)
     }
@@ -486,10 +421,8 @@ final class ConversationManagementCoordinator {
         }
         let title = conversationSD.toRowStruct().displayTitle
 
-        // [mm-4] The save panel goes up FIRST; the fetch runs only after the user picks a file,
-        // through the export projection (no image bytes). It used to fetch everything — every
-        // attached image's external-storage blob included, on the main actor — before the panel
-        // existed, so a long image-heavy conversation froze the window with nothing on screen.
+        // The save panel goes up first; the fetch runs only after a file is picked, via the export projection (no image bytes),
+        // so a long image-heavy conversation cannot freeze the window before anything is on screen.
         let persistenceService = persistenceService
         let logger = logger
         ConversationExporter.exportToFile(title: title) {
@@ -501,9 +434,7 @@ final class ConversationManagementCoordinator {
             }
             let limit = 10_000
             let source = await persistenceService.fetchMessagesForExport(for: conversationID, limit: limit)
-            // Newest-first, so hitting the cap drops the conversation's EARLIEST turns. That used
-            // to happen with no log and no notice in the file: the export simply began partway
-            // through.
+            // Newest-first, so hitting the cap drops the conversation's earliest turns; the truncation is logged.
             if source.isTruncated {
                 logger.warning("[EXPORT] Conversation \(conversationID.uuidString.prefix(8)) exceeds the \(limit)-message export cap — the export carries the most recent \(source.messages.count) and its EARLIEST turns are omitted. CONSEQUENCE: stated in the exported document's header so the file is not silently partial.")
             }

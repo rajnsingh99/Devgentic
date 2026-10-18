@@ -4,7 +4,7 @@
 //  LocalNotificationChannel.swift
 //  Devgentic
 //
-//  Delivers notifications via macOS User Notification Center (UNUserNotificationCenter).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -27,17 +27,14 @@ enum LocalNotificationError: LocalizedError {
     }
 }
 
+/// Delivers notifications via the macOS User Notification Center (`UNUserNotificationCenter`).
 final class LocalNotificationChannel: NotificationChannel {
 
     let channelID = "local_notification"
     let displayName = "Local Notification"
-    /// ⚠️ PERSISTED as of the settings wiring. It used to be a plain stored `var` on an instance
-    /// rebuilt at every launch, so turning macOS notifications off lasted until the next start and
-    /// the pane would then render the switch back ON. A toggle that silently forgets the user's
-    /// decision is worse than no toggle, which is why this had to change before the pane got one.
-    ///
-    /// ⚠️ `bool(forKey:)` alone returns false for an absent key, which would flip the default to
-    /// OFF for every existing install. The nil check is what keeps the shipped default of ON.
+    // Why: `bool(forKey:)` returns false for an absent key, so the nil check is what keeps the default ON for existing
+    // installs.
+    /// Whether macOS notifications are enabled; the user's choice is persisted and the default is on when nothing is stored.
     var isEnabled: Bool {
         get {
             let defaults = UserDefaults.standard

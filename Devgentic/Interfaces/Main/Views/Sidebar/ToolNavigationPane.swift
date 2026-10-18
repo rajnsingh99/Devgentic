@@ -4,18 +4,7 @@
 //  ToolNavigationPane.swift
 //  Devgentic
 //
-//  Created 2026-08-02 — the Tool Library's navigation, hosted in the sidebar pane.
-//
-//  Replaces the library's inner 220pt sidebar. Both were live at once before this, each
-//  listing MCP servers with different affordances — the pane's copy and the library's copy
-//  sitting next to each other on screen.
-//
-//  Two hosts, one view:
-//   • The Tools rail tab renders it directly.
-//   • The Profiles tab swaps its profile list for it WHILE the Tool Library is the active
-//     destination — derived from the router, never stored, so "save or back returns to the
-//     profile list" is a consequence of the destination changing rather than state anyone
-//     has to remember to reset.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -23,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "ToolNavigationPane")
 
+/// The Tool Library's navigation, hosted in the sidebar pane. The Tools rail tab renders it directly, and the
+/// Profiles tab swaps its profile list for it while the Tool Library is the active destination (derived from the
+/// router, never stored).
 struct ToolNavigationPane: View {
 
     /// Where this pane is hosted. When hosted in profilesTab, suppresses automatic
@@ -133,29 +125,16 @@ struct ToolNavigationPane: View {
         }
     }
 
-    /// Opens the Tool Library when the Tools rail tab is selected.
-    ///
-    /// Every other rail tab lists ITEMS you then click to navigate — the pane is a menu, and
-    /// the content area follows the click. This pane is different in kind: its rows are
-    /// categories OF the Tool Library, so they mean nothing unless that view is already on
-    /// screen. Selecting the tab only set `selectedTab` and showed the pane, which left the
-    /// user clicking "System & Shell" against the Home screen and seeing nothing happen.
-    ///
-    /// Guarded so it cannot yank the user back: if they are already somewhere in the tool
-    /// family — the library itself, or the add/edit server forms reached from it — the
-    /// destination is left alone.
+    /// Opens the Tool Library when the Tools rail tab is selected, because this pane's rows are categories of the library
+    /// and mean nothing unless it is on screen. Does not move the user if they are already somewhere in the tool family
+    /// (the library or its add/edit server forms).
     private func openLibraryIfNeeded() {
         guard host == .toolsTab else { return }
         ensureLibraryVisible()
     }
 
-    /// Belt-and-braces: a click on any row guarantees the library is on screen.
-    ///
-    /// `onAppear` alone covers entering via the rail tab, but not the case where the user
-    /// opens the library, hits Done (destination → chat) and the Tools pane stays mounted —
-    /// after which every category click was silently writing selection state against the
-    /// Home screen. Doing it at the point of selection kills the whole class rather than
-    /// one path into it.
+    /// Belt-and-braces: a click on any row guarantees the library is on screen, covering the case where Done leaves the
+    /// Tools pane mounted while the destination is chat.
     private func ensureLibraryVisible() {
         switch router.activeDestination {
         case .toolLibrary, .addMCPServer, .editMCPServer:
@@ -489,11 +468,8 @@ final class ToolLibraryFavoritesBridge {
 }
 
 
-/// One-shot hand-off for deep-linking the Tool Library onto a specific server.
-///
-/// The router carries only a destination, so there is nowhere to put "…and select this
-/// server". A shared one-shot slot is simpler than widening the route for a transient hint,
-/// and it self-clears so a later plain navigation cannot inherit a stale selection.
+/// One-shot hand-off for deep-linking the Tool Library onto a specific server. The router carries only a destination,
+/// so this shared slot carries the hint and self-clears so a later navigation cannot inherit it.
 @Observable @MainActor
 final class MCPToolLibrarySelection {
     static let shared = MCPToolLibrarySelection()

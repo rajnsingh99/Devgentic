@@ -4,18 +4,7 @@
 //  MLXModelIdentityTests.swift
 //  DevgenticTests
 //
-//  Batch 1 "Identity" group of the MLX Model Manager readiness plan.
-//
-//    A3   `displayName` re-attached the author only for `mlx-community`, so every other
-//         publisher produced a bare name — and that string is the identity key everywhere.
-//         12 of 18 models on the dev machine failed every exact-match lookup.
-//    A17  `isInstalled` compensated with a substring `contains`, which matched a DIFFERENT
-//         model whose name merely contained the candidate — showing "Installed" for a model
-//         that was never downloaded, and hiding its only Download affordance.
-//    B14  Duplicate ids were dropped with no log.
-//
-//  The two bugs are opposite errors in the same comparison, which is why derivation and
-//  comparison now live together in `MLXModelIdentity` and are pinned together here.
+//  Created by Raj Singh.
 //
 
 import XCTest

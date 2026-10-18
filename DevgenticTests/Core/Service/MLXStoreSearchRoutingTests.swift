@@ -4,12 +4,7 @@
 //  MLXStoreSearchRoutingTests.swift
 //  DevgenticTests
 //
-//  The MLX store's search box did nothing on the Recommended tab — the one a first run with
-//  no installed models lands on — while its placeholder read "Search Hugging Face...".
-//  `refreshCategoryData` serves `.recommended` entirely locally and issues no request, and
-//  `filterAndSortModels` skipped the client-side filter for every non-installed tab, so a
-//  keystroke there produced neither a remote answer nor a local one. A query is now routed to
-//  `.all`, which does issue the request.
+//  Created by Raj Singh.
 //
 
 import XCTest

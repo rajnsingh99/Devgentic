@@ -4,10 +4,7 @@
 //  MLXTokenizerDialectTests.swift
 //  DevgenticTests
 //
-//  Tests for MLXTokenizerAnalyzer.detectCognitiveProfile() — the dialect and
-//  capability detection engine for local MLX models. Creates temporary model
-//  directories with tokenizer artifacts to verify detection across all signal
-//  tiers: special tokens, Jinja templates, family names, and fallbacks.
+//  Created by Raj Singh.
 //
 
 import XCTest

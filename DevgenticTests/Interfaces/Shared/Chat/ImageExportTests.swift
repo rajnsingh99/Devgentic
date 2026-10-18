@@ -4,13 +4,7 @@
 //  ImageExportTests.swift
 //  DevgenticTests
 //
-//  Pins the save path both renderers now share.
-//
-//  Before, each had its own copy and each was wrong differently: ImageView wrote the raw
-//  payload under a hardcoded ".png" name, so a JPEG became a .png that wasn't a PNG;
-//  MediaArtifactImageView always re-encoded to PNG ignoring mimeType, recompressing the
-//  image on its way to disk. Both dropped failures with `try?`, and MediaArtifactImageView
-//  force-unwrapped the Downloads directory — a crash, to save a picture.
+//  Created by Raj Singh.
 //
 
 import XCTest

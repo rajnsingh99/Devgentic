@@ -4,7 +4,7 @@
 //  TelegramModels.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -35,13 +35,9 @@ struct TelegramUpdate: Codable {
 
 // MARK: - Force Reply
 
-/// Telegram's answer to "there is no modal".
-///
-/// ⚠️ TELEGRAM HAS NO MODAL AT PLATFORM LEVEL and `ForceReply` is its ceiling. It opens no dialog:
-/// it makes the user's client pre-focus the reply box AIMED AT this specific message, so the answer
-/// comes back carrying `reply_to_message`. That correlation is the entire point — it lets an answer
-/// name the operation it answers instead of being inferred from a provider-wide cursor, which is
-/// how a second parked clarification became unanswerable and how `/cancel` got swallowed.
+// Why: Telegram has no platform-level modal; ForceReply opens no dialog and is the closest equivalent
+/// Telegram's `ForceReply`: pre-focuses the reply box aimed at this message so the answer carries `reply_to_message`.
+/// That correlation lets an answer name the operation it answers instead of relying on a provider-wide cursor.
 struct ForceReply: Codable {
 
     let force_reply: Bool
@@ -49,11 +45,9 @@ struct ForceReply: Codable {
     /// Greyed placeholder inside the reply box. Telegram caps it at 64 characters.
     let input_field_placeholder: String?
 
-    /// ⚠️ FALSE, AND THAT IS NOT AN OVERSIGHT. Telegram's `selective` targets only users @mentioned
-    /// in the message text, or — if the bot's message is itself a reply — the original sender. A
-    /// mirrored clarification prompt is neither, so `selective: true` would force the reply box for
-    /// NOBODY and the affordance would silently do nothing. ChatOps is paired to one chat and one
-    /// human by design, so a non-selective force reply targets exactly the right person anyway.
+    // Why: `selective: true` would force the reply box for nobody on a mirrored prompt
+    /// Always false: `selective` targets only @mentioned users or the original sender of a replied-to message.
+    /// ChatOps is paired to one chat and one human, so a non-selective force reply reaches the right person.
     let selective: Bool
 
     init(placeholder: String? = nil) {
@@ -72,16 +66,9 @@ struct TelegramMessage: Codable {
     let date: Int
     let text: String?
 
+    // Why: a separate type, not `TelegramMessage?`: Swift rejects a value type that recursively contains itself
     /// The message this one replies to, when the user used Telegram's reply affordance.
-    ///
-    /// ⚠️ FLATTENED TO A SEPARATE TYPE, NOT `TelegramMessage?`. Swift rejects the obvious spelling
-    /// outright — "value type 'TelegramMessage' cannot have a stored property that recursively
-    /// contains it" — so anyone reaching for the one-line fix will hit a compiler error and may
-    /// conclude the data is unavailable. It is not: Telegram has been sending this all along and
-    /// `Codable` was silently discarding it, because unknown keys are ignored.
-    ///
-    /// Only `message_id` is carried, because only `message_id` has a reader: it is the key that
-    /// turns "some text arrived" into "this answers operation X".
+    /// Only `message_id` is carried, because it is the key that ties an answer to its operation.
     let reply_to_message: TelegramReplyReference?
 }
 

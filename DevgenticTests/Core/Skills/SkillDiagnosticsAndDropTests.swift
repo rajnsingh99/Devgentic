@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillDiagnosticsAndDropTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Three places where the app KNEW something and did not say so.
+//  Created by Raj Singh.
 //
 
 import XCTest

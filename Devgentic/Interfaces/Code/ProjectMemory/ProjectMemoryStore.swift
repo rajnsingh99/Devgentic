@@ -4,18 +4,7 @@
 //  ProjectMemoryStore.swift
 //  Devgentic
 //
-//  What a Code run has learned about a project, kept in the project at `.devgentic/memory/`:
-//  one fact per file, plus an `INDEX.md` the app regenerates from them.
-//
-//  Replaces `.devgentic/context.md` (2026-10-06). That was one file the model rewrote wholesale
-//  on every update, so a small model dropped, garbled or padded what was there, copied the
-//  system prompt into it and invented build commands that were then injected into every later
-//  conversation. Here the model adds or removes ONE entry through `remember` / `forget`; the
-//  app writes the files, so no write can damage another entry.
-//
-//  Entries hold what the code cannot tell you — commands that worked, conventions, decisions,
-//  traps, preferences. "Architecture" and "key files" are deliberately not types: `project_tree`
-//  answers those fresh every time, and a remembered copy only goes stale.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -250,10 +239,9 @@ struct ProjectMemoryStore: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    /// The files an entry names that were modified after the entry was last written — the cheap
-    /// signal that the fact may no longer hold. Compares against the entry FILE's own timestamp,
-    /// which is exact, rather than its date-only `updated` field. Empty when nothing changed, the
-    /// entry names no files, or a timestamp cannot be read.
+    /// Returns the files an entry names that were modified after the entry was last written, a cheap staleness signal.
+    /// Compares against the entry file's own timestamp, not its date-only `updated` field.
+    /// Empty when nothing changed, the entry names no files, or a timestamp cannot be read.
     func staleFiles(of entry: ProjectMemoryEntry) -> [String] {
         guard !entry.files.isEmpty,
               let written = Self.modificationDate(of: fileURL(for: entry.name)) else { return [] }

@@ -4,39 +4,16 @@
 //  ShellCommandTools.swift
 //  Devgentic
 //
-//  `batch_command`, split by intent — one tool that waits, one that does not.
-//
-//  ── Why ─────────────────────────────────────────────────────────────────────────────────
-//
-//  The Code tools guide states the rule this project already settled on, on a screen the user
-//  reads: *"Generic tools with multi-modal boolean toggles (e.g. edit_code, code_search) are
-//  superseded by focused single-intent splits. Smaller models (MLX & Ollama 7B–14B) never
-//  hallucinate toggles or corrupt files."*
-//
-//  `background: true` is exactly such a toggle, and `batch_command` survived the 2026-07-31 split
-//  work that produced `edit_code_single`/`edit_code_batch`, the three `code_search_*` tools,
-//  `create_new_file`/`overwrite_file` and `manage_processes`/`kill_process`. It was simply missed.
-//
-//  The proof it mattered: on 2026-09-21 the flag's description had to grow by 270 characters of
-//  prose explaining WHEN to set it, because a device run had backgrounded a build whose result it
-//  wanted one second later and then spent nine iterations polling for it. That prose existed only
-//  because one tool served two intents. The tool NAME now carries it, for free, and a name cannot
-//  be hallucinated the way a boolean can.
-//
-//  ⚠️ Both delegate to `BatchCommandTool`'s shared core. There is one implementation of the
-//  refusals, the timeout clamp, the truncation and the two execution paths — `batch_command`
-//  itself is now a dispatcher over the same functions. A guard or a behaviour attached to one
-//  tool is attached to a NAME rather than a capability, which is the reasoning `ShellCommandGuard`
-//  already carries.
-//
-//  ⚠️ NOT named `bash_*`: this runs `/bin/zsh`. A name that misstates the shell outlives the
-//  decision that chose it.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - run_command (waits)
 
+/// The `run_command` tool: runs a shell command (`/bin/zsh`) and waits for its result.
+/// Its non-waiting sibling is `start_background_task`; both delegate to `BatchCommandTool`'s shared core
+/// for the refusals, timeout clamp, truncation and execution paths.
 struct RunCommandTool: DevgenticTool {
     let name = "run_command"
     let category = "System & Shell"
@@ -71,17 +48,12 @@ struct RunCommandTool: DevgenticTool {
         switch BatchCommandTool.precheck(command: arguments.command,
                                          workingDirectory: arguments.working_directory) {
         case .refused(let reason):
-            // ⚠️ THROWN, not returned. `outputMayContainErrorText` switches off the mediator's
-            // output sniffing, so a returned "Error: …" is recorded as a SUCCESSFUL call and the
-            // circuit breaker never counts it. `execute_shell` held this line until its removal on
-            // 2026-09-24; `run_command` is now the shell, so it holds it here.
+            // Thrown, not returned: `outputMayContainErrorText` disables output sniffing, so a returned "Error: ..." would be
+            // recorded as a successful call and never counted by the circuit breaker.
             throw ShellCommandError.refused(reason: reason)
         case .ready(let workingDirectory):
-            // ⚠️ D-17: a command killed at its OWN `timeout_seconds`, or stopped, is THROWN as such.
-            // Returned as text it was recorded as a SUCCESSFUL call — `outputMayContainErrorText`
-            // turns off output sniffing — so reliability stats, the loop detector and the timeline
-            // chip all saw a success. The dispatcher maps these to `.timedOut` / `.cancelled` and
-            // still hands the model the partial output.
+            // A command killed at its own `timeout_seconds`, or stopped, is thrown as such; returned as text it would be recorded as
+            // a success. The dispatcher maps these to `.timedOut` / `.cancelled` and still hands the model the partial output.
             switch try await BatchCommandTool.runForegroundOutcome(
                 command: arguments.command,
                 workingDirectory: workingDirectory,
@@ -172,15 +144,14 @@ struct StartBackgroundTaskTool: DevgenticTool {
 
 // MARK: - Shared arguments
 
-/// ⚠️ Shared so the two splits cannot drift in what they accept. The `cmd` / `script` aliases are
-/// kept from `batch_command`: models emit them, and rejecting a call over a synonym wastes a turn.
+/// Arguments shared by both command tools, so they cannot drift in what they accept.
+/// The `cmd` / `script` aliases are accepted because models emit them; rejecting a synonym wastes a turn.
 struct ShellCommandArguments: Decodable, Sendable {
     let command: String
     let working_directory: String?
     let timeout_seconds: Int?
     let task_name: String?
-    /// ⚠️ OPT-IN, and the model is the one that opts in — it is the party that says it will report
-    /// back. Absent or false, a finished task updates its card and nothing else happens.
+    /// Opt-in, set by the model when it will report back; absent or false, a finished task only updates its card.
     let notify_on_completion: Bool?
 
     private struct DynamicKey: CodingKey {

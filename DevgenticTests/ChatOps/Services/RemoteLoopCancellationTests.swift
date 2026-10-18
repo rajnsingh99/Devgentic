@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RemoteLoopCancellationTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  TG-6. `catch is CancellationError` never matched a cancelled URLSession call, so every deliberate
-//  ChatOps stop wrote a line claiming a polling failure and a retry that never happened — into the
-//  exported diagnostic bundle, because that line was at a persisted level.
+//  Created by Raj Singh.
 //
 
 import XCTest

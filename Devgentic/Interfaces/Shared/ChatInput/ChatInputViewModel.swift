@@ -4,7 +4,7 @@
 //  ChatInputViewModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 21/07/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -77,9 +77,8 @@ struct PromptSuggestionState {
     var selectedID: DevPrompt.ID? = nil
 }
 
-/// ⚠️ Holds `SkillSD` ids as plain strings rather than the model objects. The picker is a composer
-/// concern and must not keep SwiftData objects alive across a store change; the name is all the
-/// selection needs, since a skill command addresses skills BY NAME.
+/// Holds `SkillSD` ids as plain strings rather than model objects, so the composer does not keep
+/// SwiftData objects alive across a store change. A skill command addresses skills by name.
 struct SkillSuggestionState {
     var isShowing: Bool = false
     var query: String = ""
@@ -98,8 +97,8 @@ struct SkillCommandItem: Identifiable, Equatable, Hashable {
     let description: String
 }
 
-/// Where the `@` picker's files come from right now — drives its empty state, so an empty list
-/// says WHY ("no folder", "indexing", "no files") instead of a generic "Type to search".
+/// Where the `@` picker's files come from right now; drives its empty state so an empty list says why
+/// ("no folder", "indexing", "no files") instead of a generic "Type to search".
 enum FileSuggestionSource: Equatable {
     case noFolder
     case indexing
@@ -127,9 +126,8 @@ struct FileSuggestionState {
 }
 
 // MARK: - Isolated Recording Display Store
-// Separated from ChatInputViewModel so high-frequency updates (power levels every ~100ms,
-// recording time every 1s) don't fire ChatInputViewModel.objectWillChange and cause
-// ChatInputAreaView to re-evaluate its entire body.
+// Separated from `ChatInputViewModel` so high-frequency updates (power levels, recording time) do not fire
+// its `objectWillChange` and re-evaluate `ChatInputAreaView`'s entire body.
 @Observable @MainActor
 final class RecordingDisplayStore {
     var powerLevels: [Float] = []
@@ -161,11 +159,9 @@ final class ChatInputViewModel {
     var skillSuggestionState = SkillSuggestionState()
     var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
 
-    /// Set to `true` to request that the chat input's `TextEditor` grab
-    /// keyboard focus on next render. `ChatInputAreaView` observes this via
-    /// `.onChange` and flips its `@FocusState`, then the VM resets the flag.
-    /// Used by external callers (prompt library's "Use in Chat") so the user
-    /// doesn't have to manually click the input after navigation.
+    /// Set to true to ask the chat input's `TextEditor` to take keyboard focus on the next render.
+    /// `ChatInputAreaView` observes it, flips its `@FocusState`, then the view model resets the flag.
+    /// Used by external callers such as the prompt library's "Use in Chat".
     var pendingInputFocusRequest: Bool = false
 
     // MARK: - Delegates
@@ -179,14 +175,9 @@ final class ChatInputViewModel {
     private(set) var attachedFiles: [FileSystemItem] = []
     private(set) var isStreaming: Bool = false
 
-    /// Attaches the file unless `AttachmentIntake` refuses it.
-    /// - Returns: the refusals (empty when attached) — callers surface them to the user.
-    ///
-    /// ⚠️ Every composer attach route (`@` picker, drag-and-drop, file panels) funnels through
-    /// these two methods, so this is where the intake policy applies for Chat and Code.
-    ///
-    /// - Parameter deliveryMode: the ACTIVE profile's mode — decides whether a folder is
-    ///   accepted (see `AttachmentIntake`). nil when no profile is resolved yet.
+    /// Attaches the file unless `AttachmentIntake` refuses it; every composer attach route funnels through here.
+    /// - Returns: the refusals (empty when attached), for callers to surface to the user.
+    /// - Parameter deliveryMode: the active profile's mode, which decides whether a folder is accepted; nil if unresolved.
     @discardableResult
     func addAttachedFile(fileItem: FileSystemItem, deliveryMode: AttachmentDeliveryMode? = nil) -> [AttachmentIntake.Refusal] {
         addAttachedFiles(fileItems: [fileItem], deliveryMode: deliveryMode)
@@ -247,10 +238,8 @@ final class ChatInputViewModel {
         }
     }
 
-    /// Re-runs intake over what is ALREADY attached and removes what the active profile can no
-    /// longer carry. Intake ran against the profile active at attach time; a later switch
-    /// (Code → a bot, say) or a restored draft can leave a folder in a composer whose profile
-    /// injects contents, where it would only fail at send.
+    /// Re-runs intake over files already attached and removes what the active profile cannot carry.
+    /// Intake ran against the profile active at attach time; a profile switch or restored draft can leave a bad file.
     /// - Returns: the removed files, for the caller to report.
     @discardableResult
     func recheckAttachments(deliveryMode: AttachmentDeliveryMode?) -> [AttachmentIntake.Refusal] {
@@ -273,10 +262,8 @@ final class ChatInputViewModel {
     // MARK: - Private State
     @ObservationIgnored private let logger = DGLogger(category: "ChatInputViewModel")
     @ObservationIgnored private var recordingTimer: Timer?
-    /// [Dead-mic] Pure detection core (ported from Orb): a session that ran ≥1s
-    /// with zero energy samples = the engine opened but delivered no audio
-    /// (`_StartIO error 35` class). Observed on-device 2026-07-19 as three silent
-    /// sessions with a normal-looking recording UI and no error.
+    /// Pure detection core: a session that ran at least 1s with zero energy samples means the engine opened
+    /// but delivered no audio.
     @ObservationIgnored private var deadMicDetector = DeadMicDetector()
     /// Set when a session enters `.recording`; consumed (nilled) by the FIRST
     /// finalize path to run — manual stop and the stream-end continuation both
@@ -292,10 +279,8 @@ final class ChatInputViewModel {
     // MARK: - Keyboard Shortcut Observer
     @ObservationIgnored private var notificationObserver: Any?
 
-    /// Guard for `setupMainDelegateObservers()`. Since this VM is app-scoped,
-    /// `ChatInputAreaView.onAppear` can re-fire on view recreation — this flag
-    /// prevents us from stacking duplicate `ObservationStream` instances for
-    /// the same two signals.
+    /// Guards `setupMainDelegateObservers()`: this view model is app-scoped and `ChatInputAreaView.onAppear` can re-fire,
+    /// so this prevents stacking duplicate `ObservationStream` instances.
     @ObservationIgnored private var hasMainDelegateObservers = false
 
     /// Holds the two ObservationStreams bridging `mainDelegate`'s state.
@@ -404,10 +389,8 @@ final class ChatInputViewModel {
 
     // MARK: - Keyboard Shortcut Observer
 
-    /// [V3] The window hosting the composer, wired by `ChatInputAreaView` via a window
-    /// reader. Used to gate the app-wide ⌘⇧V shortcut: a recording started while some
-    /// OTHER window is key (QuickAccess panel, a file-viewer window) shows no overlay —
-    /// a hot mic with no affordance to stop it.
+    /// The window hosting the composer, wired by `ChatInputAreaView`. Gates the app-wide ⌘⇧V shortcut so a recording
+    /// does not start while another window is key, with no overlay to stop it.
     @ObservationIgnored weak var composerWindow: NSWindow?
 
     private func setupKeyboardShortcutObserver() {
@@ -418,10 +401,8 @@ final class ChatInputViewModel {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                // [V3] CommandMenu shortcuts fire app-wide. Only honor the toggle when
-                // the composer's window is key, so the recording overlay is actually
-                // on screen. Fall through when the window was never wired (nil) —
-                // a dead hotkey would be worse than the gate missing.
+                // The shortcut fires app-wide; honor the toggle only when the composer's window is key so the overlay is on screen.
+                // Falls through when the window was never wired (nil), so the hotkey is not dead.
                 if let window = self.composerWindow, !window.isKeyWindow {
                     self.logger.log("[VOICE] ⌘⇧V ignored — composer window is not key (key window: \(NSApp.keyWindow.map { String(describing: type(of: $0)) } ?? "none")).")
                     return
@@ -470,11 +451,8 @@ final class ChatInputViewModel {
         fileQueryObserver = ObservationStream(
             track: { [weak self] in
                 _ = self?.fileSuggestionState.query
-                // Redundant TODAY — `fileSuggestionState` is a struct, so reading any field
-                // tracks all of it — and kept on purpose: open/close is a real dependency of
-                // `handleFilePickerOpenOrClose`. If this state ever becomes its own @Observable
-                // class, tracking only `query` would silently stop seeing the picker open, which
-                // is exactly the stale-list bug this observer was fixed for (2026-10-05).
+                // Redundant while `fileSuggestionState` is a struct, but kept: open/close is a real dependency of
+                // `handleFilePickerOpenOrClose`, and an @Observable class tracking only `query` would stop seeing the picker open.
                 _ = self?.fileSuggestionState.isShowing
             },
             onChange: { [weak self] in
@@ -514,12 +492,8 @@ final class ChatInputViewModel {
         }
     }
 
-    /// The picker OPENING searches at once; CLOSING forgets its results.
-    ///
-    /// ⚠️ Searches used to run only when the query TEXT changed, and skipped a query equal to the
-    /// last one. A fresh `@` has the empty query — the same as last time — so nothing ran: the
-    /// popup showed the PREVIOUS folder's results (never cleared on close), or "Type to search"
-    /// when there were none, until a backspace changed the query.
+    // Why: a fresh `@` has the same empty query as last time, so a query-change trigger alone shows stale results.
+    /// Searches at once when the picker opens and forgets its results when it closes.
     /// - Returns: true when this change was an open/close (handled here).
     func handleFilePickerOpenOrClose() -> Bool {
         let showing = fileSuggestionState.isShowing
@@ -592,12 +566,8 @@ final class ChatInputViewModel {
 
     // MARK: - Actions (View Triggers)
 
-    /// Replaces the `/query` the user is typing with `/skill-name `, ready for their request.
-    ///
-    /// ⚠️ Inserts the COMMAND, not the skill's body — unlike `selectPrompt`, which expands a prompt's
-    /// text. A skill body belongs in a tool result the model asked for, not pasted into the user's
-    /// own turn: it is often thousands of words, and putting it there would make every skill use
-    /// look like the user typed a manual.
+    /// Swaps the `/query` being typed for `/skill-name `, ready for the user's request.
+    /// Inserts the command, not the skill body (unlike `selectPrompt`): a skill body belongs in a tool result.
     func selectSkillCommand(_ item: SkillCommandItem) {
         guard let range = skillSuggestionState.triggerRange else { return }
         logger.log("Skill command selected: '\(item.name)'")
@@ -618,15 +588,8 @@ final class ChatInputViewModel {
     }
 
     /// Re-filters the `/` picker against what this profile's runs would actually load.
-    ///
-    /// ⚠️⚠️ BUILT FROM THE OFFER, NOT FROM THE LIBRARY. This used to fetch the library and keep rows
-    /// whose NAME was reachable, so two skills both called `learn` each got a row — an unlinked or
-    /// disabled copy included — while every row inserted the same `/learn` and the run loaded
-    /// whichever skill id sorted first. `SkillCommandOffer` comes from `SkillResolution`, the
-    /// function the run uses, so each row here is exactly the copy that will run, and a collision
-    /// is said out loud in `collisionNotes` instead of being presented as a choice.
-    ///
-    /// Drafts, deleted skills and missing pins are excluded by that same resolution.
+    /// Built from `SkillCommandOffer` (from `SkillResolution`, which runs use), so each row is the copy that will run;
+    /// drafts, deleted skills and missing pins are excluded, and name collisions are reported in `collisionNotes`.
     @MainActor
     func refreshSkillSuggestions(offer: SkillCommandOffer) {
         guard skillSuggestionState.isShowing else { return }
@@ -668,24 +631,9 @@ final class ChatInputViewModel {
         resetPromptState()
     }
 
-    /// Stages a prompt for insertion from *outside* the chat input (e.g. the
-    /// Prompt Library detail view's "Use in chat" action or the sidebar row
-    /// hover button). Unlike `selectPrompt`, no `/` trigger range is required.
-    ///
-    /// **Only `prompt.text` is inserted — the prompt's title, category, tags,
-    /// and any other metadata stay in the library.** The text is trimmed of
-    /// leading/trailing whitespace so no stray newlines bleed in. A leading
-    /// space is prepended only when the existing `userInput` doesn't already
-    /// end in whitespace — preserves the user's partially-typed draft without
-    /// smashing it up against the prompt text.
-    ///
-    /// Also records usage so the prompt bubbles up in Recently-Used sort.
-    /// Also flips `pendingInputFocusRequest` so the chat input grabs keyboard
-    /// focus on the next render — spares the user a click after navigation.
-    ///
-    /// - Returns: `true` when the prompt body was staged, `false` when it was
-    ///   empty (and therefore nothing would visibly change in the editor).
-    ///   Callers typically surface a toast on `false`.
+    /// Stages a prompt for insertion from outside the chat input (e.g. the Prompt Library's "Use in chat").
+    /// Inserts only the trimmed `prompt.text`, adding a leading space unless the draft ends in whitespace; records usage.
+    /// - Returns: true when the prompt body was staged, false when it was empty.
     @discardableResult
     func stagePromptFromLibrary(_ prompt: DevPrompt) -> Bool {
         let cleanText = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -713,15 +661,8 @@ final class ChatInputViewModel {
 
         promptService.recordUsage(of: prompt)
 
-        // Defer the focus request to the next runloop tick. Setting it in
-        // the same synchronous frame as `attributedTextInsertionRequest`
-        // causes SwiftUI to fire our `.onChange(of: pendingInputFocusRequest)`
-        // handler (which also mutates the VM), triggering an extra
-        // `updateNSView` pass that beats `CustomTextEditor`'s async
-        // `self.text = textView.string` sync-back — the stale empty
-        // `userInput` then wins and wipes the just-inserted text via the
-        // fallback sync-to-binding path. Separating the two mutations
-        // across runloop ticks avoids that race.
+        // Defer the focus request one runloop tick: setting it in the same frame as `attributedTextInsertionRequest`
+        // triggers an extra `updateNSView` pass that beats `CustomTextEditor`'s sync-back and wipes the inserted text.
         DispatchQueue.main.async { [weak self] in
             self?.pendingInputFocusRequest = true
         }
@@ -823,8 +764,7 @@ final class ChatInputViewModel {
 
     func toggleVoiceInput() {
         if voiceInputState == .recording || voiceInputState == .finalizingSilence {
-            // .finalizingSilence must stop too — the button shows "stop" during the
-            // VAD hysteresis window, and a tap there was previously swallowed.
+            // .finalizingSilence must stop too: the button shows "stop" during the VAD hysteresis window.
             stopStreamingAndFinalize()
         } else if voiceInputState == .available {
             Task { await startStreaming() }
@@ -872,9 +812,8 @@ final class ChatInputViewModel {
         case .download:
             guard let modelId = pendingDownloadModelId else { return }
             pendingDownloadModelId = nil
-            // Route through DownloadCoordinator so the download is
-            // persisted to history and short-circuits correctly if the
-            // model was already pulled in a past session.
+            // Route through `DownloadCoordinator` so the download is persisted to history and skipped
+            // if the model was already pulled.
             Task { @MainActor in
                 _ = await DownloadCoordinator.startWhisperDownloadIfNeeded(modelId: modelId)
             }
@@ -886,9 +825,8 @@ final class ChatInputViewModel {
                 if let fallback {
                     selectDownloadedModel(fallback)
                 } else {
-                    // Fix #6: No models remain — notify service so it goes idle.
-                    // Don't pretend base.en is selected; just tell the service
-                    // the current model is gone.
+                    // No models remain: tell the service the current model is gone so it goes idle,
+                    // rather than pretending a default is selected.
                     voiceInputState = .idle
                     NotificationCenter.default.post(
                         name: GlobalConstants.speechModelChangedNotification,
@@ -973,12 +911,8 @@ final class ChatInputViewModel {
         }
     }
 
-    /// Mirrors the CURRENT microphone permission into the button state. NEVER PROMPTS.
-    ///
-    /// ⚠️⚠️ DO NOT CALL `requestRecordPermission()` HERE. This runs from `init`, and the composer is
-    /// built at app scope — asking here raised the macOS microphone prompt on every first launch,
-    /// before the user had touched voice input. The prompt belongs to the mic tap:
-    /// `startStreaming()` requests it, so an undetermined status needs nothing from this function.
+    // Why: this runs from `init` at app scope; requesting permission here raises the macOS prompt on first launch.
+    /// Mirrors the current microphone permission into the button state. Never prompts.
     private func syncMicPermissionStatus() {
         switch AVAudioApplication.shared.recordPermission {
         case .denied:
@@ -996,11 +930,8 @@ final class ChatInputViewModel {
     // MARK: - Streaming Transcription Lifecycle
 
     private func startStreaming() async {
-        // [V4/C9] Synchronous re-entry guard. Two rapid mic taps each spawn a Task; both
-        // bodies run serially on the MainActor, so flipping the state BEFORE the first
-        // await makes the second body bail here. Without this, the second start leaked
-        // the first recordingTimer (accumulating +1s/s forever) and raced a second
-        // Whisper session against the shared service.
+        // Synchronous re-entry guard: flipping the state before the first await makes a second rapid mic tap bail here,
+        // otherwise it leaks the first recording timer and races a second Whisper session.
         guard voiceInputState == .available else {
             logger.log("[VOICE] startStreaming re-entry blocked (state: \(String(describing: self.voiceInputState))).")
             return
@@ -1065,9 +996,7 @@ final class ChatInputViewModel {
                     }
                     self.recordingDisplay.liveTranscriptionText = ""
                     self.recordingDisplay.powerLevels = []
-                    // RecognitionError carries user-appropriate descriptions ([V1]
-                    // unexpected-end, [V2] busy-with-owner); other errors keep the
-                    // generic streaming-failed framing.
+                    // `RecognitionError` carries user-appropriate descriptions; other errors keep the generic streaming-failed framing.
                     if let recognitionError = error as? RecognitionError {
                         self.voiceInputState = .error(recognitionError.errorDescription ?? String(localized: "Voice input failed."))
                     } else {
@@ -1102,9 +1031,8 @@ final class ChatInputViewModel {
             }
         }
 
-        // Hysteresis for .finalizingSilence state — only toggle voiceInputState after
-        // sustained silence to prevent rapid .recording↔.finalizingSilence flipping
-        // that fires objectWillChange and causes parent view re-renders.
+        // Hysteresis for `.finalizingSilence`: toggle `voiceInputState` only after sustained silence, to avoid rapid
+        // state flips that fire `objectWillChange` and re-render parent views.
         if state.isSilenceDetected && (recognitionService?.isAutoStopEnabled ?? false) {
             silenceUICounter += 1
             if silenceUICounter >= silenceUIThreshold && voiceInputState == .recording {
@@ -1152,8 +1080,7 @@ final class ChatInputViewModel {
             }
             self.recordingDisplay.liveTranscriptionText = ""
             self.recordingDisplay.powerLevels = []
-            // [Dead-mic] A ≥1s session with zero audio used to end here as a silently
-            // empty composer — recording UI looked normal, nothing arrived, no error.
+            // A session with zero audio concludes as a dead-mic error rather than an empty composer.
             self.voiceInputState = self.concludeVoiceSessionAssessingDeadMic()
                 ? .error(self.deadMicErrorMessage)
                 : .available

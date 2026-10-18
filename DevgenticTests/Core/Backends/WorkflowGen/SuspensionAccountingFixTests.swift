@@ -4,22 +4,7 @@
 //  SuspensionAccountingFixTests.swift
 //  DevgenticTests
 //
-//  Two `ExecutionSuspensionService` fixes shipped alongside the running-skip engine
-//  (Phase B increment 5), plus the install-window probe:
-//
-//  1. OVERWRITE-GUARD PARK BALANCE — the double-suspend guards used to resume the previous
-//     continuation directly, skipping `endPark`: the first suspend's `beginPark` was never
-//     balanced, `parkDepth` never returned to zero, and every later node timeout in that
-//     conversation credited all wall-clock as parked time and never fired. Latent (every caller
-//     mints fresh operation UUIDs), but exactly the accounting trap `drainOperation` documents.
-//
-//  2. HONEST TEARDOWN OUTCOME — a cancellation-driven resume posted outcome "denied"
-//     (permission) / "skipped" (clarification) / "rejected" (plan review) to the trace and audit
-//     rows: decisions the user never made. Teardown now posts "cancelled"; a REAL denial still
-//     posts "denied" (the control in both directions).
-//
-//  ⚠️ `ExecutionSuspensionService.shared` is process-wide with no reset — every test isolates by
-//  fresh UUIDs and never asserts on global totals (the `WorkflowParkAccountingTests` rule).
+//  Created by Raj Singh.
 //
 
 import XCTest

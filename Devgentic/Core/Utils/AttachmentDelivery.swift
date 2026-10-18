@@ -4,19 +4,7 @@
 //  AttachmentDelivery.swift
 //  Devgentic
 //
-//  What the model actually received for each text/document attachment, and the ONE piece of
-//  arithmetic that decides it. Three sites run that arithmetic and must agree to the character:
-//    • `BackendOrchestrationService.assembleTextFileContent` — builds what the MODEL gets
-//    • `MessageAttachmentBuilder`                          — records it on the TRANSCRIPT
-//    • `PromptFitCheck.estimatedAttachmentChars`           — prices it for the context GAUGE
-//  Each used to carry its own copy. The transcript stored up to 500K chars of a file the model
-//  never saw a character of, and the gauge priced the stateless fallback without the path
-//  wrapper the backend adds.
-//
-//  Policy (user decision, 2026-10-04): a text file over the per-file budget is CUT to what
-//  fits, with a marker telling the model so — the same treatment documents already got. It
-//  used to be dropped whole while a PDF of the same length was cut, so the model received
-//  nothing for a 120K `.java` but the first 50K of a 120K `.pdf`.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -47,10 +35,8 @@ enum AttachmentDelivery: Codable, Equatable, Sendable {
     }
 
     // MARK: Flat storage (SwiftData)
-    //
-    // Stored as scalars rather than an enum blob: three optional columns are a lightweight
-    // schema change, and a hand-written field-by-field codec is exactly where new fields get
-    // dropped — so these two functions are the ONLY codec and are round-trip tested.
+    // Stored as scalar columns rather than an enum blob; these two functions are the only codec and are round-trip
+    // tested.
 
     var storage: (kind: String, sent: Int?, total: Int?) {
         switch self {
@@ -79,11 +65,8 @@ enum AttachmentDeliveryMode: Equatable, Sendable {
     /// Content injected; `includeAbsolutePaths` widens each file's wrapper label.
     case inject(includeAbsolutePaths: Bool)
 
-    /// ⚠️ Mirrors the orchestrator's Section 2 switch exactly:
-    ///  • stateless + `read_file` → manifest
-    ///  • stateless WITHOUT `read_file` → injection WITH paths (the fallback the orchestrator
-    ///    takes so the manifest never points at a tool the profile can't call)
-    ///  • direct injection → paths only on write-capable profiles (agent / code)
+    /// Mirrors the orchestrator's Section 2 switch: stateless with `read_file` gets a manifest; stateless without it
+    /// injects with paths; direct injection includes paths only on write-capable profiles (agent, code).
     @MainActor
     static func resolve(for profile: BackendProfileModel) -> AttachmentDeliveryMode {
         switch profile.resolvedFileContextStrategy {
@@ -96,13 +79,8 @@ enum AttachmentDeliveryMode: Equatable, Sendable {
         }
     }
 
-    /// Whether the model receives the files' CONTENT — and therefore whether conversation memory
-    /// indexes them, so a later turn can recall what this one saw (RAG-18).
-    ///
-    /// ⚠️ Keyed on the DELIVERY, not the configured strategy. The orchestrator used to gate indexing
-    /// on `strategy == .directInjection`, which missed both other injecting paths: the stateless
-    /// fallback (no `read_file`) and the deprecated `.contextualRAG` strategy. The model saw those
-    /// files; later turns could not recall them.
+    /// Whether the model receives the files' content, and therefore whether conversation memory indexes them for later
+    /// recall. Keyed on the delivery, not the configured strategy, so every injecting path counts.
     var deliversContent: Bool {
         if case .inject = self { return true }
         return false
@@ -133,10 +111,9 @@ enum DirectInjectionPlan {
         wrap(body: "", name: name, label: label).count
     }
 
-    /// Decides each file's delivery, in order, from its length and wrapper width. The running
-    /// total counts everything `assemble` emits (wrapper + body + marker), as the backend
-    /// always has: a file is admitted while the total is under budget, and gets at most
-    /// `min(perFile, total − used)` characters of body.
+    /// Decides each file's delivery, in order, from its length and wrapper width. The running total counts everything
+    /// `assemble` emits; a file is admitted while the total is under budget and gets at most `min(perFile, total -
+    /// used)` characters of body.
     static func allocate(lengths: [Int], wrapperWidths: [Int]) -> [AttachmentDelivery] {
         precondition(lengths.count == wrapperWidths.count)
         var used = 0
@@ -167,9 +144,7 @@ enum DirectInjectionPlan {
         let content: String
     }
 
-    /// The two lanes that inject file content, each with its own wrapper. Both are cut by the
-    /// SAME allocation — knowledge sources used to be dropped whole past the budget while
-    /// attachments were cut (user decision 2026-10-05: one rule for both).
+    /// The two lanes that inject file content, each with its own wrapper; both are cut by the same allocation.
     enum Layout: Equatable, Sendable {
         /// Current-turn attachments: `--- Start of file: … ---` / `--- End of file: … ---`.
         case attachment(includeAbsolutePaths: Bool)

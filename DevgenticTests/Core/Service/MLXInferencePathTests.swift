@@ -4,15 +4,7 @@
 //  MLXInferencePathTests.swift
 //  DevgenticTests
 //
-//  A14 + A15 — the two deferred items from Batch 1, both on the inference/request path.
-//
-//    A14  `streamChat` took no model identifier, and `lastModelDirectory` is a single global
-//         slot holding whatever model ANY caller loaded most recently. Parallel workflow
-//         branches could answer from each other's models with no error and no user signal.
-//    A15  The installed-model scan (recursive walk + per-model config parsing) ran
-//         synchronously on the MainActor, reachable from four request-path consumers.
-//
-//  ⚠️ No test here loads an MLX model — the suite must stay hermetic and fast.
+//  Created by Raj Singh.
 //
 
 import XCTest

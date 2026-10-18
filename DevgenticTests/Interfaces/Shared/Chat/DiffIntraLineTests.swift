@@ -4,9 +4,7 @@
 //  DiffIntraLineTests.swift
 //  DevgenticTests
 //
-//  Covers DiffUtility's intra-line refinement: modified line pairs (a deletion paired
-//  with an addition) carry character-level `segments` marking the actual edit, so the
-//  renderers can highlight `1` → `2` instead of tinting both whole lines.
+//  Created by Raj Singh.
 //
 
 import XCTest

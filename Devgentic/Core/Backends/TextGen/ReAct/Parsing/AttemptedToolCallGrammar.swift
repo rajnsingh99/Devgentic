@@ -4,53 +4,18 @@
 //  AttemptedToolCallGrammar.swift
 //  Devgentic
 //
-//  ONE definition of "this text is an attempted tool call", shared by every place
-//  that must decide whether an unparsed reply is a broken call (retry it) or an
-//  answer (end the run with it):
-//
-//    - NativeParsePipeline   — zero native tool calls, content cascade said `.failed`
-//    - CognitiveParsePipeline — Stage 4 recovered nothing on a prompt-based dialect
-//    - ReActAgentExecutor    — the consecutive-format-failure bound's salvage check
-//
-//  ⚠️ Declared grammar, not shape. Braces, brackets, `int[]`, `prices[i]`, Markdown
-//  links and ```json analysis blocks decide NOTHING — judging by shape is what sent
-//  correct answers into retry loops on 12 of 18 dialects (2026-10-05 probe matrix).
-//  What DOES decide: keys and tokens a tool-call format declares.
-//
-//  ⚠️ JSON keys alone are not enough. The first version knew only rules 1 and 2, and
-//  calls written in a tag/token format — `<<function>>read_file(`, `<functioncall>…`,
-//  a cut-off `<function=read_file>…`, `[TOOL_CALLS]read_file[ARGS]{…` — were shown to
-//  the user as the answer on up to 19 of 19 paths (2026-10-05 audit). Rule 3 exists
-//  for those.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The single definition of "this text is an attempted tool call", shared wherever an unparsed reply is judged a broken
+/// call (retry) or an answer. It reads declared keys and tokens of tool-call formats, never the shape of the text.
 enum AttemptedToolCallGrammar {
 
-    /// A label for the attempted call in `text` — the tool name when the text declares
-    /// one, else the format token that opened it — or nil when `text` is not a call.
-    ///
-    /// A call is declared by ANY of:
-    ///   1. one of `callableNames` (case-insensitive) as the value of a name key
-    ///      (`name`, `tool_name`, `tool`, `function`, `function_name`, `func`, `action`,
-    ///      `command`), as a tag (`<read_file>`), or opening a Pythonic call list
-    ///      (`[read_file(`) — catches truncated calls to real tools, e.g.
-    ///      `{"name":"read_file","arguments":{"path":`;
-    ///   2. a name key (`name`, `tool_name`, `tool`, `function`, `function_name`, `func`,
-    ///      `action`) with an identifier value AND an arguments key (`arguments`,
-    ///      `parameters`, `args`, `input`, `action_input`) whose value opens an object —
-    ///      the shape of a call whatever the tool name, e.g.
-    ///      `{"function_name": "final_summary", "arguments": {…}}`;
-    ///   3. a token that opens a call in a known tool-call format (`callMarkers`), or a
-    ///      ReAct `Action:` line followed by an `Action Input:` line.
-    ///
-    /// `{"name": "Raj"}`, `{"input": 5}`, `{"analysis": {"input": [7,1,5]}}`,
-    /// `<span>{count}</span>` and a lone `Action: none needed.` line are not calls.
-    ///
-    /// Text inside an INLINE code span is ignored: that is how prose quotes a token ("Hermes wraps
-    /// calls in `<tool_call>` tags"), and a model's real call is never wrapped in single backticks.
-    /// Fenced blocks are still read — models do put real calls in ```json fences.
+    /// A label for the attempted call in `text` (the tool name, else the opening format token), or nil when it is not a call.
+    /// A call names a callable tool as a name key, tag or Pythonic list; pairs a name key with an arguments object; or opens
+    /// with a known format token (`callMarkers`) or a ReAct Action/Action Input pair. Inline code spans are ignored.
     static func attemptedCallName(in text: String, callableNames: Set<String>) -> String? {
         let text = inlineCodePattern.stringByReplacingMatches(
             in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: " ")

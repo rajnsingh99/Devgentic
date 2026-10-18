@@ -4,10 +4,7 @@
 //  RemoteModelsGateTests.swift
 //  DevgenticTests
 //
-//  Pins the General Settings "Show Remote Models" feature toggle: Gemini, OpenAI,
-//  and Anthropic are hidden from every provider picker by default; OpenRouter and
-//  OpenAI-compatible endpoints stay visible; an existing profile's configured
-//  provider stays selectable via `keepingCurrent`.
+//  Created by Raj Singh.
 //
 
 import XCTest

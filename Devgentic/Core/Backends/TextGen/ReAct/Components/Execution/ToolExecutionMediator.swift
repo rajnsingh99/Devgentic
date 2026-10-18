@@ -4,7 +4,7 @@
 //  ToolExecutionMediator.swift
 //  Devgentic
 //
-//  Created for ReAct Executor Modularization.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -17,10 +17,7 @@ private let logToolExecution = DGLogger(category: "ToolExecution")
 /// hallucination catching, Human-In-The-Loop (HITL) suspension, and Pre-flight Permissions.
 struct ToolExecutionMediator: ToolDispatching {
 
-    /// The global per-tool timeout (seconds) when the user has set no override for this tool —
-    /// 15 minutes (HITL Waiting Contract, decision 2). Was 60 s, which cut in ahead of the terminal
-    /// tools' own 900 s bound and discarded their output (Timeout inventory D-01).
-    ///
+    /// The global per-tool timeout in seconds when the user has set no override: 15 minutes.
     /// Injectable so tests can exercise the default path without a real-time wait.
     static let globalDefaultToolTimeout: TimeInterval = 15 * 60
     var defaultToolTimeout: TimeInterval = ToolExecutionMediator.globalDefaultToolTimeout
@@ -86,15 +83,11 @@ struct ToolExecutionMediator: ToolDispatching {
                 let hasPermissions = await PermissionManager.shared.ensurePermissions(for: requiredPermissions)
                 
                 if !hasPermissions {
-                    // No "System Error:" prefix here — `.systemError`'s llmObservation
-                    // template prepends its own, and doubling it read as noise. The
-                    // "Missing required macOS permissions" marker is load-bearing:
-                    // `ToolExecutionResult.failureCategory` matches on it to classify
-                    // this as `.permissionRejected`.
+                    // No "System Error:" prefix: the `.systemError` template adds its own. The "Missing required macOS permissions"
+                    // marker is matched by `failureCategory`.
                     let msg = "Missing required macOS permissions. Please ask the user to grant access in System Settings -> Privacy & Security."
-                    // Synthetic classification — no underlying Error to preserve, this is a
-                    // detected condition. `.toolPermissionDenied` drives dashboards toward
-                    // the "user needs to grant permission" remediation path.
+                    // Synthetic classification for a detected condition; `.toolPermissionDenied` drives dashboards toward the
+                    // grant-permission remediation.
                     let classified = ClassifiedAgentError.synthetic(
                         category: .toolPermissionDenied,
                         origin: "ToolExecutionMediator.preflightPermission",
@@ -123,10 +116,8 @@ struct ToolExecutionMediator: ToolDispatching {
             }
             // -----------------------------------
             
-            // --- PRE-FLIGHT ARGUMENT VALIDATION ---
-            // Dynamically validates required parameters against the tool's schema.
-            // Catches empty strings, null, and missing values BEFORE dispatch,
-            // giving the model a clear, actionable error to self-correct.
+            // Pre-flight argument validation: catches empty, null and missing required values before dispatch so the model can
+            // self-correct.
             let validationErrors = Self.validateRequiredArguments(
                 arguments: arguments,
                 schema: tool.parameters,
@@ -134,9 +125,8 @@ struct ToolExecutionMediator: ToolDispatching {
             )
             if !validationErrors.isEmpty {
                 let errorMsg = validationErrors.joined(separator: " ")
-                // Synthetic classification — argument validation is a pre-dispatch rejection,
-                // not a caught exception. `.toolArgInvalid` signals the model should retry
-                // with corrected arguments (isRetryable=false since args are wrong, not transient).
+                // Synthetic classification for a pre-dispatch rejection; `.toolArgInvalid` is not retryable because the arguments
+                // are wrong, not transient.
                 let classified = ClassifiedAgentError.synthetic(
                     category: .toolArgInvalid,
                     origin: "ToolExecutionMediator.argValidation",
@@ -175,16 +165,8 @@ struct ToolExecutionMediator: ToolDispatching {
 
                 let toolResult: (output: String, artifacts: [MediaArtifact])
 
-                // Always bound a tool call (#20), and RETURN AT THE BOUND.
-                //
-                // ⚠️⚠️ This was a `withThrowingTaskGroup` race until 2026-09-26. A task group cannot
-                // return before every child has, so for any tool that ignores cancellation — a
-                // shell command, an MCP request, an AppleScript — the timeout fired and then WAITED
-                // for the tool, discarded its finished output and told the model "timed out after
-                // 60 seconds" (P1: a 1 s bound returned after 4.01 s, the build had exited 0).
-                // `DeadlineRace` returns at the bound, cancels the tool (which fires stop hooks such
-                // as the shell's process kill) and keeps whatever it hands back within the grace.
-                // Nesting: shortened to fit an enclosing turn/run limit, keeping its reserve.
+                // Every tool call is bounded, and `DeadlineRace` returns at the bound even for tools that ignore cancellation,
+                // keeping output within the grace; shortened to fit an enclosing limit.
                 let fitted = await ExecutionBudget.clamp(
                     Self.effectiveTimeout(for: tool, defaultTimeout: defaultToolTimeout),
                     what: "Tool '\(toolName)'")
@@ -204,18 +186,15 @@ struct ToolExecutionMediator: ToolDispatching {
                                               shortenedBy: fitted.shortenedBy, reserve: fitted.reserve)
                 }
 
-                // #19 (B): tools whose legitimate output surfaces error text (shell stderr,
-                // build-error readers) opt out of content-sniffing entirely — a non-throwing
-                // return is success; their genuine failures still surface by throwing.
+                // Tools whose legitimate output surfaces error text opt out of content-sniffing; a non-throwing return is success
+                // and real failures still throw.
                 let isSemanticFailure = tool.contentMayLookLikeError
                     ? false
                     : Self.isSemanticFailure(toolResult.output)
 
                 if isSemanticFailure {
-                    // Enrich with recovery hints ONLY for errors that match a registered
-                    // (toolName, error-pattern) row AND whose suggested tools are enabled
-                    // in the current request. Unmatched errors and MCP tools pass through
-                    // unchanged — see `ToolRecoveryHints.enrich` for the safety guarantees.
+                    // Enriches with recovery hints only for errors matching a registered (tool, pattern) row whose suggested tools are
+                    // enabled (`ToolRecoveryHints.enrich`).
                     let enrichedOutput = ToolRecoveryHints.enrich(
                         toolName: toolName,
                         originalError: toolResult.output,
@@ -237,30 +216,26 @@ struct ToolExecutionMediator: ToolDispatching {
                 errorDescriptionForMetrics = "Per-tool timeout after \(Int(timeoutError.limit))s"
 
             } catch ShellCommandError.timedOut(let limit, let observation) {
-                // D-17: the command's OWN bound — a timeout, with the partial output for the model.
+                // The command's own bound: a timeout, with the partial output for the model.
                 logToolExecution.warning("[TOOL_TIMEOUT] Tool '\(toolName)' hit its own \(Self.describe(limit)) limit and was killed. CONSEQUENCE: recorded as a timeout (it used to count as a success); its partial output goes to the model.")
                 result = .timedOut(toolName: toolName, duration: limit, message: observation)
                 errorDescriptionForMetrics = "Command timed out after \(Int(limit))s"
 
             } catch ShellCommandError.stopped(let observation) where !Task.isCancelled {
-                // D-17: stopped while the run goes on (the user stopped just this command). Not the
-                // tool's failure, and the model still needs what it printed.
+                // Stopped while the run goes on (the user stopped just this command): not the tool's failure, and the model still
+                // needs its output.
                 logToolExecution.info("[CANCELLED] reason=command-stopped — '\(toolName)' was stopped while its run continues. CONSEQUENCE: recorded as cancelled, not as a success; its partial output goes to the model.")
                 result = .cancelled(toolName: toolName, message: observation)
 
             } catch _ where Task.isCancelled {
-                // Stop / an outer limit reached a running tool. Not the tool's failure: it used to
-                // land in the generic catch below as `.toolSystemCrash`, a reliability failure and
-                // an "executionThrew" chip for every Stop (Timeout inventory D-04, P7).
+                // Stop or an outer limit reached a running tool: not the tool's failure, so it is recorded as cancelled, not a
+                // crash.
                 logToolExecution.info("[CANCELLED] reason=stopped — tool '\(toolName)' was cancelled because its run was stopped. CONSEQUENCE: recorded as cancelled, not as a tool failure.")
                 result = .cancelled(toolName: toolName)
 
             } catch {
-                // Classify the underlying error into the canonical taxonomy so downstream
-                // analytics can dedupe across the propagation chain and filter by category.
-                // `.classify(...)` preserves the original Error object and — in developer mode —
-                // captures NSError domain/code/userInfo keys + a stack signature in the emitted
-                // SpanEvent (see `ClassifiedAgentError.Diagnostics`).
+                // Classifies the error into the canonical taxonomy so analytics can dedupe and filter by category; developer mode
+                // captures extra diagnostics.
                 let classified = error.classify(
                     as: .toolSystemCrash,
                     origin: "ToolExecutionMediator.toolRun",
@@ -306,20 +281,14 @@ struct ToolExecutionMediator: ToolDispatching {
     
     // MARK: - Testable Static Helpers
 
-    /// Upper bound (chars) for the "error"-prefixed semantic-failure check. Intentional
-    /// soft-failure messages (e.g. `read_file` returning "Error: File not found") are short
-    /// single lines; legitimate error-CONTAINING content (logs, build output, code hits) is
-    /// typically far longer, so it stays classified as success. (#19)
+    /// Upper bound in chars for the "error"-prefixed semantic-failure check.
+    /// Soft-failure messages are short single lines; longer error-containing content (logs, build output) stays a
+    /// success.
     static let maxSemanticErrorLength = 512
 
-    /// Heuristic for tools that report failure by RETURNING a string rather than throwing
-    /// (e.g. `read_file` → "Error: File not found"). Kept deliberately CONSERVATIVE (#19):
-    /// empty / "null" / "nil" are unambiguous "no result"; the "error" branch fires only on a
-    /// SHORT output shaped like an actual error message — "error" as a leading WORD followed by
-    /// ':' or whitespace ("Error:", "Error reading file: …"). So a successful read/search/log
-    /// whose CONTENT merely begins with "error" (a multi-KB build log, a code hit, "errors: 0")
-    /// is NOT misclassified. Tools that legitimately surface error text opt out earlier at the
-    /// call site via `AgentTool.contentMayLookLikeError`.
+    /// Heuristic for tools that report failure by returning a string rather than throwing.
+    /// Conservative: empty/"null"/"nil" mean no result; "error" counts only as a leading word on short output.
+    /// Tools that legitimately surface error text opt out via `AgentTool.contentMayLookLikeError`.
     static func isSemanticFailure(_ rawOutput: String) -> Bool {
         let trimmed = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return true }
@@ -327,10 +296,8 @@ struct ToolExecutionMediator: ToolDispatching {
         let lower = trimmed.lowercased()
         if lower == "null" || lower == "nil" { return true }
 
-        // "error"-shaped AND short enough to be a message rather than error-bearing content.
-        // The length bound is on the FIRST LINE, not the whole output: a real error message has
-        // a short header even when it interpolates a long body ("Error: <header>\n<details>"),
-        // whereas a multi-KB log that merely begins with "error" has a long first line. (#19)
+        // "error"-shaped and short enough to be a message; the bound is on the first line, since a long log has a long
+        // first line.
         if lower.hasPrefix("error") {
             let firstLineLength = trimmed.prefix(while: { !$0.isNewline }).count
             if firstLineLength <= Self.maxSemanticErrorLength {
@@ -358,15 +325,8 @@ struct ToolExecutionMediator: ToolDispatching {
     }
     
     /// Validates that all required parameters (per the tool's schema) are present and non-empty.
-    /// Returns an array of human-readable error strings — one per violation.
-    /// Empty array means all validations passed.
-    ///
-    /// Validation rules by type:
-    /// - `string`: must not be empty (`""`) or null
-    /// - `number`/`integer`: must not be null or missing
-    /// - `array`: must not be empty or null
-    /// - `object`: must not be empty or null
-    /// - Any type: must not be missing entirely
+    /// Returns human-readable errors, one per violation; empty means valid. Empty strings/arrays/objects, null and
+    /// missing values fail.
     static func validateRequiredArguments(
         arguments: [String: JSONValue],
         schema: ToolParameters,
@@ -421,9 +381,9 @@ struct ToolExecutionMediator: ToolDispatching {
 
 extension ToolExecutionMediator {
 
-    /// The bound applied to one call: the user's override if it is usable, else just above a
-    /// self-bounding tool's own ceiling, else the global default. Never 0, negative or infinite —
-    /// a 0 used to mean "time out instantly" (Timeout inventory D-05, P9).
+    /// The bound for one call: the user's override if usable, else just above a self-bounding tool's ceiling, else the
+    /// global default.
+    /// Never 0, negative or infinite.
     static func effectiveTimeout(for tool: AgentTool, defaultTimeout: TimeInterval) -> TimeInterval {
         if let override = tool.timeout {
             if override.isFinite, override > 0 { return override }
@@ -435,9 +395,8 @@ extension ToolExecutionMediator {
         return defaultTimeout
     }
 
-    /// What the model reads for a timed-out call — the REAL elapsed time, whether the work was
-    /// stopped, and what it handed back (HITL Waiting Contract §4). Replaces "timed out after
-    /// <bound> seconds", which was also sent for work that had finished.
+    /// What the model reads for a timed-out call: the real elapsed time, whether the work was stopped, and what it
+    /// handed back.
     static func timeoutObservation(_ error: PerToolTimeoutError, customMessage: String?) -> String {
         var text: String
         if error.stopped {
@@ -446,8 +405,8 @@ extension ToolExecutionMediator {
             text = "System Error: Tool '\(error.toolName)' timed out after \(describe(error.elapsed)) (limit \(describe(error.limit))). It did not stop when cancelled and may still be running; its result will not be delivered."
         }
         if let owner = error.shortenedBy {
-            // ⚠️ Nesting: the model must know WHY the limit was short, and that it still has time
-            // to answer — otherwise it retries a command that cannot fit.
+            // Nesting: the model must know why the limit was short and that it still has time to answer, or it retries a
+            // command that cannot fit.
             text += "\nThe limit was shortened to fit \(owner); about \(describe(error.reserve)) remains to respond. Do not re-run it in this turn — report what you have."
         }
         if let customMessage { text += "\n\(customMessage)" }
@@ -483,8 +442,8 @@ struct PerToolTimeoutError: Error {
         case .success(let value)?:
             return value.output
         case .failure(let error)?:
-            // `run_command` now THROWS its stopped/timed-out outcome (D-17) — its partial output
-            // rides in the error and must not be lost when the dispatcher's own limit stops it.
+            // `run_command` throws its stopped or timed-out outcome; its partial output rides in the error and must survive
+            // the dispatcher's limit.
             switch error as? ShellCommandError {
             case .stopped(let observation)?, .timedOut(_, let observation)?: return observation
             default: return nil

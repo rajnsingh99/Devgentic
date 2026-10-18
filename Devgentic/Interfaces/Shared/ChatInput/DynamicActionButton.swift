@@ -4,7 +4,7 @@
 //  DynamicActionButton.swift
 //  Devgentic
 //
-//  Extracted from ChatInputAreaView.swift
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -197,10 +197,8 @@ struct DynamicActionButton: View {
             .transition(.opacity.animation(.easeInOut(duration: 0.2)))
     }
 
-    /// ⚠️ TWO SOURCES. `voiceInputState` follows the RECOGNITION service, which only reports a
-    /// download while it is loading a model itself. A pull started from the model picker runs in
-    /// the DOWNLOAD service and never reaches `voiceInputState` — the button sat on a plain mic for
-    /// the whole download, so users tapped again and again for feedback.
+    /// Two sources: `voiceInputState` follows the recognition service, which reports a download only while loading a model
+    /// itself; a pull started from the model picker runs in the download service and never reaches it.
     private var isDownloadingModel: Bool {
         voiceInputState == .modelLoading || downloadService.isDownloading
     }
@@ -217,9 +215,8 @@ struct DynamicActionButton: View {
                 guard mode == .mic else { return }
                 suppressNextTap = true
                 inputViewModel.showModelSelectorPopover = true
-                // If AppKit swallows the release-click during popover presentation,
-                // the Button action never fires — don't let the suppression leak
-                // into the next genuine tap.
+                // If AppKit swallows the release-click during popover presentation the Button action never fires;
+                // reset the suppression so it does not leak into the next genuine tap.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     suppressNextTap = false
                 }

@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  TestHostGuardTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The XCTest host IS the real app: `DevgenticApp.init` and `applicationDidFinishLaunching` run in
-//  full on every `test-without-building` invocation, whatever the tests themselves do. Invariant 57
-//  closed the ChatOps half; this file covers the rest of the launch path.
-//
-//  ⚠️⚠️ THIS SUITE IS UNUSUAL: IT RUNS INSIDE THE CONDITION IT DESCRIBES. `TestHost.isRunning` is
-//  true here by definition, which makes `permits(...)` directly observable — and makes the
-//  "unguarded" assertions below the strongest evidence available, because they are evaluated in
-//  exactly the process the guards exist to protect.
+//  Created by Raj Singh.
 //
 
 import XCTest

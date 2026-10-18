@@ -4,21 +4,7 @@
 //  ConversationHistoryTool.swift
 //  Devgentic
 //
-//  Index-based conversation history retrieval tool for Pointer and Hybrid memory strategies.
-//  Returns a conversation turn by chronological index: the user query, the agent's response
-//  IN FULL (the prompt only ever carries a 200-char <outcome>), and every tool execution with
-//  its arguments, status, error and file diff.
-//
-//  Tool RESULTS are deliberately not stored or served. A tool call is reproducible from its
-//  name and arguments, both of which are here, so carrying results would spend context on
-//  something the agent can simply ask for again. The exception is what a write CHANGED, which
-//  is not reproducible — that rides `<effect>` and is served here in full.
-//
-//  The index matches the skeleton shown in episodic memory:
-//    <outcome>Call get_conversation_history(N) for details.</outcome>
-//
-//  Index 0 = oldest turn. Indices are computed from EpisodicHistoryFormatter.pairTurns()
-//  to guarantee stability between the skeleton and this tool's snapshot.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -26,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "ConversationHistoryTool")
 
+/// Returns a conversation turn by chronological index: the user query, the full agent response and each tool
+/// execution. Tool results are not served; a write's effect (file diff) is. Index 0 is the oldest turn, matching
+/// the episodic skeleton.
 struct ConversationHistoryTool: DevgenticTool {
 
     // MARK: - Snapshot Record
@@ -38,13 +27,8 @@ struct ConversationHistoryTool: DevgenticTool {
         let toolExecutions: String
     }
 
-    /// Ceiling for the agent response in one retrieval — half of `maxPersistedOutputLength`.
-    ///
-    /// The response prints BEFORE the tool rows, and this tool's whole return value is itself
-    /// capped at 32 KB when persisted. Left unbounded, a pathological answer would push the
-    /// `<effect>` diffs past that cut — discarding the part that CANNOT be re-derived in order
-    /// to keep the part that can. ~16 KB is far beyond any real answer, so in practice this
-    /// never fires; when it does it stops cleanly and names the loss.
+    /// Ceiling for the agent response in one retrieval: half of `maxPersistedOutputLength`.
+    /// The response prints before the tool rows, so an unbounded answer would push the effect diffs past the output cap.
     static let maxResponseChars = ToolExecutionData.maxPersistedOutputLength / 2
 
     let turnRecords: [TurnRecord]
@@ -54,10 +38,8 @@ struct ConversationHistoryTool: DevgenticTool {
 
     var name: String { "get_conversation_history" }
 
-    /// Never surfaced in the Tool Library — injected by `AgentConnect` with the run's own chat
-    /// history, so it cannot be constructed from a registry. Required by `DevgenticTool` since
-    /// 2026-07-31, which is how this tool was found at all: its `var name: String { … }` is
-    /// computed, so every `let name = "…"` grep over the tool tree had silently skipped it.
+    /// Never surfaced in the Tool Library: injected by `AgentConnect` with the run's own chat history, so it cannot be
+    /// built from a registry.
     var category: String { "Internal" }
 
     var description: String {
@@ -96,22 +78,15 @@ struct ConversationHistoryTool: DevgenticTool {
     // MARK: - Initialization
 
     /// Captures a read-only snapshot of the conversation history at construction time.
-    /// Indexes exactly the turns the pointer skeletons number — `EpisodicHistoryFormatter.retrievableTurns`,
-    /// i.e. the turns after the latest checkpoint — so `get_conversation_history(N)` returns the turn
-    /// the skeleton labelled N.
+    /// Indexes the turns after the latest checkpoint (`EpisodicHistoryFormatter.retrievableTurns`), so N matches the
+    /// skeleton's label.
     init(chatHistory: [ChatMessage], correlation: String = "") {
         self.correlation = correlation
-        // ⚠️ THE SAME TURNS THE SKELETON NUMBERED — post-checkpoint, unreadable rows skipped — via
-        // the one definition. This filtered out checkpoint ROWS and paired everything else, so after
-        // a compaction its index 0 was the oldest compacted turn while the skeleton's 0 was the first
-        // turn after the checkpoint (CR-11).
+        // The same turns the skeleton numbered (post-checkpoint, unreadable rows skipped), via the one shared definition.
         let pairs = EpisodicHistoryFormatter.retrievableTurns(from: chatHistory)
         self.turnRecords = pairs.enumerated().map { (index, pair) in
-            // The diff budget for ONE response. Each diff is already capped at
-            // `diffCharacterLimit`, and tool output is hard-capped at
-            // `maxPersistedOutputLength` (32 KB) — but that outer cap truncates mid-diff with
-            // a generic marker. Stopping at a diff boundary and saying how many were omitted
-            // is a more useful answer than a wall of text cut off mid-hunk.
+            // The diff budget for one response: stopping at a diff boundary and counting omissions beats the outer cap cutting
+            // mid-hunk.
             var diffBudget = ActionEffect.diffCharacterLimit * 2
             var omittedDiffs: [String] = []
 
@@ -122,10 +97,7 @@ struct ConversationHistoryTool: DevgenticTool {
                 let errorStr = action.errorReason.map { " — \($0)" } ?? ""
                 var line = "  - \(action.toolName)\(paramsStr) → \(status)\(errorStr)"
 
-                // This is the detail the pointer skeleton promises and could not deliver:
-                // its `<effect diff="on_demand"/>` says a file changed and by how much, and
-                // names this call for the change itself. Serving it here costs context ONCE,
-                // on request, instead of on every subsequent prompt.
+                // Serves the diff that the skeleton's `<effect diff="on_demand"/>` points to, costing context once on request.
                 if let effect = action.effect {
                     line += "\n    changed \(effect.fileName) +\(effect.linesAdded) −\(effect.linesRemoved)"
                     if let diff = effect.diff {
@@ -148,10 +120,7 @@ struct ConversationHistoryTool: DevgenticTool {
                 logger.info("[HISTORY_TOOL] \(correlation) Turn \(index): omitted \(omittedDiffs.count) diff(s) over the \(ActionEffect.diffCharacterLimit * 2)-char per-response budget (\(omittedDiffs.joined(separator: ", "))) — the model sees their counts and the omission note, not the change; ask for a narrower turn or read the file.")
             }
 
-            // The UNTRUNCATED response. This tool used to hand back `pair.outcome` — the same
-            // 200-char clip the prompt already carried — so a `pointer` agent could never
-            // recover more than 200 characters of any answer it had given, and the retrieval
-            // its own skeleton told it to make returned nothing it did not already have.
+            // The untruncated response, not the 200-char outcome the prompt already carries.
             var response = pair.fullResponse
             if response.count > ConversationHistoryTool.maxResponseChars {
                 let dropped = response.count - ConversationHistoryTool.maxResponseChars
@@ -178,10 +147,7 @@ struct ConversationHistoryTool: DevgenticTool {
         let idx = arguments.index
 
         guard idx >= 0, idx < turnRecords.count else {
-            // Silent until now. An out-of-range ask means the skeleton the model read and the
-            // snapshot this tool captured disagree on indices — a real drift signal (the
-            // snapshot is taken at request build, the skeleton is rendered from the same
-            // pairing, so they should never diverge) and the model just lost that retrieval.
+            // An out-of-range index means the skeleton and this snapshot disagree, a drift signal, so it is logged.
             logger.warning("[HISTORY_TOOL] \(correlation) Rejected get_conversation_history(\(idx)) — out of range for \(turnRecords.count) captured turn(s). The model asked for a turn the skeleton advertised but this snapshot does not hold, so it gets no detail for it; check for index drift between pairTurns at render and at tool construction.")
             return "Error: Index \(idx) is out of range. Valid range: 0–\(turnRecords.count - 1) (\(turnRecords.count) turns available)."
         }

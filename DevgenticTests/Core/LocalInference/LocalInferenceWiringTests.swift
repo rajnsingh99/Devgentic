@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  ⚠️ WIRING. The policy and the coordinator are worth nothing if the send path stops calling them,
-//  and a cut call fails no unit test of either. Source-scanned in the `ToolRegistryDriftTests` /
-//  `GaugeHistorySourceTests` idiom, over JOINED bodies (a line filter misses multi-line calls).
+//  LocalInferenceWiringTests.swift
+//  DevgenticTests
+//
+//  Created by Raj Singh.
 //
 
 import XCTest

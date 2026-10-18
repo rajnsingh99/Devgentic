@@ -4,8 +4,7 @@
 //  GitPorcelainParserTests.swift
 //  DevgenticTests
 //
-//  Fixtures are VERBATIM `git status --porcelain=v2 --branch -z --untracked-files=all` output,
-//  captured from git 2.54 (Apple Git-157) on a scratch repo built to hit every record type.
+//  Created by Raj Singh.
 //
 
 import XCTest

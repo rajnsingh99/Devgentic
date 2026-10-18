@@ -4,30 +4,7 @@
 //  PythonicListParser.swift
 //  Devgentic
 //
-//  Phase 4 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.pythonicBracketList` dialect.
-//
-//  Covers:
-//    - meta-llama/Llama-3.2-1B-Instruct (and 3B)  — pythonic-mode trained
-//    - meta-llama/Llama-4-Scout-17B / Maverick-17B — pythonic mode
-//    - Salesforce/Llama-xLAM-2-8b-fc-r (and 70B)
-//    - Team-ACE/ToolACE-8B / ToolACE-2-Llama-3.1-8B
-//
-//  Canonical output (Python-expression syntax, NOT JSON):
-//
-//    [list_directory(path="/tmp"), write_file(path="/tmp/a.txt", content="hi", append=False)]
-//
-//  This parser parses Python-literal call syntax WITHOUT exec/eval — it's a small
-//  hand-rolled tokenizer + recursive-descent parser covering the 90% case:
-//    - Top-level bracket list with comma-separated calls
-//    - Each call: `name(kwarg=value, kwarg=value, ...)`
-//    - Values: strings ("..." / '...'), numbers, bools (True/False), None,
-//      nested lists [...], nested dicts {k:v}, nested calls (rare — not supported)
-//    - Escape sequences inside strings (\", \\, \n, \t, \uXXXX)
-//
-//  Fallbacks:
-//    - Missing outer `[...]` — accept a single bare `name(args)` call
-//    - Python literals normalized to JSON before argument extraction
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -35,6 +12,9 @@ import OSLog
 
 private let logger = DGLogger(category: "PythonicListParser")
 
+/// Primary parser for the `.pythonicBracketList` dialect: a bracketed list of Python-style calls, e.g.
+/// `[list_directory(path="/tmp"), write_file(path="/tmp/a.txt", content="hi", append=False)]`.
+/// Uses a hand-rolled tokenizer and recursive-descent parser (no exec/eval); a bare `name(args)` call is also accepted.
 struct PythonicListParser: CognitiveParserProtocol {
 
     func parse(rawResponse: String) -> ModernCognitiveStep {
@@ -247,8 +227,8 @@ struct PythonicListParser: CognitiveParserProtocol {
                     idx = hexEnd
                     continue
                 default:
-                    // ⚠️ CR-22: Python KEEPS the backslash of an escape it does not define, so
-                    // `'\d+\.\d+'` is the regex the model wrote. Dropping it sent `d+.d+`.
+                    // Python keeps the backslash of an escape it does not define, so `'\d+\.\d+'` is the regex the model wrote;
+                    // dropping it would produce `d+.d+`.
                     result.append("\\")
                     result.append(escape)
                 }
@@ -261,15 +241,11 @@ struct PythonicListParser: CognitiveParserProtocol {
         return result
     }
 
-    /// Converts a Python list/dict literal to JSON by normalizing literals + quotes,
-    /// then decodes. Handles the common case; rare edge cases fall back to string.
+    /// Converts a Python list/dict literal to JSON by normalizing literals and quotes, then decodes it.
+    /// Handles the common case; anything it cannot convert falls back to a string.
     private func parseNestedStructureAsJSON(_ raw: String) -> JSONValue? {
-        // ORDER IS LOAD-BEARING. Quote conversion must come FIRST: until it runs, this
-        // literal's strings are SINGLE-quoted, so a double-quote-aware sanitizer would see
-        // the whole payload as structure and rewrite `None` inside a string value — e.g. an
-        // argument carrying Python source, `content='if x is None: pass'`. Converting first
-        // means the literal pass can tell a token from a string. (Literals are bare tokens,
-        // so quote conversion is unaffected by running before them.)
+        // Order matters: convert quotes FIRST. While strings are single-quoted, a double-quote-aware sanitizer sees the
+        // whole payload as structure and rewrites `None` inside a string value (e.g. `content='if x is None: pass'`).
         var s = convertSingleQuotedStrings(raw)
         // Python literals → JSON, plus trailing commas: `[1, 2,]` is valid Python, not JSON.
         s = JSONStructuralSanitizer.repairingStructure(s)

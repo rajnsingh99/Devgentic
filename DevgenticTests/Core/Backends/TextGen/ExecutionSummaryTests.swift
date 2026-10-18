@@ -4,8 +4,7 @@
 //  ExecutionSummaryTests.swift
 //  DevgenticTests
 //
-//  Tests for ExecutionSummary outcome classification logic.
-//  Validates CompletionStatus transitions: success, partialSuccess, failed, stalled.
+//  Created by Raj Singh.
 //
 
 import XCTest

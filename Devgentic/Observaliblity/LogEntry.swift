@@ -4,17 +4,7 @@
 //  LogEntry.swift
 //  Devgentic
 //
-//  The in-app log record. Every `DGLogger` call produces one of these (dev mode on),
-//  routed through `LogRecorder` to the ring buffer and ultimately to the `log_entries`
-//  SQLite table.
-//
-//  Why a separate log record when we already have SpanEvent?
-//    - SpanEvents are structured observations tied to a span (thoughts, tool calls,
-//      LLM requests). They're the "what the agent did" view.
-//    - LogEntries are free-text operational chatter ("Loaded profile X", "Rate limit
-//      bucket created", "Model reload failed"). They're the "what the app did" view.
-//    - Merging them would pollute SpanEvent with ~449 operational messages per run.
-//      Keeping them separate lets ReportInspector show two distinct views.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,7 +4,7 @@
 //  DiscordAPIClient.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -53,8 +53,8 @@ actor DiscordAPIClient {
 
     /// Sends multiple chunked messages for long responses (Discord's 2000-char limit).
     func sendChunkedMessage(channelID: String, content: String) async throws {
-        // ⚠️ 1950 rather than Discord's 2000 — margin for the markdown escaping applied after this
-        // budget. Measured in UTF-16 by `RemoteTextBudget.chunk`; see its header.
+        // 1950 rather than Discord's 2000, leaving margin for markdown escaping applied after this budget; measured in
+        // UTF-16 by `RemoteTextBudget.chunk`.
         let chunks = DiscordAPIClient.chunkText(content, maxLength: 1950)
         try await RemoteChunkedSend.send(chunks) { chunk in
             try await sendMessage(channelID: channelID, content: chunk)
@@ -125,16 +125,8 @@ actor DiscordAPIClient {
 
     /// Registers slash commands for a specific guild.
     func registerSlashCommands(applicationID: String, guildID: String) async throws {
-        // ⚠️ DERIVED FROM `ChatOpsVerbTable`, not a hand-written list. This was five literals
-        // against a table that had grown to eight verbs, so `/profiles` was registered nowhere and
-        // could only be reached by typing it as a message — a shipped command invisible in the very
-        // menu Discord users browse.
-        //
-        // ⚠️ ARGUMENT-TAKING VERBS ARE DELIBERATELY EXCLUDED. `DiscordSlashCommand` has no `options`
-        // field to declare a parameter and `DiscordInteractionData` has none to read one, so a
-        // registered `/use` or `/search` would arrive with its argument missing and answer with a
-        // usage hint every time — worse than not offering it. They stay reachable by typing
-        // `/search foo` as an ordinary message, which does carry the argument.
+        // Derived from `ChatOpsVerbTable` rather than a hand-written list, so every verb is registered. Argument-taking
+        // verbs are excluded: `DiscordSlashCommand` cannot declare an option, so they would arrive without their argument.
         let commands: [DiscordSlashCommand] = ChatOpsVerb.presentationOrder
             .filter { !$0.takesArgument }
             .map { verb in
@@ -215,12 +207,8 @@ actor DiscordAPIClient {
         return try JSONDecoder().decode(R.self, from: data)
     }
 
-    /// Splits text to this platform's message budget.
-    ///
-    /// ⚠️ A FORWARDER, NOT AN IMPLEMENTATION. The real one is `RemoteTextBudget.chunk`, shared by all
-    /// three clients — see its header for the UTF-16 unit bug that three separate copies of this
-    /// function each carried. It stays as a named entry point so this client's own tests exercise
-    /// the same call production takes, rather than the shared helper in isolation.
+    /// Splits text to this platform's message budget. A forwarder to `RemoteTextBudget.chunk`, kept as a named entry
+    /// point so this client's tests exercise the production call.
     static func chunkText(_ text: String, maxLength: Int = 1950) -> [String] {
         RemoteTextBudget.chunk(text, limit: maxLength)
     }
@@ -236,8 +224,7 @@ struct EmptyResponse: Decodable {}
 // MARK: - Rate-limit reporting
 
 extension DiscordAPIError: RemoteRateLimitedError {
-    /// ⚠️ `retryAfter` was parsed from the `Retry-After` header and then read by nothing but
-    /// `errorDescription`. This is the reader that makes it do something.
+    /// The `Retry-After` delay for a rate-limited error, nil for any other case.
     var retryAfterSeconds: TimeInterval? {
         guard case .rateLimited(let retryAfter) = self else { return nil }
         return retryAfter

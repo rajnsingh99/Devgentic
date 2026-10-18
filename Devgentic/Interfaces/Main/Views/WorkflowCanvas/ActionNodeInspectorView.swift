@@ -4,18 +4,14 @@
 //  ActionNodeInspectorView.swift
 //  Devgentic
 //
-//  Inspector for Action nodes — deterministic tool invocation (no LLM).
-//  Two parts:
-//    1. Tool — pick a native or MCP tool from the unified catalog.
-//    2. Arguments — one binding field per tool argument, where the value is a
-//       template resolved at run time ({{ input }}, {{ input.json.x }}, {{ var.y }}).
-//
-//  Mirrors the structural-inspector pattern: local @State edited freely, written
-//  back to `node.kind` only on Save (so Cancel discards).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Inspector for Action nodes, which invoke a tool deterministically with no LLM.
+/// Pick a tool from the unified catalog, then bind each argument to a template resolved at run time.
+/// Edits stay in local state and are written to `node.kind` only on Save, so Cancel discards.
 struct ActionNodeInspectorView: View {
     @Binding var node: WorkflowNode
     /// Workflow variable names (Code-node outputs) surfaced in the binding menu.
@@ -298,10 +294,7 @@ struct ActionNodeInspectorView: View {
             }
 
             if isBoolean {
-                // [INS-9] `isRequired` is threaded through. It used to be dropped here, so a
-                // REQUIRED boolean's Custom field carried the "Optional — leave blank to omit"
-                // placeholder and lost its amber required-and-empty stroke, flatly contradicting the
-                // "required" badge rendered eight lines above it.
+                // `isRequired` is threaded through so a required boolean keeps its required styling and placeholder.
                 booleanControl(argName: argName, value: value, isRequired: isRequired)
             } else {
                 bindingField(argName: argName, isRequired: isRequired, unbalanced: unbalanced)
@@ -372,21 +365,11 @@ struct ActionNodeInspectorView: View {
     private func tokenMenu(argName: String) -> some View {
         Menu {
             Button("{{ input }}") { appendToken(argName, "{{ input }}") }
-            // [EIO-8] Inserts an UNFINISHED placeholder that cannot resolve by accident. The old
-            // `{{ input.json. }}` had an EMPTY path, which the renderer resolved to the whole
-            // upstream document — so a user who inserted it and did not complete it silently passed
-            // the ENTIRE JSON as one argument.
-            //
-            // ⚠️ `<field>`, NOT `path`. `path` is an ordinary JSON key — it is this codebase's own
-            // metasyntactic example, and file tools genuinely return one — so `{{ input.json.path }}`
-            // would resolve silently to an unrelated field whenever the upstream happens to have it,
-            // trading one silent wrong value for another. `<field>` cannot be a key any tool here
-            // produces, so `resolve` returns nil and EIO-6's unresolved-placeholder warning fires,
-            // which is the loud failure this row asks for.
+            // Inserts an unfinished `<field>` placeholder that cannot resolve by accident: an empty path would pass the whole
+            // upstream document.
             Button("{{ input.json.… }}") { appendToken(argName, "{{ input.json.<field> }}") }
-            // [EIO-11] The explicit "parse my input as JSON" form. Same `<field>` treatment and the
-            // same reason: an incomplete token must fail LOUDLY through EIO-6's unresolved warning,
-            // never resolve to the whole document.
+            // The explicit "parse my input as JSON" form; the incomplete `<field>` token fails loudly rather than resolving to the
+            // whole document.
             Button("{{ input.parsed.… }}") { appendToken(argName, "{{ input.parsed.<field> }}") }
             if availableVariables.isEmpty {
                 Button("{{ var.… }}") { appendToken(argName, "{{ var.<name> }}") }
@@ -484,9 +467,8 @@ struct ActionNodeInspectorView: View {
                     .fill(theme.dividerColor.opacity(0.3))
                     .frame(height: 0.5)
 
-                // [WF-SE6/SE11] The EXPLICIT unattended approval — see ProfileNodeInspectorView's
-                // twin row. Without it, an unattended run refuses this tool's confirmation fast
-                // and the node fails onto its error port.
+                // The explicit unattended approval: without it an unattended run refuses this tool's confirmation and the node fails
+                // onto its error port.
                 execRow(
                     label: "Unattended Auto-Approve",
                     explainer: "Scheduled runs auto-approve this tool's confirmation. Off: a run nobody can answer fails this node onto its error port immediately. (ChatOps runs still ask — the confirmation is mirrored to your chat app.)"
@@ -497,9 +479,7 @@ struct ActionNodeInspectorView: View {
                         .controlSize(.small)
                 }
 
-                // Failure routing is not a setting — it is wiring. Connect this node's `error`
-                // port to handle a failure; leave it unwired and the branch stops. (The old
-                // "On Failure → Downstream" picker was retired 2026-08-12.)
+                // Failure routing is wiring, not a setting: connect the node's `error` port to handle a failure, or the branch stops.
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
@@ -563,11 +543,8 @@ struct ActionNodeInspectorView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         ForEach(toolSources) { source in
-                            // INS-1: a DISABLED server's tools are shown (the Tool Library idiom —
-                            // 0.55 opacity + pause glyph — so the user can see what exists and where
-                            // to re-enable it) but NOT selectable: the executor's resolver refuses a
-                            // disabled source by design, so a selection here could only ever fail at
-                            // run time and route the node to its error port.
+                            // A disabled server's tools are shown but not selectable: the executor's resolver refuses a disabled source, so a
+                            // selection could only fail.
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack(spacing: 5) {
                                     Text(source.serverName.uppercased())
@@ -648,17 +625,8 @@ struct ActionNodeInspectorView: View {
             name: def.name,
             description: def.description,
             isEnabled: true,
-            // Inherit the tool's own default rather than hardcoding `false`.
-            //
-            // This was `false` unconditionally, which made the Action-node confirmation gate in
-            // `WorkflowExecutor` (added 2026-07-31) unreachable: it tests
-            // `toolRef.requiresConfirmation`, and nothing could ever set it true. The gate was
-            // written, reviewed and documented while being dead code — the value was never
-            // traced back to the site that produces it.
-            //
-            // `def.requiresConfirmation` is the tool's own answer (for native tools, everything
-            // outside `NativeToolWrapper`'s read-only allowlist), so a destructive tool in an
-            // Action node now asks, and a read-only one does not.
+            // Inherits the tool's own confirmation default (`def.requiresConfirmation`), so a destructive tool in an Action node
+            // asks and a read-only one does not.
             requiresConfirmation: def.requiresConfirmation,
             sourceId: source.id,
             parameters: def.parameters
@@ -670,15 +638,9 @@ struct ActionNodeInspectorView: View {
         showToolPicker = false
     }
 
-    /// The per-node execution config a Save should persist, or the stored value unchanged when the
-    /// panel holds exactly the defaults `nil` already means (register INS-11).
-    ///
-    /// ⚠️ Returning `existing` — `nil` included — is the whole point: `WorkflowCanvasState.replaceNode`
-    /// refuses a write that changes nothing, so an unedited Save must produce a byte-identical node.
-    /// Materialising `WorkflowNodeConfig()` defeats that guard.
-    ///
-    /// `nonisolated static` and pure so the "is this a real change?" decision is truth-tableable —
-    /// a `private func` inside `saveAndDismiss` is unreachable from a test.
+    /// Returns the execution config a Save should persist, or the stored value unchanged when the panel holds only
+    /// defaults.
+    /// An unedited Save must stay byte-identical, since `replaceNode` refuses no-op writes. Pure and `nonisolated`.
     nonisolated static func executionConfigToPersist(
         existing: WorkflowNodeConfig?,
         maxRetries: Int,
@@ -714,12 +676,8 @@ struct ActionNodeInspectorView: View {
         let cleaned = bindings.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         node.kind = .action(ActionNodeConfig(tool: selectedTool, argumentBindings: cleaned))
 
-        // Persist execution config (preserving other nodeConfig fields).
-        // [INS-11] ONE write through the binding, via a pure helper that returns the stored value
-        // UNCHANGED — nil included — when the panel holds exactly the defaults nil already means.
-        // The old form materialised `WorkflowNodeConfig()` before writing, which `replaceNode`'s
-        // equality guard cannot absorb (nil != .some(defaults)), so a Save with no edits dirtied the
-        // canvas and burned an undo slot.
+        // Persists execution config through one binding write via a pure helper that returns the stored value unchanged when
+        // nothing was edited.
         node.nodeConfig = Self.executionConfigToPersist(
             existing: node.nodeConfig,
             maxRetries: maxRetries,

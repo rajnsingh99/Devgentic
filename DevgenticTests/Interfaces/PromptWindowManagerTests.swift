@@ -4,16 +4,7 @@
 //  PromptWindowManagerTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Register B7 — the floating prompt editors' window lifetime.
-//
-//  ⚠️ A71 and A72 were both recorded as "AppKit lifetime with no unit-testable seam, verified by
-//  inspection". That was true of the leak itself, and NOT true of the part that actually destroys
-//  user data: `windowWillClose` is a plain method taking a `Notification`, and the callbacks it
-//  clears are internal `var`s. The defect — a close notification from a window the manager no
-//  longer tracks wiping the LIVE editor's callbacks — is therefore directly reproducible without
-//  presenting anything on screen.
+//  Created by Raj Singh.
 //
 
 import XCTest

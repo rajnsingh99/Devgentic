@@ -4,17 +4,7 @@
 //  WorkflowLayoutSD.swift
 //  Devgentic
 //
-//  SwiftData @Model for `WorkflowLayout` persistence.
-//  Replaces the UserDefaults-backed `WorkflowLayoutStore` (sidecar JSON blob).
-//
-//  One row per workflow profile, keyed by `workflowProfileID` (unique).
-//  The full layout (nodes/edges/annotations) is stored as a JSON blob in
-//  `layoutData` — mirrors the `BackendProfile.configData` pattern. Reads are
-//  always whole-layout (canvas load, executor pre-flight), writes are atomic
-//  on "Save Changes", so a single blob is the right granularity.
-//
-//  Denormalized counts (`nodeCount`, `edgeCount`, `annotationCount`) are kept
-//  on the row so listing screens can show quick stats without decoding.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -23,6 +13,9 @@ import os
 
 private let logger = DGLogger(category: "WorkflowLayoutSD")
 
+/// SwiftData model persisting a workflow canvas: one row per workflow profile, keyed by unique
+/// `workflowProfileID`. The full layout is a JSON blob in `layoutData`; denormalized node, edge and
+/// annotation counts allow quick stats without decoding.
 @Model
 final class WorkflowLayoutSD {
 
@@ -48,11 +41,9 @@ final class WorkflowLayoutSD {
     @Transient
     private var _cachedLayout: WorkflowLayout?
 
-    /// True when `layoutData` could not be decoded and `_cachedLayout` is therefore the `.empty`
-    /// PLACEHOLDER rather than the user's canvas.
-    ///
-    /// ⚠️ This is what stops a read failure becoming a write failure — the same class of bug fixed
-    /// for `BackendProfile`, but the guard here is deliberately STRICTER. See the setter.
+    /// True when `layoutData` could not be decoded and `_cachedLayout` is the `.empty` placeholder rather
+    /// than the user's canvas. Stops a read failure becoming a write failure; stricter than the
+    /// `BackendProfile` guard (see the setter).
     @Transient
     private var _layoutDecodeFailed: Bool = false
 
@@ -63,26 +54,17 @@ final class WorkflowLayoutSD {
 
     // MARK: - Computed Accessor
 
-    /// True when the stored canvas could not be read, so `layout` is a placeholder and writes are
-    /// being refused. Surface this instead of presenting an empty canvas as if it were the user's.
-    ///
-    /// Corroborated by the denormalized counts, which live OUTSIDE the blob and were written by the
-    /// last successful save: a row claiming nodes while decoding to nothing is proof it once held
-    /// content. `BackendProfile` had no equivalent signal.
+    /// True when the stored canvas could not be read, so `layout` is a placeholder and writes are refused.
+    /// Corroborated by the denormalized counts, which live outside the blob: nodes claimed but nothing
+    /// decoded.
     var hasUnreadableLayout: Bool {
         primeDecodeState()
         return _layoutDecodeFailed
     }
 
-    /// True when the stored blob was stamped by a NEWER build than this one (WF-PE2).
-    ///
-    /// ⚠️ The stamp was WRITE-ONLY before this: a v2 blob decoded cleanly on a v1 build (Codable
-    /// drops unknown keys silently), and the next save re-encoded the in-memory struct — which
-    /// never held the v2-only fields — freshly stamped v1. Every newer-version setting was
-    /// stripped permanently, with no error, no log and no dirty indicator, and re-upgrading did
-    /// not bring the data back. Sparkle self-distribution makes the rollback that triggers this a
-    /// real user path. Writes are refused while this is true; viewing and RUNNING stay allowed,
-    /// because the decode genuinely succeeded.
+    /// True when the stored blob was stamped by a newer build than this one.
+    /// Writes are refused while true, since re-encoding would strip the newer fields; viewing and running
+    /// stay allowed.
     var hasNewerVersionLayout: Bool {
         primeDecodeState()
         return _layoutFromNewerVersion
@@ -101,27 +83,17 @@ final class WorkflowLayoutSD {
         return (nodeCount > 0 || edgeCount > 0 || annotationCount > 0) && _layoutDecodeFailed
     }
 
-    /// Brings `_cachedLayout` / `_layoutDecodeFailed` into agreement with the CURRENT stored bytes.
-    ///
-    /// ⚠️ EVERY accessor that consults `_layoutDecodeFailed` must call this first — the setter above
-    /// all. `_layoutDecodeFailed` is `@Transient` and therefore defaults to `false` on every freshly
-    /// materialized instance, so a guard that reads it raw is only correct if something already
-    /// happened to run the getter on that same instance. `WorkflowLayoutStore.save` fetches a row and
-    /// assigns straight to `layout` with no intervening read, which sailed past the refusal with the
-    /// flag still false and overwrote the unreadable canvas — the exact loss the guard exists to
-    /// prevent. Priming makes the refusal a function of what is ON DISK rather than of access order.
-    ///
-    /// Idempotent and cheap: `_cachedLayout` is non-nil after the first call (the failure path caches
-    /// `.empty`), after `init`, and after `applyLayout`, so the decode runs at most once per instance.
+    // Why: every accessor that reads `_layoutDecodeFailed` must call this first; the flag is @Transient and
+    // false on fresh instances.
+    /// Brings `_cachedLayout` / `_layoutDecodeFailed` into agreement with the current stored bytes.
+    /// Idempotent and cheap: the decode runs at most once per instance.
     private func primeDecodeState() {
         guard _cachedLayout == nil else { return }
         let outcome = Self.decodeLayout(from: layoutData)
         _cachedLayout = outcome.layout
         _layoutDecodeFailed = outcome.didFail
-        // Version probe is separate from decode success: a newer blob usually DECODES fine (the
-        // enum catch-alls and decodeIfPresent defaults make it), which is exactly what made the
-        // downgrade silent. Probed here so every accessor sees it regardless of access order —
-        // the same prime-is-load-bearing rule as `_layoutDecodeFailed`.
+        // The version probe is separate from decode success: a newer blob usually decodes fine, which makes
+        // a downgrade silent; probing here lets every accessor see it regardless of access order.
         if let stamped = BlobVersioning.version(of: layoutData), stamped > Self.layoutBlobVersion {
             _layoutFromNewerVersion = true
             logger.notice(
@@ -141,26 +113,8 @@ final class WorkflowLayoutSD {
             return _cachedLayout ?? .empty
         }
         set {
-            // ⚠️ REFUSE EVERY WRITE while the stored canvas is unreadable — deliberately stricter
-            // than `BackendProfile`'s "refuse only the placeholder value" rule. Two reasons, both
-            // specific to this entity:
-            //
-            //   1. `.empty` is a LEGAL user state (`WorkflowCanvasState.clearCanvas()` produces
-            //      exactly it), so "the incoming value equals the placeholder" cannot distinguish an
-            //      opportunistic save from a deliberate "delete everything". For a profile the
-            //      placeholder is an odd blank bot nobody builds on purpose; here it is one click.
-            //   2. A profile user who types a new model name can SEE that the config is blank and is
-            //      knowingly replacing it. A canvas user cannot tell a decode-failure blank canvas
-            //      from a legitimately empty one — so every save made in that session is uninformed,
-            //      including ones that differ from `.empty`.
-            //
-            // (`WorkflowLayout` is not `Equatable` either, so the value test would not even compile.
-            // Do not "fix" that by adding the conformance — the rule above is the point.)
-            //
-            // The escape hatch is `replaceUnreadableLayout(_:reason:)`, which is explicit.
-            //
-            // ⚠️ The prime is load-bearing, not defensive: without it this guard reads a `@Transient`
-            // that is `false` on any instance whose getter has not run. See `primeDecodeState()`.
+            // Refuses every write while the stored canvas is unreadable, stricter than `BackendProfile`'s rule.
+            // `.empty` is a legal user state, so a blank decode-failure canvas looks like an emptied one.
             primeDecodeState()
             guard !_layoutFromNewerVersion else {
                 logger.error(
@@ -188,10 +142,8 @@ final class WorkflowLayoutSD {
     }
 
     /// Explicitly replaces a canvas that could not be read.
-    ///
-    /// The only sanctioned way past the setter's refusal. Separate and awkwardly named on purpose:
-    /// discarding an unreadable canvas is a destructive, irreversible act and should never be
-    /// reachable by an incidental `layout = …` on a save path.
+    /// The only sanctioned way past the setter's refusal; discarding an unreadable canvas is destructive
+    /// and must not be reachable incidentally.
     func replaceUnreadableLayout(_ newValue: WorkflowLayout, reason: String) {
         logger.warning(
             "[PERSISTENCE] Replacing unreadable workflow layout — profile \(workflowProfileID), "
@@ -203,8 +155,8 @@ final class WorkflowLayoutSD {
         applyLayout(newValue)
     }
 
-    /// The persisted fields as they stand, captured before a destructive write so a FAILED save can
-    /// put this one row back (CR-62).
+    /// The persisted fields as they stand, captured before a destructive write so a failed save can restore
+    /// this row.
     struct StoredState {
         let layoutData: Data
         let nodeCount: Int
@@ -218,11 +170,8 @@ final class WorkflowLayoutSD {
                     annotationCount: annotationCount, updatedAt: updatedAt)
     }
 
-    /// Puts back what `storedState` captured, after the save that followed a write failed.
-    ///
-    /// ⚠️ The transient caches are CLEARED, not set: the next read re-primes them from the restored
-    /// bytes, so an unreadable canvas is reported unreadable again (and saves refused again) rather
-    /// than wearing the failed repair's decoded layout.
+    /// Restores what `storedState` captured after a failed save.
+    /// The transient caches are cleared, not set, so an unreadable canvas is reported unreadable again.
     func restore(_ state: StoredState) {
         layoutData = state.layoutData
         nodeCount = state.nodeCount
@@ -259,22 +208,11 @@ final class WorkflowLayoutSD {
 
     // MARK: - Encode / Decode Helpers
 
-    /// Encodes `WorkflowLayout` to JSON. Asserts on failure rather than writing a
-    /// corrupt blob — a valid in-memory layout should always encode cleanly.
-    /// Current persisted shape of `layoutData`.
-    ///
-    /// Inline key: `WorkflowLayout` encodes to an OBJECT whose keys are developer-defined, so the
-    /// version rides as a sibling and the blob keeps its shape — existing readers are unaffected and
-    /// no type gains a `schemaVersion` property (which would be the G13 trap). Bump on any change to
-    /// the persisted shape of nodes, edges or annotations.
-    ///
-    /// ⚠️ INCLUDING A PURELY ADDITIVE OPTIONAL FIELD. Additive is NOT free here: no Codable in
-    /// `WorkflowModels.swift` carries an unknown-key sidecar, so an older build drops the new key on
-    /// decode and omits it on re-encode. This stamp is the ONLY thing that turns that drop into a
-    /// refused write instead of permanent loss (WF-TS5, pinned by
-    /// `BlobWriteRefusalTests.testNewerVersionBlobKeepsAFutureFieldTheDecoderCannotSee`).
-    ///
-    /// **v1** — the baseline (history reset 2026-10-03, pre-release).
+    // Why: even an additive optional field needs a bump: older decoders drop unknown keys, and the stamp turns
+    // that into a refused write.
+    /// Encodes `WorkflowLayout` to JSON, asserting on failure rather than writing a corrupt blob.
+    /// Current persisted shape of `layoutData`: the version rides as a sibling key; bump it on any change
+    /// to nodes, edges or annotations (v1 is the baseline).
     static let layoutBlobVersion = 1
 
     private static func encodeLayout(_ layout: WorkflowLayout) -> Data {
@@ -288,26 +226,15 @@ final class WorkflowLayoutSD {
                 + "silently presenting an empty canvas."
             )
             assertionFailure("WorkflowLayout encoding should never fail for a valid in-memory value.")
-            // ⚠️ Deliberately NOT an encoded `WorkflowLayout.empty`.
-            //
-            // That was the previous fallback, and it is the worse of the two failures: an encoded
-            // `.empty` DECODES CLEANLY, so it is permanently indistinguishable from a canvas the
-            // user really did empty — the corruption becomes invisible and the read path has nothing
-            // to flag. The paired `assertionFailure` above is stripped in release, so in a shipped
-            // build that was silent, total, and undetectable.
-            //
-            // A blob that cannot decode is strictly better: `decodeLayout` reports the failure, the
-            // setter starts refusing writes, and `countsContradictStoredLayout` still shows what the
-            // row used to hold.
+            // Deliberately not an encoded `.empty`, which decodes cleanly and looks like a canvas the user
+            // emptied. An undecodable blob is reported by `decodeLayout`, so the setter refuses writes.
             return Data(#"{"__devgentic_encode_failure__":true}"#.utf8)
         }
     }
 
-    /// Decodes `WorkflowLayout` from JSON.
-    ///
-    /// Returns the value plus whether the decode FAILED. The caller must propagate `didFail`: the
-    /// `.empty` returned on failure is safe to display but must never be written back over
-    /// `layoutData` (see the `layout` setter).
+    /// Decodes `WorkflowLayout` from JSON, returning the value and whether the decode failed.
+    /// On failure the returned `.empty` is safe to display but must never be written back over
+    /// `layoutData`.
     private static func decodeLayout(from data: Data) -> (layout: WorkflowLayout, didFail: Bool) {
         do {
             return (try JSONDecoder().decode(WorkflowLayout.self, from: data), false)

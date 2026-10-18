@@ -4,20 +4,7 @@
 //  CapabilityCardRouter.swift
 //  Devgentic
 //
-//  Maintains the structured Plan & Execute / Reflexion cards inside a streaming
-//  message's timeline. ActiveStreamManager feeds it capability lifecycle events
-//  (plan generated/approved, subtask boundaries, trial boundaries) and asks it to
-//  route forwarded events (thoughts, tool rows, warnings, media) into the active
-//  step's or attempt's nested sub-timeline.
-//
-//  Attribution is ORDERING-BASED: subtask/trial boundary events delimit segments,
-//  which is sound because subtasks execute sequentially (PlanningCapabilityConfig
-//  forces parallelSubtasks = false — the knob is UI-hidden) and trials are serial
-//  by construction. If true parallel subtask execution ever ships, forwarded
-//  events need a structural subtask id and this router must key on it.
-//
-//  Stacking: ExecutorFactory builds Reflexion(Planning(ReAct)), so a plan card can
-//  live INSIDE a reflection attempt's sub-timeline. One nesting level, mirrored here.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -25,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "CapabilityCardRouter")
 
+// Why: attribution is ordering-based and assumes sequential subtasks and trials; parallel subtasks would need a subtask id on events.
+/// Maintains the Plan & Execute and Reflexion cards inside a streaming message's timeline, routing forwarded events
+/// into the active step's or attempt's nested sub-timeline.
 @MainActor
 final class CapabilityCardRouter {
 
@@ -210,14 +200,9 @@ final class CapabilityCardRouter {
 
     // MARK: - Event routing
 
-    /// Appends the event into the active step's / attempt's nested sub-timeline.
-    /// Returns `false` when no capability segment is active — the caller appends
-    /// to the message's top-level timeline as before.
-    ///
-    /// [TL-2/P3] Nested arrays share the SAME eviction rule as the top-level
-    /// timeline — they used to bypass `maxTimelineEvents` entirely, so a runaway
-    /// capability step grew its card without bound (memory, persistence blob, and
-    /// render all scaled with it, and the card itself is deliberately un-evictable).
+    /// Appends the event into the active step's or attempt's nested sub-timeline.
+    /// Returns `false` when no capability segment is active; the caller then appends to the top-level timeline.
+    /// Nested arrays follow the same eviction rule (`maxTimelineEvents`) as the top-level timeline.
     func route(_ event: TimelineEvent) -> Bool {
         withActiveEvents { events in
             events.append(event)
@@ -231,17 +216,12 @@ final class CapabilityCardRouter {
     func completeTool(output: ToolOutput, failureCategory: ToolFailureCategory?, durationMs: Int?) -> Bool {
         var completed = false
         let handled = withActiveEvents { events in
-            // CR-41: matched by name AND params — see `ToolRowMatcher`.
+            // Matched by name and params; see `ToolRowMatcher`.
             guard let idx = ToolRowMatcher.index(in: events, for: output) else { return }
             if case .toolExecution(var d) = events[idx] {
                 d.params = output.params
-                // Cap, snapshots and effect must match `completeToolTimelineEvent` exactly.
-                // This is the SECOND place a tool row is finalised — the card-nested one —
-                // and it silently lacked all three, so with Plan & Execute or Reflexion on
-                // (i.e. most agent runs) the row kept an UNCAPPED output, lost its
-                // pre/post-write snapshots, and never derived an effect: the change record
-                // the agent needs to answer "undo that" simply never existed. Found by the
-                // 2026-07-26 re-scope audit.
+                // Cap, snapshots and effect must match `completeToolTimelineEvent` exactly;
+                // this is the second place a tool row is finalised.
                 let capped = ToolExecutionData.cappedOutput(output.output)
                 if capped.count != output.output.count {
                     logger.warning("[TOOL_OUTPUT] '\(output.toolName)' returned \(output.output.count) chars — truncated to \(ToolExecutionData.maxPersistedOutputLength) for the timeline (card-nested row).")
@@ -338,18 +318,9 @@ final class CapabilityCardRouter {
         message.timelineEvents[idx] = .reflectionRun(data)
     }
 
-    /// Finishes a plan card nested in a reflection attempt (its executionFinished is
-    /// captured, not forwarded, by the reflection wrapper) and forgets it so the next
-    /// trial gets a fresh card.
+    /// Finishes a plan card nested in a reflection attempt and forgets it so the next trial gets a fresh card.
+    /// A step still `.running` never reported completion (the plan aborted early) and is force-closed `.cancelled`.
     /// - Parameter reason: the trial transition that closed the card, for the log only.
-    ///
-    /// A step still `.running` here never reported `subtaskCompleted` — the plan aborted early
-    /// (circuit breaker, iteration exhaustion). It is force-closed `.cancelled`, matching
-    /// `handleExecutionFinished`'s cancelled branch and `sanitizeCapabilityCardsForResume`.
-    /// It used to be marked `.completed`, which is a positive success claim, not a neutral one:
-    /// `CapabilityStatusIcon` renders a green checkmark for it and `completedCount` counts it,
-    /// so the header read "N steps · N done" for a plan whose last step never ran — and on the
-    /// REJECTED path that work had just been thrown away.
     private func closeNestedPlanCard(reason: String) {
         guard planCardTrial != nil, planCardID != nil else { return }
         let trial = planCardTrial

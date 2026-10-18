@@ -4,7 +4,7 @@
 //  MetricsManager.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 16/07/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -15,12 +15,8 @@ class MetricsManager {
     
     private init() {}
 
+    // Why: capture `at` before the `Task {}` hop: a default evaluated inside the Task is its start time and skews the timeline.
     /// Records a performance metric using the detailed information from the TraceContext.
-    ///
-    /// ⚠️ Every emit below captures `at` BEFORE its `Task {}` hop. The recorder stamps events
-    /// with the caller's clock (call-site-evaluated default parameter), but a default evaluated
-    /// INSIDE an unstructured Task is the Task's start time — under MainActor load that skew
-    /// landed tool events visibly late and scrambled the timeline's segment placement.
     func record(duration: TimeInterval, for key: String, context: TraceContext) {
         let at = Date()
         Task { await TraceRecorder.shared.emitMetric(span: context, key: key, valueMs: Int(duration * 1000), at: at) }
@@ -72,9 +68,8 @@ class MetricsManager {
 
     // MARK: - Helper
 
-    /// DEBUG-only console echo of a metric. Compiled out of release builds, so the hot
-    /// path doesn't pay string-formatting + stdout cost per tool execution (§12.9). The
-    /// structured metric itself still goes to TraceRecorder via the `emit*` calls above.
+    /// DEBUG-only console echo of a metric, compiled out of release builds so the hot path pays no formatting cost.
+    /// The structured metric still goes to TraceRecorder via the `emit*` calls above.
     private func logMetric(key: String, value: String, context: TraceContext, extraMeta: [String: String] = [:]) {
         #if DEBUG
         let profile = context.profileInfo

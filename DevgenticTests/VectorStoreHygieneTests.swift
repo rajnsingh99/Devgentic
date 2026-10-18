@@ -2,17 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  VectorStoreHygieneTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 11/07/26.
-//
-//  Pins the ObjectBox engine behavior the vector-store hygiene track relies on,
-//  against a real (temp-dir) Store with the production entity model:
-//  1. Scoped vector search: conversation predicate INSIDE the HNSW query makes
-//     retrieval immune to foreign-conversation crowding (the old post-filter
-//     design returned 0 docs when 50+ closer foreign chunks existed).
-//  2. Query-based removal deletes exactly the conversation's chunks.
-//  3. sourceIdentifier lookup matches for replace-on-reindex.
+//  Created by Raj Singh.
 //
 
 import XCTest

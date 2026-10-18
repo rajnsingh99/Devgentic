@@ -2,12 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ProjectMemoryTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Project memory after `.devgentic/context.md` (2026-10-06): one fact per file under
-//  `.devgentic/memory/`, written only through `remember` / `forget`, which check what they are
-//  told. On the device run the old whole-file tool wrote `python build -m math_utils` and a
-//  `cargo build` for a project with no Rust into every later conversation.
+//  Created by Raj Singh.
 //
 
 import XCTest

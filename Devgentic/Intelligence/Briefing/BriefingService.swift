@@ -1,37 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  MorningBriefService.swift
+//  BriefingService.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
-/// Orchestrates Morning Brief generation by collecting conversation context
-/// from pluggable sources and running the Intelligence Core to produce
-/// per-conversation AI summaries with actionable suggestions.
-///
-/// Architecture:
-/// 1. Checks gate conditions (feature enabled, model selected, cooldown).
-/// 2. Gathers raw conversation content from sources.
-/// 3. Feeds all context to `IntelligenceCoreService` in a single call.
-/// 4. Parses structured per-conversation insights from the AI response.
-/// 5. Returns a `MorningBrief` ready for display.
+/// Orchestrates Briefing generation: gathers conversation context from pluggable sources and runs the
+/// Intelligence Core in one call to produce per-conversation summaries with suggestions, as a `Briefing`.
+/// Gated on feature enabled, model selected and cooldown.
 @Observable @MainActor
-final class MorningBriefService {
+final class BriefingService {
 
-    static let shared = MorningBriefService()
+    static let shared = BriefingService()
 
-    @ObservationIgnored private let logger = DGLogger(category: "MorningBriefService")
+    @ObservationIgnored private let logger = DGLogger(category: "BriefingService")
 
     /// Registry of all available brief sources. Add new sources here.
-    @ObservationIgnored private(set) var sourceRegistry: [any MorningBriefSource] = []
+    @ObservationIgnored private(set) var sourceRegistry: [any BriefingSource] = []
 
     /// The most recently generated brief, cached for re-display.
-    var currentBrief: MorningBrief?
+    var currentBrief: Briefing?
 
     /// Whether the brief is currently being generated.
     var isGenerating: Bool = false
@@ -48,7 +41,7 @@ final class MorningBriefService {
             SystemHealthSource(),
             UserPersonalBriefSource()
         ]
-        logger.info("[Morning Brief] Service initialized with \(self.sourceRegistry.count) built-in sources.")
+        logger.info("[Briefing] Service initialized with \(self.sourceRegistry.count) built-in sources.")
     }
 
     // MARK: - Public API
@@ -56,33 +49,33 @@ final class MorningBriefService {
     /// Checks all gate conditions and returns whether a brief should be shown.
     func shouldShowBrief() -> Bool {
         let isICEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
-        let isBriefEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureMorningBriefKey)
+        let isBriefEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureBriefingKey)
         let hasModel = !(UserDefaults.standard.string(forKey: AppSettings.coreIntelligenceModelKey) ?? "").isEmpty
 
         guard isICEnabled, isBriefEnabled, hasModel else {
-            logger.info("[Morning Brief] Gate check FAILED — IC enabled: \(isICEnabled), Brief enabled: \(isBriefEnabled), Model selected: \(hasModel)")
+            logger.info("[Briefing] Gate check FAILED — IC enabled: \(isICEnabled), Brief enabled: \(isBriefEnabled), Model selected: \(hasModel)")
             return false
         }
 
         // Check minimum time gap
-        if let lastShown = UserDefaults.standard.object(forKey: AppSettings.lastMorningBriefDateKey) as? Date {
+        if let lastShown = UserDefaults.standard.object(forKey: AppSettings.lastBriefingDateKey) as? Date {
             let elapsed = Date().timeIntervalSince(lastShown)
             if elapsed < minimumBriefGap {
                 let elapsedMin = Int(elapsed / 60)
                 let gapMin = Int(minimumBriefGap / 60)
-                logger.info("[Morning Brief] Gate check COOLDOWN — Last shown \(elapsedMin)m ago (minimum: \(gapMin)m)")
+                logger.info("[Briefing] Gate check COOLDOWN — Last shown \(elapsedMin)m ago (minimum: \(gapMin)m)")
                 return false
             }
         }
 
-        logger.notice("[Morning Brief] Gate check PASSED — All conditions met.")
+        logger.notice("[Briefing] Gate check PASSED — All conditions met.")
         return true
     }
 
-    /// Generates a new Morning Brief by gathering context and running IC.
-    func generateBrief() async -> MorningBrief? {
+    /// Generates a new Briefing by gathering context and running IC.
+    func generateBrief() async -> Briefing? {
         guard !isGenerating else {
-            logger.warning("[Morning Brief] Generation already in progress — returning cached brief.")
+            logger.warning("[Briefing] Generation already in progress — returning cached brief.")
             return currentBrief
         }
 
@@ -93,9 +86,8 @@ final class MorningBriefService {
         let briefNum = totalBriefCount
         let overallStart = CFAbsoluteTimeGetCurrent()
 
-        logger.notice("[Morning Brief #\(briefNum)] ═══ GENERATION START ═══")
+        logger.notice("[Briefing #\(briefNum)] ═══ GENERATION START ═══")
 
-        // Phase 1: Gather raw context from all sources
         let gatherStart = CFAbsoluteTimeGetCurrent()
         let allFragments = await gatherAllFragments()
         let gatherDuration = CFAbsoluteTimeGetCurrent() - gatherStart
@@ -103,29 +95,27 @@ final class MorningBriefService {
         let conversationFragments = allFragments.filter { $0.sourceID == "recent_conversations" }
         let systemFragments = allFragments.filter { $0.sourceID == "system_health" }
 
-        logger.notice("[Morning Brief #\(briefNum)] Phase 1 (Gather) — \(String(format: "%.2f", gatherDuration))s, \(conversationFragments.count) conversations, \(systemFragments.count) system fragments")
+        logger.notice("[Briefing #\(briefNum)] Phase 1 (Gather) — \(String(format: "%.2f", gatherDuration))s, \(conversationFragments.count) conversations, \(systemFragments.count) system fragments")
 
         guard !conversationFragments.isEmpty else {
-            logger.info("[Morning Brief #\(briefNum)] No conversation context to summarize — aborting.")
+            logger.info("[Briefing #\(briefNum)] No conversation context to summarize — aborting.")
             return nil
         }
 
-        // Phase 2: Run IC to generate per-conversation insights
-        logger.notice("[Morning Brief #\(briefNum)] Phase 2 (AI Insights) — IC inference starting...")
+        logger.notice("[Briefing #\(briefNum)] Phase 2 (AI Insights) — IC inference starting...")
         let aiStart = CFAbsoluteTimeGetCurrent()
         let insights = await generateInsights(from: conversationFragments)
         let aiDuration = CFAbsoluteTimeGetCurrent() - aiStart
-        logger.notice("[Morning Brief #\(briefNum)] Phase 2 (AI Insights) — \(String(format: "%.2f", aiDuration))s, \(insights.count) insights generated")
+        logger.notice("[Briefing #\(briefNum)] Phase 2 (AI Insights) — \(String(format: "%.2f", aiDuration))s, \(insights.count) insights generated")
 
         guard !insights.isEmpty else {
-            logger.warning("[Morning Brief #\(briefNum)] IC returned no usable insights — aborting.")
+            logger.warning("[Briefing #\(briefNum)] IC returned no usable insights — aborting.")
             return nil
         }
 
-        // Phase 3: Build the brief
         let systemStatus = systemFragments.first.map { "\($0.title) — \($0.detail)" }
 
-        let brief = MorningBrief(
+        let brief = Briefing(
             insights: insights,
             systemStatus: systemStatus
         )
@@ -133,23 +123,23 @@ final class MorningBriefService {
         markBriefShown()
 
         let overallDuration = CFAbsoluteTimeGetCurrent() - overallStart
-        logger.notice("[Morning Brief #\(briefNum)] ═══ GENERATION COMPLETE — \(String(format: "%.2f", overallDuration))s total, \(insights.count) insights ═══")
+        logger.notice("[Briefing #\(briefNum)] ═══ GENERATION COMPLETE — \(String(format: "%.2f", overallDuration))s total, \(insights.count) insights ═══")
 
         return brief
     }
 
     /// Clears the cached brief (e.g. when user dismisses the card).
     func dismissBrief() {
-        logger.info("[Morning Brief] Brief dismissed by user.")
+        logger.info("[Briefing] Brief dismissed by user.")
         currentBrief = nil
     }
 
     // MARK: - Source Registration
 
     /// Register a custom source at runtime.
-    func registerSource(_ source: any MorningBriefSource) {
+    func registerSource(_ source: any BriefingSource) {
         sourceRegistry.append(source)
-        logger.notice("[Morning Brief] Source registered: \(source.displayName) (id: \(source.id)). Total sources: \(self.sourceRegistry.count)")
+        logger.notice("[Briefing] Source registered: \(source.displayName) (id: \(source.id)). Total sources: \(self.sourceRegistry.count)")
     }
 
     // MARK: - Private: Gather
@@ -157,7 +147,7 @@ final class MorningBriefService {
     /// Collects fragments from all enabled sources concurrently.
     private func gatherAllFragments() async -> [BriefFragment] {
         let enabledSources = sourceRegistry.filter { $0.isEnabled }
-        logger.debug("[Morning Brief] Gathering from \(enabledSources.count) enabled sources...")
+        logger.debug("[Briefing] Gathering from \(enabledSources.count) enabled sources...")
 
         return await withTaskGroup(of: [BriefFragment].self, returning: [BriefFragment].self) { group in
             for source in enabledSources {
@@ -194,10 +184,10 @@ final class MorningBriefService {
 
         let conversationCount = fragments.count
 
-        logger.info("[Morning Brief] AI prompt — \(conversationCount) conversations, \(contextBlock.count) chars of context")
+        logger.info("[Briefing] AI prompt — \(conversationCount) conversations, \(contextBlock.count) chars of context")
 
         let systemPrompt = """
-        You are a concise assistant generating a morning session brief for a developer.
+        You are a concise assistant generating a session briefing for a developer.
         You will receive content from the user's recent conversations.
 
         For EACH conversation, output exactly this format (one block per conversation):
@@ -228,30 +218,30 @@ final class MorningBriefService {
         ]
 
         do {
-            logger.notice("[Morning Brief] Calling IntelligenceCoreService for insights...")
+            logger.notice("[Briefing] Calling IntelligenceCoreService for insights...")
             // A background feature: it waits for the local model like a run, at the lowest priority (D7).
-            let result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "Morning Brief") {
+            let result = try await LocalInferenceCoordinator.shared.runBackgroundIntelligence(feature: "Briefing") {
                 try await IntelligenceCoreService.shared.generate(
                     messages: messages,
                     maxTokens: 500,
                     temperature: 0.3,
-                    caller: .morningBrief
+                    caller: .briefing
                 )
             }
 
-            logger.notice("[Morning Brief] IC unloading after insight generation...")
-            await IntelligenceCoreService.shared.releaseHold(caller: .morningBrief)
+            logger.notice("[Briefing] IC unloading after insight generation...")
+            await IntelligenceCoreService.shared.releaseHold(caller: .briefing)
 
             let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.info("[Morning Brief] Raw AI response: \(trimmed.count) chars")
+            logger.info("[Briefing] Raw AI response: \(trimmed.count) chars")
 
             // Parse the structured response
             let insights = parseInsights(from: trimmed, fragments: fragments)
             return insights
 
         } catch {
-            logger.error("[Morning Brief] AI insight generation FAILED: \(error.localizedDescription)")
-            await IntelligenceCoreService.shared.releaseHold(caller: .morningBrief)
+            logger.error("[Briefing] AI insight generation FAILED: \(error.localizedDescription)")
+            await IntelligenceCoreService.shared.releaseHold(caller: .briefing)
             return []
         }
     }
@@ -298,12 +288,12 @@ final class MorningBriefService {
             )
             insights.append(insight)
 
-            logger.debug("[Morning Brief] Parsed insight for \"\(fragment.title)\": \(summary.prefix(60))...")
+            logger.debug("[Briefing] Parsed insight for \"\(fragment.title)\": \(summary.prefix(60))...")
         }
 
         // If parsing failed entirely, create a fallback single insight from the raw response
         if insights.isEmpty && !response.isEmpty && !fragments.isEmpty {
-            logger.warning("[Morning Brief] Structured parsing failed — creating fallback insight from raw response.")
+            logger.warning("[Briefing] Structured parsing failed — creating fallback insight from raw response.")
             let fragment = fragments[0]
             insights.append(ConversationInsight(
                 conversationID: fragment.destination.flatMap {
@@ -335,7 +325,7 @@ final class MorningBriefService {
     // MARK: - Private: Timestamp
 
     private func markBriefShown() {
-        UserDefaults.standard.set(Date(), forKey: AppSettings.lastMorningBriefDateKey)
-        logger.debug("[Morning Brief] Marked as shown at \(Date())")
+        UserDefaults.standard.set(Date(), forKey: AppSettings.lastBriefingDateKey)
+        logger.debug("[Briefing] Marked as shown at \(Date())")
     }
 }

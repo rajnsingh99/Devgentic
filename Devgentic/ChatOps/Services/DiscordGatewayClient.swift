@@ -4,21 +4,15 @@
 //  DiscordGatewayClient.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
 /// Actor managing the Discord WebSocket Gateway lifecycle.
-///
-/// Handles the full connection flow:
-/// 1. Connect to `wss://gateway.discord.gg/?v=10&encoding=json`
-/// 2. Receive HELLO (opcode 10) with heartbeat interval
-/// 3. Send IDENTIFY (opcode 2) with bot token + intents
-/// 4. Maintain heartbeat loop
-/// 5. Receive MESSAGE_CREATE, INTERACTION_CREATE events
-/// 6. Handle reconnect/resume on disconnect
+/// Connects, answers HELLO with IDENTIFY, runs the heartbeat loop, delivers MESSAGE_CREATE and INTERACTION_CREATE,
+/// and reconnects or resumes on disconnect.
 actor DiscordGatewayClient {
 
     private let botToken: String
@@ -36,12 +30,8 @@ actor DiscordGatewayClient {
     /// Whether teardown was ASKED FOR — a deliberate stop is not a failure and must not reconnect. [DC-7]
     private var isStopping = false
 
-    /// Why the Gateway stopped for good, or nil when it stopped because it was asked to. [DC-7]
-    ///
-    /// ⚠️ Discord was the ONE platform with no such property: Telegram and Slack both gained one with
-    /// their terminal classifiers, so a revoked Discord token killed remote control while the Settings
-    /// pane kept a green dot. Set BEFORE the continuation finishes, so a consumer reading it the
-    /// moment its `for await` ends cannot see a stale nil.
+    /// Why the Gateway stopped for good, or nil when it stopped because it was asked to.
+    /// Set before the continuation finishes, so a consumer reading it as its `for await` ends never sees a stale nil.
     private(set) var terminalFailure: String?
     private var lastSequence: Int?
     private var sessionID: String?
@@ -86,8 +76,7 @@ actor DiscordGatewayClient {
                 await self.connectAndListen(continuation: continuation)
             }
 
-            // ⚠️ [DC-7] See `stop()` — without this handle, stopping the Gateway depended on the
-            //   CONSUMER abandoning its iterator.
+            // Stores the connect task so `stop()` can end the loop without depending on the consumer abandoning its iterator.
             Task { await self.storeConnectTask(task) }
 
             continuation.onTermination = { _ in
@@ -97,13 +86,8 @@ actor DiscordGatewayClient {
     }
 
     /// Stops the Gateway connection and cleans up.
-    ///
-    /// ⚠️⚠️ [DC-7] THIS COULD NOT STOP THE CONNECT LOOP. There was no handle for it at all: the only
-    /// cancellation lived in `continuation.onTermination`, so the loop ended only when the CONSUMER
-    /// stopped iterating. Every present caller happens to do that; none is required to. Tearing the
-    /// socket down without ending the loop just made `receive()` throw, which the catch arm treated
-    /// as a network fault and RECONNECTED — and logged a red "Reconnecting" error on every
-    /// deliberate shutdown and every successful pairing.
+    /// Ends the connect loop through its stored task; tearing down only the socket would make `receive()` throw and
+    /// trigger a reconnect.
     func stop() {
         isStopping = true
         connectTask?.cancel()
@@ -116,18 +100,10 @@ actor DiscordGatewayClient {
         connectTask = task
     }
 
-    /// Releases everything belonging to ONE connection.
-    ///
-    /// ⚠️⚠️ [DC-6] THE HEARTBEAT TASK OUTLIVED ITS SOCKET. `connect()` installed a new socket without
-    /// cancelling the previous connection's heartbeat, and that surviving task reads the ACTOR's
-    /// CURRENT socket — so between the new socket being installed and its HELLO arriving, a stale
-    /// tick could write op-1 to a brand-new, not-yet-identified connection and flip
-    /// `heartbeatAckReceived` behind the new loop's back.
-    ///
-    /// ⚠️⚠️ NEVER CALL THIS FROM THE CATCH ARM. That arm reads `webSocket?.closeCode` to classify the
-    /// failure, and a nil socket reads as close code 0 — which `DiscordGatewayClosePolicy` maps to
-    /// `.reconnect`. Tearing down first would therefore turn every 4004/4014 into an infinite
-    /// reconnect, silently undoing the fatal-close work. `DiscordGatewayClientLifecycleTests` pins this.
+    // Why: a surviving heartbeat task reads the actor's current socket and could write to a new, unidentified connection.
+    /// Releases everything belonging to one connection, including its heartbeat task.
+    /// Never call this from the catch arm: that arm reads `webSocket?.closeCode`, and a nil socket reads as code 0,
+    /// which maps to reconnect.
     private func teardownConnection() {
         heartbeatTask?.cancel()
         heartbeatTask = nil
@@ -147,25 +123,15 @@ actor DiscordGatewayClient {
             } catch {
                 isConnected = false
 
-                // ⚠️⚠️ [DC-7] A TEARDOWN WE ASKED FOR IS NOT A FAILURE — checked FIRST, and before the
-                // close code is read, because a deliberate stop has no close code worth classifying.
-                // This is what stopped every normal shutdown and every successful pairing from writing
-                // a red "Reconnecting in 1.0s" error.
+                // A teardown we asked for is not a failure; checked first, before the close code, since a deliberate stop has none
+                // worth classifying.
                 if isStopping {
                     logger.info("[CHATOPS] The Discord Gateway loop ended because it was stopped. CONSEQUENCE: none — no reconnect is attempted; this is a deliberate shutdown and is no longer reported as a failure.")
                     break connectLoop
                 }
 
-                // ⚠️ THE THROWN ERROR IS NOT DIAGNOSTIC. A server-side close arrives here as a
-                // generic `NSPOSIXErrorDomain` 57 ("Socket is not connected") whether Discord
-                // rejected the bot token or the Wi-Fi dropped, which is why this loop used to
-                // retry a rejected token every backoff interval forever while the user was told
-                // nothing. The close CODE is the only thing that separates those cases, and it
-                // lives on the TASK rather than on the error.
-                //
-                // ⚠️ Reading it works even though `NSURLSessionWebSocketCloseCode` declares no
-                // case above 1015 — measured against a server closing with 4004, `rawValue` is
-                // 4004. See `DiscordGatewayClosePolicy` for the measurement note.
+                // The thrown error is not diagnostic; the close code, read from the task rather than the error, separates a
+                // rejected token from a dropped network.
                 let closeCode = webSocket?.closeCode.rawValue ?? 0
                 let closeReason = webSocket?.closeReason
                     .flatMap { String(data: $0, encoding: .utf8) }?
@@ -174,9 +140,7 @@ actor DiscordGatewayClient {
 
                 switch DiscordGatewayClosePolicy.disposition(forCloseCode: closeCode) {
                 case .fatal(let explanation):
-                    // ⚠️ [DC-7] RECORDED, not merely logged. Telegram and Slack both expose a
-                    //   `terminalFailure` their bridge turns into a red Settings state; Discord was
-                    //   the one platform where a permanent close left the UI showing a green dot.
+                    // Recorded, not merely logged, so the bridge can turn it into a failed Settings state like the other platforms.
                     terminalFailure = "Discord closed the Gateway permanently (code \(closeCode)). \(explanation)"
                     logger.error("[CHATOPS] Discord Gateway closed permanently with code \(closeCode).\(reported) \(explanation) CONSEQUENCE: the Discord bridge is STOPPING and will NOT retry, because reconnecting cannot fix this. Discord commands, HITL prompts and mirroring stay off until the cause is corrected and ChatOps is restarted.")
                     continuation.yield(.disconnected(
@@ -185,10 +149,7 @@ actor DiscordGatewayClient {
                     break connectLoop
 
                 case .reconnectWithNewSession:
-                    // ⚠️ Clear the session BEFORE reconnecting. `handlePayload` sends a RESUME
-                    // whenever `sessionID` and `lastSequence` are set, so reconnecting without
-                    // clearing them replays the sequence Discord just rejected and is closed
-                    // again at once — a tight loop that reads as a transient network fault.
+                    // Clears the session before reconnecting: `handlePayload` resumes whenever `sessionID` and `lastSequence` are set.
                     logger.info("[CHATOPS] Discord Gateway closed with code \(closeCode) — the session is no longer valid.\(reported) CONSEQUENCE: the session id and sequence are discarded and the next connection re-identifies from scratch rather than resuming; queued events since the last sequence are lost.")
                     sessionID = nil
                     lastSequence = nil
@@ -196,11 +157,8 @@ actor DiscordGatewayClient {
                     continuation.yield(.disconnected(error))
 
                 case .reconnect:
-                    // ⚠️⚠️ [TG-6] A CANCELLED SOCKET ALWAYS LANDS HERE, because it has no close code
-                    // and code 0 maps to `.reconnect`. `catch is CancellationError` — which used to
-                    // sit above this block — never matched it: a cancelled URLSession call throws
-                    // `URLError(.cancelled)`, an ordinary error. Checked HERE rather than before the
-                    // switch so the `.fatal` arm can never be bypassed by a misclassification.
+                    // A cancelled socket lands here (no close code, code 0 maps to reconnect); checked here so the `.fatal` arm cannot
+                    // be bypassed.
                     if RemoteLoopCancellation.isCancellation(error) {
                         logger.info("[CHATOPS] The Discord Gateway loop ended because its call was cancelled. CONSEQUENCE: none — a deliberate stop. It previously logged a reconnect that never happened.")
                         break connectLoop
@@ -233,11 +191,8 @@ actor DiscordGatewayClient {
             throw DiscordAPIError.gatewayDisconnected(reason: "Invalid Gateway URL")
         }
 
-        // ⚠️⚠️ [DC-6] RELEASE THE PREVIOUS CONNECTION BEFORE INSTALLING THIS ONE. Without this the
-        // old heartbeat task survived, and it reads the ACTOR's current socket — so it could write
-        // op-1 to this brand-new, not-yet-identified connection and flip `heartbeatAckReceived`
-        // behind the new loop's back. Placed BEFORE the assignment: after it, this would cancel the
-        // socket it just installed.
+        // Releases the previous connection before installing this one, so a stale heartbeat cannot write to the new
+        // socket.
         teardownConnection()
 
         let ws = session.webSocketTask(with: url)
@@ -263,19 +218,16 @@ actor DiscordGatewayClient {
             case .data(let data):
                 try await handlePayload(data: data, continuation: continuation)
             @unknown default:
-                // ⚠️ A FRAME KIND THIS BUILD CANNOT MODEL. Dropping it in silence means a URLSession
-                // that grows a new case makes the Discord connection go partially deaf with nothing
-                // anywhere saying so. One line, at a level a bug report carries.
+                // A frame kind this build cannot model is logged, so a new `URLSession` case cannot make the connection partially
+                // deaf in silence.
                 logger.warning("[CHATOPS/SILENT] A Discord WebSocket frame of an unmodelled kind was received and dropped. CONSEQUENCE: whatever it carried never reached the handler — if the platform has introduced a new frame type, commands sent in it are being ignored with no other trace.")
             }
         }
     }
 
     private func handlePayload(data: Data, continuation: AsyncStream<DiscordGatewayEvent>.Continuation) async throws {
-        // ⚠️ THE ENVELOPE CARRIES THE SEQUENCE NUMBER. Losing it is not just a lost event: `s` is
-        // what heartbeats and RESUME replay from, so a run of undecodable envelopes degrades the
-        // next resume into a full reconnect and re-delivers or skips events either side of the gap.
-        // The old line said only "Failed to decode Gateway payload" — no opcode, no consequence.
+        // The envelope carries the sequence number, which heartbeats and RESUME replay from; undecodable envelopes degrade
+        // the next resume.
         let payload: DiscordGatewayPayload
         do {
             payload = try JSONDecoder().decode(DiscordGatewayPayload.self, from: data)
@@ -296,10 +248,8 @@ actor DiscordGatewayClient {
 
         switch opcode {
         case .hello:
-            // ⚠️ A DROPPED HELLO IS A DEAD CONNECTION, NOT A DROPPED MESSAGE. The heartbeat
-            // interval arrives only here, so returning silently means the heartbeat loop never
-            // starts and Discord closes the socket ~45s later as unresponsive — which surfaces as
-            // an unexplained reconnect cycle rather than as a decode problem.
+            // A dropped HELLO is a dead connection: the heartbeat interval arrives only here, so Discord would close the
+            // socket as unresponsive.
             guard let d = payload.d else {
                 logger.error("[CHATOPS] Discord HELLO arrived with no `d` payload. CONSEQUENCE: no heartbeat interval, so the heartbeat loop never starts and Discord closes this connection as unresponsive within about a minute; the bridge then reconnects and the user sees intermittent unavailability with no stated cause.")
                 return
@@ -362,9 +312,7 @@ actor DiscordGatewayClient {
 
         switch eventName {
         case "READY":
-            // ⚠️ READY CARRIES THE APPLICATION ID, and nothing else does. Without it
-            // `editInteractionResponse` cannot address a deferred reply, so every slash command
-            // falls back to a channel post and leaves its "thinking…" placeholder unresolved.
+            // READY carries the application id, which `editInteractionResponse` needs to address a deferred reply.
             let ready: DiscordReadyPayload
             do {
                 ready = try data.decode(DiscordReadyPayload.self)
@@ -383,9 +331,8 @@ actor DiscordGatewayClient {
             continuation.yield(.resumed)
 
         case "MESSAGE_CREATE":
-            // ⚠️⚠️ THIS IS THE BOT GOING DEAF, SILENTLY. A MESSAGE_CREATE this build cannot model
-            // was dropped here with no log at all, so a Discord schema change — or one unexpected
-            // field — turned every typed command into "the bot ignored me", on both sides.
+            // A MESSAGE_CREATE this build cannot model is logged; silently dropping it would make the bot ignore typed
+            // commands.
             let message: DiscordMessage
             do {
                 message = try data.decode(DiscordMessage.self)
@@ -396,9 +343,7 @@ actor DiscordGatewayClient {
             continuation.yield(.messageCreate(message))
 
         case "INTERACTION_CREATE":
-            // ⚠️⚠️ WORSE THAN A DROPPED MESSAGE: an unacked interaction shows the user Discord's red
-            // "This interaction failed" three seconds later, so they see a definite failure with
-            // nothing anywhere explaining it.
+            // An unacked interaction shows the user Discord's red "This interaction failed", so the decode failure is logged.
             let interaction: DiscordInteraction
             do {
                 interaction = try data.decode(DiscordInteraction.self)
@@ -441,9 +386,8 @@ actor DiscordGatewayClient {
                 do {
                     try await self.sendHeartbeat()
                 } catch {
-                    // ⚠️ THIS `return` ENDS THE HEARTBEAT LOOP FOR GOOD. Without a heartbeat Discord
-                    // closes the session within about a minute, so a failed send is the start of an
-                    // outage, not a blip — and the old line named neither that nor the recovery.
+                    // This `return` ends the heartbeat loop for good; without a heartbeat Discord closes the session within about a
+                    // minute.
                     await self.logWarning("[CHATOPS] Failed to send a Discord heartbeat: \(error.localizedDescription). CONSEQUENCE: the heartbeat loop STOPS here, so Discord closes this session as unresponsive within about a minute and every command sent meanwhile is lost; recovery depends entirely on the reconnect that close triggers.")
                     return
                 }
@@ -457,10 +401,8 @@ actor DiscordGatewayClient {
         }
     }
 
-    /// ⚠️ [DC-8] Typed for the same reason as `sendResume`. ⚠️ `d` is deliberately OPTIONAL: before
-    /// the first dispatch there is no sequence, and Discord expects a literal `null` there — which is
-    /// what `Optional<Int>` encodes to, where the old `compactMapValues { $0 ?? NSNull() }` dance was
-    /// reproducing that by hand.
+    /// Sends a typed heartbeat frame.
+    /// `d` is optional: before the first dispatch there is no sequence and Discord expects a literal `null`.
     private func sendHeartbeat() async throws {
         let frame = DiscordGatewayFrame(op: DiscordGatewayOpcode.heartbeat.rawValue, d: lastSequence)
         let data = try JSONEncoder().encode(frame)
@@ -470,13 +412,9 @@ actor DiscordGatewayClient {
 
     // MARK: - Identify / Resume
 
-    /// ⚠️⚠️ [DC-8] DELIBERATELY NOT CONVERTED TO A TYPED FRAME, unlike RESUME and HEARTBEAT. Discord's
-    /// IDENTIFY nests its connection properties under the keys `$os`, `$browser` and `$device` — a
-    /// leading `$` that a Swift property name cannot carry, so a `Codable` struct would need a
-    /// `CodingKeys` enum whose only job is to re-add three dollar signs. That is more moving parts
-    /// than the dictionary it would replace, on the one frame that must be byte-exact or the gateway
-    /// refuses the connection. The dictionary IS the clearer expression here; recorded so the next
-    /// reader does not "finish the job" and reintroduce the risk.
+    /// Sends IDENTIFY, built as a dictionary rather than a typed frame.
+    /// Its connection properties use `$os`, `$browser` and `$device` keys, which a Swift property name cannot carry
+    /// without a `CodingKeys` enum.
     private func sendIdentify() async throws {
         let identify = DiscordIdentifyPayload(
             token: botToken,
@@ -501,9 +439,7 @@ actor DiscordGatewayClient {
         logger.info("Sent IDENTIFY to Discord Gateway.")
     }
 
-    /// ⚠️ [DC-8] TYPED, so `DiscordResumePayload` is actually what goes on the wire. It previously had
-    /// two references in the entire repo — both in a TEST that encoded and decoded it — while this
-    /// function hand-built a dictionary. A model nothing sends is a model whose test proves nothing.
+    /// Sends RESUME as a typed `DiscordResumePayload`, so the model is what actually goes on the wire.
     private func sendResume(sessionID: String, sequence: Int) async throws {
         let frame = DiscordGatewayFrame(
             op: DiscordGatewayOpcode.resume.rawValue,

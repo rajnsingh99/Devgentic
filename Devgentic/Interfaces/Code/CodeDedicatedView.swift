@@ -4,15 +4,14 @@
 //  CodeDedicatedView.swift
 //  Devgentic
 //
-//  Dedicated view for the Code interface.
-//  Wraps ChatHistoryView with an interactive breadcrumb status header and
-//  actionable onboarding checklist cards with hover depth.
-//  The sidebar (Explorer) and CodeViewerPanel are positioned at MainApplicationView level.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// Dedicated view for the Code interface: wraps ChatHistoryView with an interactive breadcrumb status header and
+/// actionable onboarding checklist cards. The sidebar (Explorer) and CodeViewerPanel sit at MainApplicationView level.
 struct CodeDedicatedView: View {
 
     @Environment(MainApplicationViewModel.self) private var viewModel
@@ -230,12 +229,7 @@ struct CodeDedicatedView: View {
                     icon: "cpu.fill",
                     iconColor: theme.accentColor,
                     title: codeSessionManager.modelName.isEmpty ? "Select a Coding Model" : codeSessionManager.modelDisplayName,
-                    // ⚠️ This used to read "14B+ model recommended for code synthesis" — the
-                    // user-facing half of a size floor the picker enforced for Ollama only. Both
-                    // are retired together: a promise that named a parameter count could not be
-                    // kept honestly (it never applied to MLX or cloud models) and was measuring
-                    // the wrong thing anyway. Tool calling is the capability that actually decides
-                    // whether a model can drive the Code loop, and the picker annotates that.
+                    // Tool calling decides whether a model can drive the Code loop; the model picker annotates it.
                     subtitle: codeSessionManager.modelName.isEmpty ? "Any tool-capable model works best" : "\(codeSessionManager.provider.rawValue.capitalized) Provider",
                     isDone: !codeSessionManager.modelName.isEmpty,
                     actionTitle: "Choose…",

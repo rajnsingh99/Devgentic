@@ -4,11 +4,7 @@
 //  AttachmentDeliveryAgreementTests.swift
 //  DevgenticTests
 //
-//  The transcript stored up to 500K chars of an attachment while the model, past the 50K
-//  per-file budget, received NOTHING of a text file (the reader threw `.tooLarge`) and only
-//  the first 50K of a document. Now the backend cuts both to the budget and the transcript
-//  records exactly that, from the same `DirectInjectionPlan`. These drive the REAL backend
-//  assembler and the REAL transcript builder over the same files and require them to agree.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,8 +4,7 @@
 //  HeuristicCognitiveParserTests.swift
 //  DevgenticTests
 //
-//  Tests for HeuristicCognitiveParser — the battle-tested fallback parser
-//  that rescues structurally volatile responses from local models.
+//  Created by Raj Singh.
 //
 
 import XCTest

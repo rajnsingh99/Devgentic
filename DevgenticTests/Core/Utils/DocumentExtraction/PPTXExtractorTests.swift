@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  PPTXExtractorTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1 + 2: PPTX extraction — XML parser unit tests + real fixture integration.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,15 +4,13 @@
 //  WebSearchProvider.swift
 //  Devgentic
 //
-//  The search backends the `web_search` tool can talk to.
-//
-//  Deliberately a short, closed list. Each case is a real implementation with its own request
-//  shape and response parser in `WebSearchClient`, so adding one means adding a case here and
-//  the compiler pointing at every switch that has to learn it.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The search backends the `web_search` tool can talk to.
+/// Each case has its own request shape and response parser in `WebSearchClient`.
 enum WebSearchProvider: String, CaseIterable, Identifiable, Sendable {
     case brave
     case tavily

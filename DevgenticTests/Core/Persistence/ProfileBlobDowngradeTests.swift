@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ProfileBlobDowngradeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Covers G18 — an older build reading a profile blob written by a newer one — and, since the
-//  2026-10-03 history reset, a blob older than the current version (`ProfileBlobGate`).
-//
-//  A blob stamped ABOVE the version this build knows was once handed to a decoder that could not
-//  read it, and the failure presented as "this profile is corrupt", when the truth was "this
-//  profile is from the future" — two situations whose remedies are opposite. Corrupt invites the user to reconfigure, which overwrites the blob and makes the
-//  loss permanent. From-the-future needs them to change nothing and update the app.
-//
-//  ⚠️ The schema layer cannot help here. With a single declared schema version, an older build's
-//  column layout matches, so the store opens without complaint — the difference lives entirely
-//  inside an opaque `Data` column that SwiftData never inspects.
+//  Created by Raj Singh.
 //
 
 import XCTest

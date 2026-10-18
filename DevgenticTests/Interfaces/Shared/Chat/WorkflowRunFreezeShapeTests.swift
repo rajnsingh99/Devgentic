@@ -4,33 +4,7 @@
 //  WorkflowRunFreezeShapeTests.swift
 //  DevgenticTests
 //
-//  Register `Chat_Production_Readiness_Fresh.md` — CF-29, CF-31 and CF-32.
-//
-//  CF-29: `freeze` mapped `state.nodeResults` alone, so every node the run never reached was
-//  dropped from the record and the surviving rows kept event-arrival order. `WorkflowDedicatedView`
-//  swaps the live factory for the record factory the instant `finalize()` replaces the mirror row,
-//  so on a Stop at step 2 of 6 the four "Waiting" rows the user was looking at vanished at that
-//  instant and the run became a 2-row pipeline forever.
-//
-//  CF-31: `handleNodeSkipped` stores the skip SENTENCE as a user-skipped node's `detail`, while the
-//  engine forwards that node's own INPUT downstream. Both factories derived a node's input preview
-//  from `upstreamResults.map(\.detail)`, so the node that is RUNNING previewed the one string it is
-//  guaranteed not to have received.
-//
-//  CF-32: the live orphan log fired on every body pass — i.e. on every streamed workflow event.
-//
-//  ⚠️ CF-29 and CF-31 both live on the seam between the two factories, and this repo's recorded
-//  failure mode on that seam is fixing one adapter and leaving the other. Every behavioural claim
-//  below is asserted on BOTH wherever both are reachable.
-//
-//  ⚠️ Cold-read round 3 added the third reader of that seam: the CANVAS. CF-29's synthesized rows
-//  reached `WorkflowCanvasRunOverlay` — which had only ever seen the ABSENCE of a row for an
-//  unreached node — and made it draw "this branch was not taken" over a run the user had merely
-//  stopped. The overlay-side tests hand-build their fixtures; the two tests here walk the real
-//  path (`freeze` → `from(record:)` → overlay), which is the shape that actually regressed.
-//  CF-31's round-3 finding is the other half: the two factories agreed on the TEXT of a node's
-//  input preview but not on the order or multiplicity of the upstream list it is joined from,
-//  which only a FAN-IN can show — so the parity claim is now pinned on one.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,9 +4,7 @@
 //  WorkflowError.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  Error types specific to workflow orchestration.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -34,21 +32,13 @@ enum WorkflowError: LocalizedError, Sendable {
     /// Pre-flight validation found configuration errors that must be resolved before execution.
     case validationFailed(errors: [WorkflowValidationIssue], summary: String)
 
-    /// The stored canvas blob could not be decoded, so the run is refused before dispatch (WF-OB4).
-    ///
-    /// ⚠️ Distinct from `emptyWorkflow` on purpose. `WorkflowLayoutStore.load(for:)` deliberately
-    /// returns `.empty` for a missing row AND an unreadable blob, so without this case an
-    /// unreadable canvas ran into the `!layout.nodes.isEmpty` guard and the user was told "The
-    /// workflow has no nodes. Add profiles to the canvas before running." — both halves false: the
-    /// denormalized counts prove nodes exist, and the canvas REFUSES every save while unreadable,
-    /// so the suggested remedy was impossible. The counts ride along because they are the evidence
-    /// (they live outside the blob, written by the last successful save).
+    /// The stored canvas blob could not be decoded, so the run is refused before dispatch.
+    /// Distinct from `emptyWorkflow`: an unreadable canvas is not an empty one, and it refuses saves while unreadable.
+    /// The counts live outside the blob (written by the last successful save) and are the evidence.
     case layoutUnreadable(nodeCount: Int, edgeCount: Int)
 
-    /// The canvas decoded, but contains node(s) this build cannot understand ([WF-PE4]
-    /// `.unsupported` placeholders — written by a different build, e.g. a rollback or the retired
-    /// Loop kind). The graph itself is intact, visible and saveable; only the RUN is refused,
-    /// because an unknown node can neither be executed nor honestly skipped.
+    /// The canvas decoded but contains nodes this build cannot understand (`.unsupported` placeholders from another build).
+    /// The graph stays visible and saveable; only the run is refused, since an unknown node can be neither run nor skipped.
     case unsupportedNodes(names: [String])
 
     var errorDescription: String? {

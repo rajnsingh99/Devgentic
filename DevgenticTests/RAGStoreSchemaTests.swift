@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGStoreSchemaTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Batch 3 of the RAG readiness register:
-//    RAG-9  — the vector store's lookup keys are indexed, and the manual codegen carried them.
-//    RAG-13 — a full store keeps a source's PREVIOUS vectors and says so.
-//    RAG-17 — replace-on-reindex is one transaction: one copy per source, even concurrently.
-//    RAG-40 — BM25 reads terms stored at construction, scoring EXACTLY as re-tokenising did.
+//  Created by Raj Singh.
 //
 
 import XCTest

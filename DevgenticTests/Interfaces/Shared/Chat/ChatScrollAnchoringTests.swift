@@ -4,13 +4,7 @@
 //  ChatScrollAnchoringTests.swift
 //  DevgenticTests
 //
-//  The transcript keeps its own place (2026-09-27). It used to be scrolled by hand: a near-viewport
-//  minHeight hopping between rows on every append (the view stopped mid-way after a new turn),
-//  `scrollTo(newest, .bottom)` against lazily ESTIMATED row heights (landed ~90% down), and a
-//  hide → scroll → reveal on every conversation switch.
-//
-//  SwiftUI's anchoring cannot be exercised without rendering, so the policy is tested directly and
-//  the wiring by source scan.
+//  Created by Raj Singh.
 //
 
 import XCTest

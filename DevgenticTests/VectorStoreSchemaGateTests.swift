@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  VectorStoreSchemaGateTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 12/07/26.
-//
-//  Covers the schema-gate decision that replaced the UserDefaults-gated wipes:
-//  the ONLY path that destroys the store is an on-disk schema that genuinely
-//  can't be read. The historical failure this prevents: losing a preferences
-//  flag (defaults reset, partial backup restore) silently wiped a healthy,
-//  current-schema database — the store now holds every conversation's memory,
-//  so that gate had to move into the data directory itself.
+//  Created by Raj Singh.
 //
 
 import XCTest

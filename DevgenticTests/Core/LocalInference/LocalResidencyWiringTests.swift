@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  ⚠️ WIRING for phase 3. The unloads below were each deleted because they acted without knowing who
-//  needed the model; a later edit that puts one back fails no unit test. Source-scanned over joined,
-//  comment-stripped bodies, in the `LocalInferenceWiringTests` idiom.
+//  LocalResidencyWiringTests.swift
+//  DevgenticTests
+//
+//  Created by Raj Singh.
 //
 
 import XCTest
@@ -73,7 +74,7 @@ final class LocalResidencyWiringTests: XCTestCase {
 
     /// D7 — background Core Intelligence features wait for the local model like runs.
     func testBackgroundIntelligenceFeaturesQueue() throws {
-        for (path, feature) in [("Devgentic/Intelligence/MorningBrief/MorningBriefService.swift", "Morning Brief"),
+        for (path, feature) in [("Devgentic/Intelligence/Briefing/BriefingService.swift", "Briefing"),
                                 ("Devgentic/Intelligence/UserPersonal/UserPersonalService.swift", "User Personal")] {
             let code = try source(path)
             let pattern = #"runBackgroundIntelligence\(feature: ""# + feature + #""\) \{\s*try await IntelligenceCoreService\.shared\.generate\("#

@@ -4,16 +4,7 @@
 //  StreamingTabIdentityTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the field-observed duplicate-tab defect (2026-07-25).
-//
-//  A user opened a message's code blocks WHILE the response was still streaming, then
-//  clicked the same message again after it completed. Tab identity was content equality
-//  (`denotesSameBlock` = language + code), so the block that had grown in the meantime
-//  matched nothing and appended a SECOND tab holding the truncated mid-stream fragment —
-//  two tabs with the same title, one of them silently wrong.
-//
-//  Identity is now (originMessageID, originBlockIndex), which is stable from the first
-//  token onward.
+//  Created by Raj Singh.
 //
 
 import XCTest

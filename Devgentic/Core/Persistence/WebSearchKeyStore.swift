@@ -4,26 +4,20 @@
 //  WebSearchKeyStore.swift
 //  Devgentic
 //
-//  Keychain home for the web-search API key. Register KC-2.
-//
-//  ⚠️ WHY THIS EXISTS. This was the one credential in the app with no Keychain identity at all:
-//  `SettingsCoordinator` wrote it verbatim to `UserDefaults` — `~/Library/Preferences/`, readable by
-//  every process running as the user, swept into every backup — and did so by the CURRENT design,
-//  not a legacy one. Verified on disk (Keychain readiness §0): a live Google API key sat in
-//  cleartext there, and a second copy was left behind intact in the orphaned `com.dev.devgentic`
-//  domain after the bundle-id rename.
-//
-//  Mirrors `ProviderKeyStore`: an enum, one service, a `KeychainAccessing` seam, and the register-B2
-//  rule — a caller that WRITES based on the answer must use `read()`, never `load()`.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+// Why: callers that write based on the answer must use `read()`, never `load()`.
+/// Keychain home for the web-search API key.
+/// An enum with one service and a `KeychainAccessing` seam, mirroring `ProviderKeyStore`.
 enum WebSearchKeyStore {
 
     private static let logger = DGLogger(category: "WebSearchKeyStore")
 
-    /// Keychain service identifier. ⚠️ Changing this orphans the stored key — nothing migrates it.
+    // Why: changing this orphans the stored key; nothing migrates it.
+    /// Keychain service identifier.
     static let service = "com.devgentic.websearch"
 
     /// One key per user, not per profile. This is the GOOGLE account: it predates multiple
@@ -36,8 +30,8 @@ enum WebSearchKeyStore {
         provider == .google ? account : provider.rawValue
     }
 
-    /// ⚠️ TEST SEAM, same shape as `ProviderKeyStore.storage`. Mutated only by
-    /// `setStorageForTesting`; production never reassigns it.
+    /// Test seam, same shape as `ProviderKeyStore.storage`: mutated only by `setStorageForTesting`; production never
+    /// reassigns it.
     nonisolated(unsafe) private static var storage: KeychainAccessing = SecureKeyStorage()
 
     /// Swaps the Keychain backend. Test-only — pass nil to restore the real one.
@@ -69,10 +63,8 @@ enum WebSearchKeyStore {
         return true
     }
 
-    /// The key, or nil when none is stored **or the read failed**.
-    ///
-    /// ⚠️ Only for callers that merely need a value to send. Anything that WRITES based on the
-    /// answer must use `read()` — register B2.
+    /// The key, or nil when none is stored or the read failed.
+    /// Only for callers that merely need a value to send; anything that writes based on the answer must use `read()`.
     static func load(for provider: WebSearchProvider = .google) -> String? {
         guard case .found(let key) = storage.read(service: service, account: keychainAccount(for: provider)) else { return nil }
         return key
@@ -92,9 +84,7 @@ enum WebSearchKeyStore {
         return outcome
     }
 
-    /// Removes the key.
-    /// - Returns: whether the Keychain no longer holds it (`errSecItemNotFound` counts as success —
-    ///   the desired end state is "gone", not "we did the deleting").
+    /// Removes the key. Returns true when the key is gone from the Keychain; `errSecItemNotFound` counts as success.
     @discardableResult
     static func delete(for provider: WebSearchProvider = .google) -> Bool {
         let status = storage.delete(service: service, account: keychainAccount(for: provider))

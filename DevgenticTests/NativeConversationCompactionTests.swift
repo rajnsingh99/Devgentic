@@ -4,17 +4,7 @@
 //  NativeConversationCompactionTests.swift
 //  DevgenticTests
 //
-//  Unit tests for finding #22 — native-path conversation compaction.
-//
-//  The native ReAct path sends `liveConversationTurns` (an append-only [[String: Any]]
-//  array), which previously grew unbounded; the scratchpad budget only governs the
-//  legacy <working_memory> path. These tests exercise the three new seams:
-//    1. `ToolTurnAdapter.classifyTurn` — the universal turn classifier that lets the
-//       compactor find exchange boundaries without per-provider dict-walking.
-//    2. `approximateTurnChars` — the char-footprint estimator that drives the budget.
-//    3. `compactNativeConversation` — drops the OLDEST whole tool exchanges past budget,
-//       preserving the protected prefix, the keep-recent floor, and tool-call/result
-//       pairing (orphaning a tool_use id 400s Claude/OpenAI and count-mismatches Gemini).
+//  Created by Raj Singh.
 //
 
 import XCTest

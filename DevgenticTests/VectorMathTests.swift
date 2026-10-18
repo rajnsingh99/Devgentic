@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  VectorMathTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
 
 import XCTest

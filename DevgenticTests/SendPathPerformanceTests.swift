@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SendPathPerformanceTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Batch 6 of the RAG readiness register, the
-//  SwiftData send-path costs. Measured first (`SendPathHistoryBenchmarkTests`, `-O`):
-//    RAG-7  — the request's 300-message history decode: 60 ms (Code, 15 tools/turn) to 125 ms
-//             (40 tools/turn) on the MAIN actor, ~90% timeline JSON. Now decoded off-main.
-//    RAG-6  — the context gauge paid that same resolve 3–4× per send and once per scroll-back
-//             page, with every screenshot's bytes. Now: one resolve per burst, none on paging, no
-//             image bytes, off-main.
-//    RAG-26 — the background-task history scan on open: 18–28 ms per 300 messages, unbounded,
-//             on main. Now off-main.
-//    RAG-28 — every streaming flush rewrote `conversation.timestamp`, re-sorting the sidebar.
-//             Now an insert moves it; an update moves it at most once a minute.
+//  Created by Raj Singh.
 //
 
 import XCTest

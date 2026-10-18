@@ -4,9 +4,7 @@
 //  WelcomeWidget.swift
 //  Devgentic
 //
-//  A small registry that lets the welcome screen host modular "widget" cards.
-//  Introduce a new card by conforming a type to `WelcomeWidget` and adding it
-//  to `WelcomeWidgetRegistry` — `WelcomeView` never needs editing.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -35,7 +33,7 @@ protocol WelcomeWidget {
     func makeBody() -> AnyView
 
     /// Called once when the welcome screen appears — use it to kick off data
-    /// loads (e.g. generating the Morning Brief). Default: no-op.
+    /// loads (e.g. generating the Briefing). Default: no-op.
     func onWelcomeAppear()
 }
 
@@ -50,7 +48,7 @@ enum WelcomeWidgetRegistry {
     /// Default widgets shipped with the app. Add new built-ins here — this is
     /// the *only* place the welcome surface learns about a new card.
     private static var widgets: [any WelcomeWidget] = [
-        MorningBriefWidget(),
+        BriefingWidget(),
         UserPersonalWidget(),
     ]
 

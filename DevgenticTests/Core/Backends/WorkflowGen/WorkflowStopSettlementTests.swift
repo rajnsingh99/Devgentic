@@ -4,16 +4,7 @@
 //  WorkflowStopSettlementTests.swift
 //  DevgenticTests
 //
-//  Created on 31/08/26.
-//
-//  Register EXC-1: Stop during a profile node recorded it `.completed` with truncated output.
-//
-//  ⚠️ Tested as a PURE FUNCTION because the behaviour is structurally unobservable through the
-//  integration harness: cancelling the task that consumes the run's stream races the terminal
-//  event's own delivery and always wins (the WF-CC1 note in `WorkflowExecutorIntegrationTests`
-//  records an earlier attempt failing with both event arrays empty). `UserSkipTeardownPolicy` set
-//  the precedent; `WorkflowExecutor.settledStreamEndStatus` follows it, and these tests are the
-//  exhaustive coverage that extraction exists to make possible.
+//  Created by Raj Singh.
 //
 
 import XCTest

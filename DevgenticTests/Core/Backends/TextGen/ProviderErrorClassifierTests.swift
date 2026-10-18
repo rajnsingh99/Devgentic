@@ -4,10 +4,7 @@
 //  ProviderErrorClassifierTests.swift
 //  DevgenticTests
 //
-//  Pins classify(statusCode:rawBody:) verdicts, focused on the tools-rejection
-//  detection (register #1 runtime guard): a 400/422 whose body refuses the
-//  `tools` payload must classify as an actionable capability-missing fatal,
-//  while tool-ARGUMENT validation errors keep the generic bad-request verdict.
+//  Created by Raj Singh.
 //
 
 import XCTest

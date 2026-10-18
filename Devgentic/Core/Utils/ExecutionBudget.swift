@@ -4,37 +4,23 @@
 //  ExecutionBudget.swift
 //  Devgentic
 //
-//  Nesting rule for time limits (Timeout inventory "Nesting", owner decision 2026-09-27, option B).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "ExecutionBudget")
 
-/// The time limits the current task is running inside — a scheduled run, a turn, a workflow node —
-/// carried as a TaskLocal stack so an INNER limit can be shortened to fit the time an OUTER one has
-/// left.
-///
-/// ⚠️⚠️ WHY. Every limit used to ignore the ones around it. A 30-min `run_command` started at minute
-/// 9 of a 10-min turn could never reach its own limit: the TURN was cut off at 10:00, the build was
-/// killed, and the model never saw its log — the user got a bare "Timed out". A 60-min node inside a
-/// 30-min scheduled run never fired its own timeout, so its error branch (the failure notification)
-/// never ran. The rule now: an inner limit is `min(own, outer remaining − reserve)`, so the inner
-/// one fires FIRST, with its partial output, and the outer one still has `reserve` seconds for the
-/// model to answer or the workflow to route the failure.
-///
-/// Remaining time is COMPUTE time, exactly as the outer limit counts it: human waits credited to
-/// the budget's `ParkScope` do not use it up, and the clock is `SuspendingClock`.
-///
-/// ⚠️ Inherited by `Task { }` created inside, NOT by `Task.detached` — the same rule as `ParkScope`.
+/// The time limits the current task runs inside (a scheduled run, a turn, a workflow node), carried as a TaskLocal
+/// stack so an inner limit shortens to fit what an outer one has left. An inner limit is `min(own, outer remaining −
+/// reserve)`, so it fires first with its partial output. Inherited by `Task { }`, not `Task.detached`.
 enum ExecutionBudget {
 
     /// Time kept back for the enclosing limit's owner to respond once an inner limit fires.
     static let reserve: TimeInterval = 60
 
-    /// The reserve a given outer limit keeps: 60 s, or a tenth of the limit when that is shorter.
-    /// ⚠️ A flat 60 s cannot work inside a short limit: a 30 s node with retries would never retry
-    /// (its whole budget is "the reserve"), and a 120 s node would hand its tools at most 60 s.
+    /// The reserve a given outer limit keeps: 60 s, or a tenth of the limit when that is shorter. A flat 60 s would leave
+    /// short limits no usable budget.
     static func reserve(forLimit limit: TimeInterval) -> TimeInterval {
         min(reserve, limit / 10)
     }
@@ -88,13 +74,8 @@ enum ExecutionBudget {
         return best
     }
 
-    /// The time an inner bound may have, given what an outer one has left.
-    ///
-    /// - `remaining > 2 × reserve`: everything but the reserve.
-    /// - otherwise: half of what is left. The reserve cannot be honoured in full, and starting the
-    ///   inner work with no time at all would only move the failure to the outer limit.
-    ///
-    /// Pure, for tests.
+    /// The time an inner bound may have, given what an outer one has left. If `remaining > 2 × reserve`: everything but
+    /// the reserve; otherwise half of what is left. Pure, for tests.
     static func available(outerRemaining remaining: TimeInterval, reserve: TimeInterval = reserve) -> TimeInterval {
         remaining > 2 * reserve ? remaining - reserve : max(remaining / 2, 0)
     }
@@ -126,12 +107,9 @@ enum ExecutionBudget {
     }
 }
 
-/// One rule for a CONFIGURED time limit (Timeout inventory D-05): 0, a negative number or a
-/// non-finite value means "not set" — the next setting in the priority chain applies — and never
-/// "time out instantly". A stored 0 used to fail a node, a turn or a gate the moment it started
-/// (probe P9: `timeout=0` → `timedOut(0.0)` after 0.000 s), while the Code quick settings used 0
-/// to mean "no limit". The tool dispatcher already follows this rule
-/// (`ToolExecutionMediator.effectiveTimeout`); every other reader goes through here.
+/// One rule for a configured time limit: 0, a negative or a non-finite value means "not set" (the next setting in the
+/// priority chain applies), never "time out instantly". The tool dispatcher follows the same rule
+/// (`ToolExecutionMediator.effectiveTimeout`).
 enum TimeLimit {
     static func usable(_ value: TimeInterval?, _ what: @autoclosure () -> String) -> TimeInterval? {
         guard let value else { return nil }

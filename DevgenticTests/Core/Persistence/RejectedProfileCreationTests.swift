@@ -4,16 +4,7 @@
 //  RejectedProfileCreationTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Register A64 — the New Profile sheet dismissed BEFORE the save was attempted, so a rejected
-//  create discarded the name and type the user had entered and reported the reason as a toast over
-//  a sheet that no longer existed.
-//
-//  The fix makes `onContinue` throwing and dismisses only on success, rendering the reason inline.
-//  A SwiftUI sheet's `@State` is not reachable from a unit test, so what is asserted here is that
-//  the refusal the fix now handles is REAL and its message is worth showing — a catch arm for an
-//  error that never fires, or one that renders an empty string, would leave the sheet no better off.
+//  Created by Raj Singh.
 //
 
 import XCTest

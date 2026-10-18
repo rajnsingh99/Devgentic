@@ -4,15 +4,7 @@
 //  RunReportProjection.swift
 //  Devgentic
 //
-//  The Run Report's entire display logic as a PURE projection: persisted rows in,
-//  display values out. No store access, no SwiftUI, no clocks — the view paints what
-//  this returns and adds nothing, so every claim the report makes is unit-testable
-//  truth-table style (the WorkflowRunDisplayData pattern).
-//
-//  Design contract (approved 2026-08-22, "Run Report Redesign" canvas):
-//    • ONE flat chronological stream is the primitive; steps/nodes are groupings over it.
-//    • The verdict leads, as a sentence — derived from rows, never invented.
-//    • A lane or number with no data on this path is a LABELLED gap, not a blank.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -150,10 +142,8 @@ struct RunReportInput: Sendable {
     let userQueryPreview: String?  // the user message's text when available
     let traceIDOnMessage: String?  // ChatMessageSD.traceID — nil ⇒ neverRecorded
     let storeAvailable: Bool
-    /// This build's CFBundleVersion, supplied by the caller so the projection stays pure
-    /// (no `Bundle`, no clocks — see the file header). Lets the unattributed caveat tell
-    /// "recorded by an older build" apart from "this build doesn't measure that path yet"
-    /// instead of asserting the first as though it were known.
+    /// This build's CFBundleVersion, supplied by the caller so the projection stays pure (no `Bundle`, no clocks).
+    /// Lets the unattributed caveat tell 'recorded by an older build' from 'this build does not measure that path yet'.
     var currentBuildNumber: String? = nil
 }
 
@@ -245,11 +235,8 @@ struct RunReportProjection: Equatable, Sendable {
     // MARK: - Verdict
 
     static func makeVerdict(trace: TraceRecord, events: [SpanEvent], hitl: [HITLAuditRecord]) -> RunReportVerdict {
-        // ⚠️ Skips are excluded from BOTH buckets. A skip is persisted as `eventType: .error`
-        // with `severity: .warning` (its `.informational` category maps to warning), so it
-        // matched each filter and inflated "N problem(s) occurred on the way" — the verdict
-        // sentence counting the user's own instruction as a problem, twice over. Same invariant
-        // as the Problems filter, enforced in the one other place that counts trouble.
+        // Skips are excluded from both buckets: a skip is persisted as an `.error` event with `.warning` severity,
+        // so it would match each filter and inflate the problem count.
         let errorEvents = events.filter { ($0.severity == .error || $0.eventType == .error) && !isSkipEvent($0) }
         let warningEvents = events.filter { $0.severity == .warning && !isSkipEvent($0) }
         let waitedMs = hitlWaitMs(hitl: hitl, trace: trace)
@@ -300,26 +287,15 @@ struct RunReportProjection: Equatable, Sendable {
         let modelBits = [trace.modelName, trace.provider].compactMap { $0 }
         if !modelBits.isEmpty { facts.append(modelBits.joined(separator: " · ")) }
         if let d = trace.durationMs { facts.append(DurationFormat.format(ms: d)) }
-        // ⚠️ ONE NOUN, ONE MEANING. "step" is the WORKFLOW NODE — the timeline already owns
-        // that word ("failed at step 2 of 2", `WorkflowRunDisplayData.stepCounterDescription`)
-        // and it is the level a user recognises. "turn" is one ReAct model iteration.
-        //
-        // This header used to emit BOTH dimensions of the span tree side by side under two
-        // nouns the timeline had already assigned differently: `steps` counted `.iteration`
-        // spans while the timeline's "step" counted nodes, so the same 2-node run read
-        // "1 step · 2 nodes" here and "2 steps" three inches above (observed 2026-08-23).
-        // Worse, `.iteration` spans exist only on the ReAct path, so a bot-only workflow of any
-        // size reported ZERO steps and the fact vanished entirely — the count was never a
-        // node undercount, it was a different entity that happened to land nearby.
+        // One noun, one meaning: 'step' is the workflow node (as in the timeline), 'turn' is one ReAct model iteration.
+        // `.iteration` spans exist only on the ReAct path, so counting them as steps under-reports bot-only workflows.
         let turns = spans.filter { $0.kind == .iteration }.count
         let nodes = spans.filter { $0.kind == .workflowNode }.count
         let tools = events.filter { $0.eventType == .toolResult }.count
         var counts: [String] = []
         if nodes > 0 {
-            // Workflow run. Turns are deliberately NOT aggregated here: how many times a model
-            // looped is a property of a NODE, not of the run, so a run-level scalar ("1 turn"
-            // across two nodes) summarises away the only thing that makes it useful — which
-            // node looped. The stream carries it per node instead (see makeGroups).
+            // Workflow run: turns are not aggregated here, since looping is a property of a node, not of the run;
+            // the stream carries it per node instead (see `makeGroups`).
             counts.append("\(nodes) step\(nodes == 1 ? "" : "s")")
         } else if turns > 0 {
             // Chat run — no nodes exist, so the model turns are the run's structure.
@@ -418,9 +394,8 @@ struct RunReportProjection: Equatable, Sendable {
                 ))
 
             case .error, .parseError:
-                // A skip is an INSTRUCTION, never a failure (invariant 73) — it renders
-                // as its own amber row, not as a red ISSUE, and the Problems filter
-                // must not surface it.
+                // A skip is an instruction, never a failure: it renders as its own amber row, not a red ISSUE, and the Problems filter
+                // excludes it.
                 if isSkipEvent(e) {
                     let skipReason = contextValue(e, "skip_reason")
                     let ranBefore = contextValue(e, "ran_before_skip") == "true"
@@ -471,9 +446,8 @@ struct RunReportProjection: Equatable, Sendable {
                 ))
 
             case .memoryOp:
-                // CONTEXT injection (Run-Report Phase 3): one row per prompt layer that
-                // shipped, with its provenance — the report's answer to "what did the
-                // model read, and where did it come from".
+                // Context injection: one row per prompt layer that shipped, with its provenance ('what did the model read, and from
+                // where').
                 let source = detailValue(e, "source") ?? e.content ?? "context"
                 let chars = detailValue(e, "chars").flatMap(Int.init) ?? 0
                 let preview = detailValue(e, "preview") ?? ""
@@ -499,14 +473,8 @@ struct RunReportProjection: Equatable, Sendable {
             }
         }
 
-        // Any toolCall that never saw a result: it's still running or was torn down —
-        // surface it rather than dropping it. EXCEPT interception-style tools:
-        // `ask_user` is intercepted by the HITL banner BY DESIGN and never produces a
-        // tool-result event — its outcome is the APPROVAL row (hitl_audit) that carries
-        // the question, the wait and the answer. Flagging it painted a red "no result
-        // recorded" problem row onto every healthy clarification (user report,
-        // 2026-08-22 manual test) — a false alarm right above the row that showed it
-        // was answered.
+        // Any toolCall that never saw a result is surfaced (still running or torn down), except interception-style tools:
+        // `ask_user` is intercepted by the HITL banner by design, and its outcome is the approval row.
         let interceptionTools: Set<String> = ["ask_user"]
         for (_, call) in pendingToolCalls {
             let name = detailValue(call, "tool_name") ?? call.content ?? "tool"
@@ -586,26 +554,16 @@ struct RunReportProjection: Equatable, Sendable {
     // MARK: - Grouping
 
     static func makeGroups(rows: [RunReportRow], spans: [Span], trace: TraceRecord) -> [RunReportGroup] {
-        // Group boundaries come from step/node spans ordered by start time; rows fall
-        // into the last boundary that started before them. Rows before the first
-        // boundary (setup, the user message) form the "Before the run" group.
+        // Group boundaries come from step/node spans ordered by start time; rows fall into the last boundary before them.
+        // Rows before the first boundary form the 'Before the run' group.
         struct Boundary { let id: String; let label: String; let tag: String; let start: Date; let durationMs: Int? }
 
         let stepSpans = spans
             .filter { $0.kind == .iteration || $0.kind == .workflowNode || $0.kind == .subtask }
             .sorted { $0.startedAt < $1.startedAt }
 
-        // Which workflow node each span sits under, so an iteration group can name its owner.
-        //
-        // ⚠️ The boundary rule below is "last boundary that started at or before this row", and
-        // an inner `iteration_1` span starts MICROSECONDS after its parent `node:Agent 3`. The
-        // inner boundary therefore absorbs every row and the parent group is left empty, then
-        // dropped by the `filter { !$0.rows.isEmpty }` at the end — so the report showed
-        // "MLX - Bot NODE" (a bot node, no iteration span, keeps its rows) but NEVER named
-        // "Agent 3", presenting its whole run under a bare "STEP 1" (observed 2026-08-23).
-        // With two agent nodes that produced two indistinguishable "STEP 1" headers, because
-        // `ReActAgentExecutor` restarts the iteration counter for each node. Carrying the owner
-        // into the label preserves the identity the elision destroys.
+        // Which workflow node each span sits under, so an iteration group can name its owner: an inner `iteration_1` span starts
+        // microseconds after its parent node and absorbs its rows, so the label carries the owner to keep node identity.
         let nodeNameBySpanID: [String: String] = Dictionary(
             uniqueKeysWithValues: spans
                 .filter { $0.kind == .workflowNode }
@@ -664,8 +622,8 @@ struct RunReportProjection: Equatable, Sendable {
 
     // MARK: - Lanes
 
-    /// Tools + waiting-for-you are measured; model time joins when llmCall spans exist
-    /// (Phase 2 instrumentation); the remainder is a LABELLED unattributed segment.
+    /// Tools and waiting-for-you are measured; model time joins when `llmCall` spans exist; the remainder is a labelled
+    /// unattributed segment.
     static func makeLanes(trace: TraceRecord, spans: [Span], events: [SpanEvent], hitl: [HITLAuditRecord],
                           currentBuildNumber: String? = nil) -> ([RunReportLaneSegment], String) {
         guard let total = trace.durationMs, total > 0 else { return ([], "") }
@@ -679,8 +637,8 @@ struct RunReportProjection: Equatable, Sendable {
 
         let modelMs = spans.compactMap(declaredModelMs).reduce(0, +)
 
-        // Input lane (Phase 3): the `input_assembly` metrics bracket pre-flight work —
-        // BOS's attachment/RAG/knowledge assembly plus each iteration's context build.
+        // Input lane: `input_assembly` metrics bracket pre-flight work (attachment, RAG and knowledge assembly, each
+        // iteration's context build).
         let inputMs = events
             .filter { $0.eventType == .metric && detailValue($0, "key") == "input_assembly" }
             .compactMap { detailValue($0, "value_ms").flatMap(Int.init) }
@@ -715,20 +673,9 @@ struct RunReportProjection: Equatable, Sendable {
         return (segments, caveat)
     }
 
-    /// The model time a span's emitter DECLARED for its own call, in milliseconds.
-    ///
-    /// ⚠️ Deliberately NOT the span's wall-clock. `chat_call` (bot path) brackets message
-    /// assembly and the whole retry loop, and `imageGen` brackets a feasibility check —
-    /// counting either as model time over-reads. The previous rule dodged that by matching the
-    /// span NAME prefix `"llm:"`, which meant only `APISpyModel` (the ReAct/agent path) ever
-    /// counted: the bot, classifier and imageGen paths dropped their model time into
-    /// "Unattributed" silently. Observed on-device 2026-08-23 — a bot node's 11,977ms model
-    /// call rendered in the stream while the Model lane read 584ms and Unattributed read 13.4s
-    /// of a 14.0s run.
-    ///
-    /// Keying off the DECLARED measurement means a path opts in by MEASURING rather than by
-    /// matching a string, so a new emitter cannot be forgotten by failing to guess a name — it
-    /// either states its own narrow duration or it honestly contributes nothing.
+    /// The model time a span's emitter declared for its own call, in milliseconds.
+    /// Not the span's wall-clock: `chat_call` brackets assembly and retries, and `imageGen` a feasibility check.
+    /// A path opts in by measuring, so a new emitter cannot be forgotten by failing to match a name.
     static func declaredModelMs(_ span: Span) -> Int? {
         guard span.kind == .llmCall,
               let json = span.metadataJSON,
@@ -740,17 +687,8 @@ struct RunReportProjection: Equatable, Sendable {
     }
 
     /// Why a large share of the run carries no lane.
-    ///
-    /// ⚠️ This used to assert ONE hardcoded cause — "older runs predate parts of the
-    /// instrumentation" — derived from a single input, the remainder fraction. A run recorded
-    /// minutes earlier on the current build was therefore told it was old (observed on-device
-    /// 2026-08-23). That is precisely the invented explanation this file's contract forbids: an
-    /// unmeasured lane is a LABELLED GAP, never a guess.
-    ///
-    /// `TraceRecorder.beginTrace` stamps the writing build on every trace, so the one
-    /// distinction that CAN be drawn honestly is drawn here — and where it cannot be drawn, the
-    /// sentence says so rather than picking the flattering answer. `currentBuildNumber` is
-    /// passed in rather than read from `Bundle` to keep this projection pure and testable.
+    /// Separates a run recorded by an older build (the build stamp on each trace) from a path this build does not measure;
+    /// where that cannot be drawn the sentence says so. `currentBuildNumber` is passed in to keep the projection pure.
     static func unattributedCaveat(trace: TraceRecord, currentBuildNumber: String?) -> String {
         let lead = "A large share of this run isn't attributed to a lane"
         guard let recorded = trace.buildNumber else {
@@ -793,12 +731,10 @@ struct RunReportProjection: Equatable, Sendable {
             sections: sections)
     }
 
-    // MARK: - Search (Phase 4)
+    // MARK: - Search
 
-    /// Whether a row matches the search box. Case-insensitive, and DEEP: it searches
-    /// the inspector payload too (tool args, results, previews, pair values), because
-    /// "which call touched README.md" is exactly the question a search box is for —
-    /// the visible title alone often carries only a truncated preview.
+    /// Whether a row matches the search box: case-insensitive and deep, searching the inspector payload (args, results,
+    /// previews) too.
     static func rowMatches(_ row: RunReportRow, query: String) -> Bool {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return true }
@@ -851,32 +787,17 @@ struct RunReportProjection: Equatable, Sendable {
         return nil
     }
 
-    /// Is this event a workflow-node SKIP?
-    ///
-    /// ⚠️ Deliberately does NOT trust the indexed `errorCategory` column alone. `TraceRecorder`
-    /// writes that column only when `recordV2` is true — developer mode on, OR the user has left
-    /// "diagnostics recording" enabled — while trace/span/EVENT recording is not gated on that
-    /// preference at all. So a user who opts out of diagnostics still gets a fully populated Run
-    /// Report in which every skip arrives with `errorCategory == nil`, falls past the skip branch
-    /// into the generic ISSUE arm, and is painted RED as a problem: invariant 73 ("a skip is an
-    /// instruction, never a failure") was being enforced in the display layer while depending on a
-    /// field the persistence layer treats as optional telemetry.
-    ///
-    /// The fallback costs nothing: `TraceRecorder` already writes `detail["category"]`
-    /// UNCONDITIONALLY, one line above the gated column. Preferred over widening the gate — that
-    /// gate is a deliberate privacy posture, and loosening it for one category would be the wrong
-    /// seam.
+    // Why: `errorCategory` is written only when diagnostics recording is on, so a skip would paint red as a problem;
+    // fall back to `detail["category"]`, which `TraceRecorder` writes unconditionally.
+    /// Whether this event is a workflow-node skip.
     static func isSkipEvent(_ e: SpanEvent) -> Bool {
         if e.errorCategory == .wfNodeSkipped { return true }
         return detailValue(e, "category") == AgentErrorCategory.wfNodeSkipped.rawValue
     }
 
-    /// Reads a key from the event's SANITIZED CONTEXT BAG.
-    ///
-    /// ⚠️ Separate from `detailValue`, which only sees TOP-LEVEL keys. `TraceRecorder` nests a
-    /// classified error's context under `detail["context"]`, so a producer that adds a context key
-    /// and a consumer that reads it with `detailValue` silently never meet — the fix compiles,
-    /// ships, and does nothing.
+    // Why: Separate from `detailValue`, which sees only top-level keys: a classified error's context is nested under
+    // `detail["context"]`.
+    /// Reads a key from the event's sanitized context bag.
     static func contextValue(_ e: SpanEvent, _ key: String) -> String? {
         guard let json = e.detailJSON, let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -888,13 +809,7 @@ struct RunReportProjection: Equatable, Sendable {
     }
 
     /// What actually happened to a skipped node, per reason.
-    ///
-    /// ⚠️ The old sentence was one hardcoded string ending "nodes downstream received its input
-    /// unchanged" — TRUE only for `.byUser`, which is the single reason that keeps the default
-    /// edge below it live. For every cascade reason the subtree below the node is dead, so the
-    /// report asserted the opposite of what the engine did. It also hedged "by you, or by routing
-    /// that never chose its branch", which is the report declining to say which — even though the
-    /// producer knows.
+    /// Only `.byUser` keeps the default edge below it live; every cascade reason kills the subtree.
     static func skipExplanation(reason: String?, ranBeforeSkip: Bool) -> String {
         switch reason {
         case "byUser":

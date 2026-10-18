@@ -4,16 +4,7 @@
 //  CodeProfileConfigDeliveryTests.swift
 //  DevgenticTests
 //
-//  Created on 09/08/26.
-//
-//  Registers B44 / B45 / B46 — the three "the fix landed on one site and left a sibling" findings.
-//
-//  ⚠️ The B44 half is the one that carries weight, and it is deliberately written against the
-//  SHARED accessor rather than against `AgentConnect`. Register B37 recorded what happens
-//  otherwise: `ExecutionTimeoutExtractionTests` grew a private copy of the production switch, so
-//  reverting the production one left all five tests green. A test that re-implements the rule it is
-//  guarding guards nothing. `ProfileDetails.agentConfig` is now the single definition, so asserting
-//  on it is asserting on what ships.
+//  Created by Raj Singh.
 //
 
 import XCTest

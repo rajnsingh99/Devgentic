@@ -4,27 +4,17 @@
 //  AdvancedConfigEncoder.swift
 //  Devgentic
 //
-//  Created on 07/08/26.
-//
-//  Encodes an advanced-configuration struct into the `[String: JSONValue]` bag a provider reads
-//  from `LLMProviderConfig.options`.
-//
-//  ⚠️ WHY THIS EXISTS. `BackendProfileService.encodeConfig` already does this, but it is
-//  `@MainActor` and instance-bound — unusable from `AgentConnect.initializeModel`, which needs the
-//  same conversion to resolve the preset a profile was SHOWN but never had persisted (register
-//  A24/A25). Duplicating the JSONSerialization dance at that call site would have put two
-//  independently-drifting encoders on either side of the same contract, which is how the panel and
-//  the executor came to disagree in the first place.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Encodes an advanced-configuration struct into the `[String: JSONValue]` bag a provider reads
+/// from `LLMProviderConfig.options`; usable off the main actor, unlike the instance-bound profile-service encoder.
 enum AdvancedConfigEncoder {
 
     /// Encodes `config` into the provider-options dictionary shape.
-    ///
-    /// Returns `nil` only when encoding genuinely fails; callers treat that as "no options",
-    /// which is the pre-existing behaviour for an unconfigured profile.
+    /// Returns `nil` only when encoding fails; callers treat that as "no options", as for an unconfigured profile.
     static func encode<T: Encodable>(_ config: T) -> [String: JSONValue]? {
         do {
             let data = try JSONEncoder().encode(config)

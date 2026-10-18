@@ -4,19 +4,7 @@
 //  AttachmentClassifier.swift
 //  Devgentic
 //
-//  The ONE answer to "what kind of attachment is this file?". Every site that branches on
-//  it asks here:
-//    • `AttachmentIntake`          — accept or refuse at attach time
-//    • `MessageAttachmentBuilder`  — what the TRANSCRIPT records
-//    • `BackendOrchestrationService` — what the MODEL receives (image payload vs text)
-//    • `RAGIndexingService`         — what later turns can retrieve
-//    • `PreSendFitHint`             — what the context GAUGE prices, and how
-//
-//  ⚠️ Why one owner (ATT-1): these sites each carried their own classifier and disagreed.
-//  The transcript checked "text" before "image" while the backend checked "image" first, so
-//  an `.svg` (image/svg+xml — on the text list AND an image UTType) was recorded as text
-//  but shipped as an image. Extension-less files once fell through the transcript's
-//  classifiers entirely. A new type rule added here reaches all five sites at once.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -38,6 +26,9 @@ enum AttachmentKind: String, Equatable, Sendable {
     case binary
 }
 
+/// The one answer to 'what kind of attachment is this file?'; every site that branches on it asks here:
+/// `AttachmentIntake` (accept/refuse), `MessageAttachmentBuilder` (transcript), `BackendOrchestrationService` (payload),
+/// `RAGIndexingService` (retrieval) and `PreSendFitHint` (gauge pricing). A new type rule reaches all of them at once.
 enum AttachmentClassifier {
 
     static func classify(_ item: FileSystemItem) -> AttachmentKind {

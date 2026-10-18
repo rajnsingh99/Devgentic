@@ -4,25 +4,14 @@
 //  OrbSettingsView.swift
 //  Devgentic
 //
-//  Settings pane for the Orb voice HUD. Reads/writes OrbConfigManager (UserDefaults-
-//  backed) and asks AppDelegate to re-register the Carbon shortcut when activation changes.
-//
-//  Two deliberate shapes, both from the settings design review:
-//
-//  • DURATIONS ARE NAMED STEPS, NOT SLIDERS. No `Slider` appears inside a SettingsCard/
-//    SettingsRow anywhere in this app, and more importantly the effective end-of-speech is
-//    min(our window, WhisperKit's own ~1.5s VAD) — so a slider's bottom third would be
-//    visibly inert. Quick/Normal/Relaxed states the floor instead of hiding it.
-//
-//  • ROWS WHOSE BEHAVIOUR IS NOT BUILT YET SHOW A "Soon" BADGE RATHER THAN A LIVE CONTROL.
-//    The pane exists so the user knows what Orb will and won't do; hiding future rows
-//    would serve tidiness over that goal, and a working-looking toggle over a feature that
-//    does not exist is the exact complaint the pane is meant to prevent.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AVFoundation
 
+/// Settings pane for the Orb voice HUD; reads and writes `OrbConfigManager` and re-registers the Carbon shortcut.
+/// Durations are named steps, not sliders; rows for unbuilt behaviour show a "Soon" badge, not a live control.
 struct OrbSettingsView: View {
     @Environment(\.appTheme) private var theme
     @State private var config = OrbConfigManager.shared
@@ -41,8 +30,7 @@ struct OrbSettingsView: View {
     @State private var profileConfig = BackendConfiguration()
     @State private var showingProfilePopup = false
 
-    /// Private synthesizer for the voice preview — deliberately not SpeechService.shared, which
-    /// would pop the chat Read-Aloud island over the history.
+    /// Private synthesizer for the voice preview, not `SpeechService.shared`, which would pop the chat Read-Aloud island.
     @State private var previewVoice = OrbVoiceOutput()
     @State private var micPermission: AVAudioApplication.recordPermission = AVAudioApplication.shared.recordPermission
 
@@ -131,10 +119,8 @@ struct OrbSettingsView: View {
                         .frame(width: 200)
                 }
 
-                // ⚠️ Same rule as the approval keywords: show what Orb ACTUALLY listens for, not
-                // what was typed. The entry is lowercased, stripped of punctuation and rejected
-                // below two characters — a field silently disagreeing with the matcher is exactly
-                // how a user concludes the microphone is broken.
+                // Shows what Orb actually listens for, not what was typed: entries are lowercased, stripped of punctuation,
+                // and need 2+ characters.
                 let heard = OrbSessionController.wakeWordVariants(for: config.wakeWord)
                 let entryUnusable = OrbConfigManager.sanitizedWakeWord(config.wakeWordRaw) == nil
                     && !config.wakeWordRaw.isEmpty
@@ -454,10 +440,7 @@ struct OrbSettingsView: View {
                             .frame(width: 200)
                     }
 
-                    // ⚠️ Shows what Orb will ACTUALLY listen for, not what was typed. Entries
-                    // are normalized and one-letter words are dropped, so a field that reads
-                    // "Approve, a" listens for one word — and silently disagreeing with the text
-                    // box is exactly how a user concludes the microphone is broken.
+                    // Shows what Orb will actually listen for: entries are normalized and one-letter words are dropped.
                     let resolved = config.resolvedApprovalKeywords
                     rowDivider
                     readoutRow(
@@ -514,9 +497,8 @@ struct OrbSettingsView: View {
                     .frame(width: 185)
                 }
 
-                // ⚠️ BOTH recognizers need a DOWNLOADED model, and both fail quietly without one:
-                // WhisperKit refuses to start, Apple Speech transcribes degraded without erroring.
-                // The choice therefore belongs next to the recognizer picker, not buried elsewhere.
+                // Both recognizers need a downloaded model and fail quietly without one, so the choice
+                // sits beside the recognizer picker.
                 rowDivider
                 if config.recognizer.isAppleSpeech {
                     appleSpeechLanguageRow
@@ -633,10 +615,7 @@ struct OrbSettingsView: View {
                 isWarning: micPermission != .granted
             )
             rowDivider
-            // ⚠️ Under Apple Speech, Orb never touches WhisperKit — the Apple branch runs an
-            // entirely separate loop. Reporting an unloaded Whisper model as a WARNING there made
-            // the one card whose job is "why isn't this working?" raise a false alarm about a
-            // healthy session, which is the fastest way to teach someone to ignore the card.
+            // Under Apple Speech, Orb never touches WhisperKit, so an unloaded Whisper model must not raise a warning here.
             readoutRow(
                 title: config.recognizer.isAppleSpeech ? "Speech model (not in use)" : "Speech model",
                 description: config.recognizer.isAppleSpeech
@@ -662,7 +641,7 @@ struct OrbSettingsView: View {
                 HStack(spacing: 8) {
                     TactileButton(
                         title: "Check Access",
-                        icon: "checkmark.shield",   // ⚠️ `mic.badge.checkmark` is not an SF Symbol — it rendered blank and logged on every visit to the pane.
+                        icon: "checkmark.shield",
                         variant: .secondary
                     ) {
                         Task {
@@ -780,12 +759,8 @@ struct OrbSettingsView: View {
 
     private static let logger = DGLogger(category: "OrbSettings")
 
-    /// Switching Orb on asks for the microphone NOW, while the user is thinking about voice, so the
-    /// permission is settled before the orb first listens. macOS shows its prompt only while the
-    /// answer is undetermined; once allowed or denied this returns at once with no prompt, and the
-    /// Status card's Microphone row shows the result either way.
-    /// ⚠️ Orb is switched on even if access is denied. Refusing the switch would hide why; the
-    /// Microphone row says Denied and Privacy Settings is beside it.
+    /// Switching Orb on asks for the microphone immediately; macOS prompts only while the answer is undetermined.
+    /// Orb stays on even if access is denied; the Status card's Microphone row shows the result.
     private func requestMicrophoneOnEnable() {
         let before = AVAudioApplication.shared.recordPermission
         Task { @MainActor in
@@ -816,26 +791,14 @@ struct OrbSettingsView: View {
                 // The shortcut is registered ONLY in hold-to-talk mode, so a mode change is also
                 // a registration change.
                 AppDelegate.shared?.applyOrbHotkeyConfig()
-                // ⚠️ And a RUNNING session has to be told. Without this, switching from
-                // hold-to-talk to a listening mode unregistered the shortcut and started no loop:
-                // the orb read STANDBY, the wake word did nothing, and clicking it wedged the
-                // session in LISTENING with no microphone behind it.
+                // A running session must be told the activation mode changed, or it can sit in LISTENING with no microphone loop.
                 OrbPanelController.shared.session?.activationModeChanged()
             }
         )
     }
 
-    /// ⚠️ This writes the APP-WIDE speech-model key, so it must behave exactly as the General
-    /// pane's picker does for the same key. It did neither of the two things that picker does:
-    ///
-    ///  • **Post `speechModelChangedNotification`.** `WhisperRecognitionService` reloads ONLY on
-    ///    that notification and reads the key just once at startup — so choosing a model here
-    ///    changed the persisted value and nothing else. The pane then contradicted itself: the
-    ///    picker showed the new model while Status & Recovery, three rows down, correctly still
-    ///    reported the old one as loaded.
-    ///  • **Refuse a model that is not downloaded.** General reverts and offers the download;
-    ///    here the id was persisted regardless, so the NEXT LAUNCH came up naming a model that is
-    ///    not on disk and neither Orb nor composer dictation had a recognizer at all.
+    /// Writes the app-wide speech-model key and must match the General pane's picker for that key:
+    /// posts `speechModelChangedNotification` (the recognizer reloads only on it) and refuses undownloaded models.
     private var whisperModelBinding: Binding<String> {
         Binding(get: { whisperModel }, set: { newValue in
             guard newValue != whisperModel else { return }
@@ -871,9 +834,7 @@ struct OrbSettingsView: View {
     }
 
     private var wakeWordBinding: Binding<String> {
-        // ⚠️ Deliberately NOT logged here — this fires on every keystroke. The word in force is
-        // logged once per session in the [ORB_SESSION] start line, which is what a device
-        // transcript actually needs.
+        // Not logged here because this fires on every keystroke; the wake word in force is logged in the session start line.
         Binding(get: { config.wakeWordRaw }, set: { config.wakeWordRaw = $0 })
     }
 
@@ -884,10 +845,7 @@ struct OrbSettingsView: View {
     private var voiceApprovalsBinding: Binding<Bool> {
         Binding(get: { config.voiceApprovals }, set: { newValue in
             config.voiceApprovals = newValue
-            // ⚠️ The off edge must reach an ALREADY-ARMED window. The setting is read once, when
-            // the run parks; nothing re-reads it. Without this the microphone stayed hot and the
-            // next thing said in the room could still commit a tool — through a channel the UI
-            // now says is switched off.
+            // Switching off must reach an already-armed approval window, since the setting is read once when the run parks.
             if !newValue { OrbPanelController.shared.session?.cancelVoiceApproval(reason: "voice approvals switched off") }
         })
     }
@@ -903,13 +861,10 @@ struct OrbSettingsView: View {
     private var duplexBinding: Binding<Bool> {
         Binding(get: { config.duplexAudioEnabled }, set: { newValue in
             config.duplexAudioEnabled = newValue
-            // ⚠️ Turning it off must release immediately. The engine is panel-scoped, so an open
-            // orb would otherwise keep holding the device while the next turn has WhisperKit
-            // build its own engine on top of it — two input engines, no capture.
+            // Turning off releases the engine immediately; an open orb would otherwise hold the device
+            // while WhisperKit builds a second engine.
             if newValue {
-                // The ON edge was missing entirely: the engine is only warmed at panel open, so a
-                // developer enabling duplex to test it got "Duplex is ON but the engine is cold"
-                // on every turn while the toggle read on.
+                // Turning on rebuilds the engine, which is otherwise warmed only at panel open.
                 Task { await OrbDuplexAudio.shared.rebuild(reason: "duplex audio switched on") }
             } else {
                 OrbDuplexAudio.shared.release(reason: "duplex audio switched off")
@@ -920,10 +875,8 @@ struct OrbSettingsView: View {
     private var approvalsBinding: Binding<OrbToolApprovals> {
         Binding(get: { config.toolApprovals }, set: { newValue in
             config.toolApprovals = newValue
-            // ⚠️ The autonomous grant is applied per DISPATCH and revoked only at teardown, so a
-            // change made mid-run was invisible to the run in flight — the picker read "Ask me"
-            // while every remaining tool call kept auto-approving. This row's warning styling
-            // implies it governs that danger; now it does.
+            // A run in flight must be told: the autonomous grant is applied per dispatch,
+            // so a mid-run change is otherwise invisible.
             OrbPanelController.shared.session?.toolApprovalsChanged()
         })
     }

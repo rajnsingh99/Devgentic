@@ -4,7 +4,7 @@
 //  SidebarAnimations.swift
 //  Devgentic
 //
-//  Shared animation utilities and reusable components for the sidebar.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -12,9 +12,8 @@ import SwiftUI
 // MARK: - Streaming Pulse Indicator
 /// An animated pulsing dot indicating an active streaming conversation.
 struct StreamingPulseIndicator: View {
-    /// `nil` → the theme's streaming color. The sidebar row passes `warningColor`
-    /// for the needs-input state — ONE indicator, two colors (user decision
-    /// 2026-07-19: yellow = waiting on you, streaming color = generating).
+    /// `nil` uses the theme's streaming color. The sidebar row passes `warningColor` for the needs-input state:
+    /// one indicator, two colors (yellow = waiting on you, streaming color = generating).
     var color: Color? = nil
 
     @State private var isPulsing = false

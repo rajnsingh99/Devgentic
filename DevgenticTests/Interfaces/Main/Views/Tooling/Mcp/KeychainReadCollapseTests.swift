@@ -2,19 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  KeychainReadCollapseTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Registers KC-8 and KC-10 — the read-collapse defect in the two stores that never adopted
-//  `SecureKeyStorage.read`.
-//
-//  ⚠️⚠️ WHAT BOTH ROWS SHARE. `retrieve` maps "no secret stored" and "the read FAILED" to the same
-//  nil. `HuggingFaceTokenStore` then MEMOIZED that nil for the life of the process, and
-//  `ChatOpsConfigManager` fed it to the pairing restore, which reported an outage as "you have never
-//  paired" — offering to re-pair over four credentials that were intact the whole time.
-//
-//  ⚠️ Every test here drives `.failed`, never `.notFound`. A dev machine only ever produces
-//  `errSecItemNotFound`, which is exactly why both defects survived. A stub that cannot fail a read
-//  would make this whole file vacuous.
+//  Created by Raj Singh.
 //
 
 import XCTest

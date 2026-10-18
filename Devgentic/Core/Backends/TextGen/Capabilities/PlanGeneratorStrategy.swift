@@ -4,12 +4,7 @@
 //  PlanGeneratorStrategy.swift
 //  Devgentic
 //
-//  Prompts the LLM to decompose a user query into an ordered list of SubTasks.
-//
-//  Output format: Numbered list (universal across model sizes).
-//  Tool hints: Optional inline [bracket] notation, validated against the tool registry.
-//
-//  Migrated from JSON array output during the Planner Resilience Migration.
+//  Created by Raj Singh.
 //
 
 import Foundation

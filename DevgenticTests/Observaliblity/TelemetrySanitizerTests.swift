@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  TelemetrySanitizerTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Executed-regex coverage for the privacy firewall. The 2026-08-23 assessment EXECUTED the
-//  sanitizer's patterns rather than reading them and found 8 of 11 secret classes surviving
-//  `.standard` (and 11 of 11 surviving `.minimal`, which was the level every TraceRecorder
-//  preview used). These tests keep that from regressing: every class is asserted by running
-//  the sanitizer, and the anti-overreach suite pins that ordinary content is NOT eaten —
-//  shape-matching payloads is this codebase's recidivist defect class, and a sanitizer is a
-//  deliberate shape-matcher, so the overreach tests matter as much as the redaction tests.
+//  Created by Raj Singh.
 //
 
 import XCTest

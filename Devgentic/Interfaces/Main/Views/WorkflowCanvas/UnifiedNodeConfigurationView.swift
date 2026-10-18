@@ -4,14 +4,12 @@
 //  UnifiedNodeConfigurationView.swift
 //  Devgentic
 //
-//  Unified master-detail split-view configuration window for workflow canvas nodes.
-//  Inspired by the Model Catalog window design:
-//  - Master Sidebar: list of all attached canvas nodes with search, category filters, and status.
-//  - Detail View: dedicated inline rename bar, in-settings search bar, and respective node configuration.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Category filter for the node list in the workflow node configuration window's sidebar.
 enum NodeCategoryFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case agents = "Agents"

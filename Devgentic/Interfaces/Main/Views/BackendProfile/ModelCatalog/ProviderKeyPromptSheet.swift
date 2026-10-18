@@ -4,12 +4,13 @@
 //  ProviderKeyPromptSheet.swift
 //  Devgentic
 //
-//  One-time API Key and Endpoint modal sheet for remote providers with Keychain persistence.
-//  Allows configuring API keys and custom gateway/proxy endpoints across the app lifetime.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Modal sheet for entering a remote provider's API key and custom gateway or proxy endpoint, with Keychain
+/// persistence.
 struct ProviderKeyPromptSheet: View {
 
     let category: ModelCatalogProviderCategory
@@ -117,7 +118,7 @@ struct ProviderKeyPromptSheet: View {
                         }
                     }
 
-                    // Secret Input Field (UI_Guidelines.md §6.1)
+                    // Secret input field
                     HStack(spacing: 8) {
                         Image(systemName: "key.fill")
                             .font(.system(size: 11))

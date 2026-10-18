@@ -4,15 +4,13 @@
 //  HITLRiskTier+Color.swift
 //  Devgentic
 //
-//  [Q3] Single source of truth for the tool-risk-tier accent color, shared by the main
-//  window's InteractionBannerStack and the QuickAccess panel's QuickAccessHITLBanner (their
-//  local copies had already diverged, so the same tool showed different colors per surface).
-//  Lives in the Interfaces layer — HITLRiskTier is declared in Core (AgentStreamEvent.swift,
-//  Foundation-only), and this keeps SwiftUI/Theme out of that model file.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Single source of truth for the tool-risk-tier accent color, shared by the main banner stack and QuickAccess.
+/// Lives in the Interfaces layer to keep SwiftUI/Theme out of Core's Foundation-only `HITLRiskTier`.
 extension HITLRiskTier {
     /// Banner accent for this risk tier, resolved against the current theme.
     func color(in theme: any Theme) -> Color {

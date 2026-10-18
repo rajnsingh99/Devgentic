@@ -4,16 +4,7 @@
 //  CloudProviderProtocolTests.swift
 //  DevgenticTests
 //
-//  Readiness P2 batch 1 (2026-10-11): the cloud provider protocol.
-//    CR-25  the stream's stall watchdog ran while the request was still being opened
-//    CR-26  unparseable OpenAI tool arguments became [:] silently; a stream with no finish_reason
-//           was accepted as complete
-//    CR-27  gpt-5.1 / gpt-5.2 classified as standard models (max_tokens + temperature → 400)
-//    CR-28  Gemini thinking config sent at the top level; thought parts spliced into the answer
-//    CR-42  an empty native reply ended the run as "completed" with no retry
-//
-//  The wiring tests drive the REAL providers through `URLSession.shared` with a stub protocol, so a
-//  call site that stops using the fixed helper fails here, not only the helper's own unit test.
+//  Created by Raj Singh.
 //
 
 import XCTest

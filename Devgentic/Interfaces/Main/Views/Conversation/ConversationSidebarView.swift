@@ -4,7 +4,7 @@
 //  ConversationSidebarView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 28/02/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -180,9 +180,7 @@ struct ConversationSidebarRow: View {
 
     var body: some View {
         ConversationRowView(
-            // [P1] Row-weight projection: `toStruct()` decoded EVERY message's four
-            // JSON blobs per row per render (MainActor, re-run on every mid-stream
-            // flush). `toRowStruct()` decodes at most one content blob for the title.
+            // Row-weight projection: `toRowStruct()` decodes at most one content blob for the title, unlike `toStruct()`.
             conversation: conversation.toRowStruct(),
             isSelected: viewModel.selectedConversationID == conversation.id,
             isRenaming: renamingConversationID == conversation.id,
@@ -206,9 +204,8 @@ struct ConversationSidebarRow: View {
             // [P8] Live truth from the stream manager (observable — the row updates the
             // moment a stream starts/ends). First time the pulse has ever been reachable.
             isStreamingLive: viewModel.activeStreamManager.hasActiveStream(inConversation: conversation.id),
-            // [B] Not observable — `BackgroundProcessRegistry` is an `NSLock`-guarded singleton,
-            // not an `@Observable`, so a bare read here would never redraw. State + the same
-            // `.backgroundTaskChanged` notice the pill and the footer listen to.
+            // Not observable: `BackgroundProcessRegistry` is a lock-guarded singleton, so this is state refreshed by
+            // the same `.backgroundTaskChanged` notice the pill and the footer listen to.
             hasPendingBackgroundReport: hasPendingBackgroundReport
         )
         .contextMenu {
@@ -219,8 +216,7 @@ struct ConversationSidebarRow: View {
         }
         .onAppear(perform: reloadPendingBackgroundReport)
         .onReceive(NotificationCenter.default.publisher(for: .backgroundTaskChanged)) { note in
-            // ⚠️ Scoped to THIS row's conversation. Every row in the sidebar observes this notice,
-            // so an unfiltered handler would recompute the registry once per row per task event.
+            // Scoped to this row's conversation: every row observes this notice, so an unfiltered handler would run per row.
             guard note.userInfo?[BackgroundTaskNotificationKey.conversationID] as? UUID == conversation.id
             else { return }
             reloadPendingBackgroundReport()
@@ -579,7 +575,7 @@ struct ConversationSidebarView: View {
                             }
                         )
                     } else {
-                        // [P1] Lazy: rows build only as they scroll into view.
+                        // Lazy: rows build only as they scroll into view.
                         LazyVStack(spacing: 2) {
                             ForEach(data.pinned) { conversation in
                                 row(for: conversation)
@@ -596,7 +592,7 @@ struct ConversationSidebarView: View {
                 case .all:
                     // Date-Grouped Sections (non-pinned only)
                     ForEach(Array(data.dateSections.enumerated()), id: \.element.title) { index, section in
-                        // [P1] Lazy: a large date section no longer builds every row up front.
+                        // Lazy: a large date section does not build every row up front.
                         LazyVStack(alignment: .leading, spacing: 2) {
                             if index > 0 {
                                 Divider()
@@ -724,10 +720,8 @@ struct ConversationSidebarView: View {
 
     /// Single-pass partition: filters by mode, splits pinned/unpinned, and date-groups in one traversal.
     private var partitioned: PartitionedConversations {
-        // Profile type lookup for LEGACY rows only (no denormalized `profileTypeRaw`), built on first
-        // need. ⚠️ Was built unconditionally: a fetch + snapshot of every profile on each of the
-        // 2–3 evaluations per body, which ran on every streaming flush (RAG-28) even when no row
-        // needed it.
+        // Profile type lookup for legacy rows only (no denormalized `profileTypeRaw`), built on first need;
+        // building it eagerly costs a profile fetch per body evaluation.
         var typeMap: [UUID: ProfileType]?
         func profileType(for id: UUID) -> ProfileType? {
             if typeMap == nil {
@@ -767,11 +761,8 @@ struct ConversationSidebarView: View {
             if let pt = resolvedProfileType {
                 if !allowedTypes.contains(pt) { continue }
             } else {
-                // No profile type resolved — always show in chat mode. Hide from workflow
-                // (workflows always have a profile bound). Code conversations are now tagged
-                // at creation time via `tagConversationWithCurrentMode`, so an untagged entry
-                // reaching code mode implies a legacy/migrated row — show it there too so it's
-                // discoverable rather than silently excluded.
+                // No profile type resolved: shown in chat mode, hidden in workflow mode (workflows always have a profile bound).
+                // An untagged entry reaching code mode is a legacy row, shown there so it stays discoverable.
                 if viewModel.interfaceMode == .workflow { continue }
             }
 
@@ -826,11 +817,8 @@ struct ConversationSidebarView: View {
     private var dateGroupedSections: [DateSection] { partitioned.dateSections }
 
     // MARK: - Batch Selection Header
-    //
-    // Mirrors the PromptLibrarySidebarView pattern (2026-04-21): in selection
-    // mode the normal title/search/chip chrome is hidden and replaced by
-    // `[Cancel] [N selected] [Select All / Deselect All] [Delete]`. Keeps the
-    // sidebar header slot used for exactly one purpose at a time.
+    // In selection mode the title/search/chip chrome is replaced by `[Cancel] [N selected] [Select All] [Delete]`,
+    // so the header slot serves one purpose at a time.
     @ViewBuilder
     private var batchHeaderRow: some View {
         HStack(spacing: 10) {
@@ -884,10 +872,8 @@ struct ConversationSidebarView: View {
         return p.pinned + p.dateSections.flatMap(\.conversations) + p.projectGroups.flatMap(\.items)
     }
 
-    /// Flattens the current partition (pinned + all date sections) into a
-    /// set of IDs for Select-All semantics. Honors the filter chip — when
-    /// `.pinned` is selected only pinned rows are visible, so only pinned
-    /// IDs go into the set.
+    /// Flattens the current partition (pinned + date sections) into a set of IDs for Select-All.
+    /// Honors the filter chip: with `.pinned` selected only pinned IDs are included.
     private var visibleConversationIDs: Set<UUID> {
         Set(visibleConversationsList.map(\.id))
     }

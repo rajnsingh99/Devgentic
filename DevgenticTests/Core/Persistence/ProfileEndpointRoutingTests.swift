@@ -4,21 +4,7 @@
 //  ProfileEndpointRoutingTests.swift
 //  DevgenticTests
 //
-//  Created on 08/08/26.
-//
-//  Register B21 / B22 — a profile's configured API Endpoint must be the host its credential goes
-//  to, on every path that carries the credential.
-//
-//  ⚠️ The whole cluster is one failure: a user points a profile at a corporate gateway, is issued a
-//  key scoped to that gateway, and the app sends that key to the vendor anyway. It reached the
-//  vendor three different ways — a hardcoded host in the imageGen provider, a hardcoded host in the
-//  text-gen provider factory, and an endpoint string that failed to parse and silently degraded to
-//  "not configured". Each is asserted separately below because each was a separate omission.
-//
-//  B22's guard (`ConfiguredEndpoint`) and its tests were deleted on 2026-10-09 with the per-provider
-//  model pickers, its only callers. The model catalog that replaced them fetches from a typed
-//  endpoint only for Ollama and OpenAI-compatible servers, and both loaders refuse one that fails
-//  `ProviderDefaults.isUsableEndpoint` (asserted below); its cloud lists are built in — no fetch.
+//  Created by Raj Singh.
 //
 
 import XCTest

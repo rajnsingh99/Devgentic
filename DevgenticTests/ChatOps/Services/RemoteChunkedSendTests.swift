@@ -2,22 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RemoteChunkedSendTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Delivering a reply that does not fit one message.
-//
-//  ⚠️⚠️ THE THREE DEFECTS THIS PINS, ALL IN ONE LINE. Every API client spelled a chunked send as
-//  `for chunk in chunks { try await send(chunk) }`, which meant:
-//    (1) `Retry-After` was PARSED by all three clients and honoured by none — the only readers of
-//        `rateLimited(retryAfter:)` anywhere in the tree were `errorDescription` switches;
-//    (2) a throw on chunk k abandoned k+1…n, so the answer stopped mid-sentence with no signal;
-//    (3) the caller's retry restarted from chunk ONE, because nothing recorded how far it got, so
-//        the mirror re-posted every chunk that had already arrived.
-//
-//  ⚠️ AND THE CHUNKER MEASURED IN THE WRONG UNIT. `text.count` counts Characters; the platforms
-//  count UTF-16. One family emoji is 1 Character and 11 UTF-16 units, so an emoji-dense reply built
-//  "within budget" chunks an order of magnitude over the real limit — and the platform rejects the
-//  whole message rather than truncating, so the answer did not arrive at all.
+//  Created by Raj Singh.
 //
 
 import XCTest

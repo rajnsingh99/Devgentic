@@ -4,26 +4,16 @@
 //  SlackChatOpsBridge.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import SwiftData
 import os
 
-/// The core orchestrator for Slack ChatOps.
-///
-/// Routes incoming Slack Socket Mode events through the security gate, parses them into commands,
-/// and dispatches them to the appropriate handler.
-///
-/// Uses the single-path architecture: remote messages reach the agent through the same send path
-/// the Mac UI uses. The `RemoteMirrorService` handles mirroring events back to the transport.
-///
-/// ⚠️ [BR-4] FREE TEXT GOES THROUGH `ChatOpsCommandService.submitTurn`, NOT through the view model
-/// directly. This header used to name `MainApplicationViewModel.submitRemoteMessage()`, and calling
-/// it here is exactly what let a second remote message start a second root run in a conversation
-/// that was already streaming. `submitTurn` bundles the admission check, the mirror registration
-/// and the submit so the three bridges cannot order them three different ways.
+/// The core orchestrator for Slack ChatOps: routes Socket Mode events through the security gate, parses them into
+/// commands, and dispatches them. Free text goes through `ChatOpsCommandService.submitTurn`; `RemoteMirrorService`
+/// mirrors events back.
 @Observable @MainActor
 final class SlackChatOpsBridge {
 
@@ -90,24 +80,18 @@ final class SlackChatOpsBridge {
             )
         }
 
-        // ⚠️⚠️ [DC-1/LIFE-2] REFUSE A SECOND START — see `ChatOpsBridgeStart.shouldProceed` for why
-        // this refuses rather than restarting: `stop()` tears down the mirror session and would kill
-        // an in-flight tool approval. Placed after the credential guards, so a start that was never
-        // going to work is still reported as a missing token rather than as a duplicate.
+        // Refuses a second start (see `ChatOpsBridgeStart.shouldProceed`): `stop()` would kill an in-flight tool approval.
+        // Placed after the credential guards so a start that cannot work is reported as a missing token, not a duplicate.
         guard ChatOpsBridgeStart.shouldProceed(isRunning: isRunning, provider: .slack, logger: logger) else { return }
 
-        // ⚠️ [LIFE-2] THE RUN'S OWN IDENTITY. Bumped on every start so the trailing block below can
-        // tell whether it is still the live run before it writes anything user-visible.
+        // The run's own identity, bumped on every start so the trailing block can tell whether it is still the live run.
         generation &+= 1
         let thisGeneration = generation
 
         isRunning = true
 
-        // ⚠️⚠️ [NEW-1] THE ONE CASE WHERE THIS BRIDGE ANNOUNCES ITSELF UNPROMPTED. A pairing made
-        // before per-sender authorization records no account, nothing backfills it, and the gate then
-        // refuses EVERY message with a bare return — so the remote user sees a bot that simply stopped
-        // answering. Settings now says so too, but they are not looking at Settings; they are looking
-        // at this chat. See `ChatOpsUpgradeNotice` for why posting here is safe and why it is once.
+        // The one case where this bridge announces itself unprompted: a pairing without a recorded account is refused by the
+        // gate on every message, so the remote user sees a bot that stopped answering. See `ChatOpsUpgradeNotice`.
         if ChatOpsUpgradeNotice.needsRepairing(addressPresent: config.slackAuthorizedChannelID != nil,
                                                authorizedUserID: config.slackAuthorizedUserID),
            ChatOpsUpgradeNotice.claimAnnouncement(for: .slack) {
@@ -129,10 +113,8 @@ final class SlackChatOpsBridge {
                 await self.handleSocketEvent(event)
             }
 
-            // ⚠️⚠️ See the twin in `ChatOpsBridge.start()`. A stream that ends because `stop()` was
-            // called and a stream that ends because Slack will never accept this token again are
-            // the same event from here; only the socket client knows which, and until it recorded
-            // that, both produced one `.info` line over a UI still showing "Active".
+            // See the twin in `ChatOpsBridge.start()`: only the socket client knows whether the stream ended because `stop()` was
+            // called or because Slack will never accept this token again.
             let terminalFailure = await socket.terminalFailure
 
             await MainActor.run {
@@ -161,10 +143,8 @@ final class SlackChatOpsBridge {
         isRunning = false
         logger.info("SlackChatOpsBridge stopped.")
 
-        // ⚠️⚠️ [LIFE-2/LIFE-7] RELEASE WHAT THIS RUN OWNED. `stop()` used to leave every client,
-        // transport and the command service installed, so a "stopped" bridge still held a live API
-        // client and — through `ChatOpsCommandService` — a STRONG reference to the app's main view
-        // model, defeating the `weak var viewModel` this file declares two lines up.
+        // Releases what this run owned: a stopped bridge must not keep a live API client or, through `ChatOpsCommandService`, a
+        // strong reference to the main view model, which would defeat the `weak var viewModel`.
         apiClient = nil
         socketClient = nil
         slackTransport = nil
@@ -196,10 +176,8 @@ final class SlackChatOpsBridge {
 
     // MARK: - Message Handling
 
-    /// Slack subtypes that are channel housekeeping rather than something a person said to the bot.
-    ///
-    /// ⚠️ EXHAUSTIVE BY INTENT, NOT BY COVERAGE. Anything not listed is ROUTED — see the inversion
-    /// note in `handleMessage`. Adding a subtype here is a deliberate decision to ignore it.
+    /// Slack subtypes that are channel housekeeping rather than something a person said to the bot. Anything not listed is
+    /// routed (see `handleMessage`); adding a subtype here deliberately ignores it.
     private static let housekeepingSubtypes: Set<String> = [
         "bot_message", "message_changed", "message_deleted", "message_replied", "tombstone",
         "channel_join", "channel_leave", "channel_topic", "channel_purpose", "channel_name",
@@ -207,18 +185,11 @@ final class SlackChatOpsBridge {
     ]
 
     private func handleMessage(_ event: SlackEvent) async {
-        // ⚠️ THE BOT'S OWN ECHO IS DELIBERATELY UNLOGGED — the same judgement `PairingAttemptPolicy`
-        // makes for `.unrelated`: this bridge posts constantly, and a line per echo would bury the
-        // drops that matter.
+        // The bot's own echo is deliberately unlogged: this bridge posts constantly and a line per echo would bury real drops.
         guard event.bot_id == nil else { return }
 
-        // ⚠️⚠️ [BR-6] AN IGNORE-LIST, NOT `subtype == nil`, AND THE INVERSION *IS* THE FIX. Matching
-        // on "has any subtype" failed CLOSED: `file_share` — what Slack stamps on a message the
-        // operator typed WITH a file attached — was dropped before it could reach the routing switch,
-        // silently, with no reply. Telegram and Discord have no such pre-filter at all; an input they
-        // cannot route reaches `.unknown` and is logged with its consequence, which is why Slack alone
-        // could swallow a real command. Listing what is NOISE means an unmodelled subtype is routed
-        // and at worst logged; matching on "not nil" meant it was eaten.
+        // An ignore-list, not `subtype == nil`: `file_share` (a message typed with a file attached) must reach the routing
+        // switch. An unmodelled subtype is routed and at worst logged, rather than silently dropped.
         if let subtype = event.subtype, Self.housekeepingSubtypes.contains(subtype) { return }
 
         guard let channelID = event.channel else {
@@ -230,7 +201,7 @@ final class SlackChatOpsBridge {
             return
         }
 
-        // ⚠️ ONE MESSAGE, ONE RUN — see `admitOnce`.
+        // One message, one run; see `admitOnce`.
         guard admitOnce(event, channelID: channelID) else { return }
 
         // Security gate
@@ -238,10 +209,8 @@ final class SlackChatOpsBridge {
                                                 senderID: event.user,
                                                 config: config)
         if case .refused(let refusal) = authorization {
-            // ⚠️⚠️ [TG-5/SEC-6] THE ONE REFUSAL THE OPERATOR IS OWED. Every other arm stays silent on
-            // purpose — answering an unpaired room confirms a Mac is listening there. A THROTTLED
-            // sender has already proved they are the paired operator, so telling them leaks nothing,
-            // and before this they saw exactly what an intruder saw.
+            // The one refusal the operator is owed: other arms stay silent (answering an unpaired room confirms a Mac is
+            // listening), but a throttled sender has already proved they are the paired operator.
             if refusal.mayReply, ChatOpsThrottleNotice.claim(for: .slack),
                case .rateLimited(let retry) = refusal.reason {
                 await tell(channelID,
@@ -266,7 +235,7 @@ final class SlackChatOpsBridge {
             return
         }
 
-        // ⚠️ D-23: a work-starting command redelivered long after it was sent is skipped, not run late.
+        // A work-starting command redelivered long after it was sent is skipped, not run late.
         if RemoteCommandAge.isAgeGated(command),
            let age = RemoteCommandAge.staleAge(sentAt: RemoteCommandAge.slackSentAt(event.ts)) {
             logger.warning("[CHATOPS] A Slack \(String(describing: command)) in channel \(channelID) was sent \(Int(age))s ago. CONSEQUENCE: NOT run (older than \(Int(RemoteCommandAge.maxAge))s); the operator is told to send it again.")
@@ -279,20 +248,9 @@ final class SlackChatOpsBridge {
     }
 
 
-    /// Whether this event is the FIRST delivery of its message, logging the reason when it is not.
-    ///
-    /// ⚠️⚠️ ONE MESSAGE USED TO START TWO AGENT RUNS. Slack sends a separate envelope per matching
-    /// event subscription, and the standard bot recipe subscribes to both `app_mention` and
-    /// `message.channels` — so an addressed message arrived twice, neither copy bearing a `bot_id`
-    /// or a `subtype`, and `handleMessage` submitted the same prompt twice: double token spend,
-    /// double tool execution. `SlackEvent.type` was decoded and read by nothing in the whole tree.
-    ///
-    /// ⚠️ Deduplicated rather than type-filtered — see `SlackEventAdmission` for why a
-    /// `type == "message"` guard would silently break an `app_mention`-only workspace.
-    ///
-    /// ⚠️ RETURNS A VALUE RATHER THAN ENDING A SWITCH ARM IN `break`. `ChatOpsSilentDropTests`
-    /// refuses a bare `break` in a routing switch on the grounds that it cannot name a consequence,
-    /// and it is right: this is a filter, so it says so by answering yes or no.
+    /// Whether this event is the first delivery of its message, logging the reason when it is not. Slack sends one envelope
+    /// per matching subscription (`app_mention` and `message.channels`), so messages are deduplicated rather than
+    /// type-filtered; see `SlackEventAdmission`.
     private func admitOnce(_ event: SlackEvent, channelID: String) -> Bool {
         switch admission.admit(type: event.type, channel: channelID, ts: event.ts) {
         case .admit:
@@ -315,10 +273,8 @@ final class SlackChatOpsBridge {
     private static let clarificationFieldID = "answer"
 
     private func handleInteraction(_ payload: SlackInteractivePayload) async {
-        // ⚠️ ROUTE BY PAYLOAD TYPE FIRST. A `view_submission` has no `actions` array, so the
-        // `guard let action = payload.actions?.first else { return }` below used to drop every
-        // modal submission on its first line — silently, with no log, so the user's typed answer
-        // disappeared and nothing recorded that it had ever arrived.
+        // Route by payload type first: a `view_submission` has no `actions` array and must not fall into the block-actions
+        // guard.
         if payload.type == SlackInteractivePayload.viewSubmission {
             await resolveClarificationModal(payload)
             return
@@ -328,27 +284,16 @@ final class SlackChatOpsBridge {
             logger.error("[CHATOPS] A Slack interactive payload of type \(payload.type) carried no action and is not a view submission. CONSEQUENCE: it is ignored — but this line names the type, so an unsupported interaction is findable instead of vanishing the way view submissions used to.")
             return
         }
-        // ⚠️⚠️ TWO DIFFERENT QUESTIONS, AND ONE VARIABLE USED TO ANSWER BOTH — the same defect
-        // Discord's `handleInteraction` carried. This was
-        // `payload.channel?.id ?? config.slackAuthorizedChannelID ?? ""` feeding BOTH the allowlist
-        // check and the reply address. As an address the fallback is harmless; as evidence it was a
-        // BYPASS, because `authorizeSlack` compares its argument against `slackAuthorizedChannelID`
-        // — so substituting that value made the guard compare the authorized id with itself and
-        // pass unconditionally. A payload with no channel was authorized by construction.
+        // `originChannelID` is evidence for the allowlist check and `replyChannelID` is only an address; using the authorized
+        // id as a fallback for evidence would make the guard compare it with itself.
         let originChannelID = payload.channel?.id
         let replyChannelID = payload.channel?.id ?? config.slackAuthorizedChannelID ?? ""
 
         // Parse action_id using the same callback data format
         let command = ChatOpsCommand.parseSlack(actionID: action.action_id)
 
-        // [D1] Security: button taps must pass the same channel-authorization + tier gate as slash
-        // commands. This path previously bypassed BOTH — a HITL approve/deny/gate button could resolve
-        // below the .full tier or from an unauthorized channel.
-        //
-        // ⚠️ NO FALLBACK HERE. A `block_actions` payload from a message always names its channel;
-        // one that does not cannot be matched against the allowlist, so it is refused rather than
-        // admitted. View submissions are the genuine no-channel case and never reach this line —
-        // they are routed to `resolveClarificationModal` above, which documents its own exemption.
+        // Button taps pass the same channel-authorization and tier gate as slash commands. No fallback: a payload without a
+        // channel is refused; view submissions are routed to `resolveClarificationModal` above.
         guard let originChannelID else {
             logger.error("[CHATOPS] A Slack \(payload.type) payload carried no channel, so it cannot be matched against the channel allowlist. CONSEQUENCE: it is refused. Previously the authorized channel id was substituted here, which made the allowlist compare that id with itself and admit the interaction unchecked.")
             return
@@ -357,10 +302,8 @@ final class SlackChatOpsBridge {
                                                 senderID: payload.user?.id,
                                                 config: config)
         if case .refused(let refusal) = authorization {
-            // ⚠️⚠️ [TG-5/SEC-6] THE ONE REFUSAL THE OPERATOR IS OWED. Every other arm stays silent on
-            // purpose — answering an unpaired room confirms a Mac is listening there. A THROTTLED
-            // sender has already proved they are the paired operator, so telling them leaks nothing,
-            // and before this they saw exactly what an intruder saw.
+            // The one refusal the operator is owed: other arms stay silent (answering an unpaired room confirms a Mac is
+            // listening), but a throttled sender has already proved they are the paired operator.
             if refusal.mayReply, ChatOpsThrottleNotice.claim(for: .slack),
                case .rateLimited(let retry) = refusal.reason {
                 await tell(originChannelID,
@@ -377,16 +320,13 @@ final class SlackChatOpsBridge {
             return
         }
 
-        // ⚠️ The modal must be opened from THIS payload, because only it carries the `trigger_id`
-        // — which expires in about three seconds and cannot be reused.
+        // The modal must be opened from this payload: only it carries the `trigger_id`, which expires in about three seconds.
         if case .answerClarification(let operationID) = command {
             await openClarificationModal(operationID: operationID, payload: payload, channelID: replyChannelID)
             return
         }
 
-        // ⚠️ This switch used to duplicate `.switchConversation` and `.newConversation`, which
-        // `routeCommand` also handled — two arms for one verb, the shape that lets renderings drift.
-        // Delegating means a button and a slash command reach the same decision.
+        // Delegates to the service so a button and a slash command reach the same decision for a shared verb.
         if await routeThroughService(command, channelID: replyChannelID) { return }
 
         switch command {
@@ -397,11 +337,8 @@ final class SlackChatOpsBridge {
         case .gateChoiceHITL(let operationID, let optionIndex):
             await remoteMirrorService?.handleGate(operationID: operationID, optionIndex: optionIndex)
         default:
-            // ⚠️ A TAP THAT DIED HERE LEFT NO TRACE AT ALL. It is reached by an `action_id` that
-            // parses to `.unknown` — a malformed token, or any button from a superseded callback
-            // grammar still sitting in Slack scrollback, which Slack keeps indefinitely. The user
-            // taps, the message does not change, and no line records that taps are arriving and
-            // dying, so a grammar change that orphans old buttons is invisible in the field.
+            // Reached by an `action_id` that parses to `.unknown` (a malformed token or a button from a superseded grammar still in
+            // scrollback); logged so orphaned buttons are visible in the field.
             logger.warning("[CHATOPS/SILENT] A Slack button \(String(describing: command)) was dropped after both gates passed. CONSEQUENCE: the tap changed nothing and produced no reply; its callback token no longer parses, so every copy of that button in scrollback is inert.")
         }
     }
@@ -417,9 +354,8 @@ final class SlackChatOpsBridge {
 
         let view = SlackModalView(
             callbackID: Self.clarificationCallbackID,
-            // ⚠️ THE OPERATION TRAVELS HERE. A modal is not in a channel, so a submission carries no
-            // `channel` to infer anything from; `private_metadata` is the one field that goes out
-            // with the view and comes back untouched.
+            // The operation travels in `private_metadata`: a modal is not in a channel, so a submission carries no `channel` to
+            // infer it from.
             privateMetadata: CallbackToken.answerClarification(operationID: operationID).wire,
             title: "Answer the agent",
             blocks: [
@@ -450,9 +386,8 @@ final class SlackChatOpsBridge {
             return
         }
 
-        // ⚠️ TIER ONLY, NOT THE CHANNEL ALLOWLIST. A submission has no channel to check — the modal
-        // is not in one — and the channel gate already ran when the button that opened it was
-        // tapped. The tier gate still applies because it is about the ACT, not about where it began.
+        // Tier only, not the channel allowlist: a submission has no channel, and the channel gate already ran when the opening
+        // button was tapped; the tier gate is about the act itself.
         guard await securityGate.canExecute(.answerClarification(operationID: operationID),
                                             tier: config.securityTier(for: .slack)) else {
             logger.error("[CHATOPS] A Slack modal answer for clarification \(operationID) was refused by the security tier. CONSEQUENCE: the run stays parked and the answer is discarded.")
@@ -477,10 +412,8 @@ final class SlackChatOpsBridge {
                                                 senderID: payload.user_id,
                                                 config: config)
         if case .refused(let refusal) = authorization {
-            // ⚠️⚠️ [TG-5/SEC-6] THE ONE REFUSAL THE OPERATOR IS OWED. Every other arm stays silent on
-            // purpose — answering an unpaired room confirms a Mac is listening there. A THROTTLED
-            // sender has already proved they are the paired operator, so telling them leaks nothing,
-            // and before this they saw exactly what an intruder saw.
+            // The one refusal the operator is owed: other arms stay silent (answering an unpaired room confirms a Mac is
+            // listening), but a throttled sender has already proved they are the paired operator.
             if refusal.mayReply, ChatOpsThrottleNotice.claim(for: .slack),
                case .rateLimited(let retry) = refusal.reason {
                 await tell(channelID,
@@ -490,8 +423,8 @@ final class SlackChatOpsBridge {
             return
         }
 
-        // ⚠️ `payload.text` is the argument Slack sends after the command name. It was decoded and
-        // never read, so an argument-taking slash verb arrived stripped of its argument.
+        // `payload.text` is the argument Slack sends after the command name; it is passed so argument-taking verbs keep their
+        // argument.
         let command = ChatOpsCommand.parseSlack(
             slashCommand: payload.command,
             slashArgument: payload.text)
@@ -509,13 +442,8 @@ final class SlackChatOpsBridge {
 
     // MARK: - Command Routing
 
-    /// ⚠️ ONE DECISION, ONE ADDRESS. Unlike Discord, Slack has no interaction-reply destination
-    /// wired: `response_url` is decoded on both the interactive and slash payloads
-    /// (`SlackModels.swift:89`, `:111`) and read nowhere, so every view goes to the channel. Adding
-    /// that destination is a real feature — it would make tier denials and `/status` ephemeral
-    /// instead of public — but it is not this commit, whose job is to change nothing.
-    ///
-    /// - Returns: whether the command was one the service owns.
+    /// One decision, one address: Slack has no interaction-reply destination wired (`response_url` is decoded but unused),
+    /// so every view goes to the channel. - Returns: whether the command was one the service owns.
     private func routeThroughService(_ command: ChatOpsCommand, channelID: String) async -> Bool {
         let destination = RemoteDestination.channel(RemoteChannel(provider: .slack, channelID: channelID))
         switch command {
@@ -549,8 +477,8 @@ final class SlackChatOpsBridge {
         return true
     }
 
-    /// [C8] Answers the parked clarification. ⚠️ Derived at the moment of the reply, never
-    /// remembered from when the prompt was sent.
+    /// Answers the parked clarification, derived at the moment of the reply and never remembered from when the prompt was
+    /// sent.
     private func resolveClarification(_ text: String) async {
         guard let operationID = commands?.pendingClarificationOperationID() else {
             logger.error("[CHATOPS] A clarification answer arrived but no clarification is pending for the bound conversation. CONSEQUENCE: the reply was DROPPED rather than submitted as a new agent turn, and the remote user received no acknowledgement.")
@@ -577,19 +505,8 @@ final class SlackChatOpsBridge {
     }
 
 
-    /// Posts a plain-text message that EXPLAINS something to the remote user, and logs when it does
-    /// not arrive.
-    ///
-    /// ⚠️⚠️ EVERY CALLER OF THIS IS A "HERE IS WHY NOTHING HAPPENED" MESSAGE — a tier denial, an
-    /// unbound conversation, a missing profile. They were all `_ = try? await apiClient?.send…`, so
-    /// the one message whose entire job is to explain a failure was itself dropped in silence: the
-    /// user's command did nothing, the explanation never arrived, and NO line was written anywhere.
-    /// A tier-blocked command and a crashed bridge looked identical from both sides.
-    ///
-    /// ⚠️ `whenLost` IS REQUIRED, NOT DEFAULTED, and that is the anti-drift mechanism — the same one
-    /// `resolvedBy:` and `offset:` use elsewhere in this subsystem. A new call site cannot be added
-    /// without stating what the user loses when the message does not arrive, and a default would be
-    /// one generic sentence quietly inherited by all of them.
+    /// Posts a plain-text message that explains something to the remote user, and logs when it does not arrive. `whenLost`
+    /// is required, not defaulted, so every call site states what the user loses if the message is dropped.
     private func tell(_ channelID: String, _ text: String, whenLost consequence: String) async {
         guard let apiClient else {
             logger.error("[CHATOPS] No Slack API client while telling the user: \"\(text.prefix(60))\". CONSEQUENCE: \(consequence)")
@@ -616,28 +533,17 @@ final class SlackChatOpsBridge {
         case .freeText(let text):
             await handleFreeText(text, channelID: channelID)
         case .answerClarification(let operationID):
-            // ⚠️ UNREACHABLE BY DESIGN, and named rather than defaulted so it says so. The button is
-            // intercepted in `handleInteraction` before routing — the modal must be opened from the
-            // payload that carries the `trigger_id`, which expires in seconds — and the submission
-            // is intercepted alongside it. Reaching here means an intercept was removed, and the
-            // symptom would be a button that silently does nothing: the exact failure this switch's
-            // `default: break` once produced for `switch:`.
-            //
-            // ⚠️ THIS ARM PREVIOUSLY POSTED "form dialogs are not available here yet", which was
-            // true for exactly one slice. `views.open` landed; the copy would otherwise have gone
-            // on telling users to type their answer at a modal that works.
+            // Unreachable by design: the button and the submission are intercepted in `handleInteraction` before routing, so
+            // reaching here means an intercept is missing and the button would silently do nothing.
             logger.error("[CHATOPS] A Slack `.answerClarification(\(operationID))` reached routeCommand, which should be impossible: the modal intercept in handleInteraction runs first. CONSEQUENCE: the Answer button did nothing and the run stays parked.")
         case .pairingAttempt:
-            // ⚠️ A WELL-FORMED PIN THAT ARRIVES OUTSIDE A PAIRING WINDOW. The pairing services run
-            // their OWN poll loops and consume attempts there, so anything reaching routeCommand is
-            // a PIN sent when nothing is waiting for one — usually a user re-sending the code after
-            // pairing already succeeded. Named explicitly so it is not reported as an unknown-command
-            // drop, which said the bot might be dead.
+            // A well-formed PIN arriving outside a pairing window (pairing services run their own poll loops), usually a re-sent
+            // code; named explicitly so it is not reported as an unknown-command drop.
             logger.info("[CHATOPS] A pairing PIN arrived with no pairing window open. CONSEQUENCE: it is ignored — pairing is already complete, or the window expired and the user must start it again from Settings.")
 
         default:
-            // ⚠️ NOT "HANDLED ELSEWHERE" FOR EVERY CASE — `.unknown` genuinely ends here, from a
-            // message that matched no verb or a slash command this build does not know.
+            // Not 'handled elsewhere' for every case: `.unknown` genuinely ends here, from a message matching no verb or an unknown
+            // slash command.
             logger.warning("[CHATOPS/SILENT] A Slack \(String(describing: command)) reached the end of routeCommand and was dropped. CONSEQUENCE: the user received NO reply at all and cannot tell whether the bot is alive.")
         }
     }
@@ -645,10 +551,8 @@ final class SlackChatOpsBridge {
     // MARK: - Command Handlers
 
     private func handleFreeText(_ text: String, channelID: String) async {
-        // ⚠️ [LIFE-7] NO LIVENESS GUARD HERE ANY MORE. It used to bare-return, discarding a gated,
-        // tier-checked, parsed prompt with no line and no reply. `ChatOpsCommandService` now holds
-        // its host WEAKLY and answers a lost one through `hostLost` / `hostUnavailable`, so the
-        // command is refused *and the user is told* instead of vanishing.
+        // No liveness guard here: `ChatOpsCommandService` holds its host weakly and answers a lost one through `hostLost` /
+        // `hostUnavailable`, so the command is refused and the user is told.
 
         guard let conversationID = config.slackActiveConversationID else {
             await tell(channelID,
@@ -665,11 +569,8 @@ final class SlackChatOpsBridge {
 
         let requestConfig = BackendRequestConfig(profile: profile)
 
-        // ⚠️ [BR-4] See `ChatOpsCommandService.submitTurn` — admission, mirror registration and the
-        // submit are one call so the three bridges cannot order them three ways.
-        // ⚠️ [NEW-3] The transport is resolved INSIDE the closure — see the Discord twin for why the
-        // bare `guard let transport = slackTransport else { return }` that used to sit here was a
-        // silent drop on a path where every other drop tells the user what happened.
+        // `submitTurn` bundles admission, mirror registration and submit so bridges cannot order them differently; the
+        // transport is resolved inside the closure so a missing one tells the user instead of dropping silently.
         let admission = commands.submitTurn(
             prompt: text,
             conversationID: conversationID,
@@ -696,22 +597,20 @@ final class SlackChatOpsBridge {
 
 // MARK: - Announcing (slice 3)
 
-/// ⚠️ The BRIDGE conforms, not the transport: a transport renders to a destination it is given,
-/// while announcing means knowing this provider's OWN paired channel. Only the bridge knows both.
+/// The bridge conforms, not the transport: announcing needs this provider's own paired channel, which only the bridge
+/// knows.
 extension SlackChatOpsBridge: RemoteAnnouncing {
 
     var provider: RemoteChannel.Provider { .slack }
 
-    /// ⚠️ Requires a live listener AND a paired channel. A bridge that was stopped, or was never
-    /// paired, must announce nothing — otherwise a notification would be addressed to a channel the
-    /// user has disconnected.
+    /// Requires a live listener and a paired channel, so a stopped or never-paired bridge announces nothing.
     var canAnnounce: Bool {
         isRunning && config.slackBotToken != nil && config.slackAuthorizedChannelID != nil
     }
 
     func isMirroring(_ conversationID: UUID?) -> Bool {
-        // ⚠️ nil is NOT a duplicate: an app-wide notification (a finished download) belongs to no
-        // conversation, so nothing is already reporting it.
+        // nil is not a duplicate: an app-wide notification (a finished download) belongs to no conversation, so nothing else is
+        // reporting it.
         guard let conversationID else { return false }
         return remoteMirrorService?.isMirroring(conversationID) ?? false
     }

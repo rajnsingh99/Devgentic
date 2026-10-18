@@ -4,8 +4,7 @@
 //  OrbDuplexAudioTests.swift
 //  DevgenticTests
 //
-//  Pins the admission policy for the panel-scoped duplex engine. Every clause here is a bug that
-//  already happened on device, so these are regression pins, not coverage.
+//  Created by Raj Singh.
 //
 
 import XCTest

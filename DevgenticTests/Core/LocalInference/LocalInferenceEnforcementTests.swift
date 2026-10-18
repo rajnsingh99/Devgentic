@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  Phase 2: the lock is enforced — a local run that finds it taken WAITS, and starts when it passes.
+//  LocalInferenceEnforcementTests.swift
+//  DevgenticTests
 //
-//  ⚠️ Every wait here is BOUNDED. A broken waiter does not fail, it hangs; an unbounded `await` would
-//  turn every interesting mutant into a stuck test runner instead of a red test.
+//  Created by Raj Singh.
 //
 
 import XCTest

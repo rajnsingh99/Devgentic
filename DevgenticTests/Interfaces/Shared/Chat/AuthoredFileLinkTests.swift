@@ -4,13 +4,7 @@
 //  AuthoredFileLinkTests.swift
 //  DevgenticTests
 //
-//  CR18 — a model-authored markdown link could open ANY file on disk.
-//
-//  The file-reference feature verifies which inline CODE SPANS become links: a span is matched
-//  against the conversation's own file index, `stat`ed, and only then is a `devgentic-file://`
-//  URL minted for it. None of that constrains a link the AUTHOR wrote. A reply containing
-//  `[click here](devgentic-file://open?path=/Users/you/.ssh/id_rsa)` parses to a run carrying
-//  that URL verbatim, and the tap handler used to accept it because the SCHEME matched.
+//  Created by Raj Singh.
 //
 
 import XCTest

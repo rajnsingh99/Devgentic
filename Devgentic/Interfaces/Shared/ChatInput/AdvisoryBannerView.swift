@@ -4,23 +4,14 @@
 //  AdvisoryBannerView.swift
 //  Devgentic
 //
-//  Created on 12/07/26.
-//
-//  The compact, non-blocking advisory banner — mounted BETWEEN the HITL stack
-//  and the chat input (HITL top, advisory mid, input bottom). The ordering is
-//  deliberate: HITL banners are transient (FIFO, resolve within a run) while an
-//  advisory is ambient, so anchoring the advisory closest to the input keeps its
-//  position stable when HITL banners come and go — insertions above it grow the
-//  stack upward instead of displacing it. Semantically the gradient reads
-//  bottom-up: input → advice about the next send → in-flight run state.
-//
-//  Shows exactly ONE advisory per conversation (AdvisoryCenter dedupes and
-//  callers clear on resolution), so the worst-case region is one HITL banner +
-//  one advisory — bounded vertical cost.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The compact, non-blocking advisory banner, mounted between the HITL stack and the chat input.
+/// Shows one advisory per conversation, anchored nearest the input so its position stays stable as HITL banners come and
+/// go.
 struct AdvisoryBannerView: View {
     @Environment(MainApplicationViewModel.self) private var vm
     @Environment(MainViewRouter.self) private var router
@@ -111,9 +102,8 @@ struct AdvisoryBannerView: View {
         case .openProfileSettings(let profileID):
             router.navigate(to: .profileDetail(profileID: profileID))
         case .revealInFinder(let path):
-            // Same affordance the store-recovery path uses. Reveal rather than open: the target is a
-            // database directory, and selecting it lets the user inspect or move it aside without the
-            // app pretending it can repair something it has no re-open path for.
+            // Reveals the database directory in Finder, as the store-recovery path does: the app has no re-open path,
+            // so the user inspects or moves it aside.
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
     }
@@ -121,16 +111,13 @@ struct AdvisoryBannerView: View {
 
 // MARK: - QuickAccess variant
 
-/// The panel's compact advisory banner. Same AdvisoryCenter as the main window
-/// (a dismissal suppresses the situation everywhere — one mental model), but:
-/// tighter chrome for the panel's vertical budget, an icon-only settings action,
-/// and navigation via closure — the panel lives outside the main window's
-/// environment, so the action reverse-hands-off (activate main window → notify)
-/// instead of touching the router directly.
+/// The panel's compact advisory banner, backed by the same `AdvisoryCenter` as the main window, with tighter chrome.
+/// Navigation goes through a closure: the panel lives outside the main window's environment, so it activates the main
+/// window and notifies.
 struct QuickAccessAdvisoryBanner: View {
     let advisory: Advisory
     let onOpenProfileSettings: (UUID) -> Void
-    /// Phase 7 run buttons — routed by the host, which owns the run manager.
+    /// Run buttons, routed by the host, which owns the run manager.
     var onProceedRun: (UUID) -> Void = { _ in }
     var onStopRun: (UUID) -> Void = { _ in }
     @Environment(\.appTheme) private var theme

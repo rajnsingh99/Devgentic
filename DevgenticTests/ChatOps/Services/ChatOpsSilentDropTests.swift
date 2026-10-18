@@ -4,21 +4,7 @@
 //  ChatOpsSilentDropTests.swift
 //  DevgenticTests
 //
-//  The standing logging rule, enforced against the ChatOps subsystem.
-//
-//  ⚠️⚠️ WHY A SOURCE SCAN AND NOT BEHAVIOUR. What is being asserted is the ABSENCE of a silent
-//  failure path — that no send, decode or terminal arm can fail without writing a line naming what
-//  the user loses. There is no runtime observation of "nothing was logged" that a test can make
-//  without a fake for every transport, gateway and API client in the subsystem; and the bridges hold
-//  concrete clients with no injection seam. A scan is what can actually be enforced here, and its
-//  limit is stated rather than implied: it proves the wiring exists, not that the line is correct.
-//
-//  ⚠️ THE ORIGINAL COUNT WAS WRONG, AND THAT IS WHY THIS FILE IS BROAD. A single grep for
-//  `_ = try? await apiClient?` found 15 sites in three bridges. An exhaustive pass over the whole
-//  subsystem found 41 across eleven files — including two classes the grep could not see: inbound
-//  DECODE failures (a Discord/Slack payload the app cannot model was dropped with no log, so a
-//  schema change makes the bot go deaf in total silence) and the mirror's HITL status EDITS (a
-//  failed edit leaves live approve/deny buttons on an already-decided prompt, forever).
+//  Created by Raj Singh.
 //
 
 import XCTest

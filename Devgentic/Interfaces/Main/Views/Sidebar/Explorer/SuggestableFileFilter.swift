@@ -4,19 +4,15 @@
 //  SuggestableFileFilter.swift
 //  Devgentic
 //
-//  The ONE rule for which files the composer's `@` picker offers. Both the full index
-//  (`ExplorerViewModel.indexAllFiles`) and the incremental refresh (`fetchAllFiles`)
-//  apply it — they used to carry separate copies, and a copy that drifts re-admits
-//  build output on the first file-system event.
-//
-//  ⚠️ This shapes SUGGESTIONS only. The Explorer tree, drag-and-drop and the file
-//  picker still reach every file; a binary that arrives that way is refused by
-//  `BinaryFileProbe` at attach time instead.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import UniformTypeIdentifiers
 
+/// The one rule for which files the composer's `@` picker offers, applied by both the full index and the
+/// incremental refresh. Shapes suggestions only: the Explorer tree, drag-and-drop and the file picker still reach
+/// every file, and `BinaryFileProbe` refuses a binary at attach time.
 enum SuggestableFileFilter {
 
     /// Dependency and build-output folders. Their contents duplicate source names
@@ -49,12 +45,9 @@ enum SuggestableFileFilter {
         return true
     }
 
-    /// Whether `url` sits inside an excluded folder BELOW `root`.
-    ///
-    /// ⚠️ Only components under the root count: a project that itself lives in a folder
-    /// named `build` must still be indexed. The incremental refresh needs this because it
-    /// enumerates from the changed subfolder, so the enumerator never sees the excluded
-    /// ancestor it is already inside.
+    /// Whether `url` sits inside an excluded folder below `root`.
+    /// Only components under the root count, so a project that itself lives in a folder named `build` is still indexed.
+    /// The incremental refresh needs it: it enumerates from the changed subfolder and never sees the excluded ancestor.
     static func isInsideExcludedDirectory(_ url: URL, root: URL) -> Bool {
         let rootComponents = root.standardizedFileURL.resolvingSymlinksInPath().pathComponents
         let components = url.standardizedFileURL.resolvingSymlinksInPath().pathComponents

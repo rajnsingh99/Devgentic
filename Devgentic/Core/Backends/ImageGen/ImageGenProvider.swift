@@ -4,10 +4,7 @@
 //  ImageGenProvider.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Defines the contract for image generation providers (OpenAI, Gemini, MLX/Flux2, Ollama).
-//  Kept separate from LLMProvider to avoid muddying text-generation interfaces.
+//  Created by Raj Singh.
 //
 
 import Foundation

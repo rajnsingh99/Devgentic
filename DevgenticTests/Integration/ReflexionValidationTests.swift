@@ -4,12 +4,7 @@
 //  ReflexionValidationTests.swift
 //  DevgenticTests
 //
-//  Red-green validation tests for SelfReflectionCapability production fixes.
-//  Each test targets a specific gap ID from the validation plan.
-//
-//  G1: .toolOutput events now captured in trialSummary (not silently dropped)
-//  G2: CompletionStatus now reflects actual tool outcomes (not always .partialSuccess)
-//  G3: Episode duplication prevented via suppressEpisodeManagement
+//  Created by Raj Singh.
 //
 
 import XCTest

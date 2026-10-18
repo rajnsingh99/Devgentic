@@ -4,15 +4,7 @@
 //  CodeToolVisibilityTests.swift
 //  DevgenticTests
 //
-//  "Who sees this tool?" used to be answered in three places: `NativeToolCatalog` (does it exist),
-//  `LocalToolManager` (is it in the Library), and a `Set` literal in `CodeToolPreset` (is it
-//  hidden for Code). The third listed five names with the reason for each in a comment above the
-//  list rather than beside the tool, so the fact that `edit_code` is hidden *because*
-//  `edit_code_single`/`edit_code_batch` replaced it was not discoverable from either tool.
-//
-//  As of 2026-07-31 the catalogue answers all three. These tests pin the derivation — including a
-//  parity check against the exact set the hand-written literal produced, because a refactor that
-//  quietly changes which tools a Code profile sees is worse than the duplication it removed.
+//  Created by Raj Singh.
 //
 
 import XCTest

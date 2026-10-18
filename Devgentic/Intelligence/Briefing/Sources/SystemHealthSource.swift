@@ -4,14 +4,14 @@
 //  SystemHealthSource.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 /// Reports current system health — RAM availability, chip info, and disk space.
 /// Uses the existing `SystemHardwareProfiler` infrastructure.
-final class SystemHealthSource: MorningBriefSource {
+final class SystemHealthSource: BriefingSource {
 
     let id = "system_health"
     let displayName = "System"

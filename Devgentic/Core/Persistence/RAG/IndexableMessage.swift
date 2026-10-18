@@ -4,17 +4,14 @@
 //  IndexableMessage.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import Foundation
 
-/// A VALUE copy of what conversation memory indexes from one message, taken where the message
-/// lives (the main actor) before indexing is handed to a detached task (RAG-16).
-///
-/// ⚠️ The indexer used to receive the live `ChatMessage` — `@Observable`, `@unchecked Sendable`,
-/// not `@MainActor` — and read `content` from a background executor while the main actor could be
-/// writing it (a Redo regenerating the message, a stream flush). An unsynchronised read of an enum
-/// carrying a String payload is an ARC hazard, and it could index a half-streamed variant. A
-/// snapshot freezes exactly the text that was settled when indexing was requested.
+/// A value copy of what conversation memory indexes from one message, taken on the main actor before indexing is
+/// handed to a detached task. A snapshot freezes the settled text, since reading the live `@Observable` `ChatMessage`
+/// from a background executor races with streaming writes.
 struct IndexableMessage: Sendable {
 
     /// The indexable shape of `MessageContent`, reduced to Sendable values.
@@ -61,12 +58,9 @@ struct IndexableMessage: Sendable {
         }
     }
 
-    /// Parsed blocks for the chunker. Pure — `parseMarkdown` is a free function and touches no
-    /// `ChatMessage` cache, which is what lets this run off the main actor.
-    ///
-    /// ⚠️ Reasoning is stripped from the WHOLE text, BEFORE it is split into blocks. Stripped per
-    /// chunk (afterwards), a multi-paragraph `<think>` left its middle paragraphs with no tag in
-    /// sight, and they were indexed as if they were the answer (RAG-23).
+    /// Parsed blocks for the chunker. Pure (`parseMarkdown` touches no `ChatMessage` cache), so it can run off the main
+    /// actor. Reasoning is stripped from the whole text before it is split into blocks, so a multi-paragraph `<think>` is
+    /// not indexed as the answer.
     func blocksForIndexing() -> [ContentBlock] {
         switch body {
         case .markdown(let text):

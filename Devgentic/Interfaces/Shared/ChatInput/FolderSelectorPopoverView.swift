@@ -4,13 +4,13 @@
 //  FolderSelectorPopoverView.swift
 //  Devgentic
 //
-//  Popover for the Code interface's folder selector. Shows a Recent list of
-//  previously-opened project folders (move-to-front, persisted in CodeSessionManager)
-//  plus an "Open folder..." entry that falls through to NSOpenPanel.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Popover for the Code interface's folder selector: a Recent list of opened project folders
+/// (move-to-front, persisted in `CodeSessionManager`) plus an "Open folder..." entry that falls through to `NSOpenPanel`.
 struct FolderSelectorPopoverView: View {
 
     @Environment(CodeSessionManager.self) private var codeSessionManager
@@ -93,11 +93,8 @@ struct FolderSelectorPopoverView: View {
     }
 
     private func recentRow(_ url: URL) -> some View {
-        // Trailing-slash-insensitive so the active project keeps its highlight however the two
-        // URLs were built. **Hardening, not a fixed bug** — both sides are directory-flavoured
-        // today. Deliberately the LEXICAL variant: this runs in a view body on every render and
-        // `sameLocation` touches the filesystem, while `rememberRecentPath` has already
-        // collapsed the list to one canonical entry per folder.
+        // Trailing-slash-insensitive so the active project keeps its highlight however the URLs were built.
+        // The lexical variant: this runs in a view body, and `sameLocation` touches the filesystem.
         let isActive = codeSessionManager.projectPath?.sameLocationLexically(as: url) == true
         return Button {
             isPresented = false
@@ -136,9 +133,8 @@ struct FolderSelectorPopoverView: View {
         .buttonStyle(.plain)
         .popoverRowHighlight()
         .help(url.path)
-        // Read as a pile ("folder, Devgentic, ~/Documents/…, checkmark") with the ACTIVE
-        // folder marked only by a bare glyph and a cyan tint. `.help()` doesn't fill the
-        // label, so the full path was reachable by mouse hover only.
+        // Combined into one element with an explicit label, since `.help()` does not fill the label and the
+        // active folder would otherwise be marked only by a glyph.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(url.lastPathComponent)
         .accessibilityValue(url.path)

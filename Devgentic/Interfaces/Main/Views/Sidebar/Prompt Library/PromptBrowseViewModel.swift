@@ -4,11 +4,7 @@
 //  PromptBrowseViewModel.swift
 //  Devgentic
 //
-//  Browse-state for the sidebar: search, category chip, sort, selection.
-//  Split from the old PromptLibraryViewModel (2026-04-21) — the edit buffer
-//  fields moved to PromptEditViewModel so the two concerns no longer share
-//  an instance. Sidebar filter state persists across tab switches via
-//  DestinationCoordinator; edit state is per-edit-session.
+//  Created by Raj Singh.
 //
 
 import Foundation

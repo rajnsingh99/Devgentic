@@ -4,10 +4,7 @@
 //  AttachedFileSDTests.swift
 //  DevgenticTests
 //
-//  Created on 03/04/26.
-//
-//  Tests AttachedTextFileSD and AttachedImageFileSD — round-trip mapping,
-//  persistence, and edge cases.
+//  Created by Raj Singh.
 //
 
 import XCTest

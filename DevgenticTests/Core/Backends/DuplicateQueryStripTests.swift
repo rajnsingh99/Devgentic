@@ -4,35 +4,7 @@
 //  DuplicateQueryStripTests.swift
 //  DevgenticTests
 //
-//  The current question must not appear twice: once as the request's `userQuery` and again as the
-//  last row of the history that accompanies it.
-//
-//  `BackendOrchestrationService` stripped it by TEXT EQUALITY against `conversationHistory.last`,
-//  and that failed in two independent ways that both shipped:
-//
-//    IDENTITY — Orb sends the model a DECORATED query (the spoken command plus a TTS style
-//    hint) while persisting the clean command. The texts differ, so the strip never fired, the
-//    message survived into the blob, and `EpisodicHistoryFormatter.pairTurns` emitted it through
-//    its orphan handler as `wasCancelled` / "Agent never responded to this query". Every voice
-//    turn in the spoken modes told the model that the question it was being asked had already
-//    been abandoned.
-//
-//    POSITION — `.last` is the current message only if history is ascending. `SchedulerCoordinator`
-//    shipped a DESCENDING array, where `.last` is the OLDEST row: the strip could not fire, so the
-//    query was double-prompted — and on a RECURRING scheduled task, where every firing sends the
-//    same prompt, that oldest row had identical text and `removeLast()` silently DELETED the
-//    conversation's first turn from model context.
-//
-//  ⚠️ THESE TESTS CALL THE PRODUCTION RULE. They did not until 2026-09-07: the file carried a
-//  private `strip(_:userQuery:currentUserMessageID:)` that RE-IMPLEMENTED the two branches, and
-//  every test called that copy. Nothing in the repo reached
-//  `BackendOrchestrationService.strippingCurrentQuery` by any route, so deleting the production
-//  branches outright left all six green — and because `currentUserMessageID` carries a `= nil`
-//  default, dropping the argument at its one call site still COMPILED, silently reverting every
-//  surface to the text compare with the suite untouched. That is the shape this project's own
-//  memory records as "policy tests go green over broken wiring". The copy is gone; the rule was
-//  extracted to `nonisolated static` so it can be called here with no service and no backend, and
-//  `testTheCallSiteStillPassesTheMessageId` guards the argument that makes any of it run.
+//  Created by Raj Singh.
 //
 
 import XCTest

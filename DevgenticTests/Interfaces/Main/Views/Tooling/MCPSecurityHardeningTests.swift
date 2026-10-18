@@ -4,9 +4,7 @@
 //  MCPSecurityHardeningTests.swift
 //  DevgenticTests
 //
-//  P2 security fixes, 2026-08-01. Covers the pure units that need no live server:
-//  redaction (URL paths + free text), the icon-fetch SSRF allowlist, and the PKCE
-//  advertisement check whose default was inverted.
+//  Created by Raj Singh.
 //
 
 import XCTest

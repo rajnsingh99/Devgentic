@@ -4,21 +4,7 @@
 //  WorkflowVariableLintTests.swift
 //  DevgenticTests
 //
-//  Register `Workflow_Production_Readiness_Fresh.md` — `EXA-10`, fixed 2026-09-02: the same-level
-//  variable lint covered Router RULES only, so a `{{ var.… }}` reference in a Code template or an
-//  Action argument binding got NO design-time signal at all — not for a same-level write, and not
-//  even for a plain typo — while the identical mistake in a Router rule was warned.
-//
-//  ⚠️ The dominant risk here is the FALSE WARNING, not the missed one, and this file is shaped
-//  around that. A missed warning costs nothing new (the runtime unresolved-placeholder logs still
-//  fire exactly as before); a warning on a canvas that runs fine spends the validation panel's
-//  credibility, which `WorkflowValidation`'s own doctrine calls out twice as the thing that teaches
-//  people to run past the panel. The two `…IsNotWarnedAbout` cases below are therefore the load
-//  -bearing ones — they encode the asymmetry that both single-candidate implementations get wrong.
-//
-//  ⚠️ What is NOT covered here: the panel's rendering of an issue (SwiftUI), and the runtime
-//  resolver's own behaviour, which `WorkflowDataPassingTests` already owns — this file pins that
-//  the LINT reads the same rule the resolver does, not that the resolver is right.
+//  Created by Raj Singh.
 //
 
 import XCTest

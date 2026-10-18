@@ -4,10 +4,7 @@
 //  CloudRequestPipeline.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/03/26.
-//
-//  Shared HTTP middleware for all cloud LLM providers (Anthropic, OpenAI, Google).
-//  Handles rate limiting, error enrichment, and request-id logging.
+//  Created by Raj Singh.
 //
 
 import Foundation

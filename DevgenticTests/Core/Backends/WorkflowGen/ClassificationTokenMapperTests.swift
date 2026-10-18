@@ -4,21 +4,7 @@
 //  ClassificationTokenMapperTests.swift
 //  DevgenticTests
 //
-//  `ClassificationTokenMapper` had NO tests at all despite being pure, `Sendable` and
-//  dependency-free — the easiest thing in the subsystem to test, and the one deciding which branch
-//  a Router takes when the AI Classifier answers.
-//
-//  These pin the parse contract that WF-EX1 depends on: a reply carrying no recognisable token
-//  returns **nil**. `evaluateConditionWithLLM` turns that nil into "no port resolved", which makes
-//  the Router fail onto its `error` port. Before WF-EX1 the nil was converted to `""` and handed
-//  onward as if it were a routing decision.
-//
-//  ⚠️ WF-OB2 IS NOW FIXED (2026-08-17) and IS covered — see the `parse(_:)` section at the bottom.
-//  This header used to say the multi-token case was deliberately untested "because a test asserting
-//  today's answer would pin nondeterminism", which was correct at the time: `parseResponse` scanned
-//  an unordered Dictionary, so a two-token reply resolved to whichever key iteration reached first,
-//  and Swift seeds hashing per process. `parse(_:)` now orders candidates by character position, so
-//  the behaviour is deterministic and assertable.
+//  Created by Raj Singh.
 //
 
 import XCTest

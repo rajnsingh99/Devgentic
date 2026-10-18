@@ -4,7 +4,7 @@
 //  ToolDeduplicationTests.swift
 //  DevgenticTests
 //
-//  TDD: T3 — Tool Deduplication Signatures
+//  Created by Raj Singh.
 //
 
 import XCTest

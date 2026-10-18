@@ -4,7 +4,7 @@
 //  LocalToolManagerTests.swift
 //  DevgenticTests
 //
-//  TDD: T6 — Safe Tool Whitelist
+//  Created by Raj Singh.
 //
 
 import XCTest

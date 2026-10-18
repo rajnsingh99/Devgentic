@@ -4,23 +4,7 @@
 //  SoftwareUpdater.swift
 //  Devgentic
 //
-//  Sparkle 2 — in-app updates from https://rajnsingh99.github.io/devgentic/appcast.xml.
-//
-//  ⚠️⚠️ THE FEED URL AND THE PUBLIC KEY LIVE IN Devgentic/Info.plist (`SUFeedURL`, `SUPublicEDKey`)
-//  AND ARE COMPILED INTO EVERY SHIPPED BINARY. Neither can be changed for installs already in the
-//  field: a new key makes every existing copy reject every future update, and a new feed host is
-//  only survivable through GitHub Pages' 301 from the same account + repo name. The PRIVATE half of
-//  the key sits in the release machine's login Keychain (Sparkle's `generate_keys`) and must also
-//  be backed up offline — losing it strands every install permanently.
-//
-//  ⚠️ NO AUTOMATIC CHECK WITHOUT CONSENT. `SUEnableAutomaticChecks` is deliberately ABSENT from
-//  Info.plist, so Sparkle asks the user on the second launch whether to check automatically.
-//  PRIVACY.md promises the app sends nothing "on its own"; a silent daily request to GitHub would
-//  quietly break that. `SUEnableSystemProfiling` is pinned to NO for the same reason.
-//
-//  ⚠️ NOT STARTED UNDER XCTEST. The test host is the real app (see `TestHost`); an updater that
-//  starts there would make scheduled network requests — and could present update UI — during an
-//  ordinary test run. A refusal, not a redirect: there is no useful test version of "check GitHub".
+//  Created by Raj Singh.
 //
 
 import Combine

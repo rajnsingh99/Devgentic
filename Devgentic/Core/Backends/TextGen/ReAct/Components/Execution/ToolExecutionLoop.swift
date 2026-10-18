@@ -4,8 +4,7 @@
 //  ToolExecutionLoop.swift
 //  Devgentic
 //
-//  Shared parallel tool execution logic extracted from ReActAgentExecutor.
-//  Used by all agent architectures (ReAct, Plan & Execute, Reflexion, Supervisor).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -39,20 +38,13 @@ func executeToolCalls(
     unattendedAutoApprove: Bool = false,
     /// Code mode's project folder. Nil for every other profile — those stay unconfined.
     workspaceRoot: String? = nil,
-    /// Calls of this same step that failed validation while these passed (CR-52). Each becomes a
-    /// "Not run" observation, so the model learns the call did not happen and why.
+    /// Calls of this same step that failed validation while these passed; each becomes a "Not run" observation.
     rejectedCalls: [RejectedSiblingCall] = [],
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
 
-    // Emit the per-iteration reasoning trace UPFRONT so `EvaluationLogger`'s
-    // iteration counter increments on every iteration — including ones that
-    // exit via `final_answer`. The previous placement of this emission was
-    // after dedup, which the `final_answer` early-return below skipped, causing
-    // the executor-span summary to report N-1 iterations on clean exits.
-    // We use `toolCalls.count` here (pre-dedup) since dedup hasn't run yet;
-    // the separate "Deduped X → Y" log line further down preserves the dedup
-    // observability for diagnostics.
+    // Emits the per-iteration reasoning trace up front, before dedup, so the iteration counter also counts iterations
+    // that exit via `final_answer`.
     onTraceUpdate(AgentTraceLog(
         traceID: iterationSpan.traceID,
         spanID: iterationSpan.spanID,
@@ -63,12 +55,8 @@ func executeToolCalls(
         metadata: ["iteration": "\(currentIteration)"]
     ))
 
-    // --- Terminal Signal Fast-Path: final_answer wins ---
-    // If the model called `final_answer`, it's signalling task completion.
-    // Drop every other call in this iteration — the agent MUST only emit one
-    // action in the closing step (enforced via the prompt's termination_contract).
-    // This also prevents deadlocks where the model calls a read-only tool alongside
-    // final_answer and ends up blocking on unrelated dispatch.
+    // Terminal fast path: when the model calls `final_answer`, every other call in this iteration is dropped, which also
+    // prevents blocking on unrelated dispatch alongside it.
     if let finalCall = toolCalls.first(where: { $0.name == "final_answer" }) {
         let droppedCount = toolCalls.count - 1
         if droppedCount > 0 {
@@ -89,14 +77,8 @@ func executeToolCalls(
     let uniqueToolCalls = plan.run
     logger.info("Deduped \(toolCalls.count) → \(uniqueToolCalls.count) unique tools.")
 
-    // --- Partition: Interactive vs Autonomous ---
-    // Interactive tools require human input (ask_user or HITL confirmation).
-    // They must run sequentially to avoid UI deadlock (only one banner can show at a time).
-    // ⚠️ `uniquingKeysWith`, NEVER `uniqueKeysWithValues`. Names are de-duplicated (and the
-    // injected ones reserved) in `AgentConnect.resolveExecutableTools`, but a tool appended after
-    // that — as `final_answer`, the memory tools and `get_conversation_history` once were — used to
-    // TRAP here on the first tool batch (readiness CR-2). A duplicate is a wiring defect to log, not
-    // a reason to take the app down; the first registration wins, matching the resolver.
+    // Partitions interactive tools (ask_user or HITL confirmation), which run sequentially so only one banner shows.
+    // `uniquingKeysWith`, never `uniqueKeysWithValues`: a duplicate name is logged and the first registration wins.
     let toolLookup = Dictionary(availableTools.map { ($0.name, $0) }, uniquingKeysWith: { first, duplicate in
         logger.error("[TOOLRESOLVE] ⚠️ Two tools named '\(first.name)' reached the execution loop. CONSEQUENCE: calls go to the first registration; the duplicate is unreachable — and a provider that rejects duplicate tool names will have refused this request already. A tool was added after `resolveExecutableTools` de-duplicated the list.")
         return first
@@ -120,15 +102,14 @@ func executeToolCalls(
         logger.info("Partitioned tools: \(autonomousTools.count) autonomous (parallel), \(interactiveTools.count) interactive (sequential).")
     }
 
-    // A superseded write did not run; the model is told so (CR-43).
+    // A superseded write did not run; the model is told so.
     var observations: [ToolObservation] = plan.superseded.map {
         supersededObservation(for: $0.call, by: $0.by, currentIteration: currentIteration)
     }
-    // A rejected sibling did not run either; the model is told so, with the reason (CR-52).
+    // A rejected sibling did not run either; the model is told so, with the reason.
     observations += rejectedCalls.map { rejectedObservation(for: $0, currentIteration: currentIteration) }
 
-    // --- Phase 1: Run Autonomous Tools in Parallel ---
-    // One task per LANE: calls that change a common file run in order inside their lane (CR-45).
+    // Autonomous tools run in parallel, one task per lane; calls that change a common file run in order in a lane.
     if !autonomousTools.isEmpty {
         let lanes = executionLanes(for: autonomousTools, workspaceRoot: workspaceRoot)
         if lanes.count < autonomousTools.count {
@@ -165,9 +146,7 @@ func executeToolCalls(
         }
     }
 
-    // --- Phase 2: Run Interactive Tools Sequentially ---
-    // This ensures only ONE suspension banner is active at a time,
-    // preventing the deadlock where the UI can't show two interactions simultaneously.
+    // Interactive tools run sequentially, after the autonomous ones, so only one suspension banner is active at a time.
     for tool in interactiveTools {
         try Task.checkCancellation()
 
@@ -219,19 +198,8 @@ private func executeSingleTool(
     let toolCallId = tool.id
     let toolName = tool.name
 
-    // ── Workspace boundary ───────────────────────────────────────────────────────────────────
-    //
-    // ⚠️⚠️ Runs BEFORE anything else touches the arguments, because it does two jobs and the
-    // first one changes what every later step sees:
-    //
-    //  1. RESOLVES relative paths against the PROJECT, not $HOME. `FilePathResolver.resolve`
-    //     anchors a bare path to the home directory — correct for a general assistant, and the
-    //     reason `codebase_map("./")` once spent 41.8 seconds walking `/Users/<name>` for a Code
-    //     session rooted at a small Java project.
-    //  2. REFUSES writes outside the project outright, and routes outside READS through the
-    //     ordinary confirmation banner instead of running them silently.
-    //
-    // Nil root (every non-Code profile) leaves both behaviours exactly as they were.
+    // Workspace boundary: runs before anything else touches the arguments. Resolves relative paths against the project
+    // (not $HOME) and refuses writes outside it; reads outside go through the confirmation banner. Nil root changes nothing.
     let tool0Arguments = tool.arguments
     let boundary = WorkspaceBoundaryDecision.evaluate(
         toolName: toolName,
@@ -257,24 +225,18 @@ private func executeSingleTool(
         )
     }
 
-    // Path arguments are now project-anchored and canonical. Everything downstream — dedup,
-    // the confirmation banner's params, the timeline record — reads the resolved form, so what
-    // the user approves is what actually runs.
+    // Path arguments are project-anchored and canonical from here on, so what the user approves is what runs.
     let tool = PendingToolCall(id: tool.id, name: tool.name, arguments: boundary.arguments)
     let arguments = tool.arguments
     let paramsString = serializeToolParams(arguments)
 
-    // ⚠️ Logged only when the boundary actually CHANGED a path, so ordinary in-project calls stay
-    // quiet. This is the line whose absence let `codebase_map("./")` resolve to the home directory
-    // and walk it for 41.8 seconds with nothing in the log naming the substitution.
+    // Logged only when the boundary changed a path, so ordinary in-project calls stay quiet.
     if workspaceRoot != nil, boundary.arguments != tool0Arguments {
         logger.info("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' path(s) re-anchored to the project before dispatch: \(serializeToolParams(tool0Arguments)) → \(paramsString). CONSEQUENCE: the tool, the confirmation banner and the timeline all see the resolved path, so what the user approves is what runs.")
     }
 
     if case .askUser(let reason) = boundary.outcome {
-        // ⚠️ NOBODY TO ASK (HITL Waiting Contract, decision C). A scheduled or woken run renders no
-        // banner, so this park could only end by the run's limit killing the whole run. Refused at
-        // once instead, with the same honesty as the tool-confirmation and ask_user refusals.
+        // No one can be asked in an unattended run (no banner is rendered), so the request is refused at once.
         if !WorkflowRunAttendance.canReachAHuman {
             let refusal = "\(reason) Nobody can answer in this run (it is unattended), so the path outside the project was NOT accessed. Stay inside the project folder."
             logger.notice("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' reaches outside the project in an UNATTENDED run. CONSEQUENCE: refused without parking; the model is told nobody can approve it.")
@@ -297,8 +259,7 @@ private func executeSingleTool(
         logger.notice("[WORKSPACE] conv \(conversationID.uuidString.prefix(8)) — '\(toolName)' reaches outside the project; asking the user. \(reason) CONSEQUENCE: the run PARKS on a confirmation banner and the compute budget stops counting while it waits; if the user declines, the model gets an honest observation and stays inside the project.")
         continuation.yield(.requestConfirmation(toolName: toolName, params: "\(reason)\n\n\(paramsString)", operationID: operationID))
         let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID, nodeID: approvalNodeID)
-        // A Stop resolves the park as `false` too. Without this check that became the observation
-        // "The user declined…" — a denial nobody made (Timeout inventory D-21).
+        // A Stop resolves the park as `false`; without this check it would be reported as a denial nobody made.
         try Task.checkCancellation()
         if !approved {
             let denial = "\(reason) The user declined. Stay inside the project folder, or ask them which folder to use."
@@ -332,18 +293,14 @@ private func executeSingleTool(
         stepNumber: currentIteration,
         state: .acting(.tool(name: toolName)),
         content: "Executing '\(toolName)'...",
-        // `tool_params` rides along like the result record below already does (:~430) — the
-        // .toolCall span event used to carry only the NAME, so the report could show that a
-        // tool ran but not what it was asked to do until the result landed.
+        // `tool_params` rides along on the span event so the report shows what the tool was asked to do before the result lands.
         metadata: ["tool_name": toolName, "tool_params": paramsString]
     ))
 
     // Intercept ask_user
     if let question = AskUserInterceptor.extractQuestion(toolName: toolName, arguments: arguments) {
-        // [Loop Safety] Identical re-ask → replay the earlier response instead of re-raising
-        // the banner. A human's answer (or skip) stands for the run. The replayed observation
-        // is byte-identical to the original, so a stuck ask-loop becomes deterministic and the
-        // repetition fingerprint's normal warn → stop ladder governs it.
+        // Loop safety: an identical re-ask replays the earlier response instead of re-raising the banner, so a stuck ask-loop
+        // is deterministic and the repetition fingerprint's warn/stop ladder governs it.
         if let stored = await interactionMemory.storedResponse(forQuestion: question) {
             logger.info("[LoopSafety] 'ask_user' repeated an identical question — replaying the earlier response, no banner.")
             continuation.yield(.thought("↩️ Repeated question — replaying your earlier response."))
@@ -374,27 +331,12 @@ private func executeSingleTool(
             )
         }
 
-        // [WF-SE11] The closest twin of the confirmation refusal below — same function, and the
-        // shape most likely to hit it: `AskUserTool` is appended to EVERY agent profile
-        // (AgentConnect: `wrapTool(AskUserTool(...), requiresConfirmation: false)`), so a scheduled
-        // run is one model decision away from an indefinite park. `suspendForClarification` is
-        // unbounded by contract ("Indefinite — container owns the deadline"), so with nobody
-        // reachable it only ever ended one way: the 600s deadline killing the whole run.
-        //
-        // ⚠️ The confirmation arm's remedy ("turn off Ask-first for this tool") CANNOT apply here —
-        // ask_user is wrapped `requiresConfirmation: false` and never reaches the Tool Library
-        // gate — so refusing with the existing skip observation is the only honest option. That
-        // observation already has a defined meaning downstream ("the user skipped or did not
-        // respond"), which is exactly what happened.
+        // Nobody to ask in an unattended run: `suspendForClarification` is unbounded, so the call is refused with the existing
+        // skip observation ("the user skipped or did not respond"); the confirmation arm's remedy does not apply to ask_user.
         if !WorkflowRunAttendance.canReachAHuman {
             let skipText = "System: No one is available to answer (this run is unattended). Proceed with reasonable assumptions, or stop and report what you need."
             logger.error("[HITL] ask_user REFUSED — nobody can answer this run (scheduled), question of \(question.count) chars. CONSEQUENCE: the agent is told immediately that no answer is coming and continues on assumptions, instead of parking indefinitely until the run deadline cancels everything.")
-            // ⚠️ Found on adversarial audit: this arm returned the ToolObservation WITHOUT ever
-            // closing the `.toolCall` row opened above — the timeline showed the step as
-            // perpetually running (or, once a run-end settle pass closes dangling rows, as an
-            // "Interrupted" failure) for a run that actually completed cleanly on its own
-            // assumptions. Mirrors the identical-re-ask replay arm just above, which correctly
-            // closes its own `.toolCall` with a terminal event before returning.
+            // Closes the `.toolCall` row opened above before returning, as the identical-re-ask replay arm does.
             let askOutput = ToolOutput(toolName: toolName, params: paramsString, output: skipText, isSuccess: true)
             continuation.yield(.toolSucceeded(askOutput))
             return ToolObservation(
@@ -421,11 +363,8 @@ private func executeSingleTool(
 
         let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: operationID, conversationID: conversationID, nodeID: approvalNodeID)
 
-        // ⚠️ The `ask_user` twin of the permission check above. A cancelled clarification resolves
-        // `nil`, which this path reads as "the user skipped or did not respond" — it records that
-        // non-answer in `RunInteractionMemory` so an identical re-ask REPLAYS the fabricated skip,
-        // and yields `.toolFailed(… .cancelled)` for a question the user was never given the chance
-        // to answer. Checked BEFORE `recordAnswer` so nothing is written.
+        // A cancelled clarification resolves nil; checked before `recordAnswer` so a fabricated skip is neither
+        // remembered nor reported as `.toolFailed(.cancelled)`.
         if Task.isCancelled { throw CancellationError() }
 
         // [Loop Safety] Remember the response (or skip) so an identical re-ask replays it.
@@ -463,7 +402,7 @@ private func executeSingleTool(
     // [HITL/A3] Default to the agent's arguments; replaced by user edits if the confirmation was edited.
     var effectiveArguments = arguments
     var effectiveParams = paramsString
-    /// Set when the user changed the arguments in the banner: the observation must say so (CR-44).
+    /// Set when the user changed the arguments in the banner; the observation must say so.
     var userEditedParams: String?
 
     // Dispatch (handles HITL)
@@ -475,18 +414,14 @@ private func executeSingleTool(
 
     switch dispatchOutcome {
     case .requiresConfirmation(let ps):
-        // [HITL] If the user chose "Allow for this chat" for this tool, skip the banner. The
-        // allowlist is durable (survives runs + app restarts) and never touches the shared
-        // profile, so the grant can't leak to other conversations — and inside a workflow it is
-        // scoped to `approvalNodeID`, so it can't leak to another NODE of the same run either.
+        // HITL: if the user chose "Allow for this chat" for this tool, the banner is skipped. The grant is durable and scoped
+        // to the conversation (and to `approvalNodeID` inside a workflow).
         if await SessionToolApprovals.shared.isAllowed(toolName: toolName, conversationID: conversationID, nodeID: approvalNodeID) {
             let scope = approvalNodeID.map { "node \($0)" } ?? "conversation"
             logger.info("[HITL] '\(toolName)' auto-approved via the \(scope)-scoped allowlist (\"Allow for this chat\") — skipping banner.")
         } else if await interactionMemory.isDenied(toolName: toolName, params: paramsString) {
-            // [Loop Safety] Identical previously-denied request → auto-deny without a banner.
-            // The observation matches a manual denial byte-for-byte, so the consecutive-denial
-            // cap (and the repetition fingerprint) govern persistent hammering; a request with
-            // DIFFERENT arguments still reaches the user.
+            // Loop safety: an identical already-declined request is auto-denied without a banner, with an observation identical
+            // to a manual denial; a request with different arguments still reaches the user.
             logger.info("[LoopSafety] '\(toolName)' repeated an identical declined request — auto-denied, no banner.")
             continuation.yield(.thought("🚫 Repeated a declined request — auto-denied."))
             let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
@@ -505,23 +440,8 @@ private func executeSingleTool(
                 failureCategory: .userDenied
             )
         } else if !WorkflowRunAttendance.canReachAHuman {
-            // [WF-SE11] NOBODY TO ASK — a SCHEDULED run: no local banner and no remote channel.
-            // Before this, the confirmation parked to an empty room until the 600s deadline killed
-            // the WHOLE run as an unexplained `.cancelled`, on every fire, forever.
-            //
-            // ⚠️ `hasRemoteResponder` is load-bearing, not belt-and-braces. A ChatOps run also
-            // binds `isAttended = false` (for the Router arbitration reason, WF-EX5), but a human
-            // IS reachable there: `RemoteMirrorService` mirrors this confirmation to
-            // Telegram/Slack/Discord with tappable Approve/Deny and resolves it through
-            // `handleApproval`. Keying the refusal on `isAttended` alone deleted that shipped
-            // flow and left a plain ChatOps agent chat no remedy but disabling Ask-first globally.
-            //
-            // The node's EXPLICIT setting is the sanctioned unattended path (threaded from
-            // `WorkflowNodeConfig.unattendedAutoApprove`); a scheduled plain agent (no node
-            // dimension) has no such setting — its remedy is the profile Tool Library's per-tool
-            // Ask-first toggle. Refused fast, with an honest observation the model can act on and
-            // an honest category for the dashboards (`.hitlUnattendedRefused`, NOT
-            // `.toolUserDenied` — no user denied anything).
+            // Nobody to ask in a scheduled run (no banner, no remote channel): refused fast with an actionable observation.
+            // `hasRemoteResponder` matters: a ChatOps run is unattended but a human can answer the mirrored prompt.
             if unattendedAutoApprove {
                 logger.notice("[HITL] '\(toolName)' auto-approved by the workflow node's EXPLICIT unattended setting (run is unattended). CONSEQUENCE: the tool runs with no banner; this is configured intent, not a leaked chat grant.")
                 // fall through to execution below — same as an attended allowlist hit
@@ -532,10 +452,8 @@ private func executeSingleTool(
                 let reason = "Tool '\(toolName)' requires confirmation, but this run is unattended — nobody can answer. The tool was NOT executed. \(remedy)"
                 logger.error("[HITL] '\(toolName)' REFUSED — unattended run, no standing approval. CONSEQUENCE: the tool is refused NOW with an honest observation instead of parking to nobody until the run deadline kills everything. \(remedy)")
                 let refusalOutput = ToolOutput(toolName: toolName, params: paramsString, output: reason, isSuccess: false)
-                // Timeline tier: `.permissionRejected` (permission unavailable — pointedly NOT
-                // `.userDenied`, no user denied anything). Dashboard tier: the classified
-                // `.hitlUnattendedRefused`, so a schedule failing on this every night shows up
-                // in the error panels as what it is.
+                // Timeline tier is `.permissionRejected` (not `.userDenied`); dashboard tier is the classified
+                // `.hitlUnattendedRefused`.
                 continuation.yield(.toolFailed(refusalOutput, category: .permissionRejected))
                 await TraceRecorder.shared.emitAgentError(
                     span: iterationSpan,
@@ -566,31 +484,14 @@ private func executeSingleTool(
 
             let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID, nodeID: approvalNodeID)
 
-            // ⚠️ A CANCELLED PARK IS NOT A DENIAL. Every teardown path resolves a waiting
-            // permission with `false` — `cancel(for:)` force-resolves it, and the suspend's own
-            // `onCancel` handler resumes `approved: false` — so without this check, pressing Stop
-            // while a permission banner is up records a decision the user never made. That is not
-            // cosmetic: the `!approved` body below writes a denial into `RunInteractionMemory`
-            // (auto-denying an identical later call with NO banner), emits `.toolFailed(…
-            // .userDenied)` into the node timeline and the persisted record, feeds the agent a
-            // "user denied" observation it then reasons about, and charges the dedicated 2-strike
-            // denial circuit breaker. `false` here means "not approved", and only a live user can
-            // turn that into "denied".
-            //
-            // Throwing is safe and is the established shape: this function is `async throws`, its
-            // sequential caller already does `try Task.checkCancellation()` per interactive tool,
-            // and `ReActAgentExecutor` absorbs it in `catch is CancellationError`.
+            // Why: without this check Stop would record a denial, auto-deny identical later calls and charge the denial circuit breaker
+            // A cancelled park is not a denial: teardown resolves a waiting permission with `false`, so throwing here avoids
+            // recording a decision the user never made. Safe: the function is `async throws` and callers absorb CancellationError.
             if Task.isCancelled { throw CancellationError() }
 
             if approved, let edited = await ExecutionSuspensionService.shared.consumeEditedArguments(for: operationID) {
-                // [HITL/A3] The user corrected the arguments in the banner — run with those.
-                //
-                // ⚠️ READINESS CR-44 (2026-10-12). The edit used to replace the arguments AFTER the
-                // workspace boundary had run on the model's originals, so an edited path was never
-                // re-anchored to the project (a relative path went to $HOME) and a write the user
-                // pointed outside the project ran. Edited arguments now get the same boundary: a
-                // write outside is still refused; a read outside runs, because the user just
-                // approved exactly that path in the banner.
+                // The user corrected the arguments in the banner: run with those, after the same workspace boundary.
+                // A write outside is still refused; a read outside runs because the user approved exactly that path.
                 let editedBoundary = WorkspaceBoundaryDecision.evaluate(
                     toolName: toolName, arguments: edited, workspaceRoot: workspaceRoot)
                 if case .refuse(let reason) = editedBoundary.outcome {
@@ -642,10 +543,8 @@ private func executeSingleTool(
         continuation.yield(.delegationStarted(task: task))
     }
 
-    // [CodeViewer] Pre-write snapshot for file-writing tools, captured from the
-    // POST-HITL-edit arguments (the path that will actually be written). This is what
-    // the timeline's "View changes" affordance diffs against — nothing else records the
-    // file's prior state once the write lands.
+    // Pre-write snapshot for file-writing tools, from the post-HITL-edit arguments; the timeline's "View changes" diffs
+    // against it, since nothing else records the file's prior state.
     let preWriteContent = await preWriteSnapshot(toolName: toolName, arguments: effectiveArguments)
 
     let dispatchStart = Date()
@@ -668,8 +567,8 @@ private func executeSingleTool(
     // the timeline can diff what actually changed.
     let postWriteContent = await postWriteSnapshot(toolName: toolName, arguments: effectiveArguments, isSuccess: result.isSuccess)
 
-    // Emit structured success/failure — category drives negativeConstraints policy and UI affordance.
-    // `rowParams`: the timeline row was created from the model's params; a banner edit changed them (CR-41).
+    // Emits structured success/failure; the category drives the negative-constraints policy and UI affordance.
+    // `rowParams` is what the timeline row was created from, which a banner edit may have changed.
     let output = ToolOutput(toolName: toolName, params: effectiveParams, output: result.llmObservation, isSuccess: result.isSuccess, preWriteContent: preWriteContent, postWriteContent: postWriteContent, rowParams: effectiveParams == paramsString ? nil : paramsString)
     if let category = result.failureCategory {
         continuation.yield(.toolFailed(output, category: category))
@@ -698,7 +597,7 @@ private func executeSingleTool(
         ]
     ))
 
-    // CR-44: the model's own turn still carries the arguments IT sent; the result says what ran.
+    // The model's own turn carries the arguments it sent; the result states what actually ran.
     let observedResult = userEditedParams.map {
         "[The user edited this call's arguments before it ran. It ran with: \($0)]\n\(result.llmObservation)"
     } ?? result.llmObservation
@@ -719,36 +618,19 @@ private func executeSingleTool(
 
 // MARK: - Testable Helpers
 
-/// Tools whose successful execution mutates a file on disk — all of them get a PRE-write
-/// snapshot for the timeline's "View changes" diff.
-///
-/// ⚠️ "All of them" is now TRUE. It was not: `create_file` and `edit_code` were missing while
-/// `write_file` was present, though all three are `.libraryExceptCode` in `NativeToolCatalog` —
-/// the same class, superseded by the same splits. So a CHAT or WORKFLOW profile's file write got
-/// no `preWriteContent`, and `TimelineFileViewerAction.resolve` (which gates on the mirror of
-/// this set) then produced no chip and no persisted `ActionEffect`. Keep this set and
-/// `AgentTimelineView.chipEligibleTools` in step: a name in one and not the other is a row that
-/// either has a snapshot nothing renders, or an affordance with no data behind it.
+/// Tools whose successful execution mutates a file on disk; each gets a pre-write snapshot for the "View changes" diff.
+/// Keep in step with `AgentTimelineView.chipEligibleTools`, or a snapshot goes unrendered or a chip has no data.
 private let preSnapshotToolNames: Set<String> = [
     "write_file", "overwrite_file", "create_new_file", "create_file",
     "edit_code_single", "edit_code_batch", "edit_code"
 ]
 
-/// Tools whose params DON'T carry the full post-state (`edit_code_*` carry find/replace
-/// strings only) — these get a POST-write read-back after success. Ground truth beats
-/// replicating the tool's replacement semantics (uniqueness rules, matching behavior)
-/// in the UI, where they would silently drift.
-/// `edit_code` is included for the same reason as its two splits: its params are
-/// `{file_path, edits | old_string + new_string}`, i.e. find/replace only, so the post-state
-/// exists nowhere but on disk.
+/// Tools whose params do not carry the full post-state (`edit_code_*` carry find/replace strings only); these get a
+/// post-write read-back after success, since the post-state exists only on disk.
 private let postSnapshotToolNames: Set<String> = ["edit_code_single", "edit_code_batch", "edit_code"]
 
-/// Drift seam. The executor's snapshot sets and `AgentTimelineView.chipEligibleTools` are two
-/// halves of ONE contract: a name in the chip set with no snapshot gets an affordance with no data
-/// behind it, and a name with a snapshot nothing renders is a file read for nothing. [tc-2] was
-/// exactly that drift — `create_file` and `edit_code` were in neither, and the fix had to add them
-/// to BOTH. Exposed so a test can assert the two stay in step, rather than each side being tested
-/// against hand-fed fixtures that cannot notice the other half is missing.
+/// Exposes the executor's snapshot sets and the timeline's chip set, two halves of one contract, so a test can assert
+/// they stay in step.
 enum SnapshotToolContract {
     static var preSnapshot: Set<String> { preSnapshotToolNames }
     static var postSnapshot: Set<String> { postSnapshotToolNames }
@@ -758,25 +640,9 @@ enum SnapshotToolContract {
 /// carrying in a persisted timeline event just to render a diff.
 private let preWriteSnapshotByteLimit = 512_000
 
-/// The file-target path of a mutating tool call, honoring both spellings: native tools
-/// take `path`, split tools `file_path`.
-///
-/// ⚠️ [CR19] Resolved through `FilePathResolver`, which is what the tools that actually WRITE
-/// the file use (`CodingAssistantTools`) and what the live-write events use.
-///
-/// This used to be `expandingTildeInPath` alone, which expands `~` but leaves a RELATIVE path
-/// relative — and `FileManager` then resolves it against the PROCESS working directory, which for
-/// a GUI-launched app is `/`. So for a bare `notes.md` the snapshot looked at `/notes.md` and the
-/// write tool wrote `<home>/notes.md`: two different files. `snapshotContents` found nothing,
-/// returned nil, and the empty baseline made an OVERWRITE of an existing file render as a
-/// creation — every line green, nothing shown as replaced — in the timeline chip, the diff
-/// preview and the `ActionEffect` the model reads back as its own memory of what it did.
-///
-/// The resolver is the single source of truth precisely so these cannot drift; this was the one
-/// file-touching path that had not been routed through it.
-/// Internal rather than private [CR19]: this is the one place the snapshot decides WHICH FILE it
-/// is looking at, and the defect was that it decided differently from the writer. A rule that has
-/// already drifted once needs a test that can reach it.
+/// The file-target path of a mutating tool call: native tools take `path`, split tools `file_path`.
+/// Resolved through `FilePathResolver`, as the writing tools do, so a relative path anchors identically.
+/// Internal (not private) so a test can reach the rule that decides which file the snapshot reads.
 func fileTargetPath(in arguments: [String: JSONValue]) -> String? {
     guard let path = arguments["path"]?.stringValue ?? arguments["file_path"]?.stringValue,
           !path.isEmpty else { return nil }
@@ -793,17 +659,14 @@ private func snapshotContents(atPath resolved: String) -> String? {
     return content
 }
 
-/// The target file's content just before a file-mutating tool runs. Semantics:
-/// "" = the file doesn't exist yet (a diff against empty shows the whole write as
-/// added — meaningful); nil = not a file-mutating tool, no path argument, or the file
-/// is unreadable/over the cap (no diff affordance, logged).
+/// The target file's content just before a file-mutating tool runs. "" means the file does not exist yet; nil means
+/// not a file-mutating tool, no path argument, or the file is unreadable or over the cap (logged).
 private func preWriteSnapshot(toolName: String, arguments: [String: JSONValue]) async -> String? {
     guard preSnapshotToolNames.contains(toolName),
           let resolved = fileTargetPath(in: arguments) else { return nil }
 
-    // Off the cooperative pool: this reads up to `preWriteSnapshotByteLimit` bytes
-    // synchronously, and blocking a cooperative thread starves every other concurrent
-    // task in the agent run.
+    // Why: blocking a cooperative thread starves every other concurrent task in the agent run
+    // Runs off the cooperative pool: it reads up to `preWriteSnapshotByteLimit` bytes synchronously.
     return await Task.detached(priority: .utility) { () -> String? in
         guard FileManager.default.fileExists(atPath: resolved) else { return "" }
         guard let content = snapshotContents(atPath: resolved) else {
@@ -842,17 +705,11 @@ func deduplicateToolCalls(_ toolCalls: [PendingToolCall]) -> [PendingToolCall] {
     planToolCalls(toolCalls).run
 }
 
-/// Exact duplicates collapse to one; of several writes to the SAME target in one step, only the
-/// last runs (most recent intent).
-///
-/// ⚠️ READINESS CR-43 (2026-10-12). The semantic phase keyed every write by `path ?? source ??
-/// destination`, so two `copy_file`s of ONE source to two different destinations collided and the
-/// first was dropped — with no event and no observation, so the model believed both copies were
-/// made. The target is now every path ROLE of the tool (`writeTarget`): a copy or move is its source
-/// AND its destination. And a replaced call is returned in `superseded`, so the loop gives it an
-/// observation saying it did not run.
+/// Exact duplicates collapse to one; of several writes to the same target in one step only the last runs.
+/// The target is every path role of the tool (a copy or move is its source and destination); replaced calls are
+/// returned in `superseded` so the loop reports that they did not run.
 func planToolCalls(_ toolCalls: [PendingToolCall]) -> ToolCallPlan {
-    // Phase 1: Exact dedup — remove calls with identical name + serialized params.
+    // Exact dedup: removes calls with identical name and serialized params.
     var exactUnique: [PendingToolCall] = []
     var seen = Set<String>()
     for tool in toolCalls {
@@ -863,9 +720,8 @@ func planToolCalls(_ toolCalls: [PendingToolCall]) -> ToolCallPlan {
         }
     }
 
-    // Phase 2: Semantic dedup — of several writes to the same target, keep only the LAST. This
-    // stops a model flooding the HITL queue with near-identical write_file calls that differ only
-    // in whitespace (e.g., "\nHello" vs "\nHello\n" vs "Hello\n").
+    // Semantic dedup keeps only the last of several writes to the same target, so near-identical write_file
+    // calls cannot flood the HITL queue.
     var lastIndexByTarget: [String: Int] = [:]
     for (index, tool) in exactUnique.enumerated() {
         if let target = writeTarget(of: tool) { lastIndexByTarget[target] = index }
@@ -908,8 +764,8 @@ func writeTarget(of tool: PendingToolCall) -> String? {
     return ([tool.name] + values.map { $0 ?? "∅" }).joined(separator: "|")
 }
 
-/// The observation for a call a later call in the same step replaced (CR-43). Not a tool failure:
-/// it is reported `.cancelled`, which outcome accounting treats as a choice rather than evidence.
+/// The observation for a call a later call in the same step replaced; reported `.cancelled`, which outcome
+/// accounting treats as a choice rather than evidence.
 func supersededObservation(for call: PendingToolCall, by later: PendingToolCall, currentIteration: Int) -> ToolObservation {
     let note = "Not run: a later \(later.name) call in this same step (id \(later.id)) targets the same file(s), and only the last of them runs. Repeat this call in a later step if both were intended."
     return ToolObservation(
@@ -926,7 +782,7 @@ func supersededObservation(for call: PendingToolCall, by later: PendingToolCall,
     )
 }
 
-/// The observation for a call the parser rejected while its siblings ran (CR-52).
+/// The observation for a call the parser rejected while its siblings ran.
 func rejectedObservation(for rejected: RejectedSiblingCall, currentIteration: Int) -> ToolObservation {
     let note = rejected.modelNote
     return ToolObservation(
@@ -946,7 +802,7 @@ func rejectedObservation(for rejected: RejectedSiblingCall, currentIteration: In
     )
 }
 
-// MARK: - Same-file ordering (CR-45)
+// MARK: - Same-file ordering
 
 /// Tools that change a file's contents or existence. Two of these on one file must not run at once.
 let fileMutatingToolNames: Set<String> = [
@@ -955,14 +811,8 @@ let fileMutatingToolNames: Set<String> = [
     "delete_file", "move_file", "copy_file",
 ]
 
-/// Groups autonomous calls into lanes that may run in parallel. Calls that mutate a common file share
-/// a lane and run in the model's order; every other call is a lane of its own.
-///
-/// ⚠️ READINESS CR-45 (2026-10-12). Every autonomous call got its own task. Two `edit_code_single`
-/// calls on one file each read it, replaced their string and wrote it back, so the last write won
-/// and BOTH reported success — the first edit silently lost. Paths are compared after the same
-/// project re-anchoring the call will get (`WorkspaceBoundaryDecision`), so `a.swift` and
-/// `/proj/a.swift` are one file.
+/// Groups autonomous calls into lanes that may run in parallel: calls that mutate a common file share a lane and run
+/// in the model's order. Paths are compared after project re-anchoring, so `a.swift` and `/proj/a.swift` are one file.
 func executionLanes(for calls: [PendingToolCall], workspaceRoot: String?) -> [[PendingToolCall]] {
     var lanes: [[PendingToolCall]] = []
     var laneByPath: [String: Int] = [:]
@@ -999,31 +849,16 @@ func executionLanes(for calls: [PendingToolCall], workspaceRoot: String?) -> [[P
 
 func serializeToolParams(_ params: [String: JSONValue]) -> String {
     let normalized = normalizePathArguments(params)
-    // Sorted keys make the serialization DETERMINISTIC: identical logical arguments always
-    // produce identical strings. Both the repetition fingerprint (argsHash) and the
-    // RunInteractionMemory denial key depend on this.
+    // Sorted keys make the serialization deterministic; the repetition fingerprint and denial memory key depend on it.
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     if let data = try? encoder.encode(normalized), let str = String(data: data, encoding: .utf8) { return str }
     return "{}"
 }
 
-/// Normalizes filesystem path arguments to canonical form so that
-/// `/Users/alice/Acme/` and `/Users/alice/Acme` produce identical
-/// signatures for deduplication and circuit-breaker fingerprinting.
-///
-/// Handles: trailing slashes, tilde expansion, `.` / `..` segments, doubled slashes.
-///
-/// Applies ONLY to arguments that are actually paths, chosen by KEY. It used to sniff the
-/// VALUE for a leading `/`, `~` or `./` — which is true of any file whose first line is a
-/// `//` comment, so `write_file`'s `content` was run through `standardizingPath`. That
-/// silently (a) collapsed every `//` to `/`, turning Java/Swift/C line comments into syntax
-/// errors, and (b) truncated the content at PATH_MAX (1024 bytes). The corrupted string
-/// became the HITL banner's preview, the live Code Viewer tab, `ToolExecutionData.params`
-/// and therefore the episodic `effect` diff — so the user approved a write they could only
-/// partly see, and the model read its own mangled output back on the next turn and
-/// reproduced it. Field-observed 2026-07-27 (live-tab lengths 1014/1018/1019/1021 for files
-/// of 1.5K–2.9K, and `+/ Program 3:` in the rendered diff).
+// Why: never sniff values for a leading `/`: file content starting with `//` would be rewritten and truncated
+/// Normalizes filesystem path arguments to canonical form (trailing and doubled slashes, tilde, `.`/`..`) so equivalent
+/// paths produce identical dedup and circuit-breaker signatures. Applies only to arguments chosen by KEY.
 private let pathArgumentKeys: Set<String> = [
     "path", "file_path", "filepath", "filePath", "file", "filename", "destination",
     "destination_path", "destinationPath", "source", "source_path", "sourcePath",
@@ -1068,10 +903,8 @@ struct AskUserInterceptor {
         return sanitizeQuestion(arguments["question"]?.stringValue ?? "")
     }
 
-    /// Repairs an empty or visibly-unfinished clarification question so the user never sees a dead-end
-    /// prompt (e.g. "Could you please clarify what you mean by "). The model — not our parser — produces
-    /// these; we recover by trimming dangling connectors and re-terminating, or substituting a complete
-    /// fallback when nothing usable remains.
+    /// Repairs an empty or visibly unfinished clarification question so the user never sees a dead-end prompt, trimming
+    /// dangling connectors and re-terminating, or substituting a complete fallback.
     static func sanitizeQuestion(_ raw: String) -> String {
         let fallback = "Could you clarify your request so I can continue?"
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1123,10 +956,8 @@ struct AskUserInterceptor {
 /// dumping raw tool output into `answer`, which should be summarized instead.
 private let finalAnswerMaxChars = 32_000
 
-/// Builds the terminal observation for a `final_answer` call. Validates the
-/// payload; on invalid input returns a non-terminal failure observation so the
-/// loop continues and the model can retry with a valid answer. On success,
-/// returns a terminal observation that the executor breaks on.
+/// Builds the terminal observation for a `final_answer` call. Invalid input yields a non-terminal failure observation
+/// so the loop continues and the model can retry; success yields a terminal one the executor breaks on.
 private func buildFinalAnswerObservation(
     call: PendingToolCall,
     currentIteration: Int,
@@ -1161,9 +992,7 @@ private func buildFinalAnswerObservation(
         metadata: ["tool_name": "final_answer"]
     ))
 
-    // --- Validation: empty or whitespace ---
-    // Don't terminate — return a non-terminal failure so the model retries.
-    // This counts against maxIterations (per product decision #2).
+    // Empty or whitespace answer: not terminal, so the model retries (this counts against maxIterations).
     if trimmed.isEmpty {
         let errMsg = "ERROR: final_answer requires a non-empty 'answer' argument. Retry by calling final_answer again with your actual response content."
         let output = ToolOutput(toolName: "final_answer", params: paramsString, output: errMsg, isSuccess: false)

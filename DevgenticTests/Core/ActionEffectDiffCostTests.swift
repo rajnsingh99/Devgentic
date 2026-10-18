@@ -4,10 +4,7 @@
 //  ActionEffectDiffCostTests.swift
 //  DevgenticTests
 //
-//  Register codeviewer/cv-5 — every file-mutating tool completion ran the line-level LCS TWICE
-//  on the main actor (`changeCounts` and then `generateDiff` inside `changedLines`) and paid for
-//  `generateDiff`'s intra-line refinement, whose `segments` nothing in `ActionEffectBuilder`
-//  reads. These pin the cost, not just the output: one line-level pass, zero refinements.
+//  Created by Raj Singh.
 //
 
 import XCTest

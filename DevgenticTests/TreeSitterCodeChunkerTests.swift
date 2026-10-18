@@ -4,10 +4,7 @@
 //  TreeSitterCodeChunkerTests.swift
 //  DevgenticTests
 //
-//  TDD: RAG Tier 1 — TreeSitterCodeChunker Edge Cases (R7 + R8)
-//
-//  R7: Empty/whitespace code input should not produce prefix-only chunks
-//  R8: Language fallback map + single-line edge cases
+//  Created by Raj Singh.
 //
 
 import XCTest

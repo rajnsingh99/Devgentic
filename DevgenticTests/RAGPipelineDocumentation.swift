@@ -2,25 +2,10 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RAGPipelineDocumentation.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
-//  ╔══════════════════════════════════════════════════════════════╗
-//  ║  RAG Pipeline Documentation Tests                          ║
-//  ║                                                            ║
-//  ║  These tests serve as living documentation for Devgentic's ║
-//  ║  Retrieval-Augmented Generation pipeline. Each test method ║
-//  ║  demonstrates one stage with extensive comments explaining ║
-//  ║  the "why" behind each step.                               ║
-//  ║                                                            ║
-//  ║  Pipeline:                                                 ║
-//  ║  1. Message → ContentBlocks (parsing)                      ║
-//  ║  2. ContentBlocks → Chunks (SemanticChunker)               ║
-//  ║  3. Chunks → Embeddings (EmbeddingService + CoreML)        ║
-//  ║  4. Embeddings → ChildChunkEntity (HNSW native [Float]? storage) ║
-//  ║  5. Query → Ranked results (HNSW distance ≤ 0.7 ↔ sim ≥ 0.3) ║
-//  ╚══════════════════════════════════════════════════════════════╝
 
 import XCTest
 @testable import devgentic

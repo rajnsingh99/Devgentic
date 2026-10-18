@@ -4,16 +4,7 @@
 //  SecureKeyStorageObservabilityTests.swift
 //  DevgenticTests
 //
-//  Registers KC-23, KC-24, KC-26, KC-51, KC-57. Every log line this primitive emits used to be
-//  ad-hoc: three carried no tag and no consequence, the read line omitted the ACCOUNT (all four
-//  ChatOps credentials share one service, so they were indistinguishable), a decode failure
-//  logged "OSStatus 0" while claiming failure, and no OSStatus was ever translated for a reader.
-//
-//  The messages are now pure builders asserted directly, `osStatusName` is a mapping table, and
-//  the decode-failure branch is produced for real — a genuine `SecItemAdd` of non-UTF-8 bytes,
-//  read back through the real Security framework (the opt-in that `SecureKeyStorageTests`
-//  established). That one test also closes KC-26 (the primitive's integration tests never called
-//  `read`) and KC-57 (no test ever produced the `.failed` branch without a stub fabricating it).
+//  Created by Raj Singh.
 //
 
 import XCTest

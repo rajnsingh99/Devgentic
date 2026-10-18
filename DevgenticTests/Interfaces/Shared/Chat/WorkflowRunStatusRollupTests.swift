@@ -4,16 +4,7 @@
 //  WorkflowRunStatusRollupTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF4.
-//
-//  A node skipped because a Condition or Gate routed the other way never ran and nothing went
-//  wrong. The run-status roll-up in `freeze` gated on the RAW `.failed` status, so every
-//  conditional workflow reported every successful run as a failure, permanently, in persistence.
-//
-//  ⚠️ Since 2026-08-15 such a node is recorded `.skipped(reason)` rather than `.failed` with a
-//  prose detail, so these tests assert the roll-up over the TYPED status. One legacy case is kept
-//  deliberately: records written by older builds still carry the old shape and must still roll up
-//  correctly after an upgrade.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,17 +4,7 @@
 //  NestedLayoutCacheInvalidationTests.swift
 //  DevgenticTests
 //
-//  Created on 29/08/26.
-//
-//  ⚠️ A canvas caches the layouts of the workflows its sub-workflow nodes point at, because
-//  `revalidate()` runs on every node drag and inspector keystroke and resolving them walks the whole
-//  nesting tree with a fetch per workflow. The cache was keyed on the SET of child ids alone — which
-//  does not change when a child's CONTENT does — so editing a child left every parent validating
-//  against a stale copy for the rest of its session. The nesting cycle and depth rules are `.error`
-//  severity, so it failed both ways: a graph that had become cyclic still read "Workflow Ready", and
-//  one whose cycle had been removed kept a blocking error nothing could clear.
-//
-//  `WorkflowLayoutStore.writeGeneration` is the invalidation signal. These tests pin it.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,10 +4,7 @@
 //  RateLimitSingleChargeTests.swift
 //  DevgenticTests
 //
-//  One model request = one rate-limit token. The ReAct loop (and Planning/Reflexion) used to take a
-//  token with `wait(forKey:)` before each step, and `CloudRequestPipeline` took another for the same
-//  HTTP request — every limit was halved. Callers above the HTTP layer now use the non-consuming
-//  `waitForCapacity`.
+//  Created by Raj Singh.
 //
 
 import XCTest

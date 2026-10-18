@@ -4,17 +4,7 @@
 //  InteractionBannerStack.swift
 //  Devgentic
 //
-//  [HITL Standardization — P3]
-//  The single above-input HITL surface for EVERY interface (chat, code, workflow, scheduled).
-//  Reads `InteractionCenter.current(for:)` so it shows exactly one request at a time in strict
-//  FIFO order (D1) — the next slides in once the current resolves. Each banner carries a
-//  source-attribution header from `PendingHITL.origin` (D2: which interface / workflow node).
-//
-//  Dismissal is driven entirely by the center (resolved via the `.hitl*Resolved` notifications
-//  → `InteractionCenter.resolve`); there is NO optimistic timer like the legacy banner.
-//
-//  P3 dual-mounts this beside the legacy `AgentInterruptBannerView` for verification; P4 removes
-//  the legacy host and the `interfaceMode != .workflow` gate.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -26,6 +16,9 @@ private let bannerLogger = DGLogger(category: "InteractionBanner")
 
 // MARK: - Host
 
+/// The single above-input surface for human-in-the-loop requests in every interface.
+/// Shows one request at a time in FIFO order via `InteractionCenter.current(for:)`, with a source header from `origin`.
+/// Dismissal is driven entirely by the center's resolution; there is no optimistic timer.
 struct InteractionBannerStack: View {
     @Environment(MainApplicationViewModel.self) private var vm
     @Environment(\.appTheme) private var theme
@@ -36,15 +29,11 @@ struct InteractionBannerStack: View {
     var body: some View {
         let selected = vm.selectedConversationID
         let current = selected.flatMap { vm.interactionCenter.current(for: $0) }
-        // How many requests are queued for THIS conversation. `current(for:)` is a FIFO of one, so
-        // when two workflow nodes park at the same time the second was completely invisible — the
-        // user answered one banner and a new one appeared with no warning it was coming, and no way
-        // to know how many more were behind it. `items(for:)` already existed for the node badges.
+        // How many requests are queued for this conversation, so the user knows more banners are waiting.
         let queuedCount = selected.map { vm.interactionCenter.items(for: $0).count } ?? 0
 
-        // NOTE: the cross-conversation "N others awaiting input" affordance lives in
-        // `CrossConversationInputChip`, floated at the TOP of the chat area (MainApplicationView).
-        // This bottom stack is only the HITL banner for the CURRENTLY focused conversation.
+        // The cross-conversation "N others awaiting input" chip is `CrossConversationInputChip`, at the top of the chat area.
+        // This bottom stack is only the banner for the currently focused conversation.
         return VStack(spacing: 6) {
             if let pending = current {
                 if queuedCount > 1 {
@@ -82,10 +71,8 @@ struct InteractionBannerStack: View {
         .padding(.bottom, 6)
         .animation(reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.82),
                    value: current?.id)
-        // The banner slides in and flashes — both of which are invisible to a VoiceOver user,
-        // who was left with a silently blocked agent. `.immediate` is warranted here and
-        // almost nowhere else: execution is halted until they answer, and a gate will
-        // fail on a deadline they can't see.
+        // Announces immediately: the banner's slide-in and flash are invisible to VoiceOver,
+        // and execution is halted until the request is answered.
         .onChange(of: current?.id, initial: true) { _, _ in
             guard let pending = current else { return }
             let base = Self.announcement(for: pending)
@@ -137,12 +124,8 @@ struct InteractionBannerStack: View {
 
 // MARK: - Cross-conversation affordance
 
-/// Compact chip shown above the input when one or more OTHER conversations have a pending HITL.
-/// Tapping it navigates to that conversation so its banner becomes visible (D1/background case).
-/// [F2] Floating, top-centered affordance for HITL requests raised in OTHER (unfocused / background /
-/// remote / scheduled) conversations — otherwise invisible now that the legacy per-message banner is
-/// gone. A content-hugging capsule (distinct from the bottom HITL banner, which acts on the CURRENT
-/// conversation); tapping navigates to the oldest waiting conversation.
+/// Floating, top-centered capsule for requests raised in other (unfocused, background, remote or scheduled) chats.
+/// Distinct from the bottom banner; tapping navigates to the oldest waiting conversation.
 struct CrossConversationInputChip: View {
     @Environment(MainApplicationViewModel.self) private var vm
     @Environment(\.appTheme) private var theme
@@ -314,13 +297,8 @@ private struct PermissionInteractionBanner: View {
             arguments: effectiveArguments)
     }
 
-    /// A3: top-level string arguments the user can correct before approving.
-    ///
-    /// The old 2000-char cap silently EXCLUDED `content` for any file over that size — the
-    /// one argument most worth checking simply never appeared in the editor, with nothing
-    /// said about why. Everything is editable now; long or multi-line values get a real
-    /// multi-line editor instead of a one-line field (field-observed 2026-07-25: a whole
-    /// Java file collapsed to `package dsa.jan26;` in a single-line TextField).
+    /// Top-level string arguments the user can correct before approving.
+    /// Every argument is editable; long or multi-line values get a multi-line editor.
     private var editableArgs: [(key: String, value: String)] {
         guard case .object(let dict)? = confirmation.arguments else { return [] }
         return dict.compactMap { (k, v) -> (key: String, value: String)? in
@@ -442,10 +420,7 @@ private struct PermissionInteractionBanner: View {
                 }
 
                 if editing {
-                    // The diff STAYS while editing. Hiding it was how a destructive
-                    // overwrite got approved: opening the editor removed the only signal
-                    // that 2849 chars were being replaced by 531. It now reads from the
-                    // edited arguments, so it tracks what Allow will actually write.
+                    // The diff stays visible while editing and reads from the edited arguments, so it tracks what Allow will write.
                     if let fileChange {
                         FileChangePreviewView(change: fileChange)
                     }
@@ -460,9 +435,7 @@ private struct PermissionInteractionBanner: View {
                                     set: { editedValues[arg.key] = $0 }
                                 )
                                 if needsMultilineEditor(arg.value) {
-                                    // File content and other multi-line values: a real
-                                    // editor. A one-line field showed only `package …;`
-                                    // and hid everything the write would replace.
+                                    // File content and other multi-line values get a real multi-line editor, not a one-line field.
                                     VStack(alignment: .leading, spacing: 3) {
                                         HStack(spacing: 6) {
                                             Text(arg.key)
@@ -473,9 +446,8 @@ private struct PermissionInteractionBanner: View {
                                                 .foregroundColor(theme.tertiaryText.opacity(0.8))
                                             Spacer(minLength: 0)
                                         }
-                                        // NOT a plain `TextEditor`: macOS would rewrite `"`
-                                        // into curly quotes and `--` into an em dash as you
-                                        // type, and this value is a FILE about to be written.
+                                        // Not a plain `TextEditor`: macOS would substitute curly quotes and em dashes
+                                        // in a value that is a file about to be written.
                                         VerbatimTextEditor(
                                             text: binding,
                                             textColor: theme.primaryText
@@ -492,10 +464,7 @@ private struct PermissionInteractionBanner: View {
                                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                             .foregroundColor(theme.tertiaryText)
                                             .frame(minWidth: 48, alignment: .leading)
-                                        // Also substitution-free: `needsMultilineEditor` is
-                                        // just "\n or >120 chars", so a SHORT file's content
-                                        // lands here too — and a path with `--` in it would
-                                        // be em-dashed by the field editor either way.
+                                        // Also substitution-free: short file content and paths with `--` land here too.
                                         VerbatimTextEditor(
                                             text: binding,
                                             textColor: theme.primaryText,
@@ -520,9 +489,8 @@ private struct PermissionInteractionBanner: View {
                                 .foregroundColor(theme.warningColor)
                         }
                         Spacer(minLength: 0)
-                        // There was no way back to the model's proposal once edited:
-                        // toggling the editor deliberately preserves in-progress edits, so
-                        // without this the only escape was Deny and re-run.
+                        // Restores the model's proposal after edits; toggling the editor preserves edits,
+                        // so otherwise only Deny and re-run would undo them.
                         Button(action: discardEdits) {
                             Text(hasPendingEdits ? "Discard edits" : "Cancel")
                                 .font(.system(size: 10, weight: .semibold))
@@ -580,18 +548,16 @@ private struct PermissionInteractionBanner: View {
                         decide(approved: false)
                     }
 
-                    // A4: "Allow for this chat" → trust this tool for the rest of THIS conversation
-                    // (persisted, survives restart) without touching the shared profile, so the choice
-                    // never leaks to other conversations. Hidden for destructive tools (always prompt).
+                    // "Allow for this chat" trusts this tool for the rest of this conversation (persisted), not the shared profile.
+                    // Hidden for destructive tools, which always prompt.
                     if confirmation.risk != .destructive {
                         HITLActionButton(label: "Allow for this chat", icon: "checkmark.circle", style: .ghost, isDisabled: !editsValid) {
                             allowForThisConversation()
                         }
                     }
 
-                    // B1: Allow has NO Return shortcut. The chat input is an always-focused NSTextView
-                    // whose Return is claimed window-wide, so Return=Allow could approve a tool while the
-                    // user is mid-sentence. Approve is click-only; Esc=Deny is safe (bare Esc isn't a send).
+                    // Allow has no Return shortcut: the chat input claims Return window-wide, so it could approve mid-sentence.
+                    // Approve is click-only; Esc denies.
                     HITLActionButton(
                         label: confirmation.risk == .destructive ? "Allow anyway" : "Allow",
                         icon: "checkmark",
@@ -608,14 +574,8 @@ private struct PermissionInteractionBanner: View {
         .appSurface(in: .rect(cornerRadius: 16), elevation: .elevated)
     }
 
-    /// A4: trust this tool for the rest of THIS conversation — persisted (survives restart) and
-    /// scoped strictly to this chat, so it never leaks to other conversations or the shared
-    /// profile. Then approve the current request.
-    ///
-    /// Inside a workflow the grant is narrowed further, to the NODE that raised it: nodes share
-    /// one conversationID but configure their tools independently, so approving here must not
-    /// answer for a different node that was set to ask. `origin.nodeID` is nil outside workflows,
-    /// which keeps ordinary chat conversation-wide exactly as before.
+    /// Trusts this tool for the rest of this conversation (persisted, scoped to this chat), then approves the request.
+    /// Inside a workflow the grant is narrowed to the node that raised it; `origin.nodeID` is nil outside workflows.
     private func allowForThisConversation() {
         guard !isProcessing else { return }
         let tool = confirmation.toolName
@@ -633,13 +593,8 @@ private struct PermissionInteractionBanner: View {
         }
     }
 
-    /// [WF-SE3] The ONE string both the visible pill and VoiceOver read from — found on
-    /// adversarial audit that the accessibilityLabel below was hardcoded to `confirmation.risk.
-    /// label` alone, silently dropping the "(server-declared)" qualifier a sighted user sees. That
-    /// qualifier is not decorative: `ToolRiskResolver`'s own header says it must be "rendered
-    /// correctly on EVERY confirmation surface forever" because a `.destructive` server-declared
-    /// tier rests on an MCP server's UNVERIFIED self-report, not a native guarantee — a VoiceOver
-    /// user approving by ear deserves the same warning a sighted user sees.
+    /// The one string both the visible pill and VoiceOver read, including the "(server-declared)" qualifier.
+    /// The qualifier matters: a server-declared `.destructive` tier rests on an MCP server's unverified self-report.
     private var riskLabelText: String {
         confirmation.riskIsServerDeclared == true
             ? "\(confirmation.risk.label) (server-declared)"
@@ -853,19 +808,15 @@ private struct GateInteractionBanner: View {
                 .lineSpacing(2)
 
             if gate.deadline != nil {
-                // Live countdown to the configured timeout. ⚠️ NOT an auto-reject: the executor's
-                // timeout arm fails the node with `activePorts` unset, so no option branch — not even
-                // "Reject" — is ever taken (register INS-3). WorkflowExecutor enforces the actual
-                // timeout; this only displays it.
+                // Live countdown to the configured timeout; display only, not an auto-reject.
+                // `WorkflowExecutor` enforces the timeout and fails the node with no option branch taken.
                 TimelineView(.periodic(from: Date(), by: 1)) { context in
                     if let text = countdownText(now: context.date) {
                         Label(text, systemImage: "timer")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(theme.warningColor)
                             .accessibilityLabel(text)
-                            // Announcing every tick would talk over the whole app, so speak
-                            // only at thresholds. Silence here meant a VoiceOver user was
-                            // failed on a deadline they had no way to perceive.
+                            // Speaks only at thresholds, since announcing every tick would talk over the app; the deadline must be perceivable.
                             .onChange(of: Int(max(0, gate.deadline?.timeIntervalSince(context.date) ?? 0))) { _, remaining in
                                 announceCountdownIfNeeded(remaining)
                             }
@@ -924,15 +875,8 @@ private struct GateInteractionBanner: View {
     }
 
     /// The input the decision is about, with each rule's matched text painted in that rule's colour.
-    ///
-    /// ⚠️ Reuses `SearchHighlighter.applyHighlights` verbatim — a proven forward-cursor pass — by
-    /// calling it ONCE PER RULE with only that rule's spans and that rule's hue. It takes a single
-    /// base colour per call, so per-rule colouring is N passes rather than one. Where two rules
-    /// matched overlapping text the later pass wins; the association is still legible because each
-    /// rule's other spans keep its own colour.
-    ///
-    /// ⚠️ Offsets are CHARACTER offsets against `gate.inputText` exactly as the executor measured
-    /// them. Nothing here re-derives the string.
+    /// Calls `SearchHighlighter.applyHighlights` once per rule; where rules overlap, the later pass wins.
+    /// Offsets are character offsets against `gate.inputText` as the executor measured them.
     @ViewBuilder
     private func highlightedInput(_ input: String) -> some View {
         let attributed: AttributedString = {
@@ -1036,9 +980,7 @@ private struct PlanReviewInteractionBanner: View {
             HStack(spacing: 8) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
-                        // Default init mints a UUID id. A count-derived id (step_N+1) collides with an
-                        // existing id after a delete → duplicate ForEach identities (wrong-row edits /
-                        // double-delete / corrupted submitted plan).
+                        // The default init mints a UUID id; a count-derived id could collide with an existing one after a delete.
                         editableSubtasks.append(SubTask(description: ""))
                     }
                 } label: {

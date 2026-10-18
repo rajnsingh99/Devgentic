@@ -4,7 +4,7 @@
 //  DiscordModels.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -40,26 +40,9 @@ struct DiscordGatewayPayload: Codable, Sendable {
 struct DiscordRawJSON: Codable, Sendable {
     let data: Data
 
-    /// ⚠️⚠️ [DC-5] THIS USED TO SNIFF FOR TWO SHAPES AND SUBSTITUTE `null` FOR EVERY OTHER ONE. It
-    /// tried dictionary, then array, then `decodeNil()`, and its final `else` wrote the literal bytes
-    /// `null` — so any SCALAR payload was silently destroyed. Discord sends exactly one: op 9
-    /// INVALID_SESSION carries a bare `true`/`false` saying whether the session may be RESUMED.
-    /// `decodeNil()` is false for `true`, so it fell to that `else`, and the consumer's
-    /// `(try? payload.d?.decode(Bool.self)) ?? false` then decoded `Bool` from `null`, threw, and
-    /// defaulted to false. Every invalid session was therefore treated as non-resumable: the session
-    /// id and sequence were always discarded, the reconnect always degraded to a full re-IDENTIFY
-    /// (which Discord meters daily), events queued since the last sequence were always lost, and the
-    /// log could only ever print "resumable: false" — so the bug could not be seen from the field
-    /// either.
-    ///
-    /// ⚠️ A TOTAL ROUND TRIP, NOT ONE MORE BRANCH. `AnyCodableValue` already models every JSON type,
-    /// so decoding through it makes "a shape we forgot" unrepresentable instead of documented. This
-    /// is NOT the shape-matching content rewrite this codebase has been bitten by four times: nothing
-    /// is inspected or transformed, the value is decoded and re-encoded as itself.
-    ///
-    /// ⚠️ IT THROWS RATHER THAN SWALLOWING. A fragment that genuinely cannot be re-encoded now
-    /// surfaces through the envelope catch in `DiscordGatewayClient`, which names its consequence,
-    /// instead of being flattened to `null` where nothing can tell it apart from a real null.
+    /// Decodes through `AnyCodableValue` so every JSON shape round-trips as itself, including a scalar payload such as op 9
+    /// INVALID_SESSION's bare `true`/`false`; nothing is inspected or transformed. A fragment that cannot be re-encoded
+    /// throws.
     init(from decoder: Decoder) throws {
         let value = try AnyCodableValue(from: decoder)
         self.data = try JSONEncoder().encode(value)
@@ -162,15 +145,8 @@ struct DiscordConnectionProperties: Codable, Sendable {
     }
 }
 
-/// Sent on opcode 6 (RESUME) — resumes a disconnected session.
-/// A gateway frame: an opcode and its payload.
-///
-/// ⚠️⚠️ [DC-8] EXISTS BECAUSE THE MODELS WERE NOT ON THE SEND PATH. `sendResume` and `sendHeartbeat`
-/// hand-built `[String: Any]` dictionaries and serialised those, so `DiscordResumePayload` had exactly
-/// two references in the whole repo — both inside `DiscordGatewayClientTests`, which encoded it,
-/// decoded it, and asserted the round trip. That test could not fail for any reason the app cares
-/// about: the struct it validated was never what went on the wire. A typed frame puts the model back
-/// on the real path, so the test starts meaning something.
+/// A gateway frame: an opcode and its typed payload (e.g. opcode 6 RESUME, which resumes a disconnected session). Typed
+/// so the models are on the real send path rather than hand-built dictionaries.
 struct DiscordGatewayFrame<Payload: Encodable>: Encodable {
     let op: Int
     let d: Payload
@@ -235,12 +211,8 @@ struct DiscordInteraction: Codable, Sendable {
     let message: DiscordMessage?
     let member: DiscordGuildMember?
 
-    /// The text a user typed into one field of a submitted modal.
-    ///
-    /// ⚠️ VALUES ARRIVE ONE ACTIONROW DEEP: `data.components` is a list of ActionRows, each holding
-    /// the single Text Input Discord requires it to hold. Reading `data.components` directly and
-    /// looking for a `custom_id` finds only rows, which have none — so the obvious flat read
-    /// returns nil for every submission and looks like "the user submitted nothing".
+    /// The text a user typed into one field of a submitted modal. Values arrive one ActionRow deep: `data.components` is a
+    /// list of rows, each holding the single Text Input, so the `custom_id` is on the nested component.
     func submittedValue(forCustomID customID: String) -> String? {
         data?.components?
             .compactMap(\.components)
@@ -252,9 +224,8 @@ struct DiscordInteraction: Codable, Sendable {
     /// Interaction types.
     static let applicationCommand = 2
     static let messageComponent = 3
-    /// ⚠️ A user submitting a MODAL. It was unmodelled, and the bridge's interaction switch ended
-    /// in a bare `return`, so a submission was dropped with no ack and no log — which Discord shows
-    /// the user as a red "Something went wrong" three seconds later, with nothing recorded anywhere.
+    /// A user submitting a modal; it must be handled and acknowledged, or Discord shows the user a red 'Something went
+    /// wrong'.
     static let modalSubmit = 5
 }
 
@@ -264,9 +235,7 @@ struct DiscordInteractionData: Codable, Sendable {
     let component_type: Int?
     let name: String?
 
-    /// ⚠️ A MODAL SUBMISSION'S VALUES, nested one ActionRow deep. This was absent, so
-    /// `interaction.data?.components` did not compile and a submitted answer could not be reached
-    /// at all. See `DiscordInteraction.submittedValue(forCustomID:)`.
+    /// A modal submission's values, nested one ActionRow deep; see `DiscordInteraction.submittedValue(forCustomID:)`.
     let components: [DiscordComponent]?
 }
 
@@ -285,9 +254,7 @@ struct DiscordComponent: Codable, Sendable {
     let custom_id: String?
     let components: [DiscordComponent]?
 
-    /// ⚠️ THE FIELD A SUBMITTED ANSWER ARRIVES IN. Without it every modal submission decoded as
-    /// nil — the answer was on the wire and unreadable. Absent on outbound buttons, and `Codable`
-    /// omits nil optionals, so nothing changes for them.
+    /// The field a submitted answer arrives in; absent on outbound buttons, and `Codable` omits nil optionals.
     let value: String?
 
     /// Greyed hint inside a text input. Discord caps it at 100 characters.
@@ -321,14 +288,9 @@ struct DiscordComponent: Codable, Sendable {
                          components: nil, value: nil, placeholder: nil)
     }
 
-    /// Factory: creates a paragraph Text Input for a modal.
-    ///
-    /// ⚠️ LABEL AND PLACEHOLDER ARE RAW TEXT. Discord renders NO markdown inside a modal, so
-    /// running them through the message-path escaper would show the user literal backslashes.
-    /// Truncated to Discord's documented caps (label 45, placeholder 100) because exceeding either
-    /// rejects the whole interaction response — and the only feedback is a failed modal.
-    ///
-    /// ⚠️ Each Text Input must be the SOLE child of its own ActionRow; Discord rejects two in one.
+    /// Factory: creates a paragraph Text Input for a modal. Each Text Input must be the sole child of its own ActionRow.
+    /// Label and placeholder are raw text (no markdown in a modal), truncated to Discord's caps (label 45, placeholder 100),
+    /// since exceeding either rejects the response.
     static func textInput(customID: String, label: String, placeholder: String? = nil) -> DiscordComponent {
         DiscordComponent(
             type: Self.textInput,
@@ -344,31 +306,13 @@ struct DiscordComponent: Codable, Sendable {
 
 // MARK: - REST API Payloads
 
-// ⚠️ REQUEST PAYLOADS ARE `Encodable`, NOT `Codable` — they travel one way and nothing decodes them
-// (verified repo-wide). Declaring them `Codable` made the compiler warn that the `allowed_mentions`
-// default "will not be decoded", which is true and irrelevant: a field the server never sends back
-// cannot be decoded. Typing them as encode-only states the direction and removes a warning that
-// would otherwise train the next reader to ignore warnings on this file.
+// Request payloads are `Encodable`, not `Codable`: they travel one way and nothing decodes them.
 
-/// Which mentions Discord is permitted to RESOLVE in a message this app sends.
-///
-/// ⚠️⚠️ [BR-3/EG-3] THE TEXT THIS BOT POSTS IS NOT THE APP'S TEXT. It is the agent's answer, the
-/// user's own prompt echoed back, and conversation titles auto-derived from a first message — all of
-/// which reach Discord's `content` verbatim. Discord resolves `@everyone`, `@here`, `<@user>` and
-/// `<@&role>` from the message BODY by default, so any of those strings appearing anywhere in a
-/// model's output made the bot mass-ping the server. Nothing in the repo set this field; a
-/// repo-wide search for `allowed_mentions` returned nothing at all.
-///
-/// ⚠️⚠️ AND THE OBVIOUS FIX — ESCAPING `@` IN THE ESCAPER — WOULD HAVE BEEN A CONTENT-CORRUPTION BUG,
-/// the fifth in this codebase's documented history of transforms that rewrote a payload by
-/// shape-matching it. This bot posts CODE: `@MainActor`, `@Observable`, `@escaping`, `@media`,
-/// decorators, email addresses. Mangling every one of those to stop a ping is a worse defect than
-/// the ping. `allowed_mentions` is Discord's own control and is authoritative — the text renders
-/// EXACTLY as written and simply does not notify anyone.
-///
-/// ⚠️ `parse: []` is "resolve nothing", and it is deliberately not "resolve users but not everyone".
-/// A single-user remote control has no reason to notify a third party at all, and the narrower
-/// setting would still let model output ping an arbitrary member by id.
+// Why: do not escape `@` in the escaper instead: the bot posts code (`@MainActor`, `@media`, emails) and mangling
+// it is worse than the ping.
+/// Which mentions Discord is permitted to resolve in a message this app sends. The bot posts agent output and user text
+/// verbatim, so by default `@everyone`, `<@user>` and `<@&role>` in it would ping; `parse: []` resolves nothing and the
+/// text still renders exactly as written.
 struct DiscordAllowedMentions: Encodable, Sendable {
 
     /// Mention types Discord may resolve. Empty = none.
@@ -382,10 +326,8 @@ struct DiscordCreateMessagePayload: Encodable, Sendable {
     let content: String
     let components: [DiscordComponent]?
 
-    /// ⚠️ A `let` WITH A DEFAULT, WHICH IS THE WHOLE POINT: Swift excludes such a property from the
-    /// memberwise initializer, so every existing call site keeps compiling AND no future one can
-    /// construct this payload without the suppression. A field each caller had to remember would be
-    /// forgotten by exactly the new send path nobody reviewed.
+    /// A `let` with a default is excluded from the memberwise initializer, so no call site can construct this payload
+    /// without the suppression.
     let allowed_mentions: DiscordAllowedMentions = .suppressAll
 }
 
@@ -394,8 +336,7 @@ struct DiscordEditMessagePayload: Encodable, Sendable {
     let content: String
     let components: [DiscordComponent]?
 
-    /// ⚠️ Edits need it as much as creates: a mirrored HITL prompt is EDITED in place when it
-    /// resolves, and that edit carries the same model-supplied tool name and parameters.
+    /// Edits need it as much as creates: a mirrored HITL prompt is edited in place and carries the same model-supplied text.
     let allowed_mentions: DiscordAllowedMentions = .suppressAll
 }
 
@@ -409,9 +350,8 @@ struct DiscordInteractionResponsePayload: Encodable, Sendable {
     static let deferredUpdateMessage = 6    // For button clicks — acknowledges without visible response
     static let channelMessageWithSource = 4 // Respond with a new message
     static let updateMessage = 7            // Edit the original interaction message
-    /// ⚠️ Opens a MODAL, and it IS the acknowledgement — Discord permits exactly one initial
-    /// response per interaction, so a modal cannot follow a deferred ack. Every gate that decides
-    /// whether to open one must therefore run BEFORE any ack.
+    /// Opens a modal and is itself the acknowledgement: Discord permits one initial response per interaction, so every gate
+    /// that decides whether to open one must run before any ack.
     static let modal = 9
 }
 
@@ -420,26 +360,18 @@ struct DiscordInteractionCallbackData: Encodable, Sendable {
     let content: String?
     let components: [DiscordComponent]?
 
-    /// ⚠️ REQUIRED BY A TYPE-9 (modal) RESPONSE, and their absence was the single hard blocker on
-    /// opening one: the body could not be expressed, however willing the transport was.
-    /// `custom_id` comes back on the submission and is what names the operation being answered.
+    /// Required by a type-9 (modal) response; `custom_id` comes back on the submission and names the operation being
+    /// answered.
     let custom_id: String?
     /// Shown as the modal's heading. Discord caps it at 45 characters.
     let title: String?
 
-    /// ⚠️ [BR-3/EG-3] See `DiscordAllowedMentions`. An interaction response carries the same
-    /// model-supplied text as a channel post, so it needs the same suppression.
-    ///
-    /// ⚠️ OPTIONAL, AND SET ONLY WHEN THERE IS CONTENT — unlike the two message payloads, which
-    /// always have some. A type-9 MODAL response carries `custom_id`/`title`/`components` and no
-    /// message body at all; sending a mention policy for a message that does not exist invites a
-    /// 400 on the one path that cannot retry (Discord permits exactly one initial response per
-    /// interaction). Swift's synthesized encoder uses `encodeIfPresent` for optionals, so nil is
-    /// omitted from the JSON rather than sent as null.
+    /// See `DiscordAllowedMentions`. Optional and set only when there is content: a type-9 modal response has no message
+    /// body, and a mention policy for a nonexistent message risks a 400 on the one path that cannot retry. Nil is omitted
+    /// from the JSON.
     let allowed_mentions: DiscordAllowedMentions?
 
-    /// ⚠️ Explicit, with defaults, so the message-shaped call sites that predate the modal fields
-    /// keep compiling unchanged.
+    /// Explicit initializer with defaults, so message-shaped call sites compile without the modal fields.
     init(content: String? = nil,
          components: [DiscordComponent]? = nil,
          custom_id: String? = nil,

@@ -4,41 +4,22 @@
 //  MLXModelIdentity.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for Batch 1 of the MLX Model Manager readiness plan (A3 + A17).
-//
-//  The single definition of "which model is this?" for the MLX subsystem.
-//
-//  Why this file exists. `MLXModelItem.displayName` is the identity key everywhere — the
-//  install check in `DownloadCoordinator`, the terminal-state decision in `DownloadManager`,
-//  the profile-to-path resolution in `AgentConnect` / `IntelligenceCoreService` /
-//  `HistoryCompactionService` / `WorkflowExecutor`, the profile cache, and the store's
-//  Installed badge. It was produced by re-attaching the author only when the parent directory
-//  was literally `mlx-community`, so every other publisher yielded a bare model name. Two
-//  incompatible comparators then grew around that: an exact `==` (which never matched for
-//  those models) and a lenient `contains` (which matched too much, marking un-downloaded
-//  models as installed and hiding their Download button entirely).
-//
-//  Both the derivation and the comparison live here so they cannot drift apart again.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import Hub
 
+/// The single definition of "which model is this?" for the MLX subsystem.
+/// Both the derivation of a model's identity key and the comparison against it live here.
 enum MLXModelIdentity {
 
 
     // MARK: - Derivation
 
     /// The canonical `author/name` repo id for a model directory.
-    ///
-    /// `downloadBase` is `MLXModelService.modelsDirectory` — the value handed to
-    /// `HubApi(downloadBase:)`. HubApi nests everything one level deeper under the repo-type
-    /// segment (`models`), which is part of the on-disk layout but NOT part of the repo id.
-    ///
-    /// Handles three layouts:
-    ///   1. `<base>/models/<author>/<name>/`        — what HubApi writes today.
-    ///   2. `…/models--Org--Name/snapshots/<sha>/`  — the python `huggingface_hub` cache.
-    ///   3. Anything else                            — falls back to the folder name.
+    /// `downloadBase` is `MLXModelService.modelsDirectory`; HubApi's extra `models` path segment is not part of the id.
+    /// Layouts: HubApi's `<base>/models/<author>/<name>/`, the python `huggingface_hub` cache, else the folder name.
     static func canonicalRepoId(forModelAt modelDir: URL, downloadBase: URL) -> String {
         // (2) first: in the python cache `modelDir.lastPathComponent` is a commit SHA, so a
         // `starts(with: "models--")` test on the leaf never fires — the marker is an ancestor.
@@ -77,11 +58,9 @@ enum MLXModelIdentity {
         case none
     }
 
-    /// Compare a stored/installed identifier against a candidate repo id.
-    ///
-    /// ⚠️ Never use `contains` here. The bare model name is a *substring* of longer variant
-    /// names (`…-4bit` inside `…-4bit-DWQ`), so a substring test reports a distinct model as
-    /// installed and the store then renders no Download affordance for it at all.
+    // Why: a substring match reports a distinct model as installed and hides its Download button.
+    /// Compares a stored/installed identifier against a candidate repo id.
+    /// Never a `contains` test: a bare model name is a substring of longer variants (`…-4bit` in `…-4bit-DWQ`).
     static func match(installed: String, candidate: String) -> MatchKind {
         let lhs = installed.trimmingCharacters(in: .whitespacesAndNewlines)
         let rhs = candidate.trimmingCharacters(in: .whitespacesAndNewlines)

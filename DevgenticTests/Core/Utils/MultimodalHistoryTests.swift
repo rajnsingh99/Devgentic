@@ -4,20 +4,7 @@
 //  MultimodalHistoryTests.swift
 //  DevgenticTests
 //
-//  Covers the HistoryTurn refactor that made prior-turn images representable.
-//
-//  THE PIN THAT MATTERS: `testWireParity_TextOnlyHistory_MatchesLegacyShape`.
-//  Every existing conversation is text-only, and the native path depends on a
-//  byte-stable prompt prefix for KV-cache reuse. If lowering a text-only history
-//  ever stops producing exactly `["role": …, "content": …]`, caches invalidate and
-//  model behavior shifts app-wide with no other symptom.
-//
-//  NOTE ON "BYTE PARITY": the request body is built with `JSONSerialization` and no
-//  `.sortedKeys`, so intra-object key ORDER is Swift hash order and already varies
-//  across process launches. Byte-equality of the serialized request is therefore not
-//  a property that can be asserted at all. The meaningful invariant — and what these
-//  tests pin — is JSON-object equivalence: same message count, same order, same
-//  role/content values.
+//  Created by Raj Singh.
 //
 
 import XCTest

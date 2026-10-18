@@ -4,7 +4,7 @@
 //  MLXNativeStructuredGenerator.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

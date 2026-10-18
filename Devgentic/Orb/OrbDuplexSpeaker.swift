@@ -4,43 +4,15 @@
 //  OrbDuplexSpeaker.swift
 //  Devgentic
 //
-//  [Phase 4b] Renders Orb's speech through the app's OWN AVAudioEngine instead of letting
-//  AVFoundation play it on a private audio unit.
-//
-//  WHY THIS IS THE WHOLE POINT OF PHASE 4. VoiceProcessingIO cancels the audio the app plays
-//  through the SAME engine that carries the microphone. While speech goes out through
-//  `AVSpeechSynthesizer.speak`, there is no reference signal, so echo cancellation has nothing to
-//  subtract and the microphone must stay closed while Orb talks. Routing synthesis through
-//  `write(_:toBufferCallback:)` into an `AVAudioPlayerNode` on the shared engine is what makes
-//  real barge-in possible — and what lets `audioSettleDelay` finally go.
-//
-//  ⚠️ THE UNDOCUMENTED PART, AND HOW THIS HANDLES IT. `AVSpeechSynthesis.h:238-250` says nothing
-//  about how `write` signals that an utterance is fully rendered, and the delegate protocol
-//  (:296-309) never mentions `write` at all. The "final buffer has frameLength == 0" belief has
-//  no basis in the header. Rather than guess, this treats BOTH candidate signals as valid —
-//  a zero-frame buffer OR `didFinishSpeechUtterance` — takes whichever arrives first, and LOGS
-//  WHICH ONE FIRED. The first device run therefore answers the question as a side effect of
-//  working, instead of needing a separate experiment.
-//
-//  VERIFIED AGAINST THE INSTALLED SDK:
-//   • `AVSpeechSynthesizerBufferCallback` delivers `AVAudioBuffer` (AVSpeechSynthesis.h:56) —
-//     NOT `AVAudioPCMBuffer`. It must be downcast, and a failed downcast is a real possibility
-//     worth logging rather than silently dropping.
-//   • `AVSpeechSynthesisVoice.audioFileSettings` (:149) documents that buffers arrive in the
-//     VOICE's format, so a converter to the engine format is mandatory, not optional.
-//   • `scheduleBuffer(_:completionCallbackType:completionHandler:)` (AVAudioPlayerNode.h:186).
-//     ⚠️ The plain `scheduleBuffer(_:completionHandler:)` is equivalent to `.dataConsumed`
-//     (:67-69) — consumed by the player, NOT heard by the user. `.dataPlayedBack` (:53) is the
-//     only one that accounts for device latency, so it is the only correct hand-back signal.
-//   • ⚠️ "the callbacks arrive on a non-main thread" (:71) — every one of them hops to the main
-//     actor here.
-//   • ⚠️ `playerNode.stop()` fires EVERY pending completion handler. Without the generation
-//     stamp below, a barge-in would false-complete the turn and hand the microphone back twice.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import AVFoundation
 
+/// Renders Orb's speech through the app's own `AVAudioEngine` instead of a private AVFoundation audio unit.
+/// VoiceProcessingIO cancels only audio played through the engine that carries the microphone, which makes barge-in
+/// possible. Synthesis goes through `write(_:toBufferCallback:)` into an `AVAudioPlayerNode`.
 @MainActor
 final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
 
@@ -148,11 +120,8 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
 
         utteranceGenerations[ObjectIdentifier(synthesizer)] = thisGeneration
 
-        // ⚠️ `renderComplete` is only ever set by a terminator, and no terminator arrives once the
-        // audio unit is gone — while `playerNode.stop()` fires every pending `.dataPlayedBack`
-        // completion, so `playedBack` races up to `scheduled` and the drain condition is half-met
-        // forever. Releasing the engine mid-sentence therefore stranded the hand-back and left the
-        // rest of the queue unpumped, with no exit but the caller's 30 s timeout.
+        // No terminator arrives once the audio unit is gone, so `renderComplete` is never set and the drain is half-met;
+        // this exit keeps the hand-back from stranding until the caller's 30 s timeout.
         renderWatchdog?.cancel()
         renderWatchdog = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(Self.renderTimeout))
@@ -162,7 +131,7 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         }
 
         synthesizer.write(utterance) { [weak self] buffer in
-            // ⚠️ Off the main thread by contract — hop before touching any state.
+            // Called off the main thread by contract; hop before touching any state.
             Task { @MainActor [weak self] in
                 self?.handleRendered(buffer, engineFormat: engineFormat, generation: thisGeneration)
             }
@@ -174,8 +143,8 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         renderWatchdog?.cancel()
         renderWatchdog = nil
         utteranceGenerations.removeAll()
-        // ⚠️ Drop queued sentences WITHOUT calling their hand-backs. The narrator counts
-        // sentences spoken; firing them here would make a cancelled answer look complete.
+        // Drops queued sentences without calling their hand-backs: the narrator counts spoken sentences,
+        // so firing them here would make a cancelled answer look complete.
         let dropped = queue.count
         queue.removeAll()
         isBusy = false
@@ -193,23 +162,18 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         logger.info("[ORB_DUPLEX]\(self.correlationTag) Playback cancelled after \(self.playedBack)/\(self.scheduled) buffer(s).")
     }
 
-    /// Full teardown — drops anything still queued. For panel teardown and barge-in only.
-    ///
-    /// ⚠️⚠️ NEVER call this from a per-utterance completion. `finishIfDrained` used to, and
-    /// `queue.removeAll()` therefore discarded the REST OF THE ANSWER the moment the first
-    /// sentence finished playing: Orb spoke one sentence of every reply and then went silent.
-    /// Use `releaseUtterance()` between sentences.
+    // Why: never call from a per-utterance completion: `queue.removeAll()` drops the rest of the answer; use
+    // `releaseUtterance()`.
+    /// Full teardown that drops anything still queued; for panel teardown and barge-in only.
     func releaseAudio() {
         queue.removeAll()
         isBusy = false
         releaseUtterance()
     }
 
-    /// Releases the synthesizer for ONE finished sentence, leaving the queue intact.
-    ///
-    /// `speak` builds a fresh `AVSpeechSynthesizer` per utterance, so dropping it here is correct
-    /// and keeps its audio unit from outliving the sentence — but the pending sentences are not
-    /// this method's business.
+    /// Releases the synthesizer for one finished sentence, leaving the queue intact.
+    /// `speak` builds a fresh `AVSpeechSynthesizer` per utterance, so dropping it keeps its audio unit from outliving
+    /// the sentence.
     func releaseUtterance() {
         renderWatchdog?.cancel()
         renderWatchdog = nil
@@ -225,9 +189,7 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         guard generation == self.generation else { return }
 
         guard let pcm = buffer as? AVAudioPCMBuffer else {
-            // Documented as AVAudioBuffer, so a non-PCM buffer is legal in principle. Count it
-            // rather than dropping it silently — silence with no explanation is the failure mode
-            // this whole file is trying to avoid.
+            // Documented as AVAudioBuffer, so a non-PCM buffer is legal in principle; count it rather than dropping it silently.
             report.downcastFailures += 1
             logger.warning("[ORB_DUPLEX]\(self.correlationTag) Rendered buffer was \(String(describing: type(of: buffer))), not AVAudioPCMBuffer — skipped. CONSEQUENCE: that fragment of speech is silent.")
             return
@@ -240,8 +202,7 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         report.bufferCount += 1
         report.totalFrames += pcm.frameLength
 
-        // ⚠️ Candidate terminator #1. Recorded whether or not it is the one we act on, because
-        // this is the observation that settles the undocumented contract.
+        // Candidate terminator 1 (zero-frame buffer): recorded whether or not it is the one acted on, to settle the contract.
         if pcm.frameLength == 0 {
             report.sawZeroFrameTerminator = true
             finishRendering(reason: "zero-frame buffer", generation: generation)
@@ -282,9 +243,8 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
     private func schedule(_ buffer: AVAudioPCMBuffer, generation: Int) {
         guard let player else { return }
         scheduled += 1
-        // ⚠️ `.dataPlayedBack`, never the plain overload: the plain one means "consumed by the
-        // player", which fires before the user has heard it. Handing the microphone back then
-        // would open it over the tail of Orb's own voice.
+        // `.dataPlayedBack`, never the plain overload: the plain one fires when the player consumes the buffer, before it
+        // is heard, and handing the microphone back then would open it over the tail of Orb's own voice.
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, generation == self.generation else { return }
@@ -310,19 +270,15 @@ final class OrbDuplexSpeaker: NSObject, AVSpeechSynthesizerDelegate {
         guard let handBack = onPlayed else { return }
         onPlayed = nil
         logger.info("[ORB_DUPLEX]\(self.correlationTag) Sentence played — \(self.playedBack) buffer(s) heard, \(self.queue.count) still queued. Terminator: zeroFrame=\(self.report.sawZeroFrameTerminator), didFinish=\(self.report.sawDelegateDidFinish).")
-        // ⚠️ NOT releaseAudio() — that clears the queue and silences the rest of the answer.
+        // Not `releaseAudio()`: that clears the queue and silences the rest of the answer.
         releaseUtterance()
         handBack()
     }
 
     // MARK: - AVSpeechSynthesizerDelegate
 
-    // ⚠️⚠️ BOTH callbacks carry the generation of the utterance that PRODUCED them, taken from
-    // `utteranceGenerations` at delivery time. Reading `self.generation` inside the hopped task
-    // read whatever was current when the task finally ran — so the guard in `finishRendering`
-    // could never reject a stale callback, and a `didFinish` from sentence N could complete
-    // sentence N+1 before it had rendered a single buffer. `speak()` installs a new synthesizer
-    // per sentence without unhooking the old one, so that ordering is not hypothetical.
+    // Both callbacks carry the generation of their own utterance, taken from `utteranceGenerations` at delivery;
+    // reading `self.generation` in the hopped task would let a stale `didFinish` complete the next sentence.
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                                        didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor in
@@ -353,10 +309,8 @@ enum OrbDuplexProbe {
     static let sample = "This is a duplex audio test. Orb is rendering this sentence through the app's own audio engine. If you can hear all three sentences, playback works."
 
     /// Runs one utterance end to end on a throwaway engine and logs what `write` actually does.
-    ///
-    /// This exists because the completion contract is undocumented and the whole turn hand-back
-    /// depends on it: guessing wrong is either a permanently parked turn or a microphone that
-    /// opens over Orb's own voice.
+    /// The completion contract is undocumented and the hand-back depends on it: a wrong guess parks the turn or opens
+    /// the mic early.
     static func run(logger: DGLogger) async -> String {
         await OrbAudioEngineBuilder.awaitDeviceRelease(logger: logger)
         do {

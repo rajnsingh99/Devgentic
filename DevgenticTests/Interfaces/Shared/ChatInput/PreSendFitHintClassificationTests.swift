@@ -4,10 +4,7 @@
 //  PreSendFitHintClassificationTests.swift
 //  DevgenticTests
 //
-//  The context gauge decides what to price — and how — through `AttachmentClassifier`, the
-//  same owner the send path asks. It used to carry its own extension lists, which priced an
-//  `.svg` as text (the backend ships it as an image) and an `.xls` by its binary bytes (the
-//  backend extracts it).
+//  Created by Raj Singh.
 //
 
 import XCTest

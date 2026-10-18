@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  GitHubIssueLinkTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The app pre-fills GitHub issue forms by field `id` through the URL. GitHub ignores a query key
-//  that matches no field, so a renamed id in `.github/ISSUE_TEMPLATE/*.yml` would silently stop the
-//  pre-fill. These tests read the real templates and fail on that drift.
+//  Created by Raj Singh.
 //
 
 import XCTest

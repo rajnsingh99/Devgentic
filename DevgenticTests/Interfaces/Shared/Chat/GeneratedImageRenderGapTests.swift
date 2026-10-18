@@ -4,22 +4,7 @@
 //  GeneratedImageRenderGapTests.swift
 //  DevgenticTests
 //
-//  Regression guard for audit finding #2 (2026-07-18): a freshly GENERATED image
-//  was never surfaced to any rendered bubble surface.
-//
-//  Root cause (was): ImageGenExecutor yields `.artifactProduced(artifact)` — never
-//  `.content` — and ActiveStreamManager only appended a `.mediaGeneration` timeline
-//  event. Nothing set `content = .mediaArtifact` (the sole path to the sole image
-//  renderer, MediaArtifactImageView), and the timeline can't render `.mediaGeneration`
-//  (ActionDetailView is `.toolExecution`-only; imageGen isn't "agentic" so the timeline
-//  isn't even shown). finalizeMessage then wrote the "stopped" placeholder, so a
-//  SUCCESSFUL generation showed that sentence and the image was invisible.
-//
-//  Fix: `finalizeMessage` promotes a produced image artifact to `.mediaArtifact`
-//  content when the run streamed no text, via the pure, testable
-//  `ChatMessage.resolveFinalizedContent(streamed:imageArtifact:)`. These tests drive
-//  that real production function (no live model) — flipping it back would turn the
-//  first test red.
+//  Created by Raj Singh.
 //
 
 import XCTest

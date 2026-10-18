@@ -4,17 +4,7 @@
 //  EditUndo.swift
 //  Devgentic
 //
-//  Undo for agent file edits in Code conversations (2026-10-04, user decision):
-//    • Undo — this turn's edits
-//    • Rewind to here — this turn's edits and every later turn's, newest first
-//
-//  Per file, the turn's patches are applied backwards, newest first, to the file AS IT IS NOW:
-//    • unchanged since the agent's edit → restored byte for byte
-//    • changed since, elsewhere in the file → only the agent's lines are reversed (`git revert`)
-//    • changed since, in the agent's lines → conflict; the file is left alone
-//  A file is all-or-nothing: if any of its writes has no patch (expired after 7 days, or no
-//  before-copy was taken), it is not touched, since undoing part of a chain would leave a state
-//  that never existed.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -22,6 +12,8 @@ import os
 
 private let logger = DGLogger(category: "EditUndo")
 
+/// Undo for agent file edits in Code conversations: Undo reverses one turn's edits, Rewind also every later turn's.
+/// Patches apply backwards per file, newest first; a file is all-or-nothing, and a conflict leaves it untouched.
 enum EditUndo {
 
     /// One write to undo, as the timeline recorded it.

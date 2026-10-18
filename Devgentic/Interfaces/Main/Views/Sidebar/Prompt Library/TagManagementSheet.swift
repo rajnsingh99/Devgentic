@@ -4,18 +4,14 @@
 //  TagManagementSheet.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//
-//  Global tag-management UI. Until now tags could only be edited inside each
-//  prompt's detail view, which meant drift — "dev", "Dev", "development" would
-//  accumulate as distinct tags, splitting the sidebar's tag-chip filter.
-//  This sheet lists every tag in use with its usage count and offers rename
-//  + delete across the whole library.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// A global tag-management sheet listing every tag in use with its usage count, with rename and delete across
+/// the whole library.
 struct TagManagementSheet: View {
 
     @Environment(\.dismiss) var dismiss

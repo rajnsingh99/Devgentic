@@ -4,7 +4,7 @@
 //  BackoffStrategyTests.swift
 //  DevgenticTests
 //
-//  Isolated tests for BackoffStrategy behavior as consumed by LLMRetryStrategy.
+//  Created by Raj Singh.
 //
 
 import XCTest

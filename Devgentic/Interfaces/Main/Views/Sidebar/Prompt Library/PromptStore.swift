@@ -4,12 +4,7 @@
 //  PromptStore.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 27/08/25.
-//
-//  Migrated to SwiftData on 26/03/26.
-//  Result-based API (2026-04-21): errors flow up to the service instead of
-//  being silently swallowed, so the UI can distinguish "empty library" from
-//  "persistence broken."
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -18,6 +13,7 @@ import os
 
 private let logger = DGLogger(category: "PromptStore")
 
+/// Errors surfaced by the prompt store, so the UI can tell an empty library from broken persistence.
 enum PromptStoreError: LocalizedError, Equatable {
     case containerUnavailable
     case fetchFailed(String)
@@ -74,11 +70,8 @@ class PromptStore: PromptStoreProtocol {
             )
             let models = try context.fetch(descriptor)
 
-            // Normalize legacy/imported categories to their canonical casing
-            // (e.g. "general" → "General") so the sidebar badge and the
-            // category chip render the same string. Only rewrites when a
-            // case-insensitive match exists — truly unknown strings are left
-            // untouched so user-authored custom categories survive.
+            // Normalize imported categories to their canonical casing (e.g. "general" to "General") so the badge and chip agree.
+            // Only rewrites on a case-insensitive match; unknown strings are left so custom categories survive.
             var normalizedCount = 0
             for model in models {
                 if PromptCategory(rawValue: model.category) != nil {

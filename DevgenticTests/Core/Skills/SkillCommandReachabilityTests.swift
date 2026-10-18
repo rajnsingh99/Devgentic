@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillCommandReachabilityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  What a `/` command can reach — the one definition the picker and the send path both read.
-//
-//  ⚠️⚠️ THEY USED TO COMPUTE THIS SEPARATELY AND DISAGREED. The picker listed every runnable skill
-//  in the library; the send-path rewrite accepted only names the profile had LINKED. So a user could
-//  open `/`, see a skill, pick it, and have the literal text `/data-cleaner do the thing` delivered
-//  to the model — the trigger looking, from the outside, simply broken.
+//  Created by Raj Singh.
 //
 
 import XCTest

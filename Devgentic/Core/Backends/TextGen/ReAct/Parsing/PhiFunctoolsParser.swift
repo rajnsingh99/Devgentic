@@ -4,27 +4,7 @@
 //  PhiFunctoolsParser.swift
 //  Devgentic
 //
-//  Phase 4 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.phiFunctoolsBracket` dialect.
-//
-//  Covers:
-//    - microsoft/Phi-4-mini-instruct
-//    - microsoft/Phi-4-mini-reasoning (partial — tool output when present)
-//    - fireworks-ai/firefunction-v2 (same output shape, different family)
-//
-//  Canonical output:
-//
-//    functools[{"name": "list_directory", "arguments": {"path": "/tmp"}}]
-//
-//  Structurally similar to Mistral v3's `[TOOL_CALLS] [...]` but with a different
-//  marker. Multiple calls = one array with multiple objects.
-//
-//  Drift tolerated:
-//   - `tool_name` alias for `name` (cross-family flat-JSON drift)
-//   - `parameters` alias for `arguments` (Llama-style leakage)
-//   - Python literals (True/False/None → true/false/null)
-//   - Multiple `functools[` markers on separate lines (segment each array)
-//   - Missing trailing `]` (brace-balance recovery via extractor)
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -32,6 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "PhiFunctoolsParser")
 
+/// Parser for the `.phiFunctoolsBracket` dialect: `functools[{"name": ..., "arguments": {...}}]`.
+/// Covers Phi-4-mini and firefunction-v2; tolerates `tool_name`/`parameters` aliases, Python literals and a missing `]`.
 struct PhiFunctoolsParser: CognitiveParserProtocol {
 
     /// Accepts `name` and `tool_name` aliases; `arguments` and `parameters` aliases.
@@ -163,12 +145,7 @@ struct PhiFunctoolsParser: CognitiveParserProtocol {
     }
 
     /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    /// Delegates to `JSONStructuralSanitizer`, which repairs only outside string values.
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }

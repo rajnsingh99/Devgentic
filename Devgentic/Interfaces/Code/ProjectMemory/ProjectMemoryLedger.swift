@@ -4,22 +4,14 @@
 //  ProjectMemoryLedger.swift
 //  Devgentic
 //
-//  Every change `remember` / `forget` makes to project memory, recorded against the answer of the
-//  run that made it — so that answer can show "Saved 1 memory" and undo it.
-//
-//  One JSON file per change at App Support/Devgentic/ProjectMemoryChanges/<conversation>/<id>.json.
-//  The entry's whole text before and after is kept: an entry is at most a few hundred characters,
-//  so a copy is cheaper and more exact than a patch.
-//
-//  ⚠️ Undo restores ONLY when the entry still holds exactly what the change wrote. If anything
-//  touched it since — a later `remember`, the user's editor, the Memory panel — Undo says so and
-//  changes nothing, the same rule `EditUndo` applies to code edits.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 private let logger = DGLogger(category: "ProjectMemory")
 
+/// Notification names for project memory changes.
 extension Notification.Name {
     /// Posted after anything writes project memory, with the project path as `object`. The Code
     /// session refreshes its display copy (the Context gauge and the inspector) from it.
@@ -44,12 +36,14 @@ struct ProjectMemoryChange: Codable, Identifiable, Equatable, Sendable {
     let summary: String
     /// The entry file's text before the change; nil when there was no entry.
     let before: String?
-    /// The entry file's text after the change; nil when it was removed.
+    /// The entry file's text after the change; nil for a `.removed` change.
     let after: String?
     let at: Date
     var revertedAt: Date?
 }
 
+/// Records each change `remember` and `forget` make to project memory, against the run that made it, so the answer can show "Saved 1 memory" and undo it.
+/// Undo restores only when the entry still holds exactly what the change wrote; otherwise it says so and changes nothing.
 final class ProjectMemoryLedger: @unchecked Sendable {
 
     static let shared = ProjectMemoryLedger(rootDirectory: defaultRootDirectory)
@@ -103,7 +97,7 @@ final class ProjectMemoryLedger: @unchecked Sendable {
     enum UndoResult: Equatable {
         case undone
         case alreadyUndone
-        /// The entry no longer holds what the change wrote.
+        /// The entry's current text differs from what the change wrote.
         case changedSince
         case failed(String)
     }

@@ -4,16 +4,7 @@
 //  BotConfigDetailView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 05/09/25.
-//  Updated on 04/02/26 for Modern Dashboard UI.
-//  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
-//  Updated on 27/02/26 to refine Remote LLM UI and API Key gating.
-//  Updated on 28/02/26 to add OpenAI dynamic model picker.
-//  Updated on 28/02/26 to add editable Base URL endpoint field with default placeholders.
-//  Updated on 28/02/26 to align inputs right matching Modern Settings UI.
-//  Updated on 28/02/26 to fix MLX native tool toggle auto-enable bug.
-//  Updated on 28/02/26 to fix model picker alignment and remove irrelevant Tool Toggle.
-//  Refactored on 27/03/26 to use ProfileEditBuffer (single source of truth for dirty tracking).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -30,6 +21,8 @@ You are a helpful, knowledgeable assistant.
 3. **Conciseness**: Be thorough but avoid unnecessary verbosity.
 """
 
+/// The configuration screen for a bot profile: model and provider settings, system instructions, knowledge, and
+/// save/revert/delete.
 struct BotConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
@@ -58,21 +51,17 @@ struct BotConfigDetailView: View {
     // Unsaved-changes guard on back navigation.
     @State private var showingBackAlert = false
 
-    /// Advisory findings from the last save, shown until dismissed or the next save (register A34).
-    /// ⚠️ Cleared on every save, so it always describes the CURRENT state of the profile — a stale
-    /// note about a model the user has since changed would be worse than no note.
+    /// Advisory findings from the last save, shown until dismissed or the next save. Cleared on every save so it always
+    /// describes the current profile state.
     @State private var saveAdvisories: [ProfileValidationError] = []
 
     // File Importer State
     @State private var showingKnowledgeImporter = false
-    /// Why the last "Add File" did nothing, shown inline. Nil when there is nothing to report.
-    /// ⚠️ Register A60: the import result was previously discarded, so a failure was invisible.
+    /// Why the last "Add File" did nothing, shown inline; nil when there is nothing to report.
     @State private var knowledgeImportError: String?
 
-    /// Inline validation error for the System Instructions field. Set when the
-    /// user attempts to Save while the field is empty/whitespace; cleared the
-    /// moment the user starts editing again. Drives the red-border + inline
-    /// error caption next to the editor.
+    /// Inline validation error for the System Instructions field: set when Save is attempted with an empty field, cleared
+    /// when editing resumes.
     @State private var instructionsError: String? = nil
 
 
@@ -86,11 +75,8 @@ struct BotConfigDetailView: View {
     // MARK: - Computed Bindings
 
     private var providerConfig: Binding<ProviderConfig> {
-        // ⚠️ register B27 — capture the BUFFER, not `self`. Referencing `editBuffer` directly
-        // inside these closures captures the whole View struct, and the copy carries this
-        // view's `@State` window manager — so a binding handed to a long-lived NSWindow (or
-        // to a manager callback) closed a retain cycle straight back to the manager. A72
-        // fixed the callbacks and missed this, the other end of the same loop.
+        // Captures the buffer, not `self`: capturing `editBuffer` through `self` copies the view's `@State` window manager
+        // and closes a retain cycle with long-lived windows.
         let buffer = editBuffer
         return Binding<ProviderConfig>(
             get: {
@@ -124,7 +110,7 @@ struct BotConfigDetailView: View {
     }
 
     private var instructionsBinding: Binding<String> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<String>(
             get: {
                 if case .bot(let config) = buffer.draft.details { return config.instructions ?? "" }
@@ -140,7 +126,7 @@ struct BotConfigDetailView: View {
     }
 
     private var knowledgeSourcesBinding: Binding<[KnowledgeSource]> {
-        let buffer = editBuffer   // ⚠️ register B27 — capture the buffer, never `self`.
+        let buffer = editBuffer
         return Binding<[KnowledgeSource]>(
             get: {
                 if case .bot(let config) = buffer.draft.details { return config.knowledgeSources ?? [] }
@@ -165,18 +151,13 @@ struct BotConfigDetailView: View {
             }
         }
         .task {
-            // Instructions are no longer auto-populated. Empty field is the
-            // initial state for new profiles; the user must type their own
-            // before they can Save. Forces a deliberate choice instead of
-            // silently shipping with a default the user never read.
+            // Instructions are not auto-populated: the user types their own before saving, instead of silently shipping a
+            // default they never read.
             configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .chat)
         }
         .onDisappear {
-            // Close the floating prompt editor if the user leaves the panel.
-            // ⚠️ A plain close is correct HERE and only here: this is the Simple editor, whose
-            // `.onChange(of: localText)` pushes every keystroke straight back to the binding, so
-            // there is nothing pending to lose. The Agent view's Advanced editor writes back only
-            // in `saveAndClose()`, which is why it needs `closeWindowCommittingChanges()`.
+            // Closes the floating prompt editor if the user leaves the panel. A plain close is correct only here: this Simple
+            // editor pushes every keystroke to the binding.
             promptWindowManager.closeWindow()
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
@@ -204,13 +185,8 @@ struct BotConfigDetailView: View {
                 actionButtons
             }
 
-            // ⚠️ register B17 — OUTSIDE the ScrollView, directly under the pinned island bar
-            // that holds Save. It used to be the first child of the scrolling form, with a comment
-            // claiming it sat "where the user's eye already is after pressing Save" — untrue for
-            // anyone saving from the Advanced section of an 800-line page, who got a green success
-            // toast and an advisory several screens above them. Pinning it beside the control that
-            // produced it makes the channel reach the user regardless of scroll position, without
-            // a ScrollViewReader or an auto-scroll that would yank the page under them.
+            // Outside the ScrollView, directly under the pinned island bar that holds Save, so the advisory reaches the user
+            // regardless of scroll position.
             SaveAdvisoryBanner(advisories: saveAdvisories) {
                 withAnimation { saveAdvisories = [] }
             }
@@ -233,9 +209,8 @@ struct BotConfigDetailView: View {
             Button("Delete", role: .destructive) {
                 do {
                     try profileService.deleteProfile(withId: editBuffer.draft.id)
-                    // ⚠️ Without this the container re-evaluates, finds no edit buffer, and renders
-                    // "Profile Not Found — this profile may have been deleted": a deliberate,
-                    // confirmed action reported back to the user as an error.
+                    // Without this the container re-evaluates, finds no edit buffer and shows "Profile Not Found" after a confirmed
+                    // deletion.
                     router.returnToChat()
                 } catch {
                     toastManager.show(error.localizedDescription, style: .error)
@@ -243,17 +218,12 @@ struct BotConfigDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            // ⚠️ register B10 — was "This action cannot be undone", which is true and useless:
-            // it names no consequence beyond the profile itself. A30 added the real warning and
-            // wired it only to the sidebar's hover-trash — the path A26's own note calls the least
-            // discoverable. Shared with all four delete entry points, never re-implemented.
+            // The deletion message names the real consequences and is shared by all four delete entry points.
             Text(ProfileReferenceIndex.deletionMessage(
                 for: editBuffer.draft, in: profileService.profiles))
         }
-        // NOTE: Auto-applying an Ollama preset on every modelName change was
-        // removed — it silently wiped any user customization the moment the
-        // model selector changed. Users now explicitly opt in via the "Apply
-        // Optimal" menu inside Advanced Configuration.
+        // An Ollama preset is not applied automatically on a model change, which would wipe user customization; "Apply
+        // Optimal" in Advanced Configuration is opt-in.
         .unsavedChangesBackGuard(
             isDirty: editBuffer.isDirty,
             showingAlert: $showingBackAlert,
@@ -354,10 +324,7 @@ struct BotConfigDetailView: View {
                             // window instead of leaving it on the old name (A75).
                             botName: profile.displayName,
                             themeManager: themeManager,
-                            // ⚠️ Register A75: this argument existed and NO caller ever
-                            // passed it, so the editor's "% of context" readout — the
-                            // thing that tells you a system prompt is eating the window —
-                            // was dead code. The value is right here on the profile.
+                            // Passes the profile's context window so the editor's "% of context" readout works.
                             contextWindow: providerConfig.wrappedValue.modelMetadata?.contextWindow
                         )
                     }
@@ -432,19 +399,9 @@ struct BotConfigDetailView: View {
         }
     }
 
-    /// ⚠️ register B46 — FLUSH FIRST. `BackendProfileService.flushPendingEditorText`'s own doc
-    /// comment says "call this BEFORE reading `hasUnsavedEditorChanges` at an exit point", and
-    /// until now it had exactly one caller: `applicationShouldTerminate` (register B3). The
-    /// floating Advanced prompt editor holds typing in `@State` and writes back only on an explicit
-    /// commit, so a back tap read a CLEAN buffer and left with no prompt — the multi-thousand
-    /// character loss A27/A29/B3 exist to prevent, at the exit B3 did not cover.
-    ///
-    /// ⚠️ Placed in the tap ACTION, not in the `isDirty:` the guard modifier reads: that value is
-    /// computed during a view update, and committing there would mutate state mid-pass.
-    ///
-    /// A no-op in editors that register no commit hook (`SimplePromptWindowManager` syncs on every
-    /// keystroke, so it has nothing pending). It is here in all three anyway — the whole class of
-    /// B44/B46 defects is a fix that landed on the one site that had the bug.
+    // Why: flush in the tap action, not in the `isDirty:` value, which is computed during a view update; the floating prompt
+    // editor otherwise looks clean while holding unwritten typing.
+    /// Handles the back tap: flushes pending editor text before the dirty check, then leaves via `leaveEditor()`.
     private func handleBackTap() {
         profileService.flushPendingEditorText()
         if editBuffer.isDirty {
@@ -454,12 +411,8 @@ struct BotConfigDetailView: View {
         }
     }
 
-    /// The ONE way out of this editor.
-    ///
-    /// ⚠️ Register A28. The leading button used to be wired `onBack: onCancel ?? handleBackTap`,
-    /// so in the workflow sheet the xmark called `dismiss()` directly and never consulted
-    /// `editBuffer.isDirty` — the identical view, routed, prompted correctly. The dirty check now
-    /// happens for both hosts and only the EXIT differs: dismiss the sheet, or pop the router.
+    /// The single way out of this editor: checks `editBuffer.isDirty` for both hosts, and only the exit differs (dismiss
+    /// the sheet or pop the router).
     private func leaveEditor() {
         if let onCancel {
             onCancel()
@@ -478,17 +431,12 @@ struct BotConfigDetailView: View {
                 IslandPillButton(
                     title: "Revert",
                     style: .secondary,
-                    // ⚠️ register B12 — NO `.cancelAction`. Revert is destructive and discards
-                    // every unsaved edit without a prompt, so binding it to Esc gave a dirty editor
-                    // a silent one-keypress exit: Esc reverted, `isDirty` went false, and the
-                    // second Esc then passed `interactiveDismissDisabled(isDirty)` and closed the
-                    // sheet. A28's comment claimed "exactly one way out of a dirty editor, and it
-                    // is the one that prompts" — this was the second, and it prompted for nothing.
-                    // Esc now means close, which the unsaved-changes guard already governs.
+                    // No `.cancelAction`: Revert is destructive and discards edits without a prompt, so binding it to Esc would give a
+                    // dirty editor a silent exit; Esc means close, governed by the unsaved-changes guard.
                     accessibilityLabel: "Revert unsaved changes"
                 ) {
                     editBuffer.revert()
-                    // ⚠️ register B17 — the draft the advisory was about no longer exists.
+                    // The draft the advisory described has been discarded.
                     saveAdvisories = []
                     configManager.load(from: providerConfig.wrappedValue, using: profileService, defaultProfile: .chat)
                 }
@@ -500,47 +448,32 @@ struct BotConfigDetailView: View {
                     accessibilityLabel: "Save profile changes",
                     keyboardShortcut: KeyboardShortcut("s", modifiers: .command)
                 ) {
-                    // Pre-flight: a bot with empty instructions has no persona
-                    // and no behavioural guardrails. We don't auto-fill a default
-                    // anymore — the user must make a deliberate choice — so block
-                    // the save and surface the inline error.
-                    // ⚠️ Register A35: the rule and its wording now come from `ProfileValidator`,
-                    // the single definition. Each editor used to carry its own copy of both, and
-                    // every non-editor save path had neither.
+                    // Pre-flight: a bot with empty instructions has no persona or guardrails, so the save is blocked with an inline
+                    // error. The rule and wording come from `ProfileValidator`.
                     if ProfileValidator.instructionsAreMissing(instructionsBinding.wrappedValue) {
                         instructionsError = ProfileValidator.missingInstructionsMessage
-                        // ⚠️ register B17 — the save is being refused here, so any banner from an
-                        // earlier successful save is now describing a profile state this attempt
-                        // did not produce.
+                        // The save is refused here, so a banner from an earlier save does not describe the profile state.
                         saveAdvisories = []
                         return
                     }
                     instructionsError = nil
 
                     do {
-                        // ⚠️ Register A34: advisories are RETURNED now, not just logged. The
-                        // save succeeded either way — the banner explains what may not work, it
-                        // does not report a failure.
+                        // Advisories are returned for display; the save succeeded either way, so the banner explains what may not work
+                        // rather than reporting a failure.
                         saveAdvisories = try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
                         toastManager.show("Profile saved", style: .success)
                     } catch {
-                        // ⚠️ A toast and NOTHING else was the whole record of a failed save on the
-                        // primary user-data write path. It disappears in seconds, so "my bot
-                        // config won't stick" arrived with no profile id, no type and no error to
-                        // correlate against.
+                        // Logged with profile id, type and error: the toast disappears in seconds, so this is the only durable record of a
+                        // failed save.
                         logger.error(
                             "[PROFILE] Save FAILED for '\(editBuffer.draft.displayName)' "
                             + "(\(editBuffer.draft.id), bot): \(error.localizedDescription). "
                             + "CONSEQUENCE: the edit buffer stays dirty and the persisted profile is "
                             + "unchanged; the user's edits are still on screen but not on disk."
                         )
-                        // ⚠️ register B17 — clear on FAILURE too. `saveAdvisories` was assigned
-                        // only in the `do` branch and never reset, so a banner from an earlier
-                        // successful save stayed on screen reading "Saved — one thing worth
-                        // knowing" while an error toast reported that this write did not happen.
-                        // An advisory describes the state of a profile that WAS saved; after a
-                        // failure it describes nothing that exists.
+                        // Cleared on failure too: an advisory describes a profile that was saved, so it must not stay beside an error toast.
                         saveAdvisories = []
                         toastManager.show(error.localizedDescription, style: .error)
                     }

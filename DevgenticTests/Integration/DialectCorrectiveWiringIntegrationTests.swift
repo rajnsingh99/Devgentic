@@ -4,14 +4,7 @@
 //  DialectCorrectiveWiringIntegrationTests.swift
 //  DevgenticTests
 //
-//  Executor-level proof that the parse-failure corrective carries THIS RUN's dialect.
-//
-//  ⚠️ WHY THIS FILE EXISTS SEPARATELY FROM `DialectCorrectiveAlertTests`. That file proves
-//  `LLMRetryStrategy.correctiveAlert(dialect:…)` says the right thing for every dialect. Every one
-//  of those assertions passes with `dialect:` hard-wired to nil at the construction site — the
-//  policy would be perfect and the feature dead, which is exactly how a fix ships non-functional
-//  with a green suite. This file reads what actually reaches the MODEL'S OWN CONTEXT on the retry,
-//  so it fails if `ReActAgentExecutor` stops passing `input.generatorStrategy.expectedDialect`.
+//  Created by Raj Singh.
 //
 
 import XCTest

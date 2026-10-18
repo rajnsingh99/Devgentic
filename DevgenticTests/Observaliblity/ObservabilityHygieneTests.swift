@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ObservabilityHygieneTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Two pre-existing P1s that had ZERO coverage: the log SUBSYSTEM string (29 sites logged under
-//  an identifier the app does not have, so Console filtering silently missed them) and the
-//  diagnostic-bundle ALLOWLIST (the control deciding what leaves the user's machine).
+//  Created by Raj Singh.
 //
 
 import XCTest

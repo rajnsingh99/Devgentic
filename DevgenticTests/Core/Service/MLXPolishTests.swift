@@ -4,13 +4,7 @@
 //  MLXPolishTests.swift
 //  DevgenticTests
 //
-//  Batch 3 (P3 polish) of the MLX Model Manager readiness plan.
-//
-//    C1  `isCancellingDownload` was a service-global `Bool` with no model identity, so
-//        cancelling one download flipped EVERY visible MLX card to "Cleaning up…".
-//    C2  User-facing labels sourced from enum `rawValue` bind to the non-localizing
-//        `Text` overload, so they were invisible to the String Catalog extractor and would
-//        have shipped in English inside otherwise-translated chrome.
+//  Created by Raj Singh.
 //
 
 import XCTest

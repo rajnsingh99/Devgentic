@@ -4,17 +4,7 @@
 //  AttachmentURLResolutionTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  Guards G65: `AttachedTextFileSD`/`AttachedImageFileSD.toStruct()` used to do `URL(string: url)!`.
-//
-//  This was not a rendering defect — it was a TRAP on the READ path. One malformed persisted string
-//  (an empty value, a truncated write, a hand-edited store, or a future change that persists a raw
-//  path instead of an `absoluteString`) crashed the app while loading a conversation.
-//
-//  ⚠️ The replacement placeholder must be UNIQUE PER ROW: `MessagingCoordinator` builds
-//  `FileSystemItem(id: $0.url, …)`, so a shared sentinel would collide two attachments into one
-//  identity in a SwiftUI list.
+//  Created by Raj Singh.
 //
 
 import XCTest

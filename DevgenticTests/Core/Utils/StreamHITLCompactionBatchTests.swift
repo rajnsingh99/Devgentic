@@ -4,12 +4,7 @@
 //  StreamHITLCompactionBatchTests.swift
 //  DevgenticTests
 //
-//  Readiness P2 batch 3 (2026-10-12): chat stream, HITL and compaction.
-//    CR-39  the checkpoint went at last+1 ms (a message inside it vanished) and a batch could end
-//           on a question whose reply stayed outside the summary
-//    CR-40  a banner could be raised after its request was already resolved
-//    CR-41  tool rows were completed by NAME, so parallel same-name calls crossed
-//    CR-58  IC synthesis had no bound
+//  Created by Raj Singh.
 //
 
 import XCTest

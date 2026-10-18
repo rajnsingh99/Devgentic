@@ -4,22 +4,19 @@
 //  FileAttachmentPicker.swift
 //  Devgentic
 //
-//  [Q8] Shared file-attachment picking for the main composer (ChatInputAreaView) and the
-//  QuickAccess panel: panel presentation, drop handling and FileSystemItem construction.
-//  The accept/refuse POLICY is `AttachmentIntake`, applied where the items land.
+//  Created by Raj Singh.
 //
 
 import AppKit
 import UniformTypeIdentifiers
 
+/// Shared file-attachment picking for the main composer and the QuickAccess panel: panel presentation, drop
+/// handling and `FileSystemItem` construction. The accept/refuse policy is `AttachmentIntake`, applied where items land.
 enum FileAttachmentPicker {
 
     /// Builds the FileSystemItem for `url`, or nil if nothing exists there.
-    ///
-    /// ⚠️ No accept/refuse policy here — that is `AttachmentIntake`, applied by the
-    /// destination (`ChatInputViewModel.addAttachedFiles`, QuickAccess `appendAttachments`).
-    /// This file used to refuse oversized images and silently drop video itself, which the
-    /// composer's `@` picker never passed through.
+    /// Applies no accept/refuse policy: that is `AttachmentIntake`, applied by the destination
+    /// (`ChatInputViewModel.addAttachedFiles`, QuickAccess `appendAttachments`).
     private static func item(for url: URL) -> FileSystemItem? {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
@@ -45,13 +42,9 @@ enum FileAttachmentPicker {
         }
     }
 
-    /// Presents an NSOpenPanel (files + folders, multi-select) and delivers the accepted items
-    /// on the main thread. `onItems` is not called when the user cancels.
-    ///
-    /// `attachedTo`: pass the hosting window to present the picker as a SHEET on it. Required for
-    /// the QuickAccess panel — it floats at `.floating` level in a non-activating app, so a
-    /// detached `begin()` panel opens at normal level BEHIND it and is barely reachable. A sheet
-    /// is guaranteed above its parent and takes keyboard focus. nil = detached (main composer).
+    /// Presents an NSOpenPanel (files + folders, multi-select) and delivers accepted items on the main thread; `onItems`
+    /// is not called on cancel. `attachedTo` is the hosting window to present a sheet on, required for the QuickAccess
+    /// panel, which floats above a detached panel. nil presents it detached (main composer).
     @MainActor
     static func presentOpenPanel(prompt: String = "Attach",
                                  attachedTo window: NSWindow? = nil,

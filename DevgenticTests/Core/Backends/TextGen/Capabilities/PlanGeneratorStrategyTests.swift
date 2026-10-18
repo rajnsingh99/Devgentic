@@ -4,9 +4,7 @@
 //  PlanGeneratorStrategyTests.swift
 //  DevgenticTests
 //
-//  Unit tests for PlanGeneratorStrategy's numbered-list parser.
-//  Covers format variations, tool bracket extraction, tool validation,
-//  OutputSanitizer integration, and fallback behavior.
+//  Created by Raj Singh.
 //
 
 import XCTest

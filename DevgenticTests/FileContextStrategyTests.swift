@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  FileContextStrategyTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 11/07/26.
-//
-//  Covers the strategy resolution contract after the 2026-07 redesign:
-//  contextualRAG is deprecated (decodable, never resolvable), bot is pinned
-//  per profile type, and resolve() heals persisted values a type can't honor.
+//  Created by Raj Singh.
 //
 
 import XCTest

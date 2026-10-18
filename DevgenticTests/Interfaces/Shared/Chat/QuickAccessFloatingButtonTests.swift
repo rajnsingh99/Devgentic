@@ -4,7 +4,7 @@
 //  QuickAccessFloatingButtonTests.swift
 //  DevgenticTests
 //
-//  Unit tests for the Quick Access floating handoff button visibility rules and transfer contract.
+//  Created by Raj Singh.
 //
 
 import XCTest

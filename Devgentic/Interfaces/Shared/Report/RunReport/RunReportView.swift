@@ -4,14 +4,7 @@
 //  RunReportView.swift
 //  Devgentic
 //
-//  The unified Run Report — ONE view for every profile type and every user, replacing
-//  the DeveloperReportView / UserFeedbackView fork ("Run Report Redesign" canvas,
-//  approved 2026-08-22). The run is a single chronological stream; the verdict leads;
-//  filters and the Details toggle change density, never which app you're in. Feedback
-//  and export live in the same view.
-//
-//  All display logic lives in RunReportProjection (pure, truth-table-tested). This
-//  file fetches and paints — nothing here decides what a run "means".
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -19,6 +12,7 @@ import os
 
 // MARK: - View model
 
+/// Fetches a run's report data and observes it while the run proceeds; display logic lives in `RunReportProjection`.
 @Observable
 @MainActor
 final class RunReportViewModel {
@@ -73,10 +67,8 @@ final class RunReportViewModel {
         return projection.setupDetail
     }
 
-    /// One call for the view's whole lifetime (Phase 4): first paint, then a GRDB
-    /// ValueObservation keeps the report current while the run proceeds — rows land
-    /// about a second behind the recorder's flush cadence. Runs inside the view's
-    /// `.task`, so cancellation on dismiss is structural.
+    /// Loads the report once, then keeps it current via a GRDB `ValueObservation` while the run proceeds.
+    /// Rows land about a second behind the recorder's flush cadence; runs in the view's `.task`, so dismissal cancels it.
     func loadAndObserve() async {
         // Drain the recorder's buffer FIRST, so a just-ended run isn't missing its
         // last second of events on first paint (the old load-once panel was).
@@ -103,9 +95,8 @@ final class RunReportViewModel {
         let traceID = self.traceID
         let conversationID = self.conversationID
         let answerPreview = self.answerPreview
-        // Read the build stamp HERE, on the caller's side: the projection is pure by contract
-        // (no Bundle, no clocks), so the unattributed caveat gets what it needs to tell an
-        // older-build recording apart from an uninstrumented path instead of guessing.
+        // Read the build stamp here, on the caller's side: the projection is pure (no Bundle, no clocks), so it needs it
+        // to tell an older-build recording from an uninstrumented path.
         let currentBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
 
         let input: RunReportInput = await Task.detached(priority: .userInitiated) {
@@ -139,10 +130,8 @@ final class RunReportViewModel {
         }.value
 
         projection = RunReportProjection.build(input)
-        // Field-debuggability for the one thing that used to depend on a privacy-gated column:
-        // if a user reports "my skip is showing as a problem", this line says whether diagnostics
-        // recording was off (the path where `errorCategory` is NULL and the detailJSON fallback
-        // carries the classification) and whether any skip in fact leaked into the problem count.
+        // Diagnostic line for field reports: says whether diagnostics recording was off (`errorCategory` is NULL and the
+        // detailJSON fallback carries the classification) and whether any skip leaked into the problem count.
         if let p = projection {
             let rows = p.groups.flatMap(\.rows)
             let skipped = rows.filter { $0.kind == .skipped }.count
@@ -382,10 +371,8 @@ struct RunReportView: View {
         .background(theme.primaryBackground)
     }
 
-    /// Muted lane fills — the ribbon is a background instrument, not a highlight.
-    /// Full-saturation system hues as solid bars read as alarms (user feedback,
-    /// 2026-08-22 manual test); ~40% opacity over the dark ground keeps each hue
-    /// identifiable while sitting back, matching the approved design canvas.
+    /// Muted lane fills: the ribbon is a background instrument, so ~40% opacity keeps each hue identifiable
+    /// without reading as an alarm.
     private func laneColor(_ c: RunReportLaneSegment.Category) -> Color {
         switch c {
         case .input: return .teal.opacity(0.42)

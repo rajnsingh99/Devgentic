@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  MorningBriefModels.swift
+//  BriefingModels.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,12 +24,12 @@ enum BriefItemDestination: Equatable {
 
 // MARK: - Brief Fragment (Internal)
 
-/// A raw piece of context contributed by a `MorningBriefSource`.
+/// A raw piece of context contributed by a `BriefingSource`.
 /// Not displayed in the UI — used internally to pass data from sources
 /// to the service, which feeds it to the Intelligence Core for processing.
 struct BriefFragment: Identifiable, Equatable {
     let id: UUID
-    /// Which source produced this fragment (matches `MorningBriefSource.id`).
+    /// Which source produced this fragment (matches `BriefingSource.id`).
     let sourceID: String
     /// Short display title for logging/debug.
     let title: String
@@ -108,10 +108,10 @@ struct ConversationContext {
     let condensedContent: String
 }
 
-// MARK: - Morning Brief
+// MARK: - Briefing
 
-/// The complete AI-generated morning brief, ready for display.
-struct MorningBrief: Identifiable {
+/// The complete briefing, ready for display.
+struct Briefing: Identifiable {
     let id: UUID
     let generatedAt: Date
     /// Per-conversation AI summaries with suggestions.

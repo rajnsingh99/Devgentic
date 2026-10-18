@@ -4,7 +4,7 @@
 //  MCPClientService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 26/01/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -27,14 +27,8 @@ enum MCPConnectionState: Equatable {
     }
 }
 
-/// What a server told us about itself during `initialize`.
-///
-/// The whole `Initialize.Result` used to be discarded at the `client.connect` call site.
-/// That threw away three things we cannot get back later: the negotiated protocol version,
-/// the server's capability set (so every optional feature had to be attempted blindly and
-/// fail), and `instructions` — the server's own guidance on how to use it, which the SDK
-/// stores privately with no accessor, making the connect return value the only chance to
-/// read it.
+/// What a server reported about itself during `initialize`: protocol version, capabilities and `instructions`.
+/// The connect return value is the only chance to read `instructions`; the SDK stores them privately.
 struct MCPServerInfo: Sendable {
     let protocolVersion: String
     let serverName: String
@@ -76,26 +70,13 @@ final class MCPClientService {
     /// Tracks health monitor tasks so they can be cancelled on disconnect.
     private var healthMonitorTasks: [UUID: Task<Void, Never>] = [:]
 
-    /// In-flight `connect` calls, keyed by source.
-    ///
-    /// Without this, two concurrent connects for one source both passed the
-    /// "is there an existing session?" check (neither had stored one yet), both
-    /// spawned a `ShellProcess`, and the second overwrote the first in
-    /// `activeSessions` — orphaning a live child process that nothing would ever
-    /// terminate. An agent issuing parallel tool calls hits this directly.
-    /// Callers now coalesce onto the first connect instead of racing it.
+    // Why: without it two concurrent connects both spawn a `ShellProcess` and the first becomes an orphan.
+    /// In-flight `connect` calls, keyed by source, so concurrent connects coalesce onto the first.
     private var connectionTasks: [UUID: Task<(client: MCP.Client, tools: [ToolDefinition]), Error>] = [:]
 
     /// How long to wait for the SDK handshake, by transport.
-    ///
-    /// A cold `npx -y <pkg>` downloads the package before the server even starts,
-    /// which routinely exceeds 15s on a first run — the old single budget turned an
-    /// ordinary first launch into a timeout on a server that would have worked.
-    /// Remote transports do no such setup, so they keep a tight budget.
-    ///
-    /// ⚠️ `var` **only** so `MCPHarness` can shorten them; nothing in the app writes either.
-    /// Testing the timeout path against a server that hangs at `initialize` is otherwise a
-    /// 90-second test, which means in practice it is a test nobody runs.
+    /// Local servers get a long budget because a cold `npx -y` downloads the package first; remote transports stay tight.
+    /// `var` only so tests can shorten them.
     static var localHandshakeTimeout: TimeInterval = 90
     static var remoteHandshakeTimeout: TimeInterval = 20
 
@@ -114,19 +95,14 @@ final class MCPClientService {
     
     // MARK: - Connection Methods
     
-    /// Connect to an MCP server. Secrets (env values, auth tokens) are passed
-    /// as a separate `secrets` bundle and never live inside `config` — config
-    /// is persisted in SwiftData while secrets live in Keychain. When the
-    /// caller has a persisted `sourceID` + `definition` but no live secrets
-    /// (e.g. tool-execution reconnect), pass `secrets: nil` to have the
-    /// service materialize them from Keychain itself.
+    /// Connects to an MCP server. Secrets are passed as a separate `secrets` bundle and never live in `config`.
+    /// Pass `secrets: nil` to have the service load them from Keychain for a persisted `sourceID` and `definition`.
     func connect(
         sourceId: UUID,
         config: ServerDefinition,
         secrets: MCPRuntimeSecrets? = nil
     ) async throws -> (client: MCP.Client, tools: [ToolDefinition]) {
-        // Coalesce concurrent connects for the same source onto one attempt. Two
-        // callers racing here used to spawn two child processes and orphan one.
+        // Coalesce concurrent connects for the same source onto one attempt so only one child process is spawned.
         if let inFlight = connectionTasks[sourceId] {
             logger.info("""
                 [MCP-CONNECT] Connect already in flight for source \(sourceId); joining it \
@@ -160,10 +136,7 @@ final class MCPClientService {
 
         logger.info("Initializing new MCP Client for source \(sourceId)")
 
-        // Declare what WE can do for the server. The client used to be constructed with the
-        // SDK's empty default, so `initialize` advertised no sampling, no roots and no
-        // elicitation — servers correctly concluded those were unavailable and either
-        // disabled the features that need them or failed at call time.
+        // Declare what this client can do for the server (sampling, roots, elicitation) instead of the SDK's empty default.
         let client = MCP.Client(
             name: "Devgentic",
             version: "2.0.0",
@@ -174,9 +147,8 @@ final class MCPClientService {
             )
         )
 
-        // Register the server→client request handlers. These must be attached BEFORE
-        // `connect`, otherwise an eager server can issue a request we would answer with
-        // `methodNotFound` during startup.
+        // Register the server-to-client request handlers before `connect`, or an eager server's early request gets
+        // `methodNotFound`.
         let serverLabel = config.command ?? config.url ?? "MCP server"
         await registerClientHandlers(on: client, sourceId: sourceId, serverLabel: serverLabel)
 
@@ -218,9 +190,7 @@ final class MCPClientService {
 
             logger.info("[MCP-CONNECT] Transport ready for source \(sourceId). SDK handshake, budget \(handshakeTimeout)s...")
 
-            // 3. Connect via SDK with Timeout. KEEP the handshake result — it is the only
-            //    place the server's capabilities, protocol version and `instructions` are
-            //    exposed.
+            // Keep the handshake result: it is the only place capabilities, protocol version and `instructions` are exposed.
             let handshakeStart = Date()
             let initializeResult = try await withTimeout(seconds: handshakeTimeout) {
                 try await client.connect(transport: transport)
@@ -238,10 +208,7 @@ final class MCPClientService {
                 \(serverInfo.instructions?.isEmpty == false ? "\(serverInfo.instructions!.count) chars" : "none").
                 """)
 
-            // 3a. Subscribe to `tools/list_changed`. When the server adds or
-            //     removes tools at runtime, refetch and update the persisted
-            //     set so the UI and the agent both see the new surface area.
-            //     Capture weakly to avoid keeping the service alive forever.
+            // Subscribe to `tools/list_changed` so a runtime change refreshes the persisted set; capture weakly.
             await client.onNotification(ToolListChangedNotification.self) { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
@@ -249,9 +216,7 @@ final class MCPClientService {
                 }
             }
 
-            // 3b. The same treatment for resources and prompts. Only tools were subscribed
-            //     before, so a server that added a resource or prompt at runtime left the
-            //     agent looking at a stale list with nothing to indicate it.
+            // Same treatment for resource and prompt list changes.
             if serverInfo.supportsResourceListChanged {
                 await client.onNotification(ResourceListChangedNotification.self) { (_: Message<ResourceListChangedNotification>) in
                     Task { @MainActor in
@@ -295,9 +260,7 @@ final class MCPClientService {
                 startRemoteHealthMonitor(for: sourceId)
             }
 
-            // 6. Tool discovery — server tools plus the synthetic resource/prompt surface.
-            //    Composed in one shared place so the `tools/list_changed` refresh cannot
-            //    drift from this and drop half the list.
+            // Tool discovery composes server tools and the synthetic resource/prompt tools in one shared place.
             logger.info("Fetching tools...")
             let tools = try await composeToolList(client: client, serverInfo: serverInfo)
             let syntheticCount = MCPSyntheticTool.definitions(
@@ -321,18 +284,8 @@ final class MCPClientService {
 
             if let shell = shellProcess {
                 let stderr = MCPRedaction.redact(text: shell.readStdErr())
-                // ⚠️ Whether the child is STILL RUNNING is what decides the diagnosis, and it
-                // has to be read before `terminate()`.
-                //
-                // This branch used to substitute `processFailedToStart(stderr)` for whatever
-                // error had actually occurred, unconditionally, whenever stderr was non-empty.
-                // But stderr is the ONLY channel a stdio server may use for human output, so a
-                // perfectly healthy server writes to it during startup — meaning every later
-                // local failure was reported as "The server process failed to start", quoting
-                // the server's own healthy banner as the cause. A server that started in 40 ms
-                // and then hung at `initialize` for 90 seconds was reported as a start failure,
-                // which sends the user to check the command they typed instead of the server
-                // that is not answering.
+                // Read whether the child is still running before `terminate()`: it decides the diagnosis, since stderr alone
+                // proves nothing (a healthy stdio server writes to it at startup).
                 let processIsAlive = shell.process.isRunning
 
                 if !stderr.isEmpty {
@@ -348,16 +301,12 @@ final class MCPClientService {
                     finalError = MCPManagerError.processFailedToStart(stderr)
                 } else if !stderr.isEmpty {
                     // The child is alive, so the failure is in the protocol, not the launch.
-                    // Keep the real error — callers key off its case — and carry stderr through
-                    // as context on the message the user sees.
+                    // Keep the real error (callers key off its case) and carry stderr as context.
                     serverOutput = stderr
                 }
                 shell.terminate()
             } else {
-                // REMOTE failure. Only the child process was being torn down here, so a failed
-                // remote connect left the SDK client and its SSE stream alive with no session
-                // to own them — observed as repeated `nw_read_request_report … Operation timed
-                // out` long after the connect had already reported failure.
+                // Remote failure: disconnect the SDK client too, or its SSE stream outlives the failed connect.
                 await client.disconnect()
                 logger.info("[MCP-CONNECT] Tore down the remote client for \(sourceId) after a failed handshake.")
             }
@@ -374,12 +323,7 @@ final class MCPClientService {
         healthMonitorTasks[sourceId]?.cancel()
         healthMonitorTasks.removeValue(forKey: sourceId)
 
-        // A debounced `tools/list_changed` refresh can still be sleeping out its 400 ms when
-        // the user disconnects. It was not cancelled, so it woke up, found no session, and
-        // logged "tools/list_changed … with no active session; ignoring" — on an ORDINARY
-        // teardown. A warning that fires during normal operation is a warning people learn to
-        // scroll past, which costs the line its value for the case it was written for (a
-        // notification arriving after a server died on its own).
+        // Cancel a debounced `tools/list_changed` refresh on disconnect so it does not log a spurious warning after teardown.
         toolListRefreshTasks[sourceId]?.cancel()
         toolListRefreshTasks.removeValue(forKey: sourceId)
 
@@ -397,11 +341,8 @@ final class MCPClientService {
         let ids = Array(activeSessions.keys)
         guard !ids.isEmpty else { return }
 
-        // Concurrently, not sequentially. This has NO bound of its own: it runs inside
-        // AppDelegate's quit teardown, which returns at `quitTeardownLimit` (5 s,
-        // `DeadlineRace`) whether or not this finishes, and `killAllChildProcessesNow` then
-        // kills any server still alive. Serialised, one server hanging in
-        // `client.disconnect()` would still starve every server after it of its disconnect.
+        // Disconnect concurrently: this has no bound of its own and runs inside the quit teardown, which returns at
+        // `quitTeardownLimit`; serialised, one hung `client.disconnect()` would starve the servers after it.
         await withTaskGroup(of: Void.self) { group in
             for id in ids {
                 group.addTask { @MainActor [weak self] in
@@ -413,12 +354,8 @@ final class MCPClientService {
         logger.info("[MCP-LIFECYCLE] Disconnected \(ids.count) MCP session(s).")
     }
 
-    /// Last-resort synchronous teardown for app termination.
-    ///
-    /// `ShellProcess.terminate()` escalates SIGTERM → SIGKILL on a 2-second
-    /// `asyncAfter`, which can never fire at quit: the process is gone long before the
-    /// timer. A child that ignores SIGTERM therefore survived as an orphan. This sends
-    /// SIGKILL inline so nothing outlives the app.
+    /// Last-resort synchronous teardown for app termination: sends SIGKILL inline to every child process.
+    /// `ShellProcess.terminate()` escalates on a 2-second `asyncAfter` that cannot fire at quit.
     func killAllChildProcessesNow() {
         var killed = 0
         for (id, session) in activeSessions {
@@ -434,15 +371,10 @@ final class MCPClientService {
     
     // MARK: - tools/list_changed
 
-    /// Called when the SDK delivers a `notifications/tools/list_changed`
-    /// notification for an active session. Re-runs `listTools` and hands the
-    /// fresh set off to `MCPToolStore` so persistence + UI both update. Best
-    /// effort — failures log and leave the prior list in place rather than
-    /// blanking it on a transient error.
+    /// Handles a `notifications/tools/list_changed` for an active session: re-runs `listTools` and hands the set to
+    /// `MCPToolStore`. Best effort: failures are logged and the prior list stays in place.
     private func handleToolListChanged(sourceID: UUID) async {
-        // Coalesce bursts. The reference server emits this four times within a second of
-        // startup, and each one was a full `tools/list` round-trip plus a SwiftData write —
-        // wasteful with one server, and multiplied by every chatty server connected.
+        // Coalesce bursts: some servers emit this several times at startup, each costing a `tools/list` round trip and a write.
         toolListRefreshTasks[sourceID]?.cancel()
         toolListRefreshTasks[sourceID] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
@@ -461,15 +393,9 @@ final class MCPClientService {
             return
         }
         do {
-            // MUST go through the same composition as connect. Calling `listTools` directly
-            // here returned ONLY the server's own tools, so every `tools/list_changed`
-            // silently deleted the synthetic resource/prompt tools that connect had added —
-            // a server that emits the notification on startup (the reference server fires it
-            // repeatedly) wiped them within a second of them appearing.
+            // Must go through the same composition as connect, or a refresh drops the synthetic resource/prompt tools.
             let tools = try await composeToolList(client: session.client, serverInfo: session.serverInfo)
-            // Routed through the host bridge rather than straight into `MCPToolStore` — see
-            // MCPHostBridge.swift. A nil sink is loud, not silent: the accessor logs that the
-            // refreshed list was dropped and that the UI keeps a stale one.
+            // Routed through the host bridge rather than straight into `MCPToolStore`; a nil sink is logged, not silent.
             MCPHostBridge.requireToolListSink(context: "tools/list_changed for source \(sourceID)")?
                 .replaceTools(forSourceID: sourceID, with: tools)
             logger.info("[MCP-TOOLS] Refreshed \(tools.count) tool(s) for source \(sourceID) on list_changed.")
@@ -482,11 +408,8 @@ final class MCPClientService {
         }
     }
 
-    /// The complete tool list for a session: the server's own tools plus the synthetic
-    /// resource/prompt tools its capabilities justify.
-    ///
-    /// Single source of truth for both connect and `tools/list_changed` — they diverged
-    /// once and the refresh path quietly dropped the synthetic half.
+    /// The complete tool list for a session: the server's own tools plus the synthetic resource/prompt tools its
+    /// capabilities justify. Shared by connect and `tools/list_changed` so the two cannot diverge.
     private func composeToolList(client: MCP.Client, serverInfo: MCPServerInfo?) async throws -> [ToolDefinition] {
         var tools = (serverInfo?.supportsTools ?? true) ? try await listTools(client: client) : []
 
@@ -507,24 +430,16 @@ final class MCPClientService {
         let decoder = JSONDecoder()
         let mcpArgs = try decoder.decode([String: MCP.Value].self, from: argsData)
 
-        // Use the RequestContext overload rather than the `(content:isError:)` convenience:
-        // it carries `structuredContent` (dropped by the tuple form) and exposes the
-        // JSON-RPC `requestID`, which is the correlation ID tying this log line to the
-        // transport and to the server's own logs.
-        // `await` is required even though this overload is synchronous — `Client` is an
-        // actor, so the hop is what makes the call legal from the MainActor.
+        // Use the `RequestContext` overload: it keeps `structuredContent` and exposes the JSON-RPC `requestID` for log
+        // correlation. `await` is needed because `Client` is an actor.
         let context: RequestContext<CallTool.Result> =
             try await session.client.callTool(name: name, arguments: mcpArgs)
         let requestID = context.requestID
 
         logger.info("[MCP-CALL] req=\(String(describing: requestID)) tool='\(name)' source=\(sourceId) dispatched.")
 
-        // ⚠️ CANCELLATION REACHES THE SERVER (HITL Waiting Contract, MCP slice). `context.value` is a
-        // `Task.value`, which does not answer cancellation, so a timed-out or stopped call used to
-        // keep waiting for the server — forever, if it hung — and the request stayed running
-        // server-side (`cancelRequest` had no callers; Timeout inventory D-26). Cancelling now sends
-        // `notifications/cancelled` and fails the pending request locally, so this await returns
-        // at once with `CancellationError`.
+        // Cancellation reaches the server: `context.value` ignores cancellation, so cancelling sends `notifications/cancelled`
+        // and fails the pending request locally, making this await return with `CancellationError`.
         let client = session.client
         let result = try await withTaskCancellationHandler {
             try await context.value
@@ -545,10 +460,7 @@ final class MCPClientService {
 
         var rendered = result.content.map(Self.render(content:))
 
-        // `structuredContent` is the machine-readable twin of the text content when
-        // the tool declares an `outputSchema`. Append it only when the tool returned
-        // nothing else, so well-behaved servers that send both do not get duplicated
-        // into the model's context.
+        // Append `structuredContent` only when the tool returned nothing else, so servers that send both are not duplicated.
         if rendered.isEmpty, let structured = result.structuredContent,
            let data = try? JSONEncoder().encode(structured),
            let json = String(data: data, encoding: .utf8) {
@@ -557,10 +469,7 @@ final class MCPClientService {
 
         let output = rendered.joined(separator: "\n")
 
-        // A failed MCP tool returns NORMALLY with `isError: true` — it does not throw.
-        // Reading this is what separates a tool failure from a tool result: without it
-        // the failure text is handed to the model as a successful result, the mediator
-        // scores the call `.success`, and reliability metrics count it as a win.
+        // A failed MCP tool returns normally with `isError: true`; check it so the failure is not scored as a success.
         if result.isError == true {
             let detail = output.isEmpty ? "Server reported isError with no content." : output
             logger.error("""
@@ -580,12 +489,8 @@ final class MCPClientService {
                 """)
         }
 
-        // Cap at ingress. An MCP server is an untrusted remote that can return an
-        // arbitrarily large body, and this string flows on into the timeline and the
-        // persistence layer. Bounding it here — at the boundary where the untrusted data
-        // arrives — protects every downstream consumer at once, rather than relying on
-        // each one to defend itself. The limit matches the documented timeline cap
-        // (architecture_readme.md §3) so nothing downstream sees more than it already handles.
+        // Cap at ingress: an MCP server is untrusted and can return an arbitrarily large body that flows into
+        // the timeline and persistence layers.
         if output.count > Self.maxToolOutputChars {
             let dropped = output.count - Self.maxToolOutputChars
             logger.warning("""
@@ -601,17 +506,12 @@ final class MCPClientService {
         return output
     }
 
-    /// Matches the timeline/resume cap documented in `architecture_readme.md` §3.
+    /// Maximum characters of tool output kept from an MCP result.
     private static let maxToolOutputChars = 32_768
 
     /// Renders one MCP content part into the text the agent sees.
-    ///
-    /// Every non-text case used to collapse to a fixed placeholder (`"[Image Output]"`),
-    /// which discarded the payload AND made two different results indistinguishable.
-    /// Carry the identifying detail through instead — mime type, URI, name — so the
-    /// model can at least reason about what it got and ask for it another way.
-    /// `Tool` is qualified because the app declares its own `Tool` (BackendProfile.swift),
-    /// which would otherwise shadow the SDK's inside this file.
+    /// Non-text cases carry their identifying detail (mime type, URI, name) rather than a fixed placeholder.
+    /// `MCP.Tool` is qualified because the app declares its own `Tool`.
     private static func render(content: MCP.Tool.Content) -> String {
         switch content {
         case .text(let text, _, _):
@@ -671,40 +571,17 @@ final class MCPClientService {
         activeSessions[sourceID]?.serverInfo
     }
 
-    /// When each session was last PROVEN alive — set at handshake and refreshed by every
-    /// successful ping or tool call.
-    ///
-    /// A remote server used to sit on `.connected` forever: the health monitor only watched
-    /// local child processes, so a remote endpoint that went away still showed green until
-    /// the user tried to use it. This is what makes "connected" mean something for them.
+    /// When each session was last proven alive; set at handshake and refreshed by every successful ping or tool call.
+    /// Lets a remote server's `.connected` state mean something.
     private(set) var lastVerified: [UUID: Date] = [:]
 
     func markVerified(sourceID: UUID) {
         lastVerified[sourceID] = Date()
     }
 
-    /// Server-authored usage guidance from every connected server, ready for the system
-    /// prompt. Empty when nothing is connected or no server supplied instructions.
-    ///
-    /// Capped per server: `instructions` is server-controlled text that lands in EVERY
-    /// request's system prefix, so an oversized one would silently eat the context window
-    /// on all subsequent turns.
-    /// Server-authored guidance, for the servers whose tools this run actually holds.
-    ///
-    /// ⚠️ `forSourceIDs` IS THE FIX. This used to take no argument and walk every connected
-    /// session, so the text shipped in EVERY request regardless of which tools the profile enabled.
-    /// A profile with three built-in tools and zero MCP tools still received ~2,000 chars of
-    /// guidance for 41 tools it did not have — and on the workflow path that text landed inside
-    /// `<task>`, which is what made a single-node workflow fail where the same profile succeeded in
-    /// chat.
-    ///
-    /// Gating is per SERVER, not per tool: instructions describe how to drive a server as a whole,
-    /// so trimming them against individual enabled tools would not be meaningful. Pass the
-    /// `sourceId`s of the run's RESOLVED tools — a server contributes iff at least one of its tools
-    /// is among them.
-    ///
-    /// Passing `nil` restores the old take-everything behaviour and is NOT for the request path;
-    /// it exists for callers that legitimately want the full set (diagnostics, settings preview).
+    /// Returns server-authored usage guidance for the servers whose tools this run holds, ready for the system prompt.
+    /// A server contributes if any of `sourceIDs` is its tool; nil returns every server (diagnostics only). Capped per
+    /// server because `instructions` is server-controlled text added to every request.
     func connectedServerInstructions(forSourceIDs sourceIDs: Set<UUID>? = nil) -> String {
         let sessions = activeSessions.filter { key, _ in
             guard let sourceIDs else { return true }
@@ -874,17 +751,8 @@ final class MCPClientService {
         return String(text.prefix(maxToolOutputChars)) + "\n… [truncated: \(dropped) more characters]"
     }
 
-    /// Turns a raw connect failure into something the user can act on.
-    ///
-    /// The state string is what the Tool Library shows verbatim, and raw SDK text is often
-    /// a dead end: a registry-added remote server that needs sign-in surfaces only
-    /// "Internal error: Authentication required", which does not tell the user that the fix
-    /// is to edit the server and pick an auth scheme. Registry entries carry no auth
-    /// metadata at all, so this is the first point at which the requirement is knowable.
-    ///
-    /// - Parameter serverOutput: stderr from a child that is **still running**. Appended as
-    ///   context rather than substituted for the error, because a live process means the
-    ///   failure is in the protocol, not the launch — see the catch block in `performConnect`.
+    /// Turns a raw connect failure into a message the user can act on. `serverOutput` is stderr from a still-running
+    /// child; it is appended as context rather than replacing the error.
     private static func actionableConnectionMessage(
         for error: Error,
         config: ServerDefinition,
@@ -963,15 +831,8 @@ final class MCPClientService {
         )
     }
 
-    /// Attaches the server→client request handlers (roots, sampling, elicitation).
-    ///
-    /// Without these the SDK answers every such request with `methodNotFound`, which is why
-    /// filesystem-shaped servers got no workspace boundary and sampling-dependent servers
-    /// could not function at all.
-    /// Sampling and elicitation are reached through `MCPHostBridge` rather than their
-    /// concrete brokers: both pull in the agent stack and the InteractionCenter, which is
-    /// what kept this whole path untestable outside a running app. Roots stay direct —
-    /// `MCPRootsProvider` is Foundation-only and has no host dependency to break.
+    /// Attaches the server-to-client request handlers (roots, sampling, elicitation).
+    /// Sampling and elicitation go through `MCPHostBridge` rather than their concrete brokers; roots stay direct.
     private func registerClientHandlers(on client: MCP.Client, sourceId: UUID, serverLabel: String) async {
         _ = await client
             .withRootsHandler {
@@ -1011,12 +872,8 @@ final class MCPClientService {
     // MARK: - Private Helpers
     
     private func listTools(client: MCP.Client) async throws -> [ToolDefinition] {
-        // `tools/list` is paginated. Reading only the first page silently truncated
-        // every server that pages its tool list — the missing tools looked to the user
-        // like the server simply did not offer them.
-        //
-        // The page cap is a runaway guard, not a product limit: a server that returns
-        // a non-advancing cursor would otherwise loop here forever, on the MainActor.
+        // `tools/list` is paginated; read every page.
+        // The page cap is a runaway guard against a non-advancing cursor, not a product limit.
         let maxPages = 50
         var mcpTools: [MCP.Tool] = []
         var cursor: String? = nil
@@ -1056,9 +913,7 @@ final class MCPClientService {
         let definitions: [ToolDefinition] = mcpTools.compactMap { mcpTool in
             guard let paramsData = try? JSONEncoder().encode(mcpTool.inputSchema),
                   let parameters = try? JSONDecoder().decode(ToolParameters.self, from: paramsData) else {
-                // `ToolParameters` now decodes leniently, so reaching here means the
-                // schema was not even a JSON object. Record the name so the caller can
-                // say how many tools were lost instead of the list just being short.
+                // The schema was not a JSON object. Record the name so the caller can report how many tools were lost.
                 undecodable.append(mcpTool.name)
                 return nil
             }
@@ -1110,14 +965,8 @@ final class MCPClientService {
         return definitions
     }
 
-    /// Monitors the health of a local process-based MCP session.
-    /// If the process exits unexpectedly, invalidates the session and publishes an error state.
-    /// Liveness for REMOTE sessions, which have no child process to watch.
-    ///
-    /// Without this a remote server showed `.connected` for the rest of the session no
-    /// matter what happened to it — the endpoint could be down, the token revoked, the
-    /// tunnel closed, and the UI still said green until the user tried a tool and got a
-    /// failure with no warning. `ping` is the protocol's own cheap liveness check.
+    /// Liveness monitor for remote sessions, which have no child process to watch.
+    /// Uses `ping`, the protocol's own liveness check, so a dead endpoint stops showing as connected.
     private func startRemoteHealthMonitor(for sourceId: UUID) {
         healthMonitorTasks[sourceId]?.cancel()
 
@@ -1171,19 +1020,12 @@ final class MCPClientService {
                             : stderr
                     )
 
-                    // Retire the session BEFORE the await. `client.disconnect()` is async and,
-                    // against a dead transport, is exactly the call that can take a while — and
-                    // for as long as it did, `activeSessions` still held a session the monitor
-                    // had already declared dead. `executeTool` and `requireSession` look the
-                    // caller up there, so a tool call landing in that window was dispatched into
-                    // a corpse and failed with a transport error instead of the actionable
-                    // "server exited" state the UI was already showing.
+                    // Retire the session before the await: `client.disconnect()` can be slow on a dead transport, and a tool call
+                    // landing meanwhile would be dispatched into the dead session.
                     self.activeSessions.removeValue(forKey: sourceId)
                     self.healthMonitorTasks.removeValue(forKey: sourceId)
 
-                    // Tear the SDK client down too. Dropping the session without this
-                    // leaked the `MCP.Client` and left its message loop running against a
-                    // dead transport for the rest of the app's lifetime.
+                    // Tear the SDK client down too, or its message loop keeps running against a dead transport.
                     await session.client.disconnect()
                     logger.error("""
                         [MCP-HEALTH] Server process for source \(sourceId) exited unexpectedly \
@@ -1230,10 +1072,8 @@ final class MCPClientService {
             throw MCPManagerError.invalidJSONConfiguration("Invalid URL.")
         }
 
-        // HTTPS enforcement: when the user has configured *any* auth scheme,
-        // refuse to send credentials in cleartext over plain HTTP. Localhost
-        // is allowed because OAuth 2.1 (RFC 8252) explicitly permits it for
-        // loopback flows during development.
+        // HTTPS enforcement: refuse to send credentials in cleartext over plain HTTP when any auth scheme is configured.
+        // Localhost is allowed (RFC 8252 permits it for loopback flows).
         if config.auth != .none {
             let scheme = url.scheme?.lowercased() ?? ""
             let isHTTPS = scheme == "https" || scheme == "wss"
@@ -1247,9 +1087,7 @@ final class MCPClientService {
 
         let header = secrets.authorizationHeader
 
-        // `streaming` decides whether the transport opens the SSE GET stream. It was
-        // hard-wired on, which is right for the Streamable HTTP standard but left no
-        // recourse for a server that only implements POST — those simply failed to connect.
+        // `streaming` decides whether the transport opens the SSE GET stream; POST-only servers need it off.
         let isStreaming = config.transport == .streamableHTTP
         logger.info("""
             [MCP-TRANSPORT] Remote transport for \(MCPRedaction.redact(url: urlString)): \
@@ -1269,21 +1107,9 @@ final class MCPClientService {
         )
     }
     
-    /// Bounds `operation` in WALL-CLOCK time, even when the operation ignores cancellation.
-    ///
-    /// The previous implementation used `withThrowingTaskGroup` and looked correct, but
-    /// could not actually time anything out: a task group awaits ALL of its children
-    /// before the scope returns, so `cancelAll()` on a child blocked in a non-cancellable
-    /// read leaves the whole `withThrowingTaskGroup` hanging — the timeout branch wins the
-    /// race and then waits forever for the loser it just cancelled. `connect` never
-    /// returned, the Test Connection spinner span the rest of the session, and the caller
-    /// had no way out.
-    ///
-    /// Racing two *unstructured* tasks through a continuation fixes that: whichever
-    /// settles first resumes the caller, and a stuck loser drains in the background
-    /// instead of pinning the caller to it. The loser is cancelled best-effort; for the
-    /// local-process case `performConnect`'s `catch` also terminates the child, which is
-    /// what actually unblocks a wedged stdio read.
+    // Why: a task group awaits all children, so a non-cancellable read would hang the timeout forever.
+    /// Bounds `operation` in wall-clock time, even when the operation ignores cancellation. Races two unstructured
+    /// tasks through a continuation so a stuck loser drains in the background.
     private func withTimeout<T: Sendable>(
         seconds: TimeInterval,
         operation: @escaping @Sendable () async throws -> T
@@ -1303,8 +1129,7 @@ final class MCPClientService {
                     with: continuation
                 )
                 if didTimeOut {
-                    // Best effort — a non-cancellable operation will ignore this, which is
-                    // precisely why we no longer wait for it.
+                    // Best effort: a non-cancellable operation ignores this, which is why the caller does not wait for it.
                     work.cancel()
                     logger.error("""
                         [MCP-CONNECT] Operation exceeded its \(seconds)s budget and was abandoned. \

@@ -18,11 +18,8 @@ enum SuggestionNavigationDirection { case up, down }
 
 struct ChatInputAreaView: View {
 
-    /// VM is app-scoped via DevgenticApp environment injection. Previously this
-    /// was `@State private var inputViewModel = ChatInputViewModel()`, which
-    /// caused a fresh VM on every ChatInputAreaView recreation — re-requesting
-    /// mic permission, re-subscribing to WhisperKit loading state, and stacking
-    /// `setupMainDelegateObservers()` chains on the MainApplicationViewModel.
+    /// The chat input view model, app-scoped via environment injection so recreating this view does not recreate the VM
+    /// (mic permission, WhisperKit subscriptions, delegate observers).
     @Environment(ChatInputViewModel.self) private var inputViewModel
 
     @Binding var showContextArea: Bool
@@ -39,9 +36,8 @@ struct ChatInputAreaView: View {
     @Environment(ExplorerViewModel.self) private var explorerViewModel
     @Environment(MainApplicationViewModel.self) private var mainViewModel // retained only for delegate wiring
     @Environment(CodeSessionManager.self) private var codeSessionManager
-    // [Context gauge] Source of the conversation's messages (history size = the gauge's
-    // numerator) and the newest turn's real token usage. App-scoped, injected at the app
-    // root and already consumed by this view's parent — safe to read here.
+    // Source of the conversation's messages (the context gauge's history size) and the newest turn's real token usage;
+    // app-scoped and injected at the app root.
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(MainViewRouter.self) private var router
     /// Used only to resolve a profile for the MCP banner's Tool Library navigation, which is
@@ -59,10 +55,10 @@ struct ChatInputAreaView: View {
     @State private var showingBackendSelectorPopup: Bool = false
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
     @State private var selectedProfile: BackendProfileModel?
-    /// The draft key the composer's CONTENT belongs to — moved only by the swap below. Save-as-
-    /// you-type writes under THIS, not `draftKey`: on a switch both change in one pass and SwiftUI
-    /// does not order the two handlers, so keying on `draftKey` could file the old conversation's
-    /// text under the new one.
+    // Why: not `draftKey`: on a switch both change in one pass and SwiftUI does not order the handlers, so the old
+    // conversation's text could be filed under the new one.
+    /// The draft key the composer's content belongs to; moved only by the swap below. Save-as-you-type writes under this
+    /// key.
     @State private var liveDraftKey: ComposerDraftStore.Key?
     @State private var showingSchedulePopover = false
     @State private var isDropTargeted: Bool = false
@@ -71,14 +67,9 @@ struct ChatInputAreaView: View {
     /// attachment changes — never per keystroke — so it stays cheap on long transcripts.
     @State private var contextUsage: ContextWindowUsage?
 
-    /// What a `/` command can offer and expand on the selected profile.
-    ///
-    /// ⚠️ Read by BOTH the picker and the send-path rewrite, so the two cannot drift. They previously
-    /// computed this separately and disagreed: the picker offered the whole library and the rewrite
-    /// accepted only linked names, so an offered-but-unlinked skill sent raw `/name` text to the model.
-    ///
-    /// ⚠️ Computed, not stored, and read only on a trigger change or a send — never from `body` — so
-    /// it costs one library read per keystroke inside `/`, not one per render.
+    // Why: read by both the picker and the send-path rewrite so an offered skill is always expandable.
+    /// What a `/` command can offer and expand on the selected profile. Computed, not stored, and read only on a trigger
+    /// change or a send, never from `body`.
     private var skillCommandOffer: SkillCommandOffer {
         SkillCommandReachability.offer(in: selectedProfile?.details)
     }
@@ -129,17 +120,8 @@ struct ChatInputAreaView: View {
         (inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .finalizingSilence) ? .stopVoice : .mic
     }
 
-    /// Send-button availability — mirrors the old morphing button's `.send` disabled rule
-    /// (backend selected, non-empty input, not mid-request, voice not busy). Never disabled
-    /// while streaming: the button is the Stop control then.
-    /// Voice is mid-capture or mid-transcription. Sending now races the in-flight
-    /// transcript into a composer we're about to clear, so it lands as stray text at the
-    /// head of the NEXT message.
-    ///
-    /// Deliberately shared by the send BUTTON and the ENTER key: these were two
-    /// independently-computed gates and they had drifted — Enter checked only
-    /// `isInputEnabled` and sent straight through while the button was correctly
-    /// disabled. One property so they can't diverge again.
+    /// Whether voice is mid-capture or mid-transcription; sending then would race the in-flight transcript into the next
+    /// message. Shared by the send button and the Enter key, so their gates cannot diverge.
     private var isVoiceBusy: Bool {
         inputViewModel.voiceInputState == .recording
             || inputViewModel.voiceInputState == .processing
@@ -175,11 +157,8 @@ struct ChatInputAreaView: View {
                 .padding(.bottom, 6)
             }
             
-            // SKILL COMMANDS (Driven by VM State)
-            // ⚠️ Gated on the profile KIND as well as the trigger. A bot or imageGen run registers
-            // no `load_skill`, so offering a skill picker there promises something the run cannot
-            // do — distinct from an agent with nothing linked yet, which still gets the picker and
-            // an empty state telling it how to link one.
+            // Skill command picker, driven by VM state. Gated on the profile kind as well as the trigger: a bot or imageGen run
+            // registers no `load_skill`, so offering the picker there promises something it cannot do.
             if inputViewModel.skillSuggestionState.isShowing,
                SkillCommandReachability.pickerApplies(to: selectedProfile?.details) {
                 SkillCommandSuggestionView(
@@ -236,10 +215,8 @@ struct ChatInputAreaView: View {
         }
         .frame(maxWidth: ViewLayout.maxContentWidth)
         .frame(maxWidth: .infinity, alignment: .center)
-        // [V3] Wire the hosting window to the VM so the app-wide ⌘⇧V shortcut can be
-        // gated on THIS window being key (a recording started from another window has
-        // no visible overlay), and stop any live dictation when the composer leaves
-        // the hierarchy — a mic session must not outlive its UI.
+        // Wires the hosting window to the VM so the app-wide ⌘⇧V shortcut applies only when this window is key, and stops
+        // live dictation when the composer leaves the hierarchy.
         .background(ComposerWindowReader { window in
             inputViewModel.composerWindow = window
         })
@@ -249,7 +226,7 @@ struct ChatInputAreaView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("openFilePicker"))) { _ in
             openFilePicker()
         }
-        // MARK: - File Drop Zone (P1)
+        // MARK: - File Drop Zone
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }
@@ -287,30 +264,15 @@ struct ChatInputAreaView: View {
             // can jump from 24% to 100%+ on a switch to a smaller-window model.
             recomputeContextGauge()
         }
-        // [Pre-send fit hint] Surface the context-overflow advisory the moment
-        // attachments imply the prompt won't fit — before the turn is spent.
-        // Count-keyed: FileSystemItem isn't Equatable, and adds/removes are the
-        // events that change the estimate.
+        // Surfaces the context-overflow advisory as soon as attachments imply the prompt will not fit. Count-keyed because
+        // `FileSystemItem` is not Equatable.
         .onChange(of: inputViewModel.attachedFiles.count) { _, _ in
             evaluatePreSendFit()
             recomputeContextGauge()
         }
 
-        // [C2] Per-conversation drafts. The composer's view model is app-scoped and
-        // `attachedFiles` lives on the single MainApplicationViewModel, so nothing used to
-        // reset either on a conversation switch: the half-typed message and attachments
-        // from the conversation you just left stayed in the box, where they could be sent
-        // into the new one. Save under the OUTGOING id, restore the INCOMING one's.
-        //
-        // Observed here because this view is a SIBLING of the content switch — always
-        // mounted, even on the welcome screen — so it catches every change to the
-        // selection, including the ones the ChatOps bridges make, without having to patch
-        // each write site.
-        //
-        // ⚠️ Keyed on MODE + conversation (`draftKey`), not the conversation alone: every mode's
-        // Home is conversation `nil`, so a mode switch between Homes changed nothing this could
-        // see and the draft rode into the other mode. A switch that changes both at once (resume
-        // a conversation in the other mode) is ONE key change, so it saves and restores once.
+        // Per-conversation drafts: saves under the outgoing key and restores the incoming one, keyed on mode plus
+        // conversation (every mode's Home is conversation `nil`).
         .onChange(of: draftKey) { oldKey, newKey in
             guard oldKey != newKey else { return }
             ComposerDraftStore.shared.save(
@@ -323,9 +285,8 @@ struct ChatInputAreaView: View {
             // `private(set)` mirror that its observation stream keeps in sync from here.
             mainViewModel.attachedFiles = incoming.attachments
             liveDraftKey = newKey
-            // New conversation → different history size, so recompute occupancy. The
-            // message-count change fires too, but only AFTER the load completes; this
-            // clears the outgoing chat's number immediately on switch.
+            // A new conversation has a different history size, so occupancy is recomputed; this clears the outgoing chat's
+            // number immediately.
             recomputeContextGauge()
         }
 
@@ -336,24 +297,15 @@ struct ChatInputAreaView: View {
                 for: liveDraftKey ?? draftKey)
         }
 
-        // Re-search an OPEN `@` picker when the folder, its index or the indexing state changes.
-        // Keyed on the tree's item count alone, it missed a folder switch (counts can match) and
-        // an index finishing — the picker kept the old folder's files until the query changed.
+        // Re-searches an open `@` picker when the folder, its index or the indexing state changes.
         .onChange(of: fileIndexKey) { _, _ in
             if inputViewModel.fileSuggestionState.isShowing {
                 inputViewModel.refreshFileSuggestions(using: explorerViewModel)
             }
         }
 
-        // [Context gauge] Occupancy moves when a turn is added (history grows), when
-        // streaming ends (final assistant text + real usage settle), and when the mode
-        // switches (Code vs chat resolve different models). Deliberately NOT keyed on
-        // keystrokes — the unsent draft is excluded from the ring.
-        // [Context gauge] All the cheap recompute signals — a turn added (history grows),
-        // streaming settling, mode switch, and a code-folder swap (project-context size) —
-        // collapsed into ONE onChange keyed on a combined signature computed outside the
-        // body. Four separate onChanges tipped this already-large body over the SwiftUI
-        // type-checker's complexity budget; one keeps it under.
+        // One onChange on a combined signature of the cheap recompute signals (turn added, streaming settled, mode switch,
+        // code-folder swap); separate onChanges exceed the type-checker's budget.
         .onChange(of: contextGaugeTriggerKey) { _, _ in recomputeContextGauge() }
         // Re-check attachments whenever the profile a send would use changes, or the set
         // changes underneath intake (a restored draft writes `attachedFiles` directly).
@@ -367,9 +319,8 @@ struct ChatInputAreaView: View {
         
         .animation(.spring(), value: inputViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
-        // The suggestion panels declare move+opacity transitions, but insertion/removal
-        // only animates when the isShowing flip itself is animated at this container —
-        // without these the panels snap in. Reduce Motion keeps the instant swap.
+        // Suggestion panel insertion/removal only animates when the isShowing flip is animated at this container; Reduce
+        // Motion keeps the instant swap.
         .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: inputViewModel.promptSuggestionState.isShowing)
         .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: inputViewModel.fileSuggestionState.isShowing)
         .fixedSize(horizontal: false, vertical: true)
@@ -386,9 +337,8 @@ struct ChatInputAreaView: View {
     /// [Pre-send fit hint] Posts/clears the shared context-overflow advisory from
     /// composer state (stat-based estimate); the send-time check refines it.
     private func evaluatePreSendFit() {
-        // In Code mode `selectedProfile` is NOT the code profile — `selectedProfileID`
-        // is only pointed at it during send (see onCommit), so before that it's nil or
-        // the last chat profile. Resolve the real one, else Code silently got no hint.
+        // In Code mode `selectedProfile` is not the code profile (`selectedProfileID` points at it only during send), so
+        // resolve the real one.
         let profile: BackendProfileModel?
         if mainViewModel.interfaceMode == .code, let codeID = codeSessionManager.codeProfileID {
             profile = try? BackendProfileStore.shared.fetchProfile(byId: codeID)
@@ -404,10 +354,8 @@ struct ChatInputAreaView: View {
         )
     }
 
-    /// [Context gauge] Size of Code mode's per-run project knowledge (`AGENTS.md` + the memory
-    /// listing), 0 outside Code mode. Code adds it to the system prompt on every message — a real,
-    /// fixed cost the generic history/attachment estimate can't see. A plain Int so `onChange(of:)`
-    /// keeps the large body's type-checker under budget; shared by the recompute so they can't drift.
+    /// Size of Code mode's per-run project knowledge (`AGENTS.md` plus the memory listing), 0 outside Code mode. Code
+    /// adds it to the system prompt on every message, a fixed cost the generic estimate cannot see.
     private var codeProjectContextChars: Int {
         guard mainViewModel.interfaceMode == .code else { return 0 }
         return codeSessionManager.projectKnowledgeContent?.count ?? 0
@@ -417,12 +365,8 @@ struct ChatInputAreaView: View {
     /// land out of order.
     @State private var contextGaugeTask: Task<Void, Never>?
 
-    /// [Context gauge] One combined key over every cheap recompute signal (turn count,
-    /// streaming, mode, code project-context size), so a SINGLE `onChange` in the body
-    /// covers them all — keeping the large body under the type-checker's budget. Reading
-    /// each value here establishes the SwiftUI observation dependency just as separate
-    /// `onChange`s would.
-    /// The composer's content, for save-as-you-type.
+    /// One combined key over every cheap recompute signal (turn count, streaming, mode, code project-context size), so a
+    /// single `onChange` covers them. The composer's content, for save-as-you-type.
     private var draftContentSignature: String {
         inputViewModel.userInput + "\u{1}" + mainViewModel.attachedFiles.map(\.url.path).joined(separator: "\u{2}")
     }
@@ -448,22 +392,10 @@ struct ChatInputAreaView: View {
         "\(chatHistoryViewModel.contextGaugeTurnKey)|\(inputViewModel.isStreaming)|\(mainViewModel.interfaceMode)|\(codeProjectContextChars)"
     }
 
-    /// [Context gauge] Resolves the history the NEXT request would carry and sizes THAT.
-    ///
-    /// Deliberately NOT `chatHistoryViewModel.currentChatMessages`: that is the render
-    /// window (20 on open, +10 per scroll-back), so sizing from it made the ring climb as
-    /// the user scrolled while the prompt was unchanged, and made a freshly-opened long
-    /// conversation under-read its own history by up to 15×.
-    ///
-    /// Resolves the active profile the same way `evaluatePreSendFit` does — in Code mode the
-    /// real profile is not `selectedProfile` until send, so reading that would size the ring
-    /// against whichever chat model happened to be selected instead.
-    ///
-    /// No longer the synchronous array read it once was: the resolution is store-authoritative,
-    /// so this spawns a Task and pays a persistence round-trip. Affordable only because it runs
-    /// on turn / model / attachment / conversation / mode changes and never per keystroke. The
-    /// in-flight task is cancelled first so a slow earlier resolve cannot land on top of a newer
-    /// one — the triggers fire in bursts (message added, streaming toggles, profile switched).
+    // Why: do not size from `currentChatMessages`, which is only the render window; and keep it off the per-keystroke path.
+    /// Resolves the history the next request would carry and sizes that, using the same profile resolution as
+    /// `evaluatePreSendFit`. Runs a Task with a persistence round-trip, cancelling the previous one so a slow resolve
+    /// cannot land over a newer one.
     private func recomputeContextGauge() {
         let profile: BackendProfileModel?
         if mainViewModel.interfaceMode == .code, let codeID = codeSessionManager.codeProfileID {
@@ -482,9 +414,7 @@ struct ChatInputAreaView: View {
             // IS the history and a store round-trip would be pure cost.
             let history: [ChatMessage]
             if let conversationID {
-                // RAG-6: wait out the burst. Cancelling the previous task never stopped its resolve
-                // (nothing in it checks), so a send's 3–4 triggers each paid a full 300-message
-                // resolve; now only the last one in the window gets past this line.
+                // Waits out the burst of triggers so only the last task in the window pays for the full message resolve.
                 try? await Task.sleep(for: ChatHistoryViewModel.contextGaugeSettle)
                 guard !Task.isCancelled else { return }
                 history = await chatHistoryViewModel.resolveContextHistory(for: conversationID)
@@ -517,9 +447,8 @@ struct ChatInputAreaView: View {
               let config = profile?.resolvedLLMConfig else {
             return "Nothing to compact — this conversation has no history yet."
         }
-        // The transcript row (`ManualCompactionRow`) — the popover's own status vanishes with the
-        // popover, and the checkpoint card lands above the fold. `begin` refuses a second run in
-        // the same conversation, and then this call must not paint `.alreadyRunning` over it.
+        // The transcript row (`ManualCompactionRow`) shows progress, since the popover's status vanishes with it. `begin`
+        // refuses a second run per conversation; do not paint `.alreadyRunning` over it.
         let activity = ManualCompactionActivity.shared
         let ownsRow = activity.begin(conversationID)
         let history = await chatHistoryViewModel.resolveContextHistory(for: conversationID)
@@ -621,23 +550,15 @@ struct ChatInputAreaView: View {
                     inputViewModel.resetQueryHistoryIndex()
                 },
                 onTriggerStateChanged: {
-                    // ⚠️ Filtered HERE rather than on a debounce like `#`/`@`. Those search a
-                    // service; this reads an in-memory library of tens of rows, so a debounce would
-                    // only add latency between a keystroke and the list narrowing.
-                    //
-                    // ⚠️⚠️ And filtered from `onTriggerStateChanged`, NOT `onTextManuallyChanged`.
-                    // The latter runs before trigger analysis, so this read a query one keystroke
-                    // stale and saw `isShowing == false` on the very first `/` — which made a full
-                    // library render as "No skills in the library yet".
+                    // Filtered here, from `onTriggerStateChanged` rather than `onTextManuallyChanged` (which runs before trigger
+                    // analysis and reads a stale query), and not debounced since it reads an in-memory library.
                     inputViewModel.refreshSkillSuggestions(offer: skillCommandOffer)
                 }
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
             
             if inputViewModel.userInput.isEmpty {
-                // Use fixed constants matching makeNSView setup (lineFragmentPadding=5,
-                // textContainerInset.width=2, textContainerInset.height=10) instead of
-                // reading from the optional textView ref which is nil on first render.
+                // Uses fixed constants matching `makeNSView` setup, since the optional textView ref is nil on first render.
                 Text(placeholderText)
                     .font(placeholderFont)
                     .foregroundColor(theme.placeholderText)
@@ -652,12 +573,8 @@ struct ChatInputAreaView: View {
         .focused(isInputFocused)
         .disabled(!isInputEnabled)
         .opacity(isInputEnabled ? 1.0 : 0.6)
-        // When an external caller (prompt library "Use in Chat") stages text,
-        // the VM flips `pendingInputFocusRequest` so this editor grabs focus
-        // on the next render. The reset is deferred one runloop tick so it
-        // doesn't fire back into SwiftUI's update cycle inside the same
-        // frame — which would cause extra `updateNSView` passes that can
-        // race the text-binding sync-back and wipe inserted content.
+        // When an external caller stages text, the VM flips `pendingInputFocusRequest` so this editor grabs focus. The reset
+        // is deferred one runloop tick to avoid extra `updateNSView` passes that can race the text-binding sync-back.
         .onChange(of: inputViewModel.pendingInputFocusRequest) { _, newValue in
             guard newValue else { return }
             isInputFocused.wrappedValue = true
@@ -688,9 +605,8 @@ struct ChatInputAreaView: View {
         return ""
     }
 
-    // [Composer parity] Matches the QuickAccess panel's arrangement: profile chip LEADS,
-    // then the action icons, then a spacer, then SPLIT voice + send buttons (the single
-    // morphing mic/send button is now voice-only; send is the shared accent button).
+    // Matches the QuickAccess panel's arrangement: profile chip first, then action icons, a spacer, then separate voice
+    // and send buttons.
     private var toolbarArea: some View {
         HStack(alignment: .center, spacing: 8) {
             if mainViewModel.interfaceMode == .code {
@@ -718,20 +634,12 @@ struct ChatInputAreaView: View {
                 CapabilityToolbarButtons(profile: $selectedProfile, isEnabled: isInputEnabled)
             }
 
-            // MCP connection summary. Sits directly above the toolbar so the state of the
-            // agent's external capabilities is visible at the moment of sending, rather
-            // than only inside the Tool Library. Renders nothing when no MCP servers are
-            // configured, and stays a muted single line unless something is actually down.
-            // NOT gated on a selected profile. MCP server health is a property of the app,
-            // not of the chosen backend — gating it here meant the banner vanished on the
-            // launch screen, which is exactly when the launch sweep has just run and its
-            // result is most worth seeing. The banner hides itself when no servers exist.
+            // MCP connection summary above the toolbar, so the state of external capabilities is visible when sending. Renders
+            // nothing when no servers exist. Not gated on a selected profile: MCP health is a property of the app.
             if !MCPToolStore.shared.sources.isEmpty {
                 MCPStatusBanner {
-                    // The Tool Library is per-profile (it edits that profile's tool selection),
-                    // so navigation needs *a* profile: the selected one, else the first that
-                    // exists. `ToolLibraryContainerView` renders nothing for an id it cannot
-                    // find, so an invented UUID would be a dead button.
+                    // The Tool Library is per-profile, so navigation needs a profile: the selected one, else the first that exists. An
+                    // invented UUID would be a dead button.
                     if let profileID = backendConfiguration.selectedProfileID ?? profileService.sharedProfiles.first?.id {
                         router.navigate(to: .toolLibrary(profileID: profileID))
                     } else {
@@ -769,18 +677,16 @@ struct ChatInputAreaView: View {
 
             Spacer()
 
-            // [Context gauge] Small window-occupancy ring — how full the selected model's
-            // context window is for this conversation. Tap for the breakdown. Self-hides
-            // for non-chat profiles (workflow / imageGen have no single window).
+            // Small window-occupancy ring showing how full the selected model's context window is; tap for the breakdown. Hidden
+            // for non-chat profiles.
             if let contextUsage {
                 ContextWindowGauge(
                     usage: contextUsage,
                     onOpenTools: { profileID in router.navigate(to: .toolLibrary(profileID: profileID)) },
                     onCompact: { await compactHistoryNow() },
                     canCompact: isInputEnabled,
-                    // Code keeps its window in the project's quick settings, not the profile's
-                    // Advanced panel (the Code profile has none a user can reach). Ollama only —
-                    // the one provider whose window the app chooses.
+                    // Code keeps its window in the project's quick settings, not the profile's Advanced panel. Ollama only, the one
+                    // provider whose window the app chooses.
                     onRaiseContext: mainViewModel.interfaceMode == .code && codeSessionManager.provider == .ollama
                         ? { codeSessionManager.showQuickSettings = true }
                         : nil
@@ -789,9 +695,8 @@ struct ChatInputAreaView: View {
                 }
             }
 
-            // Voice — DynamicActionButton retained for its main-only machinery (voice states,
-            // Whisper model picker via long-press/right-click, download-progress ring, alerts),
-            // restyled to the QuickAccess mic look and pinned to voice-only modes.
+            // Voice: `DynamicActionButton` is kept for its voice states, Whisper model picker, download-progress ring and
+            // alerts, styled like the QuickAccess mic and pinned to voice-only modes.
             DynamicActionButton(
                 mode: voiceButtonMode,
                 isSending: isSending,
@@ -809,11 +714,8 @@ struct ChatInputAreaView: View {
                 onStopStreaming: { inputViewModel.cancelStreamingResponse() }
             )
 
-            // Per-node SKIP for a live workflow run (Phase B increment 7, D2.1) — the composer is
-            // the only skip surface when a workflow runs from chat mode. A LEAF view on purpose:
-            // it reads the observable workflow state in ITS body, so node events re-render a
-            // capsule instead of the whole composer. Renders nothing unless the selected
-            // conversation has a live run with exactly the right shape (see ComposerSkipResolver).
+            // Per-node skip for a live workflow run, the only skip surface when a workflow runs from chat mode. A leaf view, so
+            // node events re-render a capsule rather than the composer (see `ComposerSkipResolver`).
             if let conversationID = mainViewModel.selectedConversationID,
                mainViewModel.workflowExecutionStates[conversationID]?.isRunning == true {
                 ComposerWorkflowSkipButton(conversationID: conversationID)
@@ -850,16 +752,8 @@ struct ChatInputAreaView: View {
         attemptSend(attributedString)
     }
 
-    /// The ONE send path — pre-send intercepts, profile resolution, hand-off.
-    ///
-    /// ⚠️ Enter and the send button used to implement this separately, and they had drifted
-    /// (register A32): Enter intercepted an unselected or deleted profile by opening the backend
-    /// picker, while the button's `guard let config = … else { logger.error(…); return }` did
-    /// nothing a user could see. Clicking send on a profile deleted from the sidebar looked like a
-    /// dead button — the composer still showed the profile's name, because `selectedProfile` is a
-    /// stale snapshot that nothing invalidated. `isVoiceBusy` above carries the same warning about
-    /// the same two callers; this is that lesson applied to the action instead of the gate. Keep
-    /// both entry points routed through here.
+    /// The single send path: pre-send intercepts, profile resolution and hand-off. Enter and the send button both route
+    /// through it so an unselected or deleted profile behaves the same.
     private func attemptSend(_ attributedString: NSAttributedString) {
         // Code mode: intercept if model or folder not configured, then point selectedProfileID at
         // the code profile so resolution succeeds.
@@ -894,29 +788,21 @@ struct ChatInputAreaView: View {
         }
     }
 
-    /// Rewrites a leading `/skill-name` into the directive actually sent.
-    ///
-    /// ⚠️ A DIRECTIVE, not an invocation — see `SkillCommandParser`. The model is told to use the
-    /// skill and still calls `load_skill` itself. Nothing here pre-loads a body or forces a choice.
-    ///
-    /// ⚠️ ONLY for agent profiles, and only for a name the profile can actually reach. A command
-    /// naming an unlinked or misspelled skill is left EXACTLY as typed: sending an instruction the
-    /// model cannot follow would make it apologise for a skill it never had, and the typo would be
-    /// hidden from the one person able to fix it.
+    /// Rewrites a leading `/skill-name` into the directive actually sent. A directive, not an invocation (see
+    /// `SkillCommandParser`); only for agent profiles and names the profile can reach, otherwise the text is left exactly
+    /// as typed.
     private func expandSkillCommand(in attributed: NSAttributedString) -> NSAttributedString {
         guard let command = SkillCommandParser.parse(attributed.string) else { return attributed }
 
         guard let profile = selectedProfile else { return attributed }
 
-        // ⚠️ The SAME set the picker was filtered by — see `SkillCommandReachability`. Computing it
-        // here independently is exactly how the two came to disagree.
+        // Uses the same name set the picker was filtered by (see `SkillCommandReachability`).
         let rendered = SkillCommandParser.render(command, availableNames: skillCommandOffer.names)
         guard rendered != attributed.string else { return attributed }
 
         logger.log("[SKILLS] Expanded /\(command.skillName) into a directive for '\(profile.displayName)'.")
-        // ⚠️ Rebuilt with the ORIGINAL's attributes at index 0 rather than plain text: the composer
-        // hands this string to the send path with typing attributes attached, and dropping them
-        // changes how the message renders in the transcript.
+        // Rebuilt with the original's attributes at index 0, since dropping the typing attributes changes how the message
+        // renders.
         let attributes = attributed.length > 0 ? attributed.attributes(at: 0, effectiveRange: nil) : [:]
         return NSAttributedString(string: rendered, attributes: attributes)
     }
@@ -929,10 +815,8 @@ struct ChatInputAreaView: View {
             showingBackendSelectorPopup = true
 
         case .profileDeleted(let id):
-            // ⚠️ Clear the dangling selection as well as opening the picker. Leaving it set is what
-            // kept the composer showing a deleted profile's name and the send button enabled, so
-            // every subsequent click failed the same silent way. Only this arm clears it: a store
-            // read that THREW says nothing about whether the profile exists.
+            // Clears the dangling selection as well as opening the picker, so the composer stops showing a deleted profile's
+            // name. Only this arm clears it: a store read that threw says nothing about whether the profile exists.
             logger.notice(
                 "[PROFILE] Clearing the composer's selection of deleted profile \(id). "
                 + "CONSEQUENCE: the send button disables and the picker opens; the typed message is kept."
@@ -946,7 +830,7 @@ struct ChatInputAreaView: View {
             showingBackendSelectorPopup = true
 
         case .storeUnavailable(_, let description):
-            // The selection is deliberately KEPT — retrying is the right next action.
+            // The selection is kept, since retrying is the right next action.
             toastManager.show(
                 String(localized: "Couldn't read the selected profile: \(description)"),
                 style: .error
@@ -956,7 +840,7 @@ struct ChatInputAreaView: View {
     
     // MARK: - Handlers
     
-    // MARK: - File Drop Handler (P1) — [Q8] shared with the QuickAccess panel via FileAttachmentPicker.
+    // MARK: - File Drop Handler
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
         return FileAttachmentPicker.handleDrop(providers) { item in
@@ -1031,10 +915,8 @@ struct ChatInputAreaView: View {
         }
     }
 
-    /// UTTypes accepted by `openCodeFilePicker`: broad buckets (images, source code,
-    /// plain text, PDF) plus explicit per-extension entries for document formats
-    /// supported by DocumentExtractionRegistry and code extensions UTType may not
-    /// recognize on all OS versions (md, yaml, kt, etc.).
+    /// UTTypes accepted by `openCodeFilePicker`: broad buckets (images, source code, plain text, PDF) plus per-extension
+    /// entries for supported document formats and code extensions UTType may not recognize.
     private static let codeInterfaceAllowedFileTypes: [UTType] = {
         var types: [UTType] = [.image, .sourceCode, .text, .plainText, .pdf]
 
@@ -1064,12 +946,10 @@ struct ChatInputAreaView: View {
         reportRefusedAttachments(inputViewModel.addAttachedFiles(fileItems: items, deliveryMode: activeDeliveryMode()))
     }
 
-    /// The delivery mode of the profile a send would use NOW; nil when none resolves.
-    ///
-    /// ⚠️ In Code mode that is the code profile, not `selectedProfile` — same resolution as
-    /// `evaluatePreSendFit`. ⚠️ Read from `selectedProfileID`, NOT the `selectedProfile`
-    /// @State: that is refreshed by a sibling `onChange`, and SwiftUI does not order sibling
-    /// handlers, so on a profile switch the re-check could judge against the OLD profile.
+    // Why: read from `selectedProfileID`, not the `selectedProfile` @State, which a sibling onChange refreshes in unspecified
+    // order.
+    /// The delivery mode of the profile a send would use now; nil when none resolves. In Code mode that is the code
+    /// profile, resolved as in `evaluatePreSendFit`.
     private func activeDeliveryMode() -> AttachmentDeliveryMode? {
         activeProfile().map { AttachmentDeliveryMode.resolve(for: $0) }
     }

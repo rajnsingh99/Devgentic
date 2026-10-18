@@ -4,14 +4,14 @@
 //  AgentCapabilitiesSection.swift
 //  Devgentic
 //
-//  Created for Agent Capabilities Migration (Phase 0).
-//  Replaces the architecture picker with composable capability toggles.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 private let logger = DGLogger(category: "AgentCapabilities")
 
+/// The Agent configuration section of composable capability toggles (planning, reflection and related capabilities).
 struct AgentCapabilitiesSection: View {
     @Binding var capabilities: AgentCapabilities
     @Environment(\.appTheme) private var theme
@@ -50,21 +50,8 @@ struct AgentCapabilitiesSection: View {
                         .fixedSize()
                     }
 
-                    // Parallel subtasks — HIDDEN from UI
-                    // Parallel subtask execution serializes at the LLM layer (single GPU for
-                    // local models, rate-limited for cloud). The parallelism is illusory and
-                    // adds complexity without throughput gain. The config field is preserved
-                    // for future use when batch inference or multi-model routing makes true
-                    // parallelism viable.
-                    //
-                    // ⚠️ Register A67. This comment used to end "Default is forced to false
-                    // below" — and nothing below forced anything. The tolerant decoder defaults
-                    // the field only when the key is ABSENT, so a profile saved while the toggle
-                    // still existed decoded `true` and took the parallel branch, uncontrollably.
-                    // Enforcement now lives at the consumption point, in
-                    // `PlanningCapability.parallelSubtasksSupported` — one constant to flip when
-                    // parallelism becomes real. A stored `true` is logged and ignored, not
-                    // rewritten, so the preference survives for that day.
+                    // Parallel subtasks are hidden: execution serializes at the LLM layer, so the parallelism is illusory. A stored
+                    // `true` is logged and ignored (see `PlanningCapability.parallelSubtasksSupported`).
 
                     Divider().background(theme.dividerColor)
 
@@ -157,24 +144,8 @@ struct AgentCapabilitiesSection: View {
             }
 
             // MARK: - Agent Delegation — HIDDEN from UI, except as an OFF switch
-            // Agent delegation spawns concurrent sub-agents that all share the same LLM.
-            // On local models (MLX/Ollama) this serializes at the GPU actor, and on cloud
-            // providers it competes with the parent for rate-limit tokens. The result is
-            // illusory parallelism with added overhead. Hidden until true parallel inference
-            // (batch, multi-model, or dedicated cloud concurrency) is supported.
-            // The backend code (CallAgentTool, ConcurrencyLimiter, AgentConnect injection)
-            // is fully implemented and preserved — only the UI toggle is removed.
-            //
-            // ⚠️ Register A66. Removing the toggle removed the OFF switch too, and the gate in
-            // `AgentConnect.resolveTools` is the mere PRESENCE of `capabilities.agentDelegation`
-            // — there is no `isEnabled` flag. Old "Supervisor" profiles were converted to that
-            // config, so those agents inject `call_agent` on every single run,
-            // permanently, with nothing on screen to say so and no way to stop it.
-            //
-            // ⚠️ This row appears ONLY when the profile already has delegation, and turning it
-            // off nils the config so the row disappears for good. That gives existing profiles
-            // control without re-offering the capability to new ones — which is what the hide
-            // decision above is about. It is not a toggle; it is an exit.
+            // Agent delegation is hidden for new profiles, since sub-agents share one LLM. The row appears only when the profile
+            // already has delegation, and turning it off nils the config; it is an exit, not a toggle.
             if capabilities.agentDelegation != nil {
                 Divider().background(theme.dividerColor)
 

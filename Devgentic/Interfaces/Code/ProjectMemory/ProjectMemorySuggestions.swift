@@ -4,18 +4,7 @@
 //  ProjectMemorySuggestions.swift
 //  Devgentic
 //
-//  The optional end-of-run memory pass (phase 3 of the project-memory redesign, 2026-10-06).
-//
-//  After a Code answer is shown, ONE short, separate model call reads what the run did — the
-//  request, the commands it ran and their exit codes, the tool failures, the answer — and
-//  proposes at most three facts worth keeping. Each proposal goes through exactly the checks
-//  `remember` applies (`RememberTool.validate`): a command must have exited 0 in this
-//  conversation, files must exist, no secrets. What survives becomes a SUGGESTION, not an entry:
-//  nothing reaches `.devgentic/memory/` until the user accepts it under the answer or in the
-//  Project Context panel.
-//
-//  Off by default, per project (`CodeQuickSettings.suggestMemories`). It runs after the task
-//  loop has finished, so it can never take over a task; a new send in the conversation cancels it.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -24,6 +13,8 @@ private let logger = DGLogger(category: "ProjectMemory")
 
 // MARK: - Suggestion
 
+/// A fact proposed by the optional end-of-run memory pass, validated like `remember`; nothing reaches
+/// `.devgentic/memory/` until the user accepts it.
 struct ProjectMemorySuggestion: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     let conversationID: UUID

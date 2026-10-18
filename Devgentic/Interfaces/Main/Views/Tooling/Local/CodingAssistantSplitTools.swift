@@ -4,17 +4,15 @@
 //  CodingAssistantSplitTools.swift
 //  Devgentic
 //
-//  Small-model-friendly split variants of edit_code / code_search / create_file.
-//  Promoted to standard Library tools for all profiles (Chat, Code, and Workflow).
-//
-//  Each tool carries a single intent and no behavior-changing boolean toggles —
-//  so a small LLM cannot mis-set a knob and silently land in the wrong behavior.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 // MARK: - edit_code_single
 
+/// `edit_code_single`: one of the small-model-friendly split variants of edit_code / code_search / create_file.
+/// Each variant carries a single intent and no behavior-changing boolean toggles, so a small model cannot mis-set a knob.
 struct EditCodeSingleTool: DevgenticTool {
     let name = "edit_code_single"
     let category = "Coding Assistant"
@@ -121,11 +119,8 @@ struct EditCodeBatchTool: DevgenticTool {
     }
 
     var parameterSchema: ToolParameters {
-        // `edits` is built by hand rather than through `SchemaBuilder.object`, which hardcodes
-        // `items: ["type": "string"]` for every array. That is right for `tags` and `sourcePaths`
-        // and WRONG here: this is an array of objects, and the machine-readable item type is what
-        // a provider validates a tool call against — the prose in the description is not. A model
-        // reading the schema literally would send an array of strings, which cannot decode.
+        // `edits` is built by hand: `SchemaBuilder.object` hardcodes string `items`, but this is an array of objects,
+        // and providers validate tool calls against the machine-readable item type.
         var properties = SchemaBuilder.object(
             properties: [
                 ("file_path", "string", "Absolute or relative path to the file to edit.")
@@ -507,9 +502,8 @@ private enum FileCreator {
     }
 }
 
-/// Shared ripgrep runner used by the three code_search_* variants.
-/// Extracted so each variant can pin the behavior flags it wants without exposing
-/// the underlying toggles to the LLM.
+/// Shared ripgrep runner used by the three code_search_* variants; each variant pins the behavior flags it wants
+/// without exposing the underlying toggles to the LLM.
 private enum RipgrepRunner {
 
     static func run(
@@ -542,10 +536,8 @@ private enum RipgrepRunner {
             if wholeWord { args.append("-w") }
             if filesOnly { args.append("-l") }
             if let glob = glob { args += ["--glob", glob] }
-            // `--` ends option parsing. `pattern` is model-supplied, and argv does not protect
-            // the callee's own parser: a leading `-` reaches ripgrep, whose `--pre` names a
-            // preprocessor COMMAND it executes. This runner backs the three `code_search_*`
-            // tools, which are the ones a Code profile actually gets.
+            // `--` ends option parsing: `pattern` is model-supplied, and a leading `-` would otherwise reach ripgrep,
+            // whose `--pre` names a command it executes.
             args.append("--")
             args.append(pattern)
             args.append(resolvedPath)
@@ -553,9 +545,8 @@ private enum RipgrepRunner {
             process.executableURL = URL(fileURLWithPath: rgPath)
             process.arguments = args
         } else {
-            // `-E` — EXTENDED regex, so this fallback means the same thing ripgrep does. See the
-            // note in `code_search`: grep's default BASIC dialect turns `+ ? | ( )` into
-            // literals, so whether a pattern matches depended on whether ripgrep was installed.
+            // `-E`: extended regex, so the fallback means the same as ripgrep; grep's default basic dialect treats
+            // `+ ? | ( )` as literals.
             var grepArgs = ["-rnE", "--color=never"]
             if !caseSensitive { grepArgs.append("-i") }
             if wholeWord { grepArgs.append("-w") }
@@ -569,9 +560,8 @@ private enum RipgrepRunner {
             process.arguments = grepArgs
         }
 
-        // grep / ripgrep write one "Permission denied" line per unreadable directory to
-        // STDERR, and this site attached stderr to a pipe it never read — over a home
-        // directory that passes 64 KB easily and the search hangs forever.
+        // grep/ripgrep print one "Permission denied" line per unreadable directory to stderr;
+        // an unread stderr pipe passes 64 KB over a home directory and hangs the search.
         let run: ProcessRunner.Result
         do {
             run = try ProcessRunner.run(process)
@@ -592,9 +582,8 @@ private enum RipgrepRunner {
             incompleteNote = note
         }
 
-        // `maxResults` bounds PRINTED LINES, not matches — with context on, one match prints up
-        // to 2N+1 of them. The two were conflated here exactly as in `code_search`; see
-        // `SearchMatchCounter` for why the display output cannot be counted directly.
+        // `maxResults` bounds printed lines, not matches: with context on, one match prints up to 2N+1 lines.
+        // See `SearchMatchCounter`.
         let lines = rawOutput.components(separatedBy: "\n")
         var shownLines = 0
         var truncatedLines: [String] = []
@@ -609,9 +598,8 @@ private enum RipgrepRunner {
             truncatedLines.append(line)
         }
 
-        // `code_search_text` is the only one of the three splits that requests context, so it is
-        // the only one paying for a counting run. `code_search_symbol` and `code_search_files`
-        // pass `contextLines: 0` / `filesOnly`, where printed lines already equal the answer.
+        // `code_search_text` is the only split that requests context, so it alone pays for a counting run;
+        // the others already print one line per match.
         let exactMatches: Int? = (!filesOnly && contextLines > 0)
             ? SearchMatchCounter.exactMatchCount(
                 executable: rgPath ?? "/usr/bin/grep",

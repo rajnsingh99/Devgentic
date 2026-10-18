@@ -4,12 +4,7 @@
 //  ShellProcessRedactionTests.swift
 //  DevgenticTests
 //
-//  Registers KC-16 and KC-17: nothing `ShellProcess` logs may carry a secret. The log is what a
-//  bug-report bundle carries, and a bug report is what gets pasted into a public issue.
-//
-//  ⚠️ Both tests go through the real object — one through the stored `commandLine` the log lines
-//  quote, one through a real child process writing to stderr — because a unit test of
-//  `MCPRedaction` alone says nothing about whether `ShellProcess` calls it.
+//  Created by Raj Singh.
 //
 
 import XCTest

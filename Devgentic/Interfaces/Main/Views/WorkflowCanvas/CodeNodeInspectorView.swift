@@ -4,16 +4,13 @@
 //  CodeNodeInspectorView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 11/04/26.
-//
-//  Configuration sheet for Code/Transform nodes — card-based layout.
-//  Allows the user to edit the template string (Mustache-like placeholders)
-//  and set an optional output variable name.
-//  Uses SettingsCard components for visual consistency with other inspector views.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Configuration sheet for Code/Transform nodes: edits the template string (Mustache-like placeholders)
+/// and an optional output variable name.
 struct CodeNodeInspectorView: View {
     @Binding var node: WorkflowNode
     @Environment(\.closeNodeInspector) private var closeInspector
@@ -306,9 +303,8 @@ struct CodeNodeInspectorView: View {
         )
         node.kind = .code(config)
 
-        // [INS-11] Never materialise `nodeConfig` here: this panel edits no per-node config, and
-        // turning `nil` into `.some(defaults)` defeats `replaceNode`'s equality guard, so a Save
-        // that changed nothing would dirty the canvas and burn an undo slot.
+        // Never materialise `nodeConfig` here: this panel edits no per-node config, and turning `nil` into defaults defeats
+        // `replaceNode`'s equality guard, so an unchanged Save would dirty the canvas and burn an undo slot.
     }
 
     private func persistIfEmbedded() {

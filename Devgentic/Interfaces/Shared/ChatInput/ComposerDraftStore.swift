@@ -4,30 +4,14 @@
 //  ComposerDraftStore.swift
 //  Devgentic
 //
-//  Per-conversation composer drafts (typed text + attachments), held for the app session.
-//
-//  WHY: the composer's view model is APP-SCOPED — one `ChatInputViewModel` for every
-//  conversation (`DevgenticApp`), and `attachedFiles` likewise lives on the single
-//  `MainApplicationViewModel`. Nothing reset either when the selected conversation
-//  changed, so a half-typed message and its attachments followed you from conversation A
-//  into B, where they could be sent by accident. (Asymmetric, too: `startNewConversation`
-//  cleared attachments but never the text.)
-//
-//  This store makes the composer's contents belong to a conversation: they're saved under
-//  the one you're leaving and restored for the one you're entering.
-//
-//  PERSISTED across launches (user decision 2026-10-05): saved as JSON in Application
-//  Support/Devgentic/ComposerDrafts.json. The two questions that kept it session-only were
-//  answered, not ignored:
-//   • Staleness — a draft untouched for `maxAge` is dropped at load, and an attachment whose
-//     file is gone is dropped at restore.
-//   • Privacy — unsent text now lives on disk until it is sent or cleared; it is the user's
-//     own text in the user's own Application Support, which the user chose.
-//  Under XCTest the shared store is memory-only; tests that need the disk build their own.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Per-conversation composer drafts (typed text and attachments), persisted as JSON in Application Support.
+/// A draft is saved under the conversation being left and restored for the one entered.
+/// Drafts older than `maxAge` and attachments whose file is gone are dropped; memory-only under XCTest.
 @MainActor
 final class ComposerDraftStore {
 
@@ -64,13 +48,8 @@ final class ComposerDraftStore {
         var isEmpty: Bool { text.isEmpty && attachments.isEmpty }
     }
 
-    /// Where a draft belongs: an interface MODE and a conversation in it.
-    ///
-    /// ⚠️ The mode is part of the key because every mode's Home is the SAME conversation id —
-    /// `nil`. Keyed by conversation alone, text and attachments typed on Code's Home appeared on
-    /// Chat's Home after a mode switch (and a Home → Home switch changed no conversation id at
-    /// all, so nothing even swapped). `nil` is still a real key — the not-yet-created
-    /// conversation of THAT mode — so a draft typed before the first send survives a detour.
+    // Why: every mode's Home has conversation id `nil`; keyed by conversation alone, drafts leak across modes.
+    /// Where a draft belongs: an interface mode and a conversation in it.
     struct Key: Hashable {
         let mode: MainApplicationViewModel.InterfaceMode
         let conversationID: UUID?

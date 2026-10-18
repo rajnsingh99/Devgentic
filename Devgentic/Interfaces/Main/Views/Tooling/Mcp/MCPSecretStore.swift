@@ -4,19 +4,7 @@
 //  MCPSecretStore.swift
 //  Devgentic
 //
-//  Typed Keychain facade for MCP server secrets — bearer tokens, env-var values,
-//  and (in Phase 2) OAuth credential bundles. Layers on top of `SecureKeyStorage`
-//  with a per-source key namespace so we can wipe every secret tied to a server
-//  with one call when the user removes it.
-//
-//  Service: "com.devgentic.mcp.secrets"
-//  Account format: "<sourceID>::<scope>"
-//      e.g. "B33A...::auth.bearer"
-//      e.g. "B33A...::env.GITHUB_PERSONAL_ACCESS_TOKEN"
-//      e.g. "B33A...::oauth.bundle"   (Phase 2)
-//
-//  Nothing in this file logs secret content. Use `MCPRedaction` if you need to
-//  log around it.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -38,10 +26,8 @@ enum MCPSecretScope: Hashable {
     /// One env-var value, scoped by the env key name.
     case envValue(key: String)
 
-    /// JSON bundle containing the full OAuth credential set
-    /// (access_token, refresh_token, expires_at, scopes, registered client
-    /// metadata). Reserved for Phase 2; declared here so the namespace is
-    /// stable from the start.
+    /// JSON bundle of the full OAuth credential set (access_token, refresh_token, expires_at, scopes, client metadata).
+    /// Declared so the namespace is stable; not yet written by anything.
     case oauthBundle
 
     /// Stable wire format used as the Keychain account suffix.
@@ -55,12 +41,8 @@ enum MCPSecretScope: Hashable {
     }
 }
 
-/// What a guarded clear actually did. Register KC-1.
-///
-/// ⚠️ `refusedUnreadable` is the case that exists to prevent data loss, and it is deliberately NOT
-/// an error: refusing to delete a credential we could not read is the CORRECT outcome, and the
-/// caller should carry on. Treating it as a failure would push callers back into the behaviour the
-/// case exists to stop.
+/// What a guarded clear actually did. `refusedUnreadable` is deliberately not an error: refusing to delete a credential
+/// that could not be read is the correct outcome, and the caller should carry on.
 enum MCPSecretClearOutcome: Equatable {
 
     /// The item is gone — we deleted it, or it was already absent.
@@ -72,7 +54,7 @@ enum MCPSecretClearOutcome: Equatable {
     /// The delete itself failed. The secret may still be present.
     case failed(OSStatus)
 
-    /// Whether this outcome represents a genuine failure. ⚠️ `refusedUnreadable` is NOT one.
+    /// Whether this outcome is a genuine failure; `refusedUnreadable` is not one.
     var isFailure: Bool {
         if case .failed = self { return true }
         return false
@@ -89,11 +71,8 @@ final class MCPSecretStore {
     /// disambiguation lives in the account name.
     private static let service = "com.devgentic.mcp.secrets"
 
-    /// ⚠️ TEST SEAM (register KC-1). This was `private let backing = SecureKeyStorage()`, which meant
-    /// the `.failed` branch — the ONLY branch that matters here, since `clear`'s whole job is to
-    /// refuse on an unreadable read — could not be exercised at all. The guarantee was asserted by
-    /// comment alone, which is how it went unnoticed that `MCPSecretStore` had no `read` to begin
-    /// with. Mirrors `ProviderKeyStore.setStorageForTesting`; production never reassigns it.
+    /// Test seam for the Keychain backing, so the `.failed` read branch of `clear` can be exercised.
+    /// Mirrors `ProviderKeyStore.setStorageForTesting`; production never reassigns it.
     private var backing: KeychainAccessing = SecureKeyStorage()
 
     /// Swaps the Keychain backend. Test-only — pass nil to restore the real one.
@@ -101,23 +80,15 @@ final class MCPSecretStore {
         shared.backing = replacement ?? SecureKeyStorage()
     }
 
-    /// ⚠️ TEST SEAM (register KC-52). When set, receives exactly the failure line `delete` logs —
-    /// `delete` used to log NOTHING on failure and five of its six call sites discarded the Bool,
-    /// so a refused wipe (a locked Keychain during server removal) was invisible everywhere. One
-    /// message for the sink and the logger alike; the seam cannot drift from the log.
+    /// Test seam: when set, receives exactly the failure line `delete` logs, so the sink and the logger share one message.
     nonisolated(unsafe) static var deleteFailureLogSinkForTesting: (@Sendable (String) -> Void)?
 
     private init() {}
 
     // MARK: - Public API
 
-    /// Stores a secret value under `(sourceID, scope)`. Overwrites any existing
-    /// value at the same key.
-    ///
-    /// ⚠️ An empty string CLEARS rather than writes — callers often hand us "" for an un-set
-    /// field. That routes through `clear`, **not** `delete`, so an empty string can never destroy a
-    /// credential that merely could not be READ. See `clear`; that distinction is the whole of
-    /// register KC-1.
+    /// Stores a secret value under `(sourceID, scope)`, overwriting any existing value.
+    /// An empty string clears via `clear`, not `delete`, so it cannot destroy a credential that merely could not be read.
     @discardableResult
     func store(_ value: String, for scope: MCPSecretScope, sourceID: UUID) -> Bool {
         let account = Self.account(sourceID: sourceID, scope: scope)
@@ -135,13 +106,9 @@ final class MCPSecretStore {
         return true
     }
 
+    // Why: a locked Keychain collapsed to "" would let Save delete a live bearer token the user never touched
     /// Reads a secret, distinguishing "nothing stored" from "the read failed".
-    ///
-    /// ⚠️⚠️ **Anything that WRITES or DELETES based on the answer MUST use this, never `retrieve`.**
-    /// This is `SecureKeyStorage`'s register-B2 rule, which this store did not honour and which cost
-    /// us KC-1: `MCPSecretStore` exposed only the collapsing `retrieve`, so a locked Keychain or a
-    /// denied ACL prompt rendered as `""` in the edit form, and pressing Save deleted a live bearer
-    /// token the user had never touched. `ProviderKeyStore.read` is the same seam for provider keys.
+    /// Anything that writes or deletes based on the answer must use this, never `retrieve`.
     func read(_ scope: MCPSecretScope, sourceID: UUID) -> KeychainReadOutcome {
         let account = Self.account(sourceID: sourceID, scope: scope)
         let outcome = backing.read(service: Self.service, account: account)
@@ -157,31 +124,16 @@ final class MCPSecretStore {
         return outcome
     }
 
-    /// Reads a secret. Returns nil if absent **or on a Keychain error** — the two are deliberately
-    /// indistinguishable here.
-    ///
-    /// ⚠️ Only for callers that merely need a value to SEND. If the answer drives a write, use
-    /// `read` instead — see its comment.
+    /// Reads a secret; nil if absent or on a Keychain error (deliberately indistinguishable).
+    /// Only for callers that need a value to send; if the answer drives a write, use `read`.
     func retrieve(_ scope: MCPSecretScope, sourceID: UUID) -> String? {
         guard case .found(let value) = read(scope, sourceID: sourceID) else { return nil }
         return value
     }
 
-    /// Removes a secret — but **only if we could read what we are removing**.
-    ///
-    /// ⚠️⚠️ THIS IS THE KC-1 FIX, AND THE ASYMMETRY IS DELIBERATE. A Keychain read can fail for
-    /// reasons that have nothing to do with whether a secret exists: the login keychain is locked,
-    /// or the per-item ACL prompt was denied after an update changed the app's code signature. The
-    /// old path could not tell that apart from "no secret configured", so the edit form hydrated an
-    /// empty field and Save deleted a live bearer token the user never touched — unrecoverably,
-    /// since the Keychain was the only copy.
-    ///
-    /// So: losing a credential is permanent, failing to clear one is not. When the read fails we
-    /// keep the secret and say so. The user can clear it again once the Keychain is readable.
-    /// `BackendProfileSD.details` makes exactly this trade for provider keys (`suppressKeychainClear`).
-    ///
-    /// ⚠️ A genuine `.notFound` still counts as `cleared` — the desired end state is "gone", not
-    /// "we did the deleting".
+    // Why: a read can fail while a secret exists (locked keychain, denied ACL); deleting then loses the only copy
+    /// Removes a secret only if it could be read first; an unreadable secret is kept and reported as `refusedUnreadable`.
+    /// A genuine `.notFound` counts as `cleared`, since the desired end state is "gone".
     @discardableResult
     func clear(scope: MCPSecretScope, sourceID: UUID) -> MCPSecretClearOutcome {
         switch read(scope, sourceID: sourceID) {
@@ -213,19 +165,14 @@ final class MCPSecretStore {
         }
     }
 
-    /// Deletes one secret unconditionally. Returns `true` if removed or already absent.
-    ///
-    /// ⚠️ Prefer `clear`. This does NOT check whether the value was readable first, so it will
-    /// happily destroy a credential during a Keychain outage. It is correct only where the intent
-    /// is "this whole source is going away" — `purgeAll` on server deletion — and wrong anywhere a
-    /// configuration is merely being re-saved.
+    /// Deletes one secret unconditionally; returns `true` if removed or already absent.
+    /// Prefer `clear`: this skips the readability check, so use it only when a whole source is going away.
     @discardableResult
     func delete(scope: MCPSecretScope, sourceID: UUID) -> Bool {
         let account = Self.account(sourceID: sourceID, scope: scope)
         let status = backing.delete(service: Self.service, account: account)
-        // Register KC-52: `errSecItemNotFound` is success for a wipe (the goal is "nothing
-        // stored"); anything else means the secret REMAINS, and that must be visible — five of
-        // this function's callers discard the returned Bool.
+        // `errSecItemNotFound` is success for a wipe; anything else means the secret remains and must be visible,
+        // since most callers discard the returned Bool.
         if status != errSecSuccess && status != errSecItemNotFound {
             let message = "[MCP-SECRETS] Could not delete \(scope.rawScope) for source "
                 + "\(sourceID.uuidString) (\(SecureKeyStorage.osStatusName(status))). CONSEQUENCE: "
@@ -240,11 +187,8 @@ final class MCPSecretStore {
         return status == errSecSuccess || status == errSecItemNotFound
     }
 
-    /// Best-effort wipe of every secret tied to a source. Called when the user
-    /// deletes the server from the Tool Library. Iterates the scopes we know
-    /// about (bearer, api-key, oauth) and any env keys the caller hands us.
-    /// We can't enumerate Keychain by prefix without an additional attribute,
-    /// so callers must pass the env-key set they remember.
+    /// Best-effort wipe of every secret tied to a source, called when the server is deleted from the Tool Library.
+    /// Iterates the known scopes plus `knownEnvKeys`; the Keychain cannot be enumerated by prefix, so callers pass them.
     @discardableResult
     func purgeAll(sourceID: UUID, knownEnvKeys: Set<String> = []) -> Bool {
         var failed: [String] = []
@@ -262,10 +206,8 @@ final class MCPSecretStore {
             purge(.envValue(key: envKey))
         }
 
-        // Every `delete` result used to be discarded and this logged unconditional
-        // success. A Keychain failure therefore left the secret on disk for a server the
-        // user had deleted, while the log said it was purged — the one place that must
-        // not lie, since it is the record that a credential was destroyed.
+        // Logs the failures of every `delete` rather than unconditional success, since this log is the record that a
+        // credential was destroyed.
         guard failed.isEmpty else {
             logger.error("""
                 [MCP-SECRETS] ⚠️ Purge INCOMPLETE for source \(sourceID.uuidString): \

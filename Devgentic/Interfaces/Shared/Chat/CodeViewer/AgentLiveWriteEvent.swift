@@ -4,7 +4,7 @@
 //  AgentLiveWriteEvent.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -12,41 +12,18 @@ import os
 
 private let logger = DGLogger(category: "AgentLiveWriteEvent")
 
-/// Live-agent-tab plumbing: `ActiveStreamManager` posts these as file-writing tool calls
-/// start and finish, and `ChatHistoryViewModel` turns them into live Code Viewer tabs.
-///
-/// BADGE-ONLY policy (user decision 2026-07-25): live tabs update in place when the panel
-/// is open and make the minimized pill pulse otherwise — the panel is NEVER auto-opened
-/// and the active tab is never switched unless the user's follow toggle is on.
-///
-/// The payload factories are pure and unit-tested; the notification layer just carries
-/// them. Loose coupling via NotificationCenter mirrors `SpeechService.speechOpenCodeViewer`
-/// — ActiveStreamManager (Core) must not depend on the chat view model (Interfaces).
+/// Live-agent-tab plumbing: `ActiveStreamManager` posts these as file-writing tool calls start and finish,
+/// and `ChatHistoryViewModel` turns them into live Code Viewer tabs.
+/// Tabs update in place or pulse the minimized pill; the panel is never auto-opened unless follow is on.
 enum AgentLiveWriteEvent {
 
     static let began = Notification.Name("AgentLiveWriteBegan")
     static let completed = Notification.Name("AgentLiveWriteCompleted")
     static let payloadKey = "payload"
 
-    /// Live tabs cover the FULL-CONTENT writers only. Append writes carry just the
-    /// fragment (post-state unknowable before the pre-read lands) and edit tools carry
-    /// find/replace strings — both stay on the completion-chip path.
-    ///
-    /// ⚠️ [CR52/CR59] This is the FOURTH member of a four-way contract, and it is the one that
-    /// drifted. `create_file` was in `ToolExecutionLoop.preSnapshotToolNames`, in
-    /// `TimelineFileViewerAction.chipEligibleTools` and in `primaryLabel`'s write case, but never
-    /// here — it was missing from the day this set was introduced, not removed later. Since
-    /// `create_file` is `.libraryExceptCode` it is the AGENT and WORKFLOW profiles' ordinary
-    /// creation tool, so those profiles got no live tab, no pulsing pill and no "agent is writing"
-    /// banner for a file creation, while `write_file` — the same visibility class — did. The nil
-    /// was SILENT: the guards below return before `skip` is even declared.
-    ///
-    /// ⚠️ The membership rule is DERIVED, not a list to curate by hand: this set is exactly the
-    /// pre-snapshotted tools whose params already carry the full post-state, i.e.
-    /// `preSnapshot − postSnapshot`. That is what "full-content writer" means above, and
-    /// `SnapshotToolContractDriftTests` now binds both directions of it so a fifth member cannot
-    /// drift in or out silently. Do not add a name here without adding it to the executor's
-    /// snapshot sets — the test will say so.
+    // Why: derived from the executor's snapshot sets; add a name to those sets, not here, or the drift test fails.
+    /// Tools whose params carry the full post-state, so a live tab can show the write: `preSnapshot - postSnapshot`.
+    /// Append and edit tools stay on the completion-chip path.
     static let liveWriteToolNames: Set<String> = [
         "write_file", "overwrite_file", "create_new_file", "create_file"
     ]
@@ -71,12 +48,8 @@ enum AgentLiveWriteEvent {
         let preWriteContent: String?
     }
 
-    /// Payload for a STARTING file write, or nil when the call shouldn't produce a live
-    /// tab (non-file tool, append mode, unparseable/empty args, over the cap).
-    ///
-    /// Non-candidates return nil SILENTLY — every shell command would otherwise log. Once
-    /// the tool is a live-write candidate, each nil says why no tab appeared, since that is
-    /// the question a missing live tab raises on-device.
+    /// Payload for a starting file write, or nil when the call should not produce a live tab.
+    /// Non-file tools return nil silently; live-write candidates log why no tab appeared.
     static func began(toolName: String, params: String, conversationID: UUID) -> Began? {
         guard liveWriteToolNames.contains(toolName) else { return nil }
 

@@ -4,18 +4,7 @@
 //  MCPOAuthBrowserRedirectHandler.swift
 //  Devgentic
 //
-//  Concrete `MCPOAuthRedirectHandler` for desktop OAuth: spins up a one-shot
-//  loopback listener, opens the authorize URL in the user's default browser,
-//  awaits the redirect, validates the `state` round-trip, and returns the
-//  authorization code.
-//
-//  Notes on browser choice:
-//   - We use `NSWorkspace.open` (not ASWebAuthenticationSession) because
-//     ASWebAuthenticationSession's `callbackURLScheme` can't match a loopback
-//     `http://127.0.0.1` redirect URL — it only matches custom schemes.
-//   - For users who'd prefer the in-app modal browser, Phase 4 can add a
-//     custom-scheme variant (`devgentic://oauth/callback`) gated on Info.plist
-//     registration. Loopback works without any project-level setup.
+//  Created by Raj Singh.
 //
 
 import AppKit
@@ -24,13 +13,12 @@ import os
 
 private let logger = DGLogger(category: "MCPOAuthBrowserHandler")
 
+/// Errors raised by the browser-based OAuth redirect handler.
 enum MCPOAuthBrowserError: LocalizedError {
     case stateMismatch
     case authorizationServerError(error: String, description: String?)
     case openBrowserFailed
-    /// Register KC-45: the loopback listener this flow depends on is not registered. This is
-    /// NOT "couldn't open the browser" — reporting it that way sent the user hunting for a
-    /// browser problem when the actual state was that nothing is listening for the redirect.
+    /// The loopback listener this flow depends on is not registered; distinct from failing to open the browser.
     case noLoopbackListener
     case missingCode
 
@@ -66,23 +54,9 @@ struct MCPOAuthBrowserRedirectHandler: MCPOAuthRedirectHandler {
         redirectURI: URL,
         expectedState: String
     ) async throws -> String {
-        // The listener owns its port and shuts itself down on success/timeout/cancel.
-        // We hand its `redirectURL` to the AS via the authorize URL's `redirect_uri`
-        // — caller has already done that, since they built the authorize URL with
-        // this listener's redirect URL.
-        //
-        // Implementation reality: the loopback listener has to be the
-        // *same instance* whose URL got embedded in the authorize URL.
-        // The coordinator hands us that URL via `redirectURI` — we look up
-        // the live listener in `LoopbackRegistry` (a small per-flow map).
-        //
-        // ⚠️ REGISTER KC-45: LOOK BEFORE YOU LAUNCH. The browser open used to run FIRST and the
-        // registry lookup after it, so a flow whose listener had already been torn down still
-        // opened a browser tab, sent the user through their whole login, and only then died —
-        // with the miss reported as `openBrowserFailed` ("Try copying the URL manually"),
-        // naming a failure that never happened and advising a URL that has nothing to land on.
-        // Resolving the listener first means a miss throws before the browser is touched, and
-        // each failure carries its own message and its own remedy.
+        // Why: look up the listener before opening the browser, so a missing one throws before the user starts a login.
+        // Resolve the live listener for `redirectURI` from `LoopbackRegistry`; it owns its port and shuts itself down.
+        // It must be the same instance whose URL was embedded in the authorize URL.
         guard let listener = LoopbackRegistry.shared.listener(for: redirectURI) else {
             throw MCPOAuthBrowserError.noLoopbackListener
         }
@@ -100,9 +74,8 @@ struct MCPOAuthBrowserRedirectHandler: MCPOAuthRedirectHandler {
         }
         LoopbackRegistry.shared.unregister(redirectURL: redirectURI)
 
-        // Validate state round-trip first — before reading `code`. A state
-        // mismatch is the canonical sign of a redirect-confusion attack and
-        // we want to fail loud rather than smuggle a hostile code through.
+        // Validate the state round-trip before reading `code`: a mismatch signals redirect confusion,
+        // so fail loudly rather than accept a hostile code.
         let receivedState = components.queryItems?.first(where: { $0.name == "state" })?.value
         guard receivedState == expectedState else {
             throw MCPOAuthBrowserError.stateMismatch
@@ -122,11 +95,8 @@ struct MCPOAuthBrowserRedirectHandler: MCPOAuthRedirectHandler {
     }
 }
 
-/// Tracks live loopback listeners by their redirect URL so the redirect
-/// handler can find the right listener instance to await. Necessary because
-/// the coordinator constructs the listener (so it can build the authorize
-/// URL with the right `redirect_uri`) but the handler is who awaits the
-/// callback — they need to share the same listener.
+/// Tracks live loopback listeners by redirect URL so the redirect handler can find the instance to await.
+/// The coordinator builds the listener (for the authorize URL) but the handler awaits it, so both share one.
 @MainActor
 final class LoopbackRegistry {
 

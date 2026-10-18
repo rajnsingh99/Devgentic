@@ -4,20 +4,7 @@
 //  SchemaMigrationTests.swift
 //  DevgenticTests
 //
-//  Created on 04/08/26.
-//
-//  The control for every future schema change.
-//
-//  WHY THIS EXISTS: the app opens ONE SwiftData store holding every conversation, profile and
-//  workflow the user has, with no `VersionedSchema` and no migration plan — so a change that
-//  lightweight migration cannot infer makes the app refuse to launch (`exit(EXIT_FAILURE)`) with
-//  no in-app recovery. Until now no test anywhere opened an on-disk store, so nothing could catch
-//  such a change before release. See SWIFTDATA_MIGRATION_PLAN.md and SWIFTDATA_GAP_REGISTER.md
-//  (G1, G54, G56, G58).
-//
-//  These tests are deliberately on-disk. An `isStoredInMemoryOnly` container starts empty every
-//  time and therefore can NEVER detect a migration failure — which is why the six existing
-//  SwiftData test files, all in-memory, do not cover this.
+//  Created by Raj Singh.
 //
 
 import XCTest

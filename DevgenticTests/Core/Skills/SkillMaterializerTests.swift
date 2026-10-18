@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillMaterializerTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Writing a stored skill back out as a real folder — the inverse of ingest, and the only place a
-//  skill name becomes a filesystem path again.
-//
-//  ⚠️ THE TRAVERSAL TEST IN HERE INHERITED A REAL DEFECT. The old importer derived a directory name
-//  from an untrusted archive's frontmatter and handed it to `removeItem`, so `name: ../../../../victim`
-//  deleted `/victim` — verified empirically at the time, not reasoned about. That code is gone with
-//  the promote half, and this is where the same shape could reappear, so the check moved here with it.
+//  Created by Raj Singh.
 //
 
 import XCTest

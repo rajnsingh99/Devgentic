@@ -4,13 +4,7 @@
 //  OllamaLockDownloadBatchTests.swift
 //  DevgenticTests
 //
-//  Readiness P2 batch 4 (2026-10-12): Ollama, the local lock, downloads.
-//    CR-33  a sub-workflow used twice counted as unresolved → a cloud workflow took the local lock
-//    CR-34  two quick pull clicks both started a pull (check-then-act across an await)
-//    CR-35  a cancelled Ollama pull was recorded as completed (per-layer progress ≥ 0.99)
-//    CR-36  a re-acquire trusted a stale `.admitted` after the lock had moved on
-//    CR-37  one refresh error emptied the model list while the server stayed "connected"
-//    CR-38  duplicate names from /api/tags trapped `Dictionary(uniqueKeysWithValues:)`
+//  Created by Raj Singh.
 //
 
 import XCTest

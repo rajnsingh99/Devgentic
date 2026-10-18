@@ -4,27 +4,15 @@
 //  ComposerVoiceController.swift
 //  Devgentic
 //
-//  Phase 2 of the unified composer: the reusable dictation behavior behind ComposerMicButton.
-//  Owns the Whisper session lifecycle — synchronous re-entry guard, mic-permission request,
-//  live transcript mirroring, VAD auto-stop, and teardown — so a surface gets voice input by
-//  pairing this controller with ComposerMicButton and three callbacks, instead of embedding
-//  ~80 lines of session logic in its view (which is where the QuickAccess panel's lived).
-//
-//  Per-instance BY DESIGN: create one per surface (@State in the owning view). It drives the
-//  shared WhisperRecognitionService directly — the same engine the main composer uses — but
-//  holds no global state itself. The main composer's ChatInputViewModel keeps its own richer
-//  voice pipeline (VoiceInputState machine, model download/selection UX in DynamicActionButton);
-//  migrating it onto this controller is the later per-instance-VM phase.
-//
-//  Provenance: extracted verbatim-in-behavior from QuickAccessContentView's
-//  startDictation/stopDictation, preserving the C9 fix (sync re-entry guard; one @MainActor
-//  task; cancellation covers a stop during the permission prompt) and supporting the C4 fix
-//  (stopIfRecording() on view disappear so the mic never stays hot).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AVFoundation
 
+/// Dictation behaviour behind ComposerMicButton: owns the Whisper session lifecycle, permission, live transcript
+/// and VAD auto-stop. One instance per surface; it drives the shared WhisperRecognitionService and holds no global
+/// state.
 @MainActor @Observable
 final class ComposerVoiceController {
 
@@ -61,9 +49,8 @@ final class ComposerVoiceController {
 
     func start(baseText: String) {
         let svc = WhisperRecognitionService.shared
-        // [C9] Re-entry guard: flip isRecording SYNCHRONOUSLY (callers are MainActor button
-        // actions) so a rapid second tap toggles to Stop instead of launching a second
-        // concurrent Whisper session on the shared service.
+        // Re-entry guard: flips isRecording synchronously (callers are MainActor) so a rapid second tap stops instead of
+        // starting a second session.
         guard isModelReady, !isRecording else { return }
         isRecording = true
         self.baseText = baseText
@@ -81,10 +68,8 @@ final class ComposerVoiceController {
                 self?.isRecording = false
                 return
             }
-            // startStreaming BLOCKS until stopStreaming() or VAD auto-stop. Throws are
-            // deliberately absorbed here — [V2] busy (another surface holds the slot)
-            // and [V1] unexpected-end (the service already forced the engine closed)
-            // both land in the same reset below; the service logs the specifics.
+            // startStreaming blocks until stopStreaming() or VAD auto-stop; throws (slot busy, engine force-closed) are
+            // absorbed and reset below.
             try? await svc.startStreaming(owner: .quickAccess) { [weak self] state in
                 Task { @MainActor [weak self] in
                     guard let self, self.isRecording else { return }

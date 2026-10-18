@@ -4,8 +4,7 @@
 //  GitFileDiff.swift
 //  Devgentic
 //
-//  Which two versions of a file the Git Changes panel diffs, and the collapsed rows it renders.
-//  Pure — the store does the reading (`GitChangesStore.loadDiff`), these decide WHAT to read.
+//  Created by Raj Singh.
 //
 
 import Foundation

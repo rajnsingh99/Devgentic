@@ -4,26 +4,7 @@
 //  GenericToolsXMLParser.swift
 //  Devgentic
 //
-//  Fallback parser for generic XML tool-call wrappers: <tools>...</tools>
-//  and <tool>...</tool>. Used by Qwen3 and other models that wrap bare
-//  JSON tool-call objects in simple XML tags.
-//
-//  Expected formats:
-//    Reasoning text here...
-//    <tools>
-//    {"name": "tool_name", "arguments": {"key": "value"}}
-//    </tools>
-//
-//    <tool>
-//    {"name": "tool_name", "arguments": {"key": "value"}}
-//    </tool>
-//
-//  Also handles arrays inside the tags:
-//    <tools>
-//    [{"name": "tool1", "arguments": {...}}, {"name": "tool2", "arguments": {...}}]
-//    </tools>
-//
-//  Created by Raj Singh on 10/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

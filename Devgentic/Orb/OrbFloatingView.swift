@@ -4,19 +4,14 @@
 //  OrbFloatingView.swift
 //  Devgentic
 //
-//  [Orb MVP] Root of the floating panel. Two presentations:
-//
-//  • Profile picker — first run only (and on an explicit switch). The chosen profile
-//    is remembered, so every later launch goes straight to the orb.
-//  • Orb — deliberately WORDLESS, Siri-style: state is carried entirely by the core
-//    visual's motion and color. The transcript and the agent's response are not
-//    duplicated here; they stream into the real chat interface underneath, which
-//    Orb brings into view when a run starts.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// Root of Orb's floating panel: a profile picker on first run or explicit switch, otherwise the wordless orb.
+/// State is carried by the core visual's motion and color; the transcript and response stream into the chat underneath.
 struct OrbFloatingView: View {
     let controller: OrbSessionController
     /// Reports which panel size the current stage needs.
@@ -130,14 +125,8 @@ struct OrbFloatingView: View {
                 .contentShape(Circle())
                 .onTapGesture { handleOrbTap() }
                 .help(orbTooltip)
-                // ⚠️⚠️ THE ORB IS THE WHOLE FEATURE'S ONLY CONTROL, and without this it was not a
-                // control at all to VoiceOver: an unlabelled shape carrying an `onTapGesture`,
-                // announced as nothing, with its state (STANDBY vs LISTENING vs WAITING ON YOU)
-                // carried only by colour and an unlabelled capsule.
-                //
-                // ⚠️ `.accessibilityAction`, not just the trait. VoiceOver's activate does not
-                // reliably fire a bare `onTapGesture` on a shape, and this tap is the click-to-speak
-                // affordance, the send-now affordance AND the only way to interrupt an answer.
+                // The orb is the feature's only control: expose it to VoiceOver as one labelled button that carries its stage.
+                // `.accessibilityAction`, not just the trait: activate does not reliably fire a bare `onTapGesture` on a shape.
                 .accessibilityElement(children: .ignore)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(Text("Orb"))
@@ -145,10 +134,8 @@ struct OrbFloatingView: View {
                     stage: controller.stage, micTrouble: controller.micTroubleDetected)))
                 .accessibilityHint(Text(orbTooltip))
                 .accessibilityAction { handleOrbTap() }
-                // ⚠️ EVERY CONTEXT-MENU ITEM ALSO BECOMES AN ACCESSIBILITY ACTION. The recovery
-                // paths — Repair Audio for a wedged coreaudiod, Cancel for a mis-transcription
-                // about to reach a profile with shell tools — lived exclusively behind a
-                // right-click, which needs a pointer. These surface in VoiceOver's Actions rotor.
+                // Every context-menu item is also an accessibility action, so the recovery paths (Repair Audio, Cancel)
+                // do not depend on a pointer; they surface in VoiceOver's Actions rotor.
                 .accessibilityActions { orbActions }
                 .contextMenu { orbActions }
 
@@ -156,12 +143,8 @@ struct OrbFloatingView: View {
                 transcriptCaption
             }
 
-            // Close, floated off the orb's top-right — shown ONLY while the pointer is over the
-            // panel, so the resting orb stays wordless. Before this the only ways out were Escape
-            // and the right-click menu, neither discoverable. Switch Profile lives in that menu.
-            // ⚠️ Hidden means out of the hit-test and the accessibility tree too: an invisible
-            // button that still takes clicks would close the orb under a user aiming at the orb.
-            // VoiceOver keeps "Close Orb" through `orbActions`.
+            // Close, floated off the orb's top-right and shown only while the pointer is over the panel, so the resting orb
+            // stays wordless. Hidden also means out of the hit-test and accessibility tree.
             OrbBubbleButton(
                 systemName: "xmark",
                 help: "Close Orb",
@@ -182,10 +165,8 @@ struct OrbFloatingView: View {
     /// The pointer is over the orb panel — the close button shows only then.
     @State private var isPanelHovered = false
 
-    /// The orb's actions, used by BOTH the right-click menu and VoiceOver's Actions rotor.
-    ///
-    /// ⚠️ ONE LIST, TWO SURFACES. Written twice they would drift, and the half that drifts is
-    /// always the one nobody is looking at — which here is the accessible one.
+    // Why: one list for both surfaces: written twice they would drift, and the accessible copy is the one nobody checks.
+    /// The orb's actions, shared by the right-click menu and VoiceOver's Actions rotor.
     @ViewBuilder private var orbActions: some View {
         Button("Switch Profile…") { controller.requestProfileSwitch() }
         if case .voiceUnavailable = controller.stage {
@@ -201,9 +182,8 @@ struct OrbFloatingView: View {
         }
         if controller.stage == .commandCapture {
             Button("Send What I Said") { controller.commitCaptureNow() }
-            // The abort path. A tap on the orb SENDS (deliberate, Siri-style), so
-            // without this a user watching a mis-transcription had no way to stop it
-            // reaching a profile with shell and filesystem tools.
+            // The abort path: a tap on the orb sends, so this is the way to stop a mis-transcription
+            // from reaching a profile with shell and filesystem tools.
             Button("Cancel — Don't Send") { controller.cancelCapture() }
         }
         if controller.isExecuting {
@@ -216,12 +196,8 @@ struct OrbFloatingView: View {
         Button("Close Orb") { onClose() }
     }
 
-    /// What VoiceOver reads as the orb's VALUE. Pure, so every stage is guaranteed to say
-    /// something and the set can be checked without rendering.
-    ///
-    /// ⚠️ Sentence case, not the capsule's `statusText`. That is styled in capitals for the HUD
-    /// ("WAITING ON YOU"), and a screen reader is entitled to spell capitals out letter by letter.
-    /// The two strings say the same thing on purpose; only their casing differs.
+    // Why: sentence case, not the capsule's capitalized `statusText`: a screen reader may spell capitals out letter by letter.
+    /// What VoiceOver reads as the orb's value. Pure, so every stage is guaranteed to say something.
     static func accessibilityStatus(stage: OrbStage, micTrouble: Bool) -> String {
         switch stage {
         case .selectingProfile:  return String(localized: "Choosing a profile")
@@ -277,13 +253,8 @@ struct OrbFloatingView: View {
         .accessibilityHidden(true)
     }
 
-    /// What Orb currently thinks you said.
-    ///
-    /// ⚠️ Not optional, and not a setting. A mis-transcribed command reaches a profile with shell
-    /// and filesystem tools, and the source's own defence of deliberately generous wake-word
-    /// matching is that "the user can see" a false positive — which was not true until this
-    /// existed. Shown only while capture is armed, and gone the moment it commits, so the orb
-    /// stays wordless the rest of the time.
+    // Why: required, not a setting: a mis-transcribed command reaches a profile with shell tools, so the user must see it.
+    /// What Orb currently thinks you said, shown only while capture is armed and gone the moment it commits.
     @ViewBuilder private var transcriptCaption: some View {
         if controller.stage == .commandCapture, !controller.commandPreview.isEmpty {
             Text(controller.commandPreview)
@@ -316,11 +287,8 @@ struct OrbFloatingView: View {
         }
     }
 
-    /// ⚠️ `String(localized:)` rather than bare literals, because `Text(statusText)` takes a
-    /// `String` — which is SwiftUI's NON-localizing initializer. A `Text("STANDBY")` literal would
-    /// have been extracted into the catalogue for free; routing the same words through a `String`
-    /// property silently opted them out, which is how half this subsystem ended up untranslated
-    /// while the other half was not.
+    // Why: needs `String(localized:)`: `Text(statusText)` with a `String` uses SwiftUI's non-localizing initializer.
+    /// The status word shown in the HUD capsule, localized.
     private var statusText: String {
         switch controller.stage {
         case .selectingProfile:  return String(localized: "SELECTING")
@@ -373,12 +341,8 @@ struct OrbFloatingView: View {
             if controller.micTroubleDetected {
                 return String(localized: "The microphone opened but delivered no audio — right-click to repair")
             }
-            // A wake word that cannot match in the configured speech language must say so —
-            // otherwise the orb looks alive and silently ignores the user.
-            // ⚠️ The wake word is INTERPOLATED, and stays untranslated inside the sentence around
-            // it: it is an ACOUSTIC token matched against ASR output, not a word. Translating it —
-            // or hard-coding "Orb" now that the word is user-configurable — would tell the user to
-            // say something that can never match. See `wakeWordCanMatch(language:)`.
+            // A wake word that cannot match in the configured speech language must say so, or the orb looks alive and ignores
+            // the user. The wake word stays untranslated: it is an acoustic token.
             return controller.wakeWordUnavailable
                 ? String(localized: "Standing by — click to speak (the wake word can’t work in this speech language)")
                 : String(localized: "Standing by — say “\(OrbSessionController.wakeWord)”, or click to speak")
@@ -398,8 +362,9 @@ struct OrbFloatingView: View {
 /// A tactile dark glass bubble orbiting the orb for quick configuration.
 struct OrbBubbleButton: View {
     let systemName: String
-    /// ⚠️ `LocalizedStringKey`, not `String`. Both `.help` and `.accessibilityLabel` have a
-    /// non-localizing `StringProtocol` overload that a `String` property silently selects.
+    // Why: must be `LocalizedStringKey`: a `String` silently selects the non-localizing `.help` and
+    // `.accessibilityLabel` overloads.
+    /// Localized tooltip and accessibility label.
     let help: LocalizedStringKey
     let action: () -> Void
 

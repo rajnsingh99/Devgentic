@@ -4,7 +4,7 @@
 //  OnboardingViewModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/09/26.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -538,10 +538,8 @@ final class OnboardingViewModel {
             while !Task.isCancelled && isDownloading {
                 try? await Task.sleep(nanoseconds: 250_000_000) // 250ms polling
 
-                // ⚠️ D-24: a finished download LEAVES the active map in the same turn it fails or is
-                // cancelled, so reading only `activeRecord` meant the failed/cancelled arms below
-                // could never run — the poll spun every 250 ms forever with a stale "Streaming model
-                // weights..." stage. The stored record, by id, still carries the real outcome.
+                // A finished download leaves the active map when it fails or is cancelled, so also read the stored record by id;
+                // otherwise the poll never reaches the failed/cancelled arms.
                 let active = DownloadManager.shared.activeRecord(backend: backendType, modelIdentifier: modelId)
                 let record = active ?? self.activeDownloadRecordID.flatMap { DownloadHistoryStore.shared.fetch(id: $0) }
                 if record != nil { lastRecordSeenAt = Date() }
@@ -618,7 +616,7 @@ final class OnboardingViewModel {
     /// the download never started. Without it a start that registered nothing polled forever.
     nonisolated static let recordAppearanceGrace: TimeInterval = 30
 
-    /// What the onboarding poll does next. Pure, so the terminal rules are testable (D-24).
+    /// What the onboarding poll does next. Pure, so the terminal rules are testable.
     nonisolated static func pollVerdict(status: DownloadRecordStatus?, progress: Double, errorMessage: String?,
                             installed: Bool, secondsWithoutRecord: TimeInterval) -> PollVerdict {
         switch status {
@@ -647,8 +645,8 @@ final class OnboardingViewModel {
         downloadProgress = 0
         downloadStageText = String(localized: "Download cancelled.")
         let backendType: ModelBackendType = selectedBackend == .mlx ? .mlx : .ollama
-        // The record id is only known once the poll has seen the record; a cancel in the first
-        // 250 ms used to find nothing and leave the download running.
+        // The record id is only known once the poll has seen the record, so fall back to the active record for a very
+        // early cancel.
         let record = activeDownloadRecordID.flatMap { DownloadHistoryStore.shared.fetch(id: $0) }
             ?? DownloadManager.shared.activeRecord(backend: backendType, modelIdentifier: selectedModelIdentifier)
         if let record {
@@ -849,11 +847,8 @@ final class OnboardingViewModel {
             apiProvider: selectedBackend,
             modelName: selectedModelIdentifier
         )
-        // ⚠️ Apply detection to what is stored. This used to save the bare config — capability
-        // "Text Only", no context window — so the profile read as unable to call tools (and the
-        // validator said so) until someone opened its editor and saved. Runs detect live regardless
-        // (`LiveModelDetection`); this keeps the STORED copy and every display of it honest. Cache-
-        // only: if the model is not in memory yet, the bare config is kept and runs still resolve.
+        // Apply detection to what is stored so the profile does not read as unable to call tools. Cache-only: if the model
+        // is not in memory the bare config is kept; runs still detect live.
         let llmConfig = LiveModelDetection.detectedFromCache(bareLLMConfig) ?? bareLLMConfig
 
         let trimmedPrompt = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -887,8 +882,8 @@ final class OnboardingViewModel {
         themeManager.applyAccentColor(selectedAccentColor)
         themeManager.applySurfaceStyle(selectedSurfaceStyle)
 
-        // 2. Build and persist the profile. ⚠️ A failed save must NOT finish onboarding: it used to
-        // log and carry on, landing the user in the app with no profile and no explanation.
+        // Build and persist the profile. A failed save must not finish onboarding, or the user lands in the app with no
+        // profile.
         let finalName = trimmedProfileName
         let newProfile = BackendProfileModel(displayName: finalName, details: makeProfileDetails())
         do {

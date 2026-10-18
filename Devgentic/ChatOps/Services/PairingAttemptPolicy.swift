@@ -4,30 +4,15 @@
 //  PairingAttemptPolicy.swift
 //  Devgentic
 //
-//  Telling a wrong PIN apart from ordinary chatter, during a pairing window.
-//
-//  ⚠️⚠️ WHY THIS DISTINCTION IS THE WHOLE POINT. All three pairing services dropped a non-matching
-//  message on a bare `continue`, so a failed PIN attempt left no trace anywhere — you could not tell
-//  that anyone had tried, and there was no data from which to justify a lockout threshold.
-//
-//  ⚠️ BUT LOGGING EVERY NON-MATCH WOULD BE WORSE THAN LOGGING NOTHING. A pairing window is five
-//  minutes of a live chat, and most of what arrives is unrelated conversation. A line per message
-//  would bury the one event that matters in exactly the traffic it needs to stand out from — which
-//  is why the three `continue`s were defensible as written, and why this is a classifier rather than
-//  a log statement. A message shaped like `PAIR <something>` with the wrong digits is an unambiguous
-//  failed attempt; "lunch at 1?" is not.
-//
-//  ⚠️ THE ATTEMPTED DIGITS ARE DELIBERATELY NOT CARRIED. They are useless for detection — a count
-//  and an origin are what show a burst — and a mistyped attempt is one character from the real PIN,
-//  so recording them writes a near-secret into a log that ends up in diagnostic bundles.
-//
-//  ⚠️ NOT A GATE. This classifies; it does not decide whether to accept a pairing. The matching
-//  comparison stays where it is, in each service, byte-identical to what shipped.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Tells a wrong PIN apart from ordinary chatter during a pairing window, so failed attempts can be
+/// logged without logging every message. A message shaped like `PAIR <something>` with the wrong digits
+/// is a failed attempt; the attempted digits are never recorded.
 enum PairingAttemptPolicy {
 
     /// What an inbound message during a pairing window is.
@@ -39,72 +24,42 @@ enum PairingAttemptPolicy {
         /// Shaped like a pairing command, but not this window's PIN. Worth a line.
         case wrongPIN
 
-        /// Ordinary conversation. Deliberately NOT logged — see this file's header.
+        /// Ordinary conversation; deliberately not logged.
         case unrelated
     }
 
+    // Why: the trailing space is load-bearing: without it "PAIRING SCHEDULED FOR FRIDAY" classifies as a failed
+    // attempt.
     /// The prefix a pairing command starts with, once normalized.
-    ///
-    /// ⚠️ THE TRAILING SPACE IS LOAD-BEARING. Without it a message reading "PAIRING SCHEDULED FOR
-    /// FRIDAY" classifies as a failed attempt, and the log fills with the chatter this exists to
-    /// stay out of.
     static let commandPrefix = "PAIR "
 
-    /// Normalization, matching what all three services already apply before comparing.
-    ///
-    /// ⚠️ SHARED SO THE CLASSIFIER CANNOT DISAGREE WITH THE MATCH. If this normalized differently
-    /// from the services, a message they accepted could be logged as a failure — or worse, a real
-    /// failed attempt could classify as `.matched` and never be reported.
+    // Why: shared so the classifier cannot disagree with the services' own match.
+    /// Normalization matching what all three pairing services apply before comparing.
     nonisolated static func normalize(_ text: String) -> String {
         text.uppercased().trimmingCharacters(in: .whitespaces)
     }
 
     /// Classifies one inbound message against the PIN this window is waiting for.
-    ///
-    /// - Parameter expectedPIN: the window's PIN. ⚠️ REQUIRED, not read from a shared config: the
-    ///   classifier must answer for the window the caller is actually in, and three services with
-    ///   three separate windows share this function.
+    /// - Parameter expectedPIN: the window's PIN; required, because each service has its own window.
     nonisolated static func classify(_ text: String, expectedPIN: String) -> Attempt {
         let normalized = normalize(text)
         if normalized == commandPrefix + expectedPIN { return .matched }
-        // ⚠️ THE PREFIX ALONE IS THE SIGNAL, not "prefix plus six digits". Someone fumbling the
-        // format ("PAIR 12345", "PAIR abc123") is still someone trying to pair, and a classifier
-        // that required well-formed digits would miss precisely the attempts worth seeing.
+        // The prefix alone is the signal, not prefix plus six digits: a fumbled format is still a pairing
+        // attempt.
         return normalized.hasPrefix(commandPrefix) ? .wrongPIN : .unrelated
     }
 }
 
 // MARK: - Lockout
 
-/// Failed attempts within one pairing window, counted per origin.
-///
-/// ⚠️⚠️ PER ORIGIN, NOT PER WINDOW — AND THE OBVIOUS DESIGN IS STRICTLY WORSE THAN NO LOCKOUT AT
-/// ALL. "Abort the window after N failures" converts an impractical attack into a trivial one:
-/// guessing needs roughly 9,000 messages in 300 seconds to reach even a 1% chance, but a
-/// window-wide lockout lets a stranger end the user's pairing with FIVE. Telegram bots are
-/// discoverable by username, so anyone who finds the bot could then keep the user from ever pairing,
-/// indefinitely, at no cost. That trade is backwards: it spends a real capability to prevent
-/// something that was not going to happen.
-///
-/// Counting per origin keeps the window open for everyone else. One account's guesses are capped;
-/// the legitimate user pairs from their own chat regardless of what anyone else is sending. A
-/// distributed attacker needs a fresh account per `attemptsPerOrigin` guesses — on Discord and Slack
-/// that means many members of a workspace the attacker must already be inside.
-///
-/// ⚠️ NO GLOBAL BACKSTOP, DELIBERATELY. Any window-wide cap reintroduces exactly the denial of
-/// service above, just with a larger number in front of it.
-///
-/// ⚠️ THE LEDGER LIVES AND DIES WITH ONE WINDOW. It is a local value in the poll loop, so nothing
-/// persists across pairings and a blocked origin is free again next time the user clicks Pair.
+/// Failed attempts within one pairing window, counted per origin and discarded with the window.
+/// Per origin, not per window: a window-wide lockout would let a stranger end the user's pairing in a
+/// few messages.
 struct PairingAttemptLedger {
 
     /// Wrong PINs one origin may send before it is ignored for the rest of the window.
-    ///
-    /// ⚠️ TEN IS GENEROUS ON PURPOSE, because the number that matters is not this one. Against a
-    /// 900,000-value space, capping an origin at ten guesses and capping it at three are the same
-    /// answer — both are nowhere near a threat. The difference between them is entirely in how a
-    /// fat-fingered human is treated, and locking the user out of their own pairing window is a
-    /// real cost paid to prevent nothing.
+    /// Generous on purpose: against a 900,000-value space the cap barely matters, but it decides how a
+    /// fat-fingered user is treated.
     static let attemptsPerOrigin = 10
 
     /// What the caller should do with this origin now.
@@ -120,9 +75,7 @@ struct PairingAttemptLedger {
     init() {}
 
     /// Whether this origin has already spent its attempts.
-    ///
-    /// ⚠️ CHECKED BEFORE THE PIN IS COMPARED, so a blocked origin cannot pair even by then sending
-    /// the CORRECT PIN. A lockout that still honours a lucky guess is not a lockout.
+    /// Checked before the PIN is compared, so a blocked origin cannot pair even with the correct PIN.
     func isBlocked(_ origin: String) -> Bool {
         (failures[origin] ?? 0) >= Self.attemptsPerOrigin
     }
@@ -139,49 +92,28 @@ struct PairingAttemptLedger {
     /// Total wrong PINs seen this window, across every origin — for the log line only.
     var totalFailures: Int { failures.values.reduce(0, +) }
 
-    /// How many distinct origins have guessed. ⚠️ THE NUMBER THAT DISTINGUISHES A TYPO FROM AN
-    /// ATTACK: ten failures from one chat is someone struggling; ten failures from ten chats is not.
+    /// How many distinct origins have guessed; ten failures from one chat is a typo, from ten chats it is
+    /// not.
     var distinctOrigins: Int { failures.count }
 }
 
 // MARK: - Window Expiry
 
-/// What happens when a pairing window runs out of time.
-///
-/// ⚠️⚠️ SHARED BECAUSE THE BUG WAS SHARED. All three services ended their window with the same three
-/// lines — reset the connection state, delete the credentials, log the constant — and all three
-/// carried the same two defects. Keeping one copy is what stops a future fix landing on two
-/// platforms out of three, which is how the deadline bug (Telegram's loop bounds itself; Discord's
-/// and Slack's did not) survived as long as it did.
+/// What happens when a pairing window runs out of time, shared by all three services so a fix lands
+/// everywhere.
 @MainActor
 enum PairingWindowExpiry {
 
     /// The watchdog's wait, shared by all three services so the unit conversion exists once.
-    ///
-    /// ⚠️ Takes SECONDS and sleeps on a `Duration`. Each service used to hand-convert with
-    /// `UInt64(self?.pairingTimeout ?? 300 * 1_000_000_000)`: `??` binds looser than `*`, so with
-    /// the service alive that is `UInt64(300.0)` — 300 NANOSECONDS. Every pairing window expired the
-    /// moment it opened, on Telegram, Discord and Slack alike (Timeout inventory D-10, 2026-09-26).
+    /// Takes seconds and sleeps on a `Duration`; hand-converting to nanoseconds with `??` mis-binds and
+    /// expires the window instantly.
     nonisolated static func waitOutWindow(_ timeout: TimeInterval) async {
         try? await Task.sleep(for: .seconds(timeout))
     }
 
-    /// Ends an expired window — and ONLY if this window is still the live one.
-    ///
-    /// ⚠️⚠️ (1) **THE OWNERSHIP CHECK.** `Task.isCancelled` is false for an ORPHANED window: nothing
-    /// cancelled it, the view that could have simply disappeared. So an orphan reaching its deadline
-    /// happily reset `connectionState` and deleted the token belonging to a NEWER, already-successful
-    /// pairing. `connectionState` still naming THIS window's PIN is the only available proof that the
-    /// window is still ours, and it is checked before anything is written.
-    ///
-    /// ⚠️⚠️ (2) **A TIMEOUT MUST NOT DELETE CREDENTIALS.** The old arm ran `config.botToken = nil`,
-    /// which is a Keychain DELETE. That token had been VALIDATED — the user pasted it and the
-    /// platform's own API accepted it — and running out of time to send a PIN says nothing about the
-    /// token. Wiping it silently reset the pane and made the user paste it again. Credentials are
-    /// cleared by `disconnect()` and nowhere else.
-    ///
-    /// ⚠️ `.error(...)` rather than `.disconnected`, because a bare "Disconnected" is
-    /// indistinguishable from never having started and tells the user nothing about what to do next.
+    /// Ends an expired window, and only if it is still the live one (`connectionState` still names this
+    /// PIN). Never deletes credentials (only `disconnect()` does) and reports `.error(...)` rather than a
+    /// bare `.disconnected`.
     static func expire(pin: String,
                        platform: String,
                        timeout: TimeInterval,

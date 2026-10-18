@@ -4,7 +4,7 @@
 //  SlackAPIClient.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -69,8 +69,8 @@ actor SlackAPIClient {
 
     /// Sends multiple chunked messages for long responses.
     func sendChunkedMessage(channel: String, text: String) async throws {
-        // ⚠️ 3000 is a `section` block's text limit — NOT `chat.postMessage`'s 40 000. Invariant 28
-        // records why the tighter one binds. Measured in UTF-16 by `RemoteTextBudget.chunk`.
+        // 3000 is a `section` block's text limit, not `chat.postMessage`'s 40 000; the tighter one binds.
+        // Measured in UTF-16 by `RemoteTextBudget.chunk`.
         let chunks = SlackAPIClient.chunkText(text, maxLength: 3000)
         try await RemoteChunkedSend.send(chunks) { chunk in
             try await postMessage(channel: channel, text: chunk)
@@ -120,16 +120,10 @@ actor SlackAPIClient {
 
     // MARK: - Views
 
+    // Why: a rejected view returns HTTP 200 with `ok: false`; the detail is in `response_metadata.messages`, so log both.
     /// Opens a modal against a live `trigger_id`.
-    ///
-    /// ⚠️ `trigger_id` EXPIRES IN ABOUT THREE SECONDS and cannot be reused. It arrives only on
-    /// `block_actions` and `slash_commands` payloads — never on `events_api`, so a modal can never
-    /// be opened in response to typed text on Slack, only from a button or a slash command.
-    ///
-    /// ⚠️ A REJECTED VIEW COMES BACK AS HTTP 200. Slack answers `ok: false` with an `error` string
-    /// that names nothing useful ("invalid_arguments"), putting the real detail in
-    /// `response_metadata.messages` — which this app used to discard. Both are logged here, because
-    /// the user-visible symptom is a button that appears to do nothing at all.
+    /// `trigger_id` expires in about three seconds, is single-use, and arrives only on `block_actions` and `slash_commands`,
+    /// never `events_api`, so a modal can only open from a button or a slash command.
     func openView(triggerID: String, view: SlackModalView) async throws {
         let payload = SlackViewsOpenPayload(trigger_id: triggerID, view: view)
         let data = try await post(method: "views.open", payload: payload)
@@ -177,11 +171,8 @@ actor SlackAPIClient {
     }
 
     /// Splits text to this platform's message budget.
-    ///
-    /// ⚠️ A FORWARDER, NOT AN IMPLEMENTATION. The real one is `RemoteTextBudget.chunk`, shared by all
-    /// three clients — see its header for the UTF-16 unit bug that three separate copies of this
-    /// function each carried. It stays as a named entry point so this client's own tests exercise
-    /// the same call production takes, rather than the shared helper in isolation.
+    /// A forwarder to `RemoteTextBudget.chunk` (shared by all three clients), kept as a named entry point so this client's
+    /// tests exercise the same call production takes.
     static func chunkText(_ text: String, maxLength: Int = 3000) -> [String] {
         RemoteTextBudget.chunk(text, limit: maxLength)
     }
@@ -191,8 +182,7 @@ actor SlackAPIClient {
 // MARK: - Rate-limit reporting
 
 extension SlackAPIError: RemoteRateLimitedError {
-    /// ⚠️ Same story as Discord: parsed from `Retry-After`, previously read only by
-    /// `errorDescription`.
+    /// Seconds to wait, parsed from `Retry-After`, or nil when the error is not a rate limit.
     var retryAfterSeconds: TimeInterval? {
         guard case .rateLimited(let retryAfter) = self else { return nil }
         return retryAfter

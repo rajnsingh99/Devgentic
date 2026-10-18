@@ -4,22 +4,7 @@
 //  UnattendedApprovalTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md rows WF-SE6 + WF-SE11.
-//
-//  SE6: "Allow for this chat" grants are UserDefaults-durable and were served to UNATTENDED runs
-//  too — a scheduled task reuses one conversationID and one canvas nodeID on every fire, so a
-//  single attended banner click became a permanent unattended auto-approve with no revocation
-//  short of deleting the conversation. Grants are now ATTENDED-ONLY; unattended approval is the
-//  node's explicit `unattendedAutoApprove` setting, a visible configured choice.
-//
-//  SE11: an unattended run hitting a confirmation used to PARK to an empty room until a deadline
-//  killed the whole run as an unexplained `.cancelled` — every scheduled fire, forever, with no
-//  log naming why. It is now refused FAST: the tool is not executed, the node fails onto its
-//  wireable error port, and the reason names the remedy.
-//
-//  Attendance is `WorkflowRunAttendance.isAttended`, the TaskLocal the scheduler and ChatOps
-//  bridges bind `false` around `startMessageStream` — bound here around `executeWorkflow` the
-//  same way (the stream's task is created inside the binding, so every child inherits it).
+//  Created by Raj Singh.
 //
 
 import XCTest

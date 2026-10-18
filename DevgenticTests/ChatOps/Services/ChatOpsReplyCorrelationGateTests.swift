@@ -2,29 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsReplyCorrelationGateTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The one inbound path that skipped the parser and the tier gate.
-//
-//  ⚠️⚠️ THREE DEFECTS SHARED ONE CAUSE. Telegram's reply-correlation branch ran BEFORE
-//  `ChatOpsCommand.parse` and before `securityGate.canExecute`, and called `handleClarification`
-//  unconditionally for any reply it could correlate. So:
-//    • a `.readOnly` remote user could steer a live agent run just by replying — the gate never
-//      saw the act (SEC-1);
-//    • `/cancel` typed into the ForceReply box was delivered to the agent as literal answer text
-//      instead of cancelling the run — the exact failure `parse` moved its own slash branch above
-//      the clarification branch to prevent (BR-1);
-//    • a reply to a mirrored tool-confirmation, plan-review or gate prompt resolved the
-//      CLARIFICATION continuation, which resumed nothing, left that operation parked forever, and
-//      consumed its `hitlMessageIDs` entry so its buttons could never be rewritten (SEC-2).
-//
-//  ⚠️ WHY THESE ARE SOURCE-READING TESTS. `ChatOpsBridge.handleUpdate` is private, on a @MainActor
-//  class whose collaborators are reached through `MainApplicationViewModel` — which no test may
-//  construct, because doing so runs `ChatOpsCoordinator.bootstrap()` and opens real Telegram,
-//  Discord and Slack connections from the test host (finding LIFE-6). Until that seam exists, a
-//  drift test over the real source is the only thing that can fail when the guard is removed, and
-//  it is strictly better than the nothing that was here before. The classification and table halves
-//  are covered by real behavioural tests in `ChatOpsSecurityTierMatrixTests`.
+//  Created by Raj Singh.
 //
 
 import XCTest

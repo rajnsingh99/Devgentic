@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  AgentExecutor.swift
+//  Executor.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 28/01/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

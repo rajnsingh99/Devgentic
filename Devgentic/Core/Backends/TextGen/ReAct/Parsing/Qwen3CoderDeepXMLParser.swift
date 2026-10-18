@@ -4,30 +4,7 @@
 //  Qwen3CoderDeepXMLParser.swift
 //  Devgentic
 //
-//  Phase 5 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.qwen3CoderDeepXml` dialect (Qwen3-Coder 30B-A3B, 480B-A35B).
-//
-//  Canonical output — deep XML with structural tags (NOT JSON inside):
-//
-//    <tool_call>
-//    <function=read_file>
-//    <parameter=path>
-//    /path/to/file.txt
-//    </parameter>
-//    <parameter=encoding>
-//    utf-8
-//    </parameter>
-//    </function>
-//    </tool_call>
-//
-//  Parallel calls = multiple `<function=...>` blocks inside `<tool_call>` OR
-//  multiple `<tool_call>` wrappers concatenated.
-//
-//  Quirks from vLLM's qwen3coder_tool_parser.py:
-//   - Parameter values are TEXT (not JSON) — type-coerced from declared schema.
-//   - `"null"` (case-insensitive) → nil / JSON null.
-//   - Leading/trailing newlines stripped from values.
-//   - Invalid type → graceful string degradation (keep raw text).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -35,6 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "Qwen3CoderDeepXMLParser")
 
+/// Primary parser for the `.qwen3CoderDeepXml` dialect (Qwen3-Coder): `<function=...>` and `<parameter=...>` tags.
+/// Parameter values are text, type-coerced from the declared schema; `"null"` is nil and invalid types keep raw text.
 struct Qwen3CoderDeepXMLParser: CognitiveParserProtocol {
 
     func parse(rawResponse: String) -> ModernCognitiveStep {
@@ -97,11 +76,8 @@ struct Qwen3CoderDeepXMLParser: CognitiveParserProtocol {
                   let valueRange = Range(match.range(at: 2), in: body) else { continue }
 
             let key = String(body[keyRange])
-            // ⚠️⚠️ CR-21: the TEXT, kept as written — one framing newline trimmed each side (what
-            // vLLM's parser does), never all whitespace. Types come from the tool's SCHEMA in
-            // `CognitiveParsePipeline.coercingToSchema`, not from what the value looks like: shape
-            // typing turned `{"name":"app"}` content into an object (`write_file` then failed on
-            // every JSON file), `1.10` into `1.1`, and dropped trailing newlines from file content.
+            // The text, kept as written: one framing newline is trimmed on each side, never all whitespace. Types come from
+            // the tool's schema in `CognitiveParsePipeline.coercingToSchema`, never from what the value looks like.
             result[key] = .string(Self.trimmingOneFramingNewline(String(body[valueRange])))
         }
         return result

@@ -4,15 +4,12 @@
 //  WorkflowValidationPanelView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/04/26.
-//
-//  Floating validation panel that displays workflow configuration issues
-//  as an actionable list. Uses glassmorphic styling consistent with the
-//  WorkflowToolbarView capsules.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A floating panel listing workflow configuration issues as an actionable list, styled like `WorkflowToolbarView`.
 struct WorkflowValidationPanelView: View {
     let issues: [WorkflowValidationIssue]
     let onSelectNode: (UUID) -> Void
@@ -52,10 +49,8 @@ struct WorkflowValidationPanelView: View {
                 .font(theme.fontCaption.weight(.semibold))
                 .foregroundColor(.orange)
 
-            // ⚠️ [CVV-8] TWO KEYS, not a concatenated plural letter. The literal DOES bind
-            // `LocalizedStringKey`, so it was extracted — but with the "s" as a `%@` argument no
-            // translator can inflect. Split so the Int emits `%lld` and each key can carry its own
-            // plural variations. Same treatment as the toolbar pill that opens this panel.
+            // Two keys rather than a concatenated plural letter, so the count is `%lld` and each key carries its own
+            // plural variations; same treatment as the toolbar pill that opens this panel.
             Text(issues.count == 1 ? "1 issue" : "\(issues.count) issues")
                 .font(theme.fontCaption.weight(.semibold))
                 .foregroundColor(theme.primaryText)

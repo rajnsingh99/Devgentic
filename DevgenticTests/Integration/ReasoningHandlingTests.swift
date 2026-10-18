@@ -4,12 +4,7 @@
 //  ReasoningHandlingTests.swift
 //  DevgenticTests
 //
-//  Item 7 of the 2026-09-27 OpenRouter review:
-//    1. the final answer was ALSO emitted as a `.reasoning` event, so it appeared in the thinking
-//       timeline as well as the message;
-//    2. OpenRouter's `reasoning` field (its normalised thinking trace) was never read;
-//    3. OpenRouter's `reasoning_details` was not echoed back on the assistant turn, which reasoning
-//       models routed through OpenRouter need across tool calls.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,43 +4,7 @@
 //  SkillLibrarySD.swift
 //  Devgentic
 //
-//  The skill library: Devgentic OWNS skill content (schema V6).
-//
-//  ## What changed, and why it is a replacement rather than an evolution
-//
-//  V4/V5's `SkillSourceSD` + `SkillManifestSD` were an INDEX. Content lived on disk, the database
-//  held routing metadata, and a `folderPath` was the identity. That design carried a permanent tax:
-//  disk and database could disagree, so it needed reconciliation, tombstoning, staleness detection
-//  with an mtime tolerance and a future-clamp, a refcounted filesystem watcher, security-scoped
-//  bookmarks, and a protocol for telling "the volume is unmounted" apart from "the user deleted it".
-//  Every one of those exists only to paper over having two sources of truth.
-//
-//  Here there is one. A skill's bytes live in the store. Nothing points at a folder, so nothing
-//  dangles, and the entire reconciliation category disappears.
-//
-//  ## The model is Anthropic's Skills API, deliberately
-//
-//  Verified against the published API rather than invented, because matching it is what lets skills
-//  move between Claude and Devgentic without a translation layer:
-//
-//    - A skill is addressed by an OPAQUE ID (`skill_…`), never by a name or a path.
-//    - A version is an IMMUTABLE COMPLETE SNAPSHOT (`skver_…`) — every upload is the whole file set,
-//      not a delta, and omitted files are not carried forward.
-//    - The skill row holds a pointer to the latest version; a reference may pin a specific version
-//      or follow `latest`.
-//    - `name` cannot change across versions. `displayName` can.
-//    - Limits: 30 MB uncompressed per skill, name ≤64 chars of `[a-z0-9-]`, description ≤1024 chars.
-//
-//  ⚠️ **Versions are what make an agent-writable skill tolerable.** `update_skill` previously
-//  overwrote SKILL.md and kept ONE backup in a `.history` file keyed by NAME, so two skills sharing
-//  a name shared a single revert slot and a second edit destroyed the only copy of the first. An
-//  append-only version chain removes that whole problem: the agent adds a version, and nothing that
-//  existed before is mutated.
-//
-//  ## Schema history
-//
-//  The registry entities (`SkillSourceSD`, `SkillManifestSD`) existed only in development builds and
-//  are gone, classes included; the 2026-09-23 schema-history reset folded this library into V1.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -51,17 +15,16 @@ private let logger = DGLogger(category: "SkillLibrarySD")
 
 // MARK: - How a skill got here
 
-/// Where a skill came from. Recorded for display only — it grants nothing and gates nothing.
-///
-/// Stored raw for the same reason `SkillSourceKind` was: a future case must not make older rows
-/// undecodable, and an unknown value reads as `.imported`, the conservative choice.
+/// Where a skill came from: recorded for display only; it grants nothing and gates nothing.
+/// Stored raw so a future case cannot make older rows undecodable; an unknown value reads as
+/// `.imported`.
 enum SkillOrigin: String, Codable, Sendable, CaseIterable {
 
     /// Authored in Devgentic's own editor.
     case created
 
     /// Unpacked from a `.zip`/`.skill` archive, a bare `.md`, or a folder the user pointed at.
-    /// ⚠️ Imported ≠ trusted. It only means the bytes arrived from outside.
+    /// Imported does not mean trusted; it only means the bytes arrived from outside.
     case imported
 
     static func tolerant(_ raw: String) -> SkillOrigin {
@@ -79,24 +42,15 @@ enum SkillOrigin: String, Codable, Sendable, CaseIterable {
 @Model
 final class SkillSD {
 
-    /// Opaque identity, `skill_<uuid>`. **Never a path and never the name.**
-    ///
-    /// ⚠️ This is the change that makes the whole design work. V4/V5 keyed on `folderPath`, so
-    /// identity broke whenever a folder moved, a parent was renamed, a volume was unmounted, or the
-    /// store was opened on another machine — and every profile's reference broke with it. An opaque
-    /// id is stable under all of those because it describes nothing about the world.
+    /// Opaque identity, `skill_<uuid>`: never a path and never the name.
+    /// Stable when folders move or the store opens on another machine, since it describes nothing about the
+    /// world.
     @Attribute(.unique)
     var id: String
 
-    /// The skill's addressable name — what `load_skill` matches on, and what the frontmatter says.
-    ///
-    /// ⚠️ IMMUTABLE across versions, matching the reference API: a new version whose SKILL.md
-    /// renames the skill is rejected rather than applied. Renaming would silently repoint every
-    /// profile that linked the old name.
-    ///
-    /// ⚠️ NOT unique at the schema level, also matching the reference API. Two skills may legitimately
-    /// be called `code-review`. A unique constraint would turn an ordinary import into a failure;
-    /// instead the collision is resolved deterministically and REPORTED at resolve time.
+    /// The skill's addressable name, matched by `load_skill` and stated in the frontmatter.
+    /// Immutable across versions (a renaming version is rejected) and not unique at the schema level;
+    /// collisions are resolved and reported at resolve time.
     var name: String
 
     /// Human-facing label. Free-form, editable, defaults to `name`.
@@ -108,41 +62,26 @@ final class SkillSD {
     var originRaw: String
 
     /// Points at the newest `SkillVersionSD.id`.
-    ///
-    /// ⚠️ A plain id rather than a second `@Relationship`. SwiftData cannot infer an inverse when
-    /// two relationships join the same pair of entities, and the ambiguity surfaces as corrupted
-    /// back-references rather than a compile error. `versions` below is the only relationship.
+    /// A plain id, not a second `@Relationship`: SwiftData cannot infer an inverse between the same pair of
+    /// entities.
     var latestVersionID: String?
 
     /// A skill that exists but is not offered to any agent yet.
-    ///
-    /// Draft is a LIBRARY state, not a per-profile one: a half-written skill should not be linkable
-    /// at all, rather than linkable-but-off in each profile separately.
+    /// A library-level state, so a half-written skill cannot be linked to any profile.
     var isDraft: Bool = false
 
-    /// Whether an agent may add versions via `update_skill`. Default deny.
-    ///
-    /// ⚠️ Lives here, on the database row, and NOT in the SKILL.md body — that is the entire
-    /// security property, and it survives the move to DB-owned content unchanged. A skill body is
-    /// injected into the model's context, so a permission stored in content would be a permission
-    /// the model can grant itself.
+    /// Whether an agent may add versions via `update_skill`; default deny.
+    /// Stored on the database row, not in the SKILL.md body: a permission in content is one the model could
+    /// grant itself.
     var isAgentWritable: Bool = false
 
-    /// Every version, newest and oldest alike. Cascade-deleted with the skill.
-    ///
-    /// ⚠️ UNORDERED. SwiftData relationship arrays carry no ordering guarantee, so anything that
-    /// presents or exports them must sort by `createdAt` explicitly. Relying on natural order is
-    /// the same defect class as the unsorted `contentsOfDirectory` that once made the system prompt
-    /// filesystem-order dependent.
+    /// Every version, newest and oldest alike; cascade-deleted with the skill.
+    /// Unordered: relationship arrays carry no ordering guarantee, so sort by `createdAt` wherever order is
+    /// observable.
     @Relationship(deleteRule: .cascade, inverse: \SkillVersionSD.skill)
     var versions: [SkillVersionSD]
 
-    /// How this skill got here — the typed reader for `originRaw`.
-    ///
-    /// ⚠️ NOT DELETED WHEN IT HAD NO CALLER, and the reasoning is worth keeping: `originRaw` is a
-    /// PERSISTED attribute that `SkillStore.create` writes on every skill. Removing the only typed
-    /// reader would have left a column the app writes on every insert and can never read back —
-    /// strictly worse than an unused accessor. It is surfaced in the detail sheet instead.
+    /// How this skill got here: the typed reader for `originRaw`, shown in the detail sheet.
     var origin: SkillOrigin { SkillOrigin.tolerant(originRaw) }
 
     init(
@@ -169,12 +108,8 @@ final class SkillSD {
 
     static func newID() -> String { "skill_\(UUID().uuidString.lowercased())" }
 
-    /// The newest version, resolved through `latestVersionID` with a defensive fallback.
-    ///
-    /// ⚠️ The fallback is not decoration. `latestVersionID` is a soft pointer, so a partially-applied
-    /// write, a restored backup, or a future bug can leave it naming a version that is not in
-    /// `versions`. Returning the newest by date keeps the skill USABLE and logs the inconsistency,
-    /// rather than making the skill silently vanish from every prompt that linked it.
+    /// The newest version, resolved through `latestVersionID` with a fallback to the newest by date.
+    /// `latestVersionID` is a soft pointer; the fallback keeps a skill usable and logs the inconsistency.
     var latestVersion: SkillVersionSD? {
         if let latestVersionID, let match = versions.first(where: { $0.id == latestVersionID }) {
             return match
@@ -189,11 +124,9 @@ final class SkillSD {
 
 // MARK: - Version (an immutable snapshot)
 
-/// One complete, immutable snapshot of a skill.
-///
-/// ⚠️ **NOTHING MAY MUTATE A VERSION AFTER IT IS SAVED.** Editing a skill creates a new version;
-/// that is what makes history real and what makes `update_skill` append-only. The properties are
-/// `var` only because SwiftData requires it for persistence — treat every one as `let`.
+/// One complete, immutable snapshot of a skill; editing a skill creates a new version, which keeps
+/// `update_skill` append-only. Properties are `var` only because SwiftData requires it; treat every one
+/// as `let`.
 @Model
 final class SkillVersionSD {
 
@@ -206,35 +139,21 @@ final class SkillVersionSD {
     /// One line on what changed. Written by whoever created the version, agent included.
     var note: String
 
-    /// The routing key — rendered into `<available_skills>` and what the model matches a task against.
-    ///
-    /// ⚠️ Per-VERSION, not per-skill, because it is frontmatter: editing the description IS a new
-    /// version. Keeping it on the skill would let a pinned version advertise text from a newer one.
+    /// The routing key, rendered into `<available_skills>` and matched against tasks by the model.
+    /// Per version because it is frontmatter: a pinned version must not advertise text from a newer one.
     var skillDescription: String
 
-    /// The author's `allowed-tools` declaration, VERBATIM, as a JSON array in TEXT.
-    ///
-    /// ⚠️ **NOT `[String]?`, and that is not a style choice.** Below macOS 26.1 SwiftData persists a
-    /// native `[String]?` as Binary Data; a store written there and opened on 26.1+ fails with
-    /// `NSCocoaErrorDomain 134140` and the app cannot launch — an OS-side change no schema
-    /// versioning can defend against. `PromptModel.tags` is the one attribute already exposed, and
-    /// `SchemaMigrationTests.testTagsRemainsTheOnlyNonRelationshipCollectionAttribute` exists
-    /// specifically to stop a second one appearing. It caught this property. Hand-rolled JSON, as
-    /// `attachedFileURLsJSON` and `configData` already do, is the codebase's answer.
-    ///
-    /// ⚠️ JSON rather than a delimiter join, because elements legitimately CONTAIN commas —
-    /// `Bash(git add:*, git commit:*)` is a real scoped declaration, and a joined form would not
-    /// survive the round trip.
-    ///
-    /// Private: every reader goes through `allowedTools` below.
+    // Why: not `[String]?`: below macOS 26.1 that persists as Binary Data and a store opened on 26.1+ fails
+    // with 134140.
+    /// The author's `allowed-tools` declaration, verbatim, as a JSON array in text; private, read through
+    /// `allowedTools`. JSON because elements can contain commas, such as `Bash(git add:*, git commit:*)`.
     private var allowedToolsJSON: String?
 
     /// The SKILL.md body — everything below the frontmatter.
     var body: String
 
-    /// Every bundled file in this snapshot. Cascade-deleted with the version.
-    ///
-    /// ⚠️ UNORDERED, like `SkillSD.versions`. Sort by `relativePath` wherever order is observable.
+    /// Every bundled file in this snapshot; cascade-deleted with the version.
+    /// Unordered, like `SkillSD.versions`: sort by `relativePath` wherever order is observable.
     @Relationship(deleteRule: .cascade, inverse: \SkillFileSD.version)
     var files: [SkillFileSD]
 
@@ -258,18 +177,9 @@ final class SkillVersionSD {
         self.files = files
     }
 
-    /// The declaration as elements. Computed, so it is never persisted in its native form.
-    ///
-    /// ⚠️ `nil` (field absent) and `[]` (`allowed-tools: []`, "this skill needs no tools") are
-    /// DIFFERENT statements and both survive this round trip. Collapsing them would turn an explicit
-    /// declaration into silence — see `YAMLFrontmatterParser`, where exactly that was a live defect.
-    ///
-    /// ⚠️ GET-ONLY, deliberately. This had a setter with no caller anywhere in the tree, on a class
-    /// whose own header says "NOTHING MAY MUTATE A VERSION AFTER IT IS SAVED" — the initialiser
-    /// writes `allowedToolsJSON` directly, so the setter was never needed. Removing it turns that
-    /// comment into something the compiler enforces: a future edit that tries to mutate a saved
-    /// version's declaration now fails to build instead of silently rewriting history that a pinned
-    /// profile may be reading.
+    /// The declaration as elements; computed, never persisted in its native form and get-only.
+    /// `nil` (field absent) and `[]` (declares no tools) are different statements and both survive the
+    /// round trip.
     var allowedTools: [String]? {
         get {
             guard let allowedToolsJSON, let data = allowedToolsJSON.data(using: .utf8) else { return nil }
@@ -308,40 +218,21 @@ final class SkillVersionSD {
 @Model
 final class SkillFileSD {
 
-    /// Path relative to the skill root, e.g. `scripts/analyze.py`, `reference/checklist.md`.
-    ///
-    /// ⚠️ Structure lives ENTIRELY in this string — there are no directory rows. A materialized
-    /// export recreates directories from these paths, so a value containing `..` or a leading `/`
-    /// would escape the destination.
-    ///
-    /// ⚠️ INGEST IS NOT THE ONLY BOUNDARY, and this comment used to say it was. `SkillStore.create`
-    /// and `addVersion` are a second write path — the create sheet and `update_skill` — that never
-    /// passes through `SkillIngest`, so the STORE refuses a newly introduced unsafe path itself.
-    /// What stays true is the original point: a row that is already here is not re-validated on read
-    /// and is never rewritten. A row stored under an earlier, narrower rule is carried forward
-    /// verbatim, and `SkillMaterializer` re-checks at the one moment the value becomes a filesystem
-    /// operation.
+    // Why: a `..` or leading `/` would escape the destination when an export recreates directories.
+    /// Path relative to the skill root, e.g. `scripts/analyze.py`; structure lives entirely in this string,
+    /// with no directory rows. `SkillStore` refuses newly unsafe paths itself; existing rows are not
+    /// re-validated, and `SkillMaterializer` re-checks at write time.
     var relativePath: String
 
-    /// The file's bytes.
-    ///
-    /// ⚠️ `Data`, not `String`, and that is a correctness choice rather than a generalization.
-    /// V4/V5's loader called `String(contentsOf:encoding:.utf8)` and `continue`d on failure, so
-    /// every binary file in a skill — an image, a PDF, a compiled helper — was silently dropped.
-    /// Content lives here now, so a dropped file is a file the user permanently loses on export.
-    ///
-    /// ⚠️ `.externalStorage` keeps blobs out of the SQLite file, in the hidden
-    /// `.DevgenticSD_SUPPORT/` sibling. `ChatPersistenceStore` records the hazard that comes with
-    /// it: a delete-then-recreate upsert RE-CLONES the blob. Versions are append-only, so the
-    /// pattern that triggers it does not arise here — do not introduce an update path that does.
+    // Why: a delete-then-recreate upsert re-clones external blobs; versions are append-only, so do not add an
+    // update path.
+    /// The file's bytes: `Data`, not `String`, so binary files (images, PDFs, helpers) are not dropped on
+    /// export. `.externalStorage` keeps blobs out of SQLite.
     @Attribute(.externalStorage)
     var content: Data
 
-    /// Whether the file carried the executable bit.
-    ///
-    /// ⚠️ Carried because export must restore it. A `scripts/analyze.py` that arrives executable and
-    /// leaves non-executable is a skill that worked before the round-trip and does not after — a
-    /// silent, delayed failure with no visible cause.
+    /// Whether the file carried the executable bit, carried so export can restore it and scripts keep
+    /// working.
     var isExecutable: Bool = false
 
     var version: SkillVersionSD?

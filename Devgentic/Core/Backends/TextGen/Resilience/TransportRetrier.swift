@@ -4,26 +4,14 @@
 //  TransportRetrier.swift
 //  Devgentic
 //
-//  Resilience architecture, Phase C: bounded transport-retry decisions for flows
-//  that don't run the agent loop's `LLMRetryStrategy` — primarily the bot path
-//  (`ChatExecutor`), which previously had NO retry/throttle handling at all and
-//  surfaced a raw error card on the first 429 (audit gap #9).
-//
-//  This is the bot-side peer of `LLMRetryStrategy`'s transport tier: both call the
-//  shared `ProviderErrorClassifier.classifyTransport`, so they classify and bound
-//  identically. It is pure decision logic — it performs NO I/O. The caller applies
-//  the side effects (drain the rate bucket, emit a warning, sleep) from the
-//  returned `RetryStep`, which keeps the retrier trivially unit-testable and free
-//  of any `GlobalRateLimiter`/continuation coupling.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
-/// Thrown when transport retries are exhausted or a deterministic provider error
-/// occurs. Carries the honest user-facing reason plus the telemetry category,
-/// mirroring the agent path's `RetryAction.fatal` so the bot surfaces identical
-/// messages. `errorDescription` is the reason, so a plain
-/// `error.localizedDescription` render shows the right text.
+/// Thrown when transport retries are exhausted or a deterministic provider error occurs.
+/// Carries the user-facing reason and telemetry category, mirroring the agent path's `RetryAction.fatal`.
+/// `errorDescription` is the reason, so `localizedDescription` shows the right text.
 struct TransportFatalError: Error, LocalizedError, Equatable {
     let reason: String
     let category: AgentErrorCategory
@@ -38,15 +26,12 @@ struct TransportRetrier {
 
     private(set) var transientCount = 0
     private(set) var throttleCount = 0
-    /// [WF-CC12] Its own budget, mirroring `LLMRetryStrategy.consecutiveModelSlotFailures`: the
-    /// MLX model-slot race is neither a throttle nor a transient network fault, and charging it
-    /// to `transientCount` would fail on the first hit (the MLX transient budget is 0).
+    // Why: charging it to `transientCount` would fail on the first hit because the MLX transient budget is 0
+    /// Budget for the MLX model-slot race, mirroring `LLMRetryStrategy.consecutiveModelSlotFailures`.
     private(set) var modelSlotCount = 0
 
-    /// One bounded re-attempt, then fail honestly — the same bound and delay as the agent path
-    /// (`LLMRetryStrategy.maxModelSlotRetries` / `.modelSlotRetryDelay`). A single re-attempt is
-    /// enough because the retry itself re-runs `container(expecting:)`, which reloads the
-    /// requested model; a second consecutive loss means a live contender keeps evicting it.
+    /// One bounded re-attempt, then fail; same bound and delay as the agent path (`LLMRetryStrategy`).
+    /// The retry reloads the requested model, so a second consecutive loss means a live contender keeps evicting it.
     private static let maxModelSlotRetries = 1
     private static let modelSlotRetryDelay: TimeInterval = 2.0
 
@@ -67,22 +52,11 @@ struct TransportRetrier {
         let drainPenalty: TimeInterval?
     }
 
-    /// Classifies `error` and decides the next action:
-    ///   - returns a `RetryStep` → caller drains (if set), warns, sleeps, then retries;
-    ///   - throws `TransportFatalError` → deterministic failure or budget exhausted;
-    ///   - rethrows the original `error` → not a recognized transport error (the bot
-    ///     surfaces it unchanged, exactly as before).
-    ///
-    /// `CancellationError` is never reached here — callers check cancellation around
-    /// the operation and rethrow it before consulting the retrier.
+    /// Classifies `error` and decides the next action: returns a `RetryStep` (caller drains if set, warns, sleeps, retries),
+    /// throws `TransportFatalError` if deterministic or exhausted, else rethrows an unrecognized error.
     mutating func nextStep(for error: Error) throws -> RetryStep {
-        // [WF-CC12] Typed MLX model-slot arm, BEFORE the shared classifier — and deliberately NOT
-        // added to `classifyTransport` itself: the agent path calls that classifier too, and
-        // classifying `ServiceError` there would intercept the fault before `LLMRetryStrategy`'s
-        // own typed switch (the WF-CC6 fix) and route it into the wrong machinery. Until this arm,
-        // the bot path showed the true slot-race text only because the `guard/else` below rethrows
-        // what the classifier doesn't recognize — correct by accident — and it got ZERO retries
-        // where the identical fault on an agent profile self-heals after one bounded re-attempt.
+        // Why: adding `ServiceError` to `classifyTransport` would intercept it ahead of the agent path's own typed switch
+        // Typed MLX model-slot arm, checked before the shared classifier.
         if let mlxError = error as? MLXService.ServiceError {
             return try modelSlotStep(for: mlxError)
         }
@@ -108,10 +82,8 @@ struct TransportRetrier {
                 throw TransportFatalError(reason: reason, category: .providerQuotaExhausted)
             }
             let wait = ProviderErrorClassifier.sanitizedRetryAfter(retryAfter) ?? fallbackBackoff()
-            // chip task_70f0522b: avoid the 429 double-drain. CloudRequestPipeline already drains
-            // the bucket for a cloud 429 (it throws CloudProviderError only after draining), so the
-            // caller must NOT drain again. Only ask the caller to drain for pipeline-bypassing
-            // providers (Ollama/local → LLMProviderError.httpError).
+            // The caller must not drain again for a cloud 429: `CloudRequestPipeline` already drained the bucket.
+            // Only pipeline-bypassing providers (Ollama/local, `LLMProviderError.httpError`) ask the caller to drain.
             let drainPenalty: TimeInterval? = (error is CloudProviderError) ? nil : wait
             return RetryStep(
                 delay: wait,
@@ -144,13 +116,8 @@ struct TransportRetrier {
         }
     }
 
-    /// [WF-CC12] The MLX model-slot race, bounded identically to the agent path's
-    /// `modelSlotAction`. The messages are copied from there verbatim so both surfaces report the
-    /// same fault in the same words.
-    ///
-    /// ⚠️ No `default:` on purpose (same rule as `LLMRetryStrategy`'s typed switch): a new
-    /// `ServiceError` case must BREAK THIS BUILD rather than silently fall through to the
-    /// rethrow-unrecognized path and lose its retry.
+    // Why: no `default:` on purpose: a new `ServiceError` case must break the build instead of falling through to rethrow
+    /// The MLX model-slot race, bounded identically to the agent path's `modelSlotAction`, with the same messages.
     private mutating func modelSlotStep(for error: MLXService.ServiceError) throws -> RetryStep {
         switch error {
         case .modelIdentityMismatch(let expected, let actual):
@@ -172,10 +139,7 @@ struct TransportRetrier {
             )
 
         case .noModelLoaded:
-            // Deterministic: this is thrown only when the request carried NO expected model
-            // identity, so a re-attempt re-issues the identical identity-free request. (Unreachable
-            // in production today — both MLXLLMProvider construction sites pin a modelDirectory —
-            // kept so the exhaustive switch stays honest if that changes.)
+            // Deterministic: thrown only when the request carried no expected model identity, so a retry re-issues the same request.
             throw TransportFatalError(
                 reason: error.localizedDescription,
                 category: .modelUnloaded

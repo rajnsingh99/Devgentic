@@ -4,8 +4,7 @@
 //  PerformanceOptimizationTests.swift
 //  DevgenticTests
 //
-//  Tests for P14 (timeline grouping) and P15 (search highlighting) performance optimizations.
-//  Validates correctness on edge cases and measures throughput on large inputs.
+//  Created by Raj Singh.
 //
 
 import XCTest

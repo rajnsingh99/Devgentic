@@ -4,20 +4,7 @@
 //  RemoteIntentParityTests.swift
 //  DevgenticTests
 //
-//  C4.5 of the ChatOps remote-interface plan: the three entry points must agree.
-//
-//  ⚠️ THESE ARE WIRING TESTS OVER LIVE CODE, WHICH IS THE WHOLE POINT OF THE COMMIT. The existing
-//  `ChatOpsCommandSlackTests` / `ChatOpsCommandDiscordTests` assert one entry point in isolation, so
-//  they stay green while the three drift apart — and they HAD drifted: case handling, whitespace and
-//  the `help` alias set differed three ways. Parity is the property that was never checked.
-//
-//  ⚠️ WHAT IS DELIBERATELY *NOT* ASSERTED EQUAL, with the reason:
-//   - Telegram maps an unknown `/foo` to `.freeText("/foo")`; Discord and Slack map an unregistered
-//     slash name to `.unknown`, because the platform never delivers one (it is rejected client-side)
-//     and the fall-through arrives with `text == nil`. Asserting parity there would pin a path that
-//     cannot occur.
-//   - The leading slash is required for typed TEXT and optional for a platform-delivered NAME. That
-//     asymmetry is load-bearing: see `ChatOpsVerbTable`.
+//  Created by Raj Singh.
 //
 
 import XCTest

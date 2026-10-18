@@ -4,23 +4,7 @@
 //  WorkflowNodeInspectorTests.swift
 //  DevgenticTests
 //
-//  Register `Workflow_Production_Readiness_Fresh.md`, inspector cluster — the rows fixed
-//  2026-09-01: `INS-2` (Cancel kept orchestration edits), `INS-4` (panel min height below four
-//  inspectors' own minimums), `INS-6` (duplicate-label de-dup no-opped at the cap), `INS-7` (router
-//  policy silently downgraded), `INS-8` (retry stepper showed 0 while the engine would retry),
-//  `INS-10` (unavailable operator rendered as a blank dropdown) and `INS-11` (a no-op Save dirtied
-//  the layout).
-//
-//  Every one of these lived inside a SwiftUI view's `private` method or a `Binding` closure, where
-//  no test could reach it. Each fix extracted its decision first (WF-UI5), and this file is what
-//  makes that extraction worth having: the rules are truth-tabled, including the boundaries the
-//  original defects hid in.
-//
-//  ⚠️ What is NOT covered here, stated so this file is not mistaken for full coverage: the panel
-//  HOSTING (`NodeInspectorPanelManager` sizing an `NSWindow`), the SwiftUI `ForEach` identity change
-//  in `INS-5`, and the `.onChange` that drives `INS-12` are all AppKit/SwiftUI runtime behaviour
-//  with no headless seam. `INS-5`'s model-side contract IS covered — see the gate-rename tests at
-//  the end, which are the half that can actually break edges.
+//  Created by Raj Singh.
 //
 
 import XCTest

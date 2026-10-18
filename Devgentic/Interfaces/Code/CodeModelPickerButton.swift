@@ -4,10 +4,7 @@
 //  CodeModelPickerButton.swift
 //  Devgentic
 //
-//  Inline model selector for the Code interface.
-//  Shows provider + model name in a capsule button; popover for selection.
-//  Replaces BackendPickerButton when interfaceMode == .code.
-//  Styled with complete parity and alignment to BackendPickerButton and ProfileSelectorPopover.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -16,6 +13,8 @@ import os
 
 private let logger = DGLogger(category: "CodeModelPicker")
 
+/// Inline model selector for the Code interface: a capsule button showing provider and model name,
+/// with a selection popover.
 struct CodeModelPickerButton: View {
 
     @Environment(CodeSessionManager.self) private var codeSessionManager
@@ -82,22 +81,10 @@ struct CodeModelPickerButton: View {
 
 // MARK: - Model Selector Popover
 
+// Why: `supportsThinking` is tracked but not acted on: Code selects models with thinking off, since a ReAct loop
+// pays the extended-thinking cost once per iteration.
 /// A model entry with rich metadata and full cognitive profile for routing.
-///
-/// `supportsThinking` is TRACKED but not acted on: Code mode still selects models with
-/// `thinkingEnabled: false`, because a tool-heavy ReAct loop (read_file → edit_code → …) pays the
-/// extended-thinking cost once per ITERATION, and 15–60 s × 20 iterations turns a 30 s task into
-/// minutes. That default stands.
-///
-/// ⚠️ What changed: the flag used to be untracked, so detection's answer was discarded at the
-/// point of selection and nothing downstream could tell a thinking-capable model from one that
-/// cannot think at all. That made the cost/benefit un-offerable — there was no way to expose a
-/// toggle, and no record that the choice had been made. The old note here also advised users who
-/// want reasoning to "use Chat mode", which is not a real alternative: Chat cannot reach the nine
-/// `.codeOnly` tools, so the suggestion trades reasoning for the ability to edit files.
-/// ⚠️ Deliberately INTERNAL, not private: `CodeModelListing.ordered` is the reachability seam
-/// `CodeModelPickerReachabilityTests` exercises, and a private entry type would put it out of
-/// reach of the one test that stops a size filter coming back.
+/// Internal rather than private so `CodeModelListing.ordered` stays reachable from tests.
 struct CodeModelEntry: Identifiable, Hashable {
     var id: String { name }
     let name: String
@@ -105,24 +92,17 @@ struct CodeModelEntry: Identifiable, Hashable {
     let parameterSizeValue: Double
     let cognitiveProfile: CognitiveProfile
 
-    /// Whether detection says this model can use extended thinking. Recorded so the choice to
-    /// leave it off is visible and can be offered as a setting; never used to filter or rank.
+    /// Whether detection says this model can use extended thinking; recorded so it can be offered as a setting,
+    /// never applied as a filter or ranking term.
     let supportsThinking: Bool
 
     /// Detected tool-calling tier. NOT a gate — `.singleAction` runs fine in Code mode via the
     /// Markdown/ReAct generator, and even `.none` now proceeds with a warning rather than a refusal.
     var capability: ModelCognitiveCapability { cognitiveProfile.capability }
 
-    /// Display order only — nothing is ever removed from the list.
-    /// 0 = parallel tool calling confirmed · 1 = not confirmed (still selectable; the runtime
-    /// warns and proceeds).
-    ///
-    /// ⚠️⚠️ Parameter count is NOT a term here any more. A 14B floor used to rank — and, until
-    /// this change, FILTER — and it was the wrong measure twice over: it is a proxy for quality
-    /// that gets worse every model generation (a 7B coder routinely out-edits a 70B generalist),
-    /// and it was applied to exactly one of four providers (Ollama only; MLX passed `nil`, cloud
-    /// never built an entry). Size is still SHOWN, as a neutral pill, because it is a fact about
-    /// the model. It is no longer a judgement about it.
+    /// Display order only; nothing is ever removed from the list.
+    /// 0 = parallel tool calling confirmed, 1 = not confirmed (still selectable; the runtime warns and proceeds).
+    /// Parameter count is not a ranking term: it is shown as a neutral pill, not used as a judgement.
     var rank: Int {
         capability != .parallelActions ? 1 : 0
     }
@@ -159,10 +139,8 @@ private struct CodeModelSelectorPopover: View {
     /// segments live; the filter itself lives in `ProfileCapabilityFilter`.
     @AppStorage(AppSettings.showRemoteModelsKey) private var showRemoteModels: Bool = false
 
-    /// Providers offered as segments: the Code-supported list minus the remote models
-    /// the General Settings toggle hides — except the session's CURRENT provider, which
-    /// stays visible so an existing Code session isn't left with no selected segment;
-    /// the user can still see it and switch away.
+    /// Providers offered as segments: the Code-supported list minus remote models the General Settings toggle hides,
+    /// except the session's current provider, which stays visible so an existing session keeps a selected segment.
     private var selectableProviders: [ApiProvider] {
         ProfileCapabilityFilter.filteringRemoteModels(
             CodeSessionManager.supportedProviders,
@@ -568,10 +546,8 @@ private struct CodeModelSelectorPopover: View {
             isSelected: codeSessionManager.modelName == entry.name,
             onSelect: {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
-                // ⚠️ Deliberately `false` even when the model supports thinking — Code pays the
-                // thinking cost once per ReAct ITERATION, not once per turn. Logged rather than
-                // silently dropped so the choice is visible in a trace, and so the eventual
-                // per-session toggle has something to flip.
+                // Deliberately `false` even when the model supports thinking: Code pays the thinking cost once per ReAct iteration.
+                // Logged so the choice is visible in a trace.
                 if entry.supportsThinking {
                     logger.info(
                         "[CODE] '\(entry.name)' supports extended thinking; selected with it OFF. "
@@ -661,24 +637,15 @@ private struct CodeModelSelectorPopover: View {
         return entries.sorted { $0.parameterSizeValue > $1.parameterSizeValue }
     }
 
-    /// Lists the models the app's MLX model store has installed — the same list the profile
-    /// editor's MLX picker shows, and the one the runtime resolves a model name against
-    /// (`MLXModelService.installedModel(named:)`).
-    ///
-    /// ⚠️ This used to scan `~/.cache/huggingface/hub` itself. The store keeps models in its OWN
-    /// folder (`MLXModelService.modelsDirectory`, chosen in the model manager), so the Code picker
-    /// listed whatever other tools had left in the generic HuggingFace cache — on the reported
-    /// machine, one sentence-embedding model — and none of the installed chat models. Worse, the
-    /// name it saved for a model found only there could not be loaded, since the runtime looks
-    /// names up in the store.
+    // Why: scan `MLXModelService.modelsDirectory`, not the generic HuggingFace cache: names found only there cannot be loaded.
+    /// Lists the models installed in the app's MLX model store, the same list the profile editor's MLX picker shows.
+    /// Names are resolved against it at runtime (`MLXModelService.installedModel(named:)`).
     private func listInstalledMLXModels() async -> [CodeModelEntry] {
         let service = MLXModelService.shared
         await service.ensureLoaded()
         let entries = service.installedModels.map { model in
             let profile = service.cachedCognitiveProfile(for: model)
-            // ⚠️ `parameterSizeValue` was hardcoded 0 here, which sorted every MLX model
-            // below every Ollama one for no stated reason. Parse the real value so ordering
-            // is honest; nothing gates on it.
+            // Parse the real parameter count so ordering is honest; nothing gates on it.
             let parsedSize = ModelFitAdvisor.parseParameterCount(profile.metadata?.parameterCount)
             return CodeModelEntry(
                 // `displayName` is the canonical id the profile editor saves and the runtime
@@ -860,18 +827,10 @@ private struct CodeModelRow: View {
 
 // MARK: - Model Listing
 
+// Why: a hidden size filter made 'too small' indistinguishable from 'not installed', so search and tab counts misreported.
 /// Ordering and search for the Code model picker.
-///
-/// ⚠️⚠️ INVARIANT — the reason this is a named, tested seam rather than a computed property:
-/// **ordering never removes a model.** It ranks and it searches; it does not filter. A 14B size
-/// floor used to drop rows inside the old `eligibleModels`, which made "too small" indistinguishable
-/// from "not installed": the search box could not reach those models, the provider tab count
-/// under-reported, and the empty state blamed the user's model library for a decision the picker
-/// had made. Two comments in this file asserted the opposite of what the code did for as long as it
-/// shipped, which is what a filter buried in a view property buys you.
-///
-/// `CodeModelPickerReachabilityTests` fails if any filter other than the user's own search text
-/// returns. Search is the ONE permitted subsetting, because the user typed it and can clear it.
+/// Ordering never removes a model: it ranks and searches but does not filter.
+/// The user's own search text is the only permitted subsetting.
 enum CodeModelListing {
 
     /// Tool-capable models first, then alphabetical; narrowed only by `searchText`.

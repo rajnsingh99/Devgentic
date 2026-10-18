@@ -4,12 +4,7 @@
 //  WebSearchSettingsViewTests.swift
 //  DevgenticTests
 //
-//  Verifies that WebSearchSettingsView complies with Planout/UI_Guidelines.md:
-//  - Multi-card hierarchy without duplicate nested ScrollView
-//  - SecretInputField with monospace font and show/hide toggle
-//  - TactileButton usage instead of raw SwiftUI buttons
-//  - Live diagnostics accordion using in-place opacity transition (§13.2)
-//  - Coverage of all WebSearchProvider options
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,20 +4,7 @@
 //  ProfileEditBuffer.swift
 //  Devgentic
 //
-//  Created on 27/03/26.
-//
-//  Single source of truth for profile edit state and dirty tracking.
-//  Replaces the dual-tracking system (view-level initialProfileState +
-//  service-level cleanSnapshots/hasUnsavedChanges) that caused phantom
-//  save buttons and silent profile switches.
-//
-//  Design:
-//    - `original` is a frozen snapshot of the last-persisted state.
-//    - `draft` is the working copy the UI binds to.
-//    - `isDirty` compares the two — no deferred async, no race conditions.
-//    - Advanced config round-trips stay inside `draft` and never
-//      pollute the comparison because `original` is never mutated
-//      after load.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -37,14 +24,11 @@ final class ProfileEditBuffer {
     /// Never mutated by UI edits — this is the stable comparison baseline.
     private(set) var original: BackendProfileModel
 
-    /// Whether the draft differs from the last-persisted original.
-    /// Computed from value comparison — no Combine pipeline needed.
-    ///
-    /// ⚠️ Detected model measurements are IGNORED here (`ignoringDetectedMeasurements`). The model
-    /// pickers re-detect on every open, so a refresh alone used to light Save for an edit the user
-    /// never made. They are still written by the next real save, and every run detects live anyway
-    /// (`LiveModelDetection`), so nothing depends on persisting a refresh. A real model change
-    /// still counts: it changes the model name.
+    // Why: a refresh alone must not light Save for an edit the user never made; every run detects live anyway
+    // (`LiveModelDetection`), so nothing depends on persisting a refresh.
+    /// Whether the draft differs from the last-persisted original, by value comparison.
+    /// Detected model measurements are ignored (`ignoringDetectedMeasurements`): pickers re-detect on every open. A real
+    /// model change still counts because it changes the model name.
     var isDirty: Bool {
         draft.ignoringDetectedMeasurements() != original.ignoringDetectedMeasurements()
     }
@@ -69,20 +53,11 @@ final class ProfileEditBuffer {
         original = draft
     }
 
-    /// Re-baselines `original` onto a snapshot that was persisted by someone OTHER than this
-    /// buffer, leaving `draft` — and therefore the user's other in-progress edits — untouched.
-    ///
-    /// ⚠️ This is not `markSaved()` and the difference is load-bearing. Several surfaces write a
-    /// profile to disk while a detail editor is open on it: the Tool Library, the workflow canvas,
-    /// the composer's capability chips. What they persist is that ONE facet, not the whole draft.
-    /// `markSaved()` would declare the entire draft saved and quietly swallow every other pending
-    /// edit; `load()` would overwrite the draft and destroy them outright. Re-basing `original`
-    /// alone is the only operation that keeps `isDirty` honest afterwards — it stays true if and
-    /// only if the user still has unsaved work.
-    ///
-    /// ⚠️ Not calling this at all is what made **Revert lie**: `original` kept a tool list that no
-    /// longer existed on disk, so Revert restored the editor to a state the save path had already
-    /// replaced, and told the user their change was discarded when it was not.
+    // Why: other surfaces (Tool Library, workflow canvas) persist one facet while an editor is open; without re-basing, Revert
+    // restores a stale state and claims a change was discarded when it was not.
+    /// Re-baselines `original` onto a snapshot persisted by someone other than this buffer, leaving `draft` untouched.
+    /// Unlike `markSaved()` (swallows other pending edits) or `load()` (overwrites the draft), re-basing `original` alone
+    /// keeps `isDirty` true if and only if the user still has unsaved work.
     func rebase(onto persisted: BackendProfileModel) {
         original = persisted
     }

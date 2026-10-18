@@ -4,16 +4,7 @@
 //  FileImportOutcomeTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Registers A40 and A60 — the three `.fileImporter` handlers dropped `.failure` entirely, and
-//  silently discarded duplicates.
-//
-//  ⚠️ The whole difficulty of this fix is in one place: SwiftUI reports **user cancellation as a
-//  `.failure`**. The naive repair — surface every `.failure` — puts a red banner on screen every
-//  time somebody backs out of the picker, which is worse than the silence it replaced. These tests
-//  exist mainly to pin that boundary, because getting it wrong is invisible in code review and
-//  obvious to a user.
+//  Created by Raj Singh.
 //
 
 import XCTest

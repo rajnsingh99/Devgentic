@@ -4,26 +4,7 @@
 //  NativeParsePipeline.swift
 //  Devgentic
 //
-//  Validation pipeline for flows where the provider enforces tool-call
-//  structure at the transport layer: Claude `tool_use` blocks, OpenAI
-//  `tool_calls`, Gemini `functionCall` parts, and Ollama `message.tool_calls`
-//  when the model honors the native path.
-//
-//  Unlike `CognitiveParsePipeline` (which parses raw prompt-generated text),
-//  this pipeline receives a pre-built `ModernCognitiveStep` with
-//  `[PendingToolCall]` already extracted by the provider wrapper. Its only
-//  responsibility is to validate each call's name and arguments against the
-//  registered tool set, applying forgive-then-audit remapping where safe.
-//
-//  Scope:
-//    - Tool name resolution  (exact / alias / fuzzy with arg-compat gate)
-//    - Argument key repair   (filename→path, query→search_term, etc.)
-//    - Typed parse outcome   (`success` / `failed(.unknownToolName | .argSchemaMismatch)`)
-//
-//  Out of scope:
-//    - Text parsing / JSON decode  (provider already did this)
-//    - Dialect drift detection    (cloud providers can't drift at this layer)
-//    - Heuristic rescue            (no raw text to rescue from)
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -31,6 +12,8 @@ import OSLog
 
 private let logger = DGLogger(category: "NativeParsePipeline")
 
+/// Validates tool calls the provider already structured (Claude, OpenAI, Gemini, native Ollama) against the registered
+/// tools, remapping names and argument keys where safe. Does no text parsing, dialect detection or heuristic rescue.
 struct NativeParsePipeline: Sendable {
 
     /// Runtime tool registry for the current agent invocation.
@@ -42,10 +25,8 @@ struct NativeParsePipeline: Sendable {
     /// Optional iteration number for validation telemetry.
     let iteration: Int
 
-    /// Every tool name this RUN offers, including any withheld from this iteration's
-    /// schema. Used only to recognise an attempted call in leaked content — a broken
-    /// call to a withheld tool is still an attempted call, not an answer.
-    /// Empty → falls back to `registeredTools`.
+    /// Every tool name this run offers, including any withheld from this iteration's schema; recognises an attempted call
+    /// in leaked content. Empty falls back to `registeredTools`.
     let runToolNames: Set<String>
 
     init(
@@ -68,22 +49,11 @@ struct NativeParsePipeline: Sendable {
 
     // MARK: - Public API
 
-    /// Validates each tool call in `step.toolCalls`, remapping names/args where
-    /// a safe canonical resolution exists and flagging unresolvable ones.
-    ///
-    /// Never throws. Returns a new step with:
-    ///   - `toolCalls` containing only the validated + (possibly remapped) calls
-    ///   - `parseOutcome` set to `.success` when at least one call validated,
-    ///     `.genuineCompletion` when the input had no calls at all, or
-    ///     `.failed(reason)` when the sole call (or all calls) failed validation.
+    /// Validates each tool call in `step.toolCalls`, remapping names/args where a safe resolution exists. Never throws.
+    /// Returns a step whose `parseOutcome` is `.success`, `.genuineCompletion` (no calls) or `.failed(reason)`.
     func validate(step: ModernCognitiveStep) -> ModernCognitiveStep {
-        // Zero incoming tool calls. On a native-tools API the structured channel is
-        // authoritative: the model had a real way to call a tool and did not, so its
-        // text IS the answer. The provider's content fallback (OllamaLLMProvider) may
-        // still have classified it `.failed(reason)` — that cascade runs with an EMPTY
-        // registry and can only judge by shape. The fallback exists to RECOVER calls
-        // leaked into content; it must never VETO an answer. So a failure stands only
-        // when the text declares an attempted call to a tool this run offers.
+        // Zero incoming tool calls: the structured channel is authoritative, so the text is the answer. A failure from the
+        // provider's content fallback stands only when the text declares an attempted call to a tool this run offers.
         guard !step.toolCalls.isEmpty else {
             return resolveZeroCallStep(step)
         }
@@ -125,22 +95,8 @@ struct NativeParsePipeline: Sendable {
             }
         }
 
-        // Outcome policy:
-        //   - If ANY call validated → success (partial success beats zero progress;
-        //     failed siblings are dropped and logged). This matches ToolExecutionLoop's
-        //     existing semantics where one bad call in a parallel batch doesn't kill the batch.
-        //   - If NO calls validated and we captured a failure reason → return the first
-        //     failure so the terminator routes to .suspectedFormatFailure.
-        //   - If we got here with no validated calls and no captured reason something is
-        //     structurally wrong — fall through to genuineCompletion rather than hang.
-        // ⚠️ A JSON object in the ANSWER is not a call (bug 3, 2026-10-06). Ollama's content
-        // fallback lifts the first `{…}` out of a reply with no structured calls, so a user record
-        // like `{"name": "John Doe", "email": …}` arrived here as a call to a tool named "John
-        // Doe", failed as unknown, and the correct answer was retried. Only calls recovered from
-        // TEXT qualify (`callsRecoveredFromText`); a structured `tool_calls` entry naming an
-        // unknown tool is a real hallucination and keeps its correction. The grammar is the
-        // judge, as for every other answer-vs-call verdict: a name key with an arguments object,
-        // a run tool's name or a call-format token still means an attempted call.
+        // Any validated call is success (failed siblings dropped); none returns the first failure. A JSON object in the answer
+        // is not a call: only calls recovered from text qualify, and the grammar judges whether it was an attempt.
         if validated.isEmpty, !unknownNames.isEmpty, unknownNames.count == step.toolCalls.count,
            let text = step.callsRecoveredFromText,
            AttemptedToolCallGrammar.attemptedCallName(in: text, callableNames: callableNames) == nil {

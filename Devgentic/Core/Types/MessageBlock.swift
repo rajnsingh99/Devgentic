@@ -4,11 +4,7 @@
 //  MessageBlock.swift
 //  Devgentic
 //
-//  Multimodal Pipeline Migration — Phase 1A
-//  Atomic unit of multimodal content, replacing String-based message boundaries.
-//  All types are Sendable + Codable + Hashable — safe across actor boundaries.
-//
-//  Created by Raj Singh on 15/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

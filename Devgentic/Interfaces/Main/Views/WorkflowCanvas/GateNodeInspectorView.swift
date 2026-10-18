@@ -4,34 +4,23 @@
 //  GateNodeInspectorView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 11/04/26.
-//
-//  Configuration sheet for Gate (HITL) nodes — card-based layout.
-//  Allows the user to edit the approval prompt, customize option labels,
-//  and set an optional timeout.
-//  Uses SettingsCard components for visual consistency with other inspector views.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Configuration sheet for Gate (HITL) nodes: edits the approval prompt, option labels and an optional timeout.
+/// Built from `SettingsCard` components for consistency with the other inspector views.
 struct GateNodeInspectorView: View {
     @Binding var node: WorkflowNode
     @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     @State private var prompt: String = "Approve this workflow step?"
-    /// [INS-5] Option rows carry a STABLE identity, so `ForEach` keys on the option rather than on
-    /// its screen slot. With `ForEach(options.indices, id: \.self)` the identity WAS the slot:
-    /// deleting the first of three rows destroyed slot 2's view and shifted every surviving row's
-    /// text up a slot, taking keyboard focus, text selection and any in-flight IME composition with
-    /// it — the user's caret silently vanished and every visible field changed under them. The
-    /// Router's rules have used stable ids since they were written.
-    ///
-    /// ⚠️ The MODEL stays `[String]`. `GateNodeConfig.options` are PORT LABELS matched by exact
-    /// string, and `WorkflowCanvasState.gateRenameMap` recovers renames POSITIONALLY — its
-    /// documented precondition is that the inspector edits text in place and appends adds at the
-    /// end. `saveAndDismiss` therefore flattens these rows back in row order, which preserves that
-    /// precondition exactly; the ids never reach the model and cannot affect edge re-pointing.
+    // Why: keying by slot would shift text and drop focus, selection and IME composition when a row is deleted.
+    /// Option rows carry a stable identity, so `ForEach` keys on the option rather than on its screen slot.
+    /// The model stays `[String]`: `GateNodeConfig.options` are port labels matched by exact string, and `saveAndDismiss`
+    /// flattens rows in row order, which `WorkflowCanvasState.gateRenameMap` relies on to recover renames positionally.
     @State private var options: [OptionRow] = [OptionRow("Approve"), OptionRow("Reject")]
 
     struct OptionRow: Identifiable, Equatable {
@@ -157,11 +146,8 @@ struct GateNodeInspectorView: View {
                         number: "4",
                         title: "Unattended Runs",
                         subtitle: "scheduled / bridge",
-                        // ⚠️ WF-SE11 retired the "waits until the run deadline" behaviour: with no
-                        // timeout and nobody reachable, the executor refuses UP FRONT and fails the
-                        // node onto its error port. Either way the gate ends on the error port —
-                        // the timeout only changes when. This sentence was byte-identical to the
-                        // one the Workflow Guide carried, and both were stale (register CVV-7).
+                        // With no timeout and nobody reachable the executor refuses up front and fails the node onto its error port;
+                        // the timeout only changes when.
                         description: "A scheduled run shows no banner, and nobody can answer — so the node ends on its ERROR port either way: immediately if no timeout is set, or when the timeout elapses if one is. No option branch is ever taken, so wire the error port. Chat-bridge runs can be answered remotely via buttons but have no automatic deadline.",
                         color: .purple
                     )
@@ -314,11 +300,7 @@ struct GateNodeInspectorView: View {
                     }
                 }
 
-                // ⚠️ The old sentence here — "First option is treated as approval, others as
-                // rejection" — was false and contradicted guide step 2 in this same view. The engine
-                // gives index 0 no meaning: `if let chosen = chosenOption { activePorts = [chosen] }`,
-                // so EVERY option activates its own same-named port. A user who believed it wired one
-                // "reject" branch and silently got nothing from the other options.
+                // No option has special meaning: the engine gives index 0 none, so every option activates its own same-named port.
                 Text("Every option becomes its own output port — wire each one to what should happen when it is chosen.")
                     .font(theme.fontCaption2)
                     .foregroundColor(theme.secondaryText)
@@ -339,13 +321,8 @@ struct GateNodeInspectorView: View {
                         Text("Enable Timeout")
                             .font(theme.fontFootnote.weight(.semibold))
                             .foregroundColor(theme.primaryText)
-                        // [INS-3] "Auto-rejects" was a promise the engine does not keep. The
-                        // timeout arm sets `output = "Gate not answered (timed out)"` and
-                        // `status = .failed(...)` and leaves `activePorts` UNSET — only the
-                        // `if let chosen` arm ever activates an option port. A user who wired only
-                        // the Reject branch, exactly as this copy invited, got nothing at all.
-                        // The truthful description already existed in the collapsed guide above,
-                        // which defaults to hidden.
+                        // On timeout the node fails and leaves `activePorts` unset; only a chosen option activates its port,
+                        // so no option branch is taken.
                         Text("If nobody answers in time the node FAILS and its error port activates — no option branch is taken. Wire the error port to handle it.")
                             .font(theme.fontCaption2)
                             .foregroundColor(theme.secondaryText)
@@ -399,9 +376,8 @@ struct GateNodeInspectorView: View {
         )
         node.kind = .gate(config)
 
-        // [INS-11] Never materialise `nodeConfig` here: this panel edits no per-node config, and
-        // turning `nil` into `.some(defaults)` defeats `replaceNode`'s equality guard, so a Save
-        // that changed nothing would dirty the canvas and burn an undo slot.
+        // Never materialise `nodeConfig` here: turning `nil` into `.some(defaults)` defeats `replaceNode`'s equality guard,
+        // so an unchanged Save would dirty the canvas and burn an undo slot.
     }
 
     private func persistIfEmbedded() {

@@ -4,12 +4,7 @@
 //  RemoteParkNoticeTests.swift
 //  DevgenticTests
 //
-//  Timeout inventory D-23 (owner decisions 2026-09-27). Remote and voice questions stay open —
-//  HITL is unbounded — but the operator is told:
-//  - a work-starting command delivered more than 10 min after it was sent is NOT run;
-//  - a refused prompt names what the run is waiting on;
-//  - Telegram's own retry_after is honoured;
-//  - the Orb's approval window really is 30 s on WhisperKit, and can be re-opened.
+//  Created by Raj Singh.
 //
 
 import XCTest

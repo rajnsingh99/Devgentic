@@ -4,26 +4,14 @@
 //  VerbatimTextEditor.swift
 //  Devgentic
 //
-//  A text field that gives back exactly the characters that were typed.
-//
-//  macOS rewrites text as you type unless told otherwise, and both SwiftUI's `TextEditor` and
-//  `TextField` inherit that system-wide setting: `"` becomes `“”`, `--` becomes an em dash,
-//  and text replacements fire. For prose that is a nicety. For SOURCE CODE it is silent
-//  corruption — curly quotes don't compile, and `--save-dev` becomes `—save-dev`.
-//
-//  The HITL approval banner is the sharpest case: its whole purpose is to let a human read
-//  and correct a `write_file` call before it touches disk, and the value being reviewed IS a
-//  file. Merely opening the editor and typing one character could rewrite quotes elsewhere in
-//  the buffer. Approving then wrote the rewritten bytes (found by the 2026-07-27 audit).
-//
-//  `CustomTextEditor` and `AdvancedPromptEditor` already disable these for the composer and
-//  the prompt field; SwiftUI gives no way to reach the setting, so this is the third and
-//  smallest wrapper — no undo choreography, no tokenizing, just verbatim text.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// A text field that returns exactly the characters typed, with smart quotes, dashes and text replacements disabled.
+/// Needed where the value is source code, such as the approval banner's editable `write_file` content.
 struct VerbatimTextEditor: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat = 11

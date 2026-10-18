@@ -4,19 +4,7 @@
 //  ShellExitCodeMemoryTests.swift
 //  DevgenticTests
 //
-//  The shell tools read `terminationStatus` and put it in the observation, so a failed command
-//  was visible on the turn that ran it — and gone by the next one. Successful tool output is
-//  deliberately not carried (a read is repeatable), so the following prompt showed
-//  `status="success"` with nothing to contradict it: an agent could read its own record of a
-//  failed `swift build` and conclude the build passed.
-//
-//  A verdict is NOT repeatable. Re-running `swift build` after the agent edited the code
-//  answers a different question than the original run did — the same argument that justifies
-//  carrying `<effect>` for writes.
-//
-//  It is carried as `exit`, SEPARATE from `status`, and deliberately does not reclassify the
-//  call: `grep` exits 1 for "no match" and `diff` for "files differ", and
-//  `CognitiveCircuitBreaker` aborts a run after three consecutive tool failures.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,22 +4,7 @@
 //  ForegroundRunResolverTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the `streamingMessageID` clobber — Workflow_Production_Readiness.md row
-//  `WF-LC3`, and repo-root `LLM_Execution_Concurrency_Design.md` increment 1.
-//
-//  The defect: `MainApplicationViewModel` STORED which run the composer was talking about. Five
-//  surfaces wrote it, five completions nil'd it, none with an ownership guard, so whichever run
-//  finished first orphaned the others — the composer flipped back to Send while a run was still
-//  streaming and that run became unstoppable from the UI.
-//
-//  ⚠️ A clear-side identity guard does NOT fix that (slot = W → S overwrites → Stop kills S → S
-//  completes and LEGITIMATELY holds the slot → the guard passes → W is orphaned), which is why the
-//  fix deletes the storage and derives the answer instead. `testOrphanRegression_...` below is that
-//  exact interleaving, expressed against the pure function.
-//
-//  These tests construct NOTHING — no `MainApplicationViewModel` (which claims `HITLPresenter`
-//  globally), no `ActiveStreamManager`, no `ChatMessage`. That is the point of extracting the rule
-//  as a `nonisolated static` over plain values.
+//  Created by Raj Singh.
 //
 
 import XCTest

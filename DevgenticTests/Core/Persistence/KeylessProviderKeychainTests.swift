@@ -4,13 +4,7 @@
 //  KeylessProviderKeychainTests.swift
 //  DevgenticTests
 //
-//  Ollama and MLX never send an API key, so a profile on them has nothing in the Keychain.
-//
-//  ⚠️ The defect these hold off (on-device trace, 2026-10-03): two Ollama profiles produced ~30
-//  per-profile Keychain reads in one short session — one per fetch and render — plus a Keychain
-//  DELETE on every save, and picking a local model in the catalog read the shared store for
-//  "ollama" and "mlx". Every one of them could only answer "not found". Harmless while no item
-//  exists; a needless access prompt the day a stray one does under a changed signature.
+//  Created by Raj Singh.
 //
 
 import SwiftData

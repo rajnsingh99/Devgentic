@@ -4,7 +4,7 @@
 //  WhisperModelSelectorPopover.swift
 //  Devgentic
 //
-//  Popover for selecting a WhisperKit speech model when none is loaded.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -64,9 +64,7 @@ struct WhisperModelSelectorPopover: View {
                     let isDownloading = downloadService.downloadingModelId == model.id
                     ModelRowView(
                         model: model,
-                        // ⚠️ Selected means USABLE. The stored choice outlives its files (deleted,
-                        // moved, or never downloaded), and a check on a model that is not on disk
-                        // told the user voice input was ready when it was not.
+                        // Selected means usable: the stored choice outlives its files, so a model not on disk must not show as selected.
                         isSelected: isDownloaded && model.id == currentModelName,
                         isDownloaded: isDownloaded,
                         downloadProgress: isDownloading ? downloadService.downloadProgress : nil,
@@ -132,11 +130,8 @@ private struct ModelRowView: View {
 
                 Spacer()
 
-                // Trash button for downloaded models (visible on hover).
-                // Hover is a MOUSE affordance — VoiceOver and keyboard never set `isHovering`,
-                // so this button doesn't exist in the tree for them. It is not their route to
-                // delete; the accessibility action and context menu below are. (It's also a
-                // Button nested in a Button, which VoiceOver reaches unreliably at best.)
+                // Trash button for downloaded models, visible on hover. Hover is a mouse affordance: VoiceOver and keyboard never
+                // set `isHovering`, so the accessibility action and context menu below are their route to delete.
                 if isDownloaded && isHovering {
                     Button(action: onDelete) {
                         Image(systemName: "trash")
@@ -149,9 +144,8 @@ private struct ModelRowView: View {
                     .accessibilityHidden(true)
                 }
 
-                // Status is encoded ONLY in these three glyphs. Hidden from VoiceOver and
-                // folded into the row's label instead, so state is spoken rather than
-                // announced as "checkmark.circle.fill".
+                // Status is encoded only in these three glyphs; hidden from VoiceOver and folded into the row's label so state is
+                // spoken rather than announced as "checkmark.circle.fill".
                 Group {
                     if let progress = downloadProgress {
                         DownloadRing(progress: progress)

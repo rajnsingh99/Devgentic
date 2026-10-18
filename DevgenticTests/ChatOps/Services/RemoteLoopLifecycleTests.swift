@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RemoteLoopLifecycleTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  B2 — SL-7, CONC-5, DC-6, DC-7 and the wiring half of TG-6. Six register rows that all rewrite the
-//  same three lines of catch-arm code in the same two files; landed separately, the last writer wins
-//  and the others' tests pass vacuously over a predicate that no longer exists.
-//
-//  ⚠️ These are structural assertions because the subjects are actors that open real sockets — there
-//  is no way to exercise a connect loop in a unit test without one. The BEHAVIOURAL half lives in
-//  `RemoteLoopCancellationTests`, which tests the pure classifier these arms now call.
+//  Created by Raj Singh.
 //
 
 import XCTest

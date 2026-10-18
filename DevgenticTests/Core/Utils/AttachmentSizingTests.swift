@@ -4,14 +4,7 @@
 //  AttachmentSizingTests.swift
 //  DevgenticTests
 //
-//  The context gauge prices attachments with `PromptFitCheck.attachmentInjectionChars`, the
-//  backend builds them with `DirectInjectionPlan.assemble`, and the transcript records each
-//  file's `AttachmentDelivery` from the same plan. The INVARIANT pinned here is that the
-//  gauge's number equals the length of what the assembler actually emits — not any particular
-//  arithmetic, so a policy change (2026-10-04: over-budget files are CUT, no longer dropped)
-//  moves both together instead of failing on the correct fix.
-//
-//  A `.stateless` profile hands over a path manifest instead; see `estimatedAttachmentChars`.
+//  Created by Raj Singh.
 //
 
 import XCTest

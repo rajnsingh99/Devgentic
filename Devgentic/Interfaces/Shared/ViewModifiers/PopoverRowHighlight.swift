@@ -4,15 +4,13 @@
 //  PopoverRowHighlight.swift
 //  Devgentic
 //
-//  Hover affordance for menu-style popover rows (Quick Schedule, folder
-//  selector). Mirrors the hover treatment used by toolbar icons and the
-//  Whisper model rows so popover items don't feel inert. Rows keep an
-//  8pt internal + 4pt external horizontal inset so text stays at the
-//  same x-position as a plain 12pt-padded row.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Hover affordance for menu-style popover rows (Quick Schedule, folder selector), like the toolbar icons' hover.
+/// Rows keep an 8pt internal plus 4pt external horizontal inset so text aligns with a plain 12pt-padded row.
 private struct PopoverRowHighlight: ViewModifier {
     @Environment(\.appTheme) private var theme
     @State private var isHovering = false

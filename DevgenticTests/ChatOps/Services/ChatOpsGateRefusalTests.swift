@@ -2,17 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsGateRefusalTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  B4 — TG-5(B), OBS-4 and SEC-6, which are one edit because they rewrite the same three `authorize*`
-//  return types. OBS-4's filing was that the authorization boundary for untrusted remote input had ONE
-//  behavioural assertion in the whole suite; this file is the answer to that half of it.
-//
-//  ⚠️⚠️ THE SECURITY PROPERTY UNDER TEST IS AN ASYMMETRY, NOT A RULE. Most refusals must stay SILENT —
-//  replying confirms to an unpaired room that a Devgentic Mac is listening, and hands an attacker free
-//  amplification. Exactly one may answer: a throttled sender has already passed the channel AND sender
-//  checks, so they have proved they are the paired operator and telling them leaks nothing. Before
-//  this, they saw precisely what an intruder saw.
+//  Created by Raj Singh.
 //
 
 import XCTest

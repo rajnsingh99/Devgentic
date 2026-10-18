@@ -4,19 +4,7 @@
 //  CodeSnippetExtractorTests.swift
 //  DevgenticTests
 //
-//  Pins the 2026-07-16 extractor fix.
-//
-//  The old implementation hand-rolled a fence regex:
-//      ```(?:(\w+)\n)?([\s\S]*?)```
-//  `(\w+)` cannot match a non-word info string (`c++`, `objective-c`, `swift:Foo.swift`)
-//  and the group is OPTIONAL — so instead of failing it silently skipped, and the info
-//  string was swallowed into the CODE BODY. That corrupted what the viewer displayed
-//  and what the user copied. It also required exactly `\n` after the language (so
-//  "```swift " with a trailing space corrupted too), and couldn't see fences nested in
-//  list items.
-//
-//  Snippets are now derived from the real CommonMark AST (`parseMarkdown`), which
-//  already models language + our `--- Start of file ---` filename marker.
+//  Created by Raj Singh.
 //
 
 import XCTest

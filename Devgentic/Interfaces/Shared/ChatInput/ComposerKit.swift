@@ -4,21 +4,7 @@
 //  ComposerKit.swift
 //  Devgentic
 //
-//  Phase 1 of the unified composer: a per-surface capability config + the shared composer
-//  button primitives (icon / mic / send-stop), so the main composer and the QuickAccess panel
-//  stop evolving two visually-drifting copies of the same controls.
-//
-//  Deliberately NOT shared here (by design):
-//  - State: ChatInputViewModel is app-scoped single-slot (one buffer, one mainDelegate) — each
-//    surface keeps its own state holder and passes plain values/closures into these views.
-//  - The editor: main keeps CustomTextEditor, the panel keeps its TextField (slot-based
-//    unification is a later phase).
-//  - DynamicActionButton (main's morphing mic/send/stop): kept as-is after phase-2 review — its
-//    single-button morph (mic↔send contentTransition), per-VoiceInputState glyphs, Whisper
-//    download-progress ring, and long-press/right-click model picker are main-composer features
-//    the shared primitives shouldn't absorb. The shared VOICE BEHAVIOR lives in
-//    ComposerVoiceController (phase 2); DynamicActionButton's richer pipeline stays on
-//    ChatInputViewModel until the per-instance-VM phase.
+//  Created by Raj Singh.
 //
 
 import SwiftUI

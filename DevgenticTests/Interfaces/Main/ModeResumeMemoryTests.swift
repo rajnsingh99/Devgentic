@@ -4,8 +4,7 @@
 //  ModeResumeMemoryTests.swift
 //  DevgenticTests
 //
-//  A mode switch used to drop every mode to Home. `ModeResumeMemory` decides where a mode
-//  resumes; re-selecting that conversation restores its messages, profile and Code project.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,17 +4,13 @@
 //  ScheduledTaskDetailContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  In-window destination for editing an existing scheduled task.
-//  Looks up the task by ID; if missing (deleted out from under us),
-//  shows a "not found" placeholder. Otherwise hands off to
-//  CreateScheduledTaskView, which owns its own DynamicIslandBar
-//  + card-based layout (matches AgentConfigDetailView).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// In-window destination for editing an existing scheduled task. Looks the task up by ID, shows a "not found"
+/// placeholder if it is gone, and otherwise hands off to `CreateScheduledTaskView`.
 struct ScheduledTaskDetailContainerView: View {
 
     let taskID: UUID

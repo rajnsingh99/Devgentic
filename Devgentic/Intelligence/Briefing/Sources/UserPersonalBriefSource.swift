@@ -4,19 +4,19 @@
 //  UserPersonalBriefSource.swift
 //  Devgentic
 //
-//  Created by Devgentic Architect
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
-/// A `MorningBriefSource` that provides User Personal profile context
-/// to personalize morning brief insights.
+/// A `BriefingSource` that provides User Personal profile context
+/// to personalize briefing insights.
 ///
 /// When the user has a populated profile, this source contributes it
 /// as a brief fragment so the IC can tailor summaries to the user's
 /// known preferences, workflow patterns, and expertise areas.
-final class UserPersonalBriefSource: MorningBriefSource, @unchecked Sendable {
+final class UserPersonalBriefSource: BriefingSource, @unchecked Sendable {
 
     let id = "user_personal"
     let displayName = "User Profile"

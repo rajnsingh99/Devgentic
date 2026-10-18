@@ -4,9 +4,7 @@
 //  StreamingMarkdownParserTests.swift
 //  DevgenticTests
 //
-//  Pins the incremental streaming markdown parser (2026-07): settled regions
-//  parse once, only the trailing block re-parses per flush, and the result must
-//  converge to exactly what a full parseMarkdown() produces.
+//  Created by Raj Singh.
 //
 
 import XCTest

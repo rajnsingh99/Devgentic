@@ -4,9 +4,7 @@
 //  RunInteractionMemoryTests.swift
 //  DevgenticTests
 //
-//  Locks the Loop Safety prevention contract: identical clarification re-asks replay the
-//  stored response (including skips), identical previously-denied requests are recognized,
-//  and both are keyed robustly (whitespace/case-insensitive questions; canonical params).
+//  Created by Raj Singh.
 //
 
 import XCTest

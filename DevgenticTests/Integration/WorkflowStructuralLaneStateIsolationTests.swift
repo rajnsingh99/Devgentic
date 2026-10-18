@@ -4,26 +4,7 @@
 //  WorkflowStructuralLaneStateIsolationTests.swift
 //  DevgenticTests
 //
-//  WF-CC5 — two end-to-end guards `structuralDispatchLanes` itself cannot provide, since that pure
-//  function never touches `state`, timing, or the executor's `withTaskGroup` loop at all:
-//  1. `testSameLevelVariableWrite_IsInvisibleToBothLanes_RegardlessOfLaneOrder` — a NARROW guard
-//     against re-snapshotting `state` per lane (the mistake `profileDispatchLanes` makes safely and
-//     this call site must not copy). ⚠️ Post-review correction: this test passes IDENTICALLY
-//     against the reverted, fully-unpartitioned pre-fix code too — state visibility was already
-//     single-snapshot before WF-CC5 existed. It does NOT prove lanes exist or serialize anything;
-//     it only proves THIS specific regression (a per-lane re-snapshot) doesn't creep in.
-//  2. `testTwoSubWorkflows_ActuallySerializeAtRuntime` — the timing proof (1) cannot substitute for:
-//     that two same-level structural nodes are ACTUALLY dispatched in separate, sequential lanes at
-//     runtime, mirroring `WorkflowExecutorIntegrationTests.testParallel_TwoDifferentMLXModels_Serialize`
-//     (the WF-CC2 precedent for profile nodes) via the sub-workflow path, since a Router's AI
-//     Classifier call is not mockable/delayable the way a profile node's stream is. The call-site
-//     lane loop is the SAME code regardless of node kind, so proving it serializes for sub-workflow
-//     nodes is evidence it serializes for Router nodes too — there is no per-kind branch in the loop.
-//
-//  Isolated into its own file rather than appended to WorkflowExecutorIntegrationTests.swift — this
-//  session's own established trap: `-only-testing:Class/Method` has silently returned zero test
-//  cases for newly-added methods in that file before (see WF-SE2's session notes), and a fresh file
-//  reliably avoided it.
+//  Created by Raj Singh.
 //
 
 import XCTest

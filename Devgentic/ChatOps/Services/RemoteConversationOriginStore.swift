@@ -4,8 +4,7 @@
 //  RemoteConversationOriginStore.swift
 //  Devgentic
 //
-//  [CF-39] Which ChatOps service created a conversation, recorded at creation instead of guessed
-//  from its title afterwards.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -13,27 +12,14 @@ import os
 
 private let logger = DGLogger(category: "RemoteConversationOrigin")
 
-/// A conversation's remote provenance, persisted so it survives a rename.
-///
-/// ⚠️ WHY NOT A `ConversationSD` COLUMN, which is what the CF-39 row asked for. Adding a stored
-/// property to that entity is, once any build has shipped, a full versioned-schema step: a new
-/// `DevgenticSchemaV<n>`, and — per step 5b of `DevgenticSchemaVersions.swift`'s own procedure — NESTED FROZEN COPIES of the changed
-/// entity's entire relationship closure, which for `ConversationSD` is `ChatMessageSD` and
-/// `WorkflowRunRecordSD` and everything they reach. Getting that wrong crashes EVERY container
-/// open with "Duplicate version checksums detected". The value being stored decides one icon and
-/// one sentence on an empty conversation's placeholder and is documented as never gating an
-/// action, so a migration of that blast radius is not proportionate to it.
-///
-/// The precedent for conversation-keyed decoration in a side store is
-/// `NotificationConfiguration.perConversationOverrides`, whose shape this matches.
-///
-/// ⚠️ Being a side store, it can hold rows for conversations that were deleted. That is bounded
-/// and harmless — a stale row is only ever read by id, so it can never be shown against another
-/// conversation — and `forget(conversationID:)` is called on deletion to keep it tidy.
+// Why: kept out of `ConversationSD`: a new stored property there needs a versioned-schema step with frozen copies of
+// its whole relationship closure, and a mistake crashes every container open.
+/// A conversation's remote provenance, persisted in a side store so it survives a rename.
+/// Rows for deleted conversations are harmless (read only by id); `forget(conversationID:)` removes them on deletion.
 enum RemoteConversationOrigin: String, CaseIterable, Sendable {
     case telegram, discord, slack
 
-    /// How the copy refers to the service. Proper nouns — deliberately not localized.
+    /// How the copy refers to the service: proper nouns, not localized.
     var serviceName: String {
         switch self {
         case .telegram: return "Telegram"
@@ -43,10 +29,8 @@ enum RemoteConversationOrigin: String, CaseIterable, Sendable {
     }
 
     /// The title the service's bridge stamps on the conversation it creates.
-    ///
-    /// ⚠️ Retained ONLY as the fallback for conversations created before origins were recorded.
-    /// It is a guess: `userDefinedTitle` is user-editable, so a rename drops the hint and naming a
-    /// local conversation "Discord Chat" fakes one.
+    /// Used only as a fallback when no origin was recorded; it is a guess, since `userDefinedTitle` is user-editable.
+    /// A rename drops the hint, and naming a local conversation "Discord Chat" fakes one.
     var bridgeTitle: String {
         switch self {
         case .telegram: return "Telegram Chat"
@@ -82,16 +66,14 @@ enum RemoteConversationOriginStore {
 
     private static func load() -> [String: String] {
         guard let data = UserDefaults.standard.data(forKey: AppSettings.remoteConversationOriginsKey) else {
-            // ⚠️ NOT AN ERROR. No key means no remote conversation has been created yet, which is
-            // the ordinary first-run state — logging it as a failure would cry wolf on every launch.
+            // Not an error: no key means no remote conversation has been created yet, the ordinary first-run state.
             return [:]
         }
         do {
             return try JSONDecoder().decode([String: String].self, from: data)
         } catch {
-            // ⚠️ THIS ONE IS A REAL LOSS, and it read as "no remote conversations exist". The
-            // save path already logs its own failure with a consequence; the load path did not,
-            // so a corrupted map silently un-labelled EVERY remote conversation at once.
+            // A real loss: a corrupted map silently un-labels every remote conversation at once, so the failure is logged
+            // with its consequence.
             logger.error("[CHATOPS] Could not decode the remote-origin map (\(data.count) bytes): \(error.localizedDescription). CONSEQUENCE: every conversation created from chat loses its recorded origin at once and falls back to the title heuristic, so conversations named after the user's own first message no longer show as remote anywhere in the UI. The next save overwrites the unreadable data, making this permanent.")
             return [:]
         }

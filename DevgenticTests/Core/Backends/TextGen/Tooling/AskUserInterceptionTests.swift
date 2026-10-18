@@ -4,20 +4,7 @@
 //  AskUserInterceptionTests.swift
 //  DevgenticTests
 //
-//  `AskUserInterceptor` — the seam that turns an `ask_user` tool call into a HITL prompt.
-//
-//  ⚠️ Two of these tests were RED against committed code, pinning a fallback string
-//  ("Please provide clarification to proceed.") that exists nowhere in the app — the wording was
-//  changed to "Could you clarify your request so I can continue?" and the tests were never
-//  updated. They now assert the PROPERTY the fallback exists to guarantee (the user is never
-//  shown a dead-end prompt) rather than the prose, so a rewording is not a test failure while a
-//  regression to an empty or unterminated prompt still is.
-//
-//  ⚠️ The file also used to cover only `extractQuestion`'s four trivial paths. The three helpers
-//  that do the actual work — the dangling-connector repair that is the whole reason
-//  `sanitizeQuestion` exists, plus `extractOptions` and `extractMultiline` — had ZERO coverage,
-//  including the loose-encoding coercion whose own comment says it exists because weak models
-//  emit `"1"`/`"yes"`/`1` instead of `true`.
+//  Created by Raj Singh.
 //
 
 import XCTest

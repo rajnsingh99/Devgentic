@@ -4,6 +4,8 @@
 //  NetworkTools.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import Foundation
 import SystemConfiguration
@@ -40,8 +42,7 @@ struct CheckNetworkStatusTool: DevgenticTool {
         info += "Internet Reachable: \(reachable ? "Yes" : "No")\n"
 
         // IP address first: it is the evidence the SSID line needs to interpret itself.
-        // Invoked directly rather than through `zsh -c "… || echo 'No IP'"` — a shell hosting one
-        // fallback is a shell we do not need.
+        // Invoked directly rather than through `zsh -c`, since a shell hosting one fallback is a shell we do not need.
         let ipProcess = Process()
         ipProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/ipconfig")
         ipProcess.arguments = ["getifaddr", "en0"]
@@ -50,20 +51,8 @@ struct CheckNetworkStatusTool: DevgenticTool {
             ? ipRun!.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             : ""
 
-        // Wi-Fi SSID.
-        //
-        // The previous probe piped `Apple80211.framework/.../airport -I` through awk — and macOS
-        // NO LONGER SHIPS THAT BINARY. The pipeline produced nothing on stdout, the empty result
-        // was read as "no SSID", and the tool printed **"Wi-Fi SSID: Not connected"**. On a
-        // machine sitting on Wi-Fi, the agent was told flatly that it was not — a positive claim
-        // about the network derived from a probe that does not exist. "Cannot tell" and "not
-        // connected" are different answers and must read differently.
-        //
-        // `networksetup` still ships. It reports one of two sentences, and on Sonoma and later it
-        // withholds the SSID unless Location Services is granted — so its "not associated" reply
-        // is NOT by itself proof of disconnection. Cross-referencing the IP is what makes the
-        // difference legible: an interface holding an address is on a network whatever
-        // `networksetup` is willing to name.
+        // Wi-Fi SSID via `networksetup`, which withholds the SSID without Location Services, so "not associated" is not proof
+        // of disconnection; cross-referencing the IP tells "cannot tell" apart from "not connected".
         let ssidProcess = Process()
         ssidProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
         ssidProcess.arguments = ["-getairportnetwork", "en0"]
@@ -127,15 +116,8 @@ struct HTTPRequestTool: DevgenticTool {
             self.method = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "method")!))
             self.body = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "body")!))
 
-            // Accepts headers as an OBJECT or as a JSON STRING containing one.
-            //
-            // The schema used to advertise `headers` as a "string" ("JSON object of custom
-            // headers") while this decoded `[String: String]` — so a model that followed the
-            // schema it was given sent `"{\"Authorization\":\"Bearer …\"}"`, the decode threw,
-            // `try?` turned it into nil, and the request went out with NO HEADERS AT ALL. The
-            // server answered 401 and nothing anywhere said the credentials had been dropped on
-            // the way out. The schema now says "object", and the string form is still honoured
-            // because models will keep emitting it.
+            // Accepts headers as an object or as a JSON string containing one, because models keep emitting the string form;
+            // a failed decode must not silently send the request with no headers.
             var foundHeaders: [String: String]? = nil
             if let key = DynamicKey(stringValue: "headers") {
                 if let dictionary = try? container.decodeIfPresent([String: String].self, forKey: key) {
@@ -156,9 +138,7 @@ struct HTTPRequestTool: DevgenticTool {
                 ("url", "string", "The URL to request."),
                 ("method", "string", "HTTP method: 'GET' or 'POST' (default 'GET')"),
                 ("body", "string", "Request body for POST requests"),
-                // "object", not "string": whatever this declares is what a model will send, so it
-                // has to name a type the decoder accepts. It said "string" while the decoder took
-                // only an object, and the mismatch dropped headers silently.
+                // Declared "object": whatever this declares is what a model sends, so it must name a type the decoder accepts.
                 ("headers", "object", "Custom request headers as name/value pairs, e.g. {\"Authorization\": \"Bearer …\"}")
             ],
             required: ["url"]
@@ -166,12 +146,8 @@ struct HTTPRequestTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // The SCHEME is what actually has to be checked, not merely that `URL(string:)` returns
-        // something. Modern Foundation parses almost anything — `URL(string: "not a url at all")`
-        // succeeds by percent-encoding the spaces — so the old nil-check was nearly dead code,
-        // and the most common real mistake (a bare `example.com`, which models emit constantly)
-        // sailed past it to fail inside URLSession as "unsupported URL": late, after a round
-        // trip, and giving the model nothing it could act on.
+        // The scheme is what must be checked: modern Foundation parses almost anything (a bare `example.com` included),
+        // so a nil-check alone lets mistakes fail late inside URLSession with nothing the model can act on.
         guard let url = URL(string: arguments.url),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
@@ -236,13 +212,7 @@ struct DNSLookupTool: DevgenticTool {
         process.arguments = [arguments.hostname]
 
         do {
-            // ProcessRunner drains stdout AND stderr concurrently; this site read the pipe
-            // only after waitUntilExit(), which hangs once output passes the ~64 KB buffer.
-            //
-            // combinedOutput, not standardOutput: this site set `standardError = outPipe`,
-            // so its single read returned both. `nslookup` reports a failed lookup
-            // ("can't find <host>: NXDOMAIN") on stderr and exits non-zero with EMPTY
-            // stdout — reading stdout alone turns every failed lookup into blank output.
+            // `combinedOutput`, not `standardOutput`: `nslookup` reports a failed lookup on stderr, leaving stdout empty.
             let output = try ProcessRunner.run(process).combinedOutput
             return "DNS Lookup for '\(arguments.hostname)':\n\(output)"
         } catch {

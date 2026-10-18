@@ -4,12 +4,7 @@
 //  CodeViewerReopenResetTests.swift
 //  DevgenticTests
 //
-//  Register CF-8 — `openTab`'s two refresh branches replaced the snippet but left the
-//  save/draft baseline (`editedCode` / `lastSavedBuffer` / `lastSavedDisk`) in place. A SAVED
-//  tab is exactly the clean-but-`editedCode`-set state, so re-opening a file the agent had
-//  since rewritten showed the user's OLD buffer and then refused ⌘S as on-disk drift against
-//  the old bytes. These pin the three-field reset `handleAgentWriteBegan` already did, now
-//  on both `openTab` refresh paths.
+//  Created by Raj Singh.
 //
 
 import XCTest

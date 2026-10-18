@@ -4,13 +4,7 @@
 //  EpisodicEffectBudgetTests.swift
 //  DevgenticTests
 //
-//  `ActionEffect.diffCharacterLimit` caps ONE action's diff at 4,096 chars. Nothing capped
-//  the sum: a turn with ten writes carried up to 40 KB, multiplied again across ten turns
-//  of `recentHistory` and across the whole conversation under `fullHistory`. Episodic
-//  memory rides in EVERY prompt, so that was unbounded growth on the hot path.
-//
-//  These cover the aggregate budget and — the part that must not be got wrong — the
-//  distinction between a diff that was ELIDED to fit and one that never existed.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,9 +4,7 @@
 //  ParkScopeCreditTests.swift
 //  DevgenticTests
 //
-//  HITL Waiting Contract — slice 2: OWNER-CHAIN park credit (decision A) and "a human is never
-//  timed", including inside a tool call (decision 1). Replaces per-conversation credit, under which
-//  any open banner in a conversation froze every clock in it (Timeout inventory D-18).
+//  Created by Raj Singh.
 //
 
 import XCTest

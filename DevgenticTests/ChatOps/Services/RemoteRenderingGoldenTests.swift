@@ -4,19 +4,7 @@
 //  RemoteRenderingGoldenTests.swift
 //  DevgenticTests
 //
-//  C3 of the ChatOps remote-interface plan: the renderers, pinned by their wire payloads.
-//
-//  ⚠️ THESE ARE THE PRIMARY PROOF THAT C5–C7 CHANGE NO OBSERVABLE OUTPUT. Because every renderer is
-//  `nonisolated static` over plain values and every draft is `Encodable`, a test can assert the
-//  exact JSON with no transport, no API client and no network. When each bridge is swapped onto the
-//  new path, it must reproduce these bytes.
-//
-//  ⚠️ THE ONE ASSERTION THAT MATTERS MOST is `parse_mode == "Markdown"`.
-//  `TelegramAPIClient.sendMessage` defaults it, so every BRIDGE call site inherits Markdown and
-//  renders bold today, while `TelegramTransport` passes `nil` at all seven of its own sites. Hosting
-//  a renderer on the transport without noticing silently turns every reply's formatting into literal
-//  asterisks — on all five verbs, on the largest platform, with no error anywhere. Three of the four
-//  designs reviewed for this refactor walked into exactly that.
+//  Created by Raj Singh.
 //
 
 import XCTest

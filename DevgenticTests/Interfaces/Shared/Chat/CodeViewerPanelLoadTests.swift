@@ -4,14 +4,7 @@
 //  CodeViewerPanelLoadTests.swift
 //  DevgenticTests
 //
-//  Regression (2026-07-16): opening the code viewer rendered "No Code Selected"
-//  until the user navigated between snippets. `document` was assigned ONLY from
-//  `.onChange(of: codeViewerContent?.currentIndex)` with no initial load — and the
-//  panel is created only once the content is already set to index 0, so there was
-//  no transition to observe on first appear.
-//
-//  These are HOSTED tests: the bug lived in SwiftUI's onChange/appear semantics, so
-//  it only reproduces when the view is actually mounted and its lifecycle runs.
+//  Created by Raj Singh.
 //
 
 import XCTest

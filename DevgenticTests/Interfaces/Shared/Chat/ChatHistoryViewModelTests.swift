@@ -4,11 +4,7 @@
 //  ChatHistoryViewModelTests.swift
 //  DevgenticTests
 //
-//  Created on 03/04/26.
-//
-//  Tests ChatHistoryViewModel — paginated message loading, active stream merging,
-//  filter toggling, code viewer lifecycle, and edge cases.
-//  Uses a MockChatPersistenceStore to isolate from SwiftData.
+//  Created by Raj Singh.
 //
 
 import XCTest

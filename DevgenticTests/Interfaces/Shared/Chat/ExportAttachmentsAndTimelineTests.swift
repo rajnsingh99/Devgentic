@@ -4,16 +4,7 @@
 //  ExportAttachmentsAndTimelineTests.swift
 //  DevgenticTests
 //
-//  [CF-19] `ConversationExporter.toMarkdown` read `attachedTextFiles` and the content enum and
-//  nothing else. A turn that was "here's a screenshot, what's wrong?" exported as the prompt
-//  alone, with nothing recording that an image was part of the question; an agent turn that was
-//  all tool calls with no final prose exported as a heading over an empty section. Both under a
-//  comment in the same function stating that an export which quietly omits something
-//  misrepresents the conversation.
-//
-//  These pin the two writers and the bounds on them. `toMarkdown` itself is `async` and pulls in
-//  the document-extraction registry, so the per-turn helpers are what the tests drive directly —
-//  they are `nonisolated static` for exactly that reason.
+//  Created by Raj Singh.
 //
 
 import XCTest

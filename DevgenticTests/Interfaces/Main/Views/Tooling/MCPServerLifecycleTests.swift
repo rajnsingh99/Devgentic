@@ -4,8 +4,7 @@
 //  MCPServerLifecycleTests.swift
 //  DevgenticTests
 //
-//  P4 UX work, 2026-08-01: per-server enable/disable, transport selection, and the
-//  connection-status summary that drives the composer banner.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,25 +4,7 @@
 //  CuratedMLXCatalog.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for G7.
-//
-//  A brand-new user with zero models opened the store and got a raw HuggingFace popularity
-//  dump. Verified against the live endpoint this app calls: results 1, 2 and 29 of the first 30
-//  were `parakeet-tdt` automatic-speech-recognition models — which `MLXService.loadModel`
-//  cannot run as LLMs — each rendered with a "Chat" badge, and result 28 was a 657 GB repo.
-//
-//  This mirrors `WhisperModelCatalog`, which the app's sibling surface already does right: a
-//  hand-checked, RAM-tiered list that gives a first run somewhere sane to start.
-//
-//  ⚠️ Curation rules for anyone editing this list:
-//    1. Every entry must EXIST on HuggingFace. Each id below was verified live (HTTP 200) with
-//       its size read from the API on 2026-08-03. A 404 here is a broken first-run experience.
-//    2. No gated repos — the app has no HuggingFace token support yet (G4), so a gated entry
-//       would fail at download with a 401.
-//    3. Prefer tool-capable instruct models: this store is the onboarding path for agent
-//       profiles, and a model that cannot call tools is a dead end there.
-//    4. This is a STARTING POINT, not a whitelist. The full HuggingFace listing stays one tab
-//       away — per the standing directive, curation describes, it never gates.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -47,9 +29,7 @@ struct CuratedMLXModel: Identifiable, Hashable, Sendable {
 enum CuratedMLXCatalog {
 
     /// Ordered smallest-first so the list reads as a ladder.
-    ///
-    /// Sizes were read from `usedStorage` on the HuggingFace API on 2026-08-03; they are
-    /// indicative only and the download path always fetches the real total.
+    /// Sizes are indicative only (from HuggingFace `usedStorage`); the download path always fetches the real total.
     static let models: [CuratedMLXModel] = [
         CuratedMLXModel(
             id: "mlx-community/Qwen2.5-3B-Instruct-4bit",
@@ -95,10 +75,8 @@ enum CuratedMLXCatalog {
         )
     ]
 
-    /// The curated set, ordered so models this machine can actually run come first.
-    ///
-    /// Ordering only — nothing is hidden. A user on 8 GB can still see and download the 30B
-    /// coder model; it simply is not the first thing offered.
+    /// The curated set, ordered so models this machine can run come first.
+    /// Ordering only, nothing is hidden: a user on 8 GB can still see and download the 30B coder model.
     static func recommended(forSystemRAMGB ramGB: Int) -> [CuratedMLXModel] {
         models.sorted { lhs, rhs in
             let lhsFits = lhs.recommendedMinimumRAMGB <= ramGB
@@ -118,13 +96,10 @@ enum CuratedMLXCatalog {
 /// Which HuggingFace `pipeline_tag`s name models `MLXService` cannot run as an LLM.
 enum MLXPipelineFilter {
 
-    /// ⚠️ A DENYLIST, not an allowlist — deliberately.
-    ///
-    /// An allowlist silently drops anything with an unfamiliar tag, and the tag vocabulary
-    /// moves. Verified against the live top-30: `any-to-any` accounts for 8 of 30 entries (the
-    /// gemma-4 multimodal models) and those are perfectly usable LLMs — an allowlist built from
-    /// the obvious `text-generation` / `image-text-to-text` pair would have hidden all of them.
-    /// So unknown tags stay visible and only known-unusable ones are excluded.
+    // Why: a denylist, not an allowlist: an allowlist would hide usable models
+    // carrying unfamiliar tags such as `any-to-any` (multimodal LLMs).
+    /// HuggingFace pipeline tags that cannot serve as an LLM.
+    /// Unknown tags stay visible; only known-unusable ones are excluded.
     static let excludedPipelineTags: Set<String> = [
         "automatic-speech-recognition",   // parakeet — results 1, 2 and 29 of the live top-30
         "text-to-speech",

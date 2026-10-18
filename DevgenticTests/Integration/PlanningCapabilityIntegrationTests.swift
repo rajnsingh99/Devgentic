@@ -4,16 +4,7 @@
 //  PlanningCapabilityIntegrationTests.swift
 //  DevgenticTests
 //
-//  End-to-end integration tests for PlanningCapability with cross-subtask
-//  memory seeding (P4). Verifies that dependency results from completed subtasks
-//  flow into dependent subtasks' working memory via the real execution pipeline.
-//
-//  Mock: LLMProvider (scripted plan + scripted ReAct steps)
-//  Real: PlanningCapability → ReActAgentExecutor → ToolExecutionLoop → WindowedLinearMemory
-//
-//  Note: PlanningCapability does NOT forward .toolOutput events from subtask streams.
-//  It accumulates .content and forwards .thought events prefixed with [subtask_id].
-//  Assertions check thoughts and final content, not tool outputs.
+//  Created by Raj Singh.
 //
 
 import XCTest

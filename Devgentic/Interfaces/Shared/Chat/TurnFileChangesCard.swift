@@ -4,21 +4,7 @@
 //  TurnFileChangesCard.swift
 //  Devgentic
 //
-//  "Edited N files  +A −R" under a Code turn (2026-10-04, user request) — one row per file, each
-//  expanding to the change, with Open for the file as it is now.
-//
-//  Built from what every successful file write already records: `ToolExecutionData.effect`
-//  (`ActionEffect` — path, line counts, a ≤4 KB diff), which IS persisted, so the card reads the
-//  same after a relaunch. The session-only snapshots (`preWriteContent` + the written content)
-//  only sharpen the counts when they still exist.
-//
-//  ⚠️ Edits only. A shell command (`sed`, `git checkout`, a build writing outputs) changes files
-//  no edit tool recorded; the card says so when the turn ran one, rather than implying it lists
-//  every change.
-//
-//  Undo / Rewind (2026-10-04) apply each write's `EditPatch` backwards — see `EditUndo` for the
-//  rules (exact restore, `git revert` when the file changed since, conflict otherwise). Patches are
-//  kept 7 days, so an old turn's Undo reports which writes it can no longer reverse.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -111,7 +97,7 @@ enum TurnFileChanges {
         return TurnFileChangesSummary(files: files, ranCommands: ranCommands)
     }
 
-    /// Where the card is drawn: Code turns only (user scope, 2026-10-04), once the run is done.
+    /// Where the card is drawn: Code turns only, once the run is done.
     @MainActor
     static func showsCard(for message: ChatMessage) -> Bool {
         message.sender == .agent && message.profileType == .code && !message.isStreaming
@@ -413,8 +399,8 @@ struct TurnFileChangesCard: View {
         return .clear
     }
 
-    /// Opens the file as it is on disk NOW. Dropped if the conversation changed while reading —
-    /// a tab planted mid-switch lands in the wrong conversation (see AgentTimelineView, CF-53).
+    /// Opens the file as it is on disk now. Dropped if the conversation changed while reading, since a tab opened
+    /// mid-switch would land in the wrong conversation.
     private func open(_ file: TurnFileChange) {
         let origin = message.conversationId
         let path = file.path

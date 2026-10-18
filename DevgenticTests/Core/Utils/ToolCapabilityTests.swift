@@ -4,14 +4,7 @@
 //  ToolCapabilityTests.swift
 //  DevgenticTests
 //
-//  `ToolCapability.arbitraryCodeExecution` is a list of tool names, and a list of names is
-//  exactly the thing that went stale before: `HITLRiskTier.classify` named `execute_shell` and
-//  `run_applescript` but not `batch_command`, and `disk_usage` belonged in the set for months
-//  without appearing in any list at all.
-//
-//  So the list is not trusted. The test below reads the tool SOURCES, finds every tool that
-//  hands its own argument to an interpreter, and fails if that tool is not in the set. The set
-//  cannot drift from the code, because the code is what it is checked against.
+//  Created by Raj Singh.
 //
 
 import XCTest

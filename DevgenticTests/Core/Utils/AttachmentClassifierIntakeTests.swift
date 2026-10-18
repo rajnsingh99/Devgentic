@@ -4,9 +4,7 @@
 //  AttachmentClassifierIntakeTests.swift
 //  DevgenticTests
 //
-//  `AttachmentClassifier` is the one owner of a file's attachment kind — the transcript,
-//  the backend and RAG indexing all ask it. `AttachmentIntake` is the one accept/refuse
-//  decision at attach time. These pin both, plus the agreement they exist to guarantee.
+//  Created by Raj Singh.
 //
 
 import XCTest

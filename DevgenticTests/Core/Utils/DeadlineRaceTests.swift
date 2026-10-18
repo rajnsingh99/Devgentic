@@ -4,9 +4,7 @@
 //  DeadlineRaceTests.swift
 //  DevgenticTests
 //
-//  The race that RETURNS AT ITS LIMIT (HITL Waiting Contract §6.3). The work under test is
-//  deliberately NON-cancellable — a `Task.sleep` body would pass against the old task-group race
-//  too, which is exactly how `PerToolTimeoutTests` stayed green while the bound held for 4 s (P1).
+//  Created by Raj Singh.
 //
 
 import XCTest

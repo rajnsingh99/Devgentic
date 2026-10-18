@@ -4,30 +4,14 @@
 //  ModelSupportPolicy.swift
 //  Devgentic
 //
-//  The ONE answer to "can Devgentic run this model at all?" for the download surfaces.
-//
-//  ⚠️ WHY THIS IS A DOWNLOAD GATE AND NOT "CAPABILITY METADATA". The standing rule is that a
-//  capability verdict (tool support, reasoning, fit) may LABEL or GROUP a model, never block an
-//  action — because those verdicts are guesses and the user may know better. This is a different
-//  question: a decision model (Jev-style / Laya / GLiNER2.5-Decide) is an ENCODER with a typed
-//  decision head. There is no generation loop, no chat template, no tool-call output — nothing in
-//  `MLXService` or `OllamaService` can load it, so a "successful" download is a multi-GB file that
-//  fails at first use with an error that never names the cause. It is gated by the owner's
-//  explicit decision (2026-10-03: "we are not yet supporting decision models"), and every signal
-//  below is a DECLARED field on the repo, not a shape guess.
-//
-//  ⚠️ DECLARED SIGNALS ONLY. Verified against the live HuggingFace API (2026-10-03):
-//    • convaiinnovations/laya      → pipeline_tag `text-classification`, tag `system-one`,
-//                                    config `{}` — NO `architectures`, so an architecture check
-//                                    would have missed it. The pipeline tag is what catches it.
-//    • fastino/GLiNER2.5-Decide    → pipeline_tag `token-classification`, architectures
-//                                    `["SpanExtractor"]` (not a stock transformers class).
-//  Untagged repos stay SUPPORTED — the same stance `MLXPipelineFilter` already takes, for the same
-//  reason: the tag vocabulary moves, and hiding an unfamiliar-but-usable LLM is the worse error.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The single answer to "can Devgentic run this model at all?" for the download surfaces.
+/// Gates decision/classifier models that no inference service can load, using declared repo fields (pipeline tag, tags);
+/// untagged repos stay supported.
 enum ModelSupportPolicy {
 
     /// Pipelines that name a classifier/decision model specifically (as opposed to speech, image,
@@ -42,11 +26,8 @@ enum ModelSupportPolicy {
     /// The category's own self-declared label (TypeSafe/Laya publish it as a repo tag).
     nonisolated static let decisionModelTag = "system-one"
 
-    /// A user-facing reason this model cannot be run, or nil when it is supported / unknown.
-    ///
-    /// - Parameters:
-    ///   - pipelineTag: HuggingFace `pipeline_tag`, exactly as declared.
-    ///   - tags: the repo's declared `tags`.
+    /// A user-facing reason this model cannot be run, or nil when it is supported or unknown.
+    /// - Parameters: `pipelineTag` is the HuggingFace `pipeline_tag` as declared; `tags` are the repo's declared tags.
     nonisolated static func unsupportedReason(pipelineTag: String?, tags: [String]) -> String? {
         let pipeline = pipelineTag?.lowercased()
 

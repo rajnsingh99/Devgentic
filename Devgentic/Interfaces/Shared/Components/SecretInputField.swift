@@ -4,16 +4,13 @@
 //  SecretInputField.swift
 //  Devgentic
 //
-//  Reusable, tactile credential input field adhering to Planout/UI_Guidelines.md §6.1:
-//  - Leading key.fill icon
-//  - Monospaced code font (theme.fontCodeCaption)
-//  - Interactive show/hide password toggle (eye / eye.slash)
-//  - Quick clear button (xmark.circle.fill)
-//  - Contained in a continuous 6pt rounded-rect dark glass background with hairline stroke.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// A reusable credential input field: leading key icon, monospaced font, show/hide toggle and quick clear button,
+/// on a rounded dark glass background.
 struct SecretInputField: View {
     let placeholder: LocalizedStringKey
     @Binding var text: String

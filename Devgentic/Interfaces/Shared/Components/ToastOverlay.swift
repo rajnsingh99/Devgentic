@@ -4,17 +4,14 @@
 //  ToastOverlay.swift
 //  Devgentic
 //
-//  Created on 26/03/26.
-//
-//  A lightweight toast notification system.
-//  Inject `ToastManager` as an EnvironmentObject at the app root,
-//  then call `toastManager.show("message", style: .success)` from any view.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Toast Style
 
+/// The visual style of a toast shown through `ToastManager`, a lightweight notification system injected at the app root.
 enum ToastStyle {
     case success
     case error

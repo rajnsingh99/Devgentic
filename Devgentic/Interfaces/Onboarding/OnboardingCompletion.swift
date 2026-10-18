@@ -4,17 +4,7 @@
 //  OnboardingCompletion.swift
 //  Devgentic
 //
-//  What the app does when the Setup Assistant closes.
-//
-//  ⚠️ FIELD-OBSERVED (owner, ~2026-09): on a fresh install the profile created in onboarding did
-//  NOT appear in the Profiles sidebar — until the user created a second profile, when BOTH
-//  appeared at once. Cause: the app-level `BackendProfileService` reads the list ONCE, in its
-//  `init` at launch (empty on a first run), and onboarding saves straight to `BackendProfileStore`.
-//  Nothing told the service. Creating a profile through the service calls `loadProfiles()` for a
-//  new id, which is why both then showed. The service also outlives a re-run of the Setup
-//  Assistant, so a re-run had the same gap.
-//
-//  The fix lives here, not in an inline closure in `DevgenticApp`, so a test can run it.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -22,14 +12,14 @@ import os
 
 private let logger = DGLogger(category: "OnboardingCompletion")
 
+/// What the app does when the Setup Assistant closes: reloads profiles into `BackendProfileService` and
+/// selects the new one. Onboarding saves straight to `BackendProfileStore`, so the service must be
+/// told; lives here so a test can run it.
 @MainActor
 enum OnboardingCompletion {
 
-    /// Re-reads the profile list so the sidebar shows the profile onboarding created, and selects
-    /// it in the composer so the first message goes to it instead of "Select a backend…".
-    ///
-    /// - Parameter createdProfileID: the profile onboarding saved, or nil when a re-run was
-    ///   cancelled (the list is still re-read; the selection is left alone).
+    /// Re-reads the profile list so the sidebar shows the profile onboarding created, and selects it.
+    /// - Parameter createdProfileID: the saved profile, or nil when a re-run was cancelled.
     static func apply(createdProfileID: UUID?,
                       profileService: BackendProfileService,
                       backendConfiguration: BackendConfiguration) {

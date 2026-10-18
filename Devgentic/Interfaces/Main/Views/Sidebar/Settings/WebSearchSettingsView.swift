@@ -4,14 +4,14 @@
 //  WebSearchSettingsView.swift
 //  Devgentic
 //
-//  Settings pane for the `web_search` tool: choose a provider, store its credentials (Keychain)
-//  and run a real test query.
-//  Aligned with Planout/UI_Guidelines.md for a premium, tactile developer experience.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// Settings pane for the `web_search` tool: choose a provider, store its credentials (Keychain) and run a real test
+/// query.
 struct WebSearchSettingsView: View {
     @Environment(\.appTheme) private var theme
 
@@ -399,7 +399,7 @@ struct WebSearchSettingsView: View {
                             .background(Capsule().fill(theme.surfaceOverlay))
                     }
 
-                    // Live Results Accordion (§13.2)
+                    // Live results accordion
                     if !lastResults.isEmpty {
                         Button {
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
@@ -433,9 +433,9 @@ struct WebSearchSettingsView: View {
                                     }
                                     .padding(.trailing, 6)
                                 }
-                                .frame(maxHeight: 220) // Generous sub-scrolling viewport (§13.4)
+                                .frame(maxHeight: 220) // Generous sub-scrolling viewport
                             }
-                            .transition(.opacity) // In-place accordion fade (§13.2)
+                            .transition(.opacity) // In-place accordion fade
                         }
                     }
                 }
@@ -650,7 +650,7 @@ private struct ProviderOptionRow: View {
 
                 Spacer(minLength: 12)
 
-                // Trailing Selection Indicator (§5.4)
+                // Trailing selection indicator
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 16))

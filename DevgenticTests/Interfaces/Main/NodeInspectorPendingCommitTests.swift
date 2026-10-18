@@ -4,15 +4,7 @@
 //  NodeInspectorPendingCommitTests.swift
 //  DevgenticTests
 //
-//  Created on 31/08/26.
-//
-//  Phase 2 of node-owned configuration (option C): a panel close that bypasses Done COMMITS the
-//  profile inspector's buffered edits; Cancel is the one explicit discard.
-//
-//  ⚠️ Tested at the hook + commit-function level per the WF-CU9 doctrine — the panel itself is an
-//  AppKit `NSPanel` needing a real window server, so everything decidable lives in state that does
-//  not. The three fire sites (node-gone, supersede, canvas teardown) and the Done/Cancel clears are
-//  one-liners at call sites this harness cannot mount; the SEMANTICS they rely on are all here.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,24 +4,7 @@
 //  ChatSearchDecomposition.swift
 //  Devgentic
 //
-//  THE shared decomposition for find-in-conversation.
-//
-//  The chat search had two index spaces that did not agree. `performSearch` counted matches
-//  across a message's WHOLE raw markdown source and stored that counter; every rendered block
-//  was then handed that one number and compared it against offsets computed over its OWN
-//  text. So the "current match" highlight landed on a different occurrence than the one being
-//  navigated to, or on nothing at all. Separately, the count came from the raw markdown SOURCE
-//  (syntax markers, fenced code bodies) while the highlight ran over the RENDERED string — so
-//  the badge advertised positions that could never be shown, and a phrase spanning a `**`
-//  marker reported "No results" for text plainly on screen.
-//
-//  Both were the same class of bug: a transform replicated on two sides that drifted. The fix
-//  is to derive matches from the SAME decomposition and the SAME string the renderer
-//  highlights, and to key the active match by BLOCK ID rather than by an integer whose meaning
-//  differs across the seam. Correctness then holds by construction.
-//
-//  ⚠️ Never call this from inside a SwiftUI `body`: `units(for:)` reads `isStreaming` and
-//  `content`, which are observed. Today's callers are `.onChange` closures and Tasks.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -33,18 +16,14 @@ struct SearchUnit: Sendable, Equatable {
     let blockID: String?
     /// EXACTLY the characters the renderer highlights over — see `highlightableText`.
     let text: String
-    /// False for content whose view accepts no search query (code, tables, images, error
-    /// cards, checkpoints). Such units are still emitted so the structure survives, but
-    /// `performSearch` does not turn them into matches: counting them would promise a
-    /// highlight that cannot be painted.
+    /// False for content whose view accepts no search query (code, tables, images, error cards, checkpoints). Such units
+    /// are still emitted so the structure survives, but `performSearch` does not count them, since no highlight can be
+    /// painted.
     let isHighlightable: Bool
 }
 
-/// A message projected down to just what search needs.
-///
-/// Replaces `[ChatMessage]` as the corpus element. The old corpus held up to 1000 fully
-/// decoded messages — including every attached image's full bytes — until the conversation
-/// changed.
+/// A message projected down to just what search needs; the corpus element, instead of fully decoded messages with
+/// attached image bytes.
 struct SearchDocument: Sendable, Identifiable, Equatable {
     let id: UUID
     let timestamp: Date
@@ -53,14 +32,8 @@ struct SearchDocument: Sendable, Identifiable, Equatable {
 
 enum ChatSearchDecomposition {
 
-    /// The characters a highlight is measured against.
-    ///
-    /// `ContentBlockView.createStyledString` renders block text through
-    /// `AttributedString(markdown:)`, and `SearchHighlighter` then measures offsets over
-    /// `String(result.characters)` — markdown syntax already stripped. Scanning the raw source
-    /// instead is what made the count disagree with the screen in BOTH directions. This is the
-    /// one place that transform is expressed; the renderer's fallback for unparseable text
-    /// (plain `AttributedString(text)`) is mirrored here deliberately.
+    /// The characters a highlight is measured against: block text as rendered through `AttributedString(markdown:)`, with
+    /// markdown syntax stripped. The fallback for unparseable text (plain `AttributedString(text)`) is mirrored here.
     static func highlightableText(fromBlockText text: String) -> String {
         if let parsed = try? AttributedString(markdown: text) {
             return String(parsed.characters)
@@ -68,17 +41,11 @@ enum ChatSearchDecomposition {
         return text
     }
 
-    /// Pure decomposition — touches no `ChatMessage`, so it is safe anywhere.
-    ///
-    /// `blocks` must be the SAME array the renderer will iterate; pass nil for content kinds
-    /// that are not markdown.
+    /// Pure decomposition that touches no `ChatMessage`. `blocks` must be the same array the renderer iterates; pass nil
+    /// for content kinds that are not markdown.
     static func units(sender: SenderRole, content: MessageContent, blocks: [ContentBlock]?) -> [SearchUnit] {
-        // SENDER FIRST, before the content case. `UserMessageView` builds
-        // `AttributedString(text)` from the RAW string with no markdown parse, so a user
-        // bubble's highlightable string is its raw text whatever the content case is.
-        // Branching on the content case first would decompose a markdown-bearing user message
-        // into blocks the renderer never creates — breaking the one path that was already
-        // correct.
+        // Checks the sender before the content case: `UserMessageView` builds its string from the raw text with no markdown
+        // parse, so a user bubble's highlightable string is its raw text.
         guard sender == .agent else {
             guard let text = content.textContent, !text.isEmpty else { return [] }
             return [SearchUnit(blockID: nil, text: text, isHighlightable: true)]
@@ -108,12 +75,8 @@ enum ChatSearchDecomposition {
         }
     }
 
-    /// Depth-first, in render order — mirroring `ContentBlockView`'s switch.
-    ///
-    /// ⚠️ Deliberately NOT `ContentBlock.plainText`: that joins a container's children with a
-    /// space and injects list prefixes/checkbox markers, which would double-count every nested
-    /// match and shift all later indices. `plainText` stays as it is for its RAG/preview
-    /// consumers.
+    /// Depth-first, in render order, mirroring `ContentBlockView`'s switch. Not `ContentBlock.plainText`, which joins
+    /// children and injects list prefixes and would double-count nested matches.
     private static func units(fromBlock block: ContentBlock) -> [SearchUnit] {
         switch block.type {
         case .paragraph(let text):
@@ -149,16 +112,9 @@ enum ChatSearchDecomposition {
         }
     }
 
-    /// Live message → units, on the main actor.
-    ///
-    /// ⚠️ The block source is chosen deliberately. `getOrCreateMarkdownBlocks` returns the
-    /// RENDERER's own blocks (mid-stream ids from `StreamingMarkdownParser` differ from a
-    /// fresh parse), so a streaming or already-cached message must go through it or the block
-    /// ids will not match what is on screen. But it also POPULATES a cache — and the corpus
-    /// reaches messages far outside the render window, exactly the caches
-    /// `trimMarkdownCachesOutsideWindow` exists to release. So anything not already cached and
-    /// not streaming uses the pure free function, which produces identical output and writes
-    /// nothing. Do not simplify this away.
+    /// Live message to units, on the main actor. A streaming or already-cached message goes through
+    /// `getOrCreateMarkdownBlocks` so block ids match the screen; anything else uses the pure function, which writes no
+    /// cache (the corpus reaches messages outside the render window). Do not merge the two paths.
     @MainActor
     static func units(for message: ChatMessage) -> [SearchUnit] {
         let content = message.displayedContent

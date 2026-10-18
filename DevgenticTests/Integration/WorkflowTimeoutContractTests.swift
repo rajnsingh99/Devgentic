@@ -4,8 +4,7 @@
 //  WorkflowTimeoutContractTests.swift
 //  DevgenticTests
 //
-//  HITL Waiting Contract — workflow slice (rollout step 5). The Timeout inventory's probes P5 and
-//  P10, kept as tests asserting the NEW behaviour against the real `WorkflowExecutor`.
+//  Created by Raj Singh.
 //
 
 import XCTest

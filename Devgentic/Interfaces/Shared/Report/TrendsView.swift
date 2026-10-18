@@ -4,24 +4,15 @@
 //  TrendsView.swift
 //  Devgentic
 //
-//  The observability dashboard — a user-facing view of Phase E metrics. Four panels:
-//    1. Tool reliability (per-tool success rate + latency)
-//    2. Error categories (frequency distribution across the canonical taxonomy)
-//    3. Model reliability (per-(provider, model) outcome rates)
-//    4. Circuit breaker (trip counts by category, top offending tools)
-//
-//  Gated behind developer mode since it reads from populated v2 columns — users
-//  with dev mode off see "no data yet" rather than empty charts. ReportInspector
-//  shows the tab unconditionally; the tab content gates on dev mode internally so
-//  the empty-state message explains why.
-//
-//  Window: defaults to last 7 days. Picker offers 1 / 7 / 30. Lower values are
-//  faster queries; 30 days matches the retention policy.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import Charts
 
+/// The observability dashboard with four panels: tool reliability, error categories, model reliability, circuit breaker.
+/// Gated behind developer mode: with it off the tab explains there is no data yet rather than showing empty charts.
+/// The window defaults to the last 7 days; the picker offers 1 / 7 / 30 (30 matches the retention policy).
 struct TrendsView: View {
 
     @Environment(\.appTheme) private var theme
@@ -45,11 +36,8 @@ struct TrendsView: View {
             }
         }
 
-        /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)`
-        /// binds to the non-localizing `StringProtocol` overload, so every rawValue-sourced
-        /// label was invisible to the String Catalog extractor and would have shipped
-        /// untranslated inside otherwise-translated chrome. `rawValue` stays for `id`
-        /// and logging only.
+        // Why: `Text(x.rawValue)` binds to the non-localizing `StringProtocol` overload and is invisible to the String Catalog.
+        /// User-facing name, separate from `rawValue`, which is for `id` and logging only.
         var localizedTitle: LocalizedStringKey {
             switch self {
             case .oneDay:     return "24h"
@@ -71,15 +59,12 @@ struct TrendsView: View {
         case imageGen = "ImageGen"
         var id: String { rawValue }
 
-        /// The string passed to MetricsAggregator. Nil for `.all`.
-        /// ⚠️ PERSISTENCE/WIRE VALUE — matches `traces.profileType` rows written by
-        /// `ProfileType.rawValue`. Never rename a case value here.
+        // Why: a persistence/wire value matching `traces.profileType` rows written by `ProfileType.rawValue`; never rename a case.
+        /// The string passed to MetricsAggregator; nil for `.all`.
         var sqlValue: String? { self == .all ? nil : rawValue }
 
-        /// User-facing name. ⚠️ Separate from `rawValue` on purpose: `Text(x.rawValue)`
-        /// binds to the non-localizing `StringProtocol` overload, so the picker label was
-        /// invisible to the String Catalog extractor. `rawValue` stays for the SQL filter,
-        /// `id`, and logging only.
+        // Why: `Text(x.rawValue)` binds to the non-localizing `StringProtocol` overload and is invisible to the String Catalog.
+        /// User-facing name, separate from `rawValue`, which is for the SQL filter, `id` and logging only.
         var localizedTitle: LocalizedStringKey {
             switch self {
             case .all:       return "All"
@@ -143,9 +128,8 @@ struct TrendsView: View {
                     categoryFrequencySection
                     modelReliabilitySection
                     circuitBreakerSection
-                    // Workflow Activity is hidden when the user explicitly
-                    // scoped to a non-workflow profile type (panel would be empty).
-                    // Otherwise — shown whenever there are workflow nodes to report.
+                    // Workflow Activity is hidden when the user scoped to a non-workflow profile type (the panel would be empty);
+                    // otherwise it is shown whenever there are workflow nodes to report.
                     if showWorkflowActivity {
                         workflowActivitySection
                     }
@@ -169,9 +153,8 @@ struct TrendsView: View {
 
             Spacer()
 
-            // Profile-type filter — drives `MetricsAggregator.snapshot(profileType:)`.
-            // `.all` (default) keeps the pre-P1-15 behaviour; everything else
-            // scopes every panel to traces matching the selected profile type.
+            // Profile-type filter driving `MetricsAggregator.snapshot(profileType:)`: `.all` (default) is unfiltered; anything
+            // else scopes every panel to traces of the selected profile type.
             Picker("", selection: $profileFilter) {
                 ForEach(ProfileFilter.allCases) { p in
                     Text(p.localizedTitle).tag(p)
@@ -293,11 +276,8 @@ struct TrendsView: View {
 
     // MARK: - Workflow Activity
 
-    /// Decides whether the Workflow Activity panel is relevant for the current
-    /// filter. When the user explicitly chose a non-workflow profile type, the
-    /// snapshot's `workflowNodeStats` will be empty anyway (we skip the query in
-    /// `MetricsAggregator`) — hide the section so it doesn't render an empty
-    /// state every time. `.all` and `.workflow` keep it visible.
+    /// Whether the Workflow Activity panel is relevant for the current filter. A non-workflow profile type yields empty
+    /// `workflowNodeStats` (`MetricsAggregator` skips the query), so the section is hidden; `.all` and `.workflow` keep it.
     private var showWorkflowActivity: Bool {
         switch profileFilter {
         case .all, .workflow: return true
@@ -516,10 +496,8 @@ private struct ModelStatsTable: View {
 
 // MARK: - Workflow node stats table
 
-/// Per-workflow-node aggregate table. Each row = one node *name* across every
-/// workflow run that produced a `workflowNode`-kind span. Mirrors the visual
-/// style of `ToolStatsTable` so the eye treats them as a uniform family of
-/// reliability surfaces (tool → workflow node → model).
+/// Per-workflow-node aggregate table: one row per node name across every workflow run with a `workflowNode` span.
+/// Mirrors `ToolStatsTable`'s style so the reliability surfaces read as one family.
 private struct WorkflowNodeStatsTable: View {
     let stats: [WorkflowNodeStats]
     @Environment(\.appTheme) private var theme
@@ -546,10 +524,8 @@ private struct WorkflowNodeStatsTable: View {
                     Text("\(stat.totalRuns)")
                         .font(.caption.monospacedDigit())
                         .frame(width: 60, alignment: .trailing)
-                    // [WF-OB6] "—" when the node has no verdict yet (every run stopped, skipped,
-                    // or still in flight). Rendering 0% there would say "this node is broken" for
-                    // a node that was merely never allowed to finish — the same wrong signal, at a
-                    // different number. Matches how p50/p95 below already render an absent value.
+                    // Shows "—" when the node has no verdict yet (every run stopped, skipped or in flight): 0% would say the node is
+                    // broken. Matches how p50/p95 below render an absent value.
                     Text(stat.successRate.map { String(format: "%.0f%%", $0 * 100) } ?? "—")
                         .font(.caption.monospacedDigit())
                         .frame(width: 70, alignment: .trailing)
@@ -599,12 +575,8 @@ private struct PhaseSummaryRow: View {
                 if let count = byPhase[phase], count > 0 {
                     HStack(spacing: 4) {
                         Circle().frame(width: 6, height: 6).foregroundColor(color(for: phase))
-                        // Composition, not substitution: `Text("\(phase.localizedTitle)")`
-                        // would collapse the key back into a plain interpolated String and
-                        // lose localization again.
-                        // `verbatim` — ": %lld" is a punctuation fragment, not a translatable
-                        // phrase, and shipping it to the catalog gives translators nothing to
-                        // act on. The phase name beside it is the part that localizes.
+                        // Composition, not substitution: `Text("\(phase.localizedTitle)")` would collapse the key into a plain String and lose
+                        // localization. `verbatim` because ": %lld" is a punctuation fragment, not a translatable phrase.
                         (Text(phase.localizedTitle) + Text(verbatim: ": \(count)"))
                             .font(.caption2.monospacedDigit())
                             .foregroundColor(theme.secondaryText)
@@ -630,16 +602,10 @@ private struct PhaseSummaryRow: View {
 
 // MARK: - ExecutionPhase display name
 
-/// ⚠️ Declared HERE, not on the enum: `ExecutionPhase` lives in `Observaliblity/`
-/// (Foundation + GRDB) and is a `DatabaseValueConvertible` persisted into
-/// `span_events.phase` — that Core file must not import SwiftUI, and its `rawValue`
-/// is a storage key that can never be renamed.
-///
-/// The property exists at all because `Text(x.rawValue)` binds to the non-localizing
-/// `StringProtocol` overload, so the phase chips were invisible to the String Catalog
-/// extractor and shipped untranslated. The raw values are lowercase identifiers
-/// (`parsing`, `llm`, …) that were being rendered verbatim, so these read as proper
-/// capitalised phrases rather than echoing the storage token.
+// Why: `rawValue` is a storage key that can never be renamed, and `Text(x.rawValue)` is invisible to the
+// String Catalog.
+/// Localized, capitalised phrases for the phase chips, instead of echoing the lowercase storage token (`parsing`, `llm`).
+/// Declared here, not on the enum: `ExecutionPhase` lives in `Observaliblity/` (Foundation + GRDB), not SwiftUI.
 private extension ExecutionPhase {
     var localizedTitle: LocalizedStringKey {
         switch self {

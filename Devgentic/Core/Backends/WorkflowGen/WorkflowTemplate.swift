@@ -4,36 +4,19 @@
 //  WorkflowTemplate.swift
 //  Devgentic
 //
-//  Mustache-style template rendering for Code nodes, extended with JSON path
-//  access. Resolves these placeholder forms in a single pass:
-//
-//    {{ input }}              → raw upstream text
-//    {{ input.json }}         → upstream structured output, as compact JSON
-//    {{ input.json.a.b.0 }}   → a field/array-index path into the structured output
-//    {{ input.parsed }}       → THIS node's input text, parsed as JSON
-//    {{ input.parsed.a.b.0 }} → a path into that
-//    {{ var.name }}           → a workflow variable (raw string)
-//    {{ var.name.a.b }}       → a JSON path into a variable that holds JSON text
-//
-//  Single-pass design is intentionally injection-safe: matches are located in the
-//  *original* template and each is replaced exactly once, so substituted values
-//  (which may themselves contain `{{ var.x }}`-looking text) are never re-scanned.
-//  This replaces the previous two-step `replacingOccurrences` ordering hack.
-//
-//  Unresolved placeholders are left verbatim — a missing variable or bad path
-//  surfaces visibly in the output rather than silently becoming empty.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Renders `{{ … }}` templates for Code nodes in one pass: `input`, `input.json…`, `input.parsed…`, `var.…` placeholders.
+/// Matches are found in the original template and replaced once, so substituted values are never re-scanned;
+/// unresolved placeholders stay verbatim so a missing variable or bad path is visible in the output.
 enum WorkflowTemplate {
 
     /// Renders `template`, substituting the supported `{{ … }}` placeholders.
-    /// - Parameters:
-    ///   - template: The raw template string.
-    ///   - input: Raw upstream text (for `{{ input }}`).
-    ///   - inputJSON: Upstream structured output, if any (for `{{ input.json… }}`).
-    ///   - variables: Workflow variables (for `{{ var.… }}`).
+    /// - Parameters: `input` is the raw upstream text, `inputJSON` the upstream structured output (if any),
+    ///   and `variables` the workflow variables.
     static func render(
         _ template: String,
         input: String,
@@ -43,42 +26,14 @@ enum WorkflowTemplate {
         renderReportingUnresolved(template, input: input, inputJSON: inputJSON, variables: variables).rendered
     }
 
-    /// The `{{ input.parsed… }}` prefix (register EIO-11).
-    ///
-    /// ⚠️ **DELIBERATELY SEPARATE FROM `input.json`, and the distinction is the design.**
-    /// `input.json` means "a producing upstream DECLARED structured output" — it reads a typed
-    /// `JSONValue` that some node actually emitted, and it is nil at a top-level entry node because
-    /// nothing upstream produced anything. `input.parsed` means "parse whatever text is in my input
-    /// slot", which at an entry node is the user's message.
-    ///
-    /// The row this closes asked for the implicit version: make an entry node's `{{ input.json.x }}`
-    /// parse the chat box. That was rejected for three reasons, all still true.
-    ///   • It converts a FAIL-LOUD into a FAIL-SILENT for one binding shape. Today an unresolvable
-    ///     `{{ input.json.city }}` fires the EIO-6 unresolved-placeholder warning and the tool
-    ///     rejects the literal; afterwards it would resolve quietly to whatever the message author
-    ///     put there. That is the opposite direction from EIO-6 and EIO-8, both of which were fixed
-    ///     by making this exact family of failures LOUDER.
-    ///   • `JSONValue.parseStructured` extracts JSON from a ```-fenced block inside ordinary prose,
-    ///     so an implicit rule would let a normal-looking Slack or Discord message silently become
-    ///     the run's structured input. (This is not a new capability — `WorkflowActionArgs.coerce`
-    ///     already parses remote text for `array`/`object` parameters — but it would become one the
-    ///     author never asked for.)
-    ///   • It would have to land at FOUR entry seams (the Code arm, the Action arm, the
-    ///     sub-workflow inherit, the entry-skip pass-through) or those surfaces would disagree about
-    ///     what the chat box is — this register's dominant failure mode.
-    /// Making it an expression the author TYPES removes all three: the assertion is at the call
-    /// site, it works at every node rather than only at an entry one, and `{{ input.json… }}` keeps
-    /// the meaning four in-app help strings already promise.
+    // Why: an explicit expression, not an implicit `input.json` parse: that would make an unresolved warning resolve silently.
+    /// The `{{ input.parsed… }}` prefix: parses this node's own input text as JSON, at any node.
+    /// Separate from `input.json`, which reads a typed value a producing upstream declared (nil at an entry node).
     private static let parsedInputPrefix = "input.parsed"
 
-    /// `render`, plus the placeholder EXPRESSIONS that did not resolve (register EIO-6).
-    ///
-    /// ⚠️ Leaving an unresolved placeholder verbatim in the output is deliberate and stays — a bad
-    /// path being VISIBLE in the rendered text is the design. What was missing is the report: an
-    /// Action node coerced the literal `{{ var.status }}` into a tool argument and neither layer
-    /// said a word, so the tool failed (or acted on placeholder text) with nothing in the log
-    /// naming which binding, which expression, or the consequence. Callers that route arguments to
-    /// TOOLS use this and log; display-oriented callers may keep plain `render`.
+    // Why: an unresolved placeholder stays verbatim so a bad path is visible; the returned list lets tool callers log it.
+    /// `render`, plus the placeholder expressions that did not resolve.
+    /// Callers that route arguments to tools use this and log; display-oriented callers may keep plain `render`.
     static func renderReportingUnresolved(
         _ template: String,
         input: String,
@@ -93,14 +48,8 @@ enum WorkflowTemplate {
         let matches = regex.matches(in: template, range: fullRange)
         guard !matches.isEmpty else { return (template, []) }
 
-        // [EIO-11] Parsed at most ONCE per render, and only when the template asks for it — the
-        // asymmetry with `inputJSON` (which arrives already typed) would otherwise mean one parse
-        // of the whole input per placeholder.
-        //
-        // ⚠️ The `contains` gate is a COST optimisation, not a behavioural one: removing it is an
-        // EQUIVALENT MUTANT and survives the battery on purpose. Every template that never writes
-        // `input.parsed` would simply parse its input and throw the result away. Noted so the
-        // survivor is a known equivalent rather than an unexplained one.
+        // Parsed at most once per render, and only when the template asks for it: `inputJSON` arrives typed,
+        // but parsing `input` per placeholder would re-parse the whole input each time.
         let parsedInput: JSONValue? = template.contains(parsedInputPrefix)
             ? JSONValue.parseStructured(input) : nil
 
@@ -129,28 +78,15 @@ enum WorkflowTemplate {
         return (result, unresolved)
     }
 
-    /// THE placeholder pattern. ⚠️ Compiled ONCE and shared by the renderer and
-    /// `referencedVariableNames(in:)` — a design-time lint that found placeholders with its own
-    /// regex could disagree with the engine about what even IS a placeholder, which is the drift
-    /// register `EXA-10` was filed to prevent. `NSRegularExpression` is thread-safe for matching.
+    // Why: one regex for both: a lint with its own pattern could disagree with the engine about what a placeholder is.
+    /// The placeholder pattern, compiled once and shared by the renderer and `referencedVariableNames(in:)`.
+    /// `NSRegularExpression` is thread-safe for matching.
     private static let placeholderRegex: NSRegularExpression? =
         try? NSRegularExpression(pattern: #"\{\{\s*([^{}]+?)\s*\}\}"#)
 
-    /// The variable names a `{{ var.… }}` expression may resolve to, IN THE ORDER `resolve` tries
-    /// them: the exact key first, then the first dot segment. Empty for anything that is not a
-    /// `var.` reference.
-    ///
-    /// ⚠️ FACTORED OUT OF `resolve`, which now calls it — the ordering is defined in exactly one
-    /// place. A lint that re-implemented "which variable does this reference" would false-warn on
-    /// canvases that run: for `{{ var.result.status }}`, an exact-key-only reader warns when the
-    /// canvas writes `result`, and a first-segment-only reader warns when it writes `result.status`.
-    /// BOTH names are authorable — `outputVariable` is an unvalidated free-text field, so a dotted
-    /// variable name is storable — so only the ordered UNION is correct.
-    ///
-    /// ⚠️ The trim is EIO-5's and is load-bearing twice over: the regex already strips the outer
-    /// whitespace, and this strips what a user typed as `{{ var. status }}`. Skipping it makes a
-    /// lint extract `" status"`, which no writer set contains, so it false-warns on a template the
-    /// engine resolves fine — EIO-5's exact bug, re-created one layer up.
+    // Why: both names are authorable, so a lint needs this ordered union; the trim covers `{{ var. status }}`.
+    /// The variable names a `{{ var.… }}` expression may resolve to, in the order `resolve` tries them:
+    /// exact key, then first dot segment. Empty for anything that is not a `var.` reference.
     nonisolated static func variableCandidates(for expr: String) -> [String] {
         guard expr.hasPrefix("var.") else { return [] }
         let remainder = String(expr.dropFirst("var.".count))
@@ -161,12 +97,9 @@ enum WorkflowTemplate {
         return [remainder, segments[0]]
     }
 
-    /// Every `{{ var.… }}` reference in a template, as one ordered candidate list per placeholder
-    /// (register EXA-10). The `input` family is excluded by `variableCandidates`, so
-    /// `{{ input.json.status }}` is never mistaken for a variable read.
-    ///
-    /// Pure and `nonisolated` (WF-UI5) so the extraction is truth-tableable — and so the DESIGN-TIME
-    /// lint and the RUNTIME resolver read the same two functions rather than two parsers.
+    /// Every `{{ var.… }}` reference in a template, as one ordered candidate list per placeholder.
+    /// The `input` family is excluded by `variableCandidates`, so `{{ input.json.status }}` is not read as a variable.
+    /// Pure and `nonisolated`: the design-time lint and the runtime resolver read the same functions.
     nonisolated static func referencedVariableNames(in template: String) -> [[String]] {
         guard template.contains("{{"), let regex = placeholderRegex else { return [] }
         let ns = template as NSString
@@ -191,20 +124,14 @@ enum WorkflowTemplate {
             let path = String(expr.dropFirst("input.json.".count))
             return inputJSON?.value(atDotPath: path)?.templateString
         }
-        // [EIO-11] `input.parsed…` — the author asserting "treat my input text as JSON". See
-        // `parsedInputPrefix` for why this is an explicit expression rather than a change to
-        // `input.json`'s meaning. `parsedInput` is parsed ONCE per render by the caller, not once
-        // per placeholder, so a template with ten references parses one time.
+        // `input.parsed…`: the author asserting the input text is JSON; the caller parses it once per render.
         if expr == parsedInputPrefix { return parsedInput?.templateString }
         if expr.hasPrefix(parsedInputPrefix + ".") {
             let path = String(expr.dropFirst((parsedInputPrefix + ".").count))
             return parsedInput?.value(atDotPath: path)?.templateString
         }
 
-        // --- var family ---
-        // ⚠️ The candidate NAMES and their ORDER come from `variableCandidates`, which the
-        // design-time lint reads too (register EXA-10). Deriving them here as well is what would
-        // let the panel and the engine disagree about which variable a placeholder means.
+        // var family: the candidate names and their order come from `variableCandidates`, which the design-time lint also reads.
         let candidates = variableCandidates(for: expr)
         guard let exact = candidates.first else { return nil }
 

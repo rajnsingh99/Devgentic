@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  CodeAwareUploadChunkingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Created on 11/07/26.
-//
-//  Covers chunker routing + calibration: source files (and fenced code blocks
-//  inside chat messages) go to the Tree-Sitter AST chunker at the 384-char code
-//  target, prose stays on the 512-char paragraph path — one sizing mechanism
-//  (SemanticChunker.codeChunkSize) shared by the upload and message paths.
+//  Created by Raj Singh.
 //
 
 import XCTest

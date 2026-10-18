@@ -4,25 +4,7 @@
 //  RemoteRendering.swift
 //  Devgentic
 //
-//  Turning a `RemoteView` into each platform's payload — C3 of the ChatOps remote-interface plan.
-//
-//  ⚠️ THE THREE RENDERERS LIVE IN ONE FILE ON PURPOSE. Divergence between them is the defect this
-//  whole refactor exists to remove; three files is how the bridges drifted apart in the first place.
-//  Side by side, a difference has to be justified in the diff.
-//
-//  ⚠️ EVERY FUNCTION HERE IS `nonisolated static` OVER PLAIN VALUES — the `RunAdmissionPolicy` /
-//  `ForegroundRunResolver` shape. A test drives a full view-to-wire-payload round trip with no
-//  transport, no API client, no network and no view model. That is what makes the golden fixtures
-//  possible, and the golden fixtures are the primary proof that C5–C7 change no observable output.
-//
-//  ⚠️⚠️ THE `parseMode` TRAP, WHICH IS WHY THIS FILE EXISTS RATHER THAN A HOSTED RENDERER.
-//  `TelegramAPIClient.sendMessage` defaults `parseMode: "Markdown"` (TelegramAPIClient.swift:65) and
-//  every BRIDGE call site takes that default, so `*Your Conversations:*` and `📊 *Devgentic Status*`
-//  render bold today. `TelegramTransport` passes `parseMode: nil` at all seven of its OWN sites,
-//  deliberately, to avoid parse failures on code-heavy agent output. Naively hosting a renderer on
-//  the transport inherits the transport's `nil` and silently turns every bridge reply's formatting
-//  into literal asterisks — on all five verbs, on the largest platform, with no error anywhere.
-//  Here the parse mode is an explicit output of the renderer, and the golden fixture asserts it.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -30,13 +12,10 @@ import os
 
 // MARK: - Errors
 
+/// Errors a renderer throws when a `RemoteView` cannot be turned into a platform payload.
 enum RemoteRenderError: Error, Equatable {
-    /// The destination's channel id is not a shape this platform can address.
-    ///
-    /// ⚠️ Exists so the Telegram renderer can THROW rather than force-unwrap. `TelegramTransport`
-    /// already writes `Int64(chatID)!` at :33, :37, :45 and `Int(messageID)!` at :146 — safe only
-    /// because the sole producer builds those strings from an `Int64` in the first place. New code
-    /// does not inherit that assumption.
+    /// The destination's channel id is not a shape this platform can address; lets the Telegram renderer throw instead of
+    /// force-unwrapping.
     case unaddressableChannel(provider: RemoteChannel.Provider, channelID: String)
 }
 
@@ -45,15 +24,8 @@ enum RemoteRenderError: Error, Equatable {
 /// Shared so the three `render` implementations cannot describe the same event three ways.
 enum RemoteRenderLog {
 
-    /// ⚠️ Every `.silent` view is logged with its CONSEQUENCE, per the standing logging rule. This
-    /// replaces four naked `break`s in the bridges that log nothing at all, which is why a remote
-    /// user who types something unrecognised today gets no reply and leaves no trace.
-    ///
-    /// ⚠️⚠️ THE LEVEL IS CHOSEN BY `strandsTheUser`, NOT FIXED. `DGLogger.shouldPersist` writes
-    /// `.warning` and above to the ring buffer a diagnostic bundle exports, and drops everything
-    /// below it. A single `.info` for all three cases meant the ONE silence that represents a
-    /// failure — a remote user whose message got no reply — was visible only in live Console on the
-    /// machine that cannot reproduce it, which is the same invisibility the naked `break`s had.
+    /// Logs every `.silent` view with its consequence; the level follows `strandsTheUser`, so a silence that leaves a remote
+    /// user without a reply is `.warning` or above and reaches the persisted ring buffer.
     nonisolated static func silence(_ silence: RemoteSilence, channel: RemoteChannel, logger: DGLogger) {
         let line = "\(silence.tag) \(channel.provider.rawValue) channel \(channel.channelID) — nothing posted. CONSEQUENCE: \(silence.consequence)"
         if silence.strandsTheUser {
@@ -74,13 +46,8 @@ enum RemoteRenderLog {
 
 // MARK: - Escaping
 
-/// Escaping user-controlled text for each platform's text dialect.
-///
-/// ⚠️ THIS CLOSES A LIVE BUG, not a hypothetical one. The bridges interpolate conversation titles —
-/// which are auto-derived from the user's own first message — into `parse_mode: Markdown` messages
-/// at `ChatOpsBridge.swift:351` and elsewhere. A title containing an unbalanced `*`, `_`, `[` or a
-/// backtick makes Telegram reject the WHOLE message with a 400, and every one of those call sites is
-/// `_ = try? await`, so the remote user simply receives nothing and no log records why.
+/// Escaping user-controlled text for each platform's text dialect. Titles derived from user messages can contain
+/// unbalanced Markdown, which makes Telegram reject the whole message with a 400.
 enum RemoteMarkupEscaping {
 
     /// Telegram legacy `Markdown` (not MarkdownV2) treats exactly four characters as special.
@@ -111,40 +78,23 @@ enum RemoteMarkupEscaping {
         return out
     }
 
-    /// Slack `mrkdwn` requires HTML-entity escaping for these three, and only these three.
-    /// ⚠️ `&` must be replaced FIRST or the entities it introduces are re-escaped.
+    /// Slack `mrkdwn` requires HTML-entity escaping for exactly these three characters; `&` must be replaced first or its
+    /// entities are re-escaped.
     nonisolated static func slack(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    /// Strips Slack's CHANNEL-WIDE BROADCAST sequences out of text this app did not write.
-    ///
-    /// ⚠️⚠️ [BR-3/EG-3, Slack half] `<!channel>`, `<!here>` and `<!everyone>` notify every member of
-    /// the channel, and Slack resolves them from the message BODY regardless of `link_names` — so
-    /// they work from any text, including an agent's answer quoting a file it just read. The HITL
-    /// prompt path was hardened against exactly this on 2026-09-11 (`promptDraft` escapes
-    /// model-supplied substrings), but the AGENT REPLY path never was: it goes
-    /// `RemoteMirrorService` → `SlackTransport.sendChunkedMessage` → `postMessage`, and the only pass
-    /// it crosses is `RemoteEgressSanitizer.credentialsOnly`, which has no mention control.
-    ///
-    /// ⚠️ THIS IS A REWRITE OF CONTENT, WHICH THIS CODEBASE HAS GOT WRONG FOUR TIMES — so note what
-    /// makes it safe: it matches an EXACT, closed set of control sequences that have exactly one
-    /// meaning in Slack's own grammar, not a loose shape. `sanitizeHomePath` ate 221 characters of
-    /// prose because it matched a PATTERN that prose could satisfy; `<!channel>` cannot occur by
-    /// accident and means one thing.
-    ///
-    /// ⚠️ IT RENDERS THE PLAIN FORM RATHER THAN DELETING, so the reader still sees what the source
-    /// said. `@channel` is inert here: `chat.postMessage` only linkifies a bare `@name` when
-    /// `link_names` is set, and this app never sets it. ⚠️ If anyone ever does set `link_names`,
-    /// this function stops being sufficient — `SlackBroadcastNeutralisingTests` says so.
+    // Why: matches an exact closed set of control sequences, not a loose shape, so prose cannot trigger it; setting
+    // `link_names` would make this insufficient.
+    /// Strips Slack's channel-wide broadcast sequences (`<!channel>`, `<!here>`, `<!everyone>`) out of text this app did not
+    /// write, rendering the plain form (`@channel`), which is inert as long as `link_names` is never set.
     nonisolated static func withoutSlackBroadcasts(_ text: String) -> String {
         var out = text
         for broadcast in ["channel", "here", "everyone"] {
             out = out.replacingOccurrences(of: "<!\(broadcast)>", with: "@\(broadcast)")
-            // ⚠️ Slack also accepts a labelled form, `<!channel|@channel>`, which notifies
-            // identically. Matching only the bare form would leave the documented variant live.
+            // Slack also accepts the labelled form `<!channel|@channel>`, which notifies identically, so both forms are matched.
             out = out.replacingOccurrences(
                 of: "<!\(broadcast)\\|[^>]*>", with: "@\(broadcast)", options: .regularExpression)
         }
@@ -162,22 +112,11 @@ enum RemoteMarkupEscaping {
 
 // MARK: - Length budget
 
-/// Making a message fit the platform that has to accept it.
-///
-/// ⚠️⚠️ WITHOUT THIS, AN OVER-LONG REPLY DOES NOT ARRIVE TRUNCATED — IT DOES NOT ARRIVE. `render`
-/// posts through the unchunked `sendMessage` / `postMessage`, so the platform rejects the request
-/// with a 400 and the remote user sees nothing at all for a command that worked. `/history 20`
-/// builds roughly 4 100 characters (20 lines x a 200-character preview plus icons and separators),
-/// which clears Discord's 2 000 from ten turns, Slack's 3 000 block limit from about fifteen, and
-/// Telegram's 4 096 at twenty — before Markdown escaping adds a backslash per metacharacter.
-///
-/// ⚠️ WHOLE LINES GO, NEVER HALF A SENTENCE. A transcript is a list, and cutting it mid-word reads
-/// as corruption; dropping trailing entries and SAYING SO reads as a limit. The count of what went
-/// is part of the message because "the last thing I see is the newest" would otherwise be false.
+/// Making a message fit the platform that has to accept it: an over-long reply is rejected with a 400 and does not
+/// arrive at all. Whole lines are dropped, never half a sentence, and the count of what went is part of the message.
 enum RemoteTextBudget {
 
-    /// ⚠️ UTF-16, matching `RemoteCapabilities.maxMessageLength`. See that property for why the
-    /// conservative metric is the safe one.
+    /// Measures in UTF-16 units, matching `RemoteCapabilities.maxMessageLength`, the conservative metric.
     nonisolated static func measure(_ text: String) -> Int { text.utf16.count }
 
     /// Joins `lines` with newlines, dropping whole trailing lines until the result fits.
@@ -194,9 +133,7 @@ enum RemoteTextBudget {
         for line in lines {
             // +1 for the newline this line will need, once there is something before it.
             let cost = measure(line) + (kept.isEmpty ? 0 : 1)
-            // ⚠️ THE MARKER'S OWN LENGTH IS RESERVED, using the worst case rather than the actual
-            // count — the actual count depends on how many lines are dropped, which is not known
-            // until the loop ends. Reserving less would let the marker push the result back over.
+            // The marker's own length is reserved at its worst case, since the real count is unknown until the loop ends.
             guard used + cost + maxMarkerLength <= limit else { break }
             kept.append(line)
             used += cost
@@ -204,8 +141,7 @@ enum RemoteTextBudget {
         }
 
         guard dropped > 0 else { return joined }
-        // ⚠️ Even the first line may not fit — a single 5 000-character agent reply. Then there is
-        // nothing to keep and the blob form is the only honest output.
+        // Even the first line may not fit; with nothing to keep, the cut-down blob form is the only honest output.
         guard !kept.isEmpty else { return fit(lines.first ?? "", limit: limit) }
         return (kept + [marker(dropped: dropped)]).joined(separator: "\n")
     }
@@ -214,8 +150,7 @@ enum RemoteTextBudget {
     nonisolated static func fit(_ text: String, limit: Int) -> String {
         guard measure(text) > limit else { return text }
         let room = max(0, limit - measure(blobMarker))
-        // ⚠️ Cut on a UTF-16 boundary that is also a Character boundary: `String(prefix:)` over
-        // Characters cannot split a grapheme, which slicing utf16 directly can.
+        // Cut on a UTF-16 boundary that is also a Character boundary: slicing `utf16` directly can split a grapheme.
         var out = ""
         var used = 0
         for character in text {
@@ -227,24 +162,9 @@ enum RemoteTextBudget {
         return out + blobMarker
     }
 
-    /// Splits `text` into pieces that each fit `limit`, preferring paragraph then line boundaries.
-    ///
-    /// ⚠️⚠️ THIS REPLACES THREE NEAR-IDENTICAL `chunkText` COPIES — one per API client — WHICH ALL
-    /// MEASURED IN THE WRONG UNIT. They used `text.count`, which counts Characters (extended
-    /// grapheme clusters); Telegram, Discord and Slack all count UTF-16 code units. One family
-    /// emoji is 1 Character and 11 UTF-16 units, so a "within budget" chunk could be an order of
-    /// magnitude over the real limit — and the platform rejects the whole message rather than
-    /// truncating it, so an emoji-dense agent reply did not arrive at all. Invariant 28 already
-    /// required UTF-16 for the render path (`measure`); the chunkers were the half that never got it.
-    ///
-    /// ⚠️ THE CUT IS ALWAYS ON A Character BOUNDARY even though the budget is counted in UTF-16 —
-    /// slicing `utf16` directly can split a grapheme and produce a replacement character. Same
-    /// reasoning as `fit(_:limit:)` above.
-    ///
-    /// ⚠️ PROGRESS IS GUARANTEED. A single grapheme costing more than `limit` leaves no room for
-    /// even one Character, and the obvious loop then appends an empty chunk forever. Such a
-    /// grapheme is emitted alone, over budget, because a message the platform will reject is still
-    /// better than a hang — and the alternative, dropping it, silently loses content.
+    /// Splits `text` into pieces that each fit `limit` (UTF-16 units), preferring paragraph then line boundaries. Cuts
+    /// always fall on a Character boundary; a single grapheme over `limit` is emitted alone, over budget, so progress is
+    /// guaranteed.
     nonisolated static func chunk(_ text: String, limit: Int) -> [String] {
         guard limit > 0, measure(text) > limit else { return [text] }
 
@@ -305,9 +225,8 @@ enum RemoteTextBudget {
 /// differ — so it is written once and parameterised, rather than three times and compared.
 private enum NoticeText {
 
-    /// - Parameter limit: the platform's `maxMessageLength`. ⚠️ REQUIRED, NOT DEFAULTED — a
-    ///   default would be one platform's limit silently applied to the other two, and the whole
-    ///   defect this closes is that the tightest cap was never considered.
+    /// - Parameter limit: the platform's `maxMessageLength`; required, not defaulted, so one platform's limit is never
+    /// applied to another.
     nonisolated static func build(
         _ notice: Notice,
         markup: RemoteCapabilities.Markup,
@@ -319,8 +238,7 @@ private enum NoticeText {
         var lines: [String] = []
 
         if let title = notice.title, !title.isEmpty {
-            // ⚠️ The icon sits OUTSIDE the bold markers, matching every shipping heading
-            // (`📊 *Devgentic Status*`). Folding it into `title` emits `*📊 Devgentic Status*`.
+            // The icon sits outside the bold markers, matching every shipping heading.
             let heading = bold(escaped(title))
             lines.append(notice.icon.map { "\(escaped($0)) \(heading)" } ?? heading)
         }
@@ -332,8 +250,7 @@ private enum NoticeText {
             let value = field.emphasis ? bold(escaped(field.value)) : escaped(field.value)
             let piece: String
             if let label = field.label, !label.isEmpty {
-                // ⚠️ The colon goes INSIDE the bold, or `/help` ships `*Security Tier*: Full Access`
-                // where it currently reads `*Security Tier:* Full Access`.
+                // The colon goes inside the bold marker (`*Security Tier:* Full Access`).
                 piece = field.labelEmphasis
                     ? "\(bold(escaped(label) + ":")) \(value)"
                     : "\(escaped(label)): \(value)"
@@ -348,21 +265,13 @@ private enum NoticeText {
                 lines.append(piece)
             }
         }
-        // ⚠️ FITTED HERE, AFTER ESCAPING. Escaping ADDS characters (a backslash per Markdown
-        // metacharacter on Telegram, per `*_~`|>` on Discord, an entity per `&<>` on Slack), so a
-        // budget applied to the raw text would be measured against a shorter string than the one
-        // actually sent — and a code-heavy transcript would clear the limit anyway.
+        // Fitted after escaping, because escaping adds characters and a budget applied to the raw text would measure a shorter
+        // string than the one sent.
         return RemoteTextBudget.fit(lines: lines, limit: limit)
     }
 }
 
-/// A chooser's heading, built once for all three platforms.
-///
-/// ⚠️ SHARED BECAUSE THE THREE HAD ALREADY DIVERGED HERE. Slack computed `bold(title)` before its
-/// empty-chooser guard while Telegram and Discord computed it after, so the same empty chooser
-/// rendered bold on one platform and plain on the other two — in the file whose header says a
-/// difference must be justified in the diff. One builder, used by both branches, makes that
-/// unrepresentable.
+/// A chooser's heading, built once for all three platforms so an empty chooser renders identically everywhere.
 private enum ChooserHeading {
 
     nonisolated static func build(
@@ -375,22 +284,17 @@ private enum ChooserHeading {
         func escaped(_ text: String) -> String { RemoteMarkupEscaping.escape(text, for: markup) }
         let heading = bold(escaped(chooser.title))
         var full = chooser.icon.map { "\(escaped($0)) \(heading)" } ?? heading
-        // ⚠️ ESCAPED LIKE ANY OTHER TEXT even though this app writes it: the heading is fitted and
-        // escaped as one string, and an unescaped tail would be the one place markup could leak.
+        // Escaped like any other text even though this app writes it: the heading is fitted and escaped as one string.
         if let note { full += "\n" + escaped(note) }
-        // ⚠️ A HEADING CAN BE USER TEXT. `/search <query>` puts the query in it verbatim, so this is
-        // not a constant that obviously fits — and a rejected heading takes the whole button list
-        // with it.
+        // A heading can be user text (`/search <query>` puts the query in verbatim), and a rejected heading takes the whole
+        // button list with it.
         return RemoteTextBudget.fit(full, limit: limit)
     }
 }
 
 
-/// The options a chooser can actually show on one platform, and what to say about the rest.
-///
-/// ⚠️ SHARED, because a per-renderer `prefix(_:)` is exactly how the three bridges drifted apart in
-/// the first place — and because a trim that one platform reports and another performs silently is
-/// worse than no trim at all.
+/// The options a chooser can actually show on one platform, and what to say about the rest; shared so a trim is never
+/// reported on one platform and performed silently on another.
 private enum ChooserContent {
 
     /// - Returns: the buttons to render, in order, and a note for the heading when some were cut.
@@ -405,9 +309,7 @@ private enum ChooserContent {
         )
         let all = Array(chooser.options.prefix(kept)) + chooser.extraActions
         guard dropped > 0 else { return (all, nil) }
-        // ⚠️ THE COUNT IS IN THE MESSAGE, not just the log. A list silently showing 25 of 40 reads
-        // as "that is all there is" — the same lie the `/search` scan bound and the transcript
-        // budget both disclose rather than hide.
+        // The count is in the message, not just the log: a list silently showing 25 of 40 reads as 'that is all there is'.
         return (all, "showing \(kept) of \(chooser.options.count) — \(dropped) more did not fit one message")
     }
 }
@@ -419,15 +321,10 @@ enum TelegramRemoteRenderer {
     /// What `render` will hand to `TelegramAPIClient.sendMessage`.
     struct Draft: Encodable {
         let text: String
-        /// ⚠️ NOT a default. See this file's header — the whole point is that the parse mode is a
-        /// decision the renderer makes and a fixture can assert, not a value inherited from
-        /// whichever call site happens to be used.
+        /// Not defaulted: the parse mode is a decision the renderer makes and a fixture can assert, not a value inherited from a
+        /// call site.
         let parse_mode: String?
-        /// ⚠️ TYPE-ERASED, not `InlineKeyboardMarkup?`. It was the concrete type, and that single
-        /// choice is what made Telegram's only structured-input affordance unreachable: a
-        /// `ForceReply` could not be expressed here even though `sendMessage` had always accepted
-        /// one. The barrier was never the API — it was this field and the transport's literal
-        /// `.map { .inline($0) }`.
+        /// Type-erased rather than `InlineKeyboardMarkup?` so a `ForceReply` can be expressed as well as an inline keyboard.
         let reply_markup: SendMessagePayload.ReplyMarkup?
     }
 
@@ -444,10 +341,8 @@ enum TelegramRemoteRenderer {
             return nil
 
         case .prompt(let operationID, let kind):
-            // ⚠️ MOVED VERBATIM from `TelegramTransport.sendHITLPrompt`, literals included. The text
-            // is NOT escaped and `parse_mode` is nil — HITL prompts carry model-supplied tool names
-            // and parameters, and running those through a Markdown parser is exactly the 400 the
-            // notice path escapes to avoid. The asymmetry is deliberate; see this file's header.
+            // The prompt text is not escaped and `parse_mode` is nil: HITL prompts carry model-supplied tool names and parameters,
+            // and a Markdown parser would reject them with a 400. The asymmetry with the notice path is deliberate.
             return promptDraft(operationID: operationID, kind: kind)
 
         case .notice(let notice):
@@ -461,16 +356,13 @@ enum TelegramRemoteRenderer {
             let (all, note) = ChooserContent.resolve(chooser, capabilities: capabilities)
             let heading = ChooserHeading.build(chooser, markup: capabilities.markup, limit: capabilities.maxMessageLength, note: note, bold: bold)
             guard case .buttons(let rows) = RemoteChooserLayout.plan(optionCount: all.count, capabilities: capabilities) else {
-                // ⚠️ An empty chooser renders as the heading with NO keyboard — never an empty one.
-                // It is NOT the empty-state SENTENCE: producing "No conversations yet…" is the
-                // command service's job, and it must not hand an empty chooser to a renderer at all.
+                // An empty chooser renders as the heading with no keyboard; the empty-state sentence is the command service's job.
                 return Draft(text: heading, parse_mode: "Markdown", reply_markup: nil)
             }
             let keyboard = rows.map { row in
                 row.map { index -> InlineKeyboardButton in
                     let option = all[index]
-                    // ⚠️ `isCurrent` becomes the star HERE. Telegram has no styling and no subtitle,
-                    // so `intent` and `detail` are dropped — decoration, deliberately not logged.
+                    // `isCurrent` becomes the star here; Telegram has no styling or subtitle, so `intent` and `detail` are dropped.
                     let label = (option.isCurrent ? "⭐ " : "") + option.label
                     return InlineKeyboardButton(
                         text: String(label.prefix(capabilities.maxLabelLength)),
@@ -486,15 +378,10 @@ enum TelegramRemoteRenderer {
         }
     }
 
-    /// The four HITL prompts, as Telegram payloads.
-    ///
-    /// ⚠️ `parse_mode` is nil on every arm — see the call site. Button labels are never markup.
+    /// The four HITL prompts, as Telegram payloads; `parse_mode` is nil on every arm and button labels are never markup.
     nonisolated static func promptDraft(operationID: UUID, kind: HITLType) -> Draft {
-        // ⚠️ THE PROMPT ARMS NEED THIS MOST, not least. `toolConfirmation` caps its params at 500,
-        // but `planReview`'s subtask list, `gate`'s prompt and `clarification`'s question are all
-        // model-generated and UNBOUNDED — and a HITL prompt that the platform rejects leaves the run
-        // parked with no prompt visible anywhere remote, which is strictly worse than a truncated
-        // one: the buttons are what resolve it, and they arrive with the message or not at all.
+        // The prompt arms need fitting most: `planReview`, `gate` and `clarification` text is model-generated and unbounded,
+        // and a rejected prompt leaves the run parked with nothing visible remotely.
         func fit(_ text: String) -> String {
             RemoteTextBudget.fit(lines: text.components(separatedBy: "\n"), limit: capabilities.maxMessageLength)
         }
@@ -524,10 +411,8 @@ enum TelegramRemoteRenderer {
             )
 
         case .clarification(let question):
-            // ⚠️ "REPLY TO THIS MESSAGE" IS LOAD-BEARING COPY, not politeness. A reply carries
-            // `reply_to_message`, which is the only thing on the wire that says WHICH clarification
-            // is being answered. Plain text still works as a fallback, but it is answered by
-            // whichever clarification the provider cursor happens to point at.
+            // 'Reply to this message' is load-bearing copy: a reply carries `reply_to_message`, the only thing on the wire that
+            // says which clarification is being answered; plain text falls back to the provider cursor.
             let messageText = """
             💬 Agent needs clarification:
 
@@ -569,7 +454,7 @@ enum TelegramRemoteRenderer {
 
             Choose an option:
             """
-            // ⚠️ ONE BUTTON PER ROW on Telegram, unlike Discord's chunk-by-5.
+            // One button per row on Telegram, unlike Discord's chunk-by-5.
             let rows = options.enumerated().map { idx, opt in
                 [InlineKeyboardButton(
                     text: String(opt.prefix(70)),
@@ -600,8 +485,7 @@ enum DiscordRemoteRenderer {
             return nil
 
         case .prompt(let operationID, let kind):
-            // ⚠️ MOVED VERBATIM from `DiscordTransport.sendHITLPrompt`. Unescaped: the text carries
-            // model-supplied tool names and parameters.
+            // Unescaped: the text carries model-supplied tool names and parameters.
             return promptDraft(operationID: operationID, kind: kind)
 
         case .notice(let notice):
@@ -641,11 +525,8 @@ enum DiscordRemoteRenderer {
 
     /// The four HITL prompts, as Discord payloads.
     nonisolated static func promptDraft(operationID: UUID, kind: HITLType) -> Draft {
-        // ⚠️ THE PROMPT ARMS NEED THIS MOST, not least. `toolConfirmation` caps its params at 500,
-        // but `planReview`'s subtask list, `gate`'s prompt and `clarification`'s question are all
-        // model-generated and UNBOUNDED — and a HITL prompt that the platform rejects leaves the run
-        // parked with no prompt visible anywhere remote, which is strictly worse than a truncated
-        // one: the buttons are what resolve it, and they arrive with the message or not at all.
+        // The prompt arms need fitting most: `planReview`, `gate` and `clarification` text is model-generated and unbounded,
+        // and a rejected prompt leaves the run parked with nothing visible remotely.
         func fit(_ text: String) -> String {
             RemoteTextBudget.fit(lines: text.components(separatedBy: "\n"), limit: capabilities.maxMessageLength)
         }
@@ -674,12 +555,8 @@ enum DiscordRemoteRenderer {
             return Draft(content: fit(messageText), components: [row])
 
         case .clarification(let question):
-            // ⚠️ THE BUTTON IS WHAT MAKES A MODAL POSSIBLE AT ALL. A modal can only be opened as
-            // the response to a LIVE interaction (id + token, valid ~3s), and a clarification is
-            // raised asynchronously by the agent with no interaction in flight — so there is
-            // nothing to open one against until the user taps something. Clarification was the one
-            // HITL kind rendered with no affordance anywhere, which is exactly why its answer could
-            // only ever be correlated by a provider-wide cursor.
+            // The button is what makes a modal possible: a modal opens only as the response to a live interaction (valid ~3s), and
+            // a clarification is raised asynchronously with none in flight.
             let messageText = """
             💬 **Agent needs clarification:**
 
@@ -732,7 +609,7 @@ enum DiscordRemoteRenderer {
                     DiscordComponent.secondaryStyle
                 )
             }
-            // ⚠️ CHUNK BY 5 — an ActionRow's hard limit, and NOT the same as the chooser path.
+            // Chunk by 5, an ActionRow's hard limit; not the same as the chooser path.
             let rows = stride(from: 0, to: buttons.count, by: 5).map { start in
                 DiscordComponent.actionRow(Array(buttons[start..<min(start + 5, buttons.count)]))
             }
@@ -760,14 +637,12 @@ enum SlackRemoteRenderer {
             return nil
 
         case .prompt(let operationID, let kind):
-            // ⚠️ MOVED VERBATIM from `SlackTransport.sendHITLPrompt`. Unescaped, for the same reason
-            // as the other two.
+            // Unescaped, as on the other platforms.
             return promptDraft(operationID: operationID, kind: kind)
 
         case .notice(let notice):
-            // ⚠️ `text` carries the flat form as well as the blocks. That is not redundancy: Slack
-            // uses it for the notification preview and for clients that cannot render blocks, and
-            // `SlackTransport` already follows this pattern.
+            // `text` carries the flat form as well as the blocks: Slack uses it for the notification preview and for clients that
+            // cannot render blocks.
             let text = NoticeText.build(notice, markup: capabilities.markup, limit: capabilities.maxMessageLength, bold: bold)
             return Draft(text: text, blocks: [.sectionBlock(text: text)])
 
@@ -796,8 +671,7 @@ enum SlackRemoteRenderer {
         }
     }
 
-    /// ⚠️ Slack has no "secondary" style — the absence of a style IS the default button. Returning
-    /// a literal would change every existing button's appearance.
+    /// Slack has no 'secondary' style: the absence of a style is the default button, so nil is returned for it.
     nonisolated static func style(for intent: Chooser.Intent) -> String? {
         switch intent {
         case .neutral:     return nil
@@ -808,30 +682,15 @@ enum SlackRemoteRenderer {
 
     /// The four HITL prompts, as Slack payloads.
     nonisolated static func promptDraft(operationID: UUID, kind: HITLType) -> Draft {
-        // ⚠️ THE PROMPT ARMS NEED THIS MOST, not least. `toolConfirmation` caps its params at 500,
-        // but `planReview`'s subtask list, `gate`'s prompt and `clarification`'s question are all
-        // model-generated and UNBOUNDED — and a HITL prompt that the platform rejects leaves the run
-        // parked with no prompt visible anywhere remote, which is strictly worse than a truncated
-        // one: the buttons are what resolve it, and they arrive with the message or not at all.
+        // The prompt arms need fitting most: `planReview`, `gate` and `clarification` text is model-generated and unbounded,
+        // and a rejected prompt leaves the run parked with nothing visible remotely.
         func fit(_ text: String) -> String {
             RemoteTextBudget.fit(lines: text.components(separatedBy: "\n"), limit: capabilities.maxMessageLength)
         }
 
-        /// ⚠️⚠️ MODEL-SUPPLIED TEXT ONLY — never the app's own literals. `sectionBlock` hard-codes
-        /// `mrkdwn` (SlackModels.swift), so everything in it is interpreted, and this arm interpolated
-        /// tool names, parameters, questions, plan steps and gate prompts RAW. A `<!channel>` reaching
-        /// it from a file the agent read fired a channel-wide notification, and `<url|label>` rendered
-        /// as a clickable link whose visible text the model chose — sitting directly above the genuine
-        /// ✅ Approve button, in the same message. Escaping the whole string instead would turn this
-        /// renderer's own `*Tool Approval Required*` into literal asterisks.
-        ///
-        /// ⚠️ `RemoteView`'s comment claimed prompts deliberately do not escape "and pass no parse
-        /// mode". That is TELEGRAM's rationale — there is no parse mode to omit on Slack, because the
-        /// block declares its own markup. The comment has been corrected.
-        ///
-        /// ⚠️ Runs BEFORE `fit`, because escaping lengthens the text (`<` → `&lt;`) and a budget
-        /// applied first would be measured against a shorter string than the one actually sent.
-        /// ⚠️ Button LABELS need no escaping — `SlackBlockElement.button` builds `plain_text`.
+        /// Escapes model-supplied text only, never the app's own literals: `sectionBlock` hard-codes `mrkdwn`, so raw tool
+        /// names, parameters, questions and plan steps could fire broadcasts or forge links. Runs before `fit`, since escaping
+        /// lengthens the text; button labels need none.
         func safe(_ modelText: String) -> String { RemoteMarkupEscaping.slack(modelText) }
 
         func button(_ label: String, _ token: CallbackToken, _ value: String, _ style: String?) -> SlackBlockElement {
@@ -854,15 +713,8 @@ enum SlackRemoteRenderer {
             ])
 
         case .clarification(let question):
-            // ⚠️ THE BUTTON IS WHAT MAKES A MODAL REACHABLE. `views.open` needs a live
-            // `trigger_id`, which arrives only on a button tap or a slash command — never on
-            // the `events_api` path that carries typed text. A clarification is raised
-            // asynchronously by the agent with no interaction in flight, so without an
-            // affordance here there is nothing to open a modal against, ever.
-            //
-            // ⚠️ This arm previously posted TEXT ONLY, with a note that adding blocks would
-            // change every clarification prompt on Slack. It does, and that is the change:
-            // the text block carries the same words, and an actions block carries the button.
+            // The button is what makes a modal reachable: `views.open` needs a live `trigger_id`, which arrives only on a button
+            // tap or slash command, never on the `events_api` path that carries typed text.
             let messageText = "💬 *Agent needs clarification:*\n\n\(safe(question))\n\nTap *Answer* to reply, or type /skip to skip."
             return Draft(
                 text: fit(messageText),
@@ -902,10 +754,8 @@ enum SlackRemoteRenderer {
                     nil
                 )
             }
-            // ⚠️⚠️ CHUNKED BY 5 HERE, but the CHOOSER path puts up to 25 in ONE actions block. The
-            // two shipping comments about Slack's limit contradict each other (SlackTransport says
-            // 5, SlackChatOpsBridge says 25 and is correct); both BEHAVIOURS are preserved because
-            // changing either is a visible rendering change, not a refactor.
+            // Chunked by 5 here, while the chooser path puts up to 25 in one actions block; both behaviours are preserved as
+            // rendered today.
             var blocks: [SlackBlock] = [.sectionBlock(text: fit(messageText))]
             for start in stride(from: 0, to: buttons.count, by: 5) {
                 blocks.append(.actionsBlock(

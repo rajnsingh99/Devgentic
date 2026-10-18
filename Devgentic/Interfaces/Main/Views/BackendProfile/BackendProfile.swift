@@ -4,13 +4,7 @@
 //  BackendProfile.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 22/08/25.
-//
-//  Refactored to a unified model on 26/08/25.
-//  Migrated to SwiftData on 26/03/26:
-//    - ProfileDetails cases now carry single config structs (BotConfig, AgentConfig, etc.)
-//    - BackendProfileModel is a typealias for BackendProfileSnapshot (value-type mirror)
-//    - Workflow switched from embedded copies to UUID references
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,10 +13,7 @@ import os
 private let logger = DGLogger(category: "BackendProfile")
 
 // MARK: - Compatibility Typealias
-//
-// The execution layer, ChatOps bridges, and many views still reference `BackendProfileModel`.
-// Rather than renaming 40+ files in one pass, we alias to the Sendable snapshot struct
-// defined in BackendProfileSD.swift. This is functionally identical to the old struct.
+// Alias for `BackendProfileSnapshot`, the Sendable value-type mirror defined in BackendProfileSD.swift.
 typealias BackendProfileModel = BackendProfileSnapshot
 
 extension BackendProfileSnapshot {
@@ -167,9 +158,7 @@ struct ErrorRecovery: Codable, Hashable, Sendable {
         self.fallbackMessage = fallbackMessage
     }
 
-    // Tolerant per-field (same idiom as RetryPolicy above). With the synthesized decoder, one absent key here
-    // failed the whole ProfileDetails decode, which destructively collapses the
-    // profile to the default-bot fallback in BackendProfileSD.
+    // Tolerant per-field decoder: one absent key must not fail the whole ProfileDetails decode.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.onToolFailure = (try? container.decode(ToolFailurePolicy.self, forKey: .onToolFailure)) ?? .abort
@@ -184,15 +173,9 @@ struct ErrorRecovery: Codable, Hashable, Sendable {
     static let defaultFallbackMessage = "Try a completely different approach or answer from your own knowledge without using tools."
 }
 
-/// Per-tier resilience caps the user may override (Resilience architecture, Phase B).
-///
-/// Splits what the legacy single `RetryPolicy.maxRetries` knob conflated — it drove
-/// the parse-failure cap, the consecutive-tool-failure cap, AND the repetitive-action
-/// cap simultaneously. Each field here is optional: `nil` = inherit the resolved
-/// default (`ResolvedResiliencePolicy.resolved` falls back to `RetryPolicy.maxRetries`
-/// and then the provider-class default, so old profiles behave identically until a
-/// field is explicitly set). The transport tier (HTTP retries/backoff) stays
-/// auto-derived from provider class and is deliberately NOT exposed here.
+/// Per-tier resilience caps the user may override: parse failures, consecutive tool failures and repetitive actions.
+/// Each field is optional; nil inherits the resolved default (`ResolvedResiliencePolicy.resolved`).
+/// The transport tier (HTTP retries/backoff) is derived from provider class and not exposed here.
 struct ResilienceOverrides: Codable, Hashable, Sendable {
     /// Consecutive malformed-output failures tolerated before aborting. nil = Auto.
     var maxParseFailures: Int?
@@ -216,10 +199,7 @@ struct ResilienceOverrides: Codable, Hashable, Sendable {
         self.maxConsecutiveDenials = maxConsecutiveDenials
     }
 
-    // Tolerant per-field decoder (same idiom as RetryPolicy/ErrorRecovery) so a
-    // future field or a renamed key can never collapse the enclosing profile decode.
-    // (Profiles that briefly persisted maxConsecutiveAskUser/maxConsecutiveIdle simply
-    // have those keys ignored here.)
+    // Tolerant per-field decoder so a new field or renamed key cannot collapse the enclosing profile decode.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.maxParseFailures = (try? container.decodeIfPresent(Int.self, forKey: .maxParseFailures)) ?? nil
@@ -233,8 +213,7 @@ struct ResilienceOverrides: Codable, Hashable, Sendable {
         case maxConsecutiveDenials
     }
 
-    /// True when no field is set — used to omit the whole object on encode so an
-    /// all-Auto profile stays byte-identical to a pre-Phase-B one.
+    /// True when no field is set; the whole object is then omitted on encode.
     var isEmpty: Bool {
         maxParseFailures == nil && maxConsecutiveToolFailures == nil && maxRepetitiveActions == nil
             && maxConsecutiveDenials == nil
@@ -248,11 +227,7 @@ enum ToolFailurePolicy: String, Codable, Hashable, Sendable, CaseIterable, Ident
 
     var id: String { rawValue }
 
-    // ⚠️ register A63 — the `String` `displayName` that lived here is now
-    // `localizedTitle: LocalizedStringKey` in `ProfileEnumLocalizedTitles.swift`. It cannot live
-    // beside the enum: this file is Foundation-only by design (these types are Codable and reach
-    // SwiftData/JSON) and `LocalizedStringKey` is SwiftUI. `rawValue` is unchanged and remains the
-    // persistence/telemetry identifier.
+    // The localized title is in `ProfileEnumLocalizedTitles.swift`; this file is Foundation-only.
 }
 
 enum ExhaustionPolicy: String, Codable, Hashable, Sendable, CaseIterable, Identifiable {
@@ -261,11 +236,7 @@ enum ExhaustionPolicy: String, Codable, Hashable, Sendable, CaseIterable, Identi
 
     var id: String { rawValue }
 
-    // ⚠️ register A63 — the `String` `displayName` that lived here is now
-    // `localizedTitle: LocalizedStringKey` in `ProfileEnumLocalizedTitles.swift`. It cannot live
-    // beside the enum: this file is Foundation-only by design (these types are Codable and reach
-    // SwiftData/JSON) and `LocalizedStringKey` is SwiftUI. `rawValue` is unchanged and remains the
-    // persistence/telemetry identifier.
+    // The localized title is in `ProfileEnumLocalizedTitles.swift`; this file is Foundation-only.
 }
 
 // MARK: - History Strategy
@@ -285,14 +256,9 @@ enum HistoryStrategy: String, Codable, Hashable, Sendable, CaseIterable, Identif
 
     var id: String { rawValue }
 
-    // ⚠️ register A63 — the `String` `displayName` that lived here is now
-    // `localizedTitle: LocalizedStringKey` in `ProfileEnumLocalizedTitles.swift`. It cannot live
-    // beside the enum: this file is Foundation-only by design (these types are Codable and reach
-    // SwiftData/JSON) and `LocalizedStringKey` is SwiftUI. `rawValue` is unchanged and remains the
-    // persistence/telemetry identifier.
+    // The localized title is in `ProfileEnumLocalizedTitles.swift`; this file is Foundation-only.
 
-    // ⚠️ register A63 — `strategyDescription` moved to `HistoryStrategy.localizedDescription`
-    // in `ProfileEnumLocalizedTitles.swift`. See the note on the title above.
+    // The localized description is `HistoryStrategy.localizedDescription` in `ProfileEnumLocalizedTitles.swift`.
 
     var icon: String {
         switch self {
@@ -336,15 +302,11 @@ struct PlanningCapabilityConfig: Codable, Hashable, Sendable {
     var parallelSubtasks: Bool
     var subtaskToolFiltering: Bool
     var requiresPlanApproval: Bool
-    /// When true, the planner may ask the user ONE clarifying question before
-    /// producing the plan (a vague task otherwise forces it to guess the plan's
-    /// shape). Capped at a single round; the answer is recorded into the run's
-    /// interaction memory so identical `ask_user` re-asks during execution replay it.
+    /// When true, the planner may ask the user one clarifying question before producing the plan.
+    /// Capped at a single round; the answer is recorded into the run's interaction memory so `ask_user` re-asks replay it.
     var clarifyBeforePlanning: Bool
 
-    // parallelSubtasks default changed to false: parallel execution serializes at the
-    // LLM layer (single GPU for local, rate-limited for cloud) making it illusory.
-    // Field retained for future batch inference / multi-model routing support.
+    // `parallelSubtasks` defaults to false: parallel execution serializes at the LLM layer anyway.
     init(maxSubtasks: Int = 5, parallelSubtasks: Bool = false, subtaskToolFiltering: Bool = true, requiresPlanApproval: Bool = false, clarifyBeforePlanning: Bool = true) {
         self.maxSubtasks = maxSubtasks
         self.parallelSubtasks = parallelSubtasks
@@ -403,10 +365,8 @@ struct AgentDelegationConfig: Codable, Hashable, Sendable {
 }
 
 /// Configuration for a Workflow profile.
-///
-/// Holds no stored settings today: the graph lives in the layout (`WorkflowLayoutSD`), and retry,
-/// timeout and approval are per node (`WorkflowNodeConfig`). It stays a struct so `.workflow` has a
-/// payload to grow into without a format change.
+/// Holds no stored settings: the graph is in the layout (`WorkflowLayoutSD`); retry, timeout, approval are per node.
+/// It stays a struct so `.workflow` has a payload to grow into without a format change.
 struct WorkflowConfig: Codable, Hashable, Sendable {
     /// The config a NEWLY CREATED workflow profile gets.
     static func forNewProfile() -> WorkflowConfig {
@@ -414,10 +374,7 @@ struct WorkflowConfig: Codable, Hashable, Sendable {
     }
 
     /// The bound on a node that sets no `hardTimeout` and whose profile sets no `executionTimeout`.
-    ///
-    /// Every node kind is bounded, and the clock excludes time parked awaiting a human. A node that
-    /// genuinely needs longer sets its own `hardTimeout`, or its bound profile sets
-    /// `executionTimeout`, and both win over this.
+    /// The clock excludes time parked awaiting a human; a node's own `hardTimeout` or its profile's `executionTimeout` wins.
     static let nodeTimeout: TimeInterval = 120
 }
 
@@ -432,15 +389,8 @@ struct ImageGenConfig: Codable, Hashable, Sendable {
 // MARK: - Schema Versioning
 
 /// Version of the persisted `ProfileDetails` shape (`configData`).
-///
-/// ⚠️ HISTORY RESET 2026-10-03, pre-release with no users: versions 1–9 and every upgrade step
-/// between them were deleted, and this shape is the new version 1. A stored blob at any other
-/// version is NOT upgraded — it is refused and preserved (see `ProfileBlobGate`).
-///
-/// ⚠️ This number is independent of the SwiftData schema version (`DevgenticSchemaV1`) and of
-/// `MARKETING_VERSION`: SwiftData cannot see inside `configData`, so this is the only thing
-/// versioning what is actually in there. Bump it for a change to the PERSISTED shape of
-/// `ProfileDetails`, and decide then whether older blobs need an upgrade step.
+/// A stored blob at any other version is refused and preserved, not upgraded (see `ProfileBlobGate`).
+/// Independent of the SwiftData schema version: bump it for a change to the persisted shape of `ProfileDetails`.
 enum ProfileSchemaVersion: Int, Codable, Sendable {
     case v1 = 1
 
@@ -451,12 +401,7 @@ enum ProfileSchemaVersion: Int, Codable, Sendable {
 enum ProfileBlobGate {
 
     /// The blob shape this build writes and understands.
-    ///
-    /// ⚠️ DERIVED from `ProfileSchemaVersion.current`, never written as its own literal. These are
-    /// the two halves of one fact — `current` is what the ENCODER stamps
-    /// (`ProfileDetails.encode`), this is what the REFUSAL compares against — and as separate
-    /// literals they could silently disagree, locking the user out of profiles this very build
-    /// just wrote.
+    /// Derived from `ProfileSchemaVersion.current`, never a separate literal, so the encoder's stamp and the check agree.
     static var currentVersion: Int { ProfileSchemaVersion.current.rawValue }
 
     /// What `check` concluded about a stored blob.
@@ -465,14 +410,13 @@ enum ProfileBlobGate {
         case decodable
         /// Written by a NEWER build than this one. Refuse; do not guess.
         case tooNew(storedVersion: Int)
-        /// Written before the 2026-10-03 history reset. Nothing upgrades it any more.
+        /// A stored version this build does not understand; blobs at older versions are refused, not upgraded.
         case unsupported(storedVersion: Int)
     }
 
-    /// ⚠️ The newer-build refusal is the point (register G18): a blob from the future reported as
-    /// "corrupt" invites the user to reconfigure, which overwrites it and makes the loss permanent;
-    /// it needs an app update and NO change. This is not hypothetical for an unreleased app: the
-    /// store lives in an unsandboxed shared directory, so running an earlier commit is enough.
+    // Why: the store lives in a shared directory, so an older build can meet a newer build's blob.
+    /// Classifies a stored blob by its schema version: readable, written by a newer build, or unsupported.
+    /// A newer-build blob is reported as such, not as corrupt, so the user is not invited to overwrite it.
     static func check(_ data: Data) -> Verdict {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .decodable
@@ -570,11 +514,8 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             ))
 
         case .code:
-            // Code mode reuses AgentConfig — decode identically to `.agent` plus `projectPath`.
-            // ⚠️ That sentence was ASPIRATIONAL until 2026-08-05: six fields were missing here and
-            // in the encode arm, so a code profile's resilience settings never survived a save. See
-            // the encode arm for the consequence. Keep the two arms in lockstep — the round-trip
-            // test `testCodeProfileRoundTripsEverySettingAgentDoes` fails if they drift.
+            // Code mode reuses AgentConfig: decodes identically to `.agent` plus `projectPath`.
+            // Keep this arm in lockstep with the encode arm; a round-trip test fails if they drift.
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
             let tools = (try? container.decode([Tool].self, forKey: .tools)) ?? []
             let description = try container.decodeIfPresent(String.self, forKey: .description)
@@ -651,23 +592,8 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encodeIfPresent(config.advancedSettings, forKey: .advancedSettings)
 
         case .code(let config):
-            // ⚠️ MUST mirror `.agent` field-for-field, plus `projectPath`. It did not until
-            // 2026-08-05: it silently dropped description, knowledgeSources, retryPolicy,
-            // errorRecovery, resilienceOverrides and skills, even though its own comment on the
-            // decode arm claimed it decoded "identically to .agent plus projectPath".
-            //
-            // `CodeSessionManager` creates the code profile with
-            // `errorRecovery(onToolFailure: .fallbackPrompt)` and `retryPolicy(maxRetries: 3)`, and
-            // neither survived a save — they came back nil on the next launch.
-            //
-            // ⚠️ HONEST SCOPE: this is a LATENT trap, not a live user-visible bug. `AgentConnect`
-            // reads resilience under `if case .agent(let agentConfig) = profile.details` (:425), and
-            // `.code` falls to the `else` that hardcodes `ErrorRecovery()` anyway — so today the
-            // stored value is not consulted for code profiles and the loss is masked. It goes live
-            // the moment that guard is widened to include `.code` (a one-line change that would look
-            // entirely safe) or a Code-mode settings UI exposes the tool-failure policy. Persisting
-            // what the profile actually says is the cheap half of that; the runtime gate is a
-            // separate question.
+            // Mirrors `.agent` field-for-field, plus `projectPath`, so a code profile's settings survive a save.
+            // Keep in lockstep with the decode arm; a dropped field comes back nil on the next launch.
             try container.encode(ProfileType.code, forKey: .profileType)
             try container.encode(config.llmConfig, forKey: .llmConfig)
             try container.encode(config.tools, forKey: .tools)
@@ -836,15 +762,8 @@ enum ApiProvider: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// Whether this provider runs locally on the user's machine.
-    /// `.openAICompatible` is HTTP-based (it may point at a localhost server like
-    /// LM Studio, but architecturally it's a remote endpoint that flows through
-    /// CloudRequestPipeline, not the in-process/Ollama-managed local class).
-    /// Whether requests to this provider carry an API key at all. Ollama and MLX never do, so for
-    /// them there is nothing to store and every Keychain lookup is wasted — and, if a stray item
-    /// ever existed under a changed signature, a needless access prompt.
-    ///
-    /// ⚠️ Not the same as `!isLocal`: an OpenAI-compatible endpoint may be local and still take a key.
+    /// Whether requests to this provider carry an API key at all; Ollama and MLX never do, so there is nothing to store.
+    /// Not the same as `!isLocal`: an OpenAI-compatible endpoint may be local and still take a key.
     var usesAPIKey: Bool {
         switch self {
         case .ollama, .mlx: return false
@@ -887,37 +806,18 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     /// Custom stop sequences extracted from the model's tokenizer configuration.
     var stopSequences: [String] = []
 
-    /// Whether extended thinking is active for this model.
-    ///
-    /// ⚠️ This is a USER PREFERENCE with a detected default — not a detected value. Three things
-    /// write it, and only in this order of authority:
-    ///   1. **The user**, via the Extended Thinking switch in Advanced Configuration. Always wins
-    ///      over detection.
-    ///   2. **Detection**, seeding a default *at model-selection time* — when the user picks a
-    ///      DIFFERENT model, whose defaults they have not expressed an opinion about yet.
-    ///   3. **The runtime**, auto-disabling on a 400 "does not support thinking"
-    ///      (`[THINKING_AUTO_HEAL]` in `BackendOrchestrationService`). This outranks the user
-    ///      because it is not a guess — the server refused.
-    ///
-    /// ⚠️ Rule 2 used to run on every REFRESH rather than on selection (register G98).
-    /// `ModelPickerView.updateCapabilityLevel` assigned it unconditionally and is called at the end
-    /// of every `fetchModels()`, which fires on `.onAppear` — so turning the switch off, saving, and
-    /// reopening the editor silently turned it back on. The setting survived exactly until the user
-    /// next looked at it. `updateCapabilityLevel` now takes a `seedUserPreferences` flag with NO
-    /// default value, so every call site has to decide which of the three writers it is.
-    ///
-    /// Do not add a fourth writer without deciding where it sits in that order.
+    /// Whether extended thinking is active for this model: a user preference with a detected default.
+    /// Authority order: the user's switch, detection at model-selection time, then the runtime's auto-disable on a 400.
+    /// Do not add another writer without deciding where it sits in that order.
     var thinkingEnabled: Bool = false
 
-    /// The model's input/output modalities (e.g. `.visionInput`), seeded by detection
-    /// (`MLXTokenizerAnalyzer` / `OllamaShowResponse`) at model-selection time. STORED
-    /// (not derived) so the detected capability survives persistence — read by the
-    /// vision-input gate. Defaults `.textOnly` (backward-compat for old configs).
+    /// The model's input/output modalities (e.g. `.visionInput`), seeded by detection at model-selection time.
+    /// Stored, not derived, so the detected capability survives persistence; defaults to `.textOnly`.
     var supportedModalities: SupportedModalities = .textOnly
 
-    /// Context window (tokens) to run Ollama under, set by Code's per-project "Context size"
-    /// (2026-09-24). Wins over the Advanced settings, the preset and the auto-default — see
-    /// `OllamaRequestOptions.resolve`. Nil everywhere else. Ollama only; other providers ignore it.
+    /// Context window (tokens) to run Ollama under, set by Code's per-project "Context size".
+    /// Wins over the Advanced settings, the preset and the auto-default (see `OllamaRequestOptions.resolve`).
+    /// Nil elsewhere; Ollama only.
     var numCtxOverride: Int?
 
     /// Convenience: combined profile used for generator + parser routing in AgentConnect.
@@ -925,23 +825,9 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata, modalities: supportedModalities, chatTemplateSource: chatTemplateSource, stopSequences: stopSequences)
     }
 
-    /// Re-baselines the config for a different provider. Everything scoped to the old
-    /// provider — endpoint, model, analyzer artifacts, advanced generation params — is
-    /// reset to its fresh-config default so a stale value can never leak into requests
-    /// against the new provider (e.g. an Ollama `localhost:11434` baseURL sent to OpenAI,
-    /// or a tuned local `temperature` silently applied to a cloud model).
-    ///
-    /// `apiKey` is cleared too (changed 2026-09-27). It used to survive on the theory that "a key
-    /// mismatched to the new cloud provider fails visibly in the model-list fetch" — but that fetch
-    /// is itself a request to the NEW vendor carrying the OLD vendor's credential, so the "visible
-    /// failure" was the leak. Nothing needs restoring on switch-back: since 2026-10-03 the key for
-    /// OpenAI, Anthropic, Google and OpenRouter lives once per PROVIDER (`AppProviderKeyStore`) and
-    /// `BackendProfile.details` injects the new provider's own key. `.openAICompatible` keys stay per
-    /// profile, so switching to it starts empty. `ProviderKeyShape` still refuses at send time any key
-    /// that plainly belongs to another vendor.
-    /// `cognitiveCapability` is reset to `.none`;
-    /// profile-type-aware defaults are layered on by the `onProviderChanged` callbacks
-    /// via `ProfileCapabilityFilter`.
+    /// Re-baselines the config for a different provider: endpoint, model, analyzer artifacts and generation params reset.
+    /// `apiKey` is cleared too, so one vendor's credential is never sent to another; `cognitiveCapability` resets to `.none`.
+    /// Profile-type-aware defaults are layered on by the `onProviderChanged` callbacks via `ProfileCapabilityFilter`.
     mutating func switchProvider(to newProvider: ApiProvider) {
         apiProvider = newProvider
         apiKey = nil
@@ -1007,7 +893,7 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         self.thinkingEnabled = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) ?? false
         // Backward-compat: old configs have no modalities → text-only.
         self.supportedModalities = try container.decodeIfPresent(SupportedModalities.self, forKey: .supportedModalities) ?? .textOnly
-        // ⚠️ Hand-written decoder: a field missing here is encoded and then silently dropped.
+        // Hand-written decoder: a field missing here is encoded and then silently dropped.
         self.numCtxOverride = try container.decodeIfPresent(Int.self, forKey: .numCtxOverride)
     }
 
@@ -1034,27 +920,8 @@ struct ProviderConfig: Codable, Hashable, Sendable {
 }
 
 // MARK: - Tolerant Decoders for Blob-Persisted Types
-//
-// ⚠️ WHY THESE EXIST — read before deleting one as "redundant".
-//
-// Everything reachable from `ProfileDetails` is persisted as an opaque JSON blob inside
-// `BackendProfile.configData`. SwiftData's schema does not see inside that blob, so adding a
-// field to any type below is NOT a schema change: lightweight migration reports nothing, the
-// container opens perfectly, and the failure lands at READ time instead.
-//
-// Swift's SYNTHESIZED `init(from:)` calls `decode(_:forKey:)` for every non-optional stored
-// property and does NOT fall back to the property's default value — it throws `keyNotFound`.
-// So `var maxOutputBytes: Int = 4096` on `Tool`, which looks entirely routine and compiles
-// clean, would make every previously-saved profile undecodable.
-//
-// Policy below: fields that carry a DEFAULT decode tolerantly (a missing key uses the default);
-// fields that genuinely identify the value stay REQUIRED, so a truly corrupt blob still fails
-// loudly instead of silently becoming junk.
-//
-// ⚠️ Each `init(from:)` lives in an EXTENSION, not the struct body — declaring it inline would
-// suppress the synthesized memberwise initializer that call sites rely on.
-//
-// See SWIFTDATA_GAP_REGISTER.md G13/G14 and the invariant in architecture_readme.md §7.
+// The synthesized `init(from:)` throws on any non-optional key missing from older blobs, so these decoders default them.
+// Identifying fields stay required; each decoder lives in an extension to keep the memberwise init.
 
 extension Tool {
     init(from decoder: any Decoder) throws {
@@ -1074,10 +941,8 @@ extension Tool {
         timeout = (try? container.decodeIfPresent(TimeInterval.self, forKey: .timeout)) ?? nil
         timeoutMessage = (try? container.decodeIfPresent(String.self, forKey: .timeoutMessage)) ?? nil
         isFavorite = (try? container.decode(Bool.self, forKey: .isFavorite)) ?? false
-        // ⚠️ Every field on `Tool` needs a line HERE — this decoder is hand-written, so a new field
-        // is ENCODED by the synthesized encoder and silently DROPPED on the way back. `cutStrategy`
-        // shipped exactly like that for a day: the Tool Library's choice saved, and every profile
-        // read returned nil (caught 2026-09-24 by `CodeProjectSessionTests`).
+        // Every field on `Tool` needs a decode line here: the decoder is hand-written, so a new field is encoded
+        // by the synthesized encoder and silently dropped on the way back.
         cutStrategy = (try? container.decodeIfPresent(ContextCutStrategy.self, forKey: .cutStrategy)) ?? nil
     }
 }

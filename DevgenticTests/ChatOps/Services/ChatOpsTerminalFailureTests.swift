@@ -2,18 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ChatOpsTerminalFailureTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Telling "the user asked me to stop" apart from "this will never work again".
-//
-//  ⚠️⚠️ THE FAILURE THIS PINS. Both listeners ended their stream the same way whether they were
-//  stopped deliberately or killed by an error no retry could clear, so `ChatOpsBridge` and
-//  `SlackChatOpsBridge` logged one `.info` line and flipped `isRunning` for both. Nothing in the app
-//  had EVER written `ChatOpsConnectionState.error`, even though `ChatOpsSettingsView.statusColor`
-//  carried a red arm waiting for it. A revoked bot token therefore killed remote control for the
-//  life of the process while the Pairing card kept a green dot and the word "Active", and the only
-//  recovery was quitting the app. Invariant 26 records the same fix for the Discord Gateway; neither
-//  Telegram nor Slack had received it.
+//  Created by Raj Singh.
 //
 
 import XCTest

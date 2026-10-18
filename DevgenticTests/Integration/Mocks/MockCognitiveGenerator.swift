@@ -4,9 +4,7 @@
 //  MockCognitiveGenerator.swift
 //  DevgenticTests
 //
-//  Pass-through cognitive generator for integration tests.
-//  Skips prompt compilation and delegates directly to the LLMProvider,
-//  which returns scripted ModernCognitiveStep responses.
+//  Created by Raj Singh.
 //
 
 import Foundation

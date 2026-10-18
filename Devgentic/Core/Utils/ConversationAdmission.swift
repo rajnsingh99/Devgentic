@@ -4,33 +4,7 @@
 //  ConversationAdmission.swift
 //  Devgentic
 //
-//  One run at a time, per conversation.
-//
-//  ⚠️⚠️ TWO CONCURRENT RUNS IN ONE CONVERSATION WAS REACHABLE AND UNGUARDED.
-//
-//  The only thing preventing it was the composer greying out its send button while streaming —
-//  a property of the TEXT BOX, not of the engine. `SchedulerCoordinator`, Orb and the ChatOps
-//  bridge call `ActiveStreamManager` directly, and no button is involved.
-//  `ActiveStreamManager.deriveHistory` already admitted this in its own comment: *"Concurrency in
-//  one conversation is reachable: the scheduler, Orb and the ChatOps bridge carry no admission
-//  check."* — and then worked AROUND it, excluding concurrent half-written turns from history so
-//  `pairTurns` would stop reporting a live question as answered with nothing.
-//
-//  Nothing ever threw. `activeStreams` is keyed by MESSAGE id, so two runs in one conversation are
-//  a perfectly valid state. What actually happened: two agents reading the same history, calling
-//  tools against the same files, writing into one transcript, at double the token cost.
-//
-//  ── Queue, never drop ───────────────────────────────────────────────────────────────────
-//
-//  Refusing the second run is the obvious design and it is wrong here. A ChatOps message that is
-//  refused is a USER'S MESSAGE thrown away; a refused scheduled task makes schedules silently
-//  unreliable. A late answer is recoverable, a discarded one is not — so arrivals serialise.
-//
-//  ── Why this is not an actor ────────────────────────────────────────────────────────────
-//
-//  `@MainActor` because `ActiveStreamManager` is, and the busy test reads its `activeStreams`.
-//  Making this an actor would put a hop between the check and the enqueue — and that gap is
-//  exactly where a second run slips through.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -38,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "ConversationAdmission")
 
+// Why: keep this a MainActor class, not an actor: a hop between the busy check and the enqueue lets a second run slip through.
+/// Serialises runs so at most one runs per conversation at a time; later arrivals queue rather than being dropped.
+/// A ChatOps message or scheduled task is therefore never lost to a refusal.
 @MainActor
 final class ConversationAdmission {
 
@@ -55,8 +32,8 @@ final class ConversationAdmission {
         self.isBusy = isBusy
     }
 
-    /// Whether this run is parked here waiting for its turn — what makes it a QUEUED run, which Stop
-    /// must not prefer over the run actually working (readiness CR-4).
+    /// Whether this run is parked here waiting for its turn, i.e. a queued run that Stop must not prefer
+    /// over the one actually working.
     func isWaiting(_ messageID: UUID) -> Bool { waiters[messageID] != nil }
 
     /// How many runs are waiting in a conversation. Diagnostics and tests.
@@ -64,16 +41,9 @@ final class ConversationAdmission {
         queue[conversationID]?.count ?? 0
     }
 
-    /// Parks until this conversation has no other live run. Returns immediately when it is free.
-    ///
-    /// ⚠️ Also parks when the conversation looks IDLE but a queue exists. A caller that queues
-    /// BEFORE it appears in the live set leaves exactly that window: `isBusy` says no, and a run
-    /// arriving in it would jump the whole queue. The ChatOps message that has waited longest is
-    /// precisely the one that must not be starved, so the queue's mere existence is enough to
-    /// park — see `testAnArrivalDoesNotOvertakeAQueueWhenTheConversationLooksIdle`.
-    /// - Parameter onWait: called ONLY if this run actually parks, before it suspends. The caller
-    ///   uses it to say so on screen — see `AgentState.ThinkingDetail.queued`. A caller cannot ask
-    ///   "will I wait?" beforehand without a second lookup that could disagree with this one.
+    // Why: also parks when the conversation looks idle but a queue exists, so an arrival cannot overtake queued runs.
+    /// Parks until this conversation has no other live run; returns immediately when it is free.
+    /// - Parameter onWait: called only if this run actually parks, before it suspends.
     /// - Returns: whether it parked, so the caller can undo whatever `onWait` did.
     @discardableResult
     func awaitTurn(conversationID: UUID,
@@ -91,11 +61,8 @@ final class ConversationAdmission {
         return true
     }
 
+    // Why: call after the finishing run leaves the live set, or the admitted run parks again with nothing left to wake it.
     /// Admits the next waiter. Call wherever a run leaves the live set.
-    ///
-    /// ⚠️ Must be called AFTER the finishing run has been removed from the live set, or the run it
-    /// admits sees a conversation that still looks occupied, parks again, and nothing is left to
-    /// wake it.
     func admitNext(inConversation conversationID: UUID) {
         guard var waiting = queue[conversationID], !waiting.isEmpty else { return }
         let next = waiting.removeFirst()
@@ -111,12 +78,9 @@ final class ConversationAdmission {
         continuation.resume()
     }
 
+    // Why: teardown only: `withCheckedContinuation` is not cancellation-aware, so a cancelled parked task would never resume.
     /// Releases every waiter in a conversation, in order, without waiting for turns.
-    ///
-    /// ⚠️ TEARDOWN ONLY (cancel, delete). `withCheckedContinuation` is NOT cancellation-aware: a
-    /// parked task whose stream is cancelled would never resume, leaking its continuation for the
-    /// life of the process and hanging anything awaiting that task. Resuming lets each body run on
-    /// and exit through its own cancellation check.
+    /// Each body then exits through its own cancellation check.
     func releaseAll(inConversation conversationID: UUID) {
         guard let waiting = queue.removeValue(forKey: conversationID), !waiting.isEmpty else { return }
         for messageID in waiting {
@@ -126,12 +90,7 @@ final class ConversationAdmission {
     }
 
     /// Withdraws one run without admitting it.
-    ///
-    /// ⚠️ Removes the WAITER only, deliberately leaving the id in the queue for `admitNext` to skip.
-    /// The first version removed it from both, which meant `admitNext`'s skip guarded a state
-    /// nothing could produce — mutation deleted that skip and every test stayed green. Two
-    /// mechanisms for one job means neither is tested; this leaves exactly one, and it is the one
-    /// a future caller that drops a waiter without dequeuing will also need.
+    /// Removes the waiter only, leaving the id queued for `admitNext` to skip.
     func forget(messageID: UUID, inConversation conversationID: UUID) {
         waiters.removeValue(forKey: messageID)?.resume()
     }

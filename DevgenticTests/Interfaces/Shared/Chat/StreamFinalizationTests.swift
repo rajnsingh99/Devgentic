@@ -4,20 +4,7 @@
 //  StreamFinalizationTests.swift
 //  DevgenticTests
 //
-//  Perf/correctness batch (chat hardening round 3, 2026-07-19). Pins the pure
-//  finalize-time decisions extracted onto ChatMessage:
-//
-//  ASM-2 `resolveThrownFinalContent` — a throw after streaming used to REPLACE the
-//         prose the user watched with the error card (bubble + persistence + RAG all
-//         lost the partial answer).
-//  ASM-4 `resolveFallbackOutcome` — a producer that yielded `.error` and ended
-//         without `.executionFinished` (and without throwing) was stamped
-//         `.completed`: green chip + `completed` trace over an error card.
-//  TL-1  `closeDanglingToolRows` — cancel/failure mid-tool persisted rows with
-//         `isExecuting == true`, so the spinner survived reload forever.
-//  P4/TL-4 `timelineRevision` — the change marker that lets the persistence flush
-//         skip re-encoding an unchanged timeline and lets AgentTimelineView skip
-//         regrouping; bumped by `didSet` so EVERY mutation path counts.
+//  Created by Raj Singh.
 //
 
 import XCTest

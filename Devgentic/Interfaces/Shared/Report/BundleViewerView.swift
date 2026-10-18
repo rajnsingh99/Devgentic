@@ -4,16 +4,14 @@
 //  BundleViewerView.swift
 //  Devgentic
 //
-//  The MAINTAINER side of the report loop (Gap #12.7). Opens a diagnostic bundle
-//  (`*.zip`) exported from another Devgentic install, decodes its `trace.json` — now
-//  hydrated with the full span/event tree via `TraceExportDTO` (B2) — and renders the
-//  spans + events read-only, WITHOUT touching the live trace store. Closes the loop:
-//  export → save → attach → open elsewhere.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// The maintainer side of the report loop: opens a diagnostic bundle (`*.zip`) exported from another install, decodes its
+/// `trace.json` and renders the spans and events read-only, without touching the live trace store.
 struct BundleViewerView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
@@ -301,11 +299,8 @@ private struct BundleSpanRow: View {
         case "completed": return .green
         case "error":     return theme.errorColor
         case "running":   return .blue
-        // [WF-OB6] Explicit rather than riding `default`. Both are deliberately NEUTRAL, not the
-        // error colour: a stopped or skipped span is not a failure, and painting it red is the
-        // whole defect this row was filed on. They already fell to `.gray` by default — naming
-        // them keeps that a decision, so a future `SpanStatus` case has to choose for itself
-        // instead of silently inheriting "grey" from these two.
+        // Explicit rather than riding `default`: a stopped or skipped span is not a failure, so both are neutral grey,
+        // and a new `SpanStatus` case must choose its own colour.
         case "cancelled": return .gray
         case "skipped":   return .gray
         default:          return .gray
@@ -319,13 +314,8 @@ private struct BundleEventRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
-            // ⚠️ DELIBERATELY RAW — do not convert this to a `localizedTitle`.
-            // `SpanEventType.rawValue` (`llmRequest`, `toolResult`, `parseError`, …) is the
-            // literal token written into the exported `trace.json` this viewer decodes. The
-            // Bundle Viewer is the MAINTAINER side of the report loop: its job is to show
-            // what is in the file so a maintainer can grep/cross-reference the raw bundle.
-            // Translating it (or even prettifying it) would break that correspondence, and
-            // there is no user-facing copy here to be inconsistent with.
+            // Deliberately raw, not a `localizedTitle`: `SpanEventType.rawValue` is the literal token in the exported `trace.json`,
+            // and a maintainer cross-references it against the raw bundle.
             Text(event.eventType.rawValue)
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(severityColor)

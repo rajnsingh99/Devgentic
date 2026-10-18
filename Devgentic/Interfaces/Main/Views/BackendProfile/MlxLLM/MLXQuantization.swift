@@ -4,17 +4,7 @@
 //  MLXQuantization.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for G5.
-//
-//  Choosing a quantization is the single most important decision a local-model user makes, and
-//  the store could not help: `MLXDisplayModel` had no quantization field, nothing parsed one
-//  from the repo id, and there was no badge, filter or sort. The live top-30 lists
-//  `gemma-4-E4B-it-MLX-4bit`, `-5bit`, `-6bit` and `-8bit` as four visually identical cards
-//  distinguished only by a suffix buried in the title.
-//
-//  It also cost accuracy: `ModelFitAdvisor.assess` was called with `metadata: nil`, so
-//  `parseQuantizationBits` — which already understood these suffixes — was dead code on the
-//  pre-download path and the RAM verdict fell back to a crude `diskBytes × 1.2` proxy.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -33,11 +23,6 @@ enum MLXQuantization: Int, CaseIterable, Comparable, Hashable {
     static func < (lhs: MLXQuantization, rhs: MLXQuantization) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
-
-    // `shortLabel: String` lived here and computed the same text as `localizedTitle` below.
-    // Its last caller was a VoiceOver label that consequently read an untranslated form of a
-    // badge that renders translated; that site now uses `localizedTitle` and this is removed
-    // rather than left as a second, silently-diverging source of the same string.
 
     var localizedTitle: LocalizedStringKey {
         switch self {
@@ -71,29 +56,16 @@ enum MLXQuantization: Int, CaseIterable, Comparable, Hashable {
     /// can use real bits-per-weight instead of inferring from disk size.
     var advisorToken: String { "\(rawValue)bit" }
 
-    /// The token handed to HuggingFace's `search=` parameter so the SERVER returns this
-    /// quantization, instead of the client thinning an already-fetched mixed page.
-    ///
-    /// ⚠️ `.sixteenBit` is NOT "16bit". The popular uploads are named `…-bf16`
-    /// (`lmstudio-community/Qwen3-1.7B-MLX-bf16`), while `16bit` matches almost nothing.
-    /// `parse(fromRepoId:)` reads `bf16` as 16-bit, so the client-side check still agrees.
-    ///
-    /// ⚠️ Deliberately NOT merged with `advisorToken`, which feeds
-    /// `ModelFitAdvisor.parseQuantizationBits` and must keep saying "16bit" there.
+    // Why: not merged with `advisorToken`, which feeds `ModelFitAdvisor.parseQuantizationBits` and must keep saying "16bit".
+    /// The token handed to HuggingFace's `search=` parameter so the server returns this quantization.
+    /// `.sixteenBit` maps to "bf16", the name popular uploads use, not "16bit".
     var searchToken: String {
         self == .sixteenBit ? "bf16" : "\(rawValue)bit"
     }
 
-    /// Parses the quantization a publisher encoded in the repo id.
-    ///
-    /// MLX conversions overwhelmingly put it in the name (`…-MLX-4bit`, `…-8bit`, `…-bf16`)
-    /// because the HuggingFace API's `config.quantization_config` is present for only about
-    /// half of them — verified across four live repos.
-    ///
-    /// ⚠️ Matching is anchored to a digit boundary. A naive `contains("4bit")` also fires on
-    /// `…-24bit-something`, and a naive `contains("8")` matches any model with an 8 in its
-    /// parameter count (`Llama-3.1-8B`), which is why the parameter size must not be mistaken
-    /// for a quantization.
+    /// Parses the quantization a publisher encoded in the repo id (`-4bit`, `-8bit`, `-bf16`).
+    /// The name is used because the API's `quantization_config` is present for only about half of MLX conversions.
+    /// Matching is anchored to a digit boundary, so `24bit` and a parameter count like `8B` are not mistaken for it.
     static func parse(fromRepoId repoId: String) -> MLXQuantization? {
         let lower = repoId.lowercased()
 
@@ -126,17 +98,10 @@ enum MLXQuantization: Int, CaseIterable, Comparable, Hashable {
 extension MLXQuantization {
 
     /// Synthesises just enough `ModelMetadata` for `ModelFitAdvisor` to use real bits-per-weight.
-    ///
-    /// Only quantization and parameter count are supplied; everything else stays nil so the
-    /// advisor falls back exactly as before when they can't be parsed.
+    /// Only quantization and parameter count are supplied; everything else stays nil so the advisor falls back.
     static func fitMetadata(forRepoId repoId: String) -> ModelMetadata? {
-        // ⚠️ Requires a parameter count, not just a quantization.
-        //
-        // `ModelFitAdvisor.assess` tries paramCount → diskSize → tier → `.unknown`. Bits alone
-        // can't drive the formula (it needs a parameter count), so metadata carrying only a
-        // quantization would add nothing — while the mandatory `tier` field could preempt the
-        // honest `.unknown` verdict with a guess. Better to return nil and let the existing
-        // disk-size path answer.
+        // Requires a parameter count, not just a quantization: bits alone cannot drive the formula, so nil lets the disk-size
+        // path answer.
         guard let params = parameterCount(fromRepoId: repoId) else { return nil }
         let quant = parse(fromRepoId: repoId)
         return ModelMetadata(
@@ -159,24 +124,10 @@ extension MLXQuantization {
         }
     }
 
-    /// Extracts a parameter count like `7B` / `3.2B` / `30B` from the repo id.
-    ///
-    /// ⚠️ Deliberately requires a `B` suffix immediately after the number. Without it,
-    /// `Qwen2.5-3B` and `Qwen3-Coder-30B` are indistinguishable from version numbers and
-    /// quantization suffixes.
-    /// Scans for `<digits>[.<digits>]B` not glued to a preceding letter/digit run that would make
-    /// it part of another token.
-    ///
-    /// ⚠️ COMPILED ONCE. This was built inside `parameterCount` on every call, and an
-    /// `NSRegularExpression(pattern:)` is ~23 µs of ICU compilation — measured at 24.0 µs/id
-    /// compiled-per-call against 1.2 µs/id cached, about two thirds of the whole RAM-fit pipeline.
-    /// That was survivable while the only caller was a card rendering once, and stopped being so
-    /// when the "Fits my Mac" filter began calling it per card per observer tick: sizes arrive one
-    /// per model, so a 5-page grid paid ~4,500 compilations (~158 ms on the main actor) for the
-    /// next page alone.
-    ///
-    /// `try?` at the top level rather than `try!`: a nil regex degrades `parameterCount` to nil,
-    /// which the fit advisor already treats as "no parameter count" and falls back from.
+    // Why: compiled once: building the regex per call is a measurable cost on the per-card fit filter; `try?` degrades to nil.
+    /// Extracts a parameter count like `7B` / `3.2B` / `30B` from the repo id, requiring a `B` suffix right after the
+    /// number.
+    /// Scans `<digits>[.<digits>]B` not glued to a preceding letter or digit run.
     private static let parameterCountRegex: NSRegularExpression? = {
         try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9.])(\d{1,3}(?:\.\d)?)[bB](?![A-Za-z0-9])"#)
     }()

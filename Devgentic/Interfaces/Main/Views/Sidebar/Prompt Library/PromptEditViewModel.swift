@@ -4,15 +4,14 @@
 //  PromptEditViewModel.swift
 //  Devgentic
 //
-//  Edit-buffer view model for create/edit forms. Split from the old
-//  PromptLibraryViewModel (2026-04-21) — each edit surface (detail view,
-//  create popover, AdvancedPromptEditor, AgentConfigDetailView) owns its
-//  own instance so drafts never leak between contexts.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
+/// Edit-buffer view model for create/edit forms.
+/// Each edit surface owns its own instance so drafts never leak between contexts.
 @Observable @MainActor
 final class PromptEditViewModel {
 
@@ -78,10 +77,8 @@ final class PromptEditViewModel {
 
     // MARK: - Persist
 
-    /// Commits the buffer via the service. Returns the saved prompt on success,
-    /// `nil` on failure. On success `originalPrompt` updates so `isDirty` flips
-    /// back to `false` — required for the detail view's dirty-aware Save button
-    /// and unsaved-changes guard to behave correctly after a save.
+    /// Commits the buffer via the service, returning the saved prompt or `nil` on failure.
+    /// On success `originalPrompt` updates so `isDirty` returns to `false`.
     @discardableResult
     func save() -> DevPrompt? {
         let tags = parsedTags()

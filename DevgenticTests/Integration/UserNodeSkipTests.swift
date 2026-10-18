@@ -4,18 +4,7 @@
 //  UserNodeSkipTests.swift
 //  DevgenticTests
 //
-//  Phase A of per-node SKIP (`LLM_Execution_Concurrency_Design.md` §0.6 D2.1, owner-ratified
-//  2026-08-21): a user-requested skip records `.skipped(.byUser)`, forwards the node's INPUT
-//  downstream unchanged, activates no ports, and keeps every default edge below it LIVE.
-//
-//  ⚠️ SEEDING, load-bearing in every end-to-end test here: requests can only exist MID-run (the
-//  button renders only on a live run's pending rows). [WF-CC14] The store is run-token-keyed
-//  now: a toggle landing before any run owns the conversation is STAGED, and the root run's
-//  `beginRun` ADOPTS it — so pre-loading the store and running at ROOT depth is exactly the
-//  supported simulation of "clicked during the run, before dispatch reached the node". (The old
-//  harness ran at `startingDepth: 1` to dodge the root start-CLEAR, which no longer exists — a
-//  fresh token has no leftovers by construction, and leftover-request immunity across runs is
-//  pinned by its own test below plus `WorkflowSkipRunScopeTests`.)
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,15 +4,12 @@
 //  SettingsSidebarListView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 19/03/26.
-//
-//  Inline sidebar list for settings categories. Replaces the separate
-//  SettingsView window — tapping a category shows its detail in the
-//  main content area via MainViewRouter.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Inline sidebar list of settings categories; selecting one shows its detail in the main area via `MainViewRouter`.
 struct SettingsSidebarListView: View {
 
     @Environment(MainViewRouter.self) private var router

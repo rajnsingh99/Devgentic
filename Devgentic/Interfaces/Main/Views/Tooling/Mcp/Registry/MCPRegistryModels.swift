@@ -4,23 +4,7 @@
 //  MCPRegistryModels.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — decoding for the official MCP Registry
-//  (https://registry.modelcontextprotocol.io, API frozen at v0.1).
-//
-//  The registry is a DIRECTORY, not a host or a proxy: it stores metadata and pointers to
-//  where servers are published (npm, PyPI, OCI) or hosted (a vendor URL). Nothing here ever
-//  routes a tool call. An entry becomes either:
-//
-//    • a `packages` entry  → a local stdio server we launch as a child process, and whose
-//                            package the RUNTIME downloads into its own cache on first run
-//    • a `remotes` entry   → a URL we talk to over HTTPS; nothing is downloaded
-//
-//  That distinction decides whether code runs on the user's machine or their data leaves it,
-//  so it is surfaced as the first thing on every row rather than buried in a detail view.
-//
-//  Decoding is DELIBERATELY LENIENT throughout. Registry entries are third-party data with
-//  wide variation, and a strict decoder would silently drop servers from the list — the
-//  exact failure mode that made `ToolParameters` swallow MCP tools before it was fixed.
+//  Created by Raj Singh.
 //
 
 import Foundation

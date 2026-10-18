@@ -4,35 +4,7 @@
 //  OrbDispatchTests.swift
 //  DevgenticTests
 //
-//  Orb had 261 tests across 20 classes and NONE of them touched the dispatch — zero references
-//  to `startMessageStream` in the whole Orb suite. Its voice stack (ASR, approvals, narration,
-//  speaker, config) was thoroughly covered; what it handed to the send path was not. That is the
-//  gap this file closes, and it is the gap the orphan defect lived in for the entire life of the
-//  feature.
-//
-//  ⚠️ THE DEFECT, stated once. Orb persists the CLEAN spoken command (so the chat window shows
-//  what was said) and sends the model the command PLUS a spoken-style hint. Those are two
-//  different strings. `BackendOrchestrationService` used to strip the current question out of
-//  history by comparing TEXT against `userQuery`, so for every voice turn in every speaking mode
-//  the comparison failed, the question survived into the episodic blob, and
-//  `EpisodicHistoryFormatter.pairTurns` emitted it through its orphan handler as
-//  `wasCancelled: true` / "Agent never responded to this query". Every voice turn told the model
-//  that the question it was being asked had already been abandoned.
-//
-//  The strip is now BY ID. That only works if the row Orb persists and the row it hands to the
-//  send path are ONE message — same object, same id, differing only in the model-facing text
-//  carried separately as `promptOverride`. `OrbSpokenStyleHintTests` already pins that the
-//  TEXT diverges correctly; nothing pinned that the IDENTITY does not. These tests do.
-//
-//  ⚠️ Why `voiceTurn` and not `execute(_:)`. The dispatch reaches four singletons
-//  (`WhisperRecognitionService`, `OrbConfigManager`, `SessionToolApprovals`,
-//  `ChatPersistenceStore`) and a `MainApplicationViewModel`, whose init runs
-//  `ChatOpsCoordinator.bootstrap()` and opens REAL Telegram/Discord/Slack connections when the
-//  developer has them enabled. A unit test must never be able to do that. The contract that
-//  actually carries the defect is extracted instead — the same treatment
-//  `SchedulerCoordinator.prepareScheduledRequest` and `MessagingCoordinator.deliverCheckpoint`
-//  got. What remains untested here is the surrounding orchestration (approvals, notification,
-//  stream bookkeeping); that gap is real and is recorded rather than implied away.
+//  Created by Raj Singh.
 //
 
 import XCTest

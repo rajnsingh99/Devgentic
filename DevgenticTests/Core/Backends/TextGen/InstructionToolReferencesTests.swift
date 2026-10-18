@@ -4,9 +4,7 @@
 //  InstructionToolReferencesTests.swift
 //  DevgenticTests
 //
-//  Item 9 of the 2026-09-27 OpenRouter review: a profile's instructions named a tool it could not
-//  call ("use fs_smart_search first" — renamed to `spotlight_search` in Build 102.6, and not enabled
-//  under either name). Nothing reported it.
+//  Created by Raj Singh.
 //
 
 import XCTest

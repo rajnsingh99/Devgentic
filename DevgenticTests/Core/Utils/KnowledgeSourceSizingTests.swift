@@ -4,23 +4,7 @@
 //  KnowledgeSourceSizingTests.swift
 //  DevgenticTests
 //
-//  Knowledge sources ride EVERY request for a profile that has them, so the composer ring and
-//  the send-time fit check both price them — and both were guessing. The estimate stat'd byte
-//  sizes and charged a flat `wrapperCharsPerFile: 60`, a number that appears nowhere in the
-//  assembler, while claiming in its doc to be "sized exactly like attachments — same reader,
-//  same drop-don't-clip rule".
-//
-//  Two things it did not model:
-//
-//   1. `assembleKnowledgeSourceContent` caps each file at a SHRINKING `remainingBudget` —
-//      `min(perFile, total - assembled)`. The estimate counted every file in full.
-//   2. Past that budget a source is CUT to what fits (it was dropped whole until 2026-10-05,
-//      when knowledge moved onto the attachments' `DirectInjectionPlan`).
-//
-//  The estimate now runs that same plan, so it cannot drift from the assembler.
-//
-//  Both errors push the same way: the gauge charges for text that never ships, which raises an
-//  overflow warning the user cannot clear by any action that would actually help.
+//  Created by Raj Singh.
 //
 
 import XCTest

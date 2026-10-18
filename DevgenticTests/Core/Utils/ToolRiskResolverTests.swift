@@ -4,13 +4,7 @@
 //  ToolRiskResolverTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md row WF-SE3.
-//
-//  The HITL risk tier used to be derived from the bare tool NAME: a third-party MCP tool named
-//  `read_file` wore the native green "Read-only" badge, and every non-colliding MCP tool fell to
-//  `.moderate` — the tier that qualifies for the durable "Allow for this chat" grant — even when
-//  its own server declared it destructive. `ToolRiskResolver.derive` is the pure decision core
-//  (the `UserSkipTeardownPolicy` shape); this is its truth table.
+//  Created by Raj Singh.
 //
 
 import XCTest

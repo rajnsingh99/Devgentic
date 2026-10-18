@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ArgumentCodeFenceTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Readiness CR-3: a tool call's ARGUMENTS keep the code fences the model wrote.
-//
-//  ⚠️ THE DEFECT. `OutputSanitizer.sanitize` strips every ``` from the WHOLE reply before any parser
-//  reads it, so argument VALUES lost their fences too: a README written via `write_file` reached disk
-//  without its code blocks, an `edit_code_single.old_string` containing ``` could never match the
-//  file, and a ReAct `final_answer` lost its code. `AnswerCodeFenceTests` covers plain answers; this
-//  covers arguments. The 6th member of the content-corruption class (see `CodeFenceShield`): a transform that rewrote CONTENT
-//  because of what it looked like.
+//  Created by Raj Singh.
 //
 
 import XCTest

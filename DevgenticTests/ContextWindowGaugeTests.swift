@@ -2,13 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  ContextWindowGaugeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Pure-logic coverage for the composer context-window occupancy gauge: the
-//  fraction/percent math, the three threshold bands, display formatting, the
-//  over-window clamp, and the cross-model comparison. No view or store is
-//  exercised here — `ContextWindowUsage.resolve(...)` is @MainActor and store-backed
-//  and is left to on-device verification; this pins the display contract.
+//  Created by Raj Singh.
 //
 
 import XCTest

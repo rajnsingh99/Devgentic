@@ -2,23 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MCPConfigBlobIntegrityTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Registers KC-37 and KC-38 — the config blob is what NAMES a source's Keychain
-//  secrets, so a blob that is missing or unreadable must never be silently treated
-//  as "no secrets to reconcile".
-//
-//  ⚠️⚠️ THE FAILURE THESE PIN. `mcpConfigData` carries the env KEY names; the VALUES
-//  live in the Keychain under `<sourceID>::env.<key>`. Every place that decides what
-//  to purge therefore decodes the blob first — and the `try?`s in those paths made an
-//  undecodable blob read as an EMPTY key set, silently skipping the purge instead of
-//  saying why. The secrets then outlive the configuration that referenced them, with
-//  nothing left pointing at them and no log to explain the leftover.
-//
-//  ⚠️ THE DIRECTION IS DELIBERATE. An unknowable key set purges NOTHING (deleting on
-//  an uncertain read is the KC-1 hazard) — what these tests demand is that the skip is
-//  STATED, through `MCPToolStore.blobIntegrityLogSinkForTesting`, which receives the
-//  exact message the logger does.
+//  Created by Raj Singh.
 //
 
 import XCTest

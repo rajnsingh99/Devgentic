@@ -4,14 +4,7 @@
 //  TableMarkdownTests.swift
 //  DevgenticTests
 //
-//  "Copy Table (Markdown)" used to emit markdown that wasn't a table any more:
-//    - `|` inside a cell was never escaped, so one pipe split the cell in two
-//    - the separator row was sized from `headers.count` while data rows used their own
-//      length, so ragged input produced a separator that matched nothing
-//    - a newline in a cell ended the row
-//    - column alignment was dropped
-//
-//  The test that matters is the ROUND TRIP: paste it back and you must get the same table.
+//  Created by Raj Singh.
 //
 
 import XCTest

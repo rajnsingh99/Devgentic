@@ -4,11 +4,7 @@
 //  ProviderConfigSwitchProviderTests.swift
 //  DevgenticTests
 //
-//  Created on 06/07/26.
-//
-//  Unit tests for ProviderConfig.switchProvider(to:) — the provider-switch
-//  re-baseline that prevents stale provider-scoped settings (endpoint, model,
-//  analyzer artifacts, advanced params) from leaking into the new provider.
+//  Created by Raj Singh.
 //
 
 import XCTest

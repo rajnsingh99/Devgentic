@@ -4,7 +4,7 @@
 //  SecureKeyStorage.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 28/07/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -13,15 +13,9 @@ import os
 
 private let logger = DGLogger(category: "SecureKeyStorage")
 
-/// The three genuinely different results of a Keychain read. Register B2.
-///
-/// ⚠️ `notFound` and `failed` MUST NOT collapse into one `nil`. They mean opposite things: the
-/// first says the user has no credential stored, the second says we could not look. Acting on the
-/// wrong one is destructive — a caller that treats "could not look" as "none stored" will happily
-/// overwrite or delete a credential that is perfectly intact. This is the same distinction
-/// `BackendConfigUnavailability` draws for a profile lookup (register A32) and the same lesson
-/// register A47 records for the profile list: "you have none" must never render as "I couldn't
-/// read them".
+/// The three genuinely different results of a Keychain read.
+/// `notFound` and `failed` must not collapse into one nil: "no credential stored" and "could not look" call for
+/// opposite actions.
 enum KeychainReadOutcome: Equatable {
     case found(String)
     case notFound
@@ -29,8 +23,7 @@ enum KeychainReadOutcome: Equatable {
 }
 
 /// The Keychain operations `ProviderKeyStore` depends on, so its failure branches are testable.
-/// ⚠️ Registers B2 / B19: a failed READ and a failed DELETE are both destructive if mistaken for
-/// success, and neither could be exercised while the backend was a concrete `private static let`.
+/// A failed read or delete is destructive if mistaken for success.
 protocol KeychainAccessing: Sendable {
     func save(value: String, service: String, account: String) -> OSStatus
     func read(service: String, account: String) -> KeychainReadOutcome
@@ -40,34 +33,22 @@ protocol KeychainAccessing: Sendable {
 /// A service for securely saving, retrieving, and deleting sensitive data like API keys from the system Keychain.
 struct SecureKeyStorage: KeychainAccessing {
 
-    /// ⚠️ TEST SEAM (register KC-9). When set, receives EXACTLY the message a first-time item ADD
-    /// would log — the one branch of `save` whose result used to be returned unlogged, so a
-    /// credential write that failed on its very first attempt (the pairing case: nothing existed
-    /// yet, `SecItemUpdate` missed, `SecItemAdd` was the only real write) did so in complete
-    /// silence. Same shape as `ShellProcess.stderrLogSinkForTesting`: one message for the logger
-    /// and the sink alike, so the seam cannot drift from the log.
+    /// Test seam: when set, receives exactly the message a first-time item add would log.
+    /// One message feeds the logger and the sink alike, so the seam cannot drift from the log.
     nonisolated(unsafe) static var addResultLogSinkForTesting: (@Sendable (String) -> Void)?
 
-    /// The Keychain Access "Kind" column for every item this app writes. Registers KC-25 / KC-30.
+    /// The Keychain Access "Kind" column for every item this app writes.
     static let itemDescription = "Devgentic credential"
 
-    /// The Keychain Access "Name" column. Registers KC-25 / KC-30.
-    ///
-    /// ⚠️ Without a label Keychain Access shows the bare service string, and most accounts are
-    /// opaque UUIDs — so the app's own "delete it manually from Keychain Access" advice (a failed
-    /// MCP purge, a failed profile-key delete) named items nobody could find. Every label starts
-    /// with "Devgentic", so searching Keychain Access for that one word lists everything the app
-    /// has ever stored; for an app with no uninstaller that is the whole "remove my credentials"
-    /// story (KC-36). Derived from the address rather than a per-store name table, so no second
-    /// copy of the service strings exists to drift from the ones KC-56 pins.
+    /// Returns the Keychain Access "Name" label for an item; every label starts with "Devgentic" so one search lists
+    /// everything the app stored.
+    /// Derived from the address rather than a per-store name table.
     static func itemLabel(service: String, account: String) -> String {
         "Devgentic — \(service) — \(account)"
     }
 
-    /// The log line for a first-time item ADD — success and failure. Register KC-9.
-    ///
-    /// A pure function so both texts are pinnable without driving the real Security framework into
-    /// a failure it cannot be forced into deterministically. `logAddResult` is the only caller.
+    /// The log line for a first-time item add, success and failure.
+    /// A pure function so both texts are testable; `logAddResult` is the only caller.
     static func addResultMessage(status: OSStatus, service: String, account: String) -> String {
         if status == errSecSuccess {
             return "Added a new keychain item for service: \(service), account: \(account)."
@@ -92,10 +73,8 @@ struct SecureKeyStorage: KeychainAccessing {
         }
     }
 
-    /// Human names for the OSStatus values this subsystem actually produces. Register KC-51: every
-    /// log used to carry a bare integer, and `OSStatus -25308` tells a reader nothing that
-    /// "errSecInteractionNotAllowed — the Keychain is locked, or an ACL prompt was denied" does.
-    /// Unmapped codes degrade to the raw number — a wrong name would be worse than none.
+    /// Human names for the `OSStatus` values this subsystem produces, so logs say more than a bare integer.
+    /// Unmapped codes degrade to the raw number.
     static func osStatusName(_ status: OSStatus) -> String {
         switch status {
         case errSecSuccess:                 return "errSecSuccess"
@@ -110,9 +89,8 @@ struct SecureKeyStorage: KeychainAccessing {
         }
     }
 
-    /// The log line for an in-place UPDATE of an existing item — both outcomes. Register KC-24:
-    /// every message this primitive emits carries a tag, the service AND account it concerns,
-    /// and — on failure — the consequence and a named OSStatus (KC-51).
+    /// The log line for an in-place update of an existing item: tag, service, account, and on failure the consequence
+    /// and a named status.
     static func updateResultMessage(status: OSStatus, service: String, account: String) -> String {
         if status == errSecSuccess {
             return "[SECRETS] Updated an existing keychain item for service '\(service)', account '\(account)'."
@@ -123,18 +101,15 @@ struct SecureKeyStorage: KeychainAccessing {
             + "NOWHERE — see the ADD log line."
     }
 
-    /// The log line for a DELETE — failure only (a successful delete and a delete of an absent
-    /// item are unremarkable). Register KC-24 / KC-51.
+    /// The log line for a delete, failure only; a successful delete and a delete of an absent item are unremarkable.
     static func deleteResultMessage(status: OSStatus, service: String, account: String) -> String {
         return "[SECRETS] Failed to DELETE a keychain item for service '\(service)', "
             + "account '\(account)' (\(osStatusName(status))). CONSEQUENCE: the credential REMAINS "
             + "stored — the caller must not report it as cleared or removed."
     }
 
-    /// The log line for a FAILED READ. Register KC-24: this message omitted the ACCOUNT — but all
-    /// four ChatOps credentials share one service and every MCP secret shares another, so a read
-    /// failure without the account cannot be told apart from its siblings. Register B2: the
-    /// consequence is the whole reason this message exists.
+    /// The log line for a failed read, including the account, since many items share one service.
+    /// The consequence is the reason the message exists.
     // MARK: - Access-prompt tracing
 
     /// A `SecItem*` call slower than this almost certainly showed the macOS "Devgentic wants to use
@@ -146,12 +121,8 @@ struct SecureKeyStorage: KeychainAccessing {
     private static let traceSequence = OSAllocatedUnfairLock(initialState: 0)
 
     /// Runs one `SecItem*` call and logs its operation, item, status and duration.
-    ///
-    /// ⚠️ DIAGNOSTIC for the keychain prompt seen at launch. The prompt appears when an item's
-    /// ACL names a different code signature from the running build (an ad-hoc Debug build reading
-    /// an item a Developer ID build wrote, or vice versa). The slow-call branch logs the CALL STACK,
-    /// which names the launch path that reached the Keychain. Find it with:
-    /// `log show --last 10m --predicate 'eventMessage CONTAINS "[KEYCHAIN_TRACE]"' --info`
+    /// Diagnoses the keychain prompt seen at launch, which appears when an item's ACL names a different code signature;
+    /// slow calls log the call stack.
     static func traced(
         _ operation: String,
         service: String,
@@ -179,24 +150,10 @@ struct SecureKeyStorage: KeychainAccessing {
             + "than that no value exists, so it must not overwrite or delete the stored credential."
     }
 
-    /// ⚠️⚠️ THE XCTEST HOST IS THE REAL APP, AND THIS IS WHERE THAT STOPPED REACHING THE LOGIN
-    /// KEYCHAIN. Registers KC-54 / KC-55. Under XCTest every `SecureKeyStorage()` — including the
-    /// ones inside `ProviderKeyStore`, `MCPSecretStore`, `HuggingFaceTokenStore`, `WebSearchKeyStore`
-    /// and `ChatOpsConfigManager` — reads and writes a process-private in-memory store instead of
-    /// the developer's Keychain. Before this, nine `ProviderKeyStorageTests` wrote a sentinel into
-    /// the PRODUCTION `com.devgentic.provider` service, and merely constructing
-    /// `ChatOpsConfigManager.shared` ran a copy-then-delete migration against live bot tokens. Once
-    /// the repository is public, "runs the test suite" is something strangers do on their own Macs;
-    /// a test must be structurally unable to touch their secrets, and a comment asking authors to
-    /// install a stub protects nothing — the app constructs these stores before any test is named.
-    ///
-    /// REDIRECT, NOT REFUSE — `TestHost.permits` explains the split: persistence has a useful test
-    /// version (a round trip through memory is a real test); an outward side effect does not.
-    ///
-    /// ⚠️ A caller that deliberately wants the real Keychain — `SecureKeyStorageTests`, which
-    /// exercises the `SecItem*` queries against a throwaway service — opts in BY NAME with
-    /// `init(bypassingTestHostRedirect: true)`. Outside the test host the flag changes nothing, and
-    /// `SecureKeyStorageTestHostRedirectTests` pins that no production source ever passes it.
+    // Why: the test host is the real app, so tests must be structurally unable to touch real secrets.
+    /// Under XCTest every `SecureKeyStorage()` uses a process-private in-memory store instead of the developer's
+    /// Keychain.
+    /// A caller that wants the real Keychain opts in with `init(bypassingTestHostRedirect: true)`.
     private let bypassesTestHostRedirect: Bool
 
     init() {
@@ -212,14 +169,9 @@ struct SecureKeyStorage: KeychainAccessing {
         !bypassesTestHostRedirect && TestHost.isRunning
     }
 
-    /// Saves a string value (like an API key) to the Keychain.
-    /// It will update the key if it already exists, or create a new entry if it doesn't.
-    ///
-    /// - Parameters:
-    ///   - value: The string value to save.
-    ///   - service: A unique identifier for the service the key belongs to (e.g., your app's bundle ID).
-    ///   - account: A unique identifier for the account or key name.
-    /// - Returns: An `OSStatus` code indicating the result of the operation. `errSecSuccess` on success.
+    /// Saves a string value (like an API key) to the Keychain, updating it if it exists or adding it otherwise.
+    /// `service` identifies the service the key belongs to and `account` the key name.
+    /// - Returns: An `OSStatus`; `errSecSuccess` on success.
     func save(value: String, service: String, account: String) -> OSStatus {
         if redirectsToMemory {
             return TestHostKeychain.shared.save(value: value, service: service, account: account)
@@ -235,8 +187,7 @@ struct SecureKeyStorage: KeychainAccessing {
             kSecAttrAccount as String: account
         ]
 
-        // The label rides on the UPDATE too, so an item created by a build that predates KC-25
-        // is labelled the next time it is written — there is no separate backfill pass to forget.
+        // The label rides on the update too, so older items are relabelled the next time they are written.
         let attributesToUpdate: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrLabel as String: Self.itemLabel(service: service, account: account),
@@ -273,23 +224,16 @@ struct SecureKeyStorage: KeychainAccessing {
     }
 
     /// Retrieves a string value from the Keychain.
-    ///
-    /// - Parameters:
-    ///   - service: The service identifier the key was saved under.
-    ///   - account: The account name the key was saved under.
-    /// - Returns: The retrieved string value, or `nil` if it's not found or an error occurs.
+    /// - Parameters: `service` and `account` the key was saved under.
+    /// - Returns: The value, or `nil` if it is not found or an error occurs.
     func retrieve(service: String, account: String) -> String? {
         guard case .found(let value) = read(service: service, account: account) else { return nil }
         return value
     }
 
     /// Reads a value, distinguishing "nothing stored" from "the read failed".
-    ///
-    /// ⚠️ register B2 — this used to be the body of `retrieve`, which returned `nil` for BOTH. A
-    /// locked Keychain, or a denied ACL prompt after a re-sign or a Sparkle update, therefore read
-    /// as "the user has no key", and the next opportunistic profile save deleted the credential
-    /// permanently. `retrieve` survives as a thin wrapper for callers that genuinely only need
-    /// "value or nothing"; anything that WRITES based on the answer must use this instead.
+    /// `retrieve` is a thin wrapper for callers that only need value-or-nothing; anything that writes based on the
+    /// answer must use this.
     func read(service: String, account: String) -> KeychainReadOutcome {
         if redirectsToMemory {
             return TestHostKeychain.shared.read(service: service, account: account)
@@ -309,17 +253,13 @@ struct SecureKeyStorage: KeychainAccessing {
 
         if status == errSecItemNotFound { return .notFound }
 
-        // ⚠️ A SUCCESS status whose payload will not come back as decodable data is a FAILURE,
-        // not an absence — the item exists and we could not read it, which is precisely the case
-        // that must not be mistaken for "none stored". Register B2.
+        // A success status whose payload is not decodable data is a failure, not an absence: the item exists but cannot be
+        // read.
         guard status == errSecSuccess, let data = item as? Data else {
             logger.error(Self.readFailureMessage(status: status, service: service, account: account))
             return .failed(status)
         }
-        // Register KC-23: a decode failure used to return `.failed(errSecSuccess)` and log
-        // "OSStatus 0" — a self-contradicting log line. The item exists but its bytes are not
-        // valid UTF-8 (another tool wrote it, or a success arrived with no payload); that is
-        // errSecDecode, and the log now says so.
+        // The item exists but its bytes are not valid UTF-8; reported as `errSecDecode`.
         guard let value = String(data: data, encoding: .utf8) else {
             logger.error(Self.readFailureMessage(status: errSecDecode, service: service, account: account))
             return .failed(errSecDecode)
@@ -329,11 +269,8 @@ struct SecureKeyStorage: KeychainAccessing {
     }
 
     /// Deletes a value from the Keychain.
-    ///
-    /// - Parameters:
-    ///   - service: The service identifier the key was saved under.
-    ///   - account: The account name the key was saved under.
-    /// - Returns: An `OSStatus` code indicating the result of the operation. `errSecSuccess` on success.
+    /// - Parameters: `service` and `account` the key was saved under.
+    /// - Returns: An `OSStatus`; `errSecSuccess` on success.
     func delete(service: String, account: String) -> OSStatus {
         if redirectsToMemory {
             return TestHostKeychain.shared.delete(service: service, account: account)
@@ -356,14 +293,8 @@ struct SecureKeyStorage: KeychainAccessing {
 
 // MARK: - Test-host stand-in
 
-/// The process-private Keychain `SecureKeyStorage` routes to under XCTest. See the redirect note on
-/// `SecureKeyStorage.bypassesTestHostRedirect` for why it exists.
-///
-/// One dictionary for the whole process, so a value written through one store instance is readable
-/// through another — the same shape as the real Keychain, which every production store relies on
-/// (a token saved by the pairing service is read back by the config manager's restore). Statuses
-/// mirror `SecItem*`: a delete of an absent item is `errSecItemNotFound`, so caller code that
-/// branches on it behaves identically against both backends.
+/// The process-private Keychain `SecureKeyStorage` routes to under XCTest.
+/// One dictionary for the whole process, so one store's writes are visible to another; statuses mirror `SecItem*`.
 final class TestHostKeychain: KeychainAccessing, @unchecked Sendable {
 
     static let shared = TestHostKeychain()
@@ -405,8 +336,8 @@ final class TestHostKeychain: KeychainAccessing, @unchecked Sendable {
     /// Empties the store. For test isolation only.
     func removeAll() {
         lock.withLock { items.removeAll() }
-        // The shared provider keys are cached above this store; a cache left behind would keep
-        // answering with keys that no longer exist here.
+        // The shared provider keys are cached above this store; a stale cache would answer with keys that were deleted
+        // here.
         GlobalProviderKeys.discardCache()
         ProviderKeyStore.discardCache()
     }

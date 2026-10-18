@@ -4,14 +4,7 @@
 //  ComposerDraftStoreTests.swift
 //  DevgenticTests
 //
-//  C2 (composer audit, 2026-07-18): the composer's view model is app-scoped and
-//  `attachedFiles` lives on the single MainApplicationViewModel, so nothing reset either
-//  when the selected conversation changed — a half-typed message and its attachments
-//  followed you from conversation A into B, where they could be sent by accident.
-//
-//  `ComposerDraftStore` makes composer contents belong to a conversation. These tests
-//  cover the store's contract directly (it's pure); the view wiring that calls it on
-//  `selectedConversationID` changes needs an on-device pass.
+//  Created by Raj Singh.
 //
 
 import XCTest

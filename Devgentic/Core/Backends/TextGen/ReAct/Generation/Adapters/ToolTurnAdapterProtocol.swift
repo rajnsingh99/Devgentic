@@ -4,14 +4,7 @@
 //  ToolTurnAdapterProtocol.swift
 //  Devgentic
 //
-//  Serializes in-request tool-call / tool-result exchanges into each
-//  provider's native conversation shape. Parallel to `ToolSchemaAdapter`,
-//  which serializes OUTGOING tool definitions; this serializes the
-//  CONVERSATIONAL turns that carry tool calls and their results.
-//
-//  Used only on the native-turn path (Claude / OpenAI / Ollama native / Gemini).
-//  MLX and dialect generators parse tool calls from text and keep the legacy
-//  `<working_memory>` user-message path — they do not use this adapter.
+//  Created by Raj Singh.
 //
 
 import Foundation

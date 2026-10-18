@@ -4,17 +4,12 @@
 //  ProviderMessage.swift
 //  Devgentic
 //
-//  Multimodal Pipeline Migration — Phase 6
-//  Provider-agnostic message representation that replaces [[String: String]].
-//  Each provider adapter maps this to its specific API format.
-//
-//  Created by Raj Singh on 15/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 /// Provider-agnostic message representation supporting multimodal content.
-/// Replaces the legacy `[String: String]` message dictionaries used by LLMProvider.
 public struct ProviderMessage: Sendable {
     /// Message role: "system", "user", "assistant", "tool"
     public let role: String

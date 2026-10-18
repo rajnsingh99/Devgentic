@@ -4,20 +4,7 @@
 //  LiveWriteCancelSettlementTests.swift
 //  DevgenticTests
 //
-//  [CF-9] A live agent-write tab is opened from `.toolCall` and settled only by an
-//  `AgentLiveWriteEvent.completed`, which `ActiveStreamManager` posts from `.toolSucceeded` /
-//  `.toolFailed`. Stop pressed while a write is parked throws `CancellationError` without
-//  yielding `.toolFailed`, so neither post happens and the tab keeps `liveState == .active`
-//  forever — orange "Agent is writing this file" banner, pulsing pill, and a proposal that never
-//  reached disk never marked rejected.
-//
-//  The fix reuses the dangling-row close that already runs on every finalize path: it now REPORTS
-//  which rows it settled, and the caller posts the missing completion for each one that was a
-//  live write. These tests pin the reporting contract and the payload derived from it — the
-//  `NotificationCenter` post itself lives inside `finalizeMessage`, which needs a live stream and
-//  is not drivable here (see `testUnobservable_postSiteRequiresLiveStream`).
-//
-//  [CF-44] Also covers the closer's use from the two paths a force-quit leaves behind.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,12 +4,7 @@
 //  PersistenceBatch6Tests.swift
 //  DevgenticTests
 //
-//  Core readiness P2 batch 6 (2026-10-12): CR-62, CR-63, CR-64, CR-65, CR-68.
-//
-//  Each row drives the real store (WorkflowLayoutStore, ChatPersistenceStore, MCPToolStore,
-//  MediaStore), so a test fails when a fix is unwired, not only when a helper is wrong. A save is
-//  made to fail for real with a READ-ONLY container (`allowsSave: false`), as in
-//  `BlobWriteRefusalTests`.
+//  Created by Raj Singh.
 //
 
 import XCTest

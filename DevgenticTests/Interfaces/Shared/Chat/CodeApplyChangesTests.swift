@@ -4,12 +4,7 @@
 //  CodeApplyChangesTests.swift
 //  DevgenticTests
 //
-//  Covers audit finding #5 (CodeViewer apply-changes cluster), 2026-07-18:
-//   • #3 — showCodeInViewer / openMessageInCodeViewer must reset stale diff state
-//          (else the panel diffs the OLD baseline against the NEW snippet with a live Apply).
-//   • #2 — a failed apply must surface via `codeApplyError`, not vanish into the log.
-//   • #4 — apply preserves the file's trailing newline, and refuses to overwrite a file
-//          that changed on disk since it was attached (silent-revert data loss).
+//  Created by Raj Singh.
 //
 
 import XCTest

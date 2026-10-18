@@ -4,7 +4,7 @@
 //  RecordingOverlayView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/07/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -12,9 +12,8 @@ import Combine
 
 struct RecordingOverlayView: View {
 
-    // The display store is passed through but NOT observed here.
-    // Only child views that need specific properties observe it,
-    // preventing the overlay container from re-rendering on every update.
+    // The display store is passed through but not observed here; only child views that need specific properties
+    // observe it, so the container does not re-render on every update.
     let displayStore: RecordingDisplayStore
 
     // MARK: - Actions
@@ -70,11 +69,8 @@ struct RecordingOverlayView: View {
 }
 
 // MARK: - Isolated Waveform View
-// Reads the @Observable store DIRECTLY — observation tracking already re-renders
-// only the views that read a changed property, which is the isolation the old
-// `@State` mirror + `.onChange`/`.onAppear` sync was hand-building (that pattern
-// predates @Observable, and each hook was a write-state-during-view-update hazard:
-// the "Modifying state during view update" warnings adjacent to voice teardown).
+// Reads the @Observable store directly: observation tracking re-renders only views that read a changed property.
+// No `@State` mirror or `.onChange` sync, which risks modifying state during a view update.
 
 private struct WaveformBarView: View {
     let store: RecordingDisplayStore
@@ -133,9 +129,8 @@ private struct WaveformBarView: View {
 }
 
 // MARK: - Isolated Timer Text View
-// Reads `store.recordingTime` directly — see WaveformBarView's note. The
-// `isPulsing` @State stays: it drives the repeatForever animation (the standard
-// idiom, same as StreamingPulseIndicator), not a store mirror.
+// Reads `store.recordingTime` directly. `isPulsing` stays `@State`: it drives the repeatForever animation,
+// not a store mirror.
 
 private struct TimerTextView: View {
     let store: RecordingDisplayStore
@@ -170,12 +165,9 @@ private struct TimerTextView: View {
 }
 
 // MARK: - Isolated Live Transcription Text View
-// ⚠️ This @State is NOT a store mirror and deliberately survived the mirror purge
-// (WaveformBarView / TimerTextView, 2026-07-19): it is DERIVED state that lags the
-// store on purpose — the smart buffering below holds the last-known-good transcript
-// through WhisperKit's sliding-window shrinks instead of letting the text visibly
-// vanish. Replacing it with a direct `store.liveTranscriptionText` read would
-// regress that behavior.
+// Why: replacing it with a direct `store.liveTranscriptionText` read would make the text visibly vanish.
+// This @State is derived, not a store mirror: it lags the store so smart buffering can hold the last good
+// transcript through WhisperKit's sliding-window shrinks.
 
 private struct LiveTranscriptionTextView: View {
     let store: RecordingDisplayStore
@@ -213,9 +205,8 @@ private struct LiveTranscriptionTextView: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: liveTranscriptionText)
 
         // MARK: ARCHITECTURE UPDATE - Smart UI Buffering for Sliding Windows
-        // WhisperKit's sliding window frequently drops unconfirmed text during pauses,
-        // causing the text to "shrink" or "vanish" completely. We add a smart delay
-        // to text reductions to hold the last known good string on screen.
+        // WhisperKit's sliding window often drops unconfirmed text during pauses; delay text reductions so the
+        // last good string stays on screen.
         .onChange(of: store.liveTranscriptionText) { _, newText in
             if newText.isEmpty && !self.liveTranscriptionText.isEmpty {
                 clearTask?.cancel()

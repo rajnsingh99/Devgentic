@@ -4,30 +4,19 @@
 //  ChatOpsBridgeLifecycle.swift
 //  Devgentic
 //
-//  Starting a bridge that is already running, and reporting the one that died.
-//
-//  ⚠️⚠️ SHARED BECAUSE ALL THREE BRIDGES CARRIED THE SAME TWO DEFECTS. They deliberately share no base
-//  type — `ChatOpsCoordinator` says so explicitly — so the seam is a pair of static functions each
-//  bridge calls, the shape `PairingWindowExpiry` and `ChatOpsUpgradeNotice` already use.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Shared start-up helpers for the ChatOps bridges: refusing a second start and reporting a bridge that died.
+/// The bridges share no base type, so each calls these static functions.
 enum ChatOpsBridgeStart {
 
+    // Why: stop() tears down the mirror session and kills a pending approval;
+    // a second start would otherwise orphan the first connection with nothing able to cancel it.
     /// Whether `start()` may proceed.
-    ///
-    /// ⚠️⚠️ REFUSE, DO NOT RESTART — and the difference is not cosmetic. The obvious repair for a
-    /// non-idempotent `start()` is `if isRunning { stop() }`, but `stop()` tears down the mirror
-    /// session, which would destroy an IN-FLIGHT tool approval: a user who tapped Approve on their
-    /// phone would have the prompt go dead because something re-entered `start()`. A second start is
-    /// a caller mistake, not a request to reconnect; the running listener is the one that works.
-    ///
-    /// ⚠️ WHAT IT PREVENTS. Without this, a second start built a NEW client, listener and transport
-    /// and overwrote the stored references — orphaning the previous connection with nothing left able
-    /// to cancel it. It kept delivering every event a second time, and `stop()` could no longer reach
-    /// it. On Telegram the orphan also kept polling `getUpdates`, so the two loops stole each other's
-    /// updates at random (Telegram serves one poller and answers 409 to the other).
+    /// Refuses a second start while running instead of restarting, so an in-flight tool approval survives.
     static func shouldProceed(isRunning: Bool,
                               provider: RemoteChannel.Provider,
                               logger: DGLogger) -> Bool {
@@ -39,18 +28,9 @@ enum ChatOpsBridgeStart {
 
 enum ChatOpsBridgeShutdown {
 
-    /// Turns a transport's terminal failure into the one property every surface reads.
-    ///
-    /// ⚠️⚠️ THREE NEAR-IDENTICAL COPIES OF THIS EXISTED AND ONE OF THEM DID NOT EXIST. Telegram and
-    /// Slack each turned a `terminalFailure` into `.error(...)`; Discord had no `terminalFailure` at
-    /// all, so a permanently-closed Gateway left the Settings pane showing a green "Active" dot for
-    /// the life of the process. Sharing the report is what stops the next platform being the one
-    /// that gets forgotten.
-    ///
-    /// - Parameter isOwner: whether the run calling this is still the live one. ⚠️ CHECKED BY THE
-    ///   CALLER AND PASSED IN, so this function stays pure and testable; see the generation note at
-    ///   each call site. A stale orphan reaching here would otherwise paint a LIVE bridge red with a
-    ///   dead run's failure — a user-visible lie on the property every surface reads.
+    // Why: a stale run must not paint a live bridge with a dead run's failure.
+    /// Turns a transport's terminal failure into the status property every surface reads.
+    /// - Parameter isOwner: whether the calling run is still the live one; passed in so this function stays pure.
     @discardableResult
     static func report(terminalFailure: String?,
                        provider: RemoteChannel.Provider,

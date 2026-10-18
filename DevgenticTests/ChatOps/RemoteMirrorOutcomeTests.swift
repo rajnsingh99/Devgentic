@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  A finished run reaches a ChatOps chat with its OUTCOME, not just its text. A run stopped by a time
-//  limit or by Stop is stamped and cancelled — no error card is written — so its content is only the
-//  partial text it had produced; the remote chat used to receive that as a complete answer.
+//  RemoteMirrorOutcomeTests.swift
+//  DevgenticTests
+//
+//  Created by Raj Singh.
 //
 
 import XCTest

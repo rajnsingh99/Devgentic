@@ -4,9 +4,7 @@
 //  WindowedLinearMemoryEdgeCaseTests.swift
 //  DevgenticTests
 //
-//  Red-Green synthetic edge case tests for WindowedLinearMemory.
-//  These probe boundary conditions, stress scenarios, and unusual inputs
-//  that might expose bugs not caught by the standard test suite.
+//  Created by Raj Singh.
 //
 
 import XCTest

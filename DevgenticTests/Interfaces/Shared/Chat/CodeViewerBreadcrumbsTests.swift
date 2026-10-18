@@ -4,13 +4,7 @@
 //  CodeViewerBreadcrumbsTests.swift
 //  DevgenticTests
 //
-//  Covers Phase 4: Directory Breadcrumbs & Navigation:
-//  - CodeViewerBreadcrumbItem.breadcrumbs generation for file-backed tabs.
-//  - Home directory path normalization to "~/...".
-//  - Attachment / relative path splitting for slash-separated filenames.
-//  - Snippet fallback single-segment item generation.
-//  - formatRelativePath helper normalization.
-//  - codeViewerLanguageIcon symbol mappings.
+//  Created by Raj Singh.
 //
 
 import XCTest

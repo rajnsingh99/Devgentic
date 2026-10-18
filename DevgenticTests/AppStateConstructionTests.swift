@@ -4,19 +4,7 @@
 //  AppStateConstructionTests.swift
 //  DevgenticTests
 //
-//  Pins how `DevgenticApp.init()` builds its long-lived `@State` objects.
-//
-//  ⚠️ THE DEFECT CLASS, seen twice: reading `self._x.wrappedValue` inside the App's `init()`
-//  returns the initial value of THAT evaluation of the struct, which is not necessarily the
-//  instance SwiftUI keeps.
-//  - CodeSessionManager: two live managers. The view model read the blank one, and the Code system
-//    prompt was never applied.
-//  - BackendProfileService (2026-10-03): its `@State` default ran twice at launch — a second full
-//    profile fetch and Keychain read per keyed profile — and `onProfileDeleted` was wired through
-//    `self._backendProfileService.wrappedValue`.
-//  The safe shape is the one `mainVM` uses: build a LOCAL, wire it, install it with
-//  `State(wrappedValue:)`. This is a source check because SwiftUI's App storage cannot be driven
-//  from a unit test.
+//  Created by Raj Singh.
 //
 
 import XCTest

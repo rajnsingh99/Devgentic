@@ -4,12 +4,12 @@
 //  GitBranchReader.swift
 //  Devgentic
 //
-//  Sandboxed Swift utility to extract the active Git branch from .git/HEAD
-//  for a repository directory without spawning external shell processes.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// Reads the active Git branch from `.git/HEAD` for a repository directory without spawning a shell process.
 enum GitBranchReader {
     /// Reads the current branch or short commit SHA for a project directory.
     static func branch(for directoryURL: URL) -> String? {

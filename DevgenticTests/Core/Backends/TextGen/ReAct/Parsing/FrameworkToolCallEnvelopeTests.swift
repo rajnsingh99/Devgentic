@@ -2,14 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  FrameworkToolCallEnvelopeTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Calls that MLXLMCommon already decoded must reach the step intact. On 2026-10-06 the framework
-//  reported `toolCalls=3` for one Qwen2.5-3B turn and the agent ran ONE (`b.py` was never read):
-//  MLXService re-serialized each call as a bare JSON object and the dialect parser's bare-JSON
-//  fallback keeps the first. The prose around the calls was dropped the same way. And when the
-//  framework DISCARDED a call it could not decode, the run retried a byte-identical prompt and got
-//  the same 76 discarded tokens three times.
+//  Created by Raj Singh.
 //
 
 import XCTest

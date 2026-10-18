@@ -4,13 +4,7 @@
 //  XMLNativeStructuredGenerator.swift
 //  Devgentic
 //
-//  Parallel-capable cognitive strategy for Mistral-family models on MLX.
-//  These models are fine-tuned to output tool calls in XML boundaries
-//  (<tool_call>...</tool_call>) and struggle when forced into JSON prompting.
-//  Unlike Ollama (whose API abstracts the format), MLX generates raw text
-//  with no intermediary — so we must speak the model's native XML dialect.
-//
-//  Created by Raj Singh on 15/04/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

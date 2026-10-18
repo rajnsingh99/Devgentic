@@ -4,13 +4,7 @@
 //  RemoteMirrorRetryTests.swift
 //  DevgenticTests
 //
-//  The mirror's send-once claim: it must survive a successful send and NOT survive a failed one.
-//
-//  ⚠️ THIS DRIVES THE REAL SERVICE, not a copy of its logic. `evaluateMessageState` is private and
-//  reached only through `withObservationTracking`, so the test registers a real session, hands the
-//  service a real `ChatMessage` through the delegate call `ActiveStreamManager` makes, and then
-//  mutates the message exactly as a finishing stream does. A policy test over a hand-copied claim
-//  would have passed against the bug.
+//  Created by Raj Singh.
 //
 
 import XCTest

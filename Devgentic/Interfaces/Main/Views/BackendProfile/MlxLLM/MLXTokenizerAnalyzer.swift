@@ -4,8 +4,7 @@
 //  MLXTokenizerAnalyzer.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 04/03/26.
-//  Updated: Enhanced Tiered Capability Detection for MLX Models
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -19,15 +18,8 @@ enum MLXTokenizerAnalyzer {
 
     // MARK: - Sidecar file memoisation
 
-    /// Cached contents of a model's small JSON sidecars, keyed by path + modification date.
-    ///
-    /// ⚠️ `detectCognitiveProfile` reads the same four files repeatedly: config.json 3×,
-    /// tokenizer_config.json 2×, special_tokens_map.json 2×, added_tokens.json 2× — nine
-    /// blocking `Data(contentsOf:)` calls per model, on the MainActor, re-run for every model
-    /// on every `rebuildProfileCache()`. At 18 installed models that is 162 blocking reads,
-    /// and all three runtime consumers can trigger it from the request path. Reading each
-    /// file once per (path, mtime) removes the redundancy without changing any result;
-    /// keying on mtime means an edited or re-downloaded model is still picked up.
+    /// Cached contents of a model's small JSON sidecars, keyed by path and modification date.
+    /// One read per (path, mtime) avoids repeated blocking reads; an edited or re-downloaded model is still picked up.
     private static let sidecarLock = NSLock()
     nonisolated(unsafe) private static var sidecarCache: [String: Data?] = [:]
 
@@ -65,18 +57,12 @@ enum MLXTokenizerAnalyzer {
 
     // MARK: - Full Profile Detection (Step 1.2)
 
-    /// Evaluates model config files and returns a complete `CognitiveProfile` including
-    /// the detected capability tier AND the correct output dialect.
-    ///
-    /// - Parameters:
-    ///   - modelPath: The local directory path containing the downloaded MLX model weights and configs.
-    ///   - modelName: The display name of the model (used as a heuristic fallback).
-    /// - Returns: A `CognitiveProfile` encoding both capability and dialect.
+    /// Evaluates model config files into a complete `CognitiveProfile` (capability tier and output dialect).
+    /// - Parameters: `modelPath` is the model directory; `modelName` is the display name, a heuristic fallback.
+    /// - Returns: a `CognitiveProfile` encoding both capability and dialect.
     static func detectCognitiveProfile(for modelPath: URL, modelName: String) -> CognitiveProfile {
-        // A missing or unparseable config.json degrades to "no tool logic found / text-only",
-        // which is indistinguishable from a genuinely chat-only model. That verdict then
-        // drives the tool-capability label and (before Batch 1) the store/picker filters, so
-        // a corrupt file silently looked like a model limitation. Report it explicitly.
+        // A missing or unparseable config.json degrades to "text-only", indistinguishable from a chat-only model;
+        // report it explicitly so a corrupt file does not silently look like a model limitation.
         let configURL = modelPath.appendingPathComponent("config.json")
         if !FileManager.default.fileExists(atPath: configURL.path) {
             logger.error("[MLXSTORE] '\(modelName)' has no config.json at \(configURL.path). CONSEQUENCE: capability, dialect and context window are all unknown — it will be reported as text-only with no tool support, which looks identical to a genuine chat-only model.")
@@ -93,18 +79,11 @@ enum MLXTokenizerAnalyzer {
 
     // MARK: - Vision Detection
 
-    /// VLM `model_type` identifiers that the bundled MLXVLM runtime
-    /// (`MLXVLM.VLMTypeRegistry.shared`, mlx-swift-lm 3.31.3) can actually RUN.
-    /// Mirrored by hand because the registry's `creators` keys are `private`.
-    ///
-    /// This is deliberately the RUNNABLE subset, not "every VLM that exists":
-    /// `mllama` (Llama-3.2-Vision), `llava`/`llava_next` (LLaVA-1.5), `phi3_v`,
-    /// `minicpmv`, and `internvl_chat` are vision models MLXVLM CANNOT run, so they
-    /// are intentionally absent → detected as text-only → they degrade (Phase D)
-    /// instead of producing garbage. "Detect ⇔ runnable" by construction.
-    ///
-    /// Ambiguous text/vision dual-use types (`qwen3_5`, `qwen3_5_moe`) are excluded
-    /// to fail closed. Re-sync this set when bumping mlx-swift-lm.
+    // Why: absent by design: mllama, llava, phi3_v, minicpmv, internvl_chat cannot run in MLXVLM; they degrade to
+    // text.
+    /// VLM `model_type` identifiers the bundled MLXVLM runtime (`MLXVLM.VLMTypeRegistry.shared`) can actually run.
+    /// Mirrored by hand because the registry's keys are private; re-sync when bumping mlx-swift-lm.
+    /// Ambiguous text/vision types (`qwen3_5`, `qwen3_5_moe`) are excluded to fail closed.
     private static let visionModelTypes: Set<String> = [
         "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl",
         "idefics3", "gemma3", "gemma4", "smolvlm",
@@ -112,10 +91,8 @@ enum MLXTokenizerAnalyzer {
         "lfm2_vl", "lfm2-vl", "glm_ocr"
     ]
 
-    /// Reads `config.json`'s top-level `model_type` (the authoritative VLM signal,
-    /// verified against Hugging Face configs) and reports `.visionCapable` iff that
-    /// type is one MLXVLM can run. Note: text-only Gemma-3 ships as `gemma3_text`
-    /// (not `gemma3`), so it correctly stays text-only here.
+    /// Reads `config.json`'s top-level `model_type` (the authoritative VLM signal) and reports `.visionCapable` iff
+    /// MLXVLM can run it. Text-only Gemma-3 ships as `gemma3_text`, not `gemma3`, so it correctly stays text-only.
     private static func detectVisionModalities(for modelPath: URL) -> SupportedModalities {
         let configURL = modelPath.appendingPathComponent("config.json")
         guard let data = cachedSidecarData(at: configURL),
@@ -128,10 +105,8 @@ enum MLXTokenizerAnalyzer {
 
     // MARK: - Context Window Detection
 
-    /// Reads the model's trained context length from `config.json` so the context gauge
-    /// and every window-derived budget (compaction, RAG, native-turn) use the real size
-    /// instead of the conservative 8K fallback `EffectiveContextWindow` applies when the
-    /// metadata carries none.
+    /// Reads the trained context length from `config.json` so the gauge and window-derived budgets use the real size
+    /// instead of the conservative 8K fallback `EffectiveContextWindow` applies when metadata carries none.
     private static func detectContextWindow(for modelPath: URL) -> Int? {
         let configURL = modelPath.appendingPathComponent("config.json")
         guard let data = cachedSidecarData(at: configURL),
@@ -141,10 +116,9 @@ enum MLXTokenizerAnalyzer {
         return contextWindow(fromConfig: json)
     }
 
-    /// Pure extraction (unit-testable without a model on disk). Reads the standard
-    /// HF/MLX context-length keys in priority order, unwrapping a nested `text_config`
-    /// (multimodal configs put the language model's window there). `sliding_window` is
-    /// deliberately excluded — it's an attention span, not the max position count.
+    /// Pure extraction (testable without a model on disk): reads the standard HF/MLX context-length keys in priority
+    /// order, unwrapping a nested `text_config`. `sliding_window` is excluded: it is an attention span, not the max
+    /// position count.
     static func contextWindow(fromConfig json: [String: Any]) -> Int? {
         let keys = ["max_position_embeddings", "n_positions", "max_seq_len", "max_sequence_length", "seq_length", "n_ctx"]
         let nested = json["text_config"] as? [String: Any]
@@ -173,12 +147,9 @@ enum MLXTokenizerAnalyzer {
 
     // MARK: - Legacy Capability-Only API (backward compat)
 
-    /// Evaluates multiple model configuration files to accurately determine structural capability.
-    ///
-    /// - Parameters:
-    ///   - modelPath: The local directory path containing the downloaded MLX model weights and configs.
-    ///   - modelName: The display name of the model (used as a heuristic fallback).
-    /// - Returns: The `ModelCognitiveCapability` tier of the model.
+    /// Evaluates multiple model configuration files to determine structural capability.
+    /// - Parameters: `modelPath` is the model directory; `modelName` is the display name, a heuristic fallback.
+    /// - Returns: the model's `ModelCognitiveCapability` tier.
     static func detectCapability(for modelPath: URL, modelName: String) -> ModelCognitiveCapability {
         return detectCapabilityAndDialect(for: modelPath, modelName: modelName).0
     }
@@ -301,13 +272,10 @@ enum MLXTokenizerAnalyzer {
         let capability: ModelCognitiveCapability
         let detectionReason: String
 
-        // Tier 0: Reasoning-only fine-tunes — force .none regardless of tokenizer signals.
-        // Distilled reasoning models (DeepSeek-R1-Distill-Llama-*, QwQ, magistral) often
-        // inherit tool tokens from their base architecture but have had tool calling
-        // stripped by the fine-tune. Without this gate, the family-fallback at Tier 2
-        // would misclassify them as parallelActions. We check both the display name AND
-        // the true origin name from config.json's `_name_or_path` because either can
-        // preserve the reasoning-only identity while the other masquerades as the base.
+        // Why: distilled reasoning models inherit tool tokens without tool calling; the family fallback would misrate
+        // them.
+        // Tier 0: reasoning-only fine-tunes force `.none` regardless of tokenizer signals. Both the display name and
+        // `_name_or_path` from config.json are checked; either can preserve the reasoning-only identity.
         if ModelCapabilityHeuristics.isReasoningOnly(nameCandidates: modelName, originalModelName) {
             detectionReason = "Reasoning-only pattern matched — forcing .none"
             capability = .none
@@ -336,12 +304,8 @@ enum MLXTokenizerAnalyzer {
             }
         }
 
-        // --- DIALECT DECISION ---
-        //
-        // Priority order:
-        //   1. ChatTemplateFingerprinter on the extracted Jinja template (ground truth).
-        //   2. Special-token heuristics (legacy path, pre-fingerprinter).
-        //   3. Capability-based default (nativeJSON for parallel, heuristicJson otherwise).
+        // Dialect decision, in order: template fingerprint of the extracted Jinja (ground truth), special-token
+        // heuristics, then a capability default (nativeJSON for parallel, heuristicJson otherwise).
 
         let dialect: ModelDialect
 
@@ -366,10 +330,8 @@ enum MLXTokenizerAnalyzer {
             dialect = .heuristicJson
         }
 
-        // --- CHAT TEMPLATE SOURCE DECISION ---
-        // Two-Layer Strategy:
-        //   Layer 1: Use the raw Jinja template extracted from tokenizer_config.json (author's own template)
-        //   Layer 2: Detect the template family from special tokens and use a hardcoded fallback
+        // Chat template source decision: use the raw Jinja template from tokenizer_config.json (the author's own) when
+        // present; otherwise detect the template family from special tokens and use a hardcoded fallback.
 
         let chatTemplateSource: ChatTemplateSource
 
@@ -392,10 +354,8 @@ enum MLXTokenizerAnalyzer {
         var modelTier: ModelTier = .small
         let lowerName = modelName.lowercased()
 
-        // Matches a parameter-count token like "24b" while rejecting false positives
-        // like "3b" inside "3bit". A match requires the token to NOT be followed by
-        // "it" (which would form "3bit"), "yte" ("3byte"), or another digit.
-        // The token must be preceded by a non-alphanumeric character or start-of-string.
+        // Matches a parameter-count token like "24b" while rejecting false positives like "3b" inside "3bit".
+        // It must follow a non-alphanumeric (or the start) and not be followed by "it", "yte" or a digit.
         func matchesParamSize(_ pattern: String) -> Bool {
             let regex = "(^|[^a-z0-9])\(pattern)($|[^a-z0-9i])"
             return lowerName.range(of: regex, options: .regularExpression) != nil
@@ -428,11 +388,8 @@ enum MLXTokenizerAnalyzer {
 
     // MARK: - Template Family Detection (Layer 2)
 
-    /// Detects the chat template family from the combined special tokens present
-    /// across all tokenizer configuration files.
-    ///
-    /// Priority order reflects specificity: families with unique, unambiguous markers
-    /// are checked first. The fallback is ChatML as the most widely adopted format.
+    /// Detects the chat template family from the special tokens present across all tokenizer configuration files.
+    /// Families with unique markers are checked first; the fallback is ChatML as the most widely adopted format.
     private static func detectTemplateFamily(from allTokensRaw: String, modelName: String) -> ChatTemplateFamily {
 
         // Llama 3 — unique header tokens unmistakable across all other families
@@ -483,21 +440,9 @@ enum MLXTokenizerAnalyzer {
 
     // MARK: - Stop Sequence Extraction
 
-    /// Extracts custom stop sequences from the model's tokenizer files.
-    ///
-    /// Scans `added_tokens.json` for tokens marked as `"special": true` and collects
-    /// their string content. These are turn-boundary markers (e.g. `<|im_end|>`,
-    /// `<|eot_id|>`, `[/INST]`, `<end_of_turn>`) that the model should never generate
-    /// mid-response. If emitted during generation, it signals the model has crossed
-    /// a turn boundary and generation should stop immediately.
-    ///
-    /// Filters out:
-    /// - Pure EOS/BOS tokens (already handled by the MLX framework's built-in EOS detection)
-    /// - Padding tokens
-    /// - Tokens that are single control characters or empty
-    ///
-    /// - Parameter modelPath: Path to the model directory containing tokenizer files.
-    /// - Returns: An array of stop sequence strings. Empty if none are extractable.
+    /// Extracts turn-boundary stop sequences (e.g. `<|im_end|>`, `[/INST]`) from the model's tokenizer files.
+    /// Filters pure EOS/BOS tokens (handled by MLX), padding, and single-control-character or empty tokens.
+    /// - Returns: the stop sequences, empty if none are extractable.
     private static func extractStopSequences(from modelPath: URL) -> [String] {
 
         // Tokens handled by the MLX framework natively — no need to duplicate at app level
@@ -554,9 +499,8 @@ enum MLXTokenizerAnalyzer {
             }
         }
 
-        // --- Source 2: special_tokens_map.json ---
-        // Provides named roles (eos_token, bos_token, additional_special_tokens)
-        // We specifically extract additional_special_tokens that match turn boundaries
+        // Source 2: special_tokens_map.json provides named roles; extract the `additional_special_tokens` that match turn
+        // boundaries.
         let specialTokensURL = modelPath.appendingPathComponent("special_tokens_map.json")
         if let data = cachedSidecarData(at: specialTokensURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -582,10 +526,8 @@ enum MLXTokenizerAnalyzer {
             }
         }
 
-        // --- Source 3: tokenizer_config.json → extra_special_tokens ---
-        // Some models (e.g., Mistral/Devstral MLX conversions) store turn-boundary
-        // markers as a flat string array in "extra_special_tokens" instead of in
-        // added_tokens.json or special_tokens_map.json.
+        // Source 3: `extra_special_tokens` in tokenizer_config.json, where some models (Mistral/Devstral MLX conversions)
+        // store turn-boundary markers as a flat string array instead of in added_tokens.json or special_tokens_map.json.
         let tokenizerConfigURL = modelPath.appendingPathComponent("tokenizer_config.json")
         if let data = cachedSidecarData(at: tokenizerConfigURL),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

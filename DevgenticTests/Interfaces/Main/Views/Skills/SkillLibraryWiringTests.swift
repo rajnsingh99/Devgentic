@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillLibraryWiringTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The Skills tab's wiring — specifically the parts the compiler does NOT enforce.
-//
-//  Adding a `SidebarTab` case breaks the build in three places (`iconName`, `title`, and the pane
-//  container's exhaustive switch), so those need no test. Exactly one site is silent:
-//  `ActivityBarView.topTabs` is a hand-written array, and a tab omitted from it exists, routes, and
-//  persists its selection — with no button anywhere to reach it. That is what
-//  `testSkillsTabIsReachableFromTheActivityBar` exists for.
+//  Created by Raj Singh.
 //
 
 import XCTest

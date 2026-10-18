@@ -4,23 +4,16 @@
 //  NativePIMTools.swift
 //  Devgentic
 //
+//  Created by Raj Singh.
+//
 
 import Foundation
 import EventKit
 import Contacts
 
-/// Deleting a calendar event, as its own tool.
-///
-/// It was an `action` on `manage_calendar` until 2026-07-31. The problem was not the multiplexing
-/// itself — `git`'s seven subcommands share a noun and an output shape and are fine — but that
-/// this one bundled frequent harmless READS with an irreversible write under a single name, and a
-/// tool carries exactly one `requiresConfirmation`. The user could not express "ask before
-/// deleting, not before reading", and being prompted on every read is worse than useless: it
-/// teaches the reflex that approves the delete without looking.
-///
-/// Same reasoning, same shape as `create_file` → `create_new_file` / `overwrite_file`: reaching the
-/// destructive path now takes choosing a differently-named tool, not changing one word in an
-/// argument. Classified `.destructive` in `HITLRiskTier`, so the banner reads as a deletion.
+/// Deletes a calendar event, as its own tool.
+/// Separate from `manage_calendar` so it has its own `requiresConfirmation`: ask before deleting, not before reading.
+/// Classified `.destructive` in `HITLRiskTier`, so the banner reads as a deletion.
 struct DeleteCalendarEventTool: DevgenticTool {
     let name = "delete_calendar_event"
     let category = "Personal Information"
@@ -88,14 +81,9 @@ struct ManageCalendarTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        // Checked BEFORE requesting calendar access: an action that no longer lives here should
-        // not trigger a permission prompt, and the answer does not depend on the store.
+        // Checked before requesting calendar access: a moved action should not trigger a permission prompt.
         if arguments.action == "delete" {
-            // Split out to `delete_calendar_event` on 2026-07-31. A tool carries ONE
-            // `requiresConfirmation`, so while deletion lived here the user had to choose between
-            // being prompted for every calendar READ — which trains the reflex that then approves
-            // the delete — or never being prompted at all. Neither expresses "ask before
-            // destroying, not before looking".
+            // Deletion moved to `delete_calendar_event` so it can carry its own confirmation setting, separate from reads.
             return "Error: 'delete' has moved to the `delete_calendar_event` tool, so it can carry "
                 + "its own confirmation setting. Call that tool with the event_id instead."
         }
@@ -162,9 +150,8 @@ struct ManageCalendarTool: DevgenticTool {
     }
 }
 
-/// Deleting a reminder, as its own tool — split from `manage_reminders` on 2026-07-31 for the
-/// reason given on `DeleteCalendarEventTool`. Note the pairing this separates: `complete` marks a
-/// reminder done and can be undone; `delete` removes it and cannot.
+/// Deletes a reminder, as its own tool, separate from `manage_reminders` for the reason on `DeleteCalendarEventTool`.
+/// `complete` marks a reminder done and can be undone; `delete` removes it and cannot.
 struct DeleteReminderTool: DevgenticTool {
     let name = "delete_reminder"
     let category = "Personal Information"
@@ -292,9 +279,7 @@ struct ManageRemindersTool: DevgenticTool {
             return "Created reminder '\(title)'."
 
         case "complete":
-            // `complete` and `delete` shared this branch until 2026-07-31 — one reversible, one
-            // not, separated by a single word in a JSON string inside the same block. Deletion
-            // now lives in `delete_reminder` so it can carry its own confirmation setting.
+            // Deletion lives in `delete_reminder` so it can carry its own confirmation setting.
             let targetTitle = arguments.reminder_title ?? arguments.title
             guard let searchTitle = targetTitle else {
                 return "Error: 'reminder_title' or 'title' required."

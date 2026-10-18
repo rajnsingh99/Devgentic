@@ -4,7 +4,7 @@
 //  SmartSearchNullCoercionTests.swift
 //  DevgenticTests
 //
-//  TDD: Tier 1e — SmartSearchTool "null" String → nil Coercion
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
 //
-//  ChunkEntity.swift -> ObjectBoxConverters.swift
+//  ChunkEntity.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/07/25.
-//  Phase 5 Update: The flat ChunkEntity has been removed.
-//  This file now only hosts the required ObjectBox property converters.
+//  Created by Raj Singh.
 //
 
 import Foundation

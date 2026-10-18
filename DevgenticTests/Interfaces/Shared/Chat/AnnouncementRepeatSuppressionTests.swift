@@ -4,25 +4,7 @@
 //  AnnouncementRepeatSuppressionTests.swift
 //  DevgenticTests
 //
-//  Register CF-40 — historical error cards re-announced to VoiceOver.
-//
-//  `ErrorMessageView` announces from `.task(id: spokenDescription)`, which fires on view
-//  APPEARANCE as well as on id change, and `AccessibilityAnnouncer` held no already-said state.
-//  The transcript is a LazyVStack, so scrolling an old error card back into view — or switching
-//  conversations and back — rebuilt the view and spoke a days-old failure again as if it had just
-//  happened.
-//
-//  These test the rule directly: `announceOnce` returns immediately when VoiceOver is off, which
-//  is every test environment, so `claimAnnouncement` is the only observable form of it.
-//
-//  ⚠️ SCOPE, pinned here so nobody reads these tests as more than they are. They exercise the
-//  RULE, not the keys production passes it. A caller that supplies no `announcementKey` still
-//  keys on the error SENTENCE, so the rule silences a genuine second failure worded identically
-//  exactly as it silences a rebuild. Both production callers now supply one, so that fallback is
-//  currently unexercised in the app: `MediaArtifactImageView` passes artifact id + attempt, and
-//  the agent `.error` card passes message id + `generationAttempts`.
-//  `MediaArtifactImageView` does supply one (artifact id + a Retry-incremented attempt), so a
-//  retry that fails the same way speaks again; nothing below covers that wiring.
+//  Created by Raj Singh.
 //
 
 import XCTest

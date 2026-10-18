@@ -4,9 +4,7 @@
 //  MasterSwitchObservabilityTests.swift
 //  DevgenticTests
 //
-//  ⚠️ WRITTEN TO FAIL FIRST. These two tests were added against the ORIGINAL
-//  `@ObservationIgnored @AppStorage` declaration to prove the defect empirically rather than take a
-//  review's word for it. Both were red before the fix.
+//  Created by Raj Singh.
 //
 
 import XCTest

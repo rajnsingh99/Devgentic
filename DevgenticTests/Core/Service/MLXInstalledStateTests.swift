@@ -4,14 +4,7 @@
 //  MLXInstalledStateTests.swift
 //  DevgenticTests
 //
-//  G11 — MLX cards never rendered the shared component's Installed state, so MLX was the only
-//  backend without a Re-download affordance: to re-pull a model the user had to delete it and
-//  find it again.
-//
-//  The subtle part is the interaction with A7. `ModelDownloadStatusView` lets a host intercept
-//  the download via `onDownloadRequested` (MLX uses it for the RAM-fit advisory). Once MLX
-//  supplies that hook, an unconditional interception would swallow the `force` flag and turn
-//  Re-download back into the no-op A7 fixed.
+//  Created by Raj Singh.
 //
 
 import XCTest

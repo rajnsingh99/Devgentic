@@ -2,11 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MLXAdvancedConfigLadderTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The auto-detected MLX settings have two ladders, as Ollama's do. A tool loop has to repeat
-//  paths and identifiers verbatim; on the 2026-10-06 device run a 1.30 repetition penalty made
-//  Qwen2.5-3B write `DevgeticTestbed` three times, each right after the real path.
+//  Created by Raj Singh.
 //
 
 import XCTest

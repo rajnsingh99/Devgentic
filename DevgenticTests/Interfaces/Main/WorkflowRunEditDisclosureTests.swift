@@ -4,32 +4,7 @@
 //  WorkflowRunEditDisclosureTests.swift
 //  DevgenticTests
 //
-//  Register WF-CS4 — a run that executes the last-SAVED graph while the canvas holds unsaved edits
-//  must SAY SO. The defect's own filed category is "ux-lie", and the lie is the silence, not the
-//  behaviour: running the saved graph is documented, deliberate and stated in the in-canvas Guide.
-//
-//  ⚠️ EXACTLY WHAT THIS FILE COVERS, and what it provably does not.
-//  COVERED: the pure decision (`WorkflowRunEditDisclosure.shouldDisclose`), and the wiring from the
-//  real `WorkflowRunBootstrap.begin` entry point onto `WorkflowExecutionState` and through
-//  `WorkflowRunDisplayData.from(live:)` — the exact chain the run header reads. `begin` is testable
-//  only because it takes the narrow `WorkflowRunRegistry` protocol rather than a
-//  `MainApplicationViewModel` (constructing one claims `HITLPresenter` globally).
-//  NOT COVERED, deliberately and by construction:
-//    • The RENDERING (`WorkflowExecutionTimelineView.unsavedEditsDisclosure`) is a SwiftUI
-//      ViewBuilder and is unreachable from a unit test. It is pinned only by the flag on the display
-//      data it reads, asserted below — the same disclosure `WorkflowCanvasStateLifetimeTests` makes.
-//    • PERSISTENCE. There is none: the disclosure is LIVE-ONLY by owner decision (2026-08-24).
-//      `WorkflowRunRecord` is rebuilt field-by-field from promoted `WorkflowRunRecordSD` columns, so
-//      carrying it would need a new column plus (once a build has shipped) a schema-version stage. `from(record:)`
-//      therefore leaves the flag false, and `testHistoricalRunsDoNotDisclose` pins that as the
-//      intended behaviour rather than leaving it to be discovered as a bug.
-//    • ⚠️ THE TRANSITIVE-SET COMPUTATION INSIDE `begin`. The POLICY's handling of a nested set is
-//      covered (`testDisclosesWhenANestedSubWorkflowsCanvasIsDirty`), but the line that BUILDS that
-//      set — `Set([profile.id]).union(WorkflowLayoutStore.shared.resolveNestedLayouts(from:).keys)`
-//      — is not: it needs real root + child layouts persisted to the shared store, which these
-//      registry-only tests deliberately avoid. Stated rather than implied: a mutation collapsing
-//      that union back to the root id alone would NOT be caught here. `resolveNestedLayouts` itself
-//      is exercised by the workflow integration suite and by canvas validation.
+//  Created by Raj Singh.
 //
 
 import XCTest

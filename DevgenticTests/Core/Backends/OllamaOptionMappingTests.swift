@@ -4,25 +4,7 @@
 //  OllamaOptionMappingTests.swift
 //  DevgenticTests
 //
-//  `OllamaLLMProvider.mapToOllamaOptions` — this app's option keys → Ollama's `options` object.
-//
-//  ⚠️ THE DEFECT THIS PINS. Every Ollama preset sets `stop: []` explicitly rather than leaving the
-//  optional nil (OllamaAdvancedConfig.swift:72, :82, :92, :130, :134, :138), and
-//  `AdvancedConfigEncoder.encode` blind-serialises whatever the config holds. The mapper's
-//  `default:` arm then forwarded `stop` verbatim — so a request carried `"stop": []`.
-//
-//  To Ollama that is NOT "no preference". It is an empty stop list that REPLACES the ones the
-//  model's Modelfile declares. Measured against Ollama 0.33.3 on 2026-09-13 with a model created
-//  `FROM gemma:7b` + `PARAMETER stop "FIVE"`, prompt "count ONE..TEN":
-//
-//      no `stop` key        → stopped at FOUR   (9 tokens)   — Modelfile stop ACTIVE
-//      "stop": []           → ran to TEN       (22 tokens)   — Modelfile stop DISABLED
-//      "stop": ["SEVEN"]    → stopped at SIX   (13 tokens)   — explicit list replaces it
-//
-//  So the default agent preset was silently stripping the stop sequences of every Ollama model on
-//  every request. The same guard already existed three times on the cloud side
-//  (OpenAILLMProvider.swift:99, ClaudeLLMProvider.swift:111, GeminiLLMProvider.swift:85) and was
-//  missing here.
+//  Created by Raj Singh.
 //
 
 import XCTest

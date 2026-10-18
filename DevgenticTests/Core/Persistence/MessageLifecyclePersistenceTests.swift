@@ -4,10 +4,7 @@
 //  MessageLifecyclePersistenceTests.swift
 //  DevgenticTests
 //
-//  G1 Piece 1 — in-flight persistence. Validates that the lifecycle marker, the parked-HITL
-//  operationID join key, the run-identity stamp (provider/model/dialect), and ToolExecutionData.stepId
-//  survive the ChatMessage ⇄ ChatMessageSD ⇄ Codable round-trips, and that legacy rows / payloads
-//  (written before these fields existed) decode safely to `.final` / nil.
+//  Created by Raj Singh.
 //
 
 import XCTest

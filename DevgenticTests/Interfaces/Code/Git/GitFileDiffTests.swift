@@ -4,8 +4,7 @@
 //  GitFileDiffTests.swift
 //  DevgenticTests
 //
-//  Which two versions each row diffs (`GitDiffSide.sides`) and the context folding
-//  (`GitDiffDisplayRow.collapse`). Both pure.
+//  Created by Raj Singh.
 //
 
 import XCTest

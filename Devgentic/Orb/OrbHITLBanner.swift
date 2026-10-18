@@ -4,28 +4,14 @@
 //  OrbHITLBanner.swift
 //  Devgentic
 //
-//  [Phase 3] The orb's answer to a parked run.
-//
-//  ⚠️ Why this exists rather than reusing QuickAccessHITLBanner: that banner is typed on
-//  `QuickAccessSessionViewModel` and paints with the app theme, while the Orb panel forces
-//  `.darkAqua` and its own hologram palette. Sharing it would have meant genericizing a
-//  keyboard-driven surface AND theming it two ways; a small dedicated banner is less code and
-//  reads as part of the orb.
-//
-//  ⚠️ WHY IT RENDERS IN THE ORB AND DOES NOT FORCE THE MAIN WINDOW FORWARD. Three source facts:
-//  the Orb panel is already `.canJoinAllSpaces`, so it is on whatever desktop the user is on;
-//  the main window sets NO collectionBehavior, so activating it TELEPORTS the user's desktop to
-//  wherever that window lives; and `activateMainWindow()` returns false outright when the window
-//  is closed, which is routine when the app runs from the shortcut. Forcing the window forward
-//  is therefore both more disruptive and less reliable. "Open in Chat" stays available as a
-//  deliberate escalation for reading and editing arguments.
-//
-//  ⚠️ NOTHING HERE IS APPROVABLE BY VOICE. The user reads the tool name and its arguments and
-//  clicks. An ASR transcript must never be what authorizes code execution.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The orb's answer to a parked run: shows the tool name and arguments with approve/deny choices.
+/// Renders inside the Orb panel in its own hologram palette rather than forcing the main window forward.
+/// Nothing here is approvable by voice: the user reads the arguments and clicks.
 struct OrbHITLBanner: View {
     let pending: PendingHITL
     let controller: OrbSessionController
@@ -81,8 +67,7 @@ struct OrbHITLBanner: View {
                 Text(confirmation.toolName)
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundColor(OrbPalette.hologram)
-                // ⚠️ The arguments are shown, never spoken. Approving something you have only
-                // heard paraphrased is how a misheard approval becomes an executed command.
+                // The arguments are shown, never spoken: a misheard approval must not become an executed command.
                 if !confirmation.params.isEmpty {
                     ScrollView {
                         Text(confirmation.params)

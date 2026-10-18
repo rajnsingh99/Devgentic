@@ -4,10 +4,7 @@
 //  MCPProtocolSurfaceTests.swift
 //  DevgenticTests
 //
-//  Protocol-gap work, 2026-08-01. Covers the pure units of the resource/prompt surface:
-//  synthetic tool naming (which must survive the duplicate-name guard in AgentConnect),
-//  capability-driven tool exposure, and the reserved-name routing that keeps these off the
-//  `tools/call` path.
+//  Created by Raj Singh.
 //
 
 import XCTest

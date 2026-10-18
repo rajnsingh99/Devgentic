@@ -4,19 +4,7 @@
 //  FileMarkerAgreementTests.swift
 //  DevgenticTests
 //
-//  The five MarkdownParser cold-read P3s (CR29, CR30, CR32, CR43, CR55), plus the one
-//  guard outside the parser that CR55 needs in order to be safe.
-//
-//  The through-line is that DETECTION GATES STRIPPING: `strippingFileMarkerLines` runs only
-//  when `consumedFileMarker` fired. So the two must agree about what a sentinel line is, and
-//  the two ways of disagreeing fail very differently —
-//
-//    detection WIDER  → a visible sentinel and, on the Start branch, a bogus `.marker` claim
-//                       that mc-6 exempts from the one-sibling bound (CR32).
-//    detection NARROWER → silent: a line the strip would have removed renders raw.
-//
-//  Both branches now go through `FileMarkerLine.kind`, except the End branch, which stays a
-//  loose `contains` ON PURPOSE — its errors cost a badge, never a write.
+//  Created by Raj Singh.
 //
 
 import XCTest

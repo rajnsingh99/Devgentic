@@ -4,15 +4,7 @@
 //  AutoDefaultLabelTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Register A70 — the Advanced panel's "Auto (3)" labels were hardcoded, but `Auto` resolves to the
-//  profile's own legacy `retryPolicy.maxRetries`. For a profile carrying anything other than 3 the
-//  label stated a cap the run did not use.
-//
-//  The panel now reads `ResolvedResiliencePolicy.autoDefault(legacy:)`. These tests pin that the
-//  label source and the RESOLVER agree — which is the whole point, since a second copy of the
-//  number is exactly what went wrong.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,9 +4,7 @@
 //  EditUndoTests.swift
 //  DevgenticTests
 //
-//  Undo for agent edits in Code conversations (2026-10-04): a reversible patch per write, kept on
-//  disk 7 days, applied backwards — exactly when the file is unchanged since, `git revert`-style
-//  when it changed elsewhere, and refused when the agent's own lines were edited.
+//  Created by Raj Singh.
 //
 
 import XCTest

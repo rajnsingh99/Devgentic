@@ -4,15 +4,14 @@
 //  OrbComposerButton.swift
 //  Devgentic
 //
-//  [Orb MVP] The composer entry point — sits next to the voice button in the main
-//  chat input bar and toggles the floating Orb panel.
-//  Follows the exact toolbar button discipline (24×24, surfaceOverlay at rest, surfaceOverlayStrong on hover,
-//  subtle secondaryText stroke matching the voice button, zero blue border).
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import AppKit
 
+/// The composer entry point for the Orb: sits next to the voice button in the chat input bar
+/// and toggles the floating Orb panel. Styled like the toolbar buttons (24x24, overlay surface, subtle stroke).
 struct OrbComposerButton: View {
     @Environment(MainApplicationViewModel.self) private var mainVM
     @Environment(\.appTheme) private var theme

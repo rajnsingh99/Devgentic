@@ -4,15 +4,7 @@
 //  MCPRegistryReviewSheet.swift
 //  Devgentic
 //
-//  Created 2026-08-01 — the confirmation step between a registry listing and a real server.
-//
-//  This screen exists because the MCP Registry INDEXES servers, it does not review them.
-//  Anyone can publish. Adding a local entry means running a third party's code on this Mac
-//  with the user's full privileges — the app is not sandboxed — so the exact command, the
-//  values it wants, and what it will do are all shown before anything is created.
-//
-//  Deliberately not a progress dialog. Nothing has happened yet when this appears, and
-//  nothing happens if it is dismissed.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -20,6 +12,9 @@ import os
 
 private let logger = DGLogger(category: "MCPRegistryReview")
 
+/// Confirmation step between an MCP Registry listing and a real server.
+/// Shows the exact command, requested values and effects first, since a local entry runs third-party code on this Mac.
+/// Nothing has happened when it appears, and nothing happens if it is dismissed.
 struct MCPRegistryReviewSheet: View {
 
     let plan: MCPRegistryInstallPlan

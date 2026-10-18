@@ -4,10 +4,7 @@
 //  PromptCategory.swift
 //  Devgentic
 //
-//  Single source of truth for prompt categories. Replaces the two hardcoded
-//  String arrays that used to live in PromptLibrarySidebarView and
-//  CreateEditPromptView (which drifted out of sync — "Custom" existed in the
-//  form but not in the sidebar filter).
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -26,8 +23,8 @@ enum PromptCategory: String, CaseIterable, Identifiable, Codable, Hashable {
     case custom       = "Custom"
 
     var id: String { rawValue }
-    /// ⚠️ `rawValue` verbatim — kept for persistence, logging and `Codable`. NOT for display:
-    /// use `localizedTitle`. A prompt's category is stored, so the raw strings must not move.
+    // Why: a prompt's category is stored, so the raw strings must not change.
+    /// The raw value verbatim, for persistence, logging and `Codable`; use `localizedTitle` for display.
     var displayName: String { rawValue }
 
     /// Display form. `Text(displayName)` took the non-localizing `Text` overload, so every
@@ -67,11 +64,8 @@ enum PromptCategory: String, CaseIterable, Identifiable, Codable, Hashable {
     }
 }
 
-/// Filters prompts by authorship. Seeds shipped with the app (`isUserDefined
-/// == false`) are system-curated examples users can't edit away; "All" is
-/// the default, "User" shows only prompts the user created, "Built-in" shows
-/// only the seeds. Persisted via `UserDefaults` alongside the other browse
-/// filters so the sidebar restores it across launches.
+/// Filters prompts by authorship: `All` (default), `User` (prompts the user created) or `Built-in` (the shipped seeds).
+/// Persisted via `UserDefaults` alongside the other browse filters.
 enum PromptSourceFilter: String, CaseIterable, Identifiable {
     case all     = "All"
     case user    = "My Prompts"
@@ -97,13 +91,8 @@ enum PromptSourceFilter: String, CaseIterable, Identifiable {
     }
 }
 
-/// UI-level filter scope — adds the "All" pseudo-case used by sidebar chips.
-/// Keeping this separate from `PromptCategory` means prompts can never be
-/// *assigned* to "All", only filtered by it.
-///
-/// `RawRepresentable` with a `String` raw lets us persist the user's chosen
-/// filter via `UserDefaults` across launches — `"__all__"` for `.all`, the
-/// category's rawValue otherwise. Unknown strings fall back to `.all`.
+/// UI-level filter scope: adds the `All` pseudo-case used by sidebar chips, so prompts can never be assigned to All.
+/// Persisted as a String (`__all__` for `.all`, else the category's rawValue); unknown strings fall back to `.all`.
 enum PromptCategoryFilter: Hashable, Identifiable, RawRepresentable {
     case all
     case category(PromptCategory)

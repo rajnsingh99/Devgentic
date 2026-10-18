@@ -4,10 +4,7 @@
 //  ImageCapabilityAnalyzer.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/03/26.
-//
-//  Determines whether a given provider + model combination supports
-//  Text-to-Image (T2I) and/or Image-to-Image (I2I) generation.
+//  Created by Raj Singh.
 //
 
 import Foundation

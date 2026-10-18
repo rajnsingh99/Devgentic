@@ -4,14 +4,7 @@
 //  ComposerTextRewritingTests.swift
 //  DevgenticTests
 //
-//  macOS rewrites text as you type unless a text view opts out, and NSTextView inherits the
-//  system-wide "smart quotes and dashes" setting (on by default). The composer never opted
-//  out, so every message was rewritten before it was sent.
-//
-//  Observed 2026-07-16: the user typed `--- Start of file: alpha.swift ---` and the
-//  conversation auto-title — raw message text, captured before any markdown rendering —
-//  read `— Start of file: alpha.swift —`. Typed `NSLog(@"hi");` arrived as `NSLog(@“hi”);`,
-//  which is not valid Objective-C.
+//  Created by Raj Singh.
 //
 
 import XCTest

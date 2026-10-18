@@ -2,24 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  MCPOAuthBrowserRedirectHandlerTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Register KC-45 — the redirect handler opened the user's browser BEFORE checking that the
-//  flow's loopback listener still existed, and reported the registry miss as "couldn't open
-//  the browser".
-//
-//  ⚠️⚠️ THE FAILURE THESE PIN. `awaitAuthorizationCode` ran `NSWorkspace.open` first and only
-//  then looked the listener up in `LoopbackRegistry`. A flow whose listener had already been
-//  torn down therefore still popped a browser tab, sent the user through their whole login,
-//  and only then died — with the miss reported as `openBrowserFailed` ("Try copying the URL
-//  manually"), naming a failure that never happened and advising a manual URL that has nothing
-//  to land on.
-//
-//  ⚠️ WHY THE BEHAVIOURAL PROBE GUARDS ITSELF. Calling the handler with no listener registered
-//  is safe ONLY while the listener lookup precedes the browser open. If the ordering ever
-//  regresses, that call would open a REAL browser tab on the developer's machine — the exact
-//  side effect this defect is about — so the probe checks the source order first and declines
-//  to fire when it has regressed, leaving the failure to the ordering pins below.
+//  Created by Raj Singh.
 //
 
 import XCTest

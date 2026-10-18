@@ -2,10 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SkillStoreTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The V6 library's writer: the two invariants the schema cannot enforce on its own, and the
-//  error/empty distinction the `Result` API exists to preserve.
+//  Created by Raj Singh.
 //
 
 import XCTest

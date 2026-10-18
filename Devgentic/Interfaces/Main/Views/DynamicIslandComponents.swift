@@ -4,19 +4,14 @@
 //  DynamicIslandComponents.swift
 //  Devgentic
 //
-//  Shared primitives used inside DynamicIslandBar:
-//   - IslandSearchField : unified search field (one shape, one border, one font).
-//   - IslandIconButton  : 28×28 circular affordance with hover, matches the back button.
-//   - islandCircleAffordance(): modifier for non-Button affordances (Menu labels) to
-//     pick up the same visual footprint without hover.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - IslandSearchField
 
-/// Unified search field for use inside DynamicIslandBar. Replaces the three divergent
-/// implementations that previously lived in the Tool Library and Model Store containers.
+/// Unified search field for use inside DynamicIslandBar.
 struct IslandSearchField: View {
 
     @Binding var text: String
@@ -298,10 +293,8 @@ enum IslandPillStyle {
     case success
 }
 
-/// Text-based action button for DynamicIslandBar trailing slots. Replaces the
-/// hand-rolled `Text + padding + Capsule().fill(theme.…)` pattern duplicated
-/// across ~7 views. Icon is optional and leads the label. Supports `isLoading`
-/// to swap the icon for a spinner without shifting layout dramatically.
+/// Text-based action button for DynamicIslandBar trailing slots.
+/// The icon is optional and leads the label; `isLoading` swaps the icon for a spinner.
 struct IslandPillButton: View {
 
     let title: String

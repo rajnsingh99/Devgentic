@@ -4,17 +4,7 @@
 //  InteractionCenterQueueTests.swift
 //  DevgenticTests
 //
-//  The regression net for N5 (`LLM_Execution_Concurrency_Design.md` §9): when two workflow nodes
-//  park at the same moment in one conversation, only ONE banner is visible and the second was
-//  completely invisible — the user answered one and another appeared with no warning it existed.
-//
-//  ⚠️ `InteractionCenter` had ZERO test coverage before this file. `PendingInteractionTests` covers
-//  only the PendingInteraction enum (Codable/Equatable/Identifiable), never the center's queue,
-//  FIFO ordering, resolve, or conversation scoping. The banner's "1 of N" indicator reads
-//  `items(for:)` and `current(for:)`, so those two are pinned here.
-//
-//  Constructs `InteractionCenter` directly — it is `@MainActor` with no injected dependencies.
-//  Deliberately does NOT call `HITLPresenter.claim`, which sets a global weak reference.
+//  Created by Raj Singh.
 //
 
 import XCTest

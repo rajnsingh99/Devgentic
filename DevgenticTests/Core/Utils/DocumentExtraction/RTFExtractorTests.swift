@@ -2,9 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  RTFExtractorTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  Tier 1 + 2: RTF extraction via NSAttributedString — real fixture + programmatic tests.
+//  Created by Raj Singh.
 //
 
 import XCTest

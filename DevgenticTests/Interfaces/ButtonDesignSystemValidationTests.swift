@@ -4,9 +4,7 @@
 //  ButtonDesignSystemValidationTests.swift
 //  DevgenticTests
 //
-//  Regression test suite validating adherence to the button design system
-//  specification. Enforces zero bare bordered buttons
-//  across UI modules and verifies surface style synchronization.
+//  Created by Raj Singh.
 //
 
 import XCTest

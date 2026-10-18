@@ -4,11 +4,7 @@
 //  ToolSchemaSizingTests.swift
 //  DevgenticTests
 //
-//  Tool schemas rode every request and were charged as part of a flat
-//  `layerOverheadChars = 2_000` shared with instructions and environment facts. An agent with
-//  twenty tools carries several KB of names, descriptions and argument schemas; a bot carries
-//  exactly zero. Both were priced identically, and the error grew with each tool enabled —
-//  making it a large part of why the same model reads differently as a bot and as an agent.
+//  Created by Raj Singh.
 //
 
 import XCTest

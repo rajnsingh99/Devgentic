@@ -4,21 +4,14 @@
 //  ContextCutLog.swift
 //  Devgentic
 //
-//  What the LAST turn of each conversation had to cut to fit the model's context — shown in the
-//  context gauge instead of on every tool card.
-//
-//  ⚠️ WHY IT EXISTS (2026-09-24). With no limit below what fits, a cut now only happens when the
-//  room genuinely runs out — and when it does, the user should be able to find out without it
-//  cluttering the transcript. The user chose the gauge as the place (their words: managing the
-//  context is the user's responsibility, so the gauge must show them what happened). The executor
-//  already logs `[TOOLRESULT]`, but a log line is invisible to anyone not running `log stream`.
-//
-//  In-memory only, by design: it describes the most recent turn, which is gone on relaunch anyway.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import Observation
 
+/// What the last turn of each conversation had to cut to fit the model's context, shown in the context gauge.
+/// In-memory only: it describes the most recent turn.
 @MainActor
 @Observable
 final class ContextCutLog {
@@ -32,12 +25,8 @@ final class ContextCutLog {
         let keptChars: Int
     }
 
-    /// A step whose prompt filled the model's window — the PROVIDER cut it, not the app.
-    ///
-    /// ⚠️ Decided from the provider's REAL prompt-token count, never from the app's estimate.
-    /// The estimate is deliberately pessimistic (3 chars/token): on device 2026-09-24 it said
-    /// "over budget" at steps 2 and 3 while Ollama counted 5.6K of 8K, and only step 5 (8,051 of
-    /// 8,192) truly overflowed. Reporting the estimate would have named the wrong step.
+    // Why: decided from the provider's real prompt-token count, never the app's pessimistic estimate, which names the wrong step.
+    /// A step whose prompt filled the model's window: the provider cut it, not the app.
     struct Overflow: Equatable, Sendable {
         let step: Int
         let promptTokens: Int

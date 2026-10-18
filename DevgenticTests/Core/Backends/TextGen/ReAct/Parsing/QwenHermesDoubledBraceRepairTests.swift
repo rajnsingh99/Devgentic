@@ -4,16 +4,7 @@
 //  QwenHermesDoubledBraceRepairTests.swift
 //  DevgenticTests
 //
-//  Cover for the doubled-brace tool-call repair in `QwenHermesJsonParser` — defense in depth for
-//  the corrupt-template output shape observed 2026-08-21 (Qwen2.5-3B-4bit's shipped template
-//  teaches `{{"name": ...}}`; the model copies it; the strict decoder rejects it).
-//
-//  On MLX the render-side `ChatTemplateRepair` prevents the model emitting this at all, so these
-//  tests are the ONLY exercise the repair path gets — if they go, the repair is unverified.
-//
-//  ⚠️ The quoted-span tests are the ones that keep this out of the content-corruption class
-//  (transforms that rewrote payload bytes by shape-matching): a `{{` inside a string VALUE must
-//  never trigger or be altered by the repair.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,7 +4,7 @@
 //  CodeViewerPanelView.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -87,12 +87,7 @@ class CodeDocument: Equatable {
         return lhs.content == rhs.content && lhs.language.id == rhs.language.id
     }
 
-    /// Plain String. This was a `GapBuffer` — a real gap-buffer implementation whose
-    /// editing mechanics (`moveGap`/`insert`/`delete`) had ZERO callers: every live use
-    /// constructed it whole from a String and read `.string` back, so it was a String
-    /// with extra steps (and an untested one — the never-run `moveGap` else-branch
-    /// computed its new gap end from an already-mutated `gapStart`). CodeEditSourceEditor
-    /// owns actual text editing; this document just carries content in and out.
+    /// The tab's text as a plain String; `CodeEditSourceEditor` owns editing, this document only carries content in and out.
     var content: String
     var language: CodeLanguage
 
@@ -247,20 +242,11 @@ final class CodeViewerStatusBarState {
 
 // MARK: - Syntax theme memo
 
-/// Caches the resolved Code Viewer `SyntaxTheme` for as long as the tokens it derives from
-/// are unchanged.
-///
-/// `themeManager.resolvedCodeViewerSyntaxTheme` is a chain of COMPUTED properties —
-/// `ThemeDecorator.syntaxTheme` → `effectiveCodeTheme.syntaxTheme.patched(...)` — and every
-/// theme spells its palette as hex literals, so each derivation runs `NSColor(hex:)`
-/// (a `Scanner`) fifteen times and then rebuilds the `EditorTheme` on top. The panel reads
-/// it through a dozen accessors (`panelBackground`, `textColor`, `resolvedSyntax.editorTheme`,
-/// the per-chip colours, …), so ONE body pass re-derived the palette dozens of times — and
-/// every keystroke causes a pass, because the draft write-through mutates the observed
-/// `codeViewerTabs` array.
-///
-/// A reference type so a `View` struct's (non-mutating) computed property can fill it, and
-/// deliberately NOT observable: warming a cache must not invalidate anything.
+// Why: deriving the palette runs `NSColor(hex:)` many times and the panel reads it through a dozen accessors,
+// so without the cache every keystroke-driven body pass re-derives it dozens of times
+/// Caches the resolved Code Viewer `SyntaxTheme` while the tokens it derives from are unchanged.
+/// A reference type so a `View` struct's non-mutating computed property can fill it; deliberately not observable,
+/// since warming a cache must not invalidate anything.
 private final class SyntaxThemeCache {
     var key: String?
     var theme: SyntaxTheme?
@@ -288,26 +274,20 @@ struct CodeViewerPanelView: View {
     /// already-open panel (badge-only policy: the panel itself is never auto-opened).
     @AppStorage("codeViewerFollowAgent") private var followAgent: Bool = false
 
-    /// Width while a divider drag is in flight. Written per tick INSTEAD of the
-    /// @AppStorage-backed `panelWidth`: a UserDefaults write per mouse move both spams the
-    /// preferences daemon and schedules an extra invalidation on top of each layout pass.
-    /// The final width is committed to `panelWidth` once, on drag end.
-    ///
-    /// Held on the VIEW MODEL, not in `@State`, because the panel is not the only view that
-    /// has to follow the divider: in `.split` mode `MainApplicationView` insets the chat by
-    /// the panel's width, and reading only the persisted value left the chat a full drag
-    /// behind (panel over chat during the drag, chat jumping on release).
+    // Why: held on the view model, not `@State`: in `.split` mode `MainApplicationView` insets the chat by this width, and a
+    // UserDefaults write per mouse move spams the preferences daemon
+    /// Width while a divider drag is in flight, written per tick instead of the `@AppStorage`-backed `panelWidth`;
+    /// the final width is committed to `panelWidth` once, on drag end.
     private var liveDragWidth: Double? { chatHistoryViewModel.codeViewerLiveDragWidth }
 
     /// The width the panel renders at: the in-flight drag value when dragging, else the
     /// persisted preference.
     private var displayedWidth: Double { liveDragWidth ?? panelWidth }
 
-    /// The width of the container the panel is mounted in (the app window's content
-    /// area), measured via `onGeometryChange`. Caps both the drag and the rendered
-    /// width — a persisted width wider than the current window would otherwise push the
-    /// divider off-screen and leave the panel unresizable. `.infinity` until the first
-    /// geometry pass so `min(displayedWidth, containerWidth)` is a no-op at startup.
+    // Why: caps both the drag and the rendered width: a persisted width wider than the window would push the divider
+    // off-screen and leave the panel unresizable
+    /// The width of the container the panel is mounted in (the window's content area), measured via `onGeometryChange`.
+    /// `.infinity` until the first geometry pass, so `min(displayedWidth, containerWidth)` is a no-op at startup.
     @State private var containerWidth: CGFloat = .infinity
 
     /// Widest the panel may render or be dragged to. In split the chat is a real sibling
@@ -368,12 +348,10 @@ struct CodeViewerPanelView: View {
 
     @State private var syntaxCache = SyntaxThemeCache()
 
-    /// The Code Viewer's syntax palette, derived at most ONCE per (theme, code-theme
-    /// override, accent) rather than once per accessor — see `SyntaxThemeCache`.
-    ///
-    /// `themeIdentifier` is read first and unconditionally: that read is what registers the
-    /// `@Observable` dependency on the theme manager, so a theme change still invalidates
-    /// this body. The cache skips the DERIVATION, never the observation.
+    // Why: `themeIdentifier` is read first and unconditionally: that read registers the `@Observable` dependency on the
+    // theme manager, so the cache skips the derivation, never the observation
+    /// The Code Viewer's syntax palette, derived at most once per (theme, code-theme override, accent);
+    /// see `SyntaxThemeCache`.
     private var resolvedSyntax: SyntaxTheme {
         let key = themeIdentifier
         if syntaxCache.key == key, let cached = syntaxCache.theme { return cached }
@@ -390,14 +368,8 @@ struct CodeViewerPanelView: View {
     private var accentTint: Color { Color(nsColor: resolvedSyntax.keywords) }
     private var selectionColor: Color { Color(nsColor: resolvedSyntax.selection) }
 
-    /// Composite identifier for detecting theme changes in the NSViewController bridge, and
-    /// the cache key for `resolvedSyntax`.
-    ///
-    /// It must name EVERY input to `ThemeDecorator.syntaxTheme`, which is
-    /// `effectiveCodeTheme.syntaxTheme.patched(with: accentColorOverride.nsColor)` — base
-    /// theme, code-viewer override AND accent. The accent was missing, so changing the
-    /// accent left the editor rendering its previous palette until something else forced a
-    /// rebuild; it also has to be here now that a cache keys off this string.
+    /// Composite identifier for detecting theme changes in the NSViewController bridge, and the cache key
+    /// for `resolvedSyntax`. Must name every input to `ThemeDecorator.syntaxTheme`: base theme, code-viewer override, accent.
     private var themeIdentifier: String {
         "\(themeManager.currentTheme.id)|\(themeManager.codeViewerThemeOverride.rawValue)|\(themeManager.selectedAccentColor.rawValue)"
     }
@@ -419,14 +391,8 @@ struct CodeViewerPanelView: View {
             containerWidth = newWidth
         }
         .transition(.move(edge: .trailing))
-        // `initial: true` is REQUIRED, not cosmetic. This panel is only created once a tab
-        // is ALREADY active, so a plain `onChange` has no transition to observe on first
-        // appear — `document` stayed nil and the panel rendered "No Code Selected" until the
-        // user switched tabs. This is the sole assignment to `document` (no onAppear/.task).
-        //
-        // Keyed on the ACTIVE SNIPPET'S id rather than the active tab id: applying a change
-        // replaces a tab's snippet in place (same tab id, new snippet id), and that must
-        // reload the document to show the applied content — a tab-id-keyed observer misses it.
+        // `initial: true` is required: the panel is created once a tab is already active, so a plain `onChange`
+        // sees no transition. Keyed on the active snippet id, not the tab id: applying a change replaces a snippet in place.
         .onChange(of: selectedSnippet?.id, initial: true) { _, _ in
             loadSelectedSnippet()
         }
@@ -455,13 +421,9 @@ struct CodeViewerPanelView: View {
         chatHistoryViewModel.activeCodeViewerTab?.snippet
     }
 
-    /// A binding onto ONE tab's editor view state (cursor, scroll, find panel).
-    ///
-    /// The store is a plain reference held by the view model, so writes from the editor's
-    /// coordinator — one per caret move — reach no `@Observable` property and invalidate no
-    /// body. With no tab there is nothing to remember, and `.constant` gives the editor a
-    /// well-formed state whose writes go nowhere, which is the correct behaviour for a
-    /// panel showing the empty state.
+    /// A binding onto one tab's editor view state (cursor, scroll, find panel).
+    /// The store is a plain reference on the view model, so caret-move writes invalidate no body. With no tab, `.constant`
+    /// gives the editor a well-formed state whose writes go nowhere.
     private func editorStateBinding(for tabID: UUID?) -> Binding<SourceEditorState> {
         guard let tabID else { return .constant(SourceEditorState()) }
         let store = chatHistoryViewModel.codeViewerEditorStates
@@ -545,28 +507,17 @@ struct CodeViewerPanelView: View {
         .frame(maxHeight: .infinity)
         .offset(x: -7)
         .gesture(
-            // GLOBAL coordinate space is load-bearing. The divider is the panel's
-            // leading edge, so it MOVES as a result of its own drag — and in `.local`
-            // space `translation.width` then includes the divider's own (one-frame-
-            // stale) displacement on top of the cursor's. Subtracting that contaminated
-            // translation from the start width overshoots, the next frame compensates
-            // back, and the edge oscillates violently under the cursor. Global space
-            // measures the CURSOR alone, which is the only thing a resize should track.
+            // Global coordinate space is required: the divider is the panel's leading edge and moves with its own drag,
+            // so `.local` translation includes that displacement and the edge oscillates. Global space tracks the cursor alone.
             DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in
-                    // `translation.width` is cumulative from the gesture's START, so it
-                    // must be applied to the width AT THAT START — not to the live
-                    // width, which we're already moving. Subtracting the cumulative
-                    // translation from an already-moved width compounds quadratically and
-                    // the panel races to the clamp on a small drag. Capture the start once.
+                    // `translation.width` is cumulative from the gesture's start, so it is applied to the width captured once at
+                    // that start, not to the live width, which compounds as the panel moves.
                     let start = dragStartWidth ?? displayedWidth
                     if dragStartWidth == nil { dragStartWidth = start }
                     let newWidth = CGFloat(start) - value.translation.width
-                    // Rounded to whole points: fractional widths force the editor's
-                    // wrapped-text layout to re-solve on sub-pixel deltas for no
-                    // visible gain. Upper clamp is the measured container — the user
-                    // can drag the panel to the full window width, not an arbitrary
-                    // 1200pt cap.
+                    // Rounded to whole points to avoid sub-pixel relayout of the editor's wrapped text; the upper clamp is the
+                    // measured container width.
                     chatHistoryViewModel.codeViewerLiveDragWidth =
                         Double(min(max(newWidth, 400), maxPanelWidth)).rounded()
                 }
@@ -604,25 +555,16 @@ struct CodeViewerPanelView: View {
         }
     }
 
-    /// Whether the dirty-close alert can offer "Save & Close" for this tab: it can save
-    /// anything ⌘S can save, which is an ATTACHMENT-linked tab (`sourceFileID`) or a
-    /// PATH-linked one (`filePath` — every agent live-write tab and every Save-As'd tab).
-    ///
-    /// Only the first was offered, so the tabs the viewer opens most often — agent writes —
-    /// were given Discard or Cancel and nothing else, although ⌘S saves them fine.
-    /// `nonisolated static` and pure so the decision is testable without a view.
+    /// Whether the dirty-close alert can offer "Save & Close": true for any tab ⌘S can save, i.e. an attachment-linked tab
+    /// (`sourceFileID`) or a path-linked one (`filePath`, incl. agent live-write and Save-As'd tabs).
+    /// `nonisolated static` and pure so it is testable without a view.
     nonisolated static func canSaveAndClose(_ tab: CodeViewerTab) -> Bool {
         tab.snippet.sourceFileID != nil || tab.filePath != nil
     }
 
-    /// "Save & Close" from the dirty-close alert: run the guarded save, then close ONLY
-    /// if it actually cleaned the tab — a failed save (drift, I/O) leaves the tab open
-    /// with the error alert instead of discarding the draft behind the failure.
-    ///
-    /// Routes to the SAME engine ⌘S would pick (`saveActiveTab`): the attachment path when
-    /// there's a source file, else the tab's own path. `performApplyChanges` returns early
-    /// without a source link, so sending a path-linked tab there closed nothing and just
-    /// logged — which is why the button was hidden for them rather than fixed.
+    /// "Save & Close" from the dirty-close alert: runs the guarded save, then closes only if it actually cleaned the tab;
+    /// a failed save (drift, I/O) leaves the tab open with the error alert instead of discarding the draft.
+    /// Routes to the same engine ⌘S picks (`saveActiveTab`): the attachment path for a source file, else the tab's own path.
     private func saveAndClosePendingTab(_ tabID: UUID) {
         guard let tab = chatHistoryViewModel.codeViewerTabs.first(where: { $0.id == tabID }) else { return }
         Task { @MainActor in
@@ -655,10 +597,7 @@ struct CodeViewerPanelView: View {
                     set: { if !$0 { chatHistoryViewModel.pendingCloseTabID = nil } }
                 )) {
                     if let pending = pendingCloseTab {
-                        // [CF-11] Gate on `canSaveAndClose`, not on `sourceFileID` alone — a
-                        // PATH-linked tab (every agent live-write, every Save-As'd tab) can be
-                        // saved by ⌘S, so offering it only Discard/Cancel here threw away edits
-                        // the viewer could perfectly well have written.
+                        // Gate on `canSaveAndClose`, not `sourceFileID` alone: a path-linked tab can also be saved by ⌘S.
                         if Self.canSaveAndClose(pending) {
                             Button(String(localized: "Save & Close")) { saveAndClosePendingTab(pending.id) }
                         }
@@ -725,8 +664,7 @@ struct CodeViewerPanelView: View {
                 }
 
             ZStack(alignment: .top) {
-                // The panel shows CONTENT. A change is shown where it happened — in the
-                // tool output row — so this no longer branches on a diff mode.
+                // The panel shows content; a change is shown where it happened, in the tool output row.
                 if let document = document {
                     let editedTabID = chatHistoryViewModel.activeCodeViewerTabID
                     // ONE derivation for both editor tokens: `resolvedSyntax` is memoized,
@@ -741,14 +679,10 @@ struct CodeViewerPanelView: View {
                         themeIdentifier: themeIdentifier,
                         wrapLines: wrapLines,
                         showMinimap: showMinimap,
-                        // Cursor/scroll live OUTSIDE the editor because the editor is
-                        // rebuilt on every snippet change (`.id(document.id)` below) and
-                        // torn down entirely when the panel is minimized. Keyed by TAB, so
-                        // a switch away and back resumes where the user left off.
+                        // Cursor/scroll live outside the editor, which is rebuilt on every snippet change (`.id(document.id)`) and torn down
+                        // when minimized. Keyed by tab, so switching away and back resumes where the user left off.
                         editorState: editorStateBinding(for: editedTabID),
-                        // Captures the tab id the document was built FOR: a keystroke
-                        // racing a tab switch must land in the tab that owns this editor,
-                        // not whatever is active by the time the callback runs.
+                        // Captures the tab id the document was built for, so a keystroke racing a tab switch lands in the owning tab.
                         onContentChange: { [editedTabID] newContent in
                             guard let editedTabID else { return }
                             chatHistoryViewModel.updateCodeViewerDraft(tabID: editedTabID, content: newContent)
@@ -777,9 +711,8 @@ struct CodeViewerPanelView: View {
                 )
             }
         }
-        // Overlay/split modes: fixed width, clamped to the container so a width persisted
-        // on a bigger window can't push the divider off-screen. Full mode: fill everything
-        // the mount gives us (MainApplicationView insets us past the sidebar).
+        // Overlay/split: fixed width clamped to the container so a width persisted on a bigger window cannot push the
+        // divider off-screen. Full mode fills what the mount gives (`MainApplicationView` insets past the sidebar).
         .frame(width: presentation == .full ? nil : min(CGFloat(displayedWidth), maxPanelWidth))
         .frame(maxWidth: presentation == .full ? .infinity : nil)
         .background(
@@ -803,10 +736,8 @@ struct CodeViewerPanelView: View {
             }
         }
         .background(tabSwitchingShortcuts)
-        // Surfaces an Apply-Changes failure (missing file, on-disk drift, I/O error).
-        // On a subview separate from the Save-error alert on `body` so the two alert
-        // modifiers don't contend on the same view. Cleared by the VM on the next
-        // successful apply.
+        // Surfaces an Apply-Changes failure (missing file, on-disk drift, I/O error); cleared on the next successful apply.
+        // On a subview separate from the Save-error alert so the two alert modifiers do not contend on one view.
         .alert("Couldn't Apply Changes", isPresented: Binding(
             get: { chatHistoryViewModel.codeApplyError != nil },
             set: { if !$0 { chatHistoryViewModel.codeApplyError = nil } }
@@ -1078,14 +1009,9 @@ struct CodeViewerPanelView: View {
 
     // MARK: - Keyboard Shortcuts
 
-    /// Editor-parity shortcuts, live only while the panel is mounted (hidden zero-size
-    /// buttons): ⌘⇧[ / ⌘⇧] previous/next tab, ⌘W close active tab, ⌘1–9 jump to tab N,
-    /// ⌘+/⌘− font size, ⌘0 reset.
-    ///
-    /// ⌘W deliberately shadows the app menu's "Close File Viewer Window": key equivalents
-    /// route through the view hierarchy BEFORE the menu bar, so while the panel is open
-    /// ⌘W closes a tab; once the last tab closes the panel unmounts and ⌘W falls back to
-    /// the menu — the editor convention, scoped exactly to when it makes sense.
+    /// Editor-parity shortcuts, live only while the panel is mounted (hidden zero-size buttons): ⌘⇧[ / ⌘⇧] previous/next
+    /// tab, ⌘W close active tab, ⌘1–9 jump to tab N, ⌘+/⌘− font size, ⌘0 reset.
+    /// ⌘W shadows the menu's "Close File Viewer Window" while mounted: key equivalents route through views before the menu.
     private var tabSwitchingShortcuts: some View {
         ZStack {
             Button("", action: chatHistoryViewModel.navigateToPreviousSnippet)
@@ -1210,12 +1136,8 @@ struct CodeViewerPanelView: View {
 
     // MARK: - Actions
 
-    /// The text the user is actually looking at.
-    ///
-    /// `CodeViewerTab.snippet` is IMMUTABLE for the life of the tab, so once the editor has
-    /// written through to `editedCode` its `.code` is stale. Every copy action used it, so
-    /// after any edit the clipboard silently held the pre-edit version. Mirrors what
-    /// `saveCodeToFile` already does.
+    /// The text the user is actually looking at: `CodeViewerTab.snippet` is immutable, so once the editor writes through
+    /// to `editedCode` the snippet's `.code` is stale. Copy actions use this; `saveCodeToFile` does the same.
     private var codeOnScreen: String? {
         guard let snippet = currentSnippet else { return nil }
         return chatHistoryViewModel.activeCodeViewerTab?.effectiveCode ?? snippet.code
@@ -1292,17 +1214,11 @@ struct CodeViewerPanelView: View {
         }
     }
 
+    // Why: an unconditional `String(contentsOf:)` of a user-picked file can allocate a multi-GB log in full (a jetsam risk
+    // on any thread); one threshold keeps both read paths agreeing on which files the viewer holds in memory
     /// Whether Save As should pre-read an existing destination before writing over it.
-    ///
-    /// [CF-17] That pre-read exists only so `contentToApply` can copy the destination's
-    /// leading whitespace run and its trailing newline. The destination is whatever file the
-    /// user picked in the save panel, so an unconditional `String(contentsOf:)` allocates a
-    /// multi-GB log or DB dump in full for two edge characters — a jetsam risk on ANY
-    /// thread, which is why moving the read off the main actor did not settle this row.
-    /// Deliberately the SAME constant the live-tab pre-read gates on
-    /// (`handleAgentWriteBegan`): a second private threshold here would let the two read
-    /// paths disagree about which files the viewer will hold in memory.
-    /// `nonisolated static` and pure so the decision is testable without a view.
+    /// The pre-read only copies the destination's leading whitespace and trailing newline, so it is skipped over the size cap
+    /// shared with the live-tab pre-read (`handleAgentWriteBegan`). `nonisolated static` and pure so it is testable.
     nonisolated static func shouldPreReadSaveAsDestination(byteSize: Int) -> Bool {
         byteSize <= AgentLiveWriteEvent.liveContentByteLimit
     }
@@ -1334,44 +1250,23 @@ struct CodeViewerPanelView: View {
 
         savePanel.begin { (result) in
             guard result == .OK, let rawURL = savePanel.url else { return }
-            // Third save engine, same symlink rule as the other two: writing to a symlink
-            // path replaces the link with a regular file and leaves the target stale.
-            // Cheap (one stat), unlike the read/write below — kept inline like the other
-            // two engines do.
+            // Same symlink rule as the other save engines: writing to a symlink path replaces the link with a regular file
+            // and leaves the target stale. Cheap (one stat), so kept inline.
             let url = ChatHistoryViewModel.writeTarget(forPath: rawURL.path)
-            // One more cheap stat beside `writeTarget`'s, and inline for the same reason:
-            // it decides whether the EXPENSIVE read below runs at all. Absent attributes
-            // (a genuinely new destination) read as 0 — there is nothing to slurp.
+            // One more cheap stat, inline because it decides whether the expensive read below runs at all;
+            // absent attributes (a new destination) read as 0.
             let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
             let destinationBytes = (attributes?[.size] as? Int) ?? 0
             let preReadDestination = Self.shouldPreReadSaveAsDestination(byteSize: destinationBytes)
             if !preReadDestination {
                 logger.info("[CodeViewer] Save As: skipping the pre-read of '\(url.lastPathComponent)' — \(destinationBytes) bytes, over the \(AgentLiveWriteEvent.liveContentByteLimit)-byte cap. CONSEQUENCE: that file's leading whitespace and trailing newline are NOT carried over; the editor buffer is written verbatim over it.")
             }
-            // [CF-17] The read AND the write now run off the main actor, and the read is
-            // SIZE-CAPPED like the live-tab pre-read (`handleAgentWriteBegan`). This is the only
-            // engine that reads whatever destination the USER chose, which is why it was fixed
-            // first — it is the one that can be pointed at an arbitrarily large file.
-            // ⚠️ Half of this note is now out of date and half is still true.
-            // `ChatHistoryViewModel.saveTabToItsPath` (the ⌘S path for a path-linked tab) NO
-            // LONGER reads or writes on the main actor — its drift read runs in a
-            // `Task.detached` and its write goes through `atomicallyWrite`. What it still lacks
-            // is this engine's SIZE CAP: that read is an uncapped `String(contentsOf:)`, so a
-            // very large agent-written file opened from a timeline row still allocates whole
-            // into memory on save. Off-main, so no beachball — a memory spike, not a freeze.
-            // `savePanel.begin`'s completion is @MainActor (this method already touched
-            // `chatHistoryViewModel` here synchronously before this fix), so the `Task`
-            // below inherits that and only the two `await`ed legs leave it.
+            // The read and the write run off the main actor, and the read is size-capped like the live-tab pre-read.
+            // `savePanel.begin`'s completion is `@MainActor`, so this `Task` inherits it and only the two awaited legs leave it.
             Task { @MainActor in
                 do {
-                    // Save As is the THIRD save engine and was the only one still writing the
-                    // raw buffer. Every tab's content came through `CodeSnippet.normalizedCode`,
-                    // which trims BOTH edges, so writing it verbatim over an existing file
-                    // silently deleted that file's leading blank line/indentation and its POSIX
-                    // trailing newline — the exact loss `contentToApply` exists to prevent (see
-                    // its doc comment). The baseline MUST be the destination's on-disk bytes;
-                    // for a genuinely new file — or one over the cap above — there is no
-                    // baseline to restore from and the helper degrades to a no-op.
+                    // Baseline for `contentToApply`: the destination's on-disk bytes, so the trimmed buffer does not delete its leading
+                    // whitespace and trailing newline. A new file, or one over the cap, has no baseline and the helper is a no-op.
                     var onDisk: String? = nil
                     if preReadDestination {
                         onDisk = await Task.detached(priority: .utility) {
@@ -1382,19 +1277,13 @@ struct CodeViewerPanelView: View {
                         snippetCode: buffer,
                         preservingEdgeWhitespaceOf: onDisk ?? buffer
                     )
-                    // No baseline: Save As is the user explicitly choosing a destination, not
-                    // reconciling with a file the tab already claims to represent, so there is
-                    // nothing to drift-check against — the other two engines refuse on drift
-                    // because they write BACK to a path already tracked; this one has no such
-                    // history. `atomicallyWrite` also verifies the write by reading the temp
-                    // back before the atomic replace, which the old plain `write(to:atomically:)`
-                    // did not.
+                    // No baseline: Save As is an explicit destination choice, so there is nothing to drift-check, unlike the engines
+                    // that write back to a tracked path. `atomicallyWrite` verifies the write by reading the temp file back first.
                     try await ChatHistoryViewModel.atomicallyWrite(
                         content, to: url, fileName: url.lastPathComponent
                     )
-                    // Save As satisfies an UNLINKED tab's dirty state (it has no source
-                    // file — this WAS its save). For a linked tab it's just an exported
-                    // copy; the source file still hasn't seen the draft, so it stays dirty.
+                    // Save As satisfies an unlinked tab's dirty state (it has no source file); for a linked tab it is just an
+                    // exported copy and the tab stays dirty.
                     if !isLinked, let tabID {
                         // `wroteToDisk` is the drift baseline and must be the BYTES, which
                         // differ from the editor buffer whenever edge whitespace was restored.
@@ -1413,8 +1302,7 @@ struct CodeViewerPanelView: View {
 
 // MARK: - SF Symbol for a language
 
-/// The SF Symbol used to represent a code language, shared by the tab strip (and formerly the
-/// header badge). Free function so it isn't tied to a view instance.
+/// The SF Symbol representing a code language, shared by the tab strip. A free function, not tied to a view.
 func codeViewerLanguageIcon(for languageID: String?) -> String {
     switch languageID?.lowercased() {
     case "swift": return "swift"
@@ -1436,10 +1324,8 @@ func codeViewerLanguageIcon(for languageID: String?) -> String {
 
 // MARK: - Tab Strip
 
-/// The horizontal, scrollable strip of open Code Viewer tabs. Replaces the single-selection
-/// `< 1/N >` navigator: each open block is its own tab with a close control, and the active
-/// tab is highlighted (filled with the editor background so it reads as "connected" to the
-/// code below). Auto-scrolls to keep the active tab visible.
+/// The horizontal, scrollable strip of open Code Viewer tabs: each open block is its own tab with a close control,
+/// and the active tab is highlighted (filled with the editor background) and auto-scrolled into view.
 fileprivate struct CodeViewerTabStrip: View {
     let tabs: [CodeViewerTab]
     let activeTabID: UUID?
@@ -1589,11 +1475,8 @@ fileprivate struct CodeViewerTabChip: View {
                 }
             }
 
-            // Trailing slot, VS Code-style: hover always offers the ✕; a LIVE tab pulses
-            // (agent writing) or warns (write rejected); otherwise a DIRTY tab shows its
-            // unsaved-dot (even while active — the active tab is the one being edited, so
-            // its dirty state matters most); a clean active tab keeps the discoverable ✕;
-            // a clean inactive tab reserves the space.
+            // Trailing slot: hover always offers the ✕; a live tab pulses (agent writing) or warns (write rejected); a dirty tab
+            // shows its unsaved dot, even while active; a clean active tab keeps the ✕; a clean inactive tab reserves the space.
             if !isHovering, tab.liveState == .active {
                 LivePulseDot(color: .orange)
                     .frame(width: 18, height: 18)
@@ -1816,13 +1699,8 @@ class HighPerformanceCodeViewController: NSViewController {
     /// representable on make AND update so it always captures the live environment.
     var onContentChange: ((String) -> Void)?
 
-    /// The ACTIVE TAB's cursor/scroll/find state, owned by the view model's store.
-    ///
-    /// Was `.constant(.init())` at both `SourceEditor` call sites, i.e. a binding whose
-    /// setter discards: the coordinator dutifully wrote the caret and scroll position back
-    /// on every move, into a value nothing could read. Combined with the `.id(document.id)`
-    /// teardown, every tab switch, live-write refresh and minimize→reopen therefore
-    /// restarted the editor at line 1.
+    /// The active tab's cursor/scroll/find state, owned by the view model's store, so it survives tab switches,
+    /// live-write refreshes and minimize/reopen.
     var editorState: Binding<SourceEditorState>
 
     init(document: CodeDocument, language: CodeLanguage, editorTheme: CodeEditSourceEditor.EditorTheme, bracketHighlightColor: NSColor, themeIdentifier: String, wrapLines: Bool, showMinimap: Bool, editorState: Binding<SourceEditorState>) {
@@ -1881,18 +1759,10 @@ class HighPerformanceCodeViewController: NSViewController {
         )
     }
 
+    // Why: `[weak self]` is required: the binding lives in the `SourceEditor`, the `hostingController`'s `rootView`, which this
+    // controller owns; a strong capture is a cycle that leaks the whole CodeEdit stack on every panel open/close
     /// Two-way binding to the document's text.
-    ///
-    /// `[weak self]` is REQUIRED, not stylistic. The binding is stored in the
-    /// `SourceEditor`, which is the `hostingController`'s `rootView`, and this
-    /// controller OWNS `hostingController` — so a strong capture closes the loop
-    ///
-    ///     self ─▶ hostingController ─▶ rootView ─▶ contentBinding ─▶ self
-    ///
-    /// and the controller can never deallocate, leaking the whole CodeEdit stack
-    /// (editor, text storage, highlighting state, document) on every panel
-    /// open/close. Factored into one place so `setupEditorView` and
-    /// `updatePresentationView` can't drift back to a strong capture.
+    /// Built in one place so `setupEditorView` and `updatePresentationView` share the weak capture.
     private func makeContentBinding() -> Binding<String> {
         Binding<String>(
             get: { [weak self] in self?.document.content ?? "" },
@@ -1900,9 +1770,7 @@ class HighPerformanceCodeViewController: NSViewController {
                 guard let self else { return }
                 if self.document.content != newString {
                     self.document.content = newString
-                    // Write-through to the tab so the draft survives tab switches and
-                    // minimize — the panel rebuilds documents from the tab, and edits
-                    // held only in this document would die with it.
+                    // Write-through to the tab so the draft survives tab switches and minimize: the panel rebuilds documents from the tab.
                     self.onContentChange?(newString)
                 }
             }

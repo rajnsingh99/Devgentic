@@ -4,14 +4,13 @@
 //  MLXModelDetailSheet.swift
 //  Devgentic
 //
-//  Created 2026-08-03 for G6.
-//
-//  The decision aid the store never had: licence, size, quantization, architecture and the
-//  publisher's own model card, shown BEFORE the user commits to a multi-gigabyte download.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The decision aid for an MLX model: licence, size, quantization, architecture and the publisher's model card,
+/// shown before the user commits to a multi-gigabyte download.
 struct MLXModelDetailSheet: View {
 
     let model: MLXDisplayModel
@@ -35,17 +34,8 @@ struct MLXModelDetailSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    // ⚠️ ABOVE the isLoading/detail switch, not inside `factsGrid`. This is the
-                    // one fact about an installed copy that is known from DISK, so putting it in
-                    // the grid would blank it during the HuggingFace fetch and on `errorState` —
-                    // i.e. offline, which is exactly when someone inspects a model they already
-                    // have. `if let` rather than a placeholder: a copy that predates revision
-                    // tracking shows nothing instead of a made-up "unknown".
-                    // ⚠️ RESOLVED HERE, NOT CARRIED ON THE CARD. The card's `revision` was
-                    // populated only by the INSTALLED-tab mapping, so opening the sheet for the
-                    // same installed model from All or Recommended showed no row at all — which
-                    // reads as "this copy predates revision tracking", and is false. The service
-                    // is the one source that is right on every tab.
+                    // Above the isLoading/detail switch, not inside `factsGrid`: this fact is known from disk, so it stays visible offline.
+                    // Resolved from the service, not the card, whose `revision` only the installed tab fills.
                     if let revision = MLXModelService.shared.installedModel(named: model.id)?.revision {
                         fact("Installed revision", MLXModelRevision.shortForm(revision),
                              hint: "Full commit \(revision). This is the version on your disk; Check for Updates compares it against what the publisher has now.")
@@ -157,9 +147,8 @@ struct MLXModelDetailSheet: View {
 
             fact("Architecture", detail.architecture ?? "Not stated")
 
-            // ⚠️ Stated honestly. Verified across four MLX repos: HuggingFace's API never
-            // publishes `max_position_embeddings`, so this genuinely cannot be known until
-            // the model is on disk and its `config.json` can be read.
+            // Stated honestly: HuggingFace's API never publishes `max_position_embeddings`, so it is unknown until the model is on
+            // disk.
             fact("Context window", "Not published",
                  hint: "HuggingFace doesn't expose this before download. Devgentic reads it from the model once installed.")
 

@@ -4,20 +4,7 @@
 //  OrbConfigManager.swift
 //  Devgentic
 //
-//  Single source of truth for Orb configuration. Modeled on QuickAccessConfigManager:
-//  an @Observable singleton over UserDefaults, reachable BOTH from AppDelegate (which
-//  registers the Carbon shortcut outside any SwiftUI environment) and from the settings pane.
-//
-//  Why a config manager rather than reading UserDefaults at each site: OrbPanelController
-//  keeps its session PRIVATE and the panel lives outside the SwiftUI environment, so there is
-//  no back channel from Settings to a running orb. This type IS the channel — which is why
-//  OrbSessionController's tunables forward to it at USE time rather than caching at start.
-//
-//  Not @MainActor (matching QuickAccessConfigManager, diverging from ChatOpsConfigManager):
-//  AppDelegate reads it from nonisolated lifecycle/hotkey code. The backing store is
-//  thread-safe UserDefaults and all access happens on the main thread, so plain @Observable is
-//  sufficient — but Observation's access()/withMutation() are NOT thread-safe, so this type is
-//  deliberately MAIN-THREAD-CONFINED and the setters assert it in debug builds.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -28,11 +15,8 @@ import HotKey
 // MARK: - Activation
 
 /// How the user starts an Orb turn.
-///
-/// The default is `.holdShortcut`, NOT the wake word the MVP shipped with. Wake-word standby
-/// keeps a full Whisper decoder running against the room for as long as the orb is open — a
-/// battery, thermal and privacy cost that should be an explicit opt-in on a laptop, not the
-/// default. Hold-to-talk keeps the microphone CLOSED at rest.
+/// The default is `.holdShortcut`: wake-word standby keeps a Whisper decoder running (battery, thermal, privacy cost),
+/// so it is an explicit opt-in; hold-to-talk keeps the microphone closed at rest.
 enum OrbActivationMode: String, CaseIterable, Identifiable {
     /// Microphone closed at rest; the global shortcut opens it for exactly as long as it is held.
     case holdShortcut
@@ -43,13 +27,13 @@ enum OrbActivationMode: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// ⚠️ Never render `rawValue`: `Text(someString)` binds the non-localizing `StringProtocol`
-    /// overload and escapes the String Catalog. See SettingsCategory's note.
+    // Why: Never render `rawValue`: `Text(someString)` binds the non-localizing overload and escapes the String Catalog.
+    /// Localized label for the case.
     var localizedTitle: LocalizedStringKey {
         switch self {
         case .holdShortcut: return "Hold a shortcut"
-        // ⚠️ Interpolated, not the literal "Orb": the wake word is user-configurable, and a label
-        // naming a word the matcher is not listening for is the one mistake this pane cannot make.
+        // Interpolated, not a literal: the wake word is user-configurable, and the label must name the word the matcher
+        // listens for.
         case .wakeWord:     return "Say “\(OrbConfigManager.shared.wakeWord)”"
         case .clickOrb:     return "Click the orb"
         }
@@ -62,12 +46,8 @@ enum OrbActivationMode: String, CaseIterable, Identifiable {
 // MARK: - Endpointing
 
 /// How long Orb waits after you stop speaking before deciding the command is finished.
-///
-/// ⚠️ Named steps, not a seconds slider, for two independent reasons. (1) House style: no
-/// `Slider` appears inside a `SettingsCard`/`SettingsRow` anywhere in this app. (2) The
-/// effective end-of-speech is `min(this, WhisperKit's own VAD)`, and WhisperKit auto-stops
-/// after ~1.5s of silence once it has confirmed segments — so every value below the `.quick`
-/// floor does nothing at all. A slider whose bottom third is visibly inert is worse than none.
+/// Named steps, not a slider: the effective end of speech is `min(this, WhisperKit's VAD)`,
+/// which auto-stops after ~1.5 s, so values below the `.quick` floor would do nothing.
 enum OrbEndpointing: String, CaseIterable, Identifiable {
     case quick
     case normal
@@ -95,10 +75,7 @@ enum OrbEndpointing: String, CaseIterable, Identifiable {
 // MARK: - Ambient threshold
 
 /// How long a main-window run must take before it is worth interrupting for.
-///
-/// ⚠️ Named steps, not a slider — the pane's standing rule. A number of seconds would also imply
-/// a precision this has no use for: the real question is "was I still watching, or had I switched
-/// away", and that has about three answers.
+/// Named steps, not a slider: the real question is 'was I still watching', which has about three answers.
 enum OrbAmbientThreshold: String, CaseIterable, Identifiable {
     case brief
     case standard
@@ -127,16 +104,11 @@ enum OrbAmbientThreshold: String, CaseIterable, Identifiable {
 // MARK: - Spoken responses
 
 /// Whether Orb reads the assistant's answer aloud.
-///
-/// `.automatic` is the default and the interesting one: speak short answers in full, summarize
-/// long ones down to their opening, and never read a code fence aloud. The MVP behaviour was
-/// effectively `.preferSilent` — it spoke one fixed phrase and left the answer on screen.
+/// `.automatic` speaks short answers in full, summarizes long ones down to their opening, and never reads a code fence
+/// aloud.
 enum OrbSpokenResponses: String, CaseIterable, Identifiable {
-    /// One or two sentences, asked for at the SOURCE. ⚠️ Not "Automatic with a smaller cap": a cap
-    /// can only truncate, so a short cap over a six-sentence answer ends every single turn in
-    /// "there's more in the chat window", which reads as broken narration rather than as a choice.
-    /// This mode asks the model for a short answer, so the cap almost never fires — and
-    /// "tell me more" is there when the gist was not enough.
+    // Why: Not 'Automatic with a smaller cap': a cap only truncates and ends every turn in 'there's more in the chat window'.
+    /// One or two sentences, asked for at the source: the model is asked for a short answer, so the cap almost never fires.
     case gist
     /// Read the whole answer, however long.
     case preferSpoken
@@ -159,19 +131,14 @@ enum OrbSpokenResponses: String, CaseIterable, Identifiable {
     var speaksAnswer: Bool { self != .preferSilent }
 
     /// Sentences spoken before `.automatic` stops and defers to the chat window. Nil means no cap.
-    ///
-    /// ⚠️ A cap is not a substitute for barge-in — it is the honest interim while the microphone
-    /// is still closed during speech. Once full duplex lands, the user interrupting IS the cap.
+    /// A cap is the interim for a microphone that is closed during speech; with barge-in, the user interrupting is the cap.
     var sentenceCap: Int? {
         switch self {
         // A backstop, not the mechanism: the style hint below is what keeps the answer short.
         case .gist: return 2
         case .preferSpoken: return nil
-        // ⚠️ Raised 4 → 6 after the 2026-09-04 device test, where BOTH turns hit the cap and the
-        // user heard 4 of ~10 sentences. A cap that binds on almost every answer reads as the
-        // narration being broken rather than as a deliberate bound. Paired with the brevity
-        // request in `spokenStyleHint`, which shortens the answer at the source — a cap can only
-        // truncate, it cannot make the model concise.
+        // A cap that binds on almost every answer reads as broken narration; paired with the brevity request in
+        // `spokenStyleHint`, which shortens the answer at the source (a cap can only truncate).
         case .automatic:    return 6
         case .preferSilent: return 0
         }
@@ -181,11 +148,7 @@ enum OrbSpokenResponses: String, CaseIterable, Identifiable {
 // MARK: - Follow-up
 
 /// How long the microphone stays hot after an answer so a follow-up needs no wake word.
-///
-/// ⚠️ Deliberately a small fixed set rather than a duration slider. Three independent design
-/// passes proposed 0s, 7s and 8s as "the" default, which is the clearest possible evidence that
-/// no continuous value is defensible — every shipping assistant treats this as on/off with a
-/// vendor-chosen length.
+/// A small fixed set rather than a duration slider: no continuous value is defensible as the default.
 enum OrbFollowUp: String, CaseIterable, Identifiable {
     case off
     case short
@@ -213,10 +176,7 @@ enum OrbFollowUp: String, CaseIterable, Identifiable {
 // MARK: - Earcons
 
 /// Short system sounds marking the edges of a turn.
-///
-/// Without them the orb's state changes are visual only — and the user is, by design, often not
-/// looking at it. "Did it hear me?" is the single most common doubt in a voice UI, and a 60ms
-/// tone answers it better than any animation.
+/// Without them the orb's state changes are visual only, and the user is often not looking at it.
 enum OrbEarcons: String, CaseIterable, Identifiable {
     /// No sounds at all.
     case off
@@ -251,9 +211,8 @@ enum OrbEarcon: String {
     case failed      // the run failed
     case interrupted // you cut the answer short
 
-    /// ⚠️ System sound, not a bundled asset: it follows the user's alert-volume preference and
-    /// is already familiar. `NSSound(named:)` returns nil if a name is ever retired, which the
-    /// caller treats as "no sound" rather than a failure.
+    /// A system sound, not a bundled asset: it follows the user's alert-volume preference.
+    /// `NSSound(named:)` returns nil if a name is retired, which the caller treats as 'no sound'.
     var systemSoundName: String {
         switch self {
         case .listening:   return "Tink"
@@ -266,12 +225,8 @@ enum OrbEarcon: String {
 
 // MARK: - Tool approvals
 
+// Why: Neither mode approves a tool by voice: an ASR transcript must never be what authorizes code execution.
 /// What Orb does when an agent run stops to ask permission.
-///
-/// ⚠️ Neither mode approves a tool BY VOICE. `.ask` shows the request on a surface where the tool
-/// name and its arguments are readable; `.autonomous` is a standing choice the user made in
-/// Settings, not an answer to a question they were asked out loud. That distinction is the whole
-/// safety argument: an ASR transcript must never be what authorizes code execution.
 enum OrbToolApprovals: String, CaseIterable, Identifiable {
     /// Show the request and wait. The default.
     case ask
@@ -292,16 +247,9 @@ enum OrbToolApprovals: String, CaseIterable, Identifiable {
 
 // MARK: - Recognizer
 
-/// Which speech recognizer Orb listens with.
-///
-/// ⚠️ Default is `.whisperKit` — today's shipped, device-proven path. Apple Speech is the better
-/// engine on paper (streaming results with an explicit `isFinal`, no per-turn restart, no model
-/// download, no growing buffer) and it is what removes the 2.2s endpointing wait, but it has
-/// never been run against a real microphone here. It stays Developer-mode until it has.
-///
-/// The composer and QuickAccess are deliberately NOT covered by this: they keep WhisperKit
-/// unconditionally. Its per-model UX, offline guarantee and multilingual quality are the reasons
-/// it was chosen, and none of that changes because a voice HUD wants lower latency.
+/// Which speech recognizer Orb listens with; the default is `.whisperKit`, the device-proven path.
+/// Apple Speech stays Developer-mode until it has been run against a real microphone.
+/// The composer and QuickAccess are not covered: they keep WhisperKit unconditionally.
 enum OrbRecognizer: String, CaseIterable, Identifiable {
     case whisperKit
     case appleSpeech
@@ -325,10 +273,8 @@ final class OrbConfigManager {
 
     nonisolated(unsafe) static let shared = OrbConfigManager()
 
+    // Why: `assert` is stripped in release, so the paired `logger.error` is what makes an off-main mutation visible in the field.
     /// Debug tripwire: all mutation must happen on the main thread (see the type note).
-    /// ⚠️ `assert` is STRIPPED IN RELEASE, so it was the only enforcement of this type's
-    /// documented main-thread confinement and it does not exist in a shipped build. The paired
-    /// `logger.error` is what makes an off-main mutation visible in the field.
     @ObservationIgnored private static let logger = DGLogger(category: "OrbConfig")
 
     private func assertMainThread() {
@@ -338,29 +284,21 @@ final class OrbConfigManager {
         assert(false, "OrbConfigManager must be mutated on the main thread (Observation is not thread-safe).")
     }
 
-    /// Default shortcut: ⌥J. Deliberately not ⌥Space — that is QuickAccess's default, and two
-    /// features fighting for one combo is a support ticket.
+    /// Default shortcut: Option-J, deliberately not Option-Space, which is QuickAccess's default.
     static let defaultCombo = KeyCombo(key: .j, modifiers: .option)
 
-    /// ⚠️⚠️ COMPUTED and routed through `TestHost.defaults`, not `let defaults = .standard`.
-    ///
-    /// Two reasons, both load-bearing. Under an XCTest host `UserDefaults.standard` is the
-    /// SHIPPING APP's domain, so this singleton read — and WROTE — the developer's real Orb
-    /// settings during an ordinary `test-without-building` run; `OrbWakeWordTests` failed on the
-    /// author's machine and nowhere else because of it. And it is computed rather than stored
-    /// because a stored property would resolve when this singleton is first touched, which can be
-    /// during app launch — before the test bundle loads — pinning the real domain for the run.
+    // Why: Under an XCTest host `.standard` is the shipping app's domain; a stored property would resolve at first touch,
+    // before the test bundle loads.
+    /// Computed and routed through `TestHost.defaults`, not `.standard`.
     private var defaults: UserDefaults { TestHost.defaults }
 
     private init() {}
 
     // MARK: Enable
 
-    /// ⚠️ OPT-IN — DEFAULT OFF (owner, 2026-10-09). Orb is experimental and needs the microphone,
-    /// so it stays off until the user switches it on in Settings. That switch is also where the
-    /// macOS microphone prompt is asked (`OrbSettingsView.requestMicrophoneOnEnable`), with the user
-    /// thinking about voice. With the old default of ON, nobody ever pressed the switch, and the
-    /// first prompt arrived mid-gesture at the first listen.
+    /// Opt-in, default off: Orb is experimental and needs the microphone.
+    /// The Settings switch is also where the macOS microphone prompt is requested
+    /// (`OrbSettingsView.requestMicrophoneOnEnable`).
     var isEnabled: Bool {
         get {
             access(keyPath: \.isEnabled)
@@ -397,9 +335,8 @@ final class OrbConfigManager {
     var carbonKeyCode: UInt32 {
         get {
             access(keyPath: \.carbonKeyCode)
-            // Non-trapping: `UInt32(v)` traps on a negative or oversized value, and this is read
-            // at launch, so a corrupt or externally-written default (`defaults write … -1`) would
-            // crash-loop the app with no in-app recovery. Fall back to the default combo instead.
+            // Non-trapping: `UInt32(v)` traps on a negative or oversized value, and this is read at launch,
+            // so a corrupt default would crash-loop the app. Fall back to the default combo.
             if let v = defaults.object(forKey: AppSettings.orbShortcutCodeKey) as? Int,
                let code = UInt32(exactly: v) {
                 return code
@@ -484,14 +421,9 @@ final class OrbConfigManager {
 
     // MARK: Duplex audio (developer)
 
-    /// Route Orb through one app-owned `AVAudioEngine` with echo cancellation, instead of
-    /// letting WhisperKit own the microphone.
-    ///
-    /// ⚠️ DEFAULT OFF, and deliberately not a normal setting. The failure mode of this subsystem
-    /// is a microphone that reports a healthy session and hears nothing, and the path has never
-    /// been exercised on a real audio device. It is an escape hatch for a device test, not a
-    /// preference — which is why it lives behind Developer mode and why the legacy path is kept
-    /// alive rather than deleted.
+    /// Routes Orb through one app-owned `AVAudioEngine` with echo cancellation instead of letting WhisperKit own the
+    /// microphone.
+    /// Default off and behind Developer mode: an escape hatch for device testing, with the legacy path kept alive.
     var duplexAudioEnabled: Bool {
         get {
             access(keyPath: \.duplexAudioEnabled)
@@ -505,14 +437,10 @@ final class OrbConfigManager {
         }
     }
 
-    // MARK: Ambient announcements (Phase 6 · F3)
+    // MARK: Ambient announcements
 
-    /// Whether Orb speaks up about runs the user started by TYPING, while the orb is open.
-    ///
-    /// ⚠️ DEFAULT OFF, and that is a deliberate product choice rather than caution about the code.
-    /// This is the only feature that makes Orb talk UNPROMPTED, about work the user never asked
-    /// him to narrate. On by default it reads as the assistant interrupting; opt-in, it reads as
-    /// the reason to leave the orb open at all.
+    /// Whether Orb speaks up about runs the user started by typing, while the orb is open.
+    /// Default off by product choice: it is the only feature that makes Orb talk unprompted.
     var ambientAnnouncements: Bool {
         get {
             access(keyPath: \.ambientAnnouncements)
@@ -546,14 +474,11 @@ final class OrbConfigManager {
 
     var ambientThresholdSeconds: TimeInterval { ambientThreshold.seconds }
 
-    // MARK: Voice approvals (Phase 6 · F2)
+    // MARK: Voice approvals
 
-    /// Whether a spoken "yes" may approve a pending tool — for the narrow set that qualifies.
-    ///
-    /// ⚠️ DEFAULT OFF, and this one is a security surface rather than a convenience. Even switched
-    /// on, `OrbApprovalPolicy` admits only read-only, non-server-declared tools whose arguments
-    /// can be read back aloud; everything else is spoken and routed to the main window. The toggle
-    /// does not widen that set — it only decides whether the narrow channel exists at all.
+    /// Whether a spoken 'yes' may approve a pending tool, for the narrow set that qualifies. Default off.
+    /// `OrbApprovalPolicy` admits only read-only, non-server-declared tools whose arguments can be read back aloud;
+    /// the toggle only decides whether that channel exists.
     var voiceApprovals: Bool {
         get {
             access(keyPath: \.voiceApprovals)
@@ -595,9 +520,9 @@ final class OrbConfigManager {
         }
     }
 
-    /// ⚠️ The ONLY thing that should be matched against. Never match the raw strings: they are
-    /// unvalidated, un-normalized user text, and a keyword that differs by a capital letter or a
-    /// stray comma would look correct in Settings and never fire at the microphone.
+    // Why: Never match the raw strings: they are unvalidated, un-normalized user text and a keyword differing by a capital
+    // would never fire.
+    /// The only value that should be matched against the spoken text.
     var resolvedApprovalKeywords: (approve: [String], deny: [String], problems: [OrbApprovalKeywords.Problem]) {
         OrbApprovalKeywords.resolve(approveRaw: approvalKeywordsRaw, denyRaw: denialKeywordsRaw)
     }
@@ -622,19 +547,10 @@ final class OrbConfigManager {
 
     // MARK: Wake word
 
-    /// The word the wake-word mode listens for. User-configurable.
-    ///
-    /// ⚠️ SANITIZED on the way in, because it is compiled into a regular expression and matched
-    /// against ASR output. `sanitizedWakeWord` is the whole contract: no regex metacharacters, no
-    /// empty string, no one-letter word. A one-letter wake word would fire on nearly every
-    /// utterance; an unsanitized one could not be escaped into a pattern safely.
-    ///
-    /// ⚠️ Read at USE time by `OrbSessionController.wakeWord`, never cached — so a change here
-    /// reaches a RUNNING orb with no other plumbing, exactly like `endpointing`.
-    /// ⚠️ Stored VERBATIM and sanitized on READ, the same shape as `approvalKeywordsRaw`, and for
-    /// the same reason: the text field binds to this. Sanitizing in the setter would rewrite the
-    /// field under the user's cursor — "O" is below the two-character floor, so typing a fresh
-    /// word one letter at a time would snap the field back to "orb" on the first keystroke.
+    // Why: Sanitizing in the setter would rewrite the text field under the cursor and snap a one-letter edit back to 'orb'.
+    /// The word the wake-word mode listens for; user-configurable.
+    /// Stored verbatim and sanitized on read (`sanitizedWakeWord`: no regex metacharacters, empty or one-letter words);
+    /// `OrbSessionController.wakeWord` reads it at use time, so a change reaches a running orb.
     var wakeWordRaw: String {
         get {
             access(keyPath: \.wakeWordRaw)
@@ -657,30 +573,23 @@ final class OrbConfigManager {
     static let defaultWakeWord = "orb"
 
     /// `raw` reduced to something safe to match, or nil when nothing usable is left. Pure.
-    ///
-    /// Lowercased (matching is case-insensitive anyway, and storing one form keeps the homophone
-    /// lookup honest); everything that is not a letter, number or space is dropped; runs of
-    /// whitespace collapse to one, so a multi-word phrase like "hey orb" is preserved — that is
-    /// the intended escape hatch from a short word the recognizer keeps missing.
+    /// Lowercased; non-letters, numbers and spaces dropped; whitespace runs collapsed, so a phrase like 'hey orb' is
+    /// preserved.
     static func sanitizedWakeWord(_ raw: String) -> String? {
         let collapsed = String(raw.lowercased().map { $0.isLetter || $0.isNumber ? $0 : " " })
             .split(separator: " ")
             .joined(separator: " ")
-        // ⚠️ Two characters is the floor. Below it the word is a fragment of ordinary speech and
-        // every sentence in the room arms command capture.
+        // Two characters is the floor: below it the word is a fragment of ordinary speech and every sentence arms command
+        // capture.
         guard collapsed.count >= 2 else { return nil }
         return collapsed
     }
 
     // MARK: Apple Speech locale
 
-    /// Locale identifier for Apple Speech. Empty means "follow the system".
-    ///
-    /// ⚠️ This is a MODEL choice, not a language preference. Apple ships one on-device model per
-    /// locale and `SpeechTranscriber` runs DEGRADED — without erroring — if that model was never
-    /// reserved and installed. Device test 2026-09-04: an unallocated `en_IN` turned "write an
-    /// essay on technology" into "write an SM technology". Choosing and downloading here is what
-    /// makes the recognizer usable, which is why it sits next to the recognizer picker.
+    /// Locale identifier for Apple Speech; empty means 'follow the system'.
+    /// A model choice, not a language preference: Apple ships one on-device model per locale,
+    /// and `SpeechTranscriber` runs degraded without erroring if it was never installed.
     var speechLocaleIdentifier: String {
         get {
             access(keyPath: \.speechLocaleIdentifier)
@@ -753,10 +662,8 @@ final class OrbConfigManager {
 
     // MARK: Narrator
 
-    /// Voice identifier for Orb's spoken phrases. Empty string is the SENTINEL for
-    /// "same as chat Read Aloud", which preserves the pre-settings behaviour: OrbVoiceOutput
-    /// read `speechPlaybackVoiceKey` directly, so changing the voice for reading a chat message
-    /// silently changed the assistant's voice too.
+    /// Voice identifier for Orb's spoken phrases.
+    /// Empty string is the sentinel for 'same as chat Read Aloud'.
     var narratorVoiceID: String {
         get {
             access(keyPath: \.narratorVoiceID)
@@ -811,21 +718,10 @@ final class OrbConfigManager {
 
     // MARK: Reset
 
-    /// Clears every Orb preference AND the panel's remembered position. The position is the
-    /// reason this exists as a user-facing action: the panel is borderless with no titlebar, its
-    /// origin is written only on close, and a crash or a disconnected display can strand it
-    /// off-screen with no in-app way to drag it back.
-    /// ⚠️ EVERY Orb key belongs here. This list fell a whole phase behind and silently skipped
-    /// all five Phase 6 keys — and because their controls live only inside the Developer card,
-    /// Reset was the ONLY path a non-developer had to switch off voice approvals or ambient
-    /// announcements once Developer mode was turned back off. A reset that misses a key the user
-    /// cannot otherwise reach is worse than no reset.
-    ///
-    /// ⚠️ AND IT MUST GO THROUGH `withMutation`. Every setter in this type wraps its write, which
-    /// is what makes the class the documented channel from Settings to the rest of the app. The
-    /// bare `removeObject` loop emitted no observation at all: the pane only *appeared* to update
-    /// because the Reset button separately assigns an unrelated @Observable property. Any other
-    /// observer — the composer's Orb button, the hotkey registration — saw nothing.
+    // Why: A bare `removeObject` loop emits no observation: the composer's Orb button and hotkey registration would see nothing.
+    /// Clears every Orb preference and the panel's remembered position, which can be stranded off-screen by a crash or
+    /// display change.
+    /// Every Orb key belongs in the list, and the reset goes through `withMutation` so other observers see it.
     func resetAll() {
         assertMainThread()
         withMutation(keyPath: \.isEnabled) {
@@ -854,8 +750,7 @@ final class OrbConfigManager {
         Self.logger.notice("[ORB_CONFIG] All \(Self.allResettableKeys.count) Orb setting(s) reset to defaults. CONSEQUENCE: observers are notified, so the composer button, the global shortcut and an open panel all pick this up without a relaunch.")
     }
 
-    /// ⚠️ Kept beside `resetAll` and asserted by a test against `AppSettings`, so a key added in a
-    /// future phase cannot silently escape the reset the way the Phase 6 keys did.
+    /// Kept beside `resetAll` and asserted by a test against `AppSettings`, so a new key cannot silently escape the reset.
     static let allResettableKeys: [String] = [
         AppSettings.orbEnabledKey, AppSettings.orbActivationModeKey,
         AppSettings.orbWakeWordKey,
@@ -866,7 +761,6 @@ final class OrbConfigManager {
         AppSettings.orbRecognizerKey, AppSettings.orbSpeechLocaleKey,
         AppSettings.orbNarratorVoiceKey,
         AppSettings.orbNarratorRateKey, AppSettings.orbProfileIDKey,
-        // [Phase 6] These five were missing, and their controls are Developer-only.
         AppSettings.orbAmbientAnnouncementsKey, AppSettings.orbAmbientThresholdKey,
         AppSettings.orbVoiceApprovalsKey,
         AppSettings.orbApprovalKeywordsKey, AppSettings.orbDenialKeywordsKey,

@@ -4,19 +4,7 @@
 //  OrbConfigTests.swift
 //  DevgenticTests
 //
-//  The Orb settings layer. Covers the two shapes the design review argued hardest for —
-//  hold-to-talk as the DEFAULT, and endpointing as named steps whose floor is real — plus the
-//  corrupt-defaults hardening that the QuickAccess config manager learned the hard way.
-//
-//  ⚠️⚠️ These now go through `TestHost.defaults`, NOT `TestHost.defaults`. Under a test host
-//  `.standard` is the shipping app's own domain: this file cleared, rewrote and restored the
-//  developer's real Orb settings on every run, and `OrbWakeWordTests` — which has no such
-//  save/restore — read them and failed on the author's machine while passing everywhere else.
-//  `TestHost.defaults` is an isolated suite under XCTest and `.standard` in the app, so the
-//  manager and these tests still share one backing store; it is simply no longer the user's.
-//
-//  These touch the defaults store directly because that IS the backing store under test; every suite
-//  snapshots and restores the exact keys it writes.
+//  Created by Raj Singh.
 //
 
 import XCTest

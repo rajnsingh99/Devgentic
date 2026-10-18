@@ -2,23 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  GitRepositoryBoundaryTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The workspace boundary must confine what `git_tool` ACTS ON, not merely what it was HANDED.
-//
-//  ⚠️⚠️ WHY THIS FILE EXISTS. Every other preset tool acts on its path argument: `read_file(p)`
-//  reads exactly `p`, so validating `p` is the whole job. `git -C <dir>` does not operate on
-//  `<dir>` — it walks UP from `<dir>` to the nearest `.git` and operates on whatever it finds.
-//
-//  Field-observed 2026-09-20: a Code session rooted at `…/cp-dsa/java` ran `git_tool(status)`
-//  with a path that was absolute, canonical and provably inside the project. The repository lives
-//  at `…/cp-dsa`, one level ABOVE the project, so the output covered sibling folders the user had
-//  never pointed the agent at — and the boundary had nothing to object to, because the ARGUMENT
-//  was perfectly compliant. Argument validation structurally cannot catch this.
-//
-//  These tests use an injected locator rather than a real repository on disk. A test that had to
-//  `git init` a fixture would be asserting git's discovery behaviour; what needs asserting is
-//  OURS — that the discovered root is run through the same policy as any other path.
+//  Created by Raj Singh.
 //
 
 import XCTest

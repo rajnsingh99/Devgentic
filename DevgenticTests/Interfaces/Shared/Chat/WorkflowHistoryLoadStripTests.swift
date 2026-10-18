@@ -4,12 +4,7 @@
 //  WorkflowHistoryLoadStripTests.swift
 //  DevgenticTests
 //
-//  Register workflow/vm-6 — `loadFinalized` decoded every finalized run of a conversation with
-//  its node traces intact (each node up to 400 timeline events, tool rows holding whole
-//  outputs), and its ONE caller stripped them on arrival without reading a single trace in
-//  between. The strip now happens inside the same detached decode, so the transient peak is one
-//  record's traces rather than the whole page's, and the count travels with the records because
-//  the caller logs it.
+//  Created by Raj Singh.
 //
 
 import XCTest

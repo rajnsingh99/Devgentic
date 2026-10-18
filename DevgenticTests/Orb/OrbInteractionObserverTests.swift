@@ -4,21 +4,7 @@
 //  OrbInteractionObserverTests.swift
 //  DevgenticTests
 //
-//  The HITL observer's re-arm contract.
-//
-//  ⚠️ WHY A SOURCE-READING TEST. The observer re-arms itself inside its own `onChange`, so it used
-//  to outlive the conversation it was armed for: "new conversation" and a profile switch both clear
-//  `orbConversationID` while leaving the loop running, and every HITL raised anywhere in the app
-//  then woke a handler with nothing to do — emitting an ERROR claiming a parked run would hang the
-//  orb, on a session that had no run at all.
-//
-//  The fix stops re-arming while nothing is bound, which is only safe because `execute()` arms it
-//  again on every dispatch. That makes a call site in a DIFFERENT method load-bearing: delete it and
-//  the observer never comes back after a "new conversation", so an agent that parks for approval
-//  hangs the orb on THINKING with no way to answer — the exact deadlock the observer exists to
-//  prevent. Nothing else would notice. Driving the real path needs a MainApplicationViewModel, an
-//  InteractionCenter and live observation tracking, so the coupling is pinned structurally, the way
-//  `ShellInterpolationGuardTests` pins its own.
+//  Created by Raj Singh.
 //
 
 import XCTest

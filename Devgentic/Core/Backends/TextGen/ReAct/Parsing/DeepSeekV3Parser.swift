@@ -4,33 +4,7 @@
 //  DeepSeekV3Parser.swift
 //  Devgentic
 //
-//  Phase 4 — Native-tool dialect expansion (2026-04-22).
-//  Primary parser for the `.deepseekV3JsonFence` dialect.
-//
-//  Covers:
-//    - deepseek-ai/DeepSeek-V3
-//    - deepseek-ai/DeepSeek-V3-0324
-//    - deepseek-ai/DeepSeek-R1
-//    - deepseek-ai/DeepSeek-R1-0528
-//
-//  NOTE: DeepSeek-R1-Distill-* variants (Llama-distilled, Qwen-distilled) do NOT
-//  use this format — they inherit the host model family's template. Only pure
-//  DeepSeek-V3 and DeepSeek-R1 check in through our fingerprinter for this dialect.
-//
-//  Canonical output uses full-width Unicode tokens (NOT ASCII):
-//    - U+FF5C (｜) for pipes — fullwidth vertical bar
-//    - U+2581 (▁) for the underscore in markers
-//
-//    <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>list_directory
-//    ```json
-//    {"path": "/tmp"}
-//    ```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>
-//
-//  Drift tolerated:
-//   - Multiple tool calls in one block (loop over begin/end pairs)
-//   - Missing `<｜end▁of▁sentence｜>` suffix
-//   - Args inside ` ```json ... ``` ` code fence OR bare JSON without fence
-//   - Python literals in args (True/False/None → true/false/null)
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -38,18 +12,18 @@ import OSLog
 
 private let logger = DGLogger(category: "DeepSeekV3Parser")
 
+/// Primary parser for the `.deepseekV3JsonFence` dialect (DeepSeek-V3 and DeepSeek-R1; the R1-Distill
+/// variants use their host family's template). Reads full-width-token tool-call blocks with JSON arguments in
+/// a code fence or bare, tolerating multiple calls, a missing end-of-sentence suffix and Python literals.
 struct DeepSeekV3Parser: CognitiveParserProtocol {
 
-    // Full-width Unicode markers from DeepSeek's tokenizer.
-    // These are explicit Swift string literals using the distinctive code points:
-    //   \u{FF5C} = ｜ (FULLWIDTH VERTICAL LINE)
-    //   \u{2581} = ▁ (LOWER ONE EIGHTH BLOCK / used as underscore in the tokenizer)
+    // Full-width Unicode markers from DeepSeek's tokenizer, written as explicit code points: U+FF5C (｜) for
+    // pipes and U+2581 (▁) for the underscore.
     private static let callBeginMarker = "<\u{FF5C}tool\u{2581}call\u{2581}begin\u{FF5C}>"
     private static let callEndMarker   = "<\u{FF5C}tool\u{2581}call\u{2581}end\u{FF5C}>"
     private static let sepMarker       = "<\u{FF5C}tool\u{2581}sep\u{FF5C}>"
-    // `<｜tool▁calls▁begin｜>` / `<｜tool▁calls▁end｜>` wrap the whole section;
-    // we don't need the outer markers for parsing — the inner begin/end pairs are
-    // sufficient to extract each call.
+    // The outer `tool▁calls▁begin/end` markers are not needed for parsing; the inner begin/end pairs suffice to
+    // extract each call.
 
     func parse(rawResponse: String) -> ModernCognitiveStep {
         let calls = extractToolCalls(from: rawResponse)
@@ -184,13 +158,10 @@ struct DeepSeekV3Parser: CognitiveParserProtocol {
         return nil
     }
 
-    /// Repairs trailing commas and Python literals in the model's JSON.
-    ///
-    /// Delegates to the shared sanitizer so the repair happens OUTSIDE string values only.
-    /// This used to be eleven copies of the same two whole-payload regexes, each of which
-    /// also rewrote the file content carried in a `write_file` call's `arguments.content` —
-    /// deleting real trailing commas from array initializers and turning `Double.NaN` into
-    /// `Double.null`. See `JSONStructuralSanitizer` for the full account.
+    // Why: whole-payload regexes also rewrote file content in `write_file` arguments (real trailing commas,
+    // `Double.NaN`); see `JSONStructuralSanitizer`
+    /// Repairs trailing commas and Python literals in the model's JSON, delegating to the shared sanitizer so the
+    /// repair happens outside string values only.
     private func sanitizeJSON(_ raw: String) -> String {
         JSONStructuralSanitizer.repairingStructure(raw)
     }

@@ -4,9 +4,7 @@
 //  TrailingSidePanelAdoptionTests.swift
 //  DevgenticTests
 //
-//  The trailing-slot panels share ONE chrome (`TrailingSidePanel`). Before 2026-10-04 two ~137-line
-//  copies existed, so a divider or width fix had to be made twice. These fail if a panel grows its
-//  own copy again.
+//  Created by Raj Singh.
 //
 
 import XCTest

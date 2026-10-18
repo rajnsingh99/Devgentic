@@ -4,44 +4,7 @@
 //  ObservationStream.swift
 //  Devgentic
 //
-//  Reusable wrapper around the "manually re-subscribing" `withObservationTracking`
-//  pattern. The raw idiom requires a recursive helper function at each call site:
-//
-//      func observe() {
-//          withObservationTracking {
-//              _ = source.prop1
-//              _ = source.prop2
-//          } onChange: {
-//              Task { @MainActor [weak self] in
-//                  guard let self, self.isObserving else { return }
-//                  // do work...
-//                  observe()   // re-register for the next change
-//              }
-//          }
-//      }
-//
-//  That shape was duplicated across six+ view models / services in this project.
-//  Each copy reintroduced the same small hazards:
-//    - Missing `[weak self]` → retain cycle through the onChange closure.
-//    - Missing the `guard self.isObserving` / `isActive` flag → continues firing
-//      after the owner is deallocated, writing to zombie state.
-//    - Forgetting to re-call the inner `observe()` → chain dies silently after
-//      a single fire, bugs manifest as "stopped updating after the first change."
-//
-//  `ObservationStream` owns the flag, the recursive re-registration, and the
-//  cancellation semantics in one place. Callers supply two closures:
-//
-//      let stream = ObservationStream(
-//          track: { [weak self] in
-//              _ = self?.service.someProperty
-//          },
-//          onChange: { [weak self] in
-//              self?.mirrorServiceState()
-//          }
-//      )
-//
-//      // Later, or automatically on deinit:
-//      stream.cancel()
+//  Created by Raj Singh.
 //
 
 import Foundation

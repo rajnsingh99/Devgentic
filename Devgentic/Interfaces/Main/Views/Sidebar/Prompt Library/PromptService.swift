@@ -4,15 +4,14 @@
 //  PromptService.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 10/05/25.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
-/// Observable load state for the prompt library. Lets the UI distinguish
-/// "still fetching," "loaded but empty," and "fetch failed" — previously
-/// all three looked identical.
+/// Observable load state for the prompt library.
+/// Lets the UI distinguish "still fetching", "loaded but empty" and "fetch failed".
 enum PromptLoadState: Equatable {
     case idle
     case loading
@@ -26,10 +25,8 @@ enum PromptLoadState: Equatable {
 }
 
 /// Manages the collection of prompts, handling persistence and providing access.
-///
-/// Mutation methods return `Bool` indicating whether the change succeeded.
-/// Failures surface via `loadState = .error(_)` so any observer (sidebar,
-/// detail editor, chat input) can reflect the problem.
+/// Mutation methods return `Bool` for success; failures surface via `loadState = .error(_)` so any observer
+/// (sidebar, detail editor, chat input) can reflect the problem.
 @MainActor
 @Observable
 class PromptService {
@@ -126,11 +123,8 @@ class PromptService {
     }
 
     /// Deletes a prompt by ID. Returns `true` on success.
-    ///
-    /// Built-in prompts (`isUserDefined == false`) are refused and return
-    /// `false` without touching persistence — they're seeded defaults that
-    /// should remain available across fresh installs. Hide the filter with
-    /// `PromptSourceFilter.user` if a user never wants to see them.
+    /// Built-in prompts (`isUserDefined == false`) are seeded defaults: refused, returning `false`, persistence untouched.
+    /// Use `PromptSourceFilter.user` to hide them.
     @discardableResult
     func deletePrompt(withId id: UUID) -> Bool {
         if let existing = prompts.first(where: { $0.id == id }), !existing.isUserDefined {
@@ -150,10 +144,7 @@ class PromptService {
     }
 
     /// Deletes multiple prompts. Returns the count that succeeded.
-    ///
-    /// Silently filters out built-in prompts — they can't be deleted (see
-    /// `deletePrompt(withId:)`). Callers that care about the skip count can
-    /// compare against the input set size.
+    /// Built-in prompts are silently filtered out (see `deletePrompt(withId:)`); compare with the input size for skips.
     @discardableResult
     func deletePrompts(withIds ids: Set<UUID>) -> Int {
         guard !ids.isEmpty else { return 0 }
@@ -199,10 +190,8 @@ class PromptService {
 
     // MARK: - Global tag management
 
-    /// Renames a tag everywhere it appears. Returns the number of prompts
-    /// that were touched. Deduplicates within each prompt so renaming
-    /// "dev" → "development" on a prompt tagged `["dev", "development"]`
-    /// collapses to `["development"]`.
+    /// Renames a tag everywhere it appears and returns the number of prompts touched.
+    /// Deduplicates within each prompt: renaming "dev" to "development" on `["dev", "development"]` gives `["development"]`.
     @discardableResult
     func renameTag(_ oldTag: String, to newTag: String) -> Int {
         let oldTrimmed = oldTag.trimmingCharacters(in: .whitespacesAndNewlines)

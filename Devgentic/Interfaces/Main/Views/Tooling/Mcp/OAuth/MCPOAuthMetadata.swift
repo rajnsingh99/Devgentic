@@ -4,22 +4,18 @@
 //  MCPOAuthMetadata.swift
 //  Devgentic
 //
-//  RFC 8414 (OAuth 2.0 Authorization Server Metadata) — the subset of fields
-//  we need for the desktop OAuth flow. Fetched from
-//  `<issuer>/.well-known/oauth-authorization-server` (or `/.well-known/openid-configuration`
-//  for OIDC servers, which is a strict superset).
-//
-//  Unrecognized fields are tolerated by JSONDecoder; we only model what we use.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The subset of RFC 8414 (OAuth 2.0 Authorization Server Metadata) fields needed for the desktop OAuth flow.
+/// Fetched from `<issuer>/.well-known/oauth-authorization-server` (or `/.well-known/openid-configuration` for OIDC
+/// servers); unrecognized fields are ignored.
 struct MCPOAuthMetadata: Codable, Hashable, Sendable {
 
-    /// REQUIRED. The authorization-server issuer identifier — must match the
-    /// URL used to fetch this document (path-prefix check). We keep it for
-    /// later inclusion in the credential bundle so audits can trace which
-    /// issuer minted a given access token.
+    /// REQUIRED. The authorization-server issuer identifier; must match the URL this document was fetched from
+    /// (path-prefix check). Kept so the credential bundle records which issuer minted a given access token.
     let issuer: URL
 
     /// REQUIRED for the authorization-code flow. The user-facing endpoint
@@ -30,10 +26,8 @@ struct MCPOAuthMetadata: Codable, Hashable, Sendable {
     /// `refresh_token` grants.
     let tokenEndpoint: URL
 
-    /// OPTIONAL (RFC 7591). When present, we can dynamically register a
-    /// client without a pre-shared `client_id`. When absent, the server
-    /// expects a manually-provisioned client and we have to fail discovery
-    /// with a clear "needs preregistered client" error.
+    /// OPTIONAL (RFC 7591). When present, a client can be registered dynamically without a pre-shared `client_id`.
+    /// When absent, discovery fails with a clear "needs preregistered client" error.
     let registrationEndpoint: URL?
 
     /// OPTIONAL. List of OAuth scopes the server supports. Used to compose
@@ -49,10 +43,8 @@ struct MCPOAuthMetadata: Codable, Hashable, Sendable {
     /// (strongly recommended) `refresh_token`.
     let grantTypesSupported: [String]?
 
-    /// OPTIONAL. Auth methods supported at the token endpoint. We use
-    /// `"none"` (public-client + PKCE). If the server only allows
-    /// `"client_secret_basic"` we can't auth — we'd need a confidential
-    /// client which doesn't fit a desktop app.
+    /// OPTIONAL. Auth methods supported at the token endpoint. The app uses `"none"` (public client + PKCE); a server that
+    /// allows only `"client_secret_basic"` cannot be used, since a desktop app is not a confidential client.
     let tokenEndpointAuthMethodsSupported: [String]?
 
     /// OPTIONAL (RFC 7009). Where to POST a token to revoke it. Used on server
@@ -75,25 +67,10 @@ struct MCPOAuthMetadata: Codable, Hashable, Sendable {
 
 extension MCPOAuthMetadata {
 
-    /// True when the server advertises everything we need:
-    /// - authorization-code grant
-    /// - PKCE S256 method (must be advertised EXPLICITLY — see below)
-    /// - public-client token-endpoint auth (`"none"`) or omits the field entirely
-    ///
-    /// The omission rules are NOT uniform across these fields, which is what the
-    /// previous `?? true` on all three got wrong:
-    ///
-    /// - `grant_types_supported` — RFC 8414: omitted means `["authorization_code",
-    ///   "implicit"]`, so treating omission as support is correct.
-    /// - `token_endpoint_auth_methods_supported` — omitted means `client_secret_basic`.
-    ///   Strictly that excludes us, but ASes that accept public clients commonly omit
-    ///   the field, and guessing wrong here costs only a clear failure at the token
-    ///   endpoint — no credential is exposed. Left permissive on purpose.
-    /// - `code_challenge_methods_supported` — RFC 8414 is explicit that **omitted means
-    ///   the server does NOT support PKCE**. `?? true` inverted that, so an AS with no
-    ///   PKCE at all was accepted as PKCE-capable: we would send a `code_challenge` the
-    ///   server ignores and then exchange the code with no proof of possession, which is
-    ///   exactly the interception attack PKCE exists to prevent. This one is now strict.
+    // Why: omission is not uniform: grant types and token-endpoint auth are lenient when omitted, but an omitted
+    // `code_challenge_methods_supported` means the server does NOT support PKCE, so S256 must be explicit.
+    /// True when the server advertises everything the desktop flow needs: the authorization-code grant, the PKCE S256
+    /// method, and public-client token-endpoint auth (`"none"`) or omits that field.
     var supportsDesktopPKCEFlow: Bool {
         let grantsOK = grantTypesSupported?.contains("authorization_code") ?? true
         let pkceOK = codeChallengeMethodsSupported?.contains("S256") ?? false

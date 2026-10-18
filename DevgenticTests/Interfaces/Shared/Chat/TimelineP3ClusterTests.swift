@@ -4,12 +4,7 @@
 //  TimelineP3ClusterTests.swift
 //  DevgenticTests
 //
-//  Regression cover for the agent-timeline / capability-card P3s of 2026-09-03
-//  (Chat_Production_Readiness_Fresh.md rows CF-46, CF-47, CF-48, CF-50, CF-51, CF-52, CF-53).
-//
-//  CF-49 (the interim reasoning sparkle) has no test here: the whole defect is a
-//  `.symbolEffect(isActive:)` argument inside a SwiftUI body, and the fix removed the state
-//  that drove it rather than adding a decision worth extracting. It is covered by review.
+//  Created by Raj Singh.
 //
 
 import XCTest

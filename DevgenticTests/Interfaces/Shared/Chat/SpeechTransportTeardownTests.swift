@@ -4,18 +4,7 @@
 //  SpeechTransportTeardownTests.swift
 //  DevgenticTests
 //
-//  Register speech/sa-5 — nothing stopped Read Aloud when the surface hosting its transport
-//  went away: Esc on the QuickAccess panel, ⌘W on the main window, a switch to Workflow mode,
-//  or collapsing the panel left the reader speaking, the synthesizer (and its CoreAudio output
-//  context) held, and no Play/Pause/Stop on screen.
-//
-//  The service now tracks mounted transport HOSTS by identity (each `ChatHistoryView`, the
-//  panel's expanded transcript) and stops a live session once the last one is gone. A set
-//  rather than a per-surface stop, because the service is a singleton shared by both surfaces
-//  — stopping on any one surface's teardown would silence a session the other surface still
-//  shows a transport for; and a set rather than a counter, so a duplicate appear or a second
-//  teardown route (the panel's `windowWillClose`) cannot miscount. The SwiftUI hooks are one
-//  line each and not reachable from here; these pin the rule they call.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,12 +4,13 @@
 //  OnboardingBehaviorView.swift
 //  Devgentic
 //
-//  The profile's tools and system prompt, so the user lands on a profile that is ready to run.
-//  An agent gets the ten starter tools, all on and all set to Ask; a chat bot gets only the prompt.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The profile's tools and system prompt, so the user lands on a profile that is ready to run.
+/// An agent gets the ten starter tools, all on and set to Ask; a chat bot gets only the prompt.
 struct OnboardingBehaviorView: View {
     @Bindable var viewModel: OnboardingViewModel
     @Environment(\.appTheme) private var theme

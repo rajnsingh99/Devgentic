@@ -4,16 +4,7 @@
 //  VoiceLifecycleTests.swift
 //  DevgenticTests
 //
-//  Voice cluster (chat hardening round 3, 2026-07-19): V1/V2/V6 are guarded by
-//  `VoiceSessionLedger` — the pure bookkeeping for the app-wide single Whisper
-//  stream slot — tested here WITHOUT WhisperKit (loading a Whisper model in tests
-//  is forbidden; see MEMORY.md). V7's transcript join is pinned against the live
-//  display's rule (RED proven standalone: final gave "there.How" while the overlay
-//  showed "there. How"). V5's synthesizer release is pinned via SpeechService's
-//  `isSynthesizerLoaded` seam.
-//
-//  NOT covered here (needs the real engine → on-device): that the forced teardown
-//  actually closes the AVAudioEngine, and the ⌘⇧V key-window gate.
+//  Created by Raj Singh.
 //
 
 import XCTest

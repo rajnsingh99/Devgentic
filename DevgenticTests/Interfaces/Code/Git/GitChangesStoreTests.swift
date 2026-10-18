@@ -4,8 +4,7 @@
 //  GitChangesStoreTests.swift
 //  DevgenticTests
 //
-//  GitChangesStore driven by an injected runner that records every invocation and answers with
-//  canned git output. No processes. Gates make the in-flight cases deterministic.
+//  Created by Raj Singh.
 //
 
 import XCTest

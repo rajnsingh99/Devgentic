@@ -4,26 +4,7 @@
 //  LogRecorder.swift
 //  Devgentic
 //
-//  In-app log ring buffer + periodic flush to SQLite. Solves the "449 logger calls
-//  across 130 files write to OS log only" problem — previously, a user exporting a
-//  bug report got no log history beyond what happened to land in the trace timeline.
-//  Now every `DGLogger` call (info+ and developer mode on) flows here.
-//
-//  Architecture:
-//    1. Callers invoke `DGLogger.info/warning/error(...)` → DGLogger constructs a
-//       LogEntry and hands it to `LogRecorder.shared.record(_:)` via Task.
-//    2. The actor appends to an in-memory ring (bounded at `capacity`). If full,
-//       oldest entries are dropped — this is a safety valve against flush failure
-//       or write storms. 5000 entries is ~5 min of heavy logging.
-//    3. Periodic flush (every `flushInterval`) and threshold flush (buffer hits
-//       `flushThreshold`) move entries to `log_entries` in SQLite via TraceStore.
-//    4. App-lifecycle flush on quit/backgrounding for best-effort durability.
-//    5. Query API (`recent(since:level:limit:)`) reads from the buffer; Report
-//       Inspector can also hit SQLite directly for older data.
-//
-//  Dev-mode gating: `DGLogger` checks `developerMode` before calling `record(_:)`.
-//  This actor unconditionally accepts whatever reaches it — keeps the actor dumb
-//  and avoids UserDefaults reads inside a high-frequency call path.
+//  Created by Raj Singh.
 //
 
 import Foundation

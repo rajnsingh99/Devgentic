@@ -4,9 +4,8 @@
 //  HeuristicCognitiveParser.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 05/03/26.
+//  Created by Raj Singh.
 //
-
 
 import Foundation
 import OSLog
@@ -78,11 +77,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
         // --- 2. Outermost Object Extraction ---
         guard let jsonString = extractOutermostJSON(from: cleanText) else {
-            // Static method — no TraceContext to emit a structured SpanEvent against.
-            // We still stamp the classified category on the DGLogger call so ring-buffer
-            // analytics can filter/aggregate parse failures by taxonomy. Full SpanEvent
-            // classification for parser sites would require threading TraceContext through
-            // the parser API, which is a future refactor.
+            // Static method with no TraceContext, so the classified category is stamped on the logger call for
+            // filtering parse failures.
             logger.error(
                 "❌ [JSONParser] Failed to find valid JSON object. Raw text: \(rawText.prefix(500))",
                 category: .parseJsonEmpty,
@@ -103,12 +99,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
                 return recovered
             }
 
-            // No JSON braces found AND no markdown-field format AND no lenient recovery.
-            // Text is either empty or pure prose. Let the pipeline's inferFailureReason
-            // classify it — we pass no parseOutcome override so the default derivation
-            // (`toolCalls.isEmpty → .genuineCompletion`) applies. The pipeline's Stage 2+
-            // will override with `.failed(...)` if drift signals exist; otherwise empty
-            // tool calls + no signals is treated as a text-only completion.
+            // No JSON braces, markdown fields or lenient recovery: empty or pure prose.
+            // No outcome override is passed, so empty tool calls derive as genuine completion.
             return ModernCognitiveStep(reasoning: rawText, toolCalls: [])
         }
 
@@ -182,12 +174,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         logger.error("❌ [JSONParser] All parsing strategies exhausted. JSON was: \(sanitized.count) chars (snippet at debug: model output is content, CR-57)")
         logger.debug("❌ [JSONParser] All parsing strategies exhausted. JSON was: snippet: \(sanitized.prefix(500))")
 
-        // All schemas rejected the JSON despite it being structurally well-formed
-        // (extractOutermostJSON succeeded). This is the iter-5-shape failure: valid
-        // braces but wrong keys (e.g. `function_name` instead of `name`). Mark it
-        // as a typed schema-key-mismatch so the pipeline/terminator route to
-        // `.suspectedFormatFailure` instead of silently treating empty toolCalls
-        // as `.genuineCompletion`.
+        // Well-formed JSON that every schema rejected (e.g. `function_name` instead of `name`).
+        // Marked as a schema-key mismatch so it routes to `.suspectedFormatFailure`, not completion.
         let foundKeys = extractTopLevelKeys(from: sanitized)
         let reason: ParseFailureReason = .schemaKeyMismatch(
             expectedKeys: ["name", "arguments", "tool_calls", "content"],
@@ -228,11 +216,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
     /// Extracts the outermost JSON object from a string by tracking brace depth.
     private static func extractOutermostJSON(from text: String) -> String? {
-        // NOTE (#15): the `prevChar != "\\"` escape heuristic is intentional here — NOT the
-        // strict in-string-only `escaped` flag used by BalancedJSONScanner. The heuristic
-        // parser runs on malformed / stringified JSON where escaped quotes appear OUTSIDE
-        // string spans, and the legacy/native-fallback recovery depends on this looser model.
-        // (Switching to the strict flag regressed testFallback_* / testConversationalExit.)
+        // The `prevChar != "\\"` escape heuristic is intentionally looser than `BalancedJSONScanner`'s strict
+        // flag. It runs on malformed or stringified JSON where escaped quotes appear outside string spans.
         var depth = 0
         var startIndex: String.Index?
         var inString = false
@@ -257,12 +242,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             prevChar = char
         }
 
-        // Brace-balance recovery: model opened braces but the scan ended with unclosed
-        // depth. Common on Q4-quantized local models emitting longer `final_answer`
-        // payloads where the outer `}` gets dropped. Append the missing closers and
-        // let the downstream decode attempt validate. Bounded cap keeps pathological
-        // inputs from producing arbitrary-length payloads. Skip when still inside a
-        // string span — unterminated string quotes aren't fixable by brace-balancing.
+        // Brace-balance recovery: appends missing closers (bounded) when the scan ended with unclosed depth.
+        // Skipped inside a string span, since unterminated quotes cannot be fixed by balancing braces.
         if let start = startIndex, depth > 0, depth <= 4, !inString {
             let reconstructed = String(text[start...]) + String(repeating: "}", count: depth)
             logger.info("🔧 [JSONParser] Brace-balance recovery: appended \(depth) closing brace(s) to salvage unbalanced JSON.")
@@ -278,31 +259,14 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
     private static func sanitizeJSON(_ json: String) -> String {
         var result = json
 
-        // 1. Single-quote to double-quote normalization.
-        //    Python-trained models sometimes emit {'key': 'value'} instead of {"key": "value"}.
-        //    Only runs when the input has single quotes AND lacks valid double-quoted structure,
-        //    or when single quotes co-exist with double quotes in a mixed format.
+        // Single-quote to double-quote normalization for Python-style `{'key': 'value'}` output.
         result = normalizeSingleQuotes(result)
 
-        // 2-4. Structural repairs, applied OUTSIDE string values only:
-        //        • unquoted keys      {key: "v"}     → {"key": "v"}
-        //        • trailing commas    {"k": 1,}      → {"k": 1}
-        //        • Python literals    True/None/NULL → true/null
-        //
-        //      These were three whole-payload regexes. "Safe because this only runs on
-        //      extracted JSON objects" was the reasoning, and it was wrong: an extracted JSON
-        //      object CONTAINS the file the model is writing, as the string value of
-        //      `arguments.content`. `\bNaN\b` turned Java's `Double.NaN` into `Double.null`,
-        //      and `,\s*([}\]])` deleted real trailing commas out of array initializers —
-        //      silently, because the payload stayed valid JSON either way.
-        //
-        //      Note this necessarily runs BEFORE step 7 escapes raw newlines; the walker
-        //      keys on quotes, not lines, so string tracking holds regardless.
+        // Structural repairs outside string values only: unquoted keys, trailing commas, Python literals.
+        // Whole-payload regexes would corrupt file content carried in `arguments.content`.
         result = JSONStructuralSanitizer.repairingStructure(result, quotingUnquotedKeys: true)
 
-        // 5. Unwrap stringified arguments: "arguments": "{...}" → "arguments": {...}
-        //    Some models serialize the arguments dict as a JSON string instead of an object.
-        //    Detects the pattern and unescapes the inner JSON.
+        // Unwraps stringified arguments (`"arguments": "{...}"` to an object) that some models emit.
         result = unwrapStringifiedArguments(result)
 
         // 6. Strip control characters (below 0x20) except standard whitespace.
@@ -310,13 +274,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             scalar.value >= 0x20 || scalar == "\n" || scalar == "\r" || scalar == "\t"
         }.map { String($0) }.joined()
 
-        // 7. Escape raw whitespace control characters that leaked INSIDE string values.
-        //    Quantized models (qwen-coder Q4_K_M in particular) sometimes emit a literal LF
-        //    inside a JSON string value instead of the two-char sequence `\n`. JSON is strict —
-        //    raw LF/CR/TAB inside a `"..."` span is invalid and breaks JSONDecoder. This step
-        //    walks the string once, tracks string/escape state, and rewrites raw control
-        //    chars only when they appear inside a string span. Valid JSON is untouched
-        //    (valid JSON never has these chars unescaped inside strings).
+        // Escapes raw LF/CR/TAB that leaked inside string values (quantized models emit them), which JSON
+        // forbids. Tracks string and escape state, so valid JSON is untouched.
         result = escapeRawControlsInsideStrings(result)
 
         return result
@@ -367,12 +326,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         return String(result)
     }
 
-    /// Replaces single quotes used as JSON delimiters with double quotes.
-    /// Uses a state-machine approach to walk character-by-character, distinguishing
-    /// structural single quotes from apostrophes inside double-quoted strings.
-    ///
-    /// Safe because this runs only on brace-depth-extracted JSON objects, not free text.
-    /// Handles mixed quoting (some keys single-quoted, some double-quoted).
+    /// Replaces single quotes used as JSON delimiters with double quotes, via a character state machine.
+    /// Apostrophes inside double-quoted strings are kept; mixed quoting is handled.
     private static func normalizeSingleQuotes(_ json: String) -> String {
         // Quick bail: no single quotes → nothing to do
         guard json.contains("'") else { return json }
@@ -400,11 +355,9 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         return String(result)
     }
 
-    /// Upper bound on the input length for the regex-based recovery helpers below (#15
-    /// sub-issue 2). The `(?:[^"\\]|\\.)*` patterns are linear (the two branches are
-    /// disjoint), so this is a defensive cap against a pathologically large input causing a
-    /// slow scan — not a fix for exponential backtracking. Generous: a cognitive step is a
-    /// few KB, and large *valid* JSON still flows through the primary `JSONDecoder` path.
+    /// Upper bound on input length for the regex-based recovery helpers below.
+    /// The patterns are linear, so this guards against a pathologically large input; large valid JSON uses
+    /// `JSONDecoder`.
     private static let maxRegexRecoveryLength = 200_000
 
     /// Detects `"arguments": "{...}"` or `"parameters": "{...}"` patterns where the model
@@ -463,9 +416,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             return nil
         }
 
-        // Extract content leniently — don't gate tool_calls on content success.
-        // A malformed content field (e.g., HTML tags, unquoted value) must NOT
-        // prevent recovery of a valid tool_calls array sitting right next to it.
+        // Extracts content leniently: a malformed content field must not block recovery of a valid tool_calls
+        // array beside it.
         let rawContent = extractStringOrNull(forKey: "content", in: json)
         let contentReasoning = (rawContent != nil && rawContent != "null") ? rawContent! : ""
         let hasToolCallsKey = json.range(of: "\"tool_calls\"") != nil
@@ -490,9 +442,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             reasoning = contentReasoning
         }
 
-        // --- Strategy A: Extract individual tool objects from "tool_calls" array ---
-        // Handles malformed arrays (missing commas between elements, keys outside "arguments").
-        // Finds each `{"name": "..."}` object inside the array using brace-depth extraction.
+        // Strategy A: extracts individual tool objects from the "tool_calls" array by brace depth.
+        // Handles malformed arrays (missing commas, keys outside "arguments").
         var pending: [PendingToolCall] = []
 
         if let arrayStart = json.range(of: "\"tool_calls\"") {
@@ -514,8 +465,7 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
             if let toolName = toolName {
                 var arguments: [String: JSONValue]? = nil
-                // [CR-50] `parameters` is the Cohere (Command-R / R7B) spelling of the same field;
-                // reading `arguments` only ran every such call with no arguments at all.
+                // `parameters` is the Cohere (Command-R / R7B) spelling of `arguments`.
                 if let argsStart = json.range(of: "\"arguments\"") ?? json.range(of: "\"parameters\""),
                    let extracted = extractOutermostJSON(from: String(json[argsStart.lowerBound...])) {
                     if let argsData = extracted.data(using: .utf8),
@@ -539,10 +489,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             }
         }
 
-        // G7: empty reasoning stays empty. UI renders tool execution state from .toolCall events.
-        // Note: `reasoning` above is kept unfiltered for the `rescueArgumentsFromContent`
-        // call path, which mines argument values out of free-text content. Filtering only
-        // happens here, at the final boundary, so stub patterns don't leak into the step.
+        // Empty reasoning stays empty; the UI renders tool state from `.toolCall` events.
+        // `reasoning` is kept unfiltered above for argument rescue; filtering happens only at this boundary.
         return ModernCognitiveStep(
             reasoning: ReasoningQualityFilter.filter(reasoning),
             toolCalls: pending
@@ -551,16 +499,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
     // MARK: - Array Tool Call Extraction
 
-    /// Extracts individual tool call objects from a potentially malformed JSON array string.
-    ///
-    /// Walks through the array using brace-depth extraction to isolate each `{...}` block,
-    /// then attempts to decode each block individually. Handles:
-    /// - Missing commas between array elements
-    /// - Keys at the wrong nesting level (e.g., "search_term" outside "arguments")
-    /// - Missing "arguments" wrapper
-    ///
-    /// - Parameter arrayString: The raw string starting from `[` of the tool_calls array.
-    /// - Returns: An array of successfully parsed tool calls (may be partial if some fail).
+    /// Extracts tool call objects from a malformed JSON array string, decoding each `{...}` block alone.
+    /// Handles missing commas, misplaced keys and a missing "arguments" wrapper; returns the parsed calls.
     private static func extractToolCallsFromArray(_ arrayString: String) -> [PendingToolCall] {
         var results: [PendingToolCall] = []
         var searchFrom = arrayString.startIndex
@@ -734,11 +674,9 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
     // MARK: - Markdown-Field Format Recovery
 
-    /// Recovers content from a bare markdown-field format where the model output
-    /// `content: <reasoning text>` and optionally `tool_calls: <value>` without JSON wrapping.
-    ///
-    /// This format occurs when models wrap field names in triple backticks (e.g. `` ```content``` ``)
-    /// which the OutputSanitizer strips, leaving bare `content: ...` text with no JSON braces.
+    /// Recovers content from a bare markdown-field format: `content: <text>` and optionally `tool_calls:
+    /// <value>`, without JSON. Occurs when models wrap field names in triple backticks, which
+    /// OutputSanitizer strips.
     private static func extractFromMarkdownFieldFormat(_ text: String) -> ModernCognitiveStep? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 

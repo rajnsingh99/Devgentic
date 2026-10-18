@@ -2,15 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  DeterministicHashingTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  The app runs with SWIFT_DETERMINISTIC_HASHING=1 so MLX chat-template prompts render the same
-//  bytes for the same request (see DeterministicHashing.swift). These pin the two launch paths
-//  that set it and the self-check that reports whether a launch got it.
-//
-//  ⚠️ The Test action deliberately sets the variable to "0" — the test host launches through
-//  LaunchServices and would otherwise inherit LSEnvironment — so this process normally sees random
-//  per-instance order. The self-check test holds in either configuration.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,7 +4,7 @@
 //  ChatSearchViewModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -22,23 +22,15 @@ struct ActiveSearchMatch: Equatable, Sendable {
 
 struct SearchMatch: Identifiable, Equatable, Sendable {
     let messageID: UUID
-    /// `ContentBlock.id` of the block that renders this match, or nil when the message renders
-    /// as ONE undecomposed `Text` (user bubbles, agent `.plainText`).
-    ///
-    /// The old model stored a single index counted across the message's whole raw source and
-    /// handed it to every block, which then compared it against its OWN offsets — so the
-    /// active highlight landed on the wrong occurrence or on nothing.
+    /// `ContentBlock.id` of the block that renders this match, or nil when the message renders as one undecomposed `Text`
+    /// (user bubbles, agent `.plainText`). `indexInBlock` counts occurrences within that block.
     let blockID: String?
     /// 0-based index of this match WITHIN that unit's highlightable string — exactly the index
     /// `SearchHighlighter.applyHighlights` enumerates for the same string.
     let indexInBlock: Int
 
-    /// Derived rather than a fresh UUID, so a re-run can re-anchor `currentMatchIndex` on the
-    /// same match instead of silently jumping the user somewhere else.
-    ///
-    /// ⚠️ Re-runs are MEMBERSHIP- and QUERY-driven, not streaming-driven: the three call sites
-    /// fire on `messagesToken` (count + first/last id), on the debounced query, and when the bar
-    /// opens. A message whose text mutates in place changes none of those — see CH64.
+    // Why: re-runs are membership- and query-driven, not streaming-driven: an in-place text mutation triggers none of them.
+    /// Derived rather than a fresh UUID, so a re-run can re-anchor `currentMatchIndex` on the same match.
     var id: String { "\(messageID.uuidString)#\(blockID ?? "-")#\(indexInBlock)" }
 }
 
@@ -57,36 +49,19 @@ class ChatSearchViewModel {
     var matches: [SearchMatch] = []
     var currentMatchIndex: Int = 0
 
-    /// The active match was found in the stored history but sits beyond the resident
-    /// window's cap, so navigation cannot scroll to it. Set by the chat view's scroll
-    /// attempt (it owns the residency question); cleared on the next successful scroll, on
-    /// any query edit, and on dismiss — so the search bar can say "older than the loaded
-    /// history" instead of showing "3 of 12" while the transcript visibly does nothing (CF-35).
+    /// The active match was found in stored history but lies beyond the resident window's cap, so navigation cannot
+    /// scroll to it. Set by the chat view's scroll attempt; cleared on the next successful scroll, any query edit and
+    /// dismiss, so the bar can say "older than the loaded history" instead of "3 of 12" while nothing scrolls.
     var currentMatchUnreachable: Bool = false
 
-    /// [vm-3] How many of `matches` lie past the resident window's cap — the "N older not shown"
-    /// half of the badge. STORED, written by `ChatHistoryViewModel.runSearch` from the same corpus
-    /// snapshot `matches` came from, so the search bar reads a value instead of walking the
-    /// corpus. Reset with `matches` (a new match set has a new count) and on dismiss.
-    ///
-    /// It used to be computed inside `ChatSearchBar.body` through `unreachableMatchCount(in:)`,
-    /// which enumerates the COMPUTED `searchCorpus`: a 1,000-entry dictionary rebuild plus sort
-    /// and a full-text hash of every resident message — on every keystroke (the TextField binds
-    /// the query `body` also reads) and on every streaming flush (reading each resident message's
-    /// `displayedContent` made the bar an observer of every resident message's content, and the
-    /// streaming message missed the memo and re-decomposed its markdown per flush). That broke
-    /// the "never call this from inside a SwiftUI body" contract in `ChatSearchDecomposition`'s
-    /// header, from a bar that has no business depending on the resident messages at all.
+    // Why: never compute it in `ChatSearchBar.body`: it would walk the whole corpus on every keystroke and streaming flush.
+    /// How many of `matches` lie past the resident window's cap: the "N older not shown" half of the badge.
+    /// Stored, written by `ChatHistoryViewModel.runSearch` from the same corpus snapshot as `matches`;
+    /// reset with `matches` and on dismiss.
     var unreachableMatchCount: Int = 0
 
-    /// THE query both sides measure. `searchQuery` is the user's raw text (the TextField binds
-    /// straight to it); this is what is actually searched for.
-    ///
-    /// ⚠️ Every consumer that highlights MUST use this, not `searchQuery`. The producer trimmed
-    /// and the three render paths did not, so a query with leading/trailing whitespace made the
-    /// two sides count occurrences of DIFFERENT strings — the same index-space drift CH28/CH29
-    /// exist to prevent, one argument over from the one they fixed. `ChatSearchDecomposition`
-    /// makes "the text we search IN" single-sourced; this does the same for "what we search FOR".
+    // Why: highlighters must use this, not `searchQuery`: untrimmed whitespace makes the two sides count different strings.
+    /// The query both sides measure: `searchQuery` is the raw text, this is the trimmed string actually searched for.
     var effectiveQuery: String {
         searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -148,22 +123,10 @@ class ChatSearchViewModel {
             }
     }
 
-    /// Runs the search over the SAME decomposition and the SAME strings the renderer
-    /// highlights (`SearchDocument`/`SearchUnit`), emitting one match per paintable
-    /// occurrence, keyed by block.
-    ///
-    /// Extraction happens at query time, so whatever this is handed is read fresh — a
-    /// pre-computed index (an older design) went stale on every in-place content mutation.
-    ///
-    /// ⚠️ That does NOT mean a streaming answer becomes searchable the moment it settles. This
-    /// method only runs when something CALLS it, and nothing re-runs it on an in-place text
-    /// mutation: a just-finished answer is still unsearchable until membership changes or the
-    /// user edits the query. Filed as CH64 — do not read "query-time" as "live".
-    ///
-    /// Units whose view accepts no search query (code, tables, images, error cards,
-    /// checkpoints) are counted as SUPPRESSED rather than emitted: "3 of 12" is a promise
-    /// that pressing Next twelve times shows twelve highlights, and the old behaviour
-    /// advertised positions that could never be painted.
+    // Why: "3 of 12" promises twelve visible highlights, so unpaintable units are never emitted as matches.
+    /// Runs the search over the same decomposition and strings the renderer highlights, one match per paintable occurrence.
+    /// Extracts at query time but only runs when called: an in-place text mutation does not re-run it.
+    /// Units whose view takes no search query (code, tables, images, error cards, checkpoints) are counted as suppressed.
     func performSearch(in documents: [SearchDocument]) {
         let query = effectiveQuery
         guard !query.isEmpty else {
@@ -175,12 +138,8 @@ class ChatSearchViewModel {
             return
         }
 
-        // Re-anchor on the SAME match across re-runs (membership changes re-run this) — but ONLY
-        // within the same query. `SearchMatch.id` is a pure (message, block, ordinal) tuple with
-        // no query identity, and `searchQuery.didSet` deliberately keeps the old `matches`, so
-        // after an EDIT the old anchor could still be found in the new result set and drop the
-        // user into the middle of it: broadening "error" to "err" jumped to "13 of 40" and
-        // scrolled away from the first hit of what they had just typed.
+        // Re-anchor on the same match across re-runs, but only within the same query: `SearchMatch.id` has no query identity,
+        // so after an edit the old anchor could drop the user mid-results instead of at the first hit.
         let previousKey = (matchedQuery == query) ? currentMatch?.id : nil
         var results: [SearchMatch] = []
         var suppressed = 0
@@ -204,9 +163,8 @@ class ChatSearchViewModel {
         }
 
         matches = results
-        // [vm-3] A new match set invalidates the old count; `runSearch` writes the new one from
-        // the same corpus snapshot right after this returns. Direct callers (tests, a future
-        // surface without residency) get the honest "nothing known to be unreachable".
+        // A new match set invalidates the old count; `runSearch` writes the new one from the same corpus snapshot after this
+        // returns. Direct callers get "nothing known to be unreachable".
         unreachableMatchCount = 0
         currentMatchIndex = previousKey.flatMap { key in results.firstIndex { $0.id == key } }
             ?? (previousKey == nil ? 0 : (currentMatchIndex < results.count ? currentMatchIndex : 0))

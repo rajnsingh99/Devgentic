@@ -4,24 +4,18 @@
 //  VSCodifiedSidebarContainerView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/05/25.
-//
-//  Refactored on 27/08/25 to remove LLM Integration sidebar.
-//  Refactored on 27/08/25 to remove redundant NewChatTabView.
-//  Refactored on 27/08/25 to improve UI to match modern standards.
-//  Refactored on 28/08/25 to slim down the sidebar for a cleaner aesthetic.
-//  Refactored on 21/04/26 — selectedTab persisted via @AppStorage, shadow
-//  themed, user-resizable via drag handle on trailing edge.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 import os
 
 // MARK: - Main Sidebar Container View
+/// The sidebar container: hosts the selected sidebar pane, with the selected tab persisted via `@AppStorage` and a
+/// user-resizable width through a drag handle on its trailing edge.
 struct VSCodifiedSidebarContainerView: View {
 
-    /// Persists across launches — previously `@State` reset the tab to
-    /// `.conversations` every cold start.
+    /// The selected tab, persisted across launches.
     @AppStorage(SidebarTab.storageKey) private var selectedTabRawValue: String = SidebarTab.conversations.rawValue
 
     @Binding var isSidebarVisible: Bool

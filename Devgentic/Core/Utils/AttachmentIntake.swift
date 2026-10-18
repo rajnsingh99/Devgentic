@@ -4,36 +4,13 @@
 //  AttachmentIntake.swift
 //  Devgentic
 //
-//  The ONE accept/refuse decision for a file a user is attaching, made at ATTACH time so a
-//  file no send path can carry is refused while the user can still pick another.
-//
-//  Every interactive attach route funnels here:
-//    • main composer (Chat + Code) — `ChatInputViewModel.addAttachedFiles`
-//      (`@` picker, drag-and-drop, file panels)
-//    • QuickAccess panel — `QuickAccessContentView.appendAttachments`
-//  Scheduled tasks carry the composer's already-admitted files; Orb and ChatOps accept none.
-//
-//  ⚠️ Before this, the rules were split: `FileAttachmentPicker` refused oversized images and
-//  silently dropped video, but only for the panel and drag-drop — the `@` picker bypassed
-//  both — and nothing refused binaries, which failed at SEND as a read error the model never
-//  saw (`January2026.class`, 2026-10-04).
-//
-//  ⚠️ Delivery is NOT decided here. Size budgets, strategy (direct vs stateless) and the
-//  workflow document lane stay with their owners; this only refuses what the active profile's
-//  lane cannot carry.
-//
-//  Folders (ATT-3) depend on that lane, so the caller passes the profile's
-//  `AttachmentDeliveryMode`:
-//    • `.pathManifest` — ACCEPTED: the agent gets the folder's path and can list it.
-//    • `.inject`       — REFUSED: injection sends file CONTENTS and a folder has none. It used
-//      to be accepted and fail at send as "Couldn't read 'X' — Try re-attaching", advice that
-//      could never work.
-//    • nil (profile unknown) — accepted; the send path reports `.isFolder` accurately if the
-//      profile turns out to inject (e.g. the user switched profiles after attaching).
+//  Created by Raj Singh.
 //
 
 import Foundation
 
+/// The single accept/refuse decision for a file being attached, made at attach time so the user can pick another.
+/// Folders are accepted only when the profile delivers by path manifest; delivery and size budgets live elsewhere.
 enum AttachmentIntake {
 
     struct Refusal: Equatable {

@@ -4,14 +4,13 @@
 //  WorkflowToolbarView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 13/03/26.
-//
-//  Modern Floating UI overlay for the workflow canvas.
-//  Provides add-node, zoom controls, context actions, and save states in glassmorphic capsules.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Floating glass overlay for the workflow canvas.
+/// Provides add-node, zoom controls, context actions and save states in capsules.
 struct WorkflowToolbarView: View {
     var canvasState: WorkflowCanvasState
     let onAddProfile: () -> Void
@@ -42,13 +41,7 @@ struct WorkflowToolbarView: View {
                     // Validation errors indicator
                     if !canvasState.validationErrors.isEmpty {
                         ToolbarPillButton(
-                            // ⚠️ [CVV-8] TWO KEYS, not one with a concatenated plural letter. The
-                            // old form built `"\(n) error" + ("" or "s")` as a Swift String, which
-                            // was both unextractable AND unpluralizable — the "s" would arrive as a
-                            // `%@` argument no translator can inflect. Written as two
-                            // `LocalizedStringKey` literals, the Int interpolation emits `%lld`, so
-                            // a translator can attach per-language plural variations to the second
-                            // key. Same reasoning as `WorkflowCanvasState.accessibilityDescription`.
+                            // Two `LocalizedStringKey` literals, not a concatenated plural letter, so a translator can add plural variations.
                             title: canvasState.validationErrors.count == 1
                                 ? "1 error"
                                 : "\(canvasState.validationErrors.count) errors",
@@ -74,10 +67,8 @@ struct WorkflowToolbarView: View {
                         onShowGuideline()
                     }
 
-                    // ⚠️ A VISIBLE undo affordance, not just ⌘Z. The canvas has no autosave and no
-                    // focus model, so a user who deletes a node by mistake needs a control they can
-                    // see — and if the Delete KEY turns out not to fire (no focusable content in
-                    // this hierarchy), the toolbar is the only path in and must be the way back out.
+                    // A visible undo affordance, not just ⌘Z: the canvas has no autosave, so a mistaken delete needs a control the user
+                    // can see.
                     if canvasState.canUndo {
                         ToolbarPillButton(
                             title: "Undo",
@@ -98,10 +89,8 @@ struct WorkflowToolbarView: View {
                         }
                     }
 
-                    // [CVV-9] Annotations are CONTENT — the same widening the empty-state placard
-                    // got. Gated on nodes alone, a canvas holding only sticky notes offered no Clear
-                    // pill even though `clearCanvas()` removes the notes (and the alert this pill
-                    // opens says so in as many words).
+                    // Annotations count as content: a canvas with only sticky notes still offers Clear, since `clearCanvas()` removes
+                    // them.
                     if !WorkflowCanvasView.showsEmptyPlacard(
                         nodeCount: canvasState.nodes.count,
                         annotationCount: canvasState.annotations.count
@@ -262,10 +251,8 @@ struct WorkflowToolbarView: View {
 
     private var saveRevertGroup: some View {
         HStack(spacing: 8) {
-            // "Discard Changes", pairing with "Save Changes" beside it: the bottom-right cluster
-            // is DOCUMENT-level (keep or discard everything since the last save), the top cluster
-            // is EDIT-level (Undo/Delete/Clear). It was titled "Revert", which read as a sibling of
-            // Undo — and confusing the two was unrecoverable until revert became undoable.
+            // "Discard Changes" pairs with "Save Changes": the bottom-right cluster is document-level, the top cluster is
+            // edit-level.
             ToolbarPillButton(title: "Discard Changes", icon: "arrow.counterclockwise") {
                 onRevert()
             }
@@ -299,15 +286,8 @@ struct WorkflowToolbarView: View {
                 .pointingHandCursor()
             }
 
-            // Logic
-            //
-            // ⚠️ [CVV-8] The SECOND argument to `onAddStructuralNode` is the node's PERSISTED
-            // `displayName`, not chrome — it must stay an untranslated literal. `WorkflowNodeView`'s
-            // `nodeKindLabel` compares `displayName` against "Router" to decide whether to show the
-            // rule count, so localizing the palette's "Router" would silently drop that subtitle in
-            // every non-English locale. Only the `title:` and `label:` arguments are user-facing
-            // copy, which is why only those two took `LocalizedStringKey`. Same for "Code", "Gate"
-            // and "Action" below; `icon:` values are SF Symbol names, likewise not copy.
+            // Logic palette. The node's `displayName` argument is persisted, so it stays an untranslated literal; only `title:`
+            // and `label:` are copy.
             paletteSection(title: "LOGIC", icon: "arrow.triangle.branch", color: theme.nodeIdentityColor(for: .router)) {
                 Button {
                     showNodePalette = false
@@ -365,9 +345,7 @@ struct WorkflowToolbarView: View {
             paletteSection(title: "ANNOTATE", icon: "note.text", color: .yellow) {
                 Button {
                     showNodePalette = false
-                    // CVC-2: no position — the state centres the note in the current viewport on
-                    // a free slot, exactly like Add Node. The count-based formula that lived here
-                    // put notes off-screen on a panned canvas and stacked them after a delete.
+                    // No position: the state centres the note in the current viewport on a free slot, like Add Node.
                     canvasState.addStickyNote()
                 } label: {
                     paletteItem(icon: "note.text", label: "Sticky Note", color: .yellow)
@@ -435,13 +413,9 @@ private struct PaletteItemRow: View {
 // MARK: - Toolbar Pill Button (8pt continuous rounded rectangle with hover)
 
 struct ToolbarPillButton: View {
-    /// ⚠️ `LocalizedStringKey`, NOT `String` (register CVV-8). `Text(_: S) where S: StringProtocol`
-    /// is `@_disfavoredOverload`, so a `String` VARIABLE binds it and the String Catalog extractor
-    /// never sees the value — every one of this button's titles ("Add Node", "Guide", "Undo",
-    /// "Delete", "Clear", "Discard Changes", "Save Changes") was passed as a literal and then
-    /// rendered through that overload, so none of them was extractable. Taking the key here means
-    /// the literals at the call sites bind `Text(_ key: LocalizedStringKey)` instead, with no
-    /// change at any call site.
+    /// `LocalizedStringKey`, not `String`: a `String` variable binds `Text`'s non-localizing overload, so titles would
+    /// never be extracted.
+    /// Taking the key lets call-site literals bind the localizing initializer.
     let title: LocalizedStringKey
     let icon: String?
     var isPrimary: Bool = false
@@ -460,11 +434,8 @@ struct ToolbarPillButton: View {
         isPrimary && buttonAccentStyle == .accent
     }
 
-    // ⚠️ EXTRACTED, EXPLICITLY TYPED, AND THEY MUST STAY THAT WAY. Inline these back into `body`
-    // and the Swift 6.3 type checker (Xcode 27) fails the file outright with "unable to type-check
-    // this expression in reasonable time" — five nested `Color` ternaries in one literal, three of
-    // them through `??`, is past what it will solve. Each annotation below closes one branch of the
-    // search. No behaviour changes: every expression is the one that was inline.
+    // Explicitly typed members, kept separate from `body`: inlined, five nested `Color` ternaries fail with
+    // "unable to type-check this expression in reasonable time".
     private var iconColor: Color {
         if isMaterialPrimary {
             return theme.isDark ? Color(red: 0.08, green: 0.08, blue: 0.08) : .white
@@ -553,10 +524,7 @@ struct ToolbarPillButton: View {
 
 struct ToolbarIconButton: View {
     let icon: String
-    /// ⚠️ `LocalizedStringKey`, NOT `String` (register CVV-8) — `.help(_: S)` has the same
-    /// non-localizing `StringProtocol` overload `Text` does, so "Zoom out", "Zoom in" and
-    /// "Reset zoom" were passed as literals and then rendered through it, invisible to the
-    /// String Catalog extractor.
+    /// `LocalizedStringKey`, not `String`: `.help(_: S)` has the same non-localizing overload as `Text`.
     let help: LocalizedStringKey
     let action: () -> Void
 

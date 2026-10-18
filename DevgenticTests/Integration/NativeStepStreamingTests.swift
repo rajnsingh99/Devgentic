@@ -4,10 +4,7 @@
 //  NativeStepStreamingTests.swift
 //  DevgenticTests
 //
-//  Item 6 of the 2026-09-27 OpenRouter review: agent steps on the native tool path were requested
-//  with `stream: false`, so a 23–68s cloud step showed nothing until it finished. Steps now stream
-//  their visible text as a provisional `.draftText` that the final `.content` replaces, and that is
-//  withdrawn when the step turns out to be tool calls.
+//  Created by Raj Singh.
 //
 
 import XCTest

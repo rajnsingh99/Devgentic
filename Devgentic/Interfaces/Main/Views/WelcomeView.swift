@@ -4,13 +4,12 @@
 //  WelcomeView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 20/08/25.
-//  Redesigned for commercial polish — contextual greeting, quick actions,
-//  and seamless Morning Brief integration.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// The welcome screen: a contextual greeting, quick actions and Briefing integration.
 struct WelcomeView: View {
     @Environment(\.appTheme) private var theme
     @Environment(MainApplicationViewModel.self) private var viewModel
@@ -26,11 +25,11 @@ struct WelcomeView: View {
     /// One-time disclosure that on-device diagnostics are recorded (default-on, opt-out).
     @AppStorage(AppSettings.diagnosticsDisclosureSeenKey) private var diagnosticsDisclosureSeen = false
     @AppStorage(AppSettings.isIntelligenceCoreEnabledKey) private var isIntelligenceCoreEnabled = false
-    @AppStorage(AppSettings.ciFeatureMorningBriefKey) private var morningBriefEnabled = false
+    @AppStorage(AppSettings.ciFeatureBriefingKey) private var briefingEnabled = false
 
-    /// Feed is enabled only when Core Intelligence and Morning Brief are turned on.
+    /// Feed is enabled only when Core Intelligence and Briefing are turned on.
     private var isFeedEnabled: Bool {
-        (viewModel.isIntelligenceCoreEnabled || isIntelligenceCoreEnabled) && morningBriefEnabled
+        (viewModel.isIntelligenceCoreEnabled || isIntelligenceCoreEnabled) && briefingEnabled
     }
 
     /// Feed is visible when it is enabled and there are active widgets to show.
@@ -138,7 +137,7 @@ struct WelcomeView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.3).delay(0.16), value: showShortcuts)
         .animation(.easeInOut(duration: 0.3), value: isFeedVisible)
         // Animate the grid when the set of visible widgets changes (any widget
-        // appearing or disappearing), not just the Morning Brief.
+        // appearing or disappearing), not just the Briefing.
         .animation(.easeInOut(duration: 0.3), value: WelcomeWidgetRegistry.active.map(\.id))
         .onAppear {
             if !didNotifyWidgets && isFeedEnabled {
@@ -173,10 +172,9 @@ struct WelcomeView: View {
 
     // MARK: - Widget Layouts
 
-    /// Hosts the welcome "widgets" in a centered flow that reflows by available
-    /// width: one centered column when narrow, multiple columns when wide.
-    /// Content comes entirely from `WelcomeWidgetRegistry` — add a new widget by
-    /// registering it, not by editing this view.
+    /// Hosts the welcome widgets in a centered flow that reflows by available width (one column when narrow, several
+    /// when wide). Content comes from `WelcomeWidgetRegistry`: add a widget by registering it, not by editing this
+    /// view.
     @ViewBuilder private var widgetGrid: some View {
         CenteredFlowLayout(itemWidth: 480, hSpacing: 16, vSpacing: 16) {
             ForEach(WelcomeWidgetRegistry.active, id: \.id) { widget in
@@ -479,11 +477,8 @@ private struct KeyHint: View {
 
 // MARK: - Centered Flow Layout
 
-/// Lays children left→right, wrapping to new rows when they run out of
-/// horizontal space, and horizontally centers every row. Each child is sized
-/// up to `itemWidth`. One child → centered; many → fills width and reflows.
-/// This is what lets new welcome widgets be added without a single growing
-/// column (see `WelcomeView.widgetGrid`).
+/// Lays children left to right, wrapping to new rows and centering every row; each child is sized up to
+/// `itemWidth`. One child is centered; many fill the width and reflow.
 private struct CenteredFlowLayout: Layout {
     var itemWidth: CGFloat = 480
     var hSpacing: CGFloat = 16

@@ -4,10 +4,7 @@
 //  XMLStructuredGenerator.swift
 //  Devgentic
 //
-//  Step 2.2: Dialect-specific generator for the .mistralXML dialect.
-//  Injects <tool_call> wrapping instructions with hybrid tags (<content>, <tool_name>, <arguments>).
-//
-//  Created by Raj Singh on 06/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,49 +4,38 @@
 //  ChatUIConstants.swift
 //  Devgentic
 //
-//  Shared numeric constants for the chat UI. Centralised so a change here
-//  propagates to every renderer/viewmodel that asks the same question
-//  ("is this code block long?", "how tall should a streaming bubble be?")
-//  instead of drifting between three different copies of the same literal.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Shared numeric constants for the chat UI, centralised so renderers and view models answer the same question the same
+/// way.
 enum ChatUIConstants {
-    /// Line count above which a code block in a message bubble is collapsed
-    /// behind a "Show in viewer" affordance instead of being inlined.
-    /// Used by `ContentBlockView`, `AgentBubbleContentView`, and the
-    /// "open in code viewer" snippet selector in `ChatHistoryViewModel`.
+    /// Line count above which a code block in a bubble is collapsed behind a "Show in viewer" affordance.
+    /// Used by `ContentBlockView`, `AgentBubbleContentView` and the snippet selector in `ChatHistoryViewModel`.
     static let codeBlockLineLimit: Int = 50
 
     /// Minimum height applied to an actively-streaming agent bubble so
     /// incremental tokens don't cause layout thrash as the bubble grows.
     static let streamingBubbleMinHeight: CGFloat = 200
 
-    /// Widest an image renders inline in a bubble. Anything larger is scaled down to fit,
-    /// so full resolution lives behind `ImageLightbox`.
-    ///
-    /// Was duplicated as a bare `500` in four renderers and a `512` in a fifth, which made
-    /// the same image a different size depending on which code path produced it.
+    /// Widest an image renders inline in a bubble; larger images scale down to fit.
+    /// Full resolution lives behind `ImageLightbox`.
     static let imageMaxWidth: CGFloat = 500
 
     /// Placeholder height for an image that is still decoding or has failed, so the bubble
     /// doesn't jump when the picture arrives.
     static let imagePlaceholderMinHeight: CGFloat = 150
 
-    /// Longest side of a user-attached image THUMBNAIL in the user bubble (points).
-    /// Deliberately smaller than `imageMaxWidth`: a message can carry several attached
-    /// photos, and each stays a downsampled chip (`ImageDownsampler`) — full resolution
-    /// lives behind `ImageLightbox`, decoded only on tap.
+    /// Longest side of a user-attached image thumbnail in the user bubble, in points.
+    /// Smaller than `imageMaxWidth`: a message can carry several photos, each a downsampled chip decoded in full only on
+    /// tap.
     static let attachmentThumbnailPointSize: CGFloat = 120
 
     /// Tallest an inline code block grows before it scrolls internally.
-    ///
-    /// Without a cap a 50-line block rendered its full ~780pt, pushing the rest of the
-    /// reply — and the next message — off screen. 50 lines is also the point where a block
-    /// becomes a card instead (`codeBlockLineLimit`), so this only ever bites blocks just
-    /// under that line: tall enough to read a whole short function, short enough that the
-    /// conversation stays navigable.
+    /// Without a cap a 50-line block would push the rest of the reply off screen; this only bites blocks just under
+    /// `codeBlockLineLimit`.
     static let codeBlockMaxHeight: CGFloat = 420
 
     /// Tallest the expanded agent execution timeline grows before it scrolls internally.
@@ -64,22 +53,11 @@ enum ChatUIConstants {
     /// value used when no chat size is available.
     static let defaultCodeFontSize: CGFloat = 12
 
-    /// Code point size for a given chat prose size (register XUI-8).
-    ///
-    /// Code sits one step BELOW body prose, but it MOVES with `chatFontSize` — a reader at 20pt prose
-    /// getting 12pt code with no way to change it was the defect this formula was introduced to fix
-    /// on the chat side. Floored at 10 so the smallest prose setting (12) still yields legible code.
-    ///
-    /// ⚠️ SINGLE SOURCE for CODE sizing. The arithmetic was copy-pasted into two views
-    /// (`ContentBlockView`, `AgentBubbleContentView`), and the workflow node output — the one code
-    /// surface that never got the copy — silently pinned code at the 12pt default while its own
-    /// prose and tables scaled. Three callers now, two of them former copies. `nonisolated` and pure
-    /// so the rule is testable; a `private var` on a SwiftUI view is not.
-    ///
-    /// ⚠️ Two sites share this ARITHMETIC without sharing its MEANING, and are deliberately left
-    /// alone — routing them here would make a later change to the code rule silently restyle prose:
-    ///   • `ErrorMessageView`'s suggestion line is `max(10, chatFontSize - 2)` prose, not code.
-    ///   • Markdown tables floor at 11, not 10, and that asymmetry is pre-existing.
+    // Why: `ErrorMessageView` and Markdown tables share the arithmetic, not the meaning; routing them here would restyle
+    // prose.
+    /// Code point size for a given chat prose size: one step below body prose, scaling with `chatFontSize`, floored at 10.
+    /// The single source for code sizing across the chat renderers and workflow node output; `nonisolated` and pure so it is
+    /// testable.
     nonisolated static func codeFontSize(forChatFontSize chatFontSize: CGFloat) -> CGFloat {
         max(10, chatFontSize - 2)
     }
@@ -98,10 +76,9 @@ enum ChatUIConstants {
     /// divider in split mode.
     static let splitModeChatGutter: CGFloat = 16
 
-    /// Horizontal space the minimized Code Viewer pill occupies at the top-trailing corner
-    /// (its own width plus the 18pt inset it floats at). The chat search bar reserves this
-    /// while the pill is showing: capping the bar to the content lane is not enough on a
-    /// narrow window, where the centred bar's right edge still reaches under the pill.
+    /// Horizontal space the minimized Code Viewer pill occupies at the top-trailing corner (its width plus the 18pt inset).
+    /// The chat search bar reserves this while the pill shows, since capping to the content lane is not enough on a narrow
+    /// window.
     static let codeViewerPillFootprint: CGFloat = 104
 
     /// Bounds for the Code Viewer's ⌘+/⌘− font stepping. The floor keeps code legible;

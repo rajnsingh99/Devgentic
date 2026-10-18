@@ -4,13 +4,7 @@
 //  WorkflowRetryPolicyTests.swift
 //  DevgenticTests
 //
-//  The retry rules had NO test surface before this file: they lived inline in two loops that
-//  disagreed with each other, and the Action loop disagreed with its own comment (it claimed to
-//  "retry transient failures (timeout, network, MCP)" while retrying everything).
-//
-//  THE RULE (owner decision, 2026-08-19): retry on a compute timeout, or on a failure of a profile
-//  node (bot / agent / sub-workflow). Never on cancellation. Action nodes are deterministic, so a
-//  tool failure only retries when transient.
+//  Created by Raj Singh.
 //
 
 import XCTest

@@ -4,12 +4,7 @@
 //  WorkflowPortRenameTests.swift
 //  DevgenticTests
 //
-//  Regression cover for Workflow_Production_Readiness.md rows WF10, WF-CS1, WF-CS2, WF-CS12.
-//
-//  Edges address their source port by LABEL. Renaming a Condition rule or a Gate option used to
-//  strand every edge wired to it: the run skipped the whole downstream branch, while the canvas
-//  kept drawing the edge connected (the port-position lookup falls back to index 0 for an unknown
-//  label) and validation reported nothing.
+//  Created by Raj Singh.
 //
 
 import XCTest

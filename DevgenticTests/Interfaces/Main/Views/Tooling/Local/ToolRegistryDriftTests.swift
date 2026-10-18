@@ -4,19 +4,7 @@
 //  ToolRegistryDriftTests.swift
 //  DevgenticTests
 //
-//  Two registries used to decide independently what a tool IS: a `switch` in
-//  `AgentConnect.resolveNativeTool` (it RUNS) and a list of `registerNative(…)` calls in
-//  `LocalToolManager` (it is OFFERED). 63 tools were constructed identically in both, and nothing
-//  checked they agreed. The failure modes were asymmetric — a missing registration is silent
-//  because the tool still works, a missing dispatch case is loud — so the drift ran one way for a
-//  long time: 11 unreachable tools, 25 dispatchable tools in no picker, one struct dispatched
-//  under two names, and a split whose destructive half was selectable while its harmless half was
-//  not.
-//
-//  `NativeToolCatalog` (2026-07-31) made that structurally impossible: one list, both consumers
-//  derived. So these tests changed job. They no longer reconcile two lists — they assert the
-//  catalogue is still the ONLY source, and that both projections come from it. The bug they guard
-//  against is not drift any more; it is someone reintroducing a second list.
+//  Created by Raj Singh.
 //
 
 import XCTest

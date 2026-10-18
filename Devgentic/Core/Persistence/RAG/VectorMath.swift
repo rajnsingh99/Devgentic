@@ -4,27 +4,22 @@
 //  VectorMath.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import Accelerate
 
-/// A namespace for pure vector math operations used across the RAG pipeline.
-///
-/// Provides cosine similarity, dot product, magnitude, and L2 normalization —
-/// the building blocks for nearest-neighbor vector search. Extracted from
-/// VectorStoreService and EmbeddingService to enable direct unit testing
-/// via `@testable import`.
+/// A namespace for pure vector math used across the RAG pipeline.
+/// Provides cosine similarity, dot product, magnitude and L2 normalization for nearest-neighbor search.
 enum VectorMath {
 
     /// Calculates the dot product of two vectors.
     /// - Returns: The scalar dot product, or `0` if vectors have different lengths.
     static func dotProduct(_ vectorA: [Float], _ vectorB: [Float]) -> Float {
         guard vectorA.count == vectorB.count else { return 0.0 }
-        // vDSP, not `zip(...).map(*).reduce(+)`: that allocated an intermediate array per call,
-        // and the retrieval scan calls this once per chunk on every send — 4.2 ms vs 0.13 ms for
-        // 4.9k chunks at -O, 457 ms in a Debug build (CR-29 measurements).
+        // vDSP, not `zip(...).map(*).reduce(+)`, which allocates an intermediate array per call;
+        // the retrieval scan calls this once per chunk on every send.
         var result: Float = 0
         vDSP_dotpr(vectorA, 1, vectorB, 1, &result, vDSP_Length(vectorA.count))
         return result

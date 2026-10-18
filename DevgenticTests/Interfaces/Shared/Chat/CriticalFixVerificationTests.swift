@@ -4,17 +4,7 @@
 //  CriticalFixVerificationTests.swift
 //  DevgenticTests
 //
-//  Red-green verification tests for the 8 critical production-readiness fixes.
-//  Each test validates the specific behavior change introduced by the fix.
-//
-//  Fix 1: CodeBlockView — force unwrap elimination (safe font fallback)
-//  Fix 2: MarkdownTableView — try! → try? (safe markdown parsing)
-//  Fix 3: SpeechService — @MainActor thread safety
-//  Fix 4: ChatMessage.timelineEvents — bounded growth via appendTimelineEvent()
-//  Fix 5: BlinkingCursor — animation lifecycle (structural, not unit-testable)
-//  Fix 6: CodeViewerPanelView — save error surfaced to UI
-//  Fix 7: ConversationExporter — export error surfaced to user
-//  Fix 8: ConversationExporter — extraction failure logged, not swallowed
+//  Created by Raj Singh.
 //
 
 import XCTest

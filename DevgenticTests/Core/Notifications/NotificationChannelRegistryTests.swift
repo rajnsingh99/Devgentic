@@ -4,13 +4,7 @@
 //  NotificationChannelRegistryTests.swift
 //  DevgenticTests
 //
-//  The notification settings pane, wired to the real registry.
-//
-//  ⚠️ WHY A WIRING TEST AND NOT ONLY VALUE TESTS. `registeredChannels()` and `setEnabled(_:for:)`
-//  shipped with ZERO call sites and zero tests: correct API, never connected to anything, so the
-//  ChatOps channel was registered and delivering while the Settings pane showed a hardcoded
-//  "Telegram Bot — Coming soon" row and offered no way to turn it on. Pure API tests would have
-//  been green throughout. The source scans below are what fail if the pane is disconnected again.
+//  Created by Raj Singh.
 //
 
 import XCTest

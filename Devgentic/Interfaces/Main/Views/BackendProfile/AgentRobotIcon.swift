@@ -4,16 +4,13 @@
 //  AgentRobotIcon.swift
 //  Devgentic
 //
-//  Bespoke vector robot icon for Agent profiles matching the design specification:
-//  - Single floating signal dot above the antenna
-//  - Antenna stem and glowing bulb node
-//  - Squircle robot head with expressive circular eyes and horizontal pill mouth
-//  - Subtle torso/shoulder curve beneath
-//  - Pure SwiftUI vector shapes scaling crisply from 14pt to 256pt with Retina precision
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Bespoke vector robot icon for Agent profiles, drawn in pure SwiftUI shapes that scale crisply from 14pt to 256pt.
+/// Antenna with signal dot and bulb node, squircle head with circular eyes and a pill mouth, subtle torso curve.
 struct AgentRobotIcon: View {
     var size: CGFloat = 24
     var color: Color? = nil

@@ -4,26 +4,7 @@
 //  SpeedSampler.swift
 //  Devgentic
 //
-//  Created 2026-04-21.
-//
-//  Rolling-window sampler that converts periodic (bytesDownloaded, time)
-//  readings into a bytes-per-second rate. Used by `DownloadManager` to
-//  derive live download speed + ETA for the three model-download paths
-//  (Ollama / MLX / Whisper) without persisting any of it to SwiftData —
-//  speed is noise at second-level resolution.
-//
-//  Why a window at all?
-//    · Instantaneous speed (bytes since last callback) whiplashes hard,
-//      especially at the start of a download where the first chunk
-//      arrives fast and the second slower.
-//    · A time-bounded rolling window (default 3s) smooths the display
-//      while still reacting within a second or two to real slowdowns
-//      (e.g. network throttling kicking in).
-//
-//  Why a minimum age + minimum bytes gate?
-//    · Two samples from the same millisecond give infinity MB/s; the
-//      gate suppresses that nonsense until we've seen enough to compute
-//      a meaningful rate. Callers can treat `nil` as "—" in UI.
+//  Created by Raj Singh.
 //
 
 import Foundation

@@ -4,19 +4,7 @@
 //  ToolCategoryGroupingTests.swift
 //  DevgenticTests
 //
-//  `BuiltInToolCategory.allGroups` maps each sidebar group to the tool `category` values it
-//  gathers, and nothing checked it against the tools that actually exist.
-//
-//  The two directions fail differently, and only one of them is visible:
-//
-//  - A group naming a category no tool uses is INERT — `builtInGroups` drops zero-count groups —
-//    so it survives indefinitely as a description of a shape the app no longer has. Four such
-//    names accumulated from the 2026-07-31 catalogue cleanup and were removed on 2026-08-01.
-//  - A tool whose category is in NO group gets no sidebar row. It still appears under "All
-//    Tools", so it is not missing exactly — just unreachable by the route most people use, with
-//    nothing anywhere reporting it.
-//
-//  The second is why this test exists; the first is why it checks both ways.
+//  Created by Raj Singh.
 //
 
 import XCTest

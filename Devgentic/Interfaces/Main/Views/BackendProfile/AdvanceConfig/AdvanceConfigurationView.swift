@@ -4,29 +4,20 @@
 //  AdvanceConfigurationView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 05/09/25.
-//  Updated on 28/02/26 to adopt Modern UI Layout and alignment.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
 // MARK: - Shared Components
 
-/// Visible numeric text field used by MLX/Ollama advanced configuration panels.
-/// Replaces SwiftUI's `.roundedBorder` style which is nearly invisible in dark
-/// theme — users couldn't tell the value was tappable. Pair with a `Stepper`
-/// bound to the same `value` for the standard "type-or-step" combo.
-///
-/// Lives here (not as a private helper in each view) so the two providers'
-/// Advanced Configuration panels stay visually consistent — any future styling
-/// tweak lands in one place instead of drifting across copies.
+/// A visible numeric text field for the MLX/Ollama advanced configuration panels, replacing `.roundedBorder`, which is
+/// nearly invisible in dark theme. Pair with a `Stepper` bound to the same `value`.
 struct AdvancedConfigNumericField: View {
     @Binding var value: Int
     let width: CGFloat
-    /// Spoken name for the field. ⚠️ Register A61: the `TextField` label is `""` so the control
-    /// announces as a bare, nameless text field — the parameter name lives in a sibling `Text` that
-    /// VoiceOver reads as unrelated static text. Required rather than defaulted, so a new caller
-    /// cannot add another unlabeled field by omission.
+    /// Spoken name for the field: the `TextField` label is empty, so without this it announces as a nameless field.
+    /// Required rather than defaulted so a new caller cannot omit it.
     let accessibilityName: LocalizedStringKey
     @Environment(\.appTheme) private var theme
 
@@ -68,11 +59,7 @@ struct GeminiSettingsView: View {
                 }
                 Spacer(minLength: 16)
                 HStack {
-                    // ⚠️ Register A73: capped at 1.0, while `generationConfig.temperature` accepts
-                    // 0.0–2.0. The upper half of the model's range was simply unreachable, and
-                    // silently so — the slider bottomed out at its own maximum with no indication
-                    // it was the UI's limit rather than the API's. The OpenAI panel below already
-                    // uses 0.0...2.0 for the same parameter.
+                    // Spans the full 0.0-2.0 range that `generationConfig.temperature` accepts, matching the OpenAI panel.
                     Slider(value: $config.temperature.toNonOptional(defaultValue: 0.9), in: 0.0...2.0, step: 0.05)
                         .frame(width: 150)
                         .accessibilityLabel("Temperature")
@@ -123,9 +110,7 @@ struct GeminiSettingsView: View {
                 }
                 Spacer(minLength: 16)
                 HStack {
-                    // ⚠️ register A54 — the nil fallback was `1`, so merely touching the stepper
-                    // persisted greedy decoding. Google's own default is 64; 40 is the value the
-                    // stepper lands on when the user starts adjusting from an unset config.
+                    // The nil fallback is 40 (Google's own default is 64), so touching the stepper does not persist greedy decoding.
                     Text(config.topK.map(String.init) ?? "Default").monospacedDigit()
                     Stepper("", value: $config.topK.toNonOptional(defaultValue: 40), in: 1...100).labelsHidden()
                         .accessibilityLabel("Top K")
@@ -133,9 +118,7 @@ struct GeminiSettingsView: View {
                 }
             }
 
-            // ⚠️ Warn rather than clamp — the same choice the Ollama panel makes for num_ctx.
-            // Top K 1 is legitimate if you actually want greedy decoding, so the floor stays at 1;
-            // what was wrong was arriving there by accident and silently losing two other controls.
+            // Warns rather than clamps, as the Ollama panel does for num_ctx: Top K 1 is legitimate greedy decoding.
             if config.topK == 1 {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -207,13 +190,8 @@ struct GeminiSettingsView: View {
 
 // MARK: - Localized names for the Gemini safety enums (audit C2)
 
-// ⚠️ These replace `formatCategory` / `formatThreshold`, which string-munged the WIRE value at
-// runtime ("HARM_CATEGORY_HATE_SPEECH" -> "Hate Speech"). That output could never be localized:
-// a runtime-built string is not a String Catalog key, and `LocalizedStringKey(someString)` is
-// invisible to the extractor. It was also fragile — it depended on Google's constant spelling,
-// and the `text == "None" ? "Block None"` special case existed only to patch up what the
-// munging produced. ⚠️ The rawValues are WIRE values sent to the Gemini API and are `Codable`
-// (persisted in a profile's advanced config): never change them.
+// Why: the rawValues are wire values sent to the Gemini API and persisted in profiles; never change them
+// Localized titles for the harm categories and thresholds, as String Catalog keys.
 
 extension HarmCategory {
     var localizedTitle: LocalizedStringKey {
@@ -242,29 +220,19 @@ struct OllamaSettingsView: View {
     @Binding var config: OllamaAdvancedConfig
     @Binding var thinkingEnabled: Bool
 
-    /// Active model metadata. Currently only used to derive the Context Window
-    /// cap; populated from `/api/show` for Ollama models. Nil when the profile
-    /// has no model selected — the view falls back to the catalog lookup.
+    /// Active model metadata that sets the Context Window cap (from `/api/show` for Ollama).
+    /// Nil when no model is selected; the view then falls back to the catalog lookup.
     let modelMetadata: ModelMetadata?
-    /// Active model name. Used as a secondary fallback for context-window
-    /// detection when `modelMetadata.contextWindow` is nil — Ollama populates
-    /// tier/quant/family from `/api/show.details` but doesn't currently extract
-    /// the context window itself, so the catalog lookup is the practical source.
+    /// Active model name, a fallback for context-window detection when `modelMetadata.contextWindow` is nil.
     let modelName: String?
-    /// Whether this view is hosted in an Agent or Bot profile. Drives which
-    /// preset the "Apply Optimal" menu produces (strict agent vs warm chat).
-    /// No default — every callsite must specify so a Bot profile never silently
-    /// inherits agent-strict defaults from a forgotten parameter.
+    /// Whether this view is hosted in an Agent or Bot profile; selects the strict agent or warm chat preset.
+    /// No default, so a Bot profile never silently inherits agent defaults.
     let defaultProfile: OllamaConfigDefaultProfile
 
     @Environment(\.appTheme) private var theme
 
-    /// Local draft of the stop-sequences editor text. Backed by `@State` so the
-    /// TextEditor's normal Enter-to-add-line behaviour works — committing
-    /// directly to `config.stop` per keystroke would normalize the value
-    /// (split → trim → filter) and round-trip via `get` would strip trailing
-    /// newlines, yanking the cursor back from the new line the user just opened.
-    /// We commit to `config.stop` only on focus loss.
+    // Why: committing per keystroke would normalize the value and strip trailing newlines, yanking the cursor back
+    /// Local draft of the stop-sequences editor text, committed to `config.stop` only on focus loss.
     @State private var stopsDraft: String = ""
 
     /// Tracks whether the stops editor is the active responder so we can commit
@@ -272,12 +240,8 @@ struct OllamaSettingsView: View {
     /// Optimal etc.) without clobbering whatever the user is currently typing.
     @FocusState private var stopsFocused: Bool
 
-    /// Effective context window for bound derivation. Layered fallback that
-    /// mirrors AgentConnect.swift's runtime logic so the UI bounds match what
-    /// the executor will accept:
-    ///   1. ModelMetadata.contextWindow if captured during scan
-    ///   2. KnownModelContextWindows.lookup(modelName) catalog entry
-    ///   3. 8192 safe default
+    /// Effective context window for bound derivation, mirroring AgentConnect's runtime fallback: captured metadata,
+    /// then `KnownModelContextWindows.lookup(modelName)`, then 8192.
     private var contextWindow: Int {
         if let cw = modelMetadata?.contextWindow { return cw }
         if let name = modelName, let cw = KnownModelContextWindows.lookup(name) { return cw }
@@ -419,10 +383,8 @@ struct OllamaSettingsView: View {
                         .font(theme.fontCaption2)
                         .foregroundColor(theme.secondaryText.opacity(0.7))
 
-                    // Warning when the saved value exceeds this model's cap. Happens
-                    // when a user switches to a smaller-context model after tuning
-                    // numCtx for a larger one. We don't auto-clamp (would silently
-                    // destroy tuning) — the user gets the choice.
+                    // Warns when the saved value exceeds this model's cap (e.g. after switching to a smaller-context model).
+                    // It does not auto-clamp, which would destroy tuning.
                     if let current = config.numCtx, current > numCtxCap {
                         HStack(spacing: 4) {
                             Image(systemName: "exclamationmark.triangle.fill")
@@ -446,10 +408,7 @@ struct OllamaSettingsView: View {
             }
             .onChange(of: config.numCtx) { _, newVal in
                 guard let v = newVal else { return }
-                // Only clamp when the user typed a value below the absolute floor.
-                // We don't clamp the upper bound here — values exceeding the model's
-                // context window are surfaced via the warning above so the user can
-                // choose to keep their setting (e.g. switching models for comparison).
+                // Clamps only below the absolute floor; values above the model's context window are surfaced by the warning above.
                 if v < 256 { config.numCtx = 256 }
             }
 
@@ -551,13 +510,8 @@ struct OllamaSettingsView: View {
 
             Divider()
 
-            // Reset to Defaults — single click, matches MLX. Tier auto-detected
-            // from `modelMetadata.tier` (populated by OllamaConnect.buildMetadata
-            // from /api/show.details.parameter_size). Agent profiles get the
-            // strict preset; bot profiles get the warm chat preset. Replaces
-            // the legacy "Apply Optimal" 2-click menu cascade — the manual
-            // tier picker existed because auto-tier detection was unreliable
-            // before; we now have reliable metadata for every model.
+            // Reset to Defaults: the tier is auto-detected from `modelMetadata.tier`; agent profiles get the strict preset,
+            // bot profiles the warm chat preset.
             HStack {
                 Spacer()
                 GlassActionButton(title: "Reset to Defaults", icon: "arrow.counterclockwise", isAccent: false) {
@@ -580,12 +534,8 @@ struct OllamaSettingsView: View {
 
     // MARK: - Helpers
 
-    /// Multi-line editor for stop sequences. Backed by `@State stopsDraft` so
-    /// pressing Enter doesn't trip the immediate-commit binding's normalization
-    /// (split → trim → filter empties), which would round-trip back through
-    /// `get` without a trailing newline and yank the cursor back to the
-    /// previous line. Commit happens on focus loss; external changes (Apply
-    /// Optimal) sync into the draft only when the user isn't editing.
+    /// Multi-line editor for stop sequences, backed by `stopsDraft`; commits on focus loss, and external changes sync into
+    /// the draft only when the user is not editing.
     private var stopSequencesEditor: some View {
         ZStack(alignment: .topLeading) {
             TextEditor(text: $stopsDraft)
@@ -617,25 +567,19 @@ struct OllamaSettingsView: View {
             stopsDraft = (config.stop ?? []).joined(separator: "\n")
         }
         .onChange(of: stopsFocused) { _, focused in
-            // Commit when the editor loses focus. Save buttons elsewhere
-            // shift focus first, so the parent's persistence path always
-            // reads a freshly-committed config.stop.
+            // Commits when the editor loses focus; Save buttons shift focus first, so persistence reads a committed `config.stop`.
             if !focused { commitStopsDraft() }
         }
         .onChange(of: config.stop) { _, _ in
-            // External update (e.g. Apply Optimal replacing the entire config)
-            // — refresh display only when the user isn't actively editing, to
-            // avoid clobbering in-progress input.
+            // External update (e.g. a preset replacing the config): refresh only when not editing, to avoid clobbering input.
             if !stopsFocused {
                 stopsDraft = (config.stop ?? []).joined(separator: "\n")
             }
         }
     }
 
-    /// Parses the draft string into a clean `[String]?` and writes to `config.stop`.
-    /// Whitespace-only lines and empty lines are filtered. An empty result
-    /// becomes `nil` (Ollama interprets nil/missing as "use the model's
-    /// built-in stops", which is the desired default).
+    /// Parses the draft into a clean `[String]?` and writes it to `config.stop`; blank lines are dropped.
+    /// An empty result becomes nil, which Ollama reads as the model's built-in stops.
     private func commitStopsDraft() {
         let lines = stopsDraft
             .split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
@@ -650,10 +594,8 @@ struct OllamaSettingsView: View {
 
 struct AnthropicSettingsView: View {
     @Binding var config: AnthropicAdvancedConfig
-    /// Selected model id. Drives which controls are shown — the Anthropic request contract
-    /// differs by model generation, and a control the model rejects is worse than no control:
-    /// it 400s the request instead of being ignored. Nil is treated as newest (see
-    /// `AnthropicModelGeneration`).
+    /// Selected model id; drives which controls are shown, since the request contract differs by model generation.
+    /// Nil is treated as newest (see `AnthropicModelGeneration`).
     var modelName: String?
     @Environment(\.appTheme) private var theme
 
@@ -686,11 +628,8 @@ struct AnthropicSettingsView: View {
 
             Divider()
 
-            // --- SAMPLING ---
-            // ⚠️ Hidden entirely, not disabled, on models that removed these parameters. A
-            // disabled-but-visible control still implies the value is stored and honoured
-            // somewhere; on Opus 4.7+ / Sonnet 5 / Fable 5 it is neither — sending any of the
-            // three returns 400. The note below says so rather than leaving dead sliders.
+            // Sampling controls are hidden, not disabled, on models that removed these parameters (sending any returns 400);
+            // the note below says so.
             if generation.acceptsSamplingParams {
                 // Temperature
                 HStack(alignment: .center) {
@@ -800,12 +739,8 @@ struct AnthropicSettingsView: View {
                 .foregroundColor(theme.primaryText)
                 .padding(.top, 8)
 
-            // ⚠️ HIDDEN, not disabled, on models where thinking is always on (Fable 5 / Mythos 5 /
-            // Opus 5.5). Sonnet 5.5 keeps the toggle: its "off" is sent as `between_tools`.
-            // A greyed-out switch still implies the value is stored and honoured somewhere, and
-            // here it is neither: the request ignores it, and the "off" shape the provider used to
-            // send — `{"type": "disabled"}` — is rejected with a 400 by those models at every
-            // effort level. Same rule as the ImageGen Quality gate (register A56).
+            // Hidden, not disabled, on models where thinking is always on; Sonnet 5.5 keeps the toggle (its off is `between_tools`).
+            // A greyed-out switch would imply a stored, honoured value.
             if generation.canTurnThinkingOff {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -839,11 +774,8 @@ struct AnthropicSettingsView: View {
             if config.extendedThinking || !generation.canTurnThinkingOff {
                 Divider()
 
-                // ⚠️ Two different controls for the same concept, because the API contract
-                // differs by model. `budget_tokens` (a token count) was replaced by
-                // `output_config.effort` (a ladder) on Opus 4.7+ / Sonnet 5 / Fable 5, where the
-                // old shape now returns 400. Showing the stepper there would steer a parameter
-                // the model rejects.
+                // Two controls for one concept because the API contract differs by model: `budget_tokens` (a token count) on older
+                // models, `output_config.effort` (a ladder) on newer ones, which reject the old shape.
                 if generation.acceptsEffort {
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
@@ -911,9 +843,7 @@ struct OpenAISettingsView: View {
     var showsOpenRouterRouting: Bool = false
     @Environment(\.appTheme) private var theme
 
-    /// ⚠️ Register A55. **Hide, don't disable** (the rule A56 established): a greyed-out control
-    /// still implies the value is stored and honoured. Reasoning Effort was shown for every model
-    /// and sent to every endpoint, so setting it on a normal model failed the whole request.
+    /// Hides rather than disables Reasoning Effort for models that do not accept it, since setting it fails the request.
     private var family: OpenAIModelFamily { OpenAIModelFamily.classify(modelName: modelName) }
 
     var body: some View {
@@ -941,15 +871,8 @@ struct OpenAISettingsView: View {
 
             Divider()
 
-            // ⚠️ register B33 — the panel STATED the hide-don't-disable rule above and then applied
-            // it to one control out of three. `family` was consulted exactly once, for Reasoning
-            // Effort, while Temperature and Top P rendered unconditionally at full opacity with
-            // captions that said nothing about reasoning models. On an o1/o3/o4/GPT-5 profile the
-            // user could drag Temperature to 0.2, watch it save, reopen the panel to see 0.20 — and
-            // every request omitted it and ran at the model's fixed sampling
-            // (`OpenAILLMProvider.applyGenerationParams`). That is the decorative knob A56 exists to
-            // prevent, and it was strictly worse disclosure than the Anthropic panel it is modelled
-            // on, which hides the block and explains why.
+            // Temperature and Top P are hidden for reasoning-model families, which run at fixed sampling
+            // (`OpenAILLMProvider.applyGenerationParams` omits them).
             if family.acceptsSamplingParameters {
                 // Temperature
                 HStack(alignment: .center) {
@@ -999,9 +922,7 @@ struct OpenAISettingsView: View {
                     }
                 }
             } else {
-                // ⚠️ Same shape as the Anthropic panel's note: say WHICH controls are gone, WHY,
-                // and what to steer with instead. A hidden control with no explanation reads as a
-                // missing feature.
+                // Says which controls are gone, why, and what to steer with instead, like the Anthropic panel's note.
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle")
                         .foregroundColor(theme.secondaryText)

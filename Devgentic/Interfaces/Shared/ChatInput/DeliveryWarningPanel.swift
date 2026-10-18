@@ -4,14 +4,13 @@
 //  DeliveryWarningPanel.swift
 //  Devgentic
 //
-//  Inline, non-blocking warning above the attachment chips: which attachments the model will
-//  receive only part of (or none of), why, and what to do instead. Shared by the main composer
-//  and QuickAccess. Deliberately not an alert — it would interrupt every attach; this stays in
-//  view until the user acts (removes the file, switches profile) and then disappears.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
 
+/// Inline, non-blocking warning above the attachment chips: which attachments the model receives only part of or
+/// none of, and why. Shared by the main composer and QuickAccess; it stays until the user acts.
 struct DeliveryWarningPanel: View {
     let warnings: [DeliveryWarning]
 

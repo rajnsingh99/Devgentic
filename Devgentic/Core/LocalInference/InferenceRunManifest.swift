@@ -4,12 +4,7 @@
 //  InferenceRunManifest.swift
 //  Devgentic
 //
-//  What a run is EXPECTED to need from the machine, declared once at the send path's chokepoint.
-//
-//  ⚠️ EXPECTED, not observed. A run is described before it starts, so a workflow's models come from
-//  its layout and a chat's from its profile. What the run then actually touches is reported through
-//  `LocalInferenceScope.reportUse`, and the coordinator logs every use the manifest did not declare —
-//  that is how an inaccurate derivation is caught in shadow mode, before anything enforces on it.
+//  Created by Raj Singh.
 //
 
 import Foundation
@@ -38,10 +33,8 @@ enum InferenceEngine: Hashable, Sendable, CustomStringConvertible {
         }
     }
 
-    /// The engine a provider config runs on.
-    ///
-    /// ⚠️ `.openAICompatible` is CLOUD even when it points at localhost (LM Studio): the app does not
-    /// manage that server's memory, which is the same line `ApiProvider.isLocal` draws.
+    /// The engine a provider config runs on. `.openAICompatible` is cloud even when it points at localhost (LM Studio):
+    /// the app does not manage that server's memory, matching `ApiProvider.isLocal`.
     static func of(_ config: ProviderConfig) -> InferenceEngine {
         switch config.apiProvider {
         case .mlx:
@@ -66,7 +59,7 @@ enum ModelRole: String, Sendable {
     case primary
     case workflowNode
     case classifier
-    /// The Core Intelligence model, used by a background feature (Morning Brief, User Personal).
+    /// The Core Intelligence model, used by a background feature (Briefing, User Personal).
     case intelligenceCore
 }
 
@@ -124,8 +117,8 @@ enum RunOrigin: Equatable, Sendable, CustomStringConvertible {
         }
     }
 
-    /// ⚠️ Regenerate and resume win over the source: both are a button the user just pressed, so the
-    /// user is waiting regardless of which surface first asked the question.
+    /// Regenerate and resume win over the source: both are a button the user just pressed, so the user is waiting
+    /// regardless of which surface first asked.
     static func derive(source: MessageSource,
                        profileType: ProfileType,
                        isRegeneration: Bool,
@@ -148,14 +141,14 @@ enum RunOrigin: Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-/// Queue order, highest first. See plan §3.4.
+/// Queue order, highest first.
 enum PriorityClass: Int, Comparable, Sendable, CustomStringConvertible {
     /// A run taking the lock back after a HITL answer (P4). Never produced in shadow mode.
     case resumedAfterHITL = 0
     case attended = 1
     case remote = 2
     case unattended = 3
-    /// Morning Brief, User Personal (P3, decision D7).
+    /// Briefing and User Personal.
     case backgroundIC = 4
 
     static func < (lhs: PriorityClass, rhs: PriorityClass) -> Bool { lhs.rawValue < rhs.rawValue }
@@ -170,9 +163,8 @@ enum PriorityClass: Int, Comparable, Sendable, CustomStringConvertible {
         }
     }
 
-    /// ⚠️ ChatOps is checked before attendance: its runs are bound UNATTENDED (nobody at the Mac), yet
-    /// a person is waiting on the other end — that is what `.remote` is for. Every other surface
-    /// falls to `.unattended` when the caller bound it so.
+    /// ChatOps is checked before attendance: its runs are bound unattended, yet a person is waiting on the other end,
+    /// which is what `.remote` is for. Other surfaces become `.unattended` when the caller bound them so.
     static func of(origin: RunOrigin, attended: Bool) -> PriorityClass {
         switch origin {
         case .chatOps: return .remote
@@ -221,8 +213,8 @@ struct InferenceRunManifest: Sendable {
 
     var localModels: [ModelRequirement] { models.filter { $0.engine.isLocal } }
 
-    /// ⚠️ An unresolvable node counts as local on purpose: the worst case of that guess is a run that
-    /// waits when it did not need to; the opposite guess lets two local runs collide.
+    /// An unresolvable node counts as local on purpose: the worst case is a run that waits unnecessarily, while the
+    /// opposite guess lets two local runs collide.
     var needsLocalLock: Bool { !localModels.isEmpty || unresolvedNodes > 0 }
 
     /// One line for `[LOCAL-COORD]`.
@@ -269,13 +261,8 @@ enum ManifestModelResolver {
         return result
     }
 
-    /// Which nested workflows the walk has seen.
-    ///
-    /// ⚠️ READINESS CR-33 (2026-10-12). One global `visited` set answered two different questions, so
-    /// a sub-workflow used by TWO nodes was "already visited" the second time and counted as an
-    /// UNRESOLVED node — and any unresolved node makes the run take the local lock conservatively, so
-    /// an all-cloud workflow queued behind local runs for up to 90 minutes. A workflow ON THE CURRENT
-    /// PATH is a cycle (unresolvable); one already WALKED elsewhere has had its models added already.
+    /// Which nested workflows the walk has seen. A workflow on the current path is a cycle (unresolvable); one already
+    /// walked elsewhere has had its models added, so reuse is not an unresolved node.
     struct WalkState {
         var onPath: Set<UUID> = []
         var walked: Set<UUID> = []
@@ -296,9 +283,8 @@ enum ManifestModelResolver {
         case .agent(let config), .code(let config): add(config.llmConfig, role: role, into: &result, estimate: estimate)
         case .imageGen(let config): add(config.llmConfig, role: role, into: &result, estimate: estimate)
         case .workflow:
-            // ⚠️ A workflow that (directly or through a nested one) contains itself would loop
-            // forever here; the executor refuses it at run time, this walk just stops.
-            // Reused, not a cycle: its models are already in the result (CR-33).
+            // A workflow that contains itself would loop forever here; the executor refuses it at run time and this walk just
+            // stops. A reused workflow is not a cycle: its models are already in the result.
             if visited.walked.contains(profile.id) { return }
             guard depth < maxWorkflowDepth, !visited.onPath.contains(profile.id),
                   let graph = layout(profile.id) else {

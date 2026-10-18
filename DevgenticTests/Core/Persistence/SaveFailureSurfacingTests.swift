@@ -4,16 +4,7 @@
 //  SaveFailureSurfacingTests.swift
 //  DevgenticTests
 //
-//  Batch 7 of the RAG readiness register:
-//    RAG-27 (CR-69) — a failed save on the SHARED mainContext cannot be rolled back
-//                     (`SharedContextCommitTests`), so every store saves through
-//                     `SharedContextSave`, which latches the failure and tells the user app-wide
-//                     until a save of that context succeeds again.
-//    RAG-39         — `try?` no longer hides thrown lookups; titles are SAVED by the store instead
-//                     of left pending on the shared context; per-send bookkeeping skips no-op saves.
-//
-//  Failures are real: `PoisonParentSD` (see `SharedContextCommitTests`) fails validation on every
-//  save of the context it sits in — standing in for another subsystem's bad pending change.
+//  Created by Raj Singh.
 //
 
 import XCTest

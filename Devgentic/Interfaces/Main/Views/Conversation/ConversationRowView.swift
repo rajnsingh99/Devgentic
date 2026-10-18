@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright © 2025-2026 Raj Singh
-// Views/Sidebar/ConversationRowView.swift
+//
+//  ConversationRowView.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
+
 import SwiftUI
 
 struct ConversationRowView: View {
@@ -30,22 +36,13 @@ struct ConversationRowView: View {
     /// sidebar so an unfocused (or background/remote/scheduled) run that's waiting is discoverable.
     var needsInput: Bool = false
 
-    /// [P8] Live streaming flag, computed at the call site from ActiveStreamManager —
-    /// the struct's own `conversation.isStreaming` is structurally always false (the
-    /// persisted column doesn't exist), so the pulse indicator below had never
-    /// rendered once. Same live-flag pattern as `needsInput` [F2].
+    /// Live streaming flag, computed at the call site from `ActiveStreamManager`.
+    /// The struct's own `conversation.isStreaming` is always false because no persisted column backs it.
     var isStreamingLive: Bool = false
 
-    /// [B] This conversation has a background task that will add a turn to it when it ends.
-    ///
-    /// ⚠️ THE POINT IS THE CONVERSATIONS YOU ARE NOT LOOKING AT. The in-transcript footer and the
-    /// tasks pill are both scoped to the displayed conversation, so switching away takes the fact
-    /// with it — and switching away is the common case, because starting something long and going
-    /// elsewhere is what background tasks are FOR. Without this the sidebar is the only surface
-    /// that could have told you, and it said nothing.
-    ///
-    /// Computed at the call site from `PendingBackgroundReports`, the same predicate the footer
-    /// uses — same live-flag pattern as `needsInput` [F2] and `isStreamingLive` [P8].
+    /// This conversation has a background task that will add a turn to it when it ends.
+    /// Computed at the call site from `PendingBackgroundReports`, the same predicate the transcript footer uses.
+    /// Surfaces the task in the sidebar, since the footer and tasks pill cover only the displayed conversation.
     var hasPendingBackgroundReport: Bool = false
 
     var body: some View {
@@ -97,9 +94,6 @@ struct ConversationRowView: View {
     @ViewBuilder
     private var standardContentView: some View {
         HStack(alignment: .center, spacing: 0) {
-            // Title. (The backend-origin dot and the amber HITL rail were REMOVED by
-            // user decision 2026-07-19 — no profile/backend colors in the sidebar;
-            // run state lives in the single pulse indicator on the right.)
             Text(conversation.displayTitle)
                 .font(theme.fontFootnote.weight(.medium))
                 .foregroundColor(theme.primaryText)
@@ -107,11 +101,8 @@ struct ConversationRowView: View {
 
             Spacer()
 
-            // ONE state indicator, two colors — or hover actions / timestamp
-            // (mutually exclusive swap to prevent overlaps).
-            // Priority: needs-input BEFORE streaming — a run parked on HITL still
-            // holds a live stream task, so both flags can be true at once, and
-            // "waiting on you" is the actionable truth ("generating" would lie).
+            // One state indicator, or hover actions / timestamp (mutually exclusive, to prevent overlaps).
+            // Needs-input is checked before streaming: a run parked on a HITL still holds a live stream task.
             Group {
                 if needsInput {
                     StreamingPulseIndicator(color: theme.warningColor)
@@ -124,15 +115,8 @@ struct ConversationRowView: View {
                 } else if isHovering && !isSelectionMode {
                     hoverActionsView
                 } else if hasPendingBackgroundReport {
-                    // ⚠️ Deliberately NOT a pulse. The two pulses above mean "this is happening
-                    // right now, in this conversation"; this means "something will speak here
-                    // later, on its own" — a different promise, and a pulse would overstate it
-                    // into looking like a live run.
-                    //
-                    // ⚠️ Placed AFTER the hover branch, so it takes the TIMESTAMP's slot rather
-                    // than the delete button's. Ambient information belongs where ambient
-                    // information already is, and a conversation must stay deletable while a task
-                    // it started is still running.
+                    // Deliberately not a pulse: this means something will speak here later, not that a run is live.
+                    // Placed after the hover branch so it takes the timestamp's slot and the delete button stays available.
                     Image(systemName: "clock.arrow.circlepath")
                         .font(.system(.caption2))
                         .foregroundColor(theme.accentColor)

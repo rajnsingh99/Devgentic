@@ -4,15 +4,7 @@
 //  ProfileLoadDiagnosticsTests.swift
 //  DevgenticTests
 //
-//  Created on 07/08/26.
-//
-//  Regression tests for the log-visibility cluster (register A45–A50, A68) and for the silent
-//  model rewrite found by the sweep that accompanied it.
-//
-//  ⚠️ Most of this cluster is log CONTENT, which a unit test cannot assert on directly. What IS
-//  testable is the observable state those logs were added to explain — whether a failure is
-//  distinguishable from a success, and whether a value survives. Those are the assertions here;
-//  the log lines themselves are reviewed at the call sites.
+//  Created by Raj Singh.
 //
 
 import XCTest

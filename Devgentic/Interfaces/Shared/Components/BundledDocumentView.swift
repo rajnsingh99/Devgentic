@@ -4,15 +4,7 @@
 //  BundledDocumentView.swift
 //  Devgentic
 //
-//  Shows a document that ships inside the app bundle: the privacy policy, the licence and the
-//  third-party notices. The files are copied from the repo root by the "Copy licence notices into
-//  the bundle" build phase, so the copy the user reads is the same file that is published — there
-//  is no second version under Devgentic/ to drift.
-//
-//  ⚠️ Rendered LAZILY and WITHOUT syntax highlighting. THIRD_PARTY_NOTICES.md is ~250 KB with 46
-//  fenced licence texts; the chat's `CodeBlockView` runs Highlightr and builds copy/snippet chrome
-//  per block, and `WorkflowMarkdownView` lays every block out at once. Here each block is built
-//  only as it scrolls into view, and code blocks are plain monospaced text.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -20,6 +12,8 @@ import os
 
 private let logger = DGLogger(category: "BundledDocument")
 
+/// A document that ships inside the app bundle: the privacy policy, the licence or the third-party notices. The
+/// files are copied from the repo root by a build phase, so the copy the user reads is the published file.
 enum BundledDocument: String, CaseIterable, Identifiable, Codable, Hashable {
     case privacyPolicy = "PRIVACY"
     case license = "LICENSE"

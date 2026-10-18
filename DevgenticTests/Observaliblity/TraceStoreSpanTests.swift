@@ -4,13 +4,7 @@
 //  TraceStoreSpanTests.swift
 //  DevgenticTests
 //
-//  Covers span insertion semantics, in particular `ensureSpan` — the idempotent
-//  insert-or-refresh primitive behind `TraceRecorder.ensureRootSpan`. The chat
-//  pipeline's `beginTrace` auto-creates the root span as a generic "root"; the
-//  workflow executor must be able to (a) guarantee the same row exists in
-//  headless flows and (b) rename it to `workflow:<id8>` in the chat flow —
-//  WITHOUT colliding on `spans.spanID` or clobbering the row's lifecycle
-//  fields (startedAt / endedAt / status).
+//  Created by Raj Singh.
 //
 
 import XCTest

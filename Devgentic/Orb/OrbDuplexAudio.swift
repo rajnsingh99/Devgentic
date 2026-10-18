@@ -4,75 +4,39 @@
 //  OrbDuplexAudio.swift
 //  Devgentic
 //
-//  [Phase 4b] Owns the duplex audio engine for the lifetime of a PANEL session, rather than a
-//  single stream session.
-//
-//  WHY THE LIFETIME HAD TO MOVE. Measured on device 2026-09-05: VoiceProcessingIO captures
-//  perfectly when its engine is the first audio client (`OrbMicProbe` — 20 buffers in 2 s, a
-//  2-channel tap), and captures NOTHING inside a live Orb session, where the tap comes up
-//  3-channel — the raw mic-array format the input node falls back to when the VP aggregate never
-//  finishes configuring. The difference is what happens immediately before: the engine used to be
-//  built per stream session, so every turn constructed voice processing seconds after
-//  `AVSpeechSynthesizer` released its own audio unit. A 1 s `audioSettleDelay` and explicit
-//  `releaseAudio()` on both synthesizers were not enough.
-//
-//  So the engine is now built ONCE, at panel open, BEFORE Orb speaks — the condition it is
-//  proven healthy under — and survives every turn until the panel closes.
-//
-//  ⚠️⚠️ THIS WIDENS A KNOWN HAZARD. A live `AVAudioEngine` at process death wedges `coreaudiod`
-//  into `_StartIO error 35`: an app-wide dead microphone that survives relaunch and needs an admin
-//  `killall coreaudiod` to clear. It has happened twice (2026-07-18, 2026-09-04). Previously an
-//  engine existed only for the seconds of an active turn; now it spans the session. Every graceful
-//  release path is therefore wired explicitly, and `releaseWhenIdle()` gives the exposure back on
-//  long idles. Crash / force-quit / SIGKILL remain structurally uncoverable — `OrbAudioRepair`
-//  is the remedy and stays reachable from Settings without the orb.
-//
-//  ⚠️ THE ADMISSION GATES ARE NOT OPTIONAL. Each one exists because of something that broke:
-//   • `activeVoiceOwner == nil` — the duplex processor used to be built AFTER
-//     `VoiceSessionLedger.begin(owner:)`, which is the app's only capture-serialisation
-//     mechanism. Warming at panel open happens BEFORE the ledger, so without this gate opening the
-//     orb during composer dictation would put two live input engines on one device — one of them
-//     voice-processing, which is plausibly the very thing that kills VP.
-//   • `activationMode.listensContinuously` — hold-to-talk exists to keep the microphone CLOSED at
-//     rest. A panel-scoped engine holds the input device, and macOS's orange indicator, for as
-//     long as the orb is open. Warming in that mode would break the promise the mode is named for.
-//   • `recognizer == .whisperKit` — the Apple Speech path builds its OWN engine through the same
-//     builder. `AVAudioNode` allows one tap per bus, so sharing is not a small change; not warming
-//     is the correct first answer.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import AVFoundation
 
+// Why: a live AVAudioEngine at process death wedges coreaudiod (_StartIO error 35),
+// leaving the microphone dead app-wide until `killall coreaudiod`.
+/// Owns the duplex audio engine for the lifetime of a panel session rather than a single stream session.
+/// Built once at panel open, before Orb speaks, and kept across turns; `releaseWhenIdle()` returns it on long idles.
 @MainActor
 final class OrbDuplexAudio {
 
     static let shared = OrbDuplexAudio()
 
     private let logger = DGLogger(category: "OrbDuplexAudio")
-    /// ⚠️ Set by the session controller. This type is panel-session-scoped but its lines carried no
-    /// `[s:…]`, so across several orb open/close cycles in one device test there was no way to
-    /// attribute an engine line to the session that produced it — which is exactly the question
-    /// asked when one of several attempts misbehaves.
+    /// Set by the session controller; tags this type's log lines with the session that produced them (`[s:…]`).
     var correlationTag: String = "" {
-        // ⚠️ Propagated on every change, not only at warm time. The engine can be warmed BETWEEN
-        // panel sessions (the Settings toggle warms it), so a processor tagged only when built
-        // carried the PREVIOUS session's `[s:…]` through the whole next session (device, 2026-09-19).
+        // Propagated on every change, not only at warm time: the engine can be warmed between panel sessions, so a
+        // processor tagged only when built would carry the previous session's tag.
         didSet { processor?.correlationTag = correlationTag }
     }
     private var processor: OrbAudioProcessor?
     private var warmingTask: Task<Bool, Never>?
-    /// ⚠️ Set by `release`, cleared by `warm`. `Task.cancel()` is cooperative: a build already past
-    /// its last suspension point runs to completion regardless, so the latch — not cancellation —
-    /// is what stops an engine being installed onto a torn-down panel.
+    // Why: Task.cancel() is cooperative: a build past its last suspension point completes regardless.
+    /// Latch set by `release` and cleared by `warm`, preventing an engine from being installed on a torn-down panel.
     private var released = false
 
     private var configurationObserver: NSObjectProtocol?
 
     private init() {
-        // ⚠️ Nothing in the app observed this. The notification is the ONLY signal that macOS has
-        // stopped the engine out from under us; without it a device change is silent and every
-        // later turn is deaf with no line in the log saying why.
+        // The configuration-change notification is the only signal that macOS has stopped the engine;
+        // without it a device change leaves every later turn deaf with nothing in the log.
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: nil,
@@ -91,19 +55,13 @@ final class OrbDuplexAudio {
         Task { await rebuild(reason: "audio device changed") }
     }
 
-    /// True when an engine is up AND RUNNING.
-    ///
-    /// ⚠️ `processor != nil` is not enough. macOS STOPS an `AVAudioEngine` and posts
-    /// `.AVAudioEngineConfigurationChange` whenever the input or output device changes — connect
-    /// AirPods, unplug an interface — and the object survives. Reporting warmth on identity alone
-    /// meant `warm()` short-circuited, `borrow()` handed a DEAD engine to WhisperKit, and the
-    /// settle was skipped: every turn afterwards opened a microphone that delivered nothing, which
-    /// is indistinguishable from the dead-mic bug this subsystem spent six device rounds chasing.
+    /// True when an engine is up and running.
+    /// `processor != nil` is not enough: macOS stops the engine on any device change while the object survives.
+    /// Reporting warmth on identity alone would hand a dead engine to WhisperKit.
     var isWarm: Bool { processor?.engine?.isRunning == true }
 
-    /// ⚠️ The only honest basis for enabling barge-in. Voice processing can be requested, report
-    /// success, and still be inert; this reflects what the engine ACTUALLY has after any
-    /// mid-session downgrade.
+    /// The only honest basis for enabling barge-in.
+    /// Voice processing can be requested, report success and still be inert; this reflects what the engine actually has.
     var isEchoCancelling: Bool { isWarm && processor?.voiceProcessingEnabled == true }
 
     // MARK: - Lifecycle
@@ -140,8 +98,8 @@ final class OrbDuplexAudio {
         )
     }
 
-    /// Pure so the policy can be pinned by tests without an audio device or a live panel.
-    /// ⚠️ Each clause is a bug that already happened; see the admission-gate note in the header.
+    /// Pure so the policy can be tested without an audio device or a live panel.
+    /// Each clause guards a condition that breaks audio capture.
     nonisolated static func refusal(duplexEnabled: Bool,
                         recognizer: OrbRecognizer,
                         activationMode: OrbActivationMode,
@@ -169,10 +127,8 @@ final class OrbDuplexAudio {
         // `AudioProcessing.startRecordingLive`, and stalls the main thread when it fires.
         await OrbAudioEngineBuilder.awaitDeviceRelease(logger: logger)
 
-        // ⚠️ The ADMISSION GATE is re-checked here too, not just `released`. Another surface can
-        // claim the microphone during the permission prompt or the 0.4 s settle — the ledger only
-        // checks `active == nil` — and a VoiceProcessingIO engine started on top of WhisperKit's
-        // own is the two-engines-on-one-device condition that breaks capture outright.
+        // The admission gate is re-checked here too, not just `released`: another surface can claim the microphone during
+        // the permission prompt or the settle, and two engines on one device break capture outright.
         if let refusal = refusalReason() {
             logger.notice("[ORB_DUPLEX_AUDIO]\(self.correlationTag) Warm (\(reason)) abandoned after waiting — \(refusal). CONSEQUENCE: no engine was started; this session runs without echo cancellation rather than putting a second input engine on the device.")
             return false
@@ -224,11 +180,8 @@ final class OrbDuplexAudio {
     /// Synchronous and idempotent, because every caller is a teardown path that must not be
     /// allowed to return before the device is released.
     func release(reason: String) {
-        // ⚠️ CANCEL FIRST, AND UNCONDITIONALLY. `processor` is still nil while `warm()` is in
-        // flight, so guarding on it made every teardown path a silent no-op during exactly the
-        // window that matters — `build()` would then finish and install an engine on a panel that
-        // no longer exists, reachable only by the app-termination hook. That is the
-        // coreaudiod-wedge shape, and it also defeated repairAudio's release-before-killall order.
+        // Cancel first and unconditionally: `processor` is still nil while `warm()` is in flight, so guarding on it
+        // would make teardown a no-op and let `build()` install an engine on a panel that is already gone.
         warmingTask?.cancel()
         warmingTask = nil
         released = true
@@ -248,19 +201,11 @@ final class OrbDuplexAudio {
         await warm(reason: reason)
     }
 
-    /// ⚠️ The only lever that shrinks the crash-wedge window back toward the old stream-scoped
-    /// exposure. Called when the session parks somewhere it will not listen from for a while.
+    /// Releases the engine when the session parks somewhere it will not listen from for a while.
+    /// The only lever that shrinks the crash-wedge window back toward stream-scoped exposure.
     func releaseWhenIdle(reason: String) {
-        // ⚠️⚠️ NO `guard processor != nil`. This method HAD one, which is exactly the mistake
-        // `release(reason:)` documents fixing eight lines above: `processor` is still nil while
-        // `warm()` is in flight, so guarding on it made this a silent no-op during precisely the
-        // window that matters — the in-flight `build()` would then finish and install a live engine
-        // into the idle park this call exists to prevent, reachable only by the app-termination
-        // hook. That is the coreaudiod-wedge shape.
-        //
-        // It is reachable: a park can arrive inside the 0.4 s device settle of a warm started
-        // moments earlier. `release` is idempotent and cancels the warm unconditionally, so
-        // delegating without a pre-check is both simpler and the only correct form.
+        // No `guard processor != nil`: it is still nil while `warm()` is in flight, so a guard would make this a no-op
+        // and the in-flight `build()` would install a live engine. `release` is idempotent and cancels the warm itself.
         let wasUp = processor != nil
         logger.info("[ORB_DUPLEX_AUDIO]\(self.correlationTag) Releasing while idle (\(reason)) — engine was \(wasUp ? "up" : "cold or still warming"). CONSEQUENCE: the next turn pays one engine rebuild; in exchange the microphone and its indicator are not held, any in-flight warm is cancelled rather than completing into an idle session, and a crash here cannot wedge coreaudiod.")
         release(reason: "idle — \(reason)")
@@ -272,8 +217,8 @@ final class OrbDuplexAudio {
     /// subtract. Nil unless the engine is up AND actually cancelling — routing speech through a
     /// non-VP engine buys nothing and costs a conversion.
     var playbackTarget: (player: AVAudioPlayerNode, format: AVAudioFormat)? {
-        // ⚠️ `isEchoCancelling` (not the raw flag) so a stopped engine is never handed a sentence:
-        // `player.play()` on a stopped engine is a crash, not a silent no-op.
+        // `isEchoCancelling` (not the raw flag) so a stopped engine is never handed a sentence: `player.play()` on a
+        // stopped engine crashes.
         guard isEchoCancelling, let processor, let player = processor.playerNode else { return nil }
         return (player, player.outputFormat(forBus: 0))
     }

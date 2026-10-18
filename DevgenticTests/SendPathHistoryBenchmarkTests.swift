@@ -2,16 +2,9 @@
 // Copyright © 2025-2026 Raj Singh
 //
 //  SendPathHistoryBenchmarkTests.swift
-//  devgenticTests
+//  DevgenticTests
 //
-//  RAG-6 / RAG-7 measurement harness — NOT a regression test. Skipped unless RAG_BENCH=1:
-//    TEST_RUNNER_RAG_BENCH=1 xcodebuild test-without-building ... \
-//      -only-testing:devgenticTests/SendPathHistoryBenchmarkTests
-//
-//  Seeds an ON-DISK SwiftData store with a 300-message conversation, reopens it COLD (a new
-//  container, as after an app launch), and times `fetchMessages(limit: 300)` — the call the request
-//  path (`BackendHistoryResolver.resolve`) and the context gauge both make, on the main actor —
-//  then splits the cost by blob.
+//  Created by Raj Singh.
 //
 
 import XCTest

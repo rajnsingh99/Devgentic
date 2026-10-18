@@ -4,9 +4,7 @@
 //  OrbConversationalTests.swift
 //  DevgenticTests
 //
-//  Phase 2: the follow-up window, earcons, voice commands, and the spoken-style hint.
-//  All pure — the parts that decide whether a spoken phrase reaches the model or is swallowed
-//  by Orb are exactly the parts that must not be verified by talking at a laptop and hoping.
+//  Created by Raj Singh.
 //
 
 import XCTest

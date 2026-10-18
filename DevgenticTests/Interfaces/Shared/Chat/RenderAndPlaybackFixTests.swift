@@ -4,12 +4,7 @@
 //  RenderAndPlaybackFixTests.swift
 //  DevgenticTests
 //
-//  The 2026-09-12 batch from the functional+performance audit register:
-//  mc-1/mm-1 (markdown cache keyed on its source text), mm-2 (indexing is pure),
-//  RS-3 (pagination epoch guard), mc-2 (path-list separator), mc-4 (link affordance).
-//
-//  Each test is written to FAIL if its fix is reverted — see each doc comment for the
-//  mutation that must kill it.
+//  Created by Raj Singh.
 //
 
 import XCTest

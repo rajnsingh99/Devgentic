@@ -4,21 +4,15 @@
 //  SlackSocketClient.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 24/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 import os
 
 /// Actor managing the Slack Socket Mode WebSocket lifecycle.
-///
-/// Socket Mode flow:
-/// 1. Call `apps.connections.open` with app-level token to get a wss URL
-/// 2. Connect to the wss URL
-/// 3. Receive `hello` message confirming connection
-/// 4. Receive `events_api`, `interactive`, `slash_commands` envelopes
-/// 5. **Acknowledge each envelope** by sending `{ "envelope_id": "<id>" }` within 3 seconds
-/// 6. On `disconnect` type, reconnect (get new wss URL)
+/// Opens a wss URL via `apps.connections.open`, receives `events_api`, `interactive` and `slash_commands` envelopes,
+/// acknowledges each within 3 seconds with `{ "envelope_id": "<id>" }`, and reconnects on `disconnect`.
 actor SlackSocketClient {
 
     private let appToken: String
@@ -32,24 +26,14 @@ actor SlackSocketClient {
     private var backoffSeconds: Double = 1.0
     private let maxBackoff: Double = 60.0
 
+    // Why: a rejected token must not share the generic reconnect arm: it would retry on backoff forever, surfacing nothing.
     /// Why the connect loop gave up for good, or nil when it stopped because it was asked to.
-    ///
-    /// ⚠️⚠️ THIS LOOP HAD EXACTLY ONE CATCH-ALL ARM, WHICH MADE A REJECTED TOKEN INDISTINGUISHABLE
-    /// FROM A DROPPED WI-FI. Both reconnected on the same growing backoff, forever, and both
-    /// reported themselves through the same `.disconnected(error)` event that `SlackChatOpsBridge`
-    /// answers with a `logger.error` and nothing else — no state change, no user-visible signal.
-    /// Invariant 26 records this exact failure being fixed for the Discord Gateway ("the old
-    /// catch-all reconnect retried a rejected token every backoff interval forever while the user
-    /// was told nothing"); Slack never received the same treatment. Set BEFORE `continuation.finish()`.
+    /// Set before `continuation.finish()`, so the bridge can tell a rejected token from a dropped connection.
     private(set) var terminalFailure: String?
 
+    // Why: not a catch-all on "auth": `ratelimited` and transient server errors also arrive as `apiError` and must reconnect.
     /// Slack error codes that mean the app token will never work again without the user acting.
-    ///
-    /// ⚠️ `nonisolated` and `static` so the classification is assertable without a live socket,
-    /// while the loop below calls this same function — a pinned mapping cannot drift from production.
-    /// ⚠️ Deliberately NOT a catch-all on "anything containing auth": `ratelimited` and transient
-    /// server errors also arrive as `apiError`, and treating one of those as terminal would take
-    /// down a connection that was going to recover by itself.
+    /// `nonisolated static` so the mapping is testable without a live socket while the loop calls this same function.
     nonisolated static func terminalReason(slackErrorCode code: String) -> String? {
         switch code {
         case "invalid_auth", "not_authed", "token_revoked", "token_expired":
@@ -95,12 +79,8 @@ actor SlackSocketClient {
                 await self.connectAndListen(continuation: continuation)
             }
 
-            // ⚠️⚠️ [SL-7] `stop()` COULD NOT STOP THIS LOOP. It tore down the socket, which made the
-            // in-flight `receive()` throw — and the loop caught that, slept its backoff and RECONNECTED.
-            // Correctness depended entirely on the CONSUMER abandoning its iterator so
-            // `onTermination` fired, which every current caller happens to do and none is required to.
-            // The handle is stored through the same actor hop `TelegramListener.storePollingTask`
-            // already uses, because this closure is @Sendable and not actor-isolated.
+            // `stop()` must be able to stop this loop: teardown makes the in-flight `receive()` throw, which would reconnect.
+            // Stored through an actor hop (as `TelegramListener.storePollingTask` does) since this closure is @Sendable.
             Task { await self.storeConnectTask(task) }
 
             continuation.onTermination = { _ in
@@ -109,11 +89,9 @@ actor SlackSocketClient {
         }
     }
 
+    // Why: set `isStopping` before teardown so the catch arm can tell a requested stop from a failure;
+    // cancelling the task alone is not enough, as the in-flight `receive()` throws first.
     /// Stops the Socket Mode connection.
-    ///
-    /// ⚠️ [SL-7] `isStopping` is set BEFORE anything is torn down, so the loop's catch arm can tell a
-    /// teardown it asked for from one that happened to it. Cancelling the task alone is not enough:
-    /// the in-flight `receive()` throws first, and the catch arm runs before cancellation is observed.
     func stop() {
         isStopping = true
         connectTask?.cancel()
@@ -134,31 +112,21 @@ actor SlackSocketClient {
         isStopping = false
         while !Task.isCancelled {
             do {
-                // ⚠️ [CONC-5] The socket is THREADED, never re-read from `self` after a suspension.
+                // The socket is threaded through, never re-read from `self` after a suspension.
                 let ws = try await connect()
                 try await receiveLoop(on: ws, continuation: continuation)
             } catch {
                 isConnected = false
 
-                // ⚠️⚠️ [SL-7/TG-6] THE ORDER OF THESE THREE CHECKS IS THE CONTRACT.
-                //   1. `isStopping` — a teardown we asked for is never a failure and never reconnects.
-                //   2. TERMINAL — a rejected app token must be reported even mid-teardown, or the
-                //      Settings pane never learns why the bridge died.
-                //   3. CANCELLATION — `catch is CancellationError` (which used to sit above this
-                //      block) never matches a cancelled URLSession call: it throws
-                //      `URLError(.cancelled)`. So every deliberate stop fell through to the generic
-                //      arm below and logged a reconnect that never happened, at a level the exported
-                //      diagnostic bundle keeps.
-                // Reversing 2 and 3 would silently gut the terminal classifier.
+                // Order is the contract: 1. `isStopping` (never a failure), 2. terminal (report a rejected token even mid-teardown),
+                // 3. cancellation (`URLError(.cancelled)`, not `CancellationError`). Checking it before terminal hides rejected tokens.
                 if isStopping {
                     logger.info("[CHATOPS] The Slack connect loop ended because it was stopped. CONSEQUENCE: none — no reconnect is attempted and no `.disconnected` event is yielded; this is a deliberate shutdown and is no longer reported as a failure.")
                     break
                 }
 
-                // ⚠️ A REJECTED TOKEN IS NOT A NETWORK BLIP. Retrying it burns a request per backoff
-                // interval forever and can never succeed, while the user is shown a bridge that
-                // looks merely flaky. Classify first, and only fall through to the reconnect when
-                // the failure is one a reconnect could actually clear.
+                // A rejected token is not a network blip: retrying it can never succeed, so classify first and reconnect only for
+                // failures a reconnect could clear.
                 if case SlackAPIError.apiError(_, let code) = error,
                    let reason = Self.terminalReason(slackErrorCode: code) {
                     terminalFailure = reason
@@ -190,18 +158,14 @@ actor SlackSocketClient {
         isConnected = false
     }
 
-    /// ⚠️⚠️ [CONC-5] RETURNS THE SOCKET RATHER THAN PUBLISHING IT. `apps.connections.open` is an
-    /// await, and a `stop()` landing during it used to nil a socket that this function then replaced
-    /// a line later — resurrecting a connection AFTER everything had been torn down, with nothing
-    /// left holding a reference that could cancel it. Threading the value means no code after a
-    /// suspension re-reads `self.webSocket` to decide what to act on; the stored property survives
-    /// only as the handle `stop()` cancels.
+    // Why: a `stop()` during the `apps.connections.open` await must not leave a resurrected connection nothing can cancel.
+    /// Opens the Socket Mode connection and returns the socket.
+    /// Returned, not published, so no code after a suspension re-reads `self.webSocket`; it is only `stop()`'s handle.
     private func connect() async throws -> URLSessionWebSocketTask {
         // Get a fresh WebSocket URL from Slack
         let wsURL = try await SlackAPIClient.openConnection(appToken: appToken)
 
-        // ⚠️ AFTER the await, BEFORE the socket exists: a socket that must not exist is never
-        //   constructed, rather than constructed and orphaned.
+        // After the await, before the socket exists: a socket that must not exist is never constructed rather than orphaned.
         try Task.checkCancellation()
 
         guard let url = URL(string: wsURL) else {
@@ -218,8 +182,8 @@ actor SlackSocketClient {
 
     // MARK: - Receive Loop
 
-    /// ⚠️ [CONC-5] Takes the socket it must read, rather than re-reading `self.webSocket` — which
-    /// could by then be a DIFFERENT connection, or nil after a `stop()`.
+    /// Takes the socket it must read rather than re-reading `self.webSocket`,
+    /// which could by then be another connection, or nil after a `stop()`.
     private func receiveLoop(on ws: URLSessionWebSocketTask,
                              continuation: AsyncStream<SlackSocketEvent>.Continuation) async throws {
 
@@ -233,18 +197,15 @@ actor SlackSocketClient {
             case .data(let data):
                 try await handlePayload(data: data, on: ws, continuation: continuation)
             @unknown default:
-                // ⚠️ A FRAME KIND THIS BUILD CANNOT MODEL. Dropping it in silence means a URLSession
-                // that grows a new case makes the Slack connection go partially deaf with nothing
-                // anywhere saying so. One line, at a level a bug report carries.
+                // A frame kind this build cannot model: dropping it silently would leave the connection partly deaf with no trace.
                 logger.warning("[CHATOPS/SILENT] A Slack WebSocket frame of an unmodelled kind was received and dropped. CONSEQUENCE: whatever it carried never reached the handler — if the platform has introduced a new frame type, commands sent in it are being ignored with no other trace.")
             }
         }
     }
 
     private func handlePayload(data: Data, on ws: URLSessionWebSocketTask, continuation: AsyncStream<SlackSocketEvent>.Continuation) async throws {
-        // ⚠️ THE ENVELOPE CARRIES THE ACK ID. Failing here means the envelope is never
-        // acknowledged either, so Slack retries it up to three times and then treats this app as
-        // failing — the log line said only "Failed to decode", which named neither.
+        // The envelope carries the ack id: failing here leaves it unacknowledged, so Slack retries up to three times
+        // and then treats the app as failing.
         let payload: SlackSocketPayload
         do {
             payload = try JSONDecoder().decode(SlackSocketPayload.self, from: data)
@@ -266,8 +227,7 @@ actor SlackSocketClient {
             continuation.yield(.connected)
 
         case "events_api":
-            // ⚠️⚠️ THIS IS THE BOT GOING DEAF, SILENTLY — the same class as Discord's
-            // MESSAGE_CREATE drop. A typed message this build cannot model vanished with no log.
+            // A missing payload is the bot going deaf silently, the same class as Discord's MESSAGE_CREATE drop; log it.
             guard let rawPayload = payload.payload else {
                 logger.error("[CHATOPS] A Slack events_api envelope carried no payload. CONSEQUENCE: the user's message is dropped before the command parser sees it; they get no reply and no error, and the bot appears to be ignoring them.")
                 return
@@ -282,9 +242,8 @@ actor SlackSocketClient {
             continuation.yield(.message(eventPayload.event))
 
         case "interactive":
-            // ⚠️ BUTTON TAPS AND MODAL SUBMISSIONS BOTH ARRIVE HERE. Dropping a view_submission
-            // silently is how a user's typed clarification answer disappears with the run still
-            // parked — the failure slice 4.3 was built to remove, reappearing one layer lower.
+            // Button taps and modal submissions both arrive here; dropping a view_submission silently loses a typed clarification
+            // answer while the run stays parked.
             guard let rawPayload = payload.payload else {
                 logger.error("[CHATOPS] A Slack interactive envelope carried no payload. CONSEQUENCE: a button tap or modal submission is dropped; if it was a clarification answer the run stays parked and the user's typed text is lost with no trace.")
                 return
@@ -325,13 +284,8 @@ actor SlackSocketClient {
 
     // MARK: - Acknowledgment
 
+    // Why: the socket is a parameter, not an optional chain: a nil socket would drop the ack silently and Slack would redeliver.
     /// Acknowledges receipt of an envelope by sending back the envelope_id.
-    ///
-    /// ⚠️⚠️ [SL-4] THE SOCKET IS A PARAMETER BECAUSE THE OPTIONAL CHAIN WAS THE BUG. This was
-    /// `try await webSocket?.send(...)`: when the socket had been nil'd, the ack simply evaporated —
-    /// no send, no throw, no log — on the one path the file's own header calls critical. Slack then
-    /// redelivers the envelope up to three times and finally treats the app as unhealthy. A
-    /// non-optional parameter makes the silent version unwritable.
     private func acknowledge(envelopeID: String, on ws: URLSessionWebSocketTask) async throws {
         let ack = SlackSocketAck(envelope_id: envelopeID)
         let data = try JSONEncoder().encode(ack)

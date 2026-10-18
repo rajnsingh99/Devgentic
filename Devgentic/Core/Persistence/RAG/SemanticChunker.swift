@@ -4,16 +4,13 @@
 //  SemanticChunker.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 02/03/26.
+//  Created by Raj Singh.
 //
 
 import Foundation
 
 /// A utility for splitting parsed markdown and code blocks into semantically meaningful chunks.
-///
-/// This replaces the naive 512-character sliding window approach. It respects paragraph boundaries,
-/// markdown headers, and prevents splitting individual lines of code, significantly improving
-/// RAG retrieval quality and reducing context tearing.
+/// Respects paragraph boundaries and markdown headers, and never splits individual lines of code.
 struct SemanticChunker {
     
     /// The desired maximum size of each text chunk, in characters.
@@ -22,18 +19,13 @@ struct SemanticChunker {
     /// The number of characters to overlap between consecutive chunks.
     let overlap: Int
 
-    /// Override for CODE blocks only (`.code` → TreeSitterCodeChunker). Code is
-    /// symbol-dense — WordPiece burns ~3 chars/token and the MiniLM embedder
-    /// head-truncates at ~128 tokens — so code chunks need a smaller target
-    /// (~384) than prose (512) to stay fully visible to semantic search.
-    /// Nil = code uses `maxChunkSize` (legacy behavior).
+    /// Target chunk size for code blocks only (`.code` via `TreeSitterCodeChunker`). Code is symbol-dense and the embedder
+    /// truncates at ~128 tokens, so code uses a smaller target (~384) than prose (512). Nil means code uses `maxChunkSize`.
     let codeChunkSize: Int?
 
-    /// Initializes a new SemanticChunker.
-    /// - Parameters:
-    ///   - maxChunkSize: The target size for each chunk. Defaults to 512.
-    ///   - overlap: The character overlap between chunks. Defaults to 50.
-    ///   - codeChunkSize: Optional smaller target for code blocks.
+    /// Creates a chunker.
+    /// - Parameters: maxChunkSize is the target size per chunk (default 512); overlap is the character overlap (default 50).
+    /// codeChunkSize is an optional smaller target for code blocks.
     init(maxChunkSize: Int = 512, overlap: Int = 50, codeChunkSize: Int? = nil) {
         precondition(maxChunkSize > overlap, "Chunk size must be greater than overlap.")
         self.maxChunkSize = maxChunkSize
@@ -65,9 +57,8 @@ struct SemanticChunker {
                 }
 
             case .listItem:
-                // `plainText` recursively flattens the item's child blocks (prefix +
-                // checkbox marker + content). Nested list items arrive as their own
-                // blocks, so each stays an independent chunk.
+                // `plainText` recursively flattens the item's child blocks; nested list items arrive as their own blocks,
+                // so each stays an independent chunk.
                 let listText = block.plainText
                 if !listText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     allChunks.append(contentsOf: chunkText(listText))
@@ -91,12 +82,7 @@ struct SemanticChunker {
                 break // Not useful for embedding
 
             case .image(let url, let altText):
-                // [mc-3] Indexed as the markdown the author wrote. Before the parser split
-                // image-bearing paragraphs, an INLINE image's `![alt](path)` sat inside the
-                // paragraph text and was embedded with it — "where did you save the histogram?"
-                // retrieved on the alt text and the path. Once the image became its own block it
-                // fell into the old `break` here and both vanished from the index. A standalone
-                // image was never indexed; it now is, for the same reason.
+                // Indexed as the markdown the author wrote, so a query can match an image by its alt text and path.
                 let imageText = "![\(altText ?? "")](\(url))"
                 if !(altText ?? "").isEmpty || !url.isEmpty {
                     allChunks.append(contentsOf: chunkText(imageText))
@@ -109,19 +95,9 @@ struct SemanticChunker {
     
     // MARK: - Semantic Text Chunking
     
-    /// Splits standard markdown text by paragraph boundaries, grouping them until the limit.
-    ///
-    /// ⚠️ INVARIANT: no chunk exceeds `maxChunkSize`. The embedder reads ~128 tokens (~500 chars),
-    /// so anything past the cap is invisible to semantic search.
-    ///
-    /// The old packer appended an oversized paragraph WHOLE whenever a chunk was already open —
-    /// `splitLargeText` only ran for the very first paragraph. Uploads arrive as one `.paragraph`
-    /// with PDF pages joined by "\n\n", so every page after the first became one 2–4K-char chunk
-    /// whose text past ~500 chars no embedding ever saw (RAG-3). It also re-seeded the 50-char
-    /// overlap without re-checking the cap.
-    ///
-    /// Oversized paragraphs now split at LINE breaks first (a PDF page keeps its line structure),
-    /// and only a single over-long line falls back to word-snapped windows.
+    /// Splits markdown text at paragraph boundaries, grouping paragraphs until the limit.
+    /// No chunk exceeds `maxChunkSize`: the embedder reads ~128 tokens (~500 chars), so the excess is invisible to search.
+    /// Oversized paragraphs split at line breaks first; only a single over-long line falls back to word-snapped windows.
     private func chunkText(_ text: String) -> [String] {
         pack(text.components(separatedBy: "\n\n"), joiner: "\n\n") { paragraph in
             pack(paragraph.components(separatedBy: "\n"), joiner: "\n") { line in
@@ -190,12 +166,9 @@ struct SemanticChunker {
         return overlapCandidate
     }
     
-    /// Splits one over-long run of text (no paragraph or line break left to use) into windows of at
-    /// most `maxSize`, snapped back to a space when that keeps at least half a window.
-    ///
-    /// ⚠️ Linear. The old loop measured `distance(from: currentIndex, to: endIndex)` on every window —
-    /// O(remaining) each time, quadratic overall (a 500K-char run cost ~10⁸ steps, RAG-35) — and this
-    /// path is now hot: every oversized line of every upload goes through it.
+    // Why: keep it linear: measuring `distance(from:to:)` per window is quadratic, and every oversized upload line passes here.
+    /// Splits one over-long run of text into windows of at most `maxSize`,
+    /// snapped back to a space when that keeps at least half a window.
     private func splitLargeText(_ text: String, maxSize: Int, overlap: Int) -> [String] {
         var chunks: [String] = []
         var currentIndex = text.startIndex
@@ -214,9 +187,8 @@ struct SemanticChunker {
             }
             chunks.append(String(text[currentIndex..<snapIndex]))
 
-            // Advance, taking overlap into account. When the overlap would not move forward (a small
-            // window), advance past the window instead — the old `break` here DROPPED the rest of the
-            // text without a trace.
+            // Advance, taking overlap into account; when the overlap would not move forward (a small window),
+            // advance past the window instead of dropping the rest of the text.
             let advanceBy = text.distance(from: currentIndex, to: snapIndex) - overlap
             currentIndex = advanceBy > 0 ? text.index(currentIndex, offsetBy: advanceBy) : snapIndex
         }
