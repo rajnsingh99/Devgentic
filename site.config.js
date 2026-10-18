@@ -20,9 +20,9 @@ export const SITE_CONFIG = {
   name: "Devgentic",
 
   release: {
-    published: false,
-    version: null,          // e.g. "0.9.0" — shown as a badge once published
-    sha256: null,           // printed by scripts/release.sh; shown beside the download once set
+    published: true,
+    version: "1.0.0",         // e.g. "0.9.0" — shown as a badge once published
+    sha256: "03ea2ece35f94ebe1b8bcf0a5935df27ca72b0fd64816d1ab4dbbb3e8ad0c7e0", // printed by scripts/release.sh; shown beside the download once set
   },
 
   links: {

@@ -1341,8 +1341,8 @@ html[data-release="published"] .pending-only { display: none !important; }
   border: 1px solid rgba(245, 158, 11, 0.25);
   border-radius: var(--radius-pill);
 }
-/* The banner already clears the fixed header, so the hero needs less top padding while it shows. */
-html[data-release="pending"] .hero { padding-top: 48px; }
+/* The banner is always shown and already clears the fixed header, so the hero needs less top padding. */
+.hero { padding-top: 48px; }
 @media (max-width: 860px) { .prerelease-banner { border-radius: var(--radius-md); margin-top: 80px; } }
 .prerelease-banner strong { color: var(--amber); }
 .prerelease-banner a { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
